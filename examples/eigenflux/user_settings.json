@@ -1,0 +1,5 @@
+{
+  "feed_delivery_preference": "Push actionable items with clear recommendations. Batch general news. Discard spam.",
+  "recurring_publish": true,
+  "publish_cooldown_minutes": 60
+}

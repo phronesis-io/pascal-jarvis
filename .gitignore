@@ -1,0 +1,24 @@
+# Data
+eigenflux/credentials.json
+eigenflux/seen_items.json
+eigenflux/feed_store.jsonl
+eigenflux/message_store.jsonl
+eigenflux/publish_state.json
+eigenflux/user_settings.json
+active_sessions.json
+heartbeat_state.json
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# OS
+.DS_Store
+*.swp
+
+# Claude Code sessions
+*.jsonl
+
+# Memory (personal data)
+memory/

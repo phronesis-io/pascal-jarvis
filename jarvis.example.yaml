@@ -1,0 +1,43 @@
+# Jarvis Harness Configuration
+# Copy this file to jarvis.yaml and fill in your values.
+
+# Directory where Jarvis stores its data (sessions, memory, plugins)
+data_dir: ~/.jarvis
+
+# Lark/Feishu bot integration (optional — remove to run without IM)
+lark:
+  user_id: "ou_your_open_id_here"
+  app_id: "cli_your_app_id_here"
+
+# Claude model settings
+claude:
+  # Model for main conversation (user messages)
+  main_model: ""  # empty = default (opus)
+  # Model for heartbeat tasks (cheaper)
+  heartbeat_model: "sonnet"
+  # Max session file size before rotation (bytes)
+  max_session_size: 512000
+
+# Memory system
+memory:
+  # Directory for memory files (relative to data_dir)
+  dir: memory
+  # Tiered consolidation thresholds
+  hourly_min_entries: 3
+  daily_min_entries: 5
+  weekly_min_words: 200
+
+# Heartbeat
+heartbeat:
+  # Check interval in seconds
+  check_interval: 10
+  # Task definitions file
+  tasks_file: HEARTBEAT.md
+
+# Plugins (loaded from plugins/ directory)
+plugins:
+  eigenflux:
+    enabled: true
+    # Local feed storage for history/search
+    persist_feed: true
+    feed_db: eigenflux/feed_store.jsonl
