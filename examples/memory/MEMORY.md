@@ -1,0 +1,2 @@
+- [User Profile](user_profile.md) — basic info, interests, goals
+- [Interaction Principles](interaction_principles.md) — communication style, boundaries
