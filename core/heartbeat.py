@@ -11,10 +11,10 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 from .memory import load_tiered_memory
+from .timeutil import now_local_str
 
 
 def parse_interval(s: str) -> int:
@@ -83,15 +83,21 @@ class HeartbeatRunner:
     # Memory pipeline tasks — only one per cycle to prevent races
     PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly", "memory-monthly"}
 
+    # Minimum interval between force-triggered runs of the same task, in seconds.
+    # Prevents rapid Lark session rotations from hammering memory-hourly.
+    FORCE_COOLDOWN_SECONDS = 60
+
     def __init__(self, jarvis_dir: str | Path, heartbeat_file: str | Path,
                  state_file: str | Path, memory_dir: str | Path,
-                 model: str = "sonnet", persona: str = "Jarvis"):
+                 model: str = "sonnet", persona: str = "Jarvis",
+                 work_dir: str | Path | None = None):
         self.jarvis_dir = Path(jarvis_dir)
         self.heartbeat_file = Path(heartbeat_file)
         self.state_file = Path(state_file)
         self.memory_dir = Path(memory_dir)
         self.model = model
         self.persona = persona
+        self.work_dir = Path(work_dir) if work_dir else self.jarvis_dir
 
     def load_state(self) -> dict:
         if self.state_file.exists():
@@ -99,7 +105,11 @@ class HeartbeatRunner:
         return {}
 
     def save_state(self, state: dict):
-        self.state_file.write_text(json.dumps(state, indent=2))
+        """Atomic write: temp + rename prevents corrupted state on crash."""
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, self.state_file)
 
     def run_script(self, script_path: str, stdin_data: str = "") -> str:
         """Run a pre/post script, return stdout."""
@@ -122,7 +132,7 @@ class HeartbeatRunner:
     def claude_call(self, prompt: str) -> str:
         """Call Claude with memory injection, no session persistence."""
         memory = load_tiered_memory(self.memory_dir)
-        now_ts = datetime.now().strftime("%Y-%m-%d %H:%M %A")
+        now_ts = now_local_str("%Y-%m-%d %H:%M %A")
         system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
 Current time: {now_ts}
 You have access to the user's memory below. Use it to personalize your responses.
@@ -144,6 +154,7 @@ You have access to the user's memory below. Use it to personalize your responses
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=120, stdin=subprocess.DEVNULL,
+                cwd=str(self.work_dir),
             )
             return result.stdout.strip()
         except (subprocess.TimeoutExpired, Exception) as e:
@@ -163,6 +174,10 @@ You have access to the user's memory below. Use it to personalize your responses
             if only_task and task["name"] != only_task:
                 continue
             last_run = state.get(task["name"], {}).get("last_run", 0)
+            # Apply cooldown even when forced, to prevent rapid repeats
+            # (e.g. multiple Lark session rotations in quick succession).
+            if force and (now - last_run) < self.FORCE_COOLDOWN_SECONDS:
+                continue
             if force or (now - last_run >= task["interval"]):
                 if task["name"] in self.PIPELINE_TASKS:
                     if pipeline_picked:
@@ -278,7 +293,7 @@ You have access to the user's memory below. Use it to personalize your responses
         return f"{beat} → OK"
 
     def _beat_status(self, due_tasks, skipped, runnable, all_tasks) -> str:
-        ts = datetime.now().strftime("%H:%M")
+        ts = now_local_str("%H:%M")
         parts = [f"[{ts}]"]
         for t in due_tasks:
             name = t["name"].replace("eigenflux-", "")

@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Pre-hook: extract last hour's conversation from active sessions.
+# Pre-hook: extract last hour's conversation across active Lark sessions.
+# Requires CLAUDE_PROJECT_DIR (exported by bot.sh, derived from work_dir).
+
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-SESSION_DIR="${SESSION_DIR:-$HOME/.claude/projects}"
 TRACKER="$JARVIS_DIR/active_sessions.json"
+
+# CLAUDE_PROJECT_DIR is the ~/.claude/projects/<slug>/ directory where
+# session .jsonl files live. Fall back to SESSION_DIR for backwards-compat.
+SESSION_DIR="${CLAUDE_PROJECT_DIR:-${SESSION_DIR:-}}"
+
+if [ -z "$SESSION_DIR" ] || [ ! -d "$SESSION_DIR" ]; then
+  echo "[memory-hourly] no session dir available ($SESSION_DIR)" >&2
+  exit 0
+fi
 
 [ -f "$TRACKER" ] || exit 0
 
@@ -19,7 +29,11 @@ tracker_path = os.environ["TRACKER"]
 sdir = Path(os.environ["SESSION_DIR"])
 NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
-tracker = json.load(open(tracker_path))
+try:
+    tracker = json.load(open(tracker_path))
+except Exception:
+    raise SystemExit(0)
+
 cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
 
 all_msgs = []
@@ -29,6 +43,7 @@ for conv_key, entry in tracker.items():
     counter = entry.get("counter", 0)
     if not sid:
         continue
+    # Check current session + previous one (in case of rotation mid-hour)
     candidates = [sid]
     if counter > 1:
         prev = str(uuid.uuid5(NAMESPACE, f"{conv_key}-{counter - 1}"))

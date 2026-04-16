@@ -1,43 +1,101 @@
+# ═══════════════════════════════════════════════════════════════════
 # Jarvis Harness Configuration
-# Copy this file to jarvis.yaml and fill in your values.
+# ═══════════════════════════════════════════════════════════════════
+# Copy this file to jarvis.yaml and edit the fields marked ⚙.
+# Defaults below are safe for a fresh install — uncomment + change as needed.
+#
+#   cp jarvis.example.yaml jarvis.yaml
+#
+# All paths support ~ expansion. All fields are optional unless marked ⚙.
+# ═══════════════════════════════════════════════════════════════════
 
-# Directory where Jarvis stores its data (sessions, memory, plugins)
+
+# ── Data & Work Directories ────────────────────────────────────────
+
+# Where Jarvis stores its runtime data (sessions, memory, heartbeat state).
+# Defaults to ~/.jarvis. Must be writable.
 data_dir: ~/.jarvis
 
-# Lark/Feishu bot integration (optional — remove to run without IM)
-lark:
-  user_id: "ou_your_open_id_here"
-  app_id: "cli_your_app_id_here"
+# ⚙ Directory Claude operates in when responding to your messages.
+# Claude's working-directory tool calls, file reads, git operations, etc.
+# will all happen here. Common choices:
+#   - Your current project folder (bot helps with that codebase)
+#   - Your home dir (general-purpose assistant)
+#   - The jarvis repo itself (bot can edit its own config)
+# Leave empty to default to the jarvis repo directory.
+work_dir: ""
 
-# Claude model settings
+
+# ── Lark (Feishu) IM Plugin ────────────────────────────────────────
+# See plugins/lark/README.md for the full Lark app setup walkthrough.
+# Leave the whole `lark:` section empty to run in heartbeat-only mode
+# (no IM — everything else still works).
+
+lark:
+  # ⚙ Your Lark open_id (starts with "ou_"). Find it by sending any message
+  # to your bot and checking jarvis.log for "sender_id".
+  user_id: ""
+  # ⚙ Your Lark app ID (starts with "cli_"). From your app at
+  # https://open.feishu.cn/app
+  app_id: ""
+
+
+# ── Claude model settings ──────────────────────────────────────────
+
 claude:
-  # Model for main conversation (user messages)
-  main_model: ""  # empty = default (opus)
-  # Model for heartbeat tasks (cheaper)
+  # Main conversation model. Empty = default (Opus, most capable).
+  # Override if you want a cheaper model for IM replies.
+  main_model: ""
+  # Heartbeat background tasks use this (cheaper is fine — they're batched).
   heartbeat_model: "sonnet"
-  # Max session file size before rotation (bytes)
+  # Auto-rotate Claude Code session files when they exceed this size (bytes).
+  # 500KB is a good balance between context retention and API latency.
   max_session_size: 512000
 
-# Memory system
+
+# ── Memory System ──────────────────────────────────────────────────
+
 memory:
-  # Directory for memory files (relative to data_dir)
+  # Subdirectory under data_dir where memory .md files live.
   dir: memory
-  # Tiered consolidation thresholds
+  # Minimum hourly entries before daily consolidation triggers.
   hourly_min_entries: 3
+  # Minimum days in daily_log.md before weekly digest runs.
   daily_min_entries: 5
+  # Minimum words in weekly digest before monthly archive compresses it.
   weekly_min_words: 200
 
-# Heartbeat
+
+# ── Heartbeat Loop ─────────────────────────────────────────────────
+
 heartbeat:
-  # Check interval in seconds
+  # How often to check for due tasks (seconds). Low is fine — empty cycles
+  # return immediately.
   check_interval: 10
-  # Task definitions file
+  # Task definitions file (relative to repo root).
   tasks_file: HEARTBEAT.md
 
-# Plugins (loaded from plugins/ directory)
+
+# ── Admin Console ──────────────────────────────────────────────────
+# Local web dashboard for browsing memory/sessions/search.
+# Set enabled: true to have bot.sh auto-start it alongside the heartbeat.
+
+admin:
+  enabled: false
+  host: "127.0.0.1"  # use "0.0.0.0" to expose externally — ALWAYS pair with token below
+  port: 3456
+  # Uncomment + set a random secret to require X-Admin-Token header.
+  # REQUIRED if host is not 127.0.0.1.
+  # token: "some-long-random-secret"
+
+
+# ── Plugins ────────────────────────────────────────────────────────
+# Each plugin is opt-in. Disabled plugins have zero overhead.
+
 plugins:
+  # EigenFlux — broadcast network for AI agents. See plugins/eigenflux/README.md
+  # for account registration and setup.
   eigenflux:
-    enabled: true
-    # Local feed storage for history/search
-    persist_feed: true
+    enabled: false         # set true after running the email verification flow
+    persist_feed: true     # keep a local copy of every fetched item (for search)
     feed_db: eigenflux/feed_store.jsonl
