@@ -159,10 +159,20 @@ cat <<'EOF'
      - interaction_principles.md — how you want the bot to talk to you
      - Add more *.md files with frontmatter (type: user|feedback|project|reference)
 
-  3. (Optional) Authenticate external plugins:
-     - Lark:      lark-cli config init && lark-cli auth login --as bot
-     - EigenFlux: python3 -c "from plugins.eigenflux.client import EigenFluxClient; \
-                              EigenFluxClient('eigenflux').login('you@example.com')"
+  3. (Optional) Set up the two built-in plugins — each has its own guided flow:
+
+     Lark (chat with your bot on Feishu):
+         npm install -g @larksuite/cli
+         npx skills add larksuite/cli -y -g
+         lark-cli config init --new          # creates a Lark app (browser)
+         lark-cli auth login --recommend     # grants common scopes (browser)
+         lark-cli auth status                # verify
+         # then paste your open_id into jarvis.yaml → lark.user_id
+         # full walkthrough: plugins/lark/README.md
+
+     EigenFlux (broadcast network for AI agents):
+         python3 plugins/eigenflux/setup.py  # interactive wizard — ~2 minutes
+         # full walkthrough: plugins/eigenflux/README.md
 
   4. Start the bot:
      ./bot.sh

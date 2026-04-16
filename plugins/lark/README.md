@@ -1,63 +1,67 @@
 # Lark (Feishu) Plugin
 
-Bidirectional IM bridge — lets Jarvis receive messages and reply on Lark/Feishu.
+Bidirectional IM bridge — lets Jarvis receive messages and reply on Lark/Feishu from any device.
 
-This is one of the two **built-in plugins** (the other is [EigenFlux](../eigenflux/README.md)). When `lark.user_id` is configured, the plugin:
+This is one of the two **built-in plugins** (the other is [EigenFlux](../eigenflux/README.md)). When `lark.user_id` is configured in `jarvis.yaml`, the plugin:
 
 - Subscribes to `im.message.receive_v1` events (foreground in `bot.sh`)
 - Sends replies back as the bot identity
 - Shows a transient `Thinking...` indicator while Claude is working
 - Exposes calendar free/busy checks (used by the `checkin` task)
 
-## Quick Start
+---
 
-### 1. Install the CLI
+## 🚀 Quick Start
+
+Built on the official [larksuite/cli](https://github.com/larksuite/cli) — **3 commands from zero to live bot**.
+
+### If your assistant (Claude Code etc) is driving
+
+Paste this to your assistant:
+
+> Set up Lark for my Jarvis bot. Run the `lark-cli config init --new` and `lark-cli auth login --recommend` commands in the background, send me the authorization URLs they print, wait for me to approve in the browser, then verify with `lark-cli auth status`. Finally grab my `open_id` and put it in `jarvis.yaml`.
+
+It'll handle the rest — the CLI hands out a URL, you click approve, it configures everything including app creation, scope selection, and credential storage.
+
+### Manual (if you prefer)
 
 ```bash
+# 1. Install CLI + the Jarvis-relevant skill bundle
 npm install -g @larksuite/cli
+npx skills add larksuite/cli -y -g
+
+# 2. Create a Lark app (opens browser; ~30 seconds)
+lark-cli config init --new
+
+# 3. Log in with the recommended scope set
+lark-cli auth login --recommend
+
+# 4. Verify — should show your user_name + list of granted scopes
+lark-cli auth status
 ```
 
-### 2. Create a Lark app (one-time)
+### Get your `open_id` for jarvis.yaml
 
-Go to <https://open.feishu.cn/app> → **Create Custom App**. Enable these scopes:
-
-| Scope | Why |
-|---|---|
-| `im:message` | send/read messages |
-| `im:message:send_as_bot` | reply as bot |
-| `im:message.group_at_msg` | receive group @-mentions (optional) |
-| `im:message.p2p_msg` | receive direct messages |
-| `calendar:calendar.event:readonly` | freebusy for checkin task (optional) |
-| `contact:user.base:readonly` | resolve open_id (optional) |
-
-Under **Events & Callbacks → Subscribe Events**, add `im.message.receive_v1`.
-
-Under **Version Management**, publish a version and wait for tenant admin approval. Once live, Lark will issue you an `app_id` + `app_secret`.
-
-### 3. Authenticate lark-cli
+Your `open_id` (starts with `ou_`) is what the bot keys conversations by. After step 4:
 
 ```bash
-lark-cli config init        # enter app_id + app_secret
-lark-cli auth login --as bot
+lark-cli contact +users-get --as user --user-id me --format json | python3 -c "
+import json, sys
+print('open_id:', json.load(sys.stdin)['data']['user']['open_id'])
+"
 ```
 
-### 4. Find your open_id
-
-Send any message to the bot from your own Lark account. The event listener will log your `sender_id` (starts with `ou_`). Put that in `jarvis.yaml`:
+Paste it into `jarvis.yaml`:
 
 ```yaml
 lark:
-  user_id: "ou_REDACTEDREDACTEDREDACTEDREDACTE"
-  app_id:  "cli_REDACTEDREDACT"
+  user_id: "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  app_id: ""  # optional — lark-cli remembers it internally, but setting it here is fine
 ```
 
-### 5. Run the bot
+Now `./bot.sh` will start the Lark listener. Send your bot a message on Lark — it replies.
 
-```bash
-./bot.sh
-```
-
-Now messaging the bot on Lark kicks off a Claude Code session (scoped to your conv_key) and replies in-thread.
+---
 
 ## How it wires into the system
 
@@ -66,9 +70,11 @@ Now messaging the bot on Lark kicks off a Claude Code session (scoped to your co
 - **Replies**: `lark_reply` for the main markdown answer; `lark_reply_text` for short acks; `lark_delete_message` clears the `Thinking...` placeholder.
 - **Calendar**: `tasks/checkin_pre.sh` sources this plugin and calls `lark_freebusy` to skip check-ins when you're busy.
 
+---
+
 ## Shell API
 
-The plugin is a **shell module** sourced by `bot.sh`. See `client.sh` for the full surface:
+The plugin is a **shell module** sourced by `bot.sh`. See [`client.sh`](client.sh) for the full surface:
 
 | Function | Purpose |
 |---|---|
@@ -85,18 +91,77 @@ All functions:
 - Return non-zero on failure without crashing the caller
 - Expect `$USER_ID` and `$LOG_FILE` already set (bot.sh populates these)
 
+---
+
 ## Special commands
 
-The bot recognizes these as first-character-case-insensitive shortcuts:
+The bot recognizes these as case-insensitive shortcuts you can send from Lark:
 
-| User sends | Effect |
+| Send | Effect |
 |---|---|
 | `loop` or `heartbeat` | Force-trigger the next heartbeat cycle |
 
+---
+
+## Identity switching — `--as user` vs `--as bot`
+
+lark-cli supports two identities after login. Jarvis always uses the **bot** identity for replies (so the conversation UI shows the bot avatar), but you as a human can also issue commands as yourself (`--as user`):
+
+```bash
+lark-cli calendar +agenda --as user              # your agenda
+lark-cli im +messages-send --as bot --user-id ou_xxx --text "hi"  # bot replies
+```
+
+The plugin's `client.sh` hard-codes `--as bot` for outbound messages.
+
+---
+
+## Scopes used
+
+Running `lark-cli auth login --recommend` auto-grants everything we need. If you want to narrow, the minimum for Jarvis is:
+
+- `im:message` — send/read messages
+- `im:message:send_as_bot` — reply as bot
+- `im:message.p2p_msg:readonly` — receive DMs
+- `im:message.group_at_msg:readonly` — receive @ mentions in groups (optional)
+- `calendar:calendar.event:readonly` — freebusy for check-in task (optional)
+- `contact:user.base:readonly` — resolve your own open_id once during setup
+
+```bash
+# Narrow login (scope list can also be a comma-separated string)
+lark-cli auth login --scope "im:message,im:message:send_as_bot,calendar:calendar.event:readonly"
+```
+
+---
+
 ## Troubleshooting
 
-**`[SDK Error] ... not found handler` in `jarvis.log`** — Benign. `lark-cli` receives event types we don't subscribe to (like `message_read_v1`); the bot ignores them.
+**`[SDK Error] ... not found handler` in `jarvis.log`**
+Benign. `lark-cli` receives event types we don't subscribe to (like `message_read_v1`); the bot ignores them.
 
-**Bot stuck on "Thinking..." forever** — Check `work_dir` in `jarvis.yaml` matches the Claude project dir. See top-level [Troubleshooting](../../README.md#troubleshooting).
+**Bot stuck on "Thinking..." forever**
+Check `work_dir` in `jarvis.yaml` matches the Claude project dir (`~/.claude/projects/<slug>/`). See top-level [Troubleshooting](../../README.md#troubleshooting).
 
-**Messages delivered out of order / duplicated** — Known: `lark-cli` can replay events briefly after reconnect. We dedupe on `message_id` implicitly (same `message_id` → same session → idempotent reply), but rapid duplicates could still produce two `Thinking...` messages.
+**`lark-cli auth status` says "not authenticated" after login**
+You likely missed `npx skills add larksuite/cli -y -g` (the Skill bundle is required for the CLI to know how to format commands). Re-run it and try again.
+
+**Token expired (401 errors after weeks/months)**
+```bash
+lark-cli auth login --recommend   # re-auth in place
+```
+
+**Want to switch to a different Lark app**
+```bash
+lark-cli auth logout
+lark-cli config init --new
+lark-cli auth login --recommend
+# then update jarvis.yaml with new open_id if it changed
+```
+
+---
+
+## References
+
+- Official CLI docs + source: <https://github.com/larksuite/cli>
+- Lark Open Platform: <https://open.feishu.cn/app> (app management console)
+- Full scope catalog: `lark-cli auth scopes` (CLI) or the Open Platform docs

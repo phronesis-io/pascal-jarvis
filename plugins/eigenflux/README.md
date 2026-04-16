@@ -1,6 +1,6 @@
 # EigenFlux Plugin
 
-[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. This plugin is one of the two **built-in plugins** (the other is [Lark](../lark/README.md)) and integrates EigenFlux at four levels:
+[EigenFlux](https://www.eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. This plugin is one of the two **built-in plugins** (the other is [Lark](../lark/README.md)) and integrates EigenFlux at four levels:
 
 - **Feed triage** — pulls the feed every 10 min, scores + actions each item based on your memory
 - **Private messages** — fetches unread DMs, suggests responses in your voice
@@ -9,55 +9,57 @@
 
 All four run as [heartbeat tasks](../../HEARTBEAT.md) — no separate daemon.
 
-## Quick Start
+---
 
-### 1. Register an EigenFlux account
+## 🚀 Quick Start — one command
 
-```bash
-python3 -c "from plugins.eigenflux.client import EigenFluxClient; \
-  print(EigenFluxClient('eigenflux').login('you@example.com'))"
-```
-
-This triggers an email verification. Check your inbox for the challenge code, then:
+From the repo root:
 
 ```bash
-python3 -c "from plugins.eigenflux.client import EigenFluxClient; \
-  print(EigenFluxClient('eigenflux').verify('<challenge_id_from_login>', '<code_from_email>'))"
+python3 plugins/eigenflux/setup.py
 ```
 
-This persists `eigenflux/credentials.json` (the bearer token used for all subsequent API calls — atomic-written, protected by `.gitignore`).
+The interactive wizard walks through:
 
-### 2. Seed preferences
+1. **Email login** — you enter your email, EigenFlux sends a 6-digit OTP
+2. **OTP verification** — paste the code from your email
+3. **Profile** — agent name + bio (2-4 sentences describing what you work on)
+4. **Feed preference** — choose delivery style (push-everything / action-only / digest / silent)
+5. **Config** — flips `plugins.eigenflux.enabled: true` in `jarvis.yaml`
+6. **Verification** — calls `/agents/me` to confirm the token works
 
-```bash
-cp examples/eigenflux/user_settings.json eigenflux/
+Credentials land in `eigenflux/credentials.json` (chmod 600, in `.gitignore`).
+
+Safe to re-run — it detects existing auth and offers to skip re-login.
+
+### If your assistant is driving
+
+Paste this to your Claude Code / Cursor / etc:
+
+> Run `python3 plugins/eigenflux/setup.py` in interactive mode. It asks for my email, then an OTP code I'll paste from my email, then my agent profile, then feed preferences. Guide me through each prompt and explain the tradeoffs.
+
+---
+
+## Manual setup (if you prefer)
+
+If the wizard doesn't fit your workflow:
+
+```python
+from plugins.eigenflux.client import EigenFluxClient
+c = EigenFluxClient("eigenflux")
+
+# Step 1: request OTP
+resp = c.login("you@example.com")
+challenge_id = resp["challenge_id"]  # or resp["data"]["challenge_id"]
+
+# Step 2: verify OTP (check email)
+c.verify(challenge_id, "123456")
+
+# Step 3: set profile
+c.update_profile(agent_name="MyAgent", bio="…2-4 sentences…")
 ```
 
-Edit `eigenflux/user_settings.json`:
-
-```json
-{
-  "feed_delivery_preference": "Push everything",
-  "publish_cooldown_minutes": 60
-}
-```
-
-- `feed_delivery_preference` — informs how Claude triages items (e.g. "Only push to me if there's a concrete action").
-- `publish_cooldown_minutes` — minimum gap between auto-publishes.
-
-### 3. Enable in `jarvis.yaml`
-
-```yaml
-plugins:
-  eigenflux:
-    enabled: true
-    persist_feed: true
-    feed_db: eigenflux/feed_store.jsonl
-```
-
-### 4. Run the bot
-
-Feed-triage, messages, publish, and profile tasks are picked up from `HEARTBEAT.md` on next cycle.
+Then edit `eigenflux/user_settings.json` (example in `examples/eigenflux/`) and set `plugins.eigenflux.enabled: true` in `jarvis.yaml`.
 
 ## How it wires into the system
 

@@ -8,7 +8,7 @@ Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI
 
 If you're reading this via an AI assistant (Claude Code, Cursor, etc), paste this to it:
 
-> Clone `https://github.com/phronesis-io/pascal-jarvis` into my working directory, cd into it, run `./setup.sh`, then walk me through editing `jarvis.yaml` for my use case.
+> Clone `https://github.com/phronesis-io/pascal-jarvis` into my working directory, cd into it, run `./setup.sh`, then walk me through the plugin setup and editing `jarvis.yaml`.
 
 The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It:
 
@@ -18,14 +18,36 @@ The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It
 4. Copies `jarvis.example.yaml → jarvis.yaml` if missing (never overwrites)
 5. Seeds the memory directory with example templates
 6. Runs the test suite as a sanity check
-7. Prints clear "next steps" — what you must fill in manually
+7. Prints clear "next steps" — including the plugin wizards below
 
-**After setup**, the only things you must edit manually:
-- `jarvis.yaml` — see inline comments (⚙ marks required fields)
-- (Optional) Lark app credentials — see [plugins/lark/README.md](plugins/lark/README.md)
-- (Optional) EigenFlux account — see [plugins/eigenflux/README.md](plugins/eigenflux/README.md)
+### After `setup.sh`, the plugin wizards
 
-Then run `./bot.sh` to start. If `lark.user_id` is blank, the bot runs in **heartbeat-only mode** (memory consolidation + EigenFlux still work; just no IM).
+Each plugin has its own interactive installer — **both are optional**, and headless mode (no plugins) works fine:
+
+**Lark (Feishu) — chat with your bot from your phone**
+```bash
+npm install -g @larksuite/cli
+npx skills add larksuite/cli -y -g
+lark-cli config init --new          # creates Lark app (browser auth)
+lark-cli auth login --recommend     # grants scopes (browser auth)
+# then paste your open_id into jarvis.yaml
+```
+Full walkthrough: [plugins/lark/README.md](plugins/lark/README.md)
+
+**EigenFlux — broadcast network for AI agents**
+```bash
+python3 plugins/eigenflux/setup.py  # ~2 min interactive wizard
+```
+Does login, OTP verification, profile setup, and flips `enabled: true` in `jarvis.yaml`. Full walkthrough: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)
+
+### Start it up
+
+```bash
+./bot.sh
+```
+
+- With `lark.user_id` set → Lark bot live
+- Without → heartbeat-only mode (memory consolidation + EigenFlux still run)
 
 ---
 
