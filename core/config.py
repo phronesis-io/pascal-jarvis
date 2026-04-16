@@ -6,6 +6,7 @@ from pathlib import Path
 
 _DEFAULTS = {
     "data_dir": "~/.jarvis",
+    "work_dir": "",
     "lark": {"user_id": "", "app_id": ""},
     "claude": {
         "main_model": "",
@@ -21,6 +22,11 @@ _DEFAULTS = {
     "heartbeat": {
         "check_interval": 10,
         "tasks_file": "HEARTBEAT.md",
+    },
+    "admin": {
+        "enabled": False,
+        "port": 3456,
+        "host": "127.0.0.1",
     },
     "plugins": {},
 }
@@ -52,6 +58,9 @@ class Config:
         self.jarvis_dir = Path(config_path).parent if config_path else Path.cwd()
         self.data_dir = Path(os.path.expanduser(self._raw["data_dir"]))
         self.memory_dir = self.data_dir / self._raw["memory"]["dir"]
+        # work_dir: where Claude runs (file access, git, etc.). Defaults to jarvis_dir.
+        _wd = self._raw.get("work_dir", "")
+        self.work_dir = Path(os.path.expanduser(_wd)) if _wd else self.jarvis_dir
 
     @staticmethod
     def _find_config() -> Path | None:
@@ -83,6 +92,10 @@ class Config:
     @property
     def plugins(self) -> dict:
         return self._raw.get("plugins", {})
+
+    @property
+    def admin(self) -> dict:
+        return self._raw.get("admin", {})
 
     def get(self, dotpath: str, default=None):
         """Get nested config value by dot-separated path: 'claude.heartbeat_model'."""

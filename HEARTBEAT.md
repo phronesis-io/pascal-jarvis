@@ -34,14 +34,27 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 ### checkin
 - interval: 30m
 - pre: tasks/checkin_pre.sh
+- post: tasks/checkin_post.py
 - prompt: |
     [CHECKIN — User has free time]
-    The user has free time right now.
-    Based on your memory of them — their interests, goals, current projects, and recent conversations:
-    1. Ask ONE short casual question to understand their current mood/energy
-    2. Suggest 2-3 lightweight but meaningful activities they could do right now
-    3. Keep it warm and casual, like a friend checking in
-    Reply in the user's language. Keep it under 100 words.
+    The user has free time. Reach out naturally — like a close friend, not an assistant running a template.
+
+    DATA from pre-script includes: current time + phase, a suggested "mode" for this round, and the text of recent past check-ins.
+
+    HARD RULES (break them and the user gets bored):
+    1. Read the recent check-ins. Do NOT repeat the same opener, same question, or same activity set.
+       If your instinct matches something in the history, discard it and pick something else.
+    2. Vary structure. Sometimes just one sentence. Sometimes a question with no suggestions.
+       Sometimes a tiny observation tied to memory. Don't always be "question + 2-3 activities".
+    3. The "mode" hint is one of: mood-energy, curiosity-prompt, reflection, micro-challenge,
+       playful, sensory-notice, knowledge-nugget, callback. Lean into it but don't be robotic —
+       blend or swap if it doesn't land naturally with what you know about them.
+    4. Use memory specifically. Reference something concrete (a recent conversation, a holding,
+       a project, a person they mentioned) rather than generic "how's your energy?".
+    5. Match the phase of day (morning = wake-up energy, late-evening = wind-down tone).
+    6. Under 80 words. Reply in the user's language (Chinese if their memory is in Chinese).
+
+    If nothing feels genuine to send right now, reply: HEARTBEAT_OK
 
 ### memory-consolidate
 - interval: 24h

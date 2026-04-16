@@ -1,6 +1,7 @@
 """EigenFlux API client — connect to the EigenFlux broadcast network."""
 
 import json
+import os
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -57,7 +58,10 @@ class EigenFluxClient:
         return None
 
     def _save_token(self, data: dict):
-        self.creds_file.write_text(json.dumps(data, indent=2))
+        """Atomic write via temp + rename (creds_file must survive crashes)."""
+        tmp = self.creds_file.with_suffix(self.creds_file.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, self.creds_file)
 
     # ── Settings ───────────────────────────────────────────────────
 
@@ -116,22 +120,33 @@ class EigenFluxClient:
         return resp
 
     def _persist_items(self, items: list[dict]):
-        """Append items to local JSONL feed store (deduped by item_id)."""
+        """Append items to local JSONL feed store (deduped by item_id).
+
+        Write is made durable per-item (flush + fsync) and the seen-set is
+        persisted both before (for duplicates) and after (for durability)
+        writing, so a crash mid-loop leaves the two files consistent.
+        """
         seen = self._load_seen()
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        new_count = 0
+        newly_written = []
         with open(self.feed_store, "a", encoding="utf-8") as f:
             for item in items:
                 iid = str(item.get("item_id", ""))
-                if iid and iid not in seen:
-                    record = {
-                        "fetched_at": ts,
-                        **item,
-                    }
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    seen.add(iid)
-                    new_count += 1
-        if new_count > 0:
+                if not iid or iid in seen:
+                    continue
+                record = {"fetched_at": ts, **item}
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass  # some filesystems (tmpfs, etc.) don't support fsync
+                seen.add(iid)
+                newly_written.append(iid)
+                # Persist seen-set periodically so a crash doesn't orphan writes
+                if len(newly_written) % 5 == 0:
+                    self._save_seen(seen)
+        if newly_written:
             self._save_seen(seen)
 
     def _load_seen(self) -> set:
@@ -140,7 +155,10 @@ class EigenFluxClient:
         return set()
 
     def _save_seen(self, seen: set):
-        self.seen_file.write_text(json.dumps(sorted(seen)))
+        """Atomic write via temp + rename to avoid partial file on crash."""
+        tmp = self.seen_file.with_suffix(self.seen_file.suffix + ".tmp")
+        tmp.write_text(json.dumps(sorted(seen)))
+        os.replace(tmp, self.seen_file)
 
     def get_item(self, item_id: int) -> dict:
         return _request("GET", f"/items/{item_id}", token=self._token())
@@ -218,8 +236,10 @@ class EigenFluxClient:
         return 0
 
     def _record_publish(self):
-        self.publish_state.write_text(
-            json.dumps({"last_publish_epoch": int(time.time())}))
+        """Atomic write via temp + rename."""
+        tmp = self.publish_state.with_suffix(self.publish_state.suffix + ".tmp")
+        tmp.write_text(json.dumps({"last_publish_epoch": int(time.time())}))
+        os.replace(tmp, self.publish_state)
 
     # ── Messages ───────────────────────────────────────────────────
 
@@ -233,12 +253,17 @@ class EigenFluxClient:
         return resp
 
     def _persist_messages(self, messages: list[dict]):
-        """Append messages to local JSONL store."""
+        """Append messages to local JSONL store with per-line durability."""
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with open(self.msg_store, "a", encoding="utf-8") as f:
             for msg in messages:
                 record = {"fetched_at": ts, **msg}
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
 
     def send_message(self, content: str, item_id: int | None = None,
                      conv_id: str | None = None,
@@ -269,9 +294,14 @@ class EigenFluxClient:
         if agent_id:
             data["to_uid"] = agent_id
         if email:
-            data["to_email"] = email.removeprefix("eigenflux#")
+            cleaned = email.removeprefix("eigenflux#").strip()
+            if "@" not in cleaned:
+                return {"code": -1, "msg": f"invalid email: {email!r}"}
+            data["to_email"] = cleaned
         if greeting:
             data["greeting"] = greeting[:200]
+        if not data.get("to_uid") and not data.get("to_email"):
+            return {"code": -1, "msg": "either agent_id or email is required"}
         return _request("POST", "/relations/apply", data, token=self._token())
 
     def list_friends(self) -> dict:

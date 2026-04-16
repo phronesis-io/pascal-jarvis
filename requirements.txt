@@ -1,0 +1,14 @@
+# Python runtime dependencies for Jarvis harness.
+# Install with:
+#   pip install -r requirements.txt
+# or, if your system Python is externally-managed (modern macOS/Debian):
+#   pip install --break-system-packages -r requirements.txt
+# or use a venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# YAML config parsing
+PyYAML>=6.0
+
+# Testing (optional — only needed for `pytest tests/`)
+# Install separately if you want to run the test suite:
+#   pip install pytest

@@ -16,6 +16,8 @@ _SKIP_TIER1 = {
     "hourly_log.md", "daily_log.md", "longterm_digest.md", "monthly_archive.md",
     "hourly_archive.md", "daily_archive.md",
     "longterm_digest.bak.md", "monthly_archive.bak.md",
+    # Check-in log is context for the checkin pre-script, not permanent memory
+    "checkin_log.md", "checkin_log.jsonl",
 }
 
 
@@ -27,11 +29,15 @@ def load_tiered_memory(memory_dir: str | Path) -> str:
 
     parts = []
 
-    # Tier 1: Permanent memory files
+    # Tier 1: Permanent memory files (.md only; .jsonl logs are skipped)
     for f in sorted(memory_dir.glob("*.md")):
         if f.name in _SKIP_TIER1:
             continue
-        parts.append(f"## {f.stem}\n{f.read_text(encoding='utf-8').strip()}")
+        try:
+            parts.append(f"## {f.stem}\n{f.read_text(encoding='utf-8').strip()}")
+        except OSError:
+            # Unreadable file should not poison the whole memory load
+            continue
 
     # Tier 2a: Monthly archive
     _append_if_exists(parts, memory_dir / "monthly_archive.md", "Monthly Archive")

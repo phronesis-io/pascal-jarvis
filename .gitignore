@@ -1,24 +1,46 @@
-# Data
+# Config (personal)
+jarvis.yaml
+.claude/
+
+# Runtime state (bot + heartbeat + session tracking)
+active_sessions.json
+heartbeat_state.json
+jarvis.log
+.memory_cache
+
+# Temp / backup / corrupted artifacts from atomic writes or debugging
+*.bak
+*.tmp
+*.corrupted
+*.gone
+*.TEST_GONE
+
+# EigenFlux plugin data (tokens, feed, messages, state)
 eigenflux/credentials.json
+eigenflux/credentials.json.tmp
 eigenflux/seen_items.json
+eigenflux/seen_items.json.tmp
 eigenflux/feed_store.jsonl
 eigenflux/message_store.jsonl
 eigenflux/publish_state.json
+eigenflux/publish_state.json.tmp
 eigenflux/user_settings.json
-active_sessions.json
-heartbeat_state.json
 
 # Python
 __pycache__/
 *.pyc
 .env
+.pytest_cache/
 
 # OS
 .DS_Store
 *.swp
+*.swo
 
-# Claude Code sessions
+# Claude Code sessions (.jsonl in project dir)
 *.jsonl
 
-# Memory (personal data)
+# Memory (personal data — both if user makes a symlink and if they create a real dir)
+memory
 memory/
+checkin_log.jsonl
