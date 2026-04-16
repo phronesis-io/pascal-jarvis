@@ -40,7 +40,8 @@ __pycache__/
 # Claude Code sessions (.jsonl in project dir)
 *.jsonl
 
-# Memory (personal data — both if user makes a symlink and if they create a real dir)
-memory
-memory/
+# Memory (personal data) — root-anchored so it doesn't swallow examples/memory/
+# Catches both a real dir and a symlink at the repo root.
+/memory
+/memory/
 checkin_log.jsonl
