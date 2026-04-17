@@ -46,3 +46,4 @@ __pycache__/
 /memory
 /memory/
 checkin_log.jsonl
+eigenflux/.eigenflux/

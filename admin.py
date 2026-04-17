@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -90,240 +91,201 @@ HTML = r"""<!DOCTYPE html>
   --user: #7dd3fc; --user-dim: rgba(125,211,252,0.1);
   --feedback: #fdba74; --project: #86efac; --reference: #d8b4fe;
   --highlight: #fbbf24; --highlight-bg: rgba(251,191,36,0.15);
-  --danger: #f87171;
+  --danger: #f87171; --green: #4ade80; --red: #f87171; --yellow: #facc15;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
-body {
-  font-family: -apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif;
-  background: var(--bg); color: var(--text);
-  -webkit-font-smoothing: antialiased; height: 100vh; overflow: hidden;
-}
+body { font-family: -apple-system,'SF Pro Text','Inter',system-ui,sans-serif;
+  background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased;
+  height: 100vh; overflow: hidden; }
 
 .app { display: flex; height: 100vh; }
-.sidebar {
-  width: 200px; min-width: 200px; background: var(--surface);
-  border-right: 1px solid var(--border); padding: 20px 0;
-  display: flex; flex-direction: column;
-}
-.sidebar .logo {
-  font-size: 12px; font-weight: 700; letter-spacing: 0.12em;
-  text-transform: uppercase; color: var(--accent);
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  padding: 0 20px 20px; border-bottom: 1px solid var(--border);
-}
-.sidebar .nav-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 20px; font-size: 13px; font-weight: 500;
-  color: var(--dim); cursor: pointer; transition: all 0.12s; border: none;
-  background: none; width: 100%; text-align: left; font-family: inherit;
-}
+.sidebar { width: 200px; min-width: 200px; background: var(--surface);
+  border-right: 1px solid var(--border); padding: 20px 0; display: flex; flex-direction: column; }
+.sidebar .logo { font-size: 12px; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--accent); font-family: 'SF Mono','Fira Code',monospace;
+  padding: 0 20px 20px; border-bottom: 1px solid var(--border); }
+.sidebar .nav-item { display: flex; align-items: center; gap: 8px; padding: 10px 20px;
+  font-size: 13px; font-weight: 500; color: var(--dim); cursor: pointer;
+  transition: all 0.12s; border: none; background: none; width: 100%;
+  text-align: left; font-family: inherit; }
 .sidebar .nav-item:hover { color: var(--muted); background: var(--surface2); }
 .sidebar .nav-item.active { color: var(--text); background: var(--surface2); border-right: 2px solid var(--accent); }
 .main { flex: 1; overflow-y: auto; padding: 32px 40px; }
 
-.section-header {
-  display: flex; align-items: baseline; justify-content: space-between;
-  margin-bottom: 20px;
-}
+.section-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
 .section-header h2 { font-size: 18px; font-weight: 600; }
 .section-header .count { font-size: 12px; color: var(--dim); }
 section { display: none; }
 section.active { display: block; }
 
-.card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; padding: 18px 22px;
-  margin-bottom: 10px; transition: border-color 0.15s;
-}
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 18px 22px; margin-bottom: 10px; transition: border-color 0.15s; }
 .card:hover { border-color: var(--border2); }
 .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .card-name { font-size: 13px; font-weight: 600; }
-.badge {
-  font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
-  text-transform: uppercase; padding: 2px 8px; border-radius: 4px;
-}
+.badge { font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 4px; }
 .badge-user { color: var(--user); background: #0c2d48; }
 .badge-feedback { color: var(--feedback); background: #2e1d0a; }
 .badge-project { color: var(--project); background: #0a2e1a; }
 .badge-reference { color: var(--reference); background: #220a3e; }
+.badge-unknown { color: var(--dim); background: var(--surface2); }
 .card-desc { font-size: 11.5px; color: var(--dim); margin-bottom: 10px; font-style: italic; }
-.card-body {
-  font-size: 12.5px; line-height: 1.75; color: var(--muted);
-  white-space: pre-wrap; word-wrap: break-word;
-}
+.card-body { font-size: 12.5px; line-height: 1.75; color: var(--muted);
+  white-space: pre-wrap; word-wrap: break-word; }
 .card-body strong { color: var(--accent); font-weight: 600; }
 .card-meta { font-size: 10px; color: #333; margin-top: 10px; text-align: right; }
+.card-actions { display: flex; gap: 6px; margin-left: auto; }
 .filters { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
-.fbtn {
-  font-family: inherit; font-size: 11px; font-weight: 500;
-  padding: 4px 12px; border-radius: 5px;
-  border: 1px solid var(--border); background: transparent;
-  color: var(--dim); cursor: pointer; transition: all 0.15s;
-}
+.fbtn { font-family: inherit; font-size: 11px; font-weight: 500; padding: 4px 12px;
+  border-radius: 5px; border: 1px solid var(--border); background: transparent;
+  color: var(--dim); cursor: pointer; transition: all 0.15s; }
 .fbtn:hover, .fbtn.active { border-color: var(--accent); color: var(--accent); }
 
+/* Buttons */
+.btn { font-family: inherit; font-size: 11px; font-weight: 600; padding: 5px 14px;
+  border-radius: 6px; border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; }
+.btn-primary { background: var(--accent); color: #000; border-color: var(--accent); }
+.btn-primary:hover { opacity: 0.85; }
+.btn-ghost { background: transparent; color: var(--muted); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger); color: #000; }
+.btn-sm { font-size: 10px; padding: 3px 10px; }
+
+/* Form inputs */
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 11px; font-weight: 600; color: var(--dim);
+  margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.form-input { font-family: inherit; font-size: 13px; padding: 8px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+  outline: none; width: 100%; transition: border-color 0.15s; }
+.form-input:focus { border-color: var(--accent); }
+textarea.form-input { font-family: 'SF Mono','Fira Code',monospace; font-size: 12px;
+  min-height: 200px; resize: vertical; line-height: 1.7; }
+select.form-input { cursor: pointer; }
+
+/* Editor card */
+.editor-card { background: var(--surface2); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 20px; margin-bottom: 10px; }
+.editor-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+/* Search bar */
 .search-bar { display: flex; gap: 8px; margin-bottom: 20px; }
-.search-bar input {
-  flex: 1; font-family: inherit; font-size: 13px;
-  padding: 10px 16px; border-radius: 8px;
-  border: 1px solid var(--border); background: var(--surface);
-  color: var(--text); outline: none; transition: border-color 0.15s;
-}
+.search-bar input { flex: 1; font-family: inherit; font-size: 13px; padding: 10px 16px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); outline: none; transition: border-color 0.15s; }
 .search-bar input:focus { border-color: var(--accent); }
 .search-bar input::placeholder { color: var(--dim); }
-.search-bar select {
-  font-family: inherit; font-size: 12px; padding: 8px 12px;
-  border-radius: 8px; border: 1px solid var(--border);
-  background: var(--surface); color: var(--muted); outline: none;
-  cursor: pointer;
-}
-.search-bar button {
-  font-family: inherit; font-size: 13px; font-weight: 600;
-  padding: 10px 24px; border-radius: 8px; border: none;
-  background: var(--accent); color: #000; cursor: pointer;
-  transition: opacity 0.15s; white-space: nowrap;
-}
+.search-bar select { font-family: inherit; font-size: 12px; padding: 8px 12px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--muted); outline: none; cursor: pointer; }
+.search-bar button { font-family: inherit; font-size: 13px; font-weight: 600;
+  padding: 10px 24px; border-radius: 8px; border: none; background: var(--accent);
+  color: #000; cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
 .search-bar button:hover { opacity: 0.85; }
 
-.sr {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; margin-bottom: 12px; overflow: hidden;
-}
-.sr-header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 18px; font-size: 11px; color: var(--dim);
-  border-bottom: 1px solid var(--border); background: var(--surface2);
-}
-.sr-header .sr-sid { font-family: 'SF Mono', monospace; color: var(--accent2); cursor: pointer; }
+/* Search results */
+.sr { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 12px; overflow: hidden; }
+.sr-header { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+  font-size: 11px; color: var(--dim); border-bottom: 1px solid var(--border); background: var(--surface2); }
+.sr-header .sr-sid { font-family: 'SF Mono',monospace; color: var(--accent2); cursor: pointer; }
 .sr-header .sr-sid:hover { text-decoration: underline; }
 .sr-body { padding: 14px 18px; }
-.sr-ctx {
-  font-size: 12px; line-height: 1.65; color: #4a4a52;
-  padding: 4px 0 4px 14px; border-left: 2px solid var(--border);
-  margin-bottom: 4px;
-}
-.sr-ctx .sr-role { margin-right: 6px; }
-.sr-match-wrap {
-  background: var(--highlight-bg); border-radius: 6px;
-  padding: 10px 14px; margin: 8px 0;
-}
-.sr-match {
-  font-size: 12.5px; line-height: 1.75; color: var(--text);
-  white-space: pre-wrap; word-wrap: break-word;
-}
+.sr-ctx { font-size: 12px; line-height: 1.65; color: #4a4a52; padding: 4px 0 4px 14px;
+  border-left: 2px solid var(--border); margin-bottom: 4px; }
+.sr-match-wrap { background: var(--highlight-bg); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+.sr-match { font-size: 12.5px; line-height: 1.75; color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
 .sr-match mark { background: rgba(251,191,36,0.35); color: var(--highlight); padding: 1px 3px; border-radius: 2px; }
-.sr-role {
-  font-size: 9px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; display: inline-block; padding: 1px 5px;
-  border-radius: 3px;
-}
+.sr-role { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+  display: inline-block; padding: 1px 5px; border-radius: 3px; }
 .sr-role.user { color: var(--user); background: var(--user-dim); }
 .sr-role.assistant { color: var(--accent); background: var(--accent-dim); }
 
+/* Sessions */
 .sessions-layout { display: flex; gap: 0; height: calc(100vh - 120px); }
-.session-list {
-  width: 320px; min-width: 280px; overflow-y: auto;
-  border-right: 1px solid var(--border); padding-right: 0;
-}
+.session-list { width: 320px; min-width: 280px; overflow-y: auto; border-right: 1px solid var(--border); }
 .session-viewer { flex: 1; overflow-y: auto; padding-left: 24px; }
-.sl-item {
-  padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--border);
-  transition: all 0.12s;
-}
+.sl-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--border); transition: all 0.12s; }
 .sl-item:hover { background: var(--surface); }
 .sl-item.active { background: var(--surface2); border-left: 3px solid var(--accent); }
 .sl-item .sl-date { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
 .sl-item .sl-prompt { font-size: 12px; color: var(--muted); line-height: 1.4; }
 .sl-item .sl-meta { font-size: 10px; color: var(--dim); margin-top: 4px; }
-.sl-item .sl-id { font-family: 'SF Mono', monospace; font-size: 10px; color: var(--accent2); }
-
-.sv-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding-bottom: 16px; border-bottom: 1px solid var(--border);
-  margin-bottom: 16px;
-}
+.sl-item .sl-id { font-family: 'SF Mono',monospace; font-size: 10px; color: var(--accent2); }
+.sv-header { display: flex; align-items: center; justify-content: space-between;
+  padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .sv-header h3 { font-size: 14px; font-weight: 600; }
 .sv-search { display: flex; gap: 6px; }
-.sv-search input {
-  font-family: inherit; font-size: 12px; padding: 6px 12px;
-  border-radius: 6px; border: 1px solid var(--border);
-  background: var(--surface); color: var(--text); outline: none; width: 200px;
-}
+.sv-search input { font-family: inherit; font-size: 12px; padding: 6px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); outline: none; width: 200px; }
 .sv-search input:focus { border-color: var(--accent); }
 .sv-messages { padding-bottom: 40px; }
 .sv-msg { padding: 12px 0; border-bottom: 1px solid #1a1a1d; }
 .sv-msg:last-child { border-bottom: none; }
 .sv-msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .sv-msg-ts { font-size: 10px; color: var(--dim); }
-.sv-msg-text {
-  font-size: 13px; line-height: 1.8; color: var(--muted);
-  white-space: pre-wrap; word-wrap: break-word;
-}
+.sv-msg-text { font-size: 13px; line-height: 1.8; color: var(--muted); white-space: pre-wrap; word-wrap: break-word; }
 .sv-msg-text mark { background: rgba(251,191,36,0.35); color: var(--highlight); padding: 1px 3px; border-radius: 2px; }
 .sv-empty { text-align: center; padding: 80px 0; color: var(--dim); font-size: 13px; }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
-.grid-item {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 8px; padding: 16px 18px; transition: border-color 0.15s;
-}
-.grid-item:hover { border-color: var(--border2); }
-.grid-item .gi-name { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-.grid-item .gi-desc { font-size: 11px; color: var(--dim); line-height: 1.5; }
-
-.empty-state { text-align: center; padding: 60px 0; color: var(--dim); font-size: 13px; }
-
-/* Lark chats view */
+/* Lark chats */
 .chat-group { margin-bottom: 36px; }
-.chat-head {
-  display: flex; align-items: center; gap: 10px;
-  padding-bottom: 10px; margin-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.chat-head .chat-kind {
-  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
-  padding: 2px 7px; border-radius: 4px;
-}
+.chat-head { display: flex; align-items: center; gap: 10px; padding-bottom: 10px;
+  margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.chat-head .chat-kind { font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; padding: 2px 7px; border-radius: 4px; }
 .chat-head .chat-kind.p2p { color: var(--user); background: var(--user-dim); }
 .chat-head .chat-kind.group { color: var(--feedback); background: #2e1d0a; }
-.chat-head .chat-key {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 11px; color: var(--muted);
-}
+.chat-head .chat-key { font-family: 'SF Mono','Fira Code',monospace; font-size: 11px; color: var(--muted); }
 .chat-head .chat-stats { margin-left: auto; font-size: 11px; color: var(--dim); }
 .chat-timeline { display: flex; flex-direction: column; gap: 6px; }
-.ct-item {
-  display: grid; grid-template-columns: 28px 120px 100px 1fr auto; align-items: center; gap: 12px;
-  padding: 10px 14px; border-radius: 8px;
-  background: var(--surface); border: 1px solid var(--border);
-  font-size: 12px; cursor: pointer; transition: border-color 0.12s, background 0.12s;
-}
+.ct-item { display: grid; grid-template-columns: 28px 120px 100px 1fr auto; align-items: center;
+  gap: 12px; padding: 10px 14px; border-radius: 8px; background: var(--surface);
+  border: 1px solid var(--border); font-size: 12px; cursor: pointer;
+  transition: border-color 0.12s, background 0.12s; }
 .ct-item:hover { border-color: var(--border2); background: var(--surface2); }
-.ct-item.active {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
+.ct-item.active { border-color: var(--accent); background: var(--accent-dim); }
 .ct-item.missing { opacity: 0.45; cursor: default; }
-.ct-counter {
-  font-family: 'SF Mono', monospace; font-size: 11px; color: var(--dim);
-  text-align: right;
-}
+.ct-counter { font-family: 'SF Mono',monospace; font-size: 11px; color: var(--dim); text-align: right; }
 .ct-counter.current { color: var(--accent); font-weight: 700; }
-.ct-sid {
-  font-family: 'SF Mono', monospace; font-size: 11px; color: var(--accent2);
-}
+.ct-sid { font-family: 'SF Mono',monospace; font-size: 11px; color: var(--accent2); }
 .ct-date { font-size: 11px; color: var(--muted); }
-.ct-preview {
-  color: var(--dim); font-size: 11.5px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+.ct-preview { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-meta { font-size: 10px; color: var(--dim); white-space: nowrap; }
-.ct-badge-active {
-  font-size: 9px; font-weight: 700; text-transform: uppercase;
-  padding: 2px 7px; border-radius: 3px;
-  color: #000; background: var(--accent);
-}
+.ct-badge-active { font-size: 9px; font-weight: 700; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; color: #000; background: var(--accent); }
 
+/* Heartbeat */
+.hb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.hb-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.hb-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.hb-card-name { font-size: 14px; font-weight: 600; }
+.hb-row { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; }
+.hb-label { color: var(--dim); }
+.hb-value { color: var(--muted); font-family: 'SF Mono',monospace; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.dot-green { background: var(--green); }
+.dot-yellow { background: var(--yellow); }
+.dot-gray { background: var(--dim); }
+
+/* EigenFlux */
+.ef-status-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 20px; margin-bottom: 20px; }
+.ef-form { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+.radio-group { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.radio-group label { font-size: 13px; color: var(--muted); cursor: pointer;
+  display: flex; align-items: center; gap: 8px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.radio-group input[type="radio"] { accent-color: var(--accent); }
+
+/* Toast */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px;
+  padding: 10px 18px; font-size: 12px; color: var(--text); animation: toast-in 0.2s ease-out; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.empty-state { text-align: center; padding: 60px 0; color: var(--dim); font-size: 13px; }
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
@@ -336,111 +298,276 @@ section.active { display: block; }
   <div class="logo">Jarvis</div>
   <button class="nav-item active" data-tab="lark">Lark</button>
   <button class="nav-item" data-tab="memories">Memories</button>
+  <button class="nav-item" data-tab="heartbeat">Heartbeat</button>
+  <button class="nav-item" data-tab="eigenflux">EigenFlux</button>
   <button class="nav-item" data-tab="search">Search</button>
   <button class="nav-item" data-tab="sessions">Sessions</button>
-  <button class="nav-item" data-tab="skills">Skills</button>
   <button class="nav-item" data-tab="settings">Settings</button>
 </div>
 <div class="main">
 <section id="lark" class="active"></section>
 <section id="memories"></section>
+<section id="heartbeat"></section>
+<section id="eigenflux"></section>
 <section id="search"></section>
 <section id="sessions"></section>
-<section id="skills"></section>
 <section id="settings"></section>
 </div>
 </div>
+<div class="toast-container" id="toasts"></div>
 <script>
-document.querySelectorAll('.nav-item').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById(t.dataset.tab).classList.add('active');
-  });
-});
+// ── Helpers ──
 const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const bold = s => esc(s).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
-function hl(text, q) {
-  if (!q) return esc(text);
-  const e = esc(text);
-  return e.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
+function hl(text,q) {
+  if(!q) return esc(text);
+  return esc(text).replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
 }
 function roleTag(r) { return `<span class="sr-role ${r}">${r}</span>`; }
-
-function fmtBytes(n) {
-  if (!n) return '-';
-  if (n < 1024) return n + 'B';
-  if (n < 1024*1024) return (n/1024).toFixed(1) + 'KB';
-  return (n/1024/1024).toFixed(2) + 'MB';
+function fmtBytes(n) { if(!n)return '-'; if(n<1024)return n+'B'; if(n<1048576)return (n/1024).toFixed(1)+'KB'; return (n/1048576).toFixed(2)+'MB'; }
+function fmtTs(ts) { return (ts||'').slice(0,16).replace('T',' ')||'-'; }
+function toast(msg) {
+  const c=document.getElementById('toasts'), d=document.createElement('div');
+  d.className='toast'; d.textContent=msg; c.appendChild(d);
+  setTimeout(()=>d.remove(), 3000);
 }
-function fmtTs(ts) { return (ts||'').slice(0,16).replace('T',' ') || '-'; }
+function timeAgo(ts) {
+  if(!ts) return 'never';
+  const s=Math.floor(Date.now()/1000)-ts;
+  if(s<60) return s+'s ago'; if(s<3600) return Math.floor(s/60)+'m ago';
+  if(s<86400) return Math.floor(s/3600)+'h ago'; return Math.floor(s/86400)+'d ago';
+}
+function fmtCountdown(sec) {
+  if(sec<=0) return 'due now';
+  if(sec<60) return sec+'s'; if(sec<3600) return Math.floor(sec/60)+'m '+sec%60+'s';
+  return Math.floor(sec/3600)+'h '+Math.floor((sec%3600)/60)+'m';
+}
+function fmtInterval(sec) {
+  if(sec<60) return sec+'s'; if(sec<3600) return (sec/60)+'m';
+  if(sec<86400) return (sec/3600)+'h'; return (sec/86400)+'d';
+}
 
-// ── Lark Chats ──
+// ── Nav ──
+document.querySelectorAll('.nav-item').forEach(t=>{
+  t.addEventListener('click',()=>{
+    document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
+    t.classList.add('active'); document.getElementById(t.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Lark ──
 fetch('/api/lark_chats').then(r=>r.json()).then(data=>{
   const el=document.getElementById('lark');
   if(!data.length){el.innerHTML='<div class="empty-state">No Lark conversations tracked yet</div>';return;}
-
-  const totalChats = data.length;
-  const activeCount = data.reduce((a,c)=>a+(c.active_session_id?1:0),0);
-
+  const total=data.length, active=data.reduce((a,c)=>a+(c.active_session_id?1:0),0);
   el.innerHTML=`
-    <div class="section-header">
-      <h2>Lark Conversations</h2>
-      <span class="count">${totalChats} chat${totalChats>1?'s':''} · ${activeCount} active</span>
-    </div>
-    ${data.map(chat=>{
-      // Session rotations, earliest → latest
-      const activeIdx = chat.sessions.findIndex(s=>s.is_active);
-      return `
-        <div class="chat-group">
-          <div class="chat-head">
-            <span class="chat-kind ${chat.kind}">${chat.kind}</span>
-            <span class="chat-key">${esc(chat.conv_key)}</span>
-            <span class="chat-stats">${chat.current_counter} rotation${chat.current_counter>1?'s':''} · ${chat.total_messages} msgs</span>
-          </div>
-          <div class="chat-timeline">
-            ${chat.sessions.map(s=>`
-              <div class="ct-item ${s.is_active?'active':''} ${s.exists?'':'missing'}"
-                   ${s.exists?`onclick="openSession('${s.session_id}')"`:''}>
-                <span class="ct-counter ${s.is_active?'current':''}">#${s.counter}</span>
-                <span class="ct-sid">${esc(s.session_id.slice(0,8))}</span>
-                <span class="ct-date">${esc(fmtTs(s.first_ts))}</span>
-                <span class="ct-preview">${s.exists ? esc(s.first_prompt || '(no user messages)') : '<em>file missing</em>'}</span>
-                <span class="ct-meta">
-                  ${s.is_active?'<span class="ct-badge-active">current</span> ':''}
-                  ${s.exists?`${s.message_count||0} msgs · ${fmtBytes(s.size_bytes)}`:''}
-                </span>
-              </div>`).join('')}
-          </div>
-        </div>`;
-    }).join('')}`;
+    <div class="section-header"><h2>Lark Conversations</h2>
+      <span class="count">${total} chat${total>1?'s':''} &middot; ${active} active</span></div>
+    ${data.map(chat=>`<div class="chat-group"><div class="chat-head">
+        <span class="chat-kind ${chat.kind}">${chat.kind}</span>
+        <span class="chat-key">${esc(chat.conv_key)}</span>
+        <span class="chat-stats">${chat.current_counter} rotation${chat.current_counter>1?'s':''} &middot; ${chat.total_messages} msgs</span>
+      </div><div class="chat-timeline">
+        ${chat.sessions.map(s=>`<div class="ct-item ${s.is_active?'active':''} ${s.exists?'':'missing'}"
+             ${s.exists?`onclick="openSession('${s.session_id}')"`:''}>
+            <span class="ct-counter ${s.is_active?'current':''}">#${s.counter}</span>
+            <span class="ct-sid">${esc(s.session_id.slice(0,8))}</span>
+            <span class="ct-date">${esc(fmtTs(s.first_ts))}</span>
+            <span class="ct-preview">${s.exists?esc(s.first_prompt||'(no user messages)'):'<em>file missing</em>'}</span>
+            <span class="ct-meta">${s.is_active?'<span class="ct-badge-active">current</span> ':''}${s.exists?s.message_count+' msgs &middot; '+fmtBytes(s.size_bytes):''}</span>
+          </div>`).join('')}
+      </div></div>`).join('')}`;
 });
 
-fetch('/api/memories').then(r=>r.json()).then(data=>{
+// ── Memories (editable) ──
+let _memData=[], _memFilter=null, _memEditing=null;
+function loadMemories(){
+  fetch('/api/memories').then(r=>r.json()).then(data=>{ _memData=data; renderMemories(); });
+}
+function renderMemories(){
   const el=document.getElementById('memories');
-  if(!data.length){el.innerHTML='<div class="empty-state">No memories yet</div>';return;}
-  const types=[...new Set(data.map(m=>m.type))];
-  let filter=null;
-  function render(){
-    const f=filter?data.filter(m=>m.type===filter):data;
-    el.innerHTML=`
-      <div class="section-header"><h2>Memories</h2><span class="count">${f.length}</span></div>
-      <div class="filters">${['all',...types].map(t=>`<button class="fbtn${(t==='all'&&!filter)||(t===filter)?' active':''}" data-t="${t}">${t}</button>`).join('')}</div>
-      ${f.map(m=>`<div class="card">
-        <div class="card-head"><span class="card-name">${esc(m.name)}</span><span class="badge badge-${m.type}">${m.type}</span></div>
-        ${m.description?`<div class="card-desc">${esc(m.description)}</div>`:''}
-        <div class="card-body">${bold(m.body)}</div>
-        <div class="card-meta">${esc(m.file)}</div>
-      </div>`).join('')}`;
-    el.querySelectorAll('.fbtn').forEach(b=>b.addEventListener('click',()=>{
-      filter=b.dataset.t==='all'?null:b.dataset.t;render();
-    }));
-  }
-  render();
-});
+  const types=[...new Set(_memData.map(m=>m.type))];
+  const f=_memFilter?_memData.filter(m=>m.type===_memFilter):_memData;
+  el.innerHTML=`
+    <div class="section-header"><h2>Memories</h2>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="count">${f.length}</span>
+        <button class="btn btn-primary" onclick="editMemory(null)">+ New Memory</button>
+      </div></div>
+    <div class="filters">${['all',...types].map(t=>`<button class="fbtn${(t==='all'&&!_memFilter)||(t===_memFilter)?' active':''}" data-t="${t}">${t}</button>`).join('')}</div>
+    <div id="mem-editor-slot"></div>
+    <div id="mem-cards">${f.map(m=>memCardHtml(m)).join('')}</div>`;
+  el.querySelectorAll('.fbtn').forEach(b=>b.addEventListener('click',()=>{
+    _memFilter=b.dataset.t==='all'?null:b.dataset.t; renderMemories();
+  }));
+  if(_memEditing) showEditor(_memEditing);
+}
+function memCardHtml(m){
+  return `<div class="card" id="mem-${m.file}">
+    <div class="card-head">
+      <span class="card-name">${esc(m.name)}</span><span class="badge badge-${m.type}">${m.type}</span>
+      <div class="card-actions">
+        <button class="btn btn-ghost btn-sm" onclick="editMemory('${esc(m.file)}')">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteMemory('${esc(m.file)}')">Delete</button>
+      </div>
+    </div>
+    ${m.description?`<div class="card-desc">${esc(m.description)}</div>`:''}
+    <div class="card-body">${bold(m.body)}</div>
+    <div class="card-meta">${esc(m.file)}</div>
+  </div>`;
+}
+function editMemory(file){
+  const m = file ? _memData.find(x=>x.file===file) : {name:'',description:'',type:'user',body:'',file:''};
+  if(!m) return;
+  _memEditing={...m, isNew:!file};
+  showEditor(_memEditing);
+}
+function showEditor(m){
+  const slot=document.getElementById('mem-editor-slot');
+  if(!slot) return;
+  slot.innerHTML=`<div class="editor-card">
+    <div style="font-size:14px;font-weight:600;margin-bottom:14px">${m.isNew?'New Memory':'Edit: '+esc(m.name)}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div class="form-group"><label>Filename</label>
+        <input class="form-input" id="ed-file" value="${esc(m.file)}" ${m.isNew?'':'readonly style="opacity:0.6"'} placeholder="my_note.md"></div>
+      <div class="form-group"><label>Name</label>
+        <input class="form-input" id="ed-name" value="${esc(m.name)}" placeholder="Display Name"></div>
+      <div class="form-group"><label>Type</label>
+        <select class="form-input" id="ed-type">
+          ${['user','feedback','project','reference'].map(t=>`<option ${t===m.type?'selected':''}>${t}</option>`).join('')}
+        </select></div>
+    </div>
+    <div class="form-group"><label>Description</label>
+      <input class="form-input" id="ed-desc" value="${esc(m.description)}" placeholder="Short description"></div>
+    <div class="form-group"><label>Body</label>
+      <textarea class="form-input" id="ed-body" placeholder="Markdown content...">${esc(m.body)}</textarea></div>
+    <div class="editor-actions">
+      <button class="btn btn-primary" id="ed-save" onclick="saveMemory()">Save</button>
+      <button class="btn btn-ghost" onclick="cancelEdit()">Cancel</button>
+    </div>
+  </div>`;
+}
+function cancelEdit(){ _memEditing=null; const s=document.getElementById('mem-editor-slot'); if(s) s.innerHTML=''; }
+function saveMemory(){
+  const btn=document.getElementById('ed-save');
+  const payload={
+    filename: document.getElementById('ed-file').value.trim(),
+    name: document.getElementById('ed-name').value.trim(),
+    description: document.getElementById('ed-desc').value.trim(),
+    type: document.getElementById('ed-type').value,
+    body: document.getElementById('ed-body').value
+  };
+  if(!payload.filename||!payload.name){toast('Filename and name are required');return;}
+  if(!payload.filename.endsWith('.md')) payload.filename+='.md';
+  btn.textContent='Saving...'; btn.disabled=true;
+  fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(r=>r.json()).then(res=>{
+      if(res.ok){toast('Memory saved'); _memEditing=null; loadMemories();}
+      else{toast('Error: '+(res.error||'unknown')); btn.textContent='Save'; btn.disabled=false;}
+    }).catch(e=>{toast('Network error'); btn.textContent='Save'; btn.disabled=false;});
+}
+function deleteMemory(file){
+  if(!confirm('Delete '+file+'?')) return;
+  fetch('/api/memory/'+encodeURIComponent(file),{method:'DELETE'})
+    .then(r=>r.json()).then(res=>{
+      if(res.ok){toast('Deleted '+file); loadMemories();}
+      else toast('Error: '+(res.error||'unknown'));
+    });
+}
+loadMemories();
 
-let allSessionsMeta = [];
+// ── Heartbeat ──
+function loadHeartbeat(){
+  const el=document.getElementById('heartbeat');
+  el.innerHTML='<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">Loading...</div>';
+  fetch('/api/heartbeat/status').then(r=>r.json()).then(data=>{
+    if(data.error){el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">${esc(data.error)}</div>`;return;}
+    const tasks=data.tasks||[];
+    el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2><span class="count">${tasks.length} tasks</span></div>
+      <div class="hb-grid">${tasks.map(t=>{
+        const overdue=t.last_run && t.seconds_until_due<=0;
+        const never=!t.last_run;
+        const dotCls=never?'dot-gray':overdue?'dot-yellow':'dot-green';
+        const statusTxt=never?'never run':overdue?'overdue':'healthy';
+        return `<div class="hb-card">
+          <div class="hb-card-head">
+            <span class="hb-card-name"><span class="status-dot ${dotCls}"></span>${esc(t.name)}</span>
+            <button class="btn btn-primary btn-sm" onclick="forceRun('${esc(t.name)}',this)">Run Now</button>
+          </div>
+          <div class="hb-row"><span class="hb-label">Interval</span><span class="hb-value">${fmtInterval(t.interval)}</span></div>
+          <div class="hb-row"><span class="hb-label">Last run</span><span class="hb-value">${t.last_run?timeAgo(t.last_run):'never'}</span></div>
+          <div class="hb-row"><span class="hb-label">Next due</span><span class="hb-value">${never?'-':fmtCountdown(t.seconds_until_due)}</span></div>
+          <div class="hb-row"><span class="hb-label">Status</span><span class="hb-value">${statusTxt}</span></div>
+        </div>`}).join('')}</div>`;
+  });
+}
+function forceRun(name,btn){
+  btn.disabled=true; btn.textContent='...';
+  fetch('/api/heartbeat/force/'+encodeURIComponent(name),{method:'POST'})
+    .then(r=>r.json()).then(res=>{
+      if(res.ok){ btn.textContent='Triggered'; toast('Triggered: '+name); setTimeout(()=>{btn.textContent='Run Now';btn.disabled=false;},2000); }
+      else{ btn.textContent='Run Now'; btn.disabled=false; toast('Error: '+(res.error||'unknown')); }
+    }).catch(()=>{btn.textContent='Run Now';btn.disabled=false;toast('Network error');});
+}
+loadHeartbeat();
+
+// ── EigenFlux ──
+function loadEigenFlux(){
+  const el=document.getElementById('eigenflux');
+  el.innerHTML='<div class="section-header"><h2>EigenFlux</h2></div><div class="empty-state">Loading...</div>';
+  Promise.all([
+    fetch('/api/eigenflux/status').then(r=>r.json()),
+    fetch('/api/eigenflux/settings').then(r=>r.json())
+  ]).then(([status,settings])=>{
+    const authed=status.authed;
+    const profile=status.profile||{};
+    const dotHtml=authed?'<span class="status-dot dot-green"></span>Connected':'<span class="status-dot dot-gray"></span>Not connected';
+    const prefs=['Push everything','Action-only','Digest','Silent'];
+    const curPref=settings.feed_delivery_preference||'Push everything';
+    const curCool=settings.publish_cooldown_minutes||60;
+    el.innerHTML=`
+      <div class="section-header"><h2>EigenFlux</h2></div>
+      <div class="ef-status-box">
+        <div style="font-size:14px;font-weight:600;margin-bottom:10px">Connection Status</div>
+        <div style="font-size:13px;color:var(--muted)">${dotHtml}</div>
+        ${authed?`<div style="margin-top:8px;font-size:12px;color:var(--dim)">
+          Agent: <span style="color:var(--text)">${esc(profile.agent_name||profile.name||'-')}</span>
+          &middot; ID: <span style="color:var(--accent2);font-family:SF Mono,monospace">${esc(profile.agent_id||profile.id||'-')}</span>
+          ${profile.influence?` &middot; Influence items: ${profile.influence.total_items||0}`:''}
+        </div>`:`<div style="margin-top:8px;font-size:11px;color:var(--dim)">${esc(status.error||status.stderr||'')}</div>`}
+      </div>
+      <div class="ef-form">
+        <div style="font-size:14px;font-weight:600;margin-bottom:14px">Settings</div>
+        <div class="form-group"><label>Feed delivery preference</label>
+          <div class="radio-group">
+            ${prefs.map(p=>`<label><input type="radio" name="ef-pref" value="${p}" ${p===curPref?'checked':''}> ${p}</label>`).join('')}
+          </div></div>
+        <div class="form-group"><label>Publish cooldown (minutes)</label>
+          <input class="form-input" type="number" id="ef-cool" value="${curCool}" min="0" style="width:120px"></div>
+        <button class="btn btn-primary" id="ef-save" onclick="saveEFSettings()">Save</button>
+      </div>`;
+  });
+}
+function saveEFSettings(){
+  const btn=document.getElementById('ef-save');
+  const pref=document.querySelector('input[name="ef-pref"]:checked');
+  const payload={
+    feed_delivery_preference: pref?pref.value:'Push everything',
+    publish_cooldown_minutes: parseInt(document.getElementById('ef-cool').value)||60
+  };
+  btn.textContent='Saving...'; btn.disabled=true;
+  fetch('/api/eigenflux/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(r=>r.json()).then(res=>{
+      btn.textContent='Save'; btn.disabled=false;
+      if(res.ok) toast('EigenFlux settings saved');
+      else toast('Error: '+(res.error||'unknown'));
+    }).catch(()=>{btn.textContent='Save';btn.disabled=false;toast('Network error');});
+}
+loadEigenFlux();
+
+// ── Search ──
+let allSessionsMeta=[];
 fetch('/api/sessions_meta').then(r=>r.json()).then(d=>{allSessionsMeta=d;initSearch();});
 function initSearch(){
   const el=document.getElementById('search');
@@ -448,91 +575,66 @@ function initSearch(){
     <div class="section-header"><h2>Search</h2><span class="count" id="s-count"></span></div>
     <div class="search-bar">
       <input type="text" id="s-input" placeholder="Search across conversations..." />
-      <select id="s-scope">
-        <option value="">All sessions</option>
-        ${allSessionsMeta.map(s=>`<option value="${s.id}">${s.date} — ${esc(s.first_prompt.slice(0,40))}</option>`).join('')}
+      <select id="s-scope"><option value="">All sessions</option>
+        ${allSessionsMeta.map(s=>`<option value="${s.id}">${s.date} -- ${esc(s.first_prompt.slice(0,40))}</option>`).join('')}
       </select>
       <button id="s-btn">Search</button>
-    </div>
-    <div id="s-results"></div>`;
-  const input=document.getElementById('s-input');
-  const scope=document.getElementById('s-scope');
-  const btn=document.getElementById('s-btn');
-  const results=document.getElementById('s-results');
-  const countEl=document.getElementById('s-count');
+    </div><div id="s-results"></div>`;
+  const input=document.getElementById('s-input'),scope=document.getElementById('s-scope'),
+    btn=document.getElementById('s-btn'),results=document.getElementById('s-results'),
+    countEl=document.getElementById('s-count');
   function doSearch(){
-    const q=input.value.trim();
-    if(!q)return;
+    const q=input.value.trim(); if(!q)return;
     results.innerHTML='<div class="empty-state">Searching...</div>';
-    const sid=scope.value;
     let url='/api/search?q='+encodeURIComponent(q);
-    if(sid)url+='&session_id='+encodeURIComponent(sid);
+    if(scope.value)url+='&session_id='+encodeURIComponent(scope.value);
     fetch(url).then(r=>r.json()).then(data=>{
       countEl.textContent=data.length+' results';
       if(!data.length){results.innerHTML='<div class="empty-state">No results</div>';return;}
-      results.innerHTML=data.map(r=>`
-        <div class="sr">
+      results.innerHTML=data.map(r=>`<div class="sr">
           <div class="sr-header">
             <span class="sr-sid" onclick="openSession('${r.session_id}')">${esc(r.session_id.slice(0,8))}</span>
-            <span>${esc(r.timestamp)}</span>
-            ${roleTag(r.role)}
-          </div>
-          <div class="sr-body">
+            <span>${esc(r.timestamp)}</span>${roleTag(r.role)}
+          </div><div class="sr-body">
             ${r.context_before.map(c=>`<div class="sr-ctx">${roleTag(c.role)} ${esc(c.text)}</div>`).join('')}
             <div class="sr-match-wrap"><div class="sr-match">${roleTag(r.role)} ${hl(r.text,q)}</div></div>
             ${r.context_after.map(c=>`<div class="sr-ctx">${roleTag(c.role)} ${esc(c.text)}</div>`).join('')}
-          </div>
-        </div>`).join('');
+          </div></div>`).join('');
     });
   }
   btn.addEventListener('click',doSearch);
   input.addEventListener('keydown',e=>{if(e.key==='Enter')doSearch();});
 }
 
+// ── Sessions ──
 let sessionsData=[];
-fetch('/api/sessions_meta').then(r=>r.json()).then(data=>{
-  sessionsData=data;
-  renderSessionsList();
-});
+fetch('/api/sessions_meta').then(r=>r.json()).then(data=>{sessionsData=data;renderSessionsList();});
 function renderSessionsList(){
   const el=document.getElementById('sessions');
-  el.innerHTML=`
-    <div class="sessions-layout">
-      <div class="session-list" id="sess-list">
-        ${sessionsData.map((s,i)=>`
-          <div class="sl-item${i===0?' active':''}" data-id="${s.id}" onclick="selectSession('${s.id}',this)">
-            <div class="sl-date">${esc(s.date)}</div>
-            <div class="sl-prompt">${esc(s.first_prompt.slice(0,80))}${s.first_prompt.length>80?'...':''}</div>
-            <div class="sl-meta"><span class="sl-id">${s.id.slice(0,8)}</span> · ${s.message_count} msgs</div>
-          </div>`).join('')}
-      </div>
-      <div class="session-viewer" id="sess-viewer">
-        <div class="sv-empty">Select a session to view</div>
-      </div>
-    </div>`;
+  el.innerHTML=`<div class="sessions-layout">
+    <div class="session-list" id="sess-list">
+      ${sessionsData.map((s,i)=>`<div class="sl-item${i===0?' active':''}" data-id="${s.id}" onclick="selectSession('${s.id}',this)">
+          <div class="sl-date">${esc(s.date)}</div>
+          <div class="sl-prompt">${esc(s.first_prompt.slice(0,80))}${s.first_prompt.length>80?'...':''}</div>
+          <div class="sl-meta"><span class="sl-id">${s.id.slice(0,8)}</span> &middot; ${s.message_count} msgs</div>
+        </div>`).join('')}
+    </div>
+    <div class="session-viewer" id="sess-viewer"><div class="sv-empty">Select a session to view</div></div>
+  </div>`;
   if(sessionsData.length)selectSession(sessionsData[0].id,document.querySelector('.sl-item'));
 }
-let _currentMsgs=[];
-let _currentShown=30;
+let _currentMsgs=[],_currentShown=30;
 function selectSession(id,itemEl){
   document.querySelectorAll('.sl-item').forEach(e=>e.classList.remove('active'));
   if(itemEl)itemEl.classList.add('active');
   const viewer=document.getElementById('sess-viewer');
   viewer.innerHTML='<div class="sv-empty">Loading...</div>';
   fetch('/api/session/'+id).then(r=>r.json()).then(msgs=>{
-    _currentMsgs=msgs;
-    _currentShown=30;
+    _currentMsgs=msgs; _currentShown=30;
     const s=sessionsData.find(x=>x.id===id)||{};
-    viewer.innerHTML=`
-      <div class="sv-header">
-        <h3>${esc(s.date||'')} · ${msgs.length} messages</h3>
-        <div class="sv-search">
-          <input type="text" id="sv-filter" placeholder="Filter this session..." />
-        </div>
-      </div>
-      <div class="sv-messages" id="sv-msgs">
-        ${renderMessages(msgs,'',_currentShown)}
-      </div>`;
+    viewer.innerHTML=`<div class="sv-header"><h3>${esc(s.date||'')} &middot; ${msgs.length} messages</h3>
+      <div class="sv-search"><input type="text" id="sv-filter" placeholder="Filter this session..." /></div></div>
+      <div class="sv-messages" id="sv-msgs">${renderMessages(msgs,'',_currentShown)}</div>`;
     document.getElementById('sv-filter').addEventListener('input',e=>{
       document.getElementById('sv-msgs').innerHTML=renderMessages(msgs,e.target.value,0);
     });
@@ -547,23 +649,15 @@ function renderMessages(msgs,filter,tail){
   let filtered=q?msgs.filter(m=>m.text.toLowerCase().includes(q)):msgs;
   if(!filtered.length)return '<div class="sv-empty">No messages match</div>';
   let loadBtn='';
-  if(tail>0 && !q && filtered.length>tail){
+  if(tail>0&&!q&&filtered.length>tail){
     const hidden=filtered.length-tail;
     loadBtn=`<div style="text-align:center;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:8px">
-      <button onclick="loadEarlier()" style="font-family:inherit;font-size:12px;padding:6px 16px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer">
-        Load earlier messages (${hidden} hidden)
-      </button>
-    </div>`;
+      <button onclick="loadEarlier()" style="font-family:inherit;font-size:12px;padding:6px 16px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer">Load earlier (${hidden} hidden)</button></div>`;
     filtered=filtered.slice(-tail);
   }
-  return loadBtn+filtered.map(m=>`
-    <div class="sv-msg">
-      <div class="sv-msg-head">
-        ${roleTag(m.role)}
-        <span class="sv-msg-ts">${esc(m.timestamp)}</span>
-      </div>
-      <div class="sv-msg-text">${filter?hl(m.text,filter):esc(m.text)}</div>
-    </div>`).join('');
+  return loadBtn+filtered.map(m=>`<div class="sv-msg"><div class="sv-msg-head">${roleTag(m.role)}
+    <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
+    <div class="sv-msg-text">${filter?hl(m.text,filter):esc(m.text)}</div></div>`).join('');
 }
 function openSession(id){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
@@ -571,26 +665,16 @@ function openSession(id){
   document.querySelector('[data-tab="sessions"]').classList.add('active');
   document.getElementById('sessions').classList.add('active');
   const item=document.querySelector(`.sl-item[data-id="${id}"]`);
-  selectSession(id,item);
-  if(item)item.scrollIntoView({block:'center'});
+  selectSession(id,item); if(item)item.scrollIntoView({block:'center'});
 }
 
-fetch('/api/skills').then(r=>r.json()).then(data=>{
-  const el=document.getElementById('skills');
-  el.innerHTML=`<div class="section-header"><h2>Skills</h2><span class="count">${data.length}</span></div>
-    <div class="grid">${data.map(s=>`<div class="grid-item">
-      <div class="gi-name">${esc(s.name)}</div>
-      <div class="gi-desc">${esc(s.description||'')}</div>
-    </div>`).join('')}</div>`;
-});
-
+// ── Settings ──
 fetch('/api/settings').then(r=>r.json()).then(data=>{
   const el=document.getElementById('settings');
   el.innerHTML=Object.entries(data).map(([title,obj])=>`
     <div class="section-header"><h2>${esc(title)}</h2></div>
     ${Object.keys(obj).length?`<div class="card"><div class="card-body">${esc(JSON.stringify(obj,null,2))}</div></div>`
-    :'<div class="empty-state">Empty</div>'}
-  `).join('');
+    :'<div class="empty-state">Empty</div>'}`).join('');
 });
 </script>
 </body>
@@ -805,6 +889,151 @@ def load_settings() -> dict:
     return result
 
 
+# ── Memory write/delete ──────────────────────────────────────────────
+
+def save_memory(filename: str, name: str, description: str, mem_type: str, body: str) -> dict:
+    """Write a memory file with frontmatter. Returns {"ok": True} or {"error": "..."}."""
+    if not filename.endswith(".md"):
+        return {"error": "filename must end with .md"}
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return {"error": "invalid filename — path separators not allowed"}
+    if not name.strip():
+        return {"error": "name is required"}
+    content = f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}"
+    target = MEMORY_DIR / filename
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, target)
+        return {"ok": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def delete_memory(filename: str) -> dict:
+    """Delete a memory file. Returns {"ok": True} or {"error": "..."}."""
+    if filename == "MEMORY.md":
+        return {"error": "cannot delete MEMORY.md"}
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return {"error": "invalid filename — path separators not allowed"}
+    target = MEMORY_DIR / filename
+    if not target.exists():
+        return {"error": "file not found"}
+    try:
+        target.unlink()
+        return {"ok": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Heartbeat status ────────────────────────────────────────────────
+
+def heartbeat_status() -> dict:
+    """Read heartbeat_state.json + HEARTBEAT.md, return structured task status."""
+    from core.heartbeat import parse_heartbeat, parse_interval
+
+    heartbeat_path = ROOT / "HEARTBEAT.md"
+    state_path = ROOT / "heartbeat_state.json"
+
+    if not heartbeat_path.exists():
+        return {"error": "HEARTBEAT.md not found"}
+
+    tasks = parse_heartbeat(heartbeat_path)
+    state = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    now = int(time.time())
+    result = []
+    for task in tasks:
+        last_run = state.get(task["name"], {}).get("last_run", 0)
+        interval = task["interval"]
+        seconds_until_due = max(0, interval - (now - last_run)) if last_run else 0
+        # Human-readable interval string
+        if interval >= 86400:
+            interval_str = f"{interval // 86400}d"
+        elif interval >= 3600:
+            interval_str = f"{interval // 3600}h"
+        elif interval >= 60:
+            interval_str = f"{interval // 60}m"
+        else:
+            interval_str = f"{interval}s"
+
+        result.append({
+            "name": task["name"],
+            "interval": interval,
+            "interval_str": interval_str,
+            "last_run": last_run,
+            "seconds_until_due": seconds_until_due,
+        })
+    return {"tasks": result}
+
+
+# ── EigenFlux settings & status ─────────────────────────────────────
+
+EIGENFLUX_DIR = ROOT / "eigenflux"
+
+
+def eigenflux_settings() -> dict:
+    """Read eigenflux/user_settings.json."""
+    settings_path = EIGENFLUX_DIR / "user_settings.json"
+    if not settings_path.exists():
+        return {}
+    try:
+        return json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def save_eigenflux_settings(settings: dict) -> dict:
+    """Write eigenflux/user_settings.json (atomic)."""
+    settings_path = EIGENFLUX_DIR / "user_settings.json"
+    tmp = settings_path.with_suffix(settings_path.suffix + ".tmp")
+    try:
+        EIGENFLUX_DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, settings_path)
+        return {"ok": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def eigenflux_status() -> dict:
+    """Check if eigenflux CLI is authed by running `eigenflux profile show`."""
+    env = os.environ.copy()
+    env["PATH"] = str(Path.home() / ".local/bin") + ":" + env.get("PATH", "")
+    try:
+        result = subprocess.run(
+            ["eigenflux", "profile", "show", "-f", "json"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        if result.returncode == 0:
+            try:
+                data = json.loads(result.stdout)
+                # CLI returns {"profile": {...}, "influence": {...}} — flatten
+                profile = data.get("profile", {})
+                influence = data.get("influence", {})
+                return {
+                    "authed": True,
+                    "agent_name": profile.get("agent_name", ""),
+                    "agent_id": profile.get("agent_id", ""),
+                    "bio": profile.get("bio", ""),
+                    "influence": influence,
+                }
+            except json.JSONDecodeError:
+                return {"authed": True, "raw": result.stdout.strip()}
+        return {"authed": False, "stderr": result.stderr.strip()}
+    except FileNotFoundError:
+        return {"authed": False, "error": "eigenflux CLI not found"}
+    except subprocess.TimeoutExpired:
+        return {"authed": False, "error": "timeout"}
+    except Exception as e:
+        return {"authed": False, "error": str(e)}
+
+
 # ── Server ───────────────────────────────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -857,17 +1086,111 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(lark_chats())
         elif path == "/api/settings":
             self._json(load_settings())
+        elif path == "/api/heartbeat/status":
+            self._json(heartbeat_status())
+        elif path == "/api/eigenflux/status":
+            self._json(eigenflux_status())
+        elif path == "/api/eigenflux/settings":
+            self._json(eigenflux_settings())
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(HTML.encode())
 
-    def _json(self, data):
-        self.send_response(200)
+    def _json(self, data, status=200):
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+    def _read_json_body(self) -> dict | None:
+        """Read and parse JSON request body. Returns None on failure (sends 400)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, ValueError):
+            self._json({"error": "invalid JSON body"}, status=400)
+            return None
+
+    def do_POST(self):
+        if not self._check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":"unauthorized"}')
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/memory":
+            body = self._read_json_body()
+            if body is None:
+                return
+            required = ("filename", "name", "description", "type", "body")
+            missing = [k for k in required if k not in body]
+            if missing:
+                self._json({"error": f"missing fields: {', '.join(missing)}"}, status=400)
+                return
+            result = save_memory(
+                filename=body["filename"],
+                name=body["name"],
+                description=body["description"],
+                mem_type=body["type"],
+                body=body["body"],
+            )
+            self._json(result, status=200 if "ok" in result else 400)
+
+        elif path.startswith("/api/heartbeat/force/"):
+            task_name = path.split("/api/heartbeat/force/", 1)[1]
+            if not task_name:
+                self._json({"error": "task name required"}, status=400)
+                return
+            # Write trigger file that bot.sh reads
+            trigger_path = Path("/tmp/jarvis-heartbeat-trigger")
+            try:
+                trigger_path.write_text(task_name, encoding="utf-8")
+                self._json({"ok": True, "task": task_name})
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+
+        elif path == "/api/eigenflux/settings":
+            body = self._read_json_body()
+            if body is None:
+                return
+            # Merge with existing settings so partial updates work
+            current = eigenflux_settings()
+            if "error" in current:
+                current = {}
+            current.update(body)
+            result = save_eigenflux_settings(current)
+            self._json(result, status=200 if "ok" in result else 500)
+
+        else:
+            self._json({"error": "not found"}, status=404)
+
+    def do_DELETE(self):
+        if not self._check_auth():
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":"unauthorized"}')
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path.startswith("/api/memory/"):
+            filename = path.split("/api/memory/", 1)[1]
+            if not filename:
+                self._json({"error": "filename required"}, status=400)
+                return
+            result = delete_memory(filename)
+            self._json(result, status=200 if "ok" in result else 400)
+        else:
+            self._json({"error": "not found"}, status=404)
 
     def log_message(self, fmt, *args):
         pass
