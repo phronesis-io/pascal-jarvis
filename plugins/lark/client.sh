@@ -76,6 +76,27 @@ lark_delete_message() {
     --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null || true
 }
 
+# lark_add_reaction <message_id> <emoji_type>
+# Add an emoji reaction to a message. Returns reaction_id for later removal.
+lark_add_reaction() {
+  local mid="$1" emoji="${2:-THUMBSUP}"
+  [ -z "$mid" ] && return 0
+  lark-cli im reactions create \
+    --params "{\"message_id\":\"$mid\"}" \
+    --data "{\"reaction_type\":{\"emoji_type\":\"$emoji\"}}" \
+    --as bot 2>>"${LOG_FILE:-/dev/null}" || true
+}
+
+# lark_remove_reaction <message_id> <reaction_id>
+# Remove a reaction the bot previously added.
+lark_remove_reaction() {
+  local mid="$1" rid="$2"
+  [ -z "$mid" ] || [ -z "$rid" ] && return 0
+  lark-cli im reactions delete \
+    --params "{\"message_id\":\"$mid\",\"reaction_id\":\"$rid\"}" \
+    --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null || true
+}
+
 # ── Inbound: event subscription ──────────────────────────────────────
 
 # lark_subscribe_messages
