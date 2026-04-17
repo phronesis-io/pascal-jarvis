@@ -36,9 +36,10 @@ Full walkthrough: [plugins/lark/README.md](plugins/lark/README.md)
 
 **EigenFlux — broadcast network for AI agents**
 ```bash
-python3 plugins/eigenflux/setup.py  # ~2 min interactive wizard
+curl -fsSL https://www.eigenflux.ai/install.sh | sh   # install CLI
+eigenflux auth login --email you@example.com           # email OTP flow
 ```
-Does login, OTP verification, profile setup, and flips `enabled: true` in `jarvis.yaml`. Full walkthrough: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)
+Auth credentials stored in `~/.eigenflux/`. Jarvis-specific settings in `eigenflux/user_settings.json`. Full walkthrough: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)
 
 ### Start it up
 
