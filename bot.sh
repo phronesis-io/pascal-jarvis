@@ -80,6 +80,7 @@ c = Config(os.environ["CONFIG_FILE"])
 def emit(name, value):
     print(f"{name}={shlex.quote(str(value))}")
 emit("USER_ID", c.lark.get("user_id", ""))
+emit("APP_ID", c.lark.get("app_id", ""))
 emit("DATA_DIR", c.data_dir)
 emit("WORK_DIR", c.work_dir)
 emit("MEMORY_DIR", c.memory_dir)
@@ -302,6 +303,21 @@ lark_subscribe_messages \
 
       [ -z "$content" ] || [ -z "$message_id" ] && continue
 
+      # In group chats, only respond when mentioned
+      if [ "$chat_type" != "p2p" ]; then
+        mentions=$(echo "$line" | jq -r '.mentions // "[]"' 2>/dev/null)
+        is_mentioned=$(echo "$mentions" | jq -r '.[].id.open_id // .[].id.union_id // empty' 2>/dev/null | grep -c "bot" || true)
+        # Also check if raw mentions contain the app_id
+        app_mentioned=$(echo "$line" | jq -r '.mentions' 2>/dev/null | grep -c "$APP_ID" || true)
+        if [ "$is_mentioned" -eq 0 ] && [ "$app_mentioned" -eq 0 ]; then
+          # Check if bot name appears in content as fallback
+          bot_named=$(echo "$content" | grep -ci "jax" || true)
+          if [ "$bot_named" -eq 0 ]; then
+            continue
+          fi
+        fi
+      fi
+
       # Handle manual heartbeat trigger
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
       if [ "$content_lower" = "loop" ] || [ "$content_lower" = "heartbeat" ]; then
@@ -334,9 +350,9 @@ runner.run_cycle(force=True, only_task='memory-hourly')
 
       log_info "[$session_id] Received: $content"
 
-      # Send "Thinking..." indicator (captures message_id for later deletion)
-      thinking_result=$(lark_reply_text "$message_id" "Thinking...")
-      thinking_id=$(echo "$thinking_result" | jq -r '.data.message_id // empty' 2>/dev/null || true)
+      # Add a reaction to indicate we're working on it
+      reaction_result=$(lark_add_reaction "$message_id" "Typing")
+      reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
 
       # Build system prompt with memory + recent turns
       memory=$(load_memory)
@@ -367,6 +383,16 @@ $memory
 $recent_turns"
 
       # Call Claude (runs in WORK_DIR, with optional timeout)
+      # Wait for any existing session lock (previous message still processing)
+      LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
+      waited=0
+      while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 130 ]; do
+        log_info "[$session_id] Session busy, waiting..."
+        sleep 5
+        waited=$((waited + 5))
+      done
+      touch "$LOCK_FILE"
+
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
       if [ -f "$session_file" ]; then
         log_info "[$session_id] Resuming session"
@@ -384,6 +410,8 @@ $recent_turns"
           < /dev/null 2>>"$LOG_FILE" || true)
       fi
 
+      rm -f "$LOCK_FILE"
+
       # Filter error-like answers — never send them to the user as the "real" reply
       reply=""
       if [ -n "$answer" ] && ! looks_like_error "$answer"; then
@@ -392,7 +420,7 @@ $recent_turns"
 
       if [ -z "$reply" ]; then
         log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
-        [ -n "$thinking_id" ] && lark_delete_message "$thinking_id"
+        [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
         lark_reply_text "$message_id" \
           "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
         continue
@@ -400,8 +428,8 @@ $recent_turns"
 
       log_info "[$session_id] Replied (${#reply} chars)"
 
-      # Delete "Thinking..." and send the real reply
-      [ -n "$thinking_id" ] && lark_delete_message "$thinking_id"
+      # Remove the "working on it" reaction and send the real reply
+      [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
       if ! lark_reply "$message_id" "$reply"; then
         log_err "[$session_id] Failed to send reply to Lark"
       fi
