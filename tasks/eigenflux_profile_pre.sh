@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Pre-hook: get current EigenFlux profile
+# Pre-hook: get current EigenFlux profile via CLI
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+# shellcheck source=../plugins/eigenflux/client.sh
+. "$JARVIS_DIR/plugins/eigenflux/client.sh"
 
-current=$(python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
-from plugins.eigenflux.client import EigenFluxClient
-import json
-client = EigenFluxClient('$JARVIS_DIR/eigenflux')
-print(json.dumps(client.get_me(), indent=2))
-" 2>/dev/null || true)
+eigenflux_require || exit 0
 
+current=$(eigenflux_profile_show)
 [ -z "$current" ] && exit 0
+
 echo "Current EigenFlux profile:"
 echo "$current"

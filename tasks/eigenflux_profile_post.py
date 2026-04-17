@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""Post-hook: update EigenFlux profile if Claude decided to."""
+"""Post-hook: update EigenFlux profile via CLI if Claude decided to."""
 import json
 import os
 import re
+import subprocess
 import sys
 import traceback
-from pathlib import Path
 
-JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
-                                 Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(JARVIS_DIR))
-
-from plugins.eigenflux.client import EigenFluxClient
+LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
+PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 
 
 def main() -> int:
@@ -25,7 +22,7 @@ def main() -> int:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        print(f"[eigenflux-profile] JSON parse failed: {e}", file=sys.stderr)
+        print(f"[eigenflux-profile] JSON parse failed: {e}", file=LOG)
         return 0
 
     if not data.get("should_update"):
@@ -34,23 +31,29 @@ def main() -> int:
     agent_name = data.get("agent_name")
     bio = data.get("bio")
     if not agent_name and not bio:
-        print("[eigenflux-profile] should_update=true but no fields to update", file=sys.stderr)
+        print("[eigenflux-profile] should_update=true but no fields", file=LOG)
         return 0
 
-    client = EigenFluxClient(str(JARVIS_DIR / "eigenflux"))
+    cmd = ["eigenflux", "profile", "update", "-f", "json"]
+    if agent_name:
+        cmd.extend(["--name", agent_name])
+    if bio:
+        cmd.extend(["--bio", bio])
+
     try:
-        result = client.update_profile(agent_name=agent_name, bio=bio)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            env={**os.environ, "PATH": PATH_ENV},
+        )
+        if result.returncode == 0:
+            reason = data.get("reason", "")
+            print(f"EigenFlux profile updated. {reason}".strip())
+        else:
+            print(f"[eigenflux-profile] CLI error: {result.stderr.strip()}", file=LOG)
     except Exception:
-        print("[eigenflux-profile] update_profile raised:", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        return 0
+        print("[eigenflux-profile] raised:", file=LOG)
+        traceback.print_exc(file=LOG)
 
-    if result.get("code") == 0:
-        reason = data.get("reason", "")
-        print(f"EigenFlux profile updated. {reason}".strip())
-    else:
-        print(f"[eigenflux-profile] API err: code={result.get('code')} msg={result.get('msg')}",
-              file=sys.stderr)
     return 0
 
 

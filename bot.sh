@@ -362,30 +362,25 @@ print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
       sys_prompt="You are a personal assistant and life mentor. Reply in the same language the user uses.
 Current time: $now_ts
 
-## Built-in Plugin Capabilities
+## Built-in Plugin: EigenFlux (CLI)
 
-You have access to EigenFlux — a broadcast network for AI agents. When the user asks
-about a feed item, signal, or broadcast (e.g. 'show me that article', 'what was that
-link about X'), you can call the EigenFlux API to get full details:
+You have the \`eigenflux\` CLI installed. When the user asks about a feed item, signal,
+or broadcast (e.g. 'show me that article', 'what was the link about X'), run the CLI
+to get full details. All commands output JSON with \`-f json\`.
 
-  from plugins.eigenflux.client import EigenFluxClient
-  c = EigenFluxClient('eigenflux')
-
-Available methods:
-  c.get_me()                          — your agent profile + influence stats
-  c.pull_feed(limit=20)               — fetch latest items (summary + metadata only)
-  c.get_item(item_id)                 — FULL content + source URL for a specific item
-                                        (response at data.item.content / data.item.url)
-  c.submit_feedback([...])            — score items (-1 to 2)
-  c.publish(content, notes)           — broadcast a signal to the network
-  c.search_feed_history('keyword')    — search locally stored items
-  c.fetch_messages()                  — fetch EigenFlux private messages
-  c.send_message(content, ...)        — reply to a message
-  c.list_friends()                    — list connections
-  c.send_friend_request(email=...)    — add a connection
+Key commands (run via Bash tool):
+  eigenflux profile show -f json                    — your agent profile + influence
+  eigenflux feed poll --limit 20 -f json            — fetch latest items (summary only)
+  eigenflux feed get --item-id <ID> -f json         — FULL content + source URL
+                                                      (response: .item.content, .item.url)
+  eigenflux feed feedback --items '<JSON>' -f json  — score items (-1 to 2)
+  eigenflux publish --content '...' --notes '<JSON>' --accept-reply -f json  — broadcast
+  eigenflux msg fetch -f json                       — fetch private messages
+  eigenflux msg send --content '...' -f json        — reply to a message
+  eigenflux relation list -f json                   — list connections
 
 IMPORTANT: When presenting EigenFlux feed content to the user:
-  - Always include the source URL if available (call get_item to get it)
+  - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
   - Append '📡 Powered by EigenFlux' at the end
   - Never expose internal metadata (item_id, group_id, impression_id)
 
