@@ -478,29 +478,79 @@ function deleteMemory(file){
 loadMemories();
 
 // ── Heartbeat ──
+let _hbTasks=[];
 function loadHeartbeat(){
   const el=document.getElementById('heartbeat');
   el.innerHTML='<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">Loading...</div>';
   fetch('/api/heartbeat/status').then(r=>r.json()).then(data=>{
     if(data.error){el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">${esc(data.error)}</div>`;return;}
-    const tasks=data.tasks||[];
-    el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2><span class="count">${tasks.length} tasks</span></div>
-      <div class="hb-grid">${tasks.map(t=>{
-        const overdue=t.last_run && t.seconds_until_due<=0;
-        const never=!t.last_run;
-        const dotCls=never?'dot-gray':overdue?'dot-yellow':'dot-green';
-        const statusTxt=never?'never run':overdue?'overdue':'healthy';
-        return `<div class="hb-card">
-          <div class="hb-card-head">
-            <span class="hb-card-name"><span class="status-dot ${dotCls}"></span>${esc(t.name)}</span>
-            <button class="btn btn-primary btn-sm" onclick="forceRun('${esc(t.name)}',this)">Run Now</button>
-          </div>
-          <div class="hb-row"><span class="hb-label">Interval</span><span class="hb-value">${fmtInterval(t.interval)}</span></div>
-          <div class="hb-row"><span class="hb-label">Last run</span><span class="hb-value">${t.last_run?timeAgo(t.last_run):'never'}</span></div>
-          <div class="hb-row"><span class="hb-label">Next due</span><span class="hb-value">${never?'-':fmtCountdown(t.seconds_until_due)}</span></div>
-          <div class="hb-row"><span class="hb-label">Status</span><span class="hb-value">${statusTxt}</span></div>
-        </div>`}).join('')}</div>`;
+    _hbTasks=data.tasks||[];
+    renderHeartbeat();
   });
+}
+function renderHeartbeat(){
+  const el=document.getElementById('heartbeat');
+  const tasks=_hbTasks;
+  el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2><span class="count">${tasks.length} tasks</span></div>
+    <div style="display:flex;flex-direction:column;gap:10px">${tasks.map((t,i)=>{
+      const overdue=t.last_run && t.seconds_until_due<=0;
+      const never=!t.last_run;
+      const dotCls=never?'dot-gray':overdue?'dot-yellow':'dot-green';
+      const statusTxt=never?'never run':overdue?'overdue':'healthy';
+      return `<div class="card" id="hb-card-${i}">
+        <div class="hb-card-head">
+          <span class="hb-card-name"><span class="status-dot ${dotCls}"></span>${esc(t.name)}</span>
+          <span style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="toggleHbEdit(${i})">Edit</button>
+            <button class="btn btn-primary btn-sm" onclick="forceRun('${esc(t.name)}',this)">Run Now</button>
+          </span>
+        </div>
+        <div class="hb-row"><span class="hb-label">Interval</span><span class="hb-value">${t.interval_str||fmtInterval(t.interval)}</span></div>
+        <div class="hb-row"><span class="hb-label">Last run</span><span class="hb-value">${t.last_run?timeAgo(t.last_run):'never'}</span></div>
+        <div class="hb-row"><span class="hb-label">Next due</span><span class="hb-value">${never?'-':fmtCountdown(t.seconds_until_due)}</span></div>
+        <div class="hb-row"><span class="hb-label">Status</span><span class="hb-value">${statusTxt}</span></div>
+        ${t.pre?`<div class="hb-row"><span class="hb-label">Pre-script</span><span class="hb-value" style="font-family:monospace;font-size:11px">${esc(t.pre)}</span></div>`:''}
+        ${t.post?`<div class="hb-row"><span class="hb-label">Post-script</span><span class="hb-value" style="font-family:monospace;font-size:11px">${esc(t.post)}</span></div>`:''}
+        <div class="hb-row" style="margin-top:8px"><span class="hb-label" style="align-self:flex-start">Prompt</span></div>
+        <div style="background:var(--surface2);border-radius:6px;padding:10px 12px;font-size:11.5px;color:var(--muted);white-space:pre-wrap;word-wrap:break-word;line-height:1.6;max-height:200px;overflow-y:auto;margin-top:4px">${esc(t.prompt||'(none)')}</div>
+        <div id="hb-edit-${i}" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center;margin-bottom:8px">
+            <label style="font-size:11px;color:var(--dim)">Interval</label>
+            <input id="hb-int-${i}" class="form-input" value="${esc(t.interval_str||'')}" style="width:80px" placeholder="10m" />
+            <label style="font-size:11px;color:var(--dim)">Pre-script</label>
+            <input id="hb-pre-${i}" class="form-input" value="${esc(t.pre||'')}" placeholder="tasks/xxx_pre.sh" />
+            <label style="font-size:11px;color:var(--dim)">Post-script</label>
+            <input id="hb-post-${i}" class="form-input" value="${esc(t.post||'')}" placeholder="tasks/xxx_post.py" />
+          </div>
+          <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:4px">Prompt</label>
+          <textarea id="hb-prompt-${i}" class="form-input" style="font-family:'SF Mono',monospace;font-size:11.5px;min-height:180px;width:100%;resize:vertical">${esc(t.prompt||'')}</textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+            <button class="btn btn-ghost btn-sm" onclick="toggleHbEdit(${i})">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="hb-save-${i}" onclick="saveHbTask(${i})">Save</button>
+          </div>
+        </div>
+      </div>`}).join('')}</div>`;
+}
+function toggleHbEdit(i){
+  const ed=document.getElementById('hb-edit-'+i);
+  ed.style.display=ed.style.display==='none'?'block':'none';
+}
+function saveHbTask(i){
+  const t=_hbTasks[i];
+  const btn=document.getElementById('hb-save-'+i);
+  btn.disabled=true; btn.textContent='Saving...';
+  const body={
+    name:t.name,
+    interval_str:document.getElementById('hb-int-'+i).value,
+    pre:document.getElementById('hb-pre-'+i).value,
+    post:document.getElementById('hb-post-'+i).value,
+    prompt:document.getElementById('hb-prompt-'+i).value,
+  };
+  fetch('/api/heartbeat/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(res=>{
+      if(res.ok){toast('Task "'+t.name+'" saved');loadHeartbeat();}
+      else{toast('Error: '+(res.error||'unknown'));btn.textContent='Save';btn.disabled=false;}
+    }).catch(()=>{toast('Network error');btn.textContent='Save';btn.disabled=false;});
 }
 function forceRun(name,btn){
   btn.disabled=true; btn.textContent='...';
@@ -968,8 +1018,60 @@ def heartbeat_status() -> dict:
             "interval_str": interval_str,
             "last_run": last_run,
             "seconds_until_due": seconds_until_due,
+            "pre": task.get("pre", ""),
+            "post": task.get("post", ""),
+            "prompt": task.get("prompt", "").strip(),
         })
     return {"tasks": result}
+
+
+def save_heartbeat_task(name: str, interval_str: str, pre: str, post: str,
+                        prompt: str) -> dict:
+    """Update a single task in HEARTBEAT.md. Rewrites the file preserving all other tasks."""
+    heartbeat_path = ROOT / "HEARTBEAT.md"
+    if not heartbeat_path.exists():
+        return {"error": "HEARTBEAT.md not found"}
+
+    text = heartbeat_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    # Find the task section by "### <name>"
+    header = f"### {name}"
+    start_idx = None
+    end_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start_idx = i
+        elif start_idx is not None and line.startswith("### ") and i > start_idx:
+            end_idx = i
+            break
+    if start_idx is None:
+        return {"error": f"task '{name}' not found in HEARTBEAT.md"}
+    if end_idx is None:
+        end_idx = len(lines)
+
+    # Build the new task block
+    new_block = [header]
+    new_block.append(f"- interval: {interval_str}")
+    if pre:
+        new_block.append(f"- pre: {pre}")
+    if post:
+        new_block.append(f"- post: {post}")
+    new_block.append("- prompt: |")
+    for pline in prompt.strip().splitlines():
+        new_block.append(f"    {pline}")
+    new_block.append("")  # blank line after task
+
+    # Replace the section
+    new_lines = lines[:start_idx] + new_block + lines[end_idx:]
+    new_text = "\n".join(new_lines)
+
+    # Atomic write
+    tmp = heartbeat_path.with_suffix(".md.tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    os.replace(tmp, heartbeat_path)
+
+    return {"ok": True}
 
 
 # ── EigenFlux settings & status ─────────────────────────────────────
@@ -1141,6 +1243,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 mem_type=body["type"],
                 body=body["body"],
             )
+            self._json(result, status=200 if "ok" in result else 400)
+
+        elif path == "/api/heartbeat/task":
+            body = self._read_json_body()
+            if body is None:
+                return
+            name = body.get("name", "")
+            interval_str = body.get("interval_str", "")
+            pre = body.get("pre", "")
+            post = body.get("post", "")
+            prompt = body.get("prompt", "")
+            if not name or not interval_str or not prompt:
+                self._json({"error": "name, interval_str, and prompt are required"}, status=400)
+                return
+            result = save_heartbeat_task(name, interval_str, pre, post, prompt)
             self._json(result, status=200 if "ok" in result else 400)
 
         elif path.startswith("/api/heartbeat/force/"):
