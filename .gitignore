@@ -14,6 +14,7 @@ jarvis.log
 *.corrupted
 *.gone
 *.TEST_GONE
+.session_lock_*
 
 # EigenFlux plugin data (tokens, feed, messages, state)
 eigenflux/credentials.json
