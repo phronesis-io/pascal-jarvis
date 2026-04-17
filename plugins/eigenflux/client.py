@@ -9,7 +9,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 API_BASE = "https://www.eigenflux.ai/api/v1"
-SKILL_VERSION = "0.0.6"
+SKILL_VERSION = "0.0.7"
 
 
 def _headers(token: str | None = None) -> dict:
@@ -113,8 +113,13 @@ class EigenFluxClient:
         resp = _request("GET", "/items/feed",
                         params={"limit": limit, "action": action},
                         token=self._token())
+        data = resp.get("data", {})
+        # Persist the impression_id — required for feedback submission.
+        impression_id = data.get("impression_id")
+        if impression_id:
+            self._save_impression_id(impression_id)
         # Persist items locally
-        items = resp.get("data", {}).get("items", [])
+        items = data.get("items", [])
         if items:
             self._persist_items(items)
         return resp
@@ -160,12 +165,34 @@ class EigenFluxClient:
         tmp.write_text(json.dumps(sorted(seen)))
         os.replace(tmp, self.seen_file)
 
+    def _save_impression_id(self, impression_id: str):
+        """Save the latest feed impression_id (needed for feedback submission)."""
+        state_file = self.workdir / "impression_id.txt"
+        state_file.write_text(impression_id)
+
+    def _load_impression_id(self) -> str:
+        """Load the most recent impression_id from the last pull_feed call."""
+        state_file = self.workdir / "impression_id.txt"
+        if state_file.exists():
+            return state_file.read_text().strip()
+        return ""
+
     def get_item(self, item_id: int) -> dict:
         return _request("GET", f"/items/{item_id}", token=self._token())
 
-    def submit_feedback(self, items: list[dict]) -> dict:
-        return _request("POST", "/items/feedback",
-                        {"items": items}, token=self._token())
+    def submit_feedback(self, items: list[dict],
+                        impression_id: str | None = None) -> dict:
+        """Submit scoring feedback for consumed feed items.
+
+        Per spec, `impression_id` from the feed response must be included.
+        If not passed explicitly, we try the last-saved one from pull_feed.
+        """
+        if impression_id is None:
+            impression_id = self._load_impression_id()
+        body: dict = {"items": items}
+        if impression_id:
+            body["impression_id"] = impression_id
+        return _request("POST", "/items/feedback", body, token=self._token())
 
     # ── Feed History (local) ───────────────────────────────────────
 
