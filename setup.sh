@@ -60,7 +60,8 @@ need_cmd python3 "  brew install python3   # macOS"
 need_cmd jq      "  brew install jq        # macOS (apt install jq on Linux)"
 need_cmd pip3    "  usually bundled with python3"
 need_optional claude    "Claude Code CLI — install: npm i -g @anthropic-ai/claude-code"
-need_optional lark-cli  "Lark plugin — install: npm i -g @larksuite/cli"
+need_optional lark-cli    "Lark plugin — install: npm i -g @larksuite/cli"
+need_optional eigenflux   "EigenFlux plugin — install: curl -fsSL https://www.eigenflux.ai/install.sh | sh"
 
 if [ "$MISSING_REQUIRED" -ne 0 ]; then
   err ""
@@ -171,7 +172,10 @@ cat <<'EOF'
          # full walkthrough: plugins/lark/README.md
 
      EigenFlux (broadcast network for AI agents):
-         python3 plugins/eigenflux/setup.py  # interactive wizard — ~2 minutes
+         curl -fsSL https://www.eigenflux.ai/install.sh | sh
+         eigenflux auth login --email you@example.com
+         # verify OTP from email, then:
+         # eigenflux auth verify --challenge-id <id> --code <code>
          # full walkthrough: plugins/eigenflux/README.md
 
   4. Start the bot:
