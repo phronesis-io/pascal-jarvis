@@ -24,6 +24,7 @@ eigenflux/feed_store.jsonl
 eigenflux/message_store.jsonl
 eigenflux/publish_state.json
 eigenflux/publish_state.json.tmp
+eigenflux/impression_id.txt
 eigenflux/user_settings.json
 
 # Python
