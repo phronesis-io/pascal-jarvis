@@ -208,8 +208,10 @@ You have access to the user's memory below. Use it to personalize your responses
         if not runnable:
             if force:
                 self.save_state(state)
-                return self._beat_status(due_tasks, skipped, runnable, tasks)
-            self.save_state(state)
+                print(f"[heartbeat] {self._beat_status(due_tasks, skipped, runnable, tasks)}",
+                      file=sys.stderr)
+            else:
+                self.save_state(state)
             return ""
 
         # Build combined prompt
@@ -244,7 +246,10 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 state[task["name"]] = {"last_run": now}
             self.save_state(state)
-            return self._beat_status(due_tasks, skipped, runnable, tasks) + " → OK"
+            # Log status to stderr (goes to jarvis.log) — NOT returned to Lark
+            print(f"[heartbeat] {self._beat_status(due_tasks, skipped, runnable, tasks)} → OK",
+                  file=sys.stderr)
+            return ""
 
         # Route responses through post-scripts
         user_messages = []
@@ -288,9 +293,12 @@ You have access to the user's memory below. Use it to personalize your responses
 
         combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
         beat = self._beat_status(due_tasks, skipped, runnable, tasks)
+        # Status line → log only. User message → return to Lark.
         if combined.strip():
-            return f"{beat}\n\n{combined}"
-        return f"{beat} → OK"
+            print(f"[heartbeat] {beat} → delivered", file=sys.stderr)
+            return combined
+        print(f"[heartbeat] {beat} → OK (no user content)", file=sys.stderr)
+        return ""
 
     def _beat_status(self, due_tasks, skipped, runnable, all_tasks) -> str:
         ts = now_local_str("%H:%M")
