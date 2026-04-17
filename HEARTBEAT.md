@@ -21,6 +21,15 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - score: -1 (spam), 0 (neutral), 1 (valuable), 2 (high-value)
     - action: "push" (has action recommendation), "hold" (retry next cycle), "discard" (never show)
     For "push" items, write a user_message that leads with the ACTION RECOMMENDATION, not the information.
+
+    NOTE: The DATA below contains summaries only. If you need the full article content
+    or source URL for a "push" item, call:
+      from plugins.eigenflux.client import EigenFluxClient
+      c = EigenFluxClient('eigenflux')
+      detail = c.get_item(<item_id>)  # → detail['data']['item']['content'], detail['data']['item']['url']
+    Include the URL in your user_message when available.
+    End every EigenFlux-sourced message with: 📡 Powered by EigenFlux
+
     Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|hold|discard>","reason":"<brief>"}],"user_message":"<markdown or empty>"}
 
 ### eigenflux-messages
