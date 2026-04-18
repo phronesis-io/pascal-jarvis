@@ -122,6 +122,9 @@ fi
 mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$JARVIS_DIR/eigenflux"
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
+# Clean up stale session locks from previous crashes/restarts
+rm -f "$JARVIS_DIR"/.session_lock_* 2>/dev/null
+
 # ── Load built-in plugins ────────────────────────────────────────────
 # Lark (Feishu) — shell helpers for IM. Other plugins (e.g. eigenflux)
 # are Python libraries loaded directly by tasks/*.py scripts.
@@ -300,6 +303,12 @@ lark_subscribe_messages \
       chat_type=$(echo "$line" | jq -r '.chat_type // empty' 2>/dev/null)
       chat_id=$(echo "$line" | jq -r '.chat_id // empty' 2>/dev/null)
       sender_id=$(echo "$line" | jq -r '.sender_id // empty' 2>/dev/null)
+      msg_type=$(echo "$line" | jq -r '.msg_type // empty' 2>/dev/null)
+
+      # Log every received event for debugging (even if we skip it)
+      if [ -n "$message_id" ]; then
+        log_info "Event: msg_type=${msg_type:-text} content_len=${#content} mid=${message_id} chat_type=${chat_type} content_head=${content:0:80}"
+      fi
 
       [ -z "$content" ] || [ -z "$message_id" ] && continue
 
