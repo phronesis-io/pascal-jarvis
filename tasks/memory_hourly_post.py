@@ -10,7 +10,7 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-HOURLY_LOG = MEMORY_DIR / "hourly_log.md"
+HOURLY_LOG = MEMORY_DIR / "timeline" / "hourly_log.md"
 
 
 def main() -> int:
@@ -22,7 +22,7 @@ def main() -> int:
         return 0
 
     ts = now_local_str("%Y-%m-%d %H:%M")
-    HOURLY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    HOURLY_LOG.parent.mkdir(parents=True, exist_ok=True)  # ensures timeline/ exists
     with HOURLY_LOG.open("a", encoding="utf-8") as f:
         f.write(f"\n### {ts}\n{summary}\n")
     print(f"[memory] Hourly summary saved at {ts}", file=sys.stderr)

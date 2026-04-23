@@ -67,7 +67,7 @@ print('free')
 fi
 
 # Last 5 check-ins (if any) — read via Python since JSONL needs parsing
-log_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/checkin_log.jsonl"
+log_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/checkin_log.jsonl"
 recent_checkins=""
 if [ -f "$log_file" ]; then
   recent_checkins=$(LOG_FILE="$log_file" python3 -c "

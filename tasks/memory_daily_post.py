@@ -15,10 +15,10 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-HOURLY_LOG = MEMORY_DIR / "hourly_log.md"
-HOURLY_ARCHIVE = MEMORY_DIR / "hourly_archive.md"
-DAILY_LOG = MEMORY_DIR / "daily_log.md"
-PENDING_UPDATES = MEMORY_DIR / "pending_updates.md"
+HOURLY_LOG = MEMORY_DIR / "timeline" / "hourly_log.md"
+HOURLY_ARCHIVE = MEMORY_DIR / "timeline" / "hourly_archive.md"
+DAILY_LOG = MEMORY_DIR / "timeline" / "daily_log.md"
+PENDING_UPDATES = MEMORY_DIR / "system" / "pending_updates.md"
 
 
 def _ensure_pending_header(path: Path) -> None:

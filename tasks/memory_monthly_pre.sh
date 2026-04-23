@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pre-hook: check if weekly digest is long enough to compress
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
-WEEKLY_DIGEST="$MEMORY_DIR/longterm_digest.md"
-MONTHLY_ARCHIVE="$MEMORY_DIR/monthly_archive.md"
+WEEKLY_DIGEST="$MEMORY_DIR/timeline/longterm_digest.md"
+MONTHLY_ARCHIVE="$MEMORY_DIR/timeline/monthly_archive.md"
 
 [ -f "$WEEKLY_DIGEST" ] || exit 0
 [ -s "$WEEKLY_DIGEST" ] || exit 0

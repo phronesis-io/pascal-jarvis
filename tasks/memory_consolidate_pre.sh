@@ -14,7 +14,7 @@ if [ "$hour" -lt 21 ] || [ "$hour" -ge 22 ]; then
 fi
 
 shopt -s nullglob
-files=("$MEMORY_DIR"/*.md)
+files=("$MEMORY_DIR"/hot/*.md "$MEMORY_DIR"/warm/*.md "$MEMORY_DIR"/system/*.md)
 shopt -u nullglob
 if [ ${#files[@]} -eq 0 ]; then
   exit 0
@@ -23,7 +23,9 @@ fi
 echo "Current memory files:"
 echo "---"
 for f in "${files[@]}"; do
-  basename "$f"
+  # Show relative path from MEMORY_DIR
+  relpath="${f#$MEMORY_DIR/}"
+  echo "$relpath"
   head -5 "$f" 2>/dev/null
   echo "---"
 done

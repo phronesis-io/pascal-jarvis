@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pre-hook: check if daily log has 5+ days to consolidate
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
-DAILY_LOG="$MEMORY_DIR/daily_log.md"
-LONGTERM="$MEMORY_DIR/longterm_digest.md"
+DAILY_LOG="$MEMORY_DIR/timeline/daily_log.md"
+LONGTERM="$MEMORY_DIR/timeline/longterm_digest.md"
 
 [ -f "$DAILY_LOG" ] || exit 0
 [ -s "$DAILY_LOG" ] || exit 0

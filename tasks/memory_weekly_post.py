@@ -10,10 +10,10 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-DAILY_LOG = MEMORY_DIR / "daily_log.md"
-DAILY_ARCHIVE = MEMORY_DIR / "daily_archive.md"
-LONGTERM = MEMORY_DIR / "longterm_digest.md"
-LONGTERM_BAK = MEMORY_DIR / "longterm_digest.bak.md"
+DAILY_LOG = MEMORY_DIR / "timeline" / "daily_log.md"
+DAILY_ARCHIVE = MEMORY_DIR / "timeline" / "daily_archive.md"
+LONGTERM = MEMORY_DIR / "timeline" / "longterm_digest.md"
+LONGTERM_BAK = MEMORY_DIR / "timeline" / "longterm_digest.bak.md"
 
 
 def main() -> int:
