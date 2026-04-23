@@ -17,7 +17,7 @@ from core.safety import looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
-LOG_FILE = MEMORY_DIR / "checkin_log.jsonl"
+LOG_FILE = MEMORY_DIR / "system" / "checkin_log.jsonl"
 MAX_ENTRIES = 20
 
 

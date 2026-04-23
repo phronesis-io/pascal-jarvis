@@ -228,6 +228,23 @@ select.form-input { cursor: pointer; }
 .sv-msg-ts { font-size: 10px; color: var(--dim); }
 .sv-msg-text { font-size: 13px; line-height: 1.8; color: var(--muted); white-space: pre-wrap; word-wrap: break-word; }
 .sv-msg-text mark { background: rgba(251,191,36,0.35); color: var(--highlight); padding: 1px 3px; border-radius: 2px; }
+/* Session viewer: tool blocks */
+.sv-msg.sv-tool { border-bottom: none; padding: 6px 0 2px 0; }
+.sv-msg.sv-tool .sv-msg-text { color: #c4b5fd; font-family: 'SF Mono','Fira Code',monospace;
+  font-size: 12px; line-height: 1.5; background: rgba(139,92,246,0.06);
+  border-left: 3px solid #8b5cf6; padding: 6px 12px; border-radius: 4px; }
+.sv-msg.sv-tool .sv-msg-text pre { background: rgba(0,0,0,0.3); border: none;
+  padding: 6px 10px; margin: 4px 0 2px 0; font-size: 11px; color: #e2e8f0;
+  border-radius: 4px; overflow-x: auto; }
+.sv-msg.sv-tool .sv-msg-text code { background: rgba(0,0,0,0.2); color: #e2e8f0;
+  padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+.sv-msg.sv-tool .tool-name { color: #a78bfa; font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; }
+.sv-msg.sv-tool-result { border-bottom: none; padding: 0 0 4px 0; }
+.sv-msg.sv-tool-result .sv-msg-text { color: #9ca3af; font-family: 'SF Mono','Fira Code',monospace;
+  font-size: 11px; line-height: 1.4; background: rgba(0,0,0,0.15);
+  border-left: 3px solid #4b5563; padding: 4px 12px; border-radius: 0 0 4px 4px;
+  max-height: 120px; overflow-y: auto; }
 .sv-empty { text-align: center; padding: 80px 0; color: var(--dim); font-size: 13px; }
 
 /* Lark chats */
@@ -285,6 +302,55 @@ select.form-input { cursor: pointer; }
   padding: 10px 18px; font-size: 12px; color: var(--text); animation: toast-in 0.2s ease-out; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
+/* Live chat */
+.live-status { display: flex; align-items: center; gap: 16px; padding: 12px 18px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 16px; font-size: 12px; position: sticky; top: 0; z-index: 10; }
+.live-status .status-label { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.live-status .status-label .status-dot { width: 10px; height: 10px; }
+.live-status .status-detail { color: var(--dim); margin-left: auto; }
+.state-working .status-dot { background: var(--green); animation: live-pulse 1s infinite; }
+.state-idle .status-dot { background: var(--yellow); }
+.state-dead .status-dot { background: var(--red); }
+.state-working .status-text { color: var(--green); }
+.state-idle .status-text { color: var(--yellow); }
+.state-dead .status-text { color: var(--red); }
+.live-header { display: flex; align-items: center; gap: 12px; padding-bottom: 14px;
+  margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.live-header h2 { font-size: 18px; font-weight: 600; }
+.live-meta { font-size: 11px; color: var(--dim); margin-left: auto; }
+.live-messages { display: flex; flex-direction: column; gap: 6px; padding-bottom: 40px; }
+.live-msg { padding: 14px 18px; border-radius: 10px; max-width: 85%; font-size: 13px;
+  line-height: 1.7; word-wrap: break-word; }
+.live-msg p { margin: 0 0 0.4em 0; } .live-msg p:last-child { margin-bottom: 0; }
+.live-msg.user { align-self: flex-end; background: #0c3a5c; color: #e0f2fe;
+  border-bottom-right-radius: 2px; }
+.live-msg.assistant { align-self: flex-start; background: var(--surface2);
+  border: 1px solid var(--border2); color: var(--text); border-bottom-left-radius: 2px; }
+.live-msg .live-ts { font-size: 9px; color: var(--muted); margin-bottom: 4px; display: block; }
+.live-msg pre { background: #0d1117; border: 1px solid var(--border2); border-radius: 6px;
+  padding: 8px 12px; overflow-x: auto; font-size: 11px; line-height: 1.5;
+  margin: 4px 0; font-family: 'SF Mono','Fira Code',monospace; }
+.live-msg code { font-family: 'SF Mono','Fira Code',monospace; font-size: 11px;
+  background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; }
+/* Tool use: distinct left-bordered block, not a chat bubble */
+.live-msg.tool { align-self: stretch; max-width: 100%; padding: 6px 12px 6px 14px;
+  border-radius: 4px; background: rgba(139,92,246,0.06);
+  border-left: 3px solid #8b5cf6; font-size: 12px; line-height: 1.5;
+  font-family: 'SF Mono','Fira Code',monospace; color: #c4b5fd; }
+.live-msg.tool .tool-name { color: #a78bfa; font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; }
+.live-msg.tool pre { background: rgba(0,0,0,0.3); border: none; padding: 6px 10px;
+  margin: 4px 0 2px 0; font-size: 11px; color: #e2e8f0; }
+.live-msg.tool code { background: rgba(0,0,0,0.2); color: #e2e8f0; }
+/* Tool result: indented, muted, collapsible */
+.live-msg.tool_result { align-self: stretch; max-width: 100%; padding: 4px 12px 4px 20px;
+  border-radius: 0 0 4px 4px; background: rgba(0,0,0,0.15);
+  border-left: 3px solid #4b5563; margin-top: -4px;
+  font-size: 11px; line-height: 1.4; color: #9ca3af;
+  font-family: 'SF Mono','Fira Code',monospace;
+  max-height: 120px; overflow-y: auto; white-space: pre-wrap; }
+
 .empty-state { text-align: center; padding: 60px 0; color: var(--dim); font-size: 13px; }
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -296,7 +362,8 @@ select.form-input { cursor: pointer; }
 <div class="app">
 <div class="sidebar">
   <div class="logo">Jarvis</div>
-  <button class="nav-item active" data-tab="lark">Lark</button>
+  <button class="nav-item active" data-tab="live">Live</button>
+  <button class="nav-item" data-tab="lark">Lark</button>
   <button class="nav-item" data-tab="memories">Memories</button>
   <button class="nav-item" data-tab="heartbeat">Heartbeat</button>
   <button class="nav-item" data-tab="eigenflux">EigenFlux</button>
@@ -305,7 +372,8 @@ select.form-input { cursor: pointer; }
   <button class="nav-item" data-tab="settings">Settings</button>
 </div>
 <div class="main">
-<section id="lark" class="active"></section>
+<section id="live" class="active"></section>
+<section id="lark"></section>
 <section id="memories"></section>
 <section id="heartbeat"></section>
 <section id="eigenflux"></section>
@@ -322,6 +390,34 @@ const bold = s => esc(s).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
 function hl(text,q) {
   if(!q) return esc(text);
   return esc(text).replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
+}
+function fmtParagraphs(s) {
+  if(!s) return '';
+  // First: extract fenced code blocks (```...```) and render as <pre>
+  const codeRe = /```(\w*)\n([\s\S]*?)```/g;
+  const tokens = []; let last = 0, m;
+  while((m = codeRe.exec(s)) !== null) {
+    if(m.index > last) tokens.push({type:'text', val:s.slice(last,m.index)});
+    tokens.push({type:'code', lang:m[1], val:m[2]});
+    last = m.index + m[0].length;
+  }
+  if(last < s.length) tokens.push({type:'text', val:s.slice(last)});
+
+  return tokens.map(tok => {
+    if(tok.type === 'code') return '<pre>' + esc(tok.val.trim()) + '</pre>';
+    // Text block: split by double newlines into paragraphs
+    return tok.val.split(/\n{2,}/).map(p => {
+      const lines = p.split('\n').map(l => {
+        if(/^\[.+\]$/.test(l.trim())) return '<span class="live-tool">'+esc(l.trim())+'</span>';
+        if(/^⟶/.test(l.trim())) return '<span style="color:var(--dim);font-size:11px">'+esc(l)+'</span>';
+        // Inline backticks
+        let h = bold(l);
+        h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+        return h;
+      });
+      return '<p>' + lines.join('<br>') + '</p>';
+    }).join('');
+  }).join('');
 }
 function roleTag(r) { return `<span class="sr-role ${r}">${r}</span>`; }
 function fmtBytes(n) { if(!n)return '-'; if(n<1024)return n+'B'; if(n<1048576)return (n/1024).toFixed(1)+'KB'; return (n/1048576).toFixed(2)+'MB'; }
@@ -355,6 +451,83 @@ document.querySelectorAll('.nav-item').forEach(t=>{
     t.classList.add('active'); document.getElementById(t.dataset.tab).classList.add('active');
   });
 });
+
+// ── Live ──
+let _liveCount=0, _liveAutoScroll=true;
+function fmtAgo(sec){
+  if(sec==null) return '?';
+  if(sec<60) return sec+'s ago'; if(sec<3600) return Math.floor(sec/60)+'m ago';
+  if(sec<86400) return Math.floor(sec/3600)+'h ago'; return Math.floor(sec/86400)+'d ago';
+}
+const stateLabels={working:'Working',idle:'Idle',dead:'Offline'};
+function botAction(action){
+  if(action==='restart'&&!confirm('Restart bot?')) return;
+  fetch('/api/bot/'+action,{method:'POST'}).then(r=>r.json()).then(d=>{
+    toast(d.message||action+' done'); loadBotStatus();
+  }).catch(()=>toast('Failed'));
+}
+function loadBotStatus(){
+  fetch('/api/bot_status').then(r=>r.json()).then(s=>{
+    const el=document.getElementById('live-status');
+    if(!el) return;
+    el.className='live-status state-'+s.state;
+    el.innerHTML=`
+      <span class="status-label"><span class="status-dot"></span>
+        <span class="status-text">${stateLabels[s.state]||s.state}</span></span>
+      <span style="color:var(--muted);font-size:11px">Last: ${esc(s.last_log_ts||'never')} (${fmtAgo(s.last_activity_ago)})</span>
+      ${s.active_locks?'<span style="color:var(--muted);font-size:11px">'+s.active_locks+' task(s) running</span>':''}
+      <span style="margin-left:auto;display:flex;gap:6px">
+        ${s.active_locks?'<button class="btn btn-danger btn-sm" onclick="botAction(\'stop_task\')">Stop Task</button>':''}
+        <button class="btn btn-ghost btn-sm" onclick="botAction(\'restart\')">Restart</button>
+      </span>`;
+  }).catch(()=>{});
+}
+function loadLive(){
+  loadBotStatus();
+  fetch('/api/live').then(r=>r.json()).then(data=>{
+    const el=document.getElementById('live');
+    if(!data.session_id){
+      el.innerHTML='<div id="live-status" class="live-status"></div><div class="empty-state">No active conversations</div>';
+      loadBotStatus();
+      return;
+    }
+    const msgs=data.messages;
+    // Only re-render messages if count changed
+    if(msgs.length===_liveCount) return;
+    _liveCount=msgs.length;
+    const sid=data.session_id.slice(0,8);
+    const key=data.conv_key;
+    el.innerHTML=`
+      <div id="live-status" class="live-status"></div>
+      <div class="live-header">
+        <h2>Live Chat</h2>
+        <span class="live-meta">${esc(key)} &middot; ${sid} &middot; ${msgs.length} msgs</span>
+      </div>
+      <div class="live-messages" id="live-msgs">
+        ${msgs.map(m => {
+          if(m.role === 'tool') {
+            return `<div class="live-msg tool">
+              <span class="tool-name">${esc(m.tool_name||'tool')}</span>
+              ${fmtParagraphs(m.text)}</div>`;
+          }
+          if(m.role === 'tool_result') {
+            return `<div class="live-msg tool_result">${esc(m.text)}</div>`;
+          }
+          return `<div class="live-msg ${m.role}">
+            <span class="live-ts">${esc(m.timestamp)}</span>${fmtParagraphs(m.text)}</div>`;
+        }).join('')}
+      </div>`;
+    loadBotStatus();
+    if(_liveAutoScroll){
+      const main=document.querySelector('.main');
+      main.scrollTop=main.scrollHeight;
+    }
+  }).catch(()=>{});
+}
+loadLive();
+setInterval(()=>{
+  if(document.getElementById('live').classList.contains('active')) loadLive();
+}, 3000);
 
 // ── Lark ──
 fetch('/api/lark_chats').then(r=>r.json()).then(data=>{
@@ -705,9 +878,21 @@ function renderMessages(msgs,filter,tail){
       <button onclick="loadEarlier()" style="font-family:inherit;font-size:12px;padding:6px 16px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer">Load earlier (${hidden} hidden)</button></div>`;
     filtered=filtered.slice(-tail);
   }
-  return loadBtn+filtered.map(m=>`<div class="sv-msg"><div class="sv-msg-head">${roleTag(m.role)}
-    <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
-    <div class="sv-msg-text">${filter?hl(m.text,filter):esc(m.text)}</div></div>`).join('');
+  return loadBtn+filtered.map(m=>{
+    if(m.role==='tool'){
+      return `<div class="sv-msg sv-tool"><div class="sv-msg-head">
+        <span class="tool-name">${esc(m.tool_name||'tool')}</span>
+        <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
+        <div class="sv-msg-text">${fmtParagraphs(m.text)}</div></div>`;
+    }
+    if(m.role==='tool_result'){
+      return `<div class="sv-msg sv-tool-result">
+        <div class="sv-msg-text">${filter?hl(m.text,filter):esc(m.text)}</div></div>`;
+    }
+    return `<div class="sv-msg"><div class="sv-msg-head">${roleTag(m.role)}
+      <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
+      <div class="sv-msg-text">${filter?hl(m.text,filter):fmtParagraphs(m.text)}</div></div>`;
+  }).join('');
 }
 function openSession(id){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
@@ -776,7 +961,7 @@ def load_full_session(session_id: str) -> list:
     path = _find_session_file(session_id)
     if not path:
         return []
-    return core_search.load_session_messages(path)
+    return core_search.load_chat_messages(path, verbose=True)
 
 
 def search_sessions(query: str, session_id: str = "", max_results: int = 40) -> list:
@@ -875,6 +1060,112 @@ def lark_chats() -> list:
 
     _lark_chats_cache.update(key=key, data=chats, time=now)
     return chats
+
+
+def live_chat() -> dict:
+    """Return the most recently active Lark conversation's chat messages.
+
+    Finds the active session with the newest last_ts across all tracked
+    Lark conversations, then returns its messages via the chat-only loader
+    (no tool_use / tool_result noise, no truncation).
+    """
+    if not SESSION_TRACKER.exists():
+        return {"session_id": "", "conv_key": "", "messages": []}
+    try:
+        tracker = json.loads(SESSION_TRACKER.read_text())
+    except Exception:
+        return {"session_id": "", "conv_key": "", "messages": []}
+
+    best_sid = ""
+    best_key = ""
+    best_mtime = 0.0
+    for conv_key, entry in tracker.items():
+        sid = entry.get("session_id", "")
+        path = _find_session_file(sid)
+        if path and path.exists():
+            mt = path.stat().st_mtime
+            if mt > best_mtime:
+                best_mtime = mt
+                best_sid = sid
+                best_key = conv_key
+
+    if not best_sid:
+        return {"session_id": "", "conv_key": "", "messages": []}
+
+    path = _find_session_file(best_sid)
+    msgs = core_search.load_chat_messages(path, verbose=True) if path else []
+    return {
+        "session_id": best_sid,
+        "conv_key": best_key,
+        "messages": msgs,
+    }
+
+
+def bot_status() -> dict:
+    """Return the bot's current status: alive/dead, working/idle, last activity."""
+    import glob as _glob
+    import subprocess as _sp
+
+    # 1. Process alive?
+    try:
+        result = _sp.run(["pgrep", "-f", "bash.*bot\\.sh"], capture_output=True, text=True, timeout=3)
+        alive = bool(result.stdout.strip())
+    except Exception:
+        alive = False
+
+    # 2. Currently working? (session lock files exist)
+    locks = _glob.glob(str(ROOT / ".session_lock_*"))
+    working = len(locks) > 0
+
+    # 3. Last log activity — read tail of log, find newest timestamped line
+    log_file = ROOT / "jarvis.log"
+    last_log_line = ""
+    last_log_ts = ""
+    if log_file.exists():
+        try:
+            size = log_file.stat().st_size
+            with open(log_file, "rb") as f:
+                f.seek(max(0, size - 4096))
+                tail = f.read().decode("utf-8", errors="ignore")
+            for line in reversed(tail.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+                if m:
+                    last_log_ts = m.group(1)
+                    last_log_line = line[:200]
+                    break
+        except Exception:
+            pass
+
+    # 4. Seconds since last activity
+    last_activity_ago = None
+    if last_log_ts:
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(last_log_ts, "%Y-%m-%d %H:%M:%S")
+            last_activity_ago = int((datetime.now() - dt).total_seconds())
+        except Exception:
+            pass
+
+    # Determine overall state
+    if not alive:
+        state = "dead"
+    elif working:
+        state = "working"
+    else:
+        state = "idle"
+
+    return {
+        "state": state,
+        "alive": alive,
+        "working": working,
+        "active_locks": len(locks),
+        "last_log_ts": last_log_ts,
+        "last_log_line": last_log_line,
+        "last_activity_ago": last_activity_ago,
+    }
 
 
 def load_skills() -> list:
@@ -1184,6 +1475,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(search_sessions(query, sid))
         elif path == "/api/skills":
             self._json(load_skills())
+        elif path == "/api/live":
+            self._json(live_chat())
+        elif path == "/api/bot_status":
+            self._json(bot_status())
         elif path == "/api/lark_chats":
             self._json(lark_chats())
         elif path == "/api/settings":
@@ -1284,6 +1579,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             current.update(body)
             result = save_eigenflux_settings(current)
             self._json(result, status=200 if "ok" in result else 500)
+
+        elif path == "/api/bot/stop_task":
+            # Kill the running Claude process for the most active session
+            import glob as _glob
+            locks = _glob.glob(str(ROOT / ".session_lock_*"))
+            killed = 0
+            for lock in locks:
+                try:
+                    pid = int(Path(lock).read_text().strip())
+                    os.kill(pid, 9)
+                    killed += 1
+                except (ValueError, ProcessLookupError, OSError):
+                    pass
+                Path(lock).unlink(missing_ok=True)
+            self._json({"ok": True, "killed": killed})
+
+        elif path == "/api/bot/restart":
+            # Write restart trigger file for bot.sh to pick up
+            trigger = ROOT / ".restart_trigger"
+            trigger.write_text(str(int(time.time())))
+            self._json({"ok": True, "message": "Restart triggered"})
 
         else:
             self._json({"error": "not found"}, status=404)

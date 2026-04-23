@@ -119,7 +119,8 @@ if [ -n "$USER_ID" ] && ! command -v lark-cli >/dev/null 2>&1; then
   USER_ID=""  # degrade to headless
 fi
 
-mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$JARVIS_DIR/eigenflux"
+mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
+         "$MEMORY_DIR/timeline" "$MEMORY_DIR/system" "$JARVIS_DIR/eigenflux"
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
 # Clean up stale session locks from previous crashes/restarts
@@ -220,6 +221,15 @@ heartbeat_loop() {
   log_info "[heartbeat] Starting (${CHECK_INTERVAL}s cycle)..."
 
   while true; do
+    # Check for restart trigger in heartbeat loop too (message loop may be idle)
+    if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
+      rm -f "$JARVIS_DIR/.restart_trigger"
+      log_info "Restart triggered from heartbeat loop — exec-ing self..."
+      # Kill parent and children, then restart
+      kill 0 2>/dev/null || true
+      exec "$JARVIS_DIR/bot.sh"
+    fi
+
     local force_flag=""
     if [ -f "$HEARTBEAT_TRIGGER" ]; then
       force_flag="--force"
@@ -262,7 +272,99 @@ if result:
 
 heartbeat_loop &
 HEARTBEAT_PID=$!
+
+# ── EigenFlux Real-Time Stream (background) ─────────────────────────
+# Spawns `eigenflux stream` for real-time private message delivery.
+# Reconnects with exponential backoff on failure.
+eigenflux_stream_loop() {
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v eigenflux >/dev/null 2>&1 || {
+    log_info "[ef-stream] eigenflux CLI not installed, skipping stream"
+    return 0
+  }
+
+  sleep 5  # let heartbeat settle first
+  log_info "[ef-stream] Starting real-time message stream..."
+
+  local backoff=1 max_backoff=60 failures=0 max_failures=20 cursor=""
+
+  while true; do
+    local args="stream -f json"
+    [ -n "$cursor" ] && args="$args --cursor $cursor"
+
+    log_info "[ef-stream] Spawning: eigenflux $args"
+
+    # Read NDJSON lines from eigenflux stream
+    eigenflux $args 2>>"$LOG_FILE" | while IFS= read -r line; do
+      [ -z "$line" ] && continue
+
+      # Extract cursor for reconnect resume
+      new_cursor=$(echo "$line" | python3 -c "
+import sys, json
+try:
+    e = json.loads(sys.stdin.read())
+    c = e.get('data', {}).get('next_cursor', '')
+    if c: print(c)
+except: pass
+" 2>/dev/null || true)
+      [ -n "$new_cursor" ] && cursor="$new_cursor"
+
+      # Format message for Lark delivery
+      msg=$(JV_LINE="$line" python3 -c "
+import os, sys, json
+try:
+    event = json.loads(os.environ['JV_LINE'])
+    messages = event.get('data', {}).get('messages', [])
+    if not messages:
+        sys.exit(0)
+    parts = []
+    for m in messages:
+        sender = m.get('sender_name', 'Unknown agent')
+        content = m.get('content', '')
+        if content:
+            parts.append(f'💬 **{sender}**: {content}')
+    if parts:
+        print('\n'.join(parts) + '\n\n📡 Powered by EigenFlux')
+except Exception:
+    sys.exit(0)
+" 2>/dev/null || true)
+
+      if [ -n "$msg" ]; then
+        send_to_lark "$msg"
+        log_info "[ef-stream] Delivered real-time message"
+        backoff=1
+        failures=0
+      fi
+    done
+
+    # Stream process exited
+    local exit_code=${PIPESTATUS[0]:-0}
+
+    if [ "$exit_code" -eq 4 ]; then
+      log_warn "[ef-stream] Auth required — token may be expired"
+      send_to_lark "⚠️ EigenFlux token expired. Please re-authenticate: \`eigenflux auth login\`"
+      # Wait longer before retry on auth issues
+      sleep 300
+      continue
+    fi
+
+    failures=$((failures + 1))
+    if [ "$failures" -ge "$max_failures" ]; then
+      log_err "[ef-stream] Giving up after $max_failures consecutive failures"
+      return 1
+    fi
+
+    log_info "[ef-stream] Reconnecting in ${backoff}s (failure #$failures)"
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    [ "$backoff" -gt "$max_backoff" ] && backoff="$max_backoff"
+  done
+}
+
+eigenflux_stream_loop &
+STREAM_PID=$!
 log_info "Heartbeat started (PID: $HEARTBEAT_PID)"
+log_info "EigenFlux stream started (PID: $STREAM_PID)"
 
 # ── Admin Console (optional, background) ─────────────────────────────
 ADMIN_PID=""
@@ -278,8 +380,12 @@ fi
 cleanup() {
   log_info "Shutting down..."
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
+  [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
   kill "$HEARTBEAT_PID" 2>/dev/null || true
+  # Kill any lingering eigenflux stream subprocesses
+  pkill -P "$STREAM_PID" 2>/dev/null || true
   wait "$HEARTBEAT_PID" 2>/dev/null || true
+  [ -n "$STREAM_PID" ] && wait "$STREAM_PID" 2>/dev/null || true
   [ -n "$ADMIN_PID" ] && wait "$ADMIN_PID" 2>/dev/null || true
   log_info "Stopped."
 }
@@ -297,6 +403,13 @@ lark_subscribe_messages \
   | while IFS= read -r line; do
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
+
+      # Check for restart trigger (written by admin panel)
+      if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
+        rm -f "$JARVIS_DIR/.restart_trigger"
+        log_info "Restart triggered — exec-ing self..."
+        exec "$JARVIS_DIR/bot.sh"
+      fi
 
       content=$(echo "$line" | jq -r '.content // empty' 2>/dev/null)
       message_id=$(echo "$line" | jq -r '.message_id // empty' 2>/dev/null)
@@ -323,11 +436,50 @@ lark_subscribe_messages \
         fi
       fi
 
-      # Handle manual heartbeat trigger
+      # Handle special commands
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
       if [ "$content_lower" = "loop" ] || [ "$content_lower" = "heartbeat" ]; then
         touch "$HEARTBEAT_TRIGGER"
         lark_reply_text "$message_id" "Heartbeat triggered" >/dev/null
+        continue
+      fi
+
+      # "stop" — kill the running Claude process for this session
+      if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
+        # Find the lock file for this conv_key's session
+        if [ "$chat_type" = "p2p" ]; then
+          _stop_key="$sender_id"
+        else
+          _stop_key="$chat_id"
+        fi
+        _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$_stop_key" python3 -c "
+import json, os
+try:
+    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+        _stop_lock="$JARVIS_DIR/.session_lock_${_stop_sid}"
+        if [ -f "$_stop_lock" ]; then
+          _stop_pid=$(cat "$_stop_lock" 2>/dev/null)
+          if [ -n "$_stop_pid" ] && kill -0 "$_stop_pid" 2>/dev/null; then
+            # Kill the subshell and all its children (claude, timeout, etc.)
+            # First try TERM on the process tree, then KILL after 2s
+            pkill -TERM -P "$_stop_pid" 2>/dev/null || true
+            kill "$_stop_pid" 2>/dev/null || true
+            sleep 1
+            # Force kill if still alive
+            if kill -0 "$_stop_pid" 2>/dev/null; then
+              pkill -KILL -P "$_stop_pid" 2>/dev/null || true
+              kill -KILL "$_stop_pid" 2>/dev/null || true
+            fi
+            log_info "[$_stop_sid] Killed by user (PID $_stop_pid)"
+          fi
+          rm -f "$_stop_lock"
+          lark_reply_text "$message_id" "Stopped. Session is free now." >/dev/null
+        else
+          lark_reply_text "$message_id" "Nothing running." >/dev/null
+        fi
         continue
       fi
 
@@ -380,25 +532,31 @@ print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
                          int(os.environ['JV_COUNTER']), os.environ['JV_KEY'], 20))
 " 2>>"$LOG_FILE" || echo "")
 
+      # Load EigenFlux skill docs (strip YAML frontmatter)
+      ef_skills=""
+      for _skill_dir in "$JARVIS_DIR/plugins/eigenflux/skills"/ef-*/; do
+        _skill_file="$_skill_dir/SKILL.md"
+        [ -f "$_skill_file" ] || continue
+        # Strip YAML frontmatter (everything between first --- and second ---)
+        _skill_body=$(sed -n '/^---$/,/^---$/!p' "$_skill_file" 2>/dev/null)
+        ef_skills="$ef_skills
+$_skill_body
+"
+      done
+
       sys_prompt="You are a personal assistant and life mentor. Reply in the same language the user uses.
 Current time: $now_ts
 
-## Built-in Plugin: EigenFlux (CLI)
+IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment where plan mode confirmations will break the conversation flow. Just execute tasks directly.
 
-You have the \`eigenflux\` CLI installed. When the user asks about a feed item, signal,
-or broadcast (e.g. 'show me that article', 'what was the link about X'), run the CLI
-to get full details. All commands output JSON with \`-f json\`.
+## EigenFlux Agent Network
 
-Key commands (run via Bash tool):
-  eigenflux profile show -f json                    — your agent profile + influence
-  eigenflux feed poll --limit 20 -f json            — fetch latest items (summary only)
-  eigenflux feed get --item-id <ID> -f json         — FULL content + source URL
-                                                      (response: .item.content, .item.url)
-  eigenflux feed feedback --items '<JSON>' -f json  — score items (-1 to 2)
-  eigenflux publish --content '...' --notes '<JSON>' --accept-reply -f json  — broadcast
-  eigenflux msg fetch -f json                       — fetch private messages
-  eigenflux msg send --content '...' -f json        — reply to a message
-  eigenflux relation list -f json                   — list connections
+You have the \`eigenflux\` CLI installed. Skills available:
+$ef_skills
+For detailed reference docs, read files in:
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-broadcast/references/
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-communication/references/
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-profile/references/
 
 IMPORTANT: When presenting EigenFlux feed content to the user:
   - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
@@ -412,32 +570,36 @@ $recent_turns"
       # Call Claude (runs in WORK_DIR, with optional timeout)
       # Wait for any existing session lock (previous message still processing)
       LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
+      ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
       waited=0
       while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 130 ]; do
         log_info "[$session_id] Session busy, waiting..."
         sleep 5
         waited=$((waited + 5))
       done
-      touch "$LOCK_FILE"
 
+      # Run Claude in background so we can record its PID for "stop" command
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
       if [ -f "$session_file" ]; then
         log_info "[$session_id] Resuming session"
-        answer=$(cd "$WORK_DIR" && with_timeout 120 claude -p "$content" \
+        (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
           --resume "$session_id" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
-          < /dev/null 2>>"$LOG_FILE" || true)
+          < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
       else
         log_info "[$session_id] New session"
-        answer=$(cd "$WORK_DIR" && with_timeout 120 claude -p "$content" \
+        (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
           --session-id "$session_id" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
-          < /dev/null 2>>"$LOG_FILE" || true)
+          < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
       fi
-
-      rm -f "$LOCK_FILE"
+      _claude_pid=$!
+      echo "$_claude_pid" > "$LOCK_FILE"
+      wait $_claude_pid 2>/dev/null || true
+      answer=$(cat "$ANSWER_FILE" 2>/dev/null)
+      rm -f "$ANSWER_FILE" "$LOCK_FILE"
 
       # Filter error-like answers — never send them to the user as the "real" reply
       reply=""

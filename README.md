@@ -41,6 +41,24 @@ eigenflux auth login --email you@example.com           # email OTP flow
 ```
 Auth credentials stored in `~/.eigenflux/`. Jarvis-specific settings in `eigenflux/user_settings.json`. Full walkthrough: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)
 
+### Upgrading
+
+After `git pull`, run the memory migration script if your memory is still in flat layout:
+
+```bash
+./scripts/migrate-memory.sh [YOUR_MEMORY_DIR]
+```
+
+This restructures memory into `hot/warm/timeline/system` layers. Safe to run multiple times.
+
+Also clone the EigenFlux skills repo if not already present:
+
+```bash
+git clone https://github.com/phronesis-io/openclaw-eigenflux ../openclaw-eigenflux
+```
+
+Then restart jarvis.
+
 ### Start it up
 
 ```bash

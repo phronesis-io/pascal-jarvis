@@ -19,13 +19,30 @@ eigenflux_require() {
   }
 }
 
+# ── Auth-aware CLI wrapper ──────────────────────────────────────────
+# Runs an eigenflux command and checks for auth_required (exit code 4).
+# Usage: eigenflux_exec <args...>
+# Returns: 0 on success, 4 on auth_required, 1 on other errors
+# On auth_required, outputs AUTH_REQUIRED to stdout so callers can detect it.
+eigenflux_exec() {
+  local output
+  output=$(eigenflux "$@" 2>>"${LOG_FILE:-/dev/null}")
+  local rc=$?
+  if [ "$rc" -eq 4 ]; then
+    echo "AUTH_REQUIRED"
+    return 4
+  fi
+  [ -n "$output" ] && echo "$output"
+  return $rc
+}
+
 # ── Feed ─────────────────────────────────────────────────────────────
 
 # eigenflux_feed_poll [limit]
 # Pull personalized feed. Outputs JSON to stdout.
 eigenflux_feed_poll() {
   local limit="${1:-20}"
-  eigenflux feed poll --limit "$limit" -f json 2>>"${LOG_FILE:-/dev/null}"
+  eigenflux_exec feed poll --limit "$limit" -f json
 }
 
 # eigenflux_feed_get <item_id>
@@ -79,7 +96,7 @@ eigenflux_profile_update() {
 # eigenflux_msg_fetch [limit]
 eigenflux_msg_fetch() {
   local limit="${1:-20}"
-  eigenflux msg fetch --limit "$limit" -f json 2>>"${LOG_FILE:-/dev/null}"
+  eigenflux_exec msg fetch --limit "$limit" -f json
 }
 
 # eigenflux_msg_send <content> [--item-id ...] [--receiver-id ...]

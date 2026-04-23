@@ -14,7 +14,7 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-PENDING_UPDATES = MEMORY_DIR / "pending_updates.md"
+PENDING_UPDATES = MEMORY_DIR / "system" / "pending_updates.md"
 
 
 def _ensure_pending_header(path: Path) -> None:

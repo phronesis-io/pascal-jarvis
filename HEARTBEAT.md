@@ -71,9 +71,12 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - post: tasks/memory_consolidate_post.py
 - prompt: |
     [DAILY MEMORY CONSOLIDATION]
-    Review the memory files and today's context below. Identify new learnings to persist.
+    Review the memory files and today's context below. Memory is organized as:
+    - hot/ : always-loaded core files (user_profile, feedback_rules, etc.)
+    - warm/ : on-demand reference files (health, cultural, investment, etc.)
+    - system/ : operational files (todos, open_threads, pending_updates)
     For each update needed, output a line in this exact format:
-    → UPDATE: <filename>.md: <what to add or change>
+    → UPDATE: <subdir/filename>.md: <what to add or change>
     Then output a brief diary summary of what changed today.
     If nothing new, reply: HEARTBEAT_OK
 
@@ -120,6 +123,30 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Format: 1-2 bullet points per week, each under 30 words.
     Focus on: milestones, turning points, evolving patterns.
     Keep under 500 words total.
+
+### calendar-sync
+- interval: 30m
+- pre: tasks/calendar_sync_pre.sh
+- post: tasks/calendar_sync_post.py
+- prompt: |
+    [CALENDAR SYNC]
+    The pre-script pulled today's and tomorrow's calendar events from Lark.
+    Clean up the data: remove past events (before current time), format nicely.
+    Output a clean markdown schedule. If no events, reply HEARTBEAT_OK.
+
+### memory-tidy
+- interval: 6h
+- pre: tasks/memory_tidy_pre.sh
+- post: tasks/memory_tidy_post.py
+- prompt: |
+    [MEMORY TIDY]
+    Review the memory health report below. Your job:
+    1. Check hot/ total size — if over 6000 chars, suggest what to trim
+    2. Check for duplicate entries in timeline files
+    3. Regenerate _index.md with accurate one-line descriptions for each warm/ file
+    4. Flag any stale system/ entries (e.g. open_threads items older than 2 weeks)
+    Return JSON: {"index_update":"<full _index.md content>","actions_taken":["<what you did>"],"warnings":["<issues found>"]}
+    If everything looks clean, reply HEARTBEAT_OK.
 
 ### eigenflux-profile
 - interval: 24h
