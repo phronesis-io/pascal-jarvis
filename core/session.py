@@ -11,6 +11,7 @@ import json
 import os
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
@@ -108,6 +109,29 @@ class SessionManager:
         return self._read().get(conv_key, {}).get("counter", 0)
 
 
+def _utc_to_local(ts_raw: str) -> str:
+    """Convert a UTC ISO timestamp (e.g. '2026-04-23T03:10:33.939Z') to local time.
+
+    Returns 'YYYY-MM-DD HH:MM' in the system's local timezone.
+    Falls back to truncated UTC if parsing fails.
+    """
+    if not ts_raw:
+        return ""
+    try:
+        # Import here to avoid circular imports
+        from core.timeutil import _LOCAL_TZ
+        # Strip trailing Z and parse as UTC
+        clean = ts_raw.rstrip("Z")[:19]  # "2026-04-23T03:10:33"
+        dt_utc = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+        if _LOCAL_TZ is not None:
+            dt_local = dt_utc.astimezone(_LOCAL_TZ)
+        else:
+            dt_local = dt_utc
+        return dt_local.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ts_raw[:16]
+
+
 def read_tail_turns(session_dir: str | Path, session_id: str,
                     limit: int = 20, max_msg_chars: int = 400,
                     max_total_chars: int = 6000) -> list[dict]:
@@ -133,7 +157,7 @@ def read_tail_turns(session_dir: str | Path, session_id: str,
         text = _extract_text(content)
         if not text:
             continue
-        ts = obj.get("timestamp", "")[:16]
+        ts = _utc_to_local(obj.get("timestamp", ""))
         turns.append({"role": role, "text": text, "ts": ts})
 
     return turns[-limit:]

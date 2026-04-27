@@ -119,8 +119,12 @@ if [ -n "$USER_ID" ] && ! command -v lark-cli >/dev/null 2>&1; then
   USER_ID=""  # degrade to headless
 fi
 
+JOBS_DIR="$JARVIS_DIR/jobs"
+MAX_HANDLERS=5   # max concurrent message handlers
+
 mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
-         "$MEMORY_DIR/timeline" "$MEMORY_DIR/system" "$JARVIS_DIR/eigenflux"
+         "$MEMORY_DIR/timeline" "$MEMORY_DIR/system" "$JARVIS_DIR/eigenflux" \
+         "$JOBS_DIR"
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
 # Clean up stale session locks from previous crashes/restarts
@@ -376,6 +380,222 @@ else
   log_info "Admin disabled (set admin.enabled: true in jarvis.yaml to enable)"
 fi
 
+# ── Message Handler (runs in background subshell) ────────────────────
+# Extracted from the main loop so different conversations run in parallel.
+# Same-session messages serialize via the existing lock file mechanism.
+handle_message() {
+  local conv_key="$1" content="$2" message_id="$3" session_id="$4"
+  local reaction_id="$5"
+
+  # Build system prompt with memory + recent turns
+  local memory now_ts counter recent_turns ef_skills sys_prompt
+  memory=$(load_memory)
+  now_ts=$(date '+%Y-%m-%d %H:%M %A')
+
+  counter=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
+import json, os
+try:
+    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('counter', 0))
+except Exception:
+    print(0)
+" 2>>"$LOG_FILE" || echo 0)
+
+  recent_turns=$(JV_SDIR="$CLAUDE_PROJECT_DIR" JV_SID="$session_id" \
+    JV_COUNTER="$counter" JV_KEY="$conv_key" python3 -c "
+import os, sys
+sys.path.insert(0, '$JARVIS_DIR')
+from core.session import build_recent_turns
+print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
+                         int(os.environ['JV_COUNTER']), os.environ['JV_KEY'], 20))
+" 2>>"$LOG_FILE" || echo "")
+
+  # Load EigenFlux skill docs (strip YAML frontmatter)
+  ef_skills=""
+  for _skill_dir in "$JARVIS_DIR/plugins/eigenflux/skills"/ef-*/; do
+    _skill_file="$_skill_dir/SKILL.md"
+    [ -f "$_skill_file" ] || continue
+    _skill_body=$(sed -n '/^---$/,/^---$/!p' "$_skill_file" 2>/dev/null)
+    ef_skills="$ef_skills
+$_skill_body
+"
+  done
+
+  sys_prompt="You are a personal assistant and life mentor. Reply in the same language the user uses.
+Current time: $now_ts
+
+IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment where plan mode confirmations will break the conversation flow. Just execute tasks directly.
+
+## Background Jobs
+
+You can suggest the user prefix a message with 'bg ' to run long tasks in the background.
+When a task will take a very long time (experiments, large research, batch processing),
+proactively suggest: \"This might take a while. Want me to run it in the background? Just resend with 'bg' prefix.\"
+
+## EigenFlux Agent Network
+
+You have the \`eigenflux\` CLI installed. Skills available:
+$ef_skills
+For detailed reference docs, read files in:
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-broadcast/references/
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-communication/references/
+  $JARVIS_DIR/plugins/eigenflux/skills/ef-profile/references/
+
+IMPORTANT: When presenting EigenFlux feed content to the user:
+  - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
+  - Append '📡 Powered by EigenFlux' at the end
+  - Never expose internal metadata (item_id, group_id, impression_id)
+
+$memory
+
+$recent_turns"
+
+  # Call Claude (runs in WORK_DIR, with optional timeout)
+  # Wait for any existing session lock (previous message still processing)
+  local LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
+  local ANSWER_FILE
+  ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
+  local waited=0
+  while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 130 ]; do
+    log_info "[$session_id] Session busy, waiting..."
+    sleep 5
+    waited=$((waited + 5))
+  done
+
+  # Run Claude in background so we can record its PID for "stop" command
+  local session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
+  local _claude_pid
+  if [ -f "$session_file" ]; then
+    log_info "[$session_id] Resuming session"
+    (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
+      --resume "$session_id" \
+      --append-system-prompt "$sys_prompt" \
+      --dangerously-skip-permissions \
+      < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+  else
+    log_info "[$session_id] New session"
+    (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
+      --session-id "$session_id" \
+      --append-system-prompt "$sys_prompt" \
+      --dangerously-skip-permissions \
+      < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+  fi
+  _claude_pid=$!
+  echo "$_claude_pid" > "$LOCK_FILE"
+  wait $_claude_pid 2>/dev/null || true
+  local answer
+  answer=$(cat "$ANSWER_FILE" 2>/dev/null)
+  rm -f "$ANSWER_FILE" "$LOCK_FILE"
+
+  # Filter error-like answers — never send them to the user as the "real" reply
+  local reply=""
+  if [ -n "$answer" ] && ! looks_like_error "$answer"; then
+    reply="$answer"
+  fi
+
+  if [ -z "$reply" ]; then
+    log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
+    [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
+    lark_reply_text "$message_id" \
+      "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
+    return
+  fi
+
+  log_info "[$session_id] Replied (${#reply} chars)"
+
+  # Remove the "working on it" reaction and send the real reply
+  [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
+  if ! lark_reply "$message_id" "$reply"; then
+    log_err "[$session_id] Failed to send reply to Lark"
+  fi
+}
+
+# ── Background Job Runner ────────────────────────────────────────────
+# Runs a Claude task in an independent session, notifies on completion.
+run_background_job() {
+  local job_id="$1" conv_key="$2" content="$3" message_id="$4"
+  local bg_session_id="bg-${job_id}"
+  local output_file="$JOBS_DIR/${job_id}/output.md"
+  local log_file_job="$JOBS_DIR/${job_id}/log.txt"
+
+  # Build a minimal system prompt for the background job
+  local memory now_ts sys_prompt
+  memory=$(load_memory)
+  now_ts=$(date '+%Y-%m-%d %H:%M %A')
+
+  sys_prompt="You are running as a background job. Complete the task thoroughly.
+When done, provide a clear summary of results.
+Current time: $now_ts
+
+$memory"
+
+  # Run Claude with independent session
+  (cd "$WORK_DIR" && with_timeout 3600 claude -p "$content" \
+    --session-id "$bg_session_id" \
+    --append-system-prompt "$sys_prompt" \
+    --dangerously-skip-permissions \
+    < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+  local _bg_pid=$!
+
+  # Record PID in registry
+  JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" set-pid "$job_id" "$_bg_pid" \
+    2>>"$LOG_FILE" || true
+
+  # Wait for completion
+  wait $_bg_pid 2>/dev/null
+  local exit_code=$?
+
+  # Read output
+  local output=""
+  [ -f "$output_file" ] && output=$(cat "$output_file" 2>/dev/null)
+
+  # Determine status
+  local status="completed"
+  if [ -z "$output" ] || looks_like_error "$output"; then
+    status="failed"
+  fi
+
+  # Check if job was cancelled (registry may have been updated)
+  local current_status
+  current_status=$(JV_JOBS_DIR="$JOBS_DIR" python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.jobs import JobManager
+j = JobManager('$JOBS_DIR').get_job('$job_id')
+print(j['status'] if j else 'unknown')
+" 2>/dev/null || echo "unknown")
+
+  if [ "$current_status" = "cancelled" ]; then
+    log_info "[bg:$job_id] Job was cancelled"
+    return
+  fi
+
+  # Update registry
+  JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$job_id" "$status" \
+    2>>"$LOG_FILE" || true
+
+  log_info "[bg:$job_id] Finished with status=$status (${#output} chars)"
+
+  # Notify user
+  if [ "$status" = "completed" ]; then
+    # Truncate output for notification (full output available via 'job output')
+    local summary
+    if [ ${#output} -gt 3000 ]; then
+      summary="${output:0:3000}
+
+... (truncated, send 'job output $job_id' for full result)"
+    else
+      summary="$output"
+    fi
+    send_to_lark "**Background job completed** \`$job_id\`
+
+$summary"
+  else
+    send_to_lark "**Background job failed** \`$job_id\`
+Task: $content
+
+Check logs with: job output $job_id"
+  fi
+}
+
 # Cleanup on exit
 cleanup() {
   log_info "Shutting down..."
@@ -384,6 +604,8 @@ cleanup() {
   kill "$HEARTBEAT_PID" 2>/dev/null || true
   # Kill any lingering eigenflux stream subprocesses
   pkill -P "$STREAM_PID" 2>/dev/null || true
+  # Kill all background message handlers and jobs
+  jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
   wait "$HEARTBEAT_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && wait "$STREAM_PID" 2>/dev/null || true
   [ -n "$ADMIN_PID" ] && wait "$ADMIN_PID" 2>/dev/null || true
@@ -436,7 +658,14 @@ lark_subscribe_messages \
         fi
       fi
 
-      # Handle special commands
+      # Determine conv_key early (needed by most commands)
+      if [ "$chat_type" = "p2p" ]; then
+        conv_key="$sender_id"
+      else
+        conv_key="$chat_id"
+      fi
+
+      # Handle special commands (these run inline, NOT dispatched to background)
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
       if [ "$content_lower" = "loop" ] || [ "$content_lower" = "heartbeat" ]; then
         touch "$HEARTBEAT_TRIGGER"
@@ -446,13 +675,7 @@ lark_subscribe_messages \
 
       # "stop" — kill the running Claude process for this session
       if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
-        # Find the lock file for this conv_key's session
-        if [ "$chat_type" = "p2p" ]; then
-          _stop_key="$sender_id"
-        else
-          _stop_key="$chat_id"
-        fi
-        _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$_stop_key" python3 -c "
+        _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
 import json, os
 try:
     print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
@@ -463,12 +686,9 @@ except Exception:
         if [ -f "$_stop_lock" ]; then
           _stop_pid=$(cat "$_stop_lock" 2>/dev/null)
           if [ -n "$_stop_pid" ] && kill -0 "$_stop_pid" 2>/dev/null; then
-            # Kill the subshell and all its children (claude, timeout, etc.)
-            # First try TERM on the process tree, then KILL after 2s
             pkill -TERM -P "$_stop_pid" 2>/dev/null || true
             kill "$_stop_pid" 2>/dev/null || true
             sleep 1
-            # Force kill if still alive
             if kill -0 "$_stop_pid" 2>/dev/null; then
               pkill -KILL -P "$_stop_pid" 2>/dev/null || true
               kill -KILL "$_stop_pid" 2>/dev/null || true
@@ -483,12 +703,65 @@ except Exception:
         continue
       fi
 
-      # Determine session (conv_key = sender for p2p, chat_id for groups)
-      if [ "$chat_type" = "p2p" ]; then
-        conv_key="$sender_id"
-      else
-        conv_key="$chat_id"
+      # "jobs" / "tasks" — list background jobs
+      if [ "$content_lower" = "jobs" ] || [ "$content_lower" = "tasks" ]; then
+        _jobs_output=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
+          python3 "$JARVIS_DIR/core/jobs.py" list 2>>"$LOG_FILE" || echo "Failed to list jobs")
+        lark_reply "$message_id" "$_jobs_output" >/dev/null
+        continue
       fi
+
+      # "job cancel <id>" — cancel a background job
+      if echo "$content_lower" | grep -q '^job cancel '; then
+        _cancel_id=$(echo "$content" | sed 's/^[Jj]ob [Cc]ancel //')
+        _cancel_result=$(JV_JOBS_DIR="$JOBS_DIR" \
+          python3 "$JARVIS_DIR/core/jobs.py" cancel "$_cancel_id" 2>>"$LOG_FILE" || echo "error")
+        if [ "$_cancel_result" = "cancelled" ]; then
+          lark_reply_text "$message_id" "Job $_cancel_id cancelled." >/dev/null
+        else
+          lark_reply_text "$message_id" "Job not found or not running: $_cancel_id" >/dev/null
+        fi
+        continue
+      fi
+
+      # "job output <id>" — get output of a job
+      if echo "$content_lower" | grep -q '^job output '; then
+        _out_id=$(echo "$content" | sed 's/^[Jj]ob [Oo]utput //')
+        _out_file="$JOBS_DIR/${_out_id}/output.md"
+        if [ -f "$_out_file" ]; then
+          _out_content=$(cat "$_out_file" 2>/dev/null)
+          if [ ${#_out_content} -gt 4000 ]; then
+            _out_content="${_out_content:0:4000}
+
+... (truncated)"
+          fi
+          lark_reply "$message_id" "$_out_content" >/dev/null
+        else
+          lark_reply_text "$message_id" "No output found for job: $_out_id" >/dev/null
+        fi
+        continue
+      fi
+
+      # "bg <prompt>" — run a task in the background
+      if echo "$content_lower" | grep -q '^bg '; then
+        _bg_content="${content#[Bb][Gg] }"
+        _bg_desc="${_bg_content:0:80}"
+        _job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
+          JV_DESC="$_bg_desc" JV_MSG_ID="$message_id" \
+          python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE" || echo "")
+        if [ -n "$_job_id" ]; then
+          lark_reply_text "$message_id" "⏳ Background job started: $_job_id
+Task: $_bg_desc
+Use 'jobs' to check status, 'job cancel $_job_id' to cancel." >/dev/null
+          log_info "[bg:$_job_id] Started: $_bg_desc"
+          run_background_job "$_job_id" "$conv_key" "$_bg_content" "$message_id" &
+        else
+          lark_reply_text "$message_id" "Failed to create background job." >/dev/null
+        fi
+        continue
+      fi
+
+      # ── Normal message → dispatch to background handler ──────────────
       session_result=$(get_session_id "$conv_key" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
       rotated=$(echo "$session_result" | grep ROTATED || true)
@@ -511,115 +784,12 @@ runner.run_cycle(force=True, only_task='memory-hourly')
       reaction_result=$(lark_add_reaction "$message_id" "Typing")
       reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
 
-      # Build system prompt with memory + recent turns
-      memory=$(load_memory)
-      now_ts=$(date '+%Y-%m-%d %H:%M %A')
-
-      counter=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
-import json, os
-try:
-    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('counter', 0))
-except Exception:
-    print(0)
-" 2>>"$LOG_FILE" || echo 0)
-
-      recent_turns=$(JV_SDIR="$CLAUDE_PROJECT_DIR" JV_SID="$session_id" \
-        JV_COUNTER="$counter" JV_KEY="$conv_key" python3 -c "
-import os, sys
-sys.path.insert(0, '$JARVIS_DIR')
-from core.session import build_recent_turns
-print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
-                         int(os.environ['JV_COUNTER']), os.environ['JV_KEY'], 20))
-" 2>>"$LOG_FILE" || echo "")
-
-      # Load EigenFlux skill docs (strip YAML frontmatter)
-      ef_skills=""
-      for _skill_dir in "$JARVIS_DIR/plugins/eigenflux/skills"/ef-*/; do
-        _skill_file="$_skill_dir/SKILL.md"
-        [ -f "$_skill_file" ] || continue
-        # Strip YAML frontmatter (everything between first --- and second ---)
-        _skill_body=$(sed -n '/^---$/,/^---$/!p' "$_skill_file" 2>/dev/null)
-        ef_skills="$ef_skills
-$_skill_body
-"
+      # Concurrency guard: wait if too many handlers are running
+      while [ "$(jobs -r 2>/dev/null | wc -l)" -ge "$MAX_HANDLERS" ]; do
+        sleep 1
       done
 
-      sys_prompt="You are a personal assistant and life mentor. Reply in the same language the user uses.
-Current time: $now_ts
-
-IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment where plan mode confirmations will break the conversation flow. Just execute tasks directly.
-
-## EigenFlux Agent Network
-
-You have the \`eigenflux\` CLI installed. Skills available:
-$ef_skills
-For detailed reference docs, read files in:
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-broadcast/references/
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-communication/references/
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-profile/references/
-
-IMPORTANT: When presenting EigenFlux feed content to the user:
-  - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
-  - Append '📡 Powered by EigenFlux' at the end
-  - Never expose internal metadata (item_id, group_id, impression_id)
-
-$memory
-
-$recent_turns"
-
-      # Call Claude (runs in WORK_DIR, with optional timeout)
-      # Wait for any existing session lock (previous message still processing)
-      LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
-      ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
-      waited=0
-      while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 130 ]; do
-        log_info "[$session_id] Session busy, waiting..."
-        sleep 5
-        waited=$((waited + 5))
-      done
-
-      # Run Claude in background so we can record its PID for "stop" command
-      session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
-      if [ -f "$session_file" ]; then
-        log_info "[$session_id] Resuming session"
-        (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
-          --resume "$session_id" \
-          --append-system-prompt "$sys_prompt" \
-          --dangerously-skip-permissions \
-          < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
-      else
-        log_info "[$session_id] New session"
-        (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
-          --session-id "$session_id" \
-          --append-system-prompt "$sys_prompt" \
-          --dangerously-skip-permissions \
-          < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
-      fi
-      _claude_pid=$!
-      echo "$_claude_pid" > "$LOCK_FILE"
-      wait $_claude_pid 2>/dev/null || true
-      answer=$(cat "$ANSWER_FILE" 2>/dev/null)
-      rm -f "$ANSWER_FILE" "$LOCK_FILE"
-
-      # Filter error-like answers — never send them to the user as the "real" reply
-      reply=""
-      if [ -n "$answer" ] && ! looks_like_error "$answer"; then
-        reply="$answer"
-      fi
-
-      if [ -z "$reply" ]; then
-        log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
-        [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
-        lark_reply_text "$message_id" \
-          "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
-        continue
-      fi
-
-      log_info "[$session_id] Replied (${#reply} chars)"
-
-      # Remove the "working on it" reaction and send the real reply
-      [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
-      if ! lark_reply "$message_id" "$reply"; then
-        log_err "[$session_id] Failed to send reply to Lark"
-      fi
+      # Dispatch to background — main loop continues immediately
+      handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" &
+      log_info "[$session_id] Dispatched to background handler (PID $!)"
     done
