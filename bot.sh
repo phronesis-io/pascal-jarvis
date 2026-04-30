@@ -224,6 +224,12 @@ heartbeat_loop() {
   sleep 3
   log_info "[heartbeat] Starting (${CHECK_INTERVAL}s cycle)..."
 
+  # Trim outbox to last 20 entries on startup (prevents unbounded growth)
+  local _outbox="$JARVIS_DIR/heartbeat_outbox.jsonl"
+  if [ -f "$_outbox" ] && [ "$(wc -l < "$_outbox")" -gt 20 ]; then
+    tail -20 "$_outbox" > "$_outbox.tmp" && mv "$_outbox.tmp" "$_outbox"
+  fi
+
   while true; do
     # Check for restart trigger in heartbeat loop too (message loop may be idle)
     if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
@@ -265,6 +271,11 @@ if result:
 
     if [ -n "$output" ] && ! looks_like_error "$output"; then
       send_to_lark "$output"
+      # Write to outbox so main session can see what heartbeat sent
+      local ts_iso
+      ts_iso=$(date '+%Y-%m-%d %H:%M')
+      printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$output" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
+        >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
       log_info "[heartbeat] Beat sent"
     elif [ -n "$output" ]; then
       log_warn "[heartbeat] Suppressed error-like output (see log)"

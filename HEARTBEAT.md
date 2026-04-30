@@ -51,7 +51,9 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     BEFORE you compose anything, apply this filter:
       Interruption Value = (relevance × timeliness × memory-evidence) ÷ (cognitive cost × frequency)
-      If you can't score high on the numerator, reply HEARTBEAT_OK. Silence > noise.
+      You SHOULD send something most of the time — your job is to find something valuable,
+      not to find reasons to stay silent. Only reply HEARTBEAT_OK if you genuinely cannot think
+      of a single interesting fact, timely pointer, or worthwhile question after trying.
 
     DATA includes: time/phase, calendar context (transition signals, free block size),
     user interests, suggested mode, and recent past check-ins.
@@ -87,7 +89,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
        Never fabricate citations. If unsure of the exact source, say "大致出自..." or skip it.
        This rule exists because the user values intellectual rigor — unverified trivia is noise.
 
-    HEARTBEAT_OK is always the right answer when nothing genuine comes to mind.
+    HEARTBEAT_OK is acceptable when nothing genuine comes to mind — but try harder first.
+    You have access to all of human knowledge. There is almost always something worth sharing.
 
 ### memory-consolidate
 - interval: 24h
