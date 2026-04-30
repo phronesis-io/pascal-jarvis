@@ -117,8 +117,13 @@ class HeartbeatRunner:
         if not full_path.exists():
             return ""
         try:
+            # Use python3 for .py files that aren't executable
+            if full_path.suffix == ".py" and not os.access(full_path, os.X_OK):
+                cmd = ["python3", str(full_path)]
+            else:
+                cmd = [str(full_path)]
             result = subprocess.run(
-                [str(full_path)],
+                cmd,
                 input=stdin_data,
                 capture_output=True, text=True,
                 timeout=30,
@@ -153,7 +158,7 @@ You have access to the user's memory below. Use it to personalize your responses
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
-                timeout=120, stdin=subprocess.DEVNULL,
+                timeout=300, stdin=subprocess.DEVNULL,
                 cwd=str(self.work_dir),
             )
             return result.stdout.strip()
