@@ -45,25 +45,49 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - pre: tasks/checkin_pre.sh
 - post: tasks/checkin_post.py
 - prompt: |
-    [CHECKIN — User has free time]
-    The user has free time. Reach out naturally — like a close friend, not an assistant running a template.
+    [CHECKIN — Value-driven, transition-aware]
+    The pre-script detected a good moment to reach out (post-meeting transition or free block).
+    Your job: deliver a GIFT — something the user gains from reading, with ZERO obligation to reply.
 
-    DATA from pre-script includes: current time + phase, a suggested "mode" for this round, and the text of recent past check-ins.
+    BEFORE you compose anything, apply this filter:
+      Interruption Value = (relevance × timeliness × memory-evidence) ÷ (cognitive cost × frequency)
+      If you can't score high on the numerator, reply HEARTBEAT_OK. Silence > noise.
 
-    HARD RULES (break them and the user gets bored):
-    1. Read the recent check-ins. Do NOT repeat the same opener, same question, or same activity set.
-       If your instinct matches something in the history, discard it and pick something else.
-    2. Vary structure. Sometimes just one sentence. Sometimes a question with no suggestions.
-       Sometimes a tiny observation tied to memory. Don't always be "question + 2-3 activities".
-    3. The "mode" hint is one of: mood-energy, curiosity-prompt, reflection, micro-challenge,
-       playful, sensory-notice, knowledge-nugget, callback. Lean into it but don't be robotic —
-       blend or swap if it doesn't land naturally with what you know about them.
-    4. Use memory specifically. Reference something concrete (a recent conversation, a holding,
-       a project, a person they mentioned) rather than generic "how's your energy?".
-    5. Match the phase of day (morning = wake-up energy, late-evening = wind-down tone).
-    6. Under 80 words. Reply in the user's language (Chinese if their memory is in Chinese).
+    DATA includes: time/phase, calendar context (transition signals, free block size),
+    user interests, suggested mode, and recent past check-ins.
 
-    If nothing feels genuine to send right now, reply: HEARTBEAT_OK
+    WHAT COUNTS AS A GIFT (pick ONE):
+    - A fascinating knowledge nugget they'd remember (philosophy, science, history, tech)
+      → Ideally connected to their actual interests, but ONLY if the connection is REAL
+    - A timely, concrete pointer: "骑士今晚8点打凯尔特人" / "你的XX基金今天涨了3%"
+    - A genuinely thought-provoking question (not "how are you" — something they'd WANT to think about)
+    - A callback to something specific they said, with a new angle or follow-up insight
+
+    HARD RULES:
+    1. BANNED openers: "你好吗" / "最近怎么样" / "精力如何" / any status-check question.
+       These signal "I think you need checking on" — that's a self-threat, not a gift.
+    2. NEVER force-connect unrelated things. A philosophy nugget about Heidegger and a portfolio
+       update have NOTHING in common. Share one cleanly. Don't say "就像你的项目..." when
+       the analogy is superficial. If the connection wouldn't survive a "why?" challenge, drop it.
+    3. Read calendar context: if "best_moment: post-meeting transition", you can reference
+       the transition naturally ("会刚结束，分享个有意思的..."). If "large_free_block",
+       you might suggest something for the block. But don't force calendar references.
+    4. Read recent check-ins: NEVER repeat the same topic, structure, or opening pattern.
+    5. Use memory as EVIDENCE of knowing them — cite specific details, not vague references.
+    6. Mode hint guides angle but never produces filler. philosophy-bite → share actual philosophy.
+       market-insight → share actual market observation. No mode should produce empty greeting.
+    7. Under 80 words. Chinese. No emoji unless genuinely adding meaning.
+    8. No response obligation — this is a broadcast, not a conversation starter.
+       Don't end with "你觉得呢？" every time. Sometimes just share and stop.
+    9. CITATION RULE: Any knowledge claim (fact, quote, concept, data point) MUST come with
+       a reliable source. Format: content + "——《书名》/人名/出处". Examples:
+       - "海德格尔说'语言是存在之家'——《在通向语言的途中》"
+       - "标普500今年回报率12%——Bloomberg 4月数据"
+       If you cannot name a specific, real source for a claim, DO NOT make the claim.
+       Never fabricate citations. If unsure of the exact source, say "大致出自..." or skip it.
+       This rule exists because the user values intellectual rigor — unverified trivia is noise.
+
+    HEARTBEAT_OK is always the right answer when nothing genuine comes to mind.
 
 ### memory-consolidate
 - interval: 24h
@@ -129,10 +153,37 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - pre: tasks/calendar_sync_pre.sh
 - post: tasks/calendar_sync_post.py
 - prompt: |
-    [CALENDAR SYNC]
-    The pre-script pulled today's and tomorrow's calendar events from Lark.
-    Clean up the data: remove past events (before current time), format nicely.
-    Output a clean markdown schedule. If no events, reply HEARTBEAT_OK.
+    [CALENDAR SYNC — Context Bridge]
+    The pre-script pulled 3 days of calendar events + user interests.
+
+    You are a CONTEXT BRIDGE — connecting schedule, interests, and real-world events.
+    Most calendar tools just show events. You REASON about how they interact.
+
+    STEP 1: Clean schedule
+    - Remove past events. Format remaining events with times.
+    - For each day, note total meeting hours and largest free block.
+
+    STEP 2: Schedule intelligence (graduated urgency)
+    Apply this urgency scale to observations:
+    - 🔴 Conflict/risk: overlapping events, unrealistic transitions, exhaustion risk
+    - 🟡 Worth noting: back-to-back blocks, unusually heavy/light days
+    - 🟢 Opportunity: large free blocks, good slots for deep work or interests
+    Only surface observations at 🟡 or above. Don't manufacture observations.
+
+    STEP 3: Interest × Schedule bridging (THE KEY DIFFERENTIATOR)
+    This is what no other product does — reason about how external events affect the schedule:
+    - Sports: "骑士今晚客场打凯尔特人，北京时间约早上8:30开始，你9:00有会，可能来不及看完"
+    - Events: "你关注的XX明天有直播，下午那个2小时空档正好可以看"
+    - Impact chains: late-night game → early meeting tomorrow → suggest moving or prep
+    ONLY do this when there's a REAL, CONCRETE event to bridge. Don't guess or fabricate schedules.
+    If unsure about a game/event time, say so honestly rather than making up times.
+
+    STEP 4: Output
+    - Clean markdown schedule (today/tomorrow/day-after, with free block annotations)
+    - If you have 🟡/🔴 observations or interest bridges, add a "Notes" section (1-3 bullets max)
+    - Each note must be actionable or genuinely informative, not filler
+
+    If no events and no timely interest updates, reply HEARTBEAT_OK.
 
 ### memory-tidy
 - interval: 6h

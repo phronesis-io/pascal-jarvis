@@ -558,28 +558,50 @@ let _memData=[], _memFilter=null, _memEditing=null;
 function loadMemories(){
   fetch('/api/memories').then(r=>r.json()).then(data=>{ _memData=data; renderMemories(); });
 }
+function _memTier(m){ const p=m.file||''; if(p.startsWith('hot/')) return 'hot'; if(p.startsWith('warm/')) return 'warm'; if(p.startsWith('system/')) return 'system'; if(p.startsWith('timeline/')) return 'timeline'; return 'other'; }
+const _tierMeta={hot:{icon:'\u{1f525}',label:'Hot — 每次加载',color:'#ef4444'},warm:{icon:'\u{1f4e6}',label:'Warm — 按需加载',color:'#f59e0b'},system:{icon:'\u2699\ufe0f',label:'System — 运行状态',color:'#6366f1'},timeline:{icon:'\u{1f4c5}',label:'Timeline — 时间线日志',color:'#06b6d4'},other:{icon:'\u{1f4c4}',label:'Other',color:'#9ca3af'}};
 function renderMemories(){
   const el=document.getElementById('memories');
   const types=[...new Set(_memData.map(m=>m.type))];
-  const f=_memFilter?_memData.filter(m=>m.type===_memFilter):_memData;
+  const tiers=['hot','warm','system','timeline','other'];
+  const filterOpts=[{k:'all',label:'all'},...types.map(t=>({k:'type:'+t,label:t})),...tiers.filter(t=>_memData.some(m=>_memTier(m)===t)).map(t=>({k:'tier:'+t,label:_tierMeta[t].icon+' '+t}))];
+  const f=_memData.filter(m=>{
+    if(!_memFilter) return true;
+    if(_memFilter.startsWith('type:')) return m.type===_memFilter.slice(5);
+    if(_memFilter.startsWith('tier:')) return _memTier(m)===_memFilter.slice(5);
+    return true;
+  });
+  const grouped={};
+  f.forEach(m=>{ const t=_memTier(m); (grouped[t]=grouped[t]||[]).push(m); });
+  let cardsHtml='';
+  for(const t of tiers){
+    const items=grouped[t]; if(!items) continue;
+    const tm=_tierMeta[t];
+    cardsHtml+=`<div class="tier-group" style="margin-top:20px">
+      <div style="font-size:13px;font-weight:600;color:${tm.color};margin-bottom:8px;display:flex;align-items:center;gap:6px">
+        <span>${tm.icon}</span>${tm.label}<span class="count" style="font-size:11px">${items.length}</span></div>
+      ${items.map(m=>memCardHtml(m)).join('')}
+    </div>`;
+  }
   el.innerHTML=`
     <div class="section-header"><h2>Memories</h2>
       <div style="display:flex;align-items:center;gap:12px">
         <span class="count">${f.length}</span>
         <button class="btn btn-primary" onclick="editMemory(null)">+ New Memory</button>
       </div></div>
-    <div class="filters">${['all',...types].map(t=>`<button class="fbtn${(t==='all'&&!_memFilter)||(t===_memFilter)?' active':''}" data-t="${t}">${t}</button>`).join('')}</div>
+    <div class="filters">${filterOpts.map(o=>`<button class="fbtn${(o.k==='all'&&!_memFilter)||(o.k===_memFilter)?' active':''}" data-t="${o.k}">${o.label}</button>`).join('')}</div>
     <div id="mem-editor-slot"></div>
-    <div id="mem-cards">${f.map(m=>memCardHtml(m)).join('')}</div>`;
+    <div id="mem-cards">${cardsHtml}</div>`;
   el.querySelectorAll('.fbtn').forEach(b=>b.addEventListener('click',()=>{
     _memFilter=b.dataset.t==='all'?null:b.dataset.t; renderMemories();
   }));
   if(_memEditing) showEditor(_memEditing);
 }
 function memCardHtml(m){
+  const tier=_memTier(m), tm=_tierMeta[tier];
   return `<div class="card" id="mem-${m.file}">
     <div class="card-head">
-      <span class="card-name">${esc(m.name)}</span><span class="badge badge-${m.type}">${m.type}</span>
+      <span class="card-name">${esc(m.name)}</span><span class="badge badge-${m.type}">${m.type}</span><span class="badge" style="background:${tm.color}22;color:${tm.color};font-size:10px">${tm.icon} ${tier}</span>
       <div class="card-actions">
         <button class="btn btn-ghost btn-sm" onclick="editMemory('${esc(m.file)}')">Edit</button>
         <button class="btn btn-danger btn-sm" onclick="deleteMemory('${esc(m.file)}')">Delete</button>
@@ -935,7 +957,7 @@ def parse_memory(path: Path) -> dict | None:
         "description": meta.get("description", ""),
         "type": meta.get("type", "unknown"),
         "body": parts[2].strip(),
-        "file": path.name,
+        "file": str(path.relative_to(MEMORY_DIR)) if path.is_relative_to(MEMORY_DIR) else path.name,
     }
 
 
@@ -1236,12 +1258,15 @@ def save_memory(filename: str, name: str, description: str, mem_type: str, body:
     """Write a memory file with frontmatter. Returns {"ok": True} or {"error": "..."}."""
     if not filename.endswith(".md"):
         return {"error": "filename must end with .md"}
-    if "/" in filename or "\\" in filename or ".." in filename:
-        return {"error": "invalid filename — path separators not allowed"}
+    if "\\" in filename or ".." in filename:
+        return {"error": "invalid filename — '..' not allowed"}
     if not name.strip():
         return {"error": "name is required"}
     content = f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}"
     target = MEMORY_DIR / filename
+    if not target.resolve().is_relative_to(MEMORY_DIR.resolve()):
+        return {"error": "path escapes memory directory"}
+    target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
         tmp.write_text(content, encoding="utf-8")
@@ -1255,9 +1280,11 @@ def delete_memory(filename: str) -> dict:
     """Delete a memory file. Returns {"ok": True} or {"error": "..."}."""
     if filename == "MEMORY.md":
         return {"error": "cannot delete MEMORY.md"}
-    if "/" in filename or "\\" in filename or ".." in filename:
-        return {"error": "invalid filename — path separators not allowed"}
+    if "\\" in filename or ".." in filename:
+        return {"error": "invalid filename — '..' not allowed"}
     target = MEMORY_DIR / filename
+    if not target.resolve().is_relative_to(MEMORY_DIR.resolve()):
+        return {"error": "path escapes memory directory"}
     if not target.exists():
         return {"error": "file not found"}
     try:
@@ -1457,7 +1484,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/memories":
             memories = []
             if MEMORY_DIR.is_dir():
-                for f in sorted(MEMORY_DIR.glob("*.md")):
+                for f in sorted(MEMORY_DIR.rglob("*.md")):
                     if f.name == "MEMORY.md":
                         continue
                     m = parse_memory(f)
