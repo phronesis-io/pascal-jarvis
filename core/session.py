@@ -165,7 +165,11 @@ def read_tail_turns(session_dir: str | Path, session_id: str,
 
 def format_recent_turns(turns: list[dict], max_msg_chars: int = 400,
                         max_total_chars: int = 6000) -> str:
-    """Format turns into a markdown block for system prompt injection."""
+    """Format turns into a markdown block for system prompt injection.
+
+    Inserts date separators (e.g. '--- 昨天 2026-05-09 ---') when turns span
+    multiple days, so Claude can clearly distinguish today vs past messages.
+    """
     if not turns:
         return ""
 
@@ -185,8 +189,20 @@ def format_recent_turns(turns: list[dict], max_msg_chars: int = 400,
         total += len(line)
     formatted.reverse()
 
+    # Insert date separators between days
+    today_str = datetime.now().strftime("%Y-%m-%d")
     lines = ["## Recent Turns", ""]
-    lines.extend(f"{line}\n" for line in formatted)
+    prev_date = None
+    for line in formatted:
+        # Extract date from "[YYYY-MM-DD HH:MM]" prefix
+        turn_date = line[1:11] if len(line) > 11 and line[0] == "[" else None
+        if turn_date and turn_date != prev_date:
+            if turn_date == today_str:
+                lines.append(f"--- 今天 {turn_date} ---\n")
+            else:
+                lines.append(f"--- 过去 {turn_date} (不是今天) ---\n")
+            prev_date = turn_date
+        lines.append(f"{line}\n")
     return "\n".join(lines)
 
 

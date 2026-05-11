@@ -9,6 +9,9 @@ import time
 import traceback
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.card import build_card
+
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
@@ -58,6 +61,9 @@ def main() -> int:
             # Update local publish state for cooldown tracking
             state_file = JARVIS_DIR / "eigenflux" / "publish_state.json"
             state_file.write_text(json.dumps({"last_publish_epoch": int(time.time())}))
+            # Notify user via card
+            summary = content[:200] + "..." if len(content) > 200 else content
+            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{summary}"))
         else:
             print(f"[eigenflux-publish] CLI error: {result.stderr.strip()}", file=LOG)
     except Exception:

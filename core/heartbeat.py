@@ -267,8 +267,14 @@ You have access to the user's memory below. Use it to personalize your responses
             else:
                 user_messages.append(raw)
         else:
+            # Multi-task: Claude returns JSON envelope. Extract robustly.
             cleaned = re.sub(r'^```json?\s*', '', raw.strip())
             cleaned = re.sub(r'```\s*$', '', cleaned.strip())
+            # Try to find JSON object if there's preamble text
+            json_start = cleaned.find('{')
+            json_end = cleaned.rfind('}')
+            if json_start >= 0 and json_end > json_start:
+                cleaned = cleaned[json_start:json_end + 1]
             try:
                 envelope = json.loads(cleaned)
                 task_responses = envelope.get("tasks", {})
@@ -276,20 +282,20 @@ You have access to the user's memory below. Use it to personalize your responses
                     resp = task_responses.get(task["name"])
                     if resp is None:
                         continue
-                    resp_str = json.dumps(resp) if isinstance(resp, dict) else str(resp)
+                    resp_str = json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp)
                     if task["post"]:
                         post_output = self.run_script(task["post"], stdin_data=resp_str)
                         if post_output:
                             user_messages.append(post_output)
-                    else:
-                        text = resp if isinstance(resp, str) else resp_str
-                        if text.strip() and "HEARTBEAT_OK" not in text:
-                            user_messages.append(text)
+                    # Tasks without post-scripts: only show string responses, never raw JSON
+                    elif isinstance(resp, str) and resp.strip() and "HEARTBEAT_OK" not in resp:
+                        user_messages.append(resp)
                 top_msg = envelope.get("user_message", "")
                 if top_msg and top_msg.strip():
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
-                user_messages.append(raw)
+                # NEVER dump raw JSON to user — log and skip
+                print(f"[heartbeat] JSON parse failed, skipping output", file=sys.stderr)
 
         # Update state
         for task in runnable:

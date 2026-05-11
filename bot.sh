@@ -230,6 +230,12 @@ heartbeat_loop() {
     tail -20 "$_outbox" > "$_outbox.tmp" && mv "$_outbox.tmp" "$_outbox"
   fi
 
+  # Trim engagement log to last 500 entries (keeps ~2 weeks of data)
+  local _elog="$JARVIS_DIR/engagement_log.jsonl"
+  if [ -f "$_elog" ] && [ "$(wc -l < "$_elog")" -gt 500 ]; then
+    tail -500 "$_elog" > "$_elog.tmp" && mv "$_elog.tmp" "$_elog"
+  fi
+
   while true; do
     # Check for restart trigger in heartbeat loop too (message loop may be idle)
     if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
@@ -270,12 +276,32 @@ if result:
     }
 
     if [ -n "$output" ] && ! looks_like_error "$output"; then
-      send_to_lark "$output"
+      if [[ "$output" == '{"config":'* ]]; then
+        lark_send_card "$output"
+      else
+        send_to_lark "$output"
+      fi
       # Write to outbox so main session can see what heartbeat sent
       local ts_iso
       ts_iso=$(date '+%Y-%m-%d %H:%M')
       printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$output" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
         >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
+      # Record heartbeat send for engagement tracking
+      local _hb_source
+      _hb_source=$(python3 -c "
+import json, sys
+try:
+    # Detect source from heartbeat state (last task that produced output)
+    with open('$JARVIS_DIR/heartbeat_state.json') as f:
+        state = json.load(f)
+    # Find most recently run task
+    latest = max(state.items(), key=lambda x: x[1].get('last_run', 0))
+    print(latest[0])
+except Exception:
+    print('heartbeat')
+" 2>/dev/null || echo "heartbeat")
+      printf '%s\n' "{\"ts\":\"$ts_iso\",\"source\":\"$_hb_source\",\"type\":\"sent\",\"epoch\":$(date +%s)}" \
+        >> "$JARVIS_DIR/engagement_log.jsonl"
       log_info "[heartbeat] Beat sent"
     elif [ -n "$output" ]; then
       log_warn "[heartbeat] Suppressed error-like output (see log)"
@@ -346,6 +372,11 @@ except Exception:
 
       if [ -n "$msg" ]; then
         send_to_lark "$msg"
+        # Write to outbox so main session can reference this message
+        local ts_iso
+        ts_iso=$(date '+%Y-%m-%d %H:%M')
+        printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$msg" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"eigenflux-stream\"}" \
+          >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
         log_info "[ef-stream] Delivered real-time message"
         backoff=1
         failures=0
@@ -390,6 +421,147 @@ if [ "$ADMIN_ENABLED" = "true" ]; then
 else
   log_info "Admin disabled (set admin.enabled: true in jarvis.yaml to enable)"
 fi
+
+# ── Action Post-Processor ────────────────────────────────────────────
+# Scans Claude's reply for [ACTION:...] markers, executes them, and
+# returns the cleaned reply with any action results appended.
+# Usage: cleaned_reply=$(process_actions "$reply" "$conv_key" "$message_id")
+process_actions() {
+  local reply="$1" conv_key="$2" message_id="$3"
+  local action_results=""
+
+  # Extract all action markers
+  local actions
+  actions=$(echo "$reply" | grep -o '\[ACTION:[^]]*\]' 2>/dev/null || true)
+
+  if [ -z "$actions" ]; then
+    printf '%s' "$reply"
+    return
+  fi
+
+  while IFS= read -r marker; do
+    [ -z "$marker" ] && continue
+    # Parse action type and params
+    local action_body="${marker#\[ACTION:}"
+    action_body="${action_body%\]}"
+    local action_type="${action_body%%|*}"
+    local action_params="${action_body#*|}"
+    [ "$action_params" = "$action_type" ] && action_params=""
+
+    case "$action_type" in
+      feed_search)
+        local query="${action_params#query=}"
+        local results
+        results=$(JV_QUERY="$query" python3 -c "
+import sys, os
+sys.path.insert(0, '$JARVIS_DIR')
+from plugins.eigenflux.client import EigenFluxClient
+c = EigenFluxClient('eigenflux')
+items = c.search_feed_history(os.environ['JV_QUERY'], limit=5)
+if not items:
+    print('没找到相关内容')
+else:
+    for item in items:
+        title = item.get('title', item.get('content', '')[:60])
+        url = item.get('url', '')
+        ts = item.get('fetched_at', '')[:16]
+        print(f'• [{ts}] {title}')
+        if url:
+            print(f'  {url}')
+        print()
+" 2>/dev/null || echo "搜索失败")
+        if [ -n "$results" ]; then
+          action_results="${action_results}
+${results}"
+        fi
+        ;;
+
+      watchlater)
+        # Parse title and url from params: title=<title>|url=<url>
+        local wl_title="" wl_url=""
+        wl_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        wl_url=$(echo "$action_params" | sed -n 's/.*url=\([^|]*\).*/\1/p')
+        if [ -n "$wl_url" ]; then
+          python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$wl_title" "$wl_url" "action" \
+            2>>"$LOG_FILE" >/dev/null || true
+          log_info "[action] watchlater saved: $wl_title"
+        fi
+        ;;
+
+      bg)
+        local bg_prompt="${action_params#prompt=}"
+        local bg_desc="${bg_prompt:0:80}"
+        local job_id
+        job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
+          JV_DESC="$bg_desc" JV_MSG_ID="$message_id" \
+          python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE" || echo "")
+        if [ -n "$job_id" ]; then
+          log_info "[bg:$job_id] Started via action: $bg_desc"
+          run_background_job "$job_id" "$conv_key" "$bg_prompt" "$message_id" &
+          action_results="${action_results}
+⏳ Job ID: \`$job_id\`"
+        fi
+        ;;
+
+      jobs)
+        local jobs_output
+        jobs_output=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
+          python3 "$JARVIS_DIR/core/jobs.py" list 2>>"$LOG_FILE" || echo "Failed to list jobs")
+        action_results="${action_results}
+${jobs_output}"
+        ;;
+
+      job_cancel)
+        local cancel_id="${action_params#id=}"
+        local cancel_result
+        cancel_result=$(JV_JOBS_DIR="$JOBS_DIR" \
+          python3 "$JARVIS_DIR/core/jobs.py" cancel "$cancel_id" 2>>"$LOG_FILE" || echo "error")
+        if [ "$cancel_result" = "cancelled" ]; then
+          action_results="${action_results}
+Job $cancel_id cancelled."
+        else
+          action_results="${action_results}
+Job not found or not running: $cancel_id"
+        fi
+        ;;
+
+      job_output)
+        local out_id="${action_params#id=}"
+        local out_file="$JOBS_DIR/${out_id}/output.md"
+        if [ -f "$out_file" ]; then
+          local out_content
+          out_content=$(cat "$out_file" 2>/dev/null)
+          if [ ${#out_content} -gt 4000 ]; then
+            out_content="${out_content:0:4000}
+
+... (truncated)"
+          fi
+          action_results="${action_results}
+${out_content}"
+        else
+          action_results="${action_results}
+No output found for job: $out_id"
+        fi
+        ;;
+
+      heartbeat)
+        touch "$HEARTBEAT_TRIGGER"
+        log_info "[action] Heartbeat triggered"
+        ;;
+    esac
+  done <<< "$actions"
+
+  # Strip all [ACTION:...] markers and collapse blank lines (macOS-safe)
+  local cleaned
+  cleaned=$(echo "$reply" | sed 's/\[ACTION:[^]]*\]//g' | grep -v '^[[:space:]]*$' || true)
+
+  # Append action results if any
+  if [ -n "$action_results" ]; then
+    printf '%s\n%s' "$cleaned" "$action_results"
+  else
+    printf '%s' "$cleaned"
+  fi
+}
 
 # ── Message Handler (runs in background subshell) ────────────────────
 # Extracted from the main loop so different conversations run in parallel.
@@ -436,11 +608,29 @@ Current time: $now_ts
 
 IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment where plan mode confirmations will break the conversation flow. Just execute tasks directly.
 
-## Background Jobs
+## Available Actions
 
-You can suggest the user prefix a message with 'bg ' to run long tasks in the background.
-When a task will take a very long time (experiments, large research, batch processing),
-proactively suggest: \"This might take a while. Want me to run it in the background? Just resend with 'bg' prefix.\"
+When the user's intent requires a system action, include the appropriate marker in your response.
+The system will execute it and the result will be available. Actions:
+
+- [ACTION:feed_search|query=<keyword>] — Search EigenFlux feed history. Use when user wants to find past articles/content.
+- [ACTION:watchlater|title=<title>|url=<url>] — Save content for later. Use when user wants to bookmark/save something.
+- [ACTION:bg|prompt=<task>] — Run a long task in background. Use when user requests research or complex work that will take a long time.
+- [ACTION:jobs] — List active background jobs. Use when user asks about running tasks.
+- [ACTION:job_cancel|id=<id>] — Cancel a background job.
+- [ACTION:job_output|id=<id>] — Get output of a background job.
+- [ACTION:heartbeat] — Trigger an immediate heartbeat cycle (system check).
+
+Rules:
+- Include the action marker naturally in your response (it will be stripped before delivery)
+- You can include multiple actions in one response
+- For feed_search: the system will execute the search and append results to your response
+- For watchlater: just confirm to the user that it's saved
+- For bg: tell the user the task is running in the background
+- For jobs/job_cancel/job_output: the system will execute and append results
+- Always respond naturally in Chinese — the marker is just a signal to the system
+- When a task will take a very long time (experiments, large research, batch processing),
+  proactively suggest running it in the background using the bg action.
 
 ## EigenFlux Agent Network
 
@@ -455,6 +645,23 @@ IMPORTANT: When presenting EigenFlux feed content to the user:
   - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
   - Append '📡 Powered by EigenFlux' at the end
   - Never expose internal metadata (item_id, group_id, impression_id)
+
+## Calendar Data
+
+CRITICAL: For ANY schedule or time-related statements, ONLY use the data from the
+calendar_today.md file in your memory. NEVER rely on schedule mentions from conversation
+history (recent turns) — those may be stale/outdated from previous days.
+If calendar_today.md says the next event is X, that is the truth.
+If a previous conversation turn mentioned event Y, but calendar_today.md doesn't list it,
+then Y is in the past — do NOT reference it as upcoming.
+
+## Watch Later (收藏)
+
+If the user mentions wanting to save, bookmark, or watch something later (e.g. '这个先收藏',
+'以后看', '记一下这个链接', 'save this for later'), and the conversation contains or references
+a specific URL + title, append this marker at the very end of your response (on its own line):
+[SAVE_LATER: <title> | <url>]
+This will be automatically parsed and saved. Do NOT mention this marker to the user.
 
 $memory
 
@@ -509,6 +716,28 @@ $recent_turns"
     lark_reply_text "$message_id" \
       "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
     return
+  fi
+
+  # ── Process [ACTION:...] markers (LLM-driven action system) ──
+  reply=$(process_actions "$reply" "$conv_key" "$message_id")
+
+  # ── Detect [SAVE_LATER: title | url] markers and save to watchlater ──
+  if echo "$reply" | grep -q '\[SAVE_LATER:'; then
+    _sl_extracted=$(echo "$reply" | python3 -c "
+import sys, re
+text = sys.stdin.read()
+matches = re.findall(r'\[SAVE_LATER:\s*(.+?)\s*\|\s*(https?://[^\]\s]+)\s*\]', text)
+for title, url in matches:
+    print(f'{title}\t{url}')
+" 2>/dev/null)
+    while IFS=$'\t' read -r _sl_title _sl_url; do
+      [ -z "$_sl_url" ] && continue
+      python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_sl_title" "$_sl_url" "natural" \
+        2>>"$LOG_FILE" >/dev/null || true
+      log_info "[$session_id] watchlater saved: $_sl_title"
+    done <<< "$_sl_extracted"
+    # Strip markers from reply
+    reply=$(echo "$reply" | sed 's/\[SAVE_LATER:[^]]*\]//g' | sed '/^[[:space:]]*$/d')
   fi
 
   log_info "[$session_id] Replied (${#reply} chars)"
@@ -585,7 +814,8 @@ print(j['status'] if j else 'unknown')
 
   log_info "[bg:$job_id] Finished with status=$status (${#output} chars)"
 
-  # Notify user
+  # Notify user via card
+  local card_body card_json
   if [ "$status" = "completed" ]; then
     # Truncate output for notification (full output available via 'job output')
     local summary
@@ -596,14 +826,24 @@ print(j['status'] if j else 'unknown')
     else
       summary="$output"
     fi
-    send_to_lark "**Background job completed** \`$job_id\`
+    card_body="**Job completed** \`$job_id\`
 
 $summary"
   else
-    send_to_lark "**Background job failed** \`$job_id\`
+    card_body="**Job failed** \`$job_id\`
 Task: $content
 
 Check logs with: job output $job_id"
+  fi
+  card_json=$(JV_BODY="$card_body" python3 -c "
+import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.card import build_card
+print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
+" 2>/dev/null) || card_json=""
+  if [ -n "$card_json" ]; then
+    lark_send_card "$card_json"
+  else
+    send_to_lark "$card_body"
   fi
 }
 
@@ -637,6 +877,19 @@ lark_subscribe_messages \
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
+      # ── Card action callback (e.g. watchlater button) ──────────────
+      _card_action=$(echo "$line" | jq -r '.action.value.action // empty' 2>/dev/null)
+      if [ "$_card_action" = "watchlater" ]; then
+        _wl_title=$(echo "$line" | jq -r '.action.value.title // empty' 2>/dev/null)
+        _wl_url=$(echo "$line" | jq -r '.action.value.url // empty' 2>/dev/null)
+        if [ -n "$_wl_url" ]; then
+          _wl_result=$(python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_wl_title" "$_wl_url" "button" 2>>"$LOG_FILE")
+          log_info "[watchlater] Saved via button: $_wl_title"
+          # Card action callbacks can return a toast; for now just log
+        fi
+        continue
+      fi
+
       # Check for restart trigger (written by admin panel)
       if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
         rm -f "$JARVIS_DIR/.restart_trigger"
@@ -658,6 +911,27 @@ lark_subscribe_messages \
 
       [ -z "$content" ] || [ -z "$message_id" ] && continue
 
+      # ── Image detection: compact mode sends images as [Image: img_v3_xxx] ──
+      if [[ "$content" == "[Image: img_v3_"* ]]; then
+        _img_key=$(echo "$content" | sed 's/\[Image: \(.*\)\]/\1/')
+        _img_dir="$JARVIS_DIR/tmp/images"
+        mkdir -p "$_img_dir"
+        _img_path="$_img_dir/${_img_key}.png"
+        log_info "Image detected: $_img_key — downloading..."
+        if (cd "$_img_dir" && lark-cli im +messages-resources-download \
+            --message-id "$message_id" \
+            --file-key "$_img_key" \
+            --type image \
+            --output "${_img_key}.png" \
+            --as bot 2>>"$LOG_FILE"); then
+          content="[User sent an image, saved to $_img_path. Use the Read tool to view it and reply about its content.]"
+          log_info "Image downloaded: $_img_path"
+        else
+          content="[User sent an image (key: $_img_key) but download failed. Tell the user the image could not be received.]"
+          log_warn "Image download failed: $_img_key"
+        fi
+      fi
+
       # In group chats, only respond when the bot is @mentioned.
       # Check if APP_ID appears anywhere in the mentions JSON — this is the
       # reliable way to detect a bot mention regardless of display name.
@@ -677,14 +951,10 @@ lark_subscribe_messages \
       fi
 
       # Handle special commands (these run inline, NOT dispatched to background)
+      # ONLY stop/cancel bypass Claude — everything else goes through LLM + action markers
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
-      if [ "$content_lower" = "loop" ] || [ "$content_lower" = "heartbeat" ]; then
-        touch "$HEARTBEAT_TRIGGER"
-        lark_reply_text "$message_id" "Heartbeat triggered" >/dev/null
-        continue
-      fi
 
-      # "stop" — kill the running Claude process for this session
+      # "stop" / "cancel" — kill the running Claude process for this session (safety bypass)
       if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
         _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
 import json, os
@@ -714,64 +984,6 @@ except Exception:
         continue
       fi
 
-      # "jobs" / "tasks" — list background jobs
-      if [ "$content_lower" = "jobs" ] || [ "$content_lower" = "tasks" ]; then
-        _jobs_output=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
-          python3 "$JARVIS_DIR/core/jobs.py" list 2>>"$LOG_FILE" || echo "Failed to list jobs")
-        lark_reply "$message_id" "$_jobs_output" >/dev/null
-        continue
-      fi
-
-      # "job cancel <id>" — cancel a background job
-      if echo "$content_lower" | grep -q '^job cancel '; then
-        _cancel_id=$(echo "$content" | sed 's/^[Jj]ob [Cc]ancel //')
-        _cancel_result=$(JV_JOBS_DIR="$JOBS_DIR" \
-          python3 "$JARVIS_DIR/core/jobs.py" cancel "$_cancel_id" 2>>"$LOG_FILE" || echo "error")
-        if [ "$_cancel_result" = "cancelled" ]; then
-          lark_reply_text "$message_id" "Job $_cancel_id cancelled." >/dev/null
-        else
-          lark_reply_text "$message_id" "Job not found or not running: $_cancel_id" >/dev/null
-        fi
-        continue
-      fi
-
-      # "job output <id>" — get output of a job
-      if echo "$content_lower" | grep -q '^job output '; then
-        _out_id=$(echo "$content" | sed 's/^[Jj]ob [Oo]utput //')
-        _out_file="$JOBS_DIR/${_out_id}/output.md"
-        if [ -f "$_out_file" ]; then
-          _out_content=$(cat "$_out_file" 2>/dev/null)
-          if [ ${#_out_content} -gt 4000 ]; then
-            _out_content="${_out_content:0:4000}
-
-... (truncated)"
-          fi
-          lark_reply "$message_id" "$_out_content" >/dev/null
-        else
-          lark_reply_text "$message_id" "No output found for job: $_out_id" >/dev/null
-        fi
-        continue
-      fi
-
-      # "bg <prompt>" — run a task in the background
-      if echo "$content_lower" | grep -q '^bg '; then
-        _bg_content="${content#[Bb][Gg] }"
-        _bg_desc="${_bg_content:0:80}"
-        _job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
-          JV_DESC="$_bg_desc" JV_MSG_ID="$message_id" \
-          python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE" || echo "")
-        if [ -n "$_job_id" ]; then
-          lark_reply_text "$message_id" "⏳ Background job started: $_job_id
-Task: $_bg_desc
-Use 'jobs' to check status, 'job cancel $_job_id' to cancel." >/dev/null
-          log_info "[bg:$_job_id] Started: $_bg_desc"
-          run_background_job "$_job_id" "$conv_key" "$_bg_content" "$message_id" &
-        else
-          lark_reply_text "$message_id" "Failed to create background job." >/dev/null
-        fi
-        continue
-      fi
-
       # ── Normal message → dispatch to background handler ──────────────
       session_result=$(get_session_id "$conv_key" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
@@ -790,6 +1002,59 @@ runner.run_cycle(force=True, only_task='memory-hourly')
       fi
 
       log_info "[$session_id] Received: $content"
+
+      # ── Engagement tracking: check if this message responds to a heartbeat ──
+      python3 -c "
+import json, time, os, sys
+
+log_path = os.path.join('$JARVIS_DIR', 'engagement_log.jsonl')
+if not os.path.exists(log_path):
+    sys.exit(0)
+
+# Read last 'sent' entry
+last_sent = None
+with open(log_path, encoding='utf-8') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            if entry.get('type') == 'sent':
+                last_sent = entry
+        except json.JSONDecodeError:
+            continue
+
+if not last_sent:
+    sys.exit(0)
+
+sent_epoch = last_sent.get('epoch', 0)
+now_epoch = int(time.time())
+gap_seconds = now_epoch - sent_epoch
+
+# Only track if sent within last 60 minutes
+if gap_seconds > 3600:
+    sys.exit(0)
+
+# Classify: engaged (<10min), late (10-30min), ignored (>30min)
+if gap_seconds <= 600:
+    reaction = 'engaged'
+elif gap_seconds <= 1800:
+    reaction = 'late_reply'
+else:
+    reaction = 'ignored'
+
+entry = {
+    'ts': time.strftime('%Y-%m-%d %H:%M'),
+    'source': last_sent.get('source', 'unknown'),
+    'type': 'response',
+    'reaction': reaction,
+    'gap_seconds': gap_seconds,
+    'content_head': sys.argv[1][:80] if len(sys.argv) > 1 else '',
+}
+with open(log_path, 'a', encoding='utf-8') as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+" "$content" 2>>"$LOG_FILE" || true
 
       # Add a reaction to indicate we're working on it
       reaction_result=$(lark_add_reaction "$message_id" "Typing")

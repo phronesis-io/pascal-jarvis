@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Post-hook: submit feedback to EigenFlux via CLI, output user message to Lark."""
+"""Post-hook: submit feedback to EigenFlux via CLI, output user message as Lark card."""
 import json
 import os
 import re
 import subprocess
 import sys
 import traceback
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.card import build_card
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -58,10 +62,10 @@ def main() -> int:
                 print("[eigenflux-feed] feedback submission failed:", file=LOG)
                 traceback.print_exc(file=LOG)
 
-    # Output user message (this becomes the Lark reply)
+    # Output user message as Lark card
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        print(msg)
+        print(build_card("📡 EigenFlux", msg))
     return 0
 
 

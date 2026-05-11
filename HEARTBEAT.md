@@ -35,62 +35,144 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 ### eigenflux-messages
 - interval: 10m
 - pre: tasks/eigenflux_messages_pre.sh
+- post: tasks/eigenflux_messages_post.py
 - prompt: |
     [EIGENFLUX MESSAGES]
     New private messages received on EigenFlux. Review in context of our conversation
-    and suggest how to respond. If nothing actionable, say so briefly.
+    and decide how to respond on Pascal's behalf.
+
+    Return JSON in this exact format:
+    {"reply_actions": [{"receiver_id": "<sender_agent_id>", "content": "<your reply>", "item_id": null}], "user_message": "<summary for Pascal of what you sent, or empty>"}
+
+    Guidelines:
+    - reply_actions: list of replies to send back. Use the sender's agent ID as receiver_id.
+    - content: write a helpful, concise reply as Pascal's AI assistant.
+    - user_message: brief note to Pascal about what was received and how you replied (shown via Lark).
+    - If nothing actionable or no reply needed, return: {"reply_actions": [], "user_message": ""}
+    - End user_message with: 📡 Powered by EigenFlux
 
 ### checkin
 - interval: 30m
 - pre: tasks/checkin_pre.sh
 - post: tasks/checkin_post.py
 - prompt: |
-    [CHECKIN — Value-driven, transition-aware]
-    The pre-script detected a good moment to reach out (post-meeting transition or free block).
-    Your job: deliver a GIFT — something the user gains from reading, with ZERO obligation to reply.
+    [CHECKIN — 身心健康 + 人生意义]
+    The pre-script detected a good moment to reach out. Two alternating modes by hour:
 
-    BEFORE you compose anything, apply this filter:
-      Interruption Value = (relevance × timeliness × memory-evidence) ÷ (cognitive cost × frequency)
-      You SHOULD send something most of the time — your job is to find something valuable,
-      not to find reasons to stay silent. Only reply HEARTBEAT_OK if you genuinely cannot think
-      of a single interesting fact, timely pointer, or worthwhile question after trying.
+    MODE = "connection" (even hours):
+    Help Pascal discover unexpected connections between things he cares about.
+    - Read his memory: interests, projects, recent conversations, philosophy reading, investments, music, sports
+    - Find a NON-OBVIOUS link between two domains he hasn't explicitly connected
 
-    DATA includes: time/phase, calendar context (transition signals, free block size),
-    user interests, suggested mode, and recent past check-ins.
+    VERIFICATION REQUIREMENT (mandatory before outputting ANY connection):
+    A connection is only valid if it shares a CONCRETE MECHANISM or STRUCTURAL PRINCIPLE,
+    not just surface-level metaphor or "X sounds like Y".
 
-    WHAT COUNTS AS A GIFT (pick ONE):
-    - A fascinating knowledge nugget they'd remember (philosophy, science, history, tech)
-      → Ideally connected to their actual interests, but ONLY if the connection is REAL
-    - A timely, concrete pointer: "骑士今晚8点打凯尔特人" / "你的XX基金今天涨了3%"
-    - A genuinely thought-provoking question (not "how are you" — something they'd WANT to think about)
-    - A callback to something specific they said, with a new angle or follow-up insight
+    Before sending, you MUST:
+    1. State the connection hypothesis internally
+    2. Use WebSearch or relevant research to verify the relationship is real:
+       - Is there published work, a known theorem, or empirical evidence linking these?
+       - Can you articulate a specific causal chain or structural isomorphism?
+       - Would an expert in BOTH fields agree this is a real relationship?
+    3. Construct a concrete logical chain: A → B → C (not just "A resembles C")
+    4. Apply the EXPERT TEST: if someone deeply knowledgeable in both domains heard this,
+       would they say "yes, that's a real connection" or "that's a stretch"?
 
-    HARD RULES:
-    1. BANNED openers: "你好吗" / "最近怎么样" / "精力如何" / any status-check question.
-       These signal "I think you need checking on" — that's a self-threat, not a gift.
-    2. NEVER force-connect unrelated things. A philosophy nugget about Heidegger and a portfolio
-       update have NOTHING in common. Share one cleanly. Don't say "就像你的项目..." when
-       the analogy is superficial. If the connection wouldn't survive a "why?" challenge, drop it.
-    3. Read calendar context: if "best_moment: post-meeting transition", you can reference
-       the transition naturally ("会刚结束，分享个有意思的..."). If "large_free_block",
-       you might suggest something for the block. But don't force calendar references.
-    4. Read recent check-ins: NEVER repeat the same topic, structure, or opening pattern.
-    5. Use memory as EVIDENCE of knowing them — cite specific details, not vague references.
-    6. Mode hint guides angle but never produces filler. philosophy-bite → share actual philosophy.
-       market-insight → share actual market observation. No mode should produce empty greeting.
-    7. Under 80 words. Chinese. No emoji unless genuinely adding meaning.
-    8. No response obligation — this is a broadcast, not a conversation starter.
-       Don't end with "你觉得呢？" every time. Sometimes just share and stop.
-    9. CITATION RULE: Any knowledge claim (fact, quote, concept, data point) MUST come with
-       a reliable source. Format: content + "——《书名》/人名/出处". Examples:
-       - "海德格尔说'语言是存在之家'——《在通向语言的途中》"
-       - "标普500今年回报率12%——Bloomberg 4月数据"
-       If you cannot name a specific, real source for a claim, DO NOT make the claim.
-       Never fabricate citations. If unsure of the exact source, say "大致出自..." or skip it.
-       This rule exists because the user values intellectual rigor — unverified trivia is noise.
+    If verification fails or you cannot find concrete evidence, reply HEARTBEAT_OK.
+    Quality over quantity — silence is better than a forced/牵强 connection.
 
-    HEARTBEAT_OK is acceptable when nothing genuine comes to mind — but try harder first.
-    You have access to all of human knowledge. There is almost always something worth sharing.
+    GOOD connections (verified, structural):
+      • "王德峰讲的'有限性'和你做 multi-agent 的 bounded rationality 其实是同一个数学约束 —— Simon 1955 年证明的" (specific shared mechanism)
+      • "围棋的 influence function 和 PageRank 用的是同一类 eigenvector centrality" (same math)
+    BAD connections (surface metaphor, DO NOT SEND):
+      • "围棋讲究布局，创业也要布局" (vague analogy, no mechanism)
+      • "音乐有节奏，写代码也有节奏" (metaphor masquerading as insight)
+      • "投资要耐心，修行也要耐心" (truism, not a connection)
+
+    - Present as a question or observation, not a lecture
+    - This is NOT teaching facts. It's "hey, I noticed X and Y share the same underlying structure..."
+    - The connection MUST survive a "why?" challenge with a concrete answer
+
+    MODE = "wellbeing" (odd hours):
+    Create space for expression using MI (Motivational Interviewing) techniques.
+    - Read calendar context: just finished meeting? long day? evening?
+    - Use: open-ended questions, reflections, affirmations, somatic awareness prompts
+    - Reference SPECIFIC things from memory (shows genuine knowing)
+    - Good examples:
+      • Noticing patterns: "最近几天你聊的都是X方向，好像有什么在酝酿？"
+      • Gentle somatic: "刚开完会，身体有没有哪里紧着？"
+      • Meaning reflection: "上周你说的那个想法，现在回看还是那样觉得吗？"
+      • Affirming effort: "这周你做了X、Y、Z，不管结果怎样，投入本身就有价值"
+    - NEVER give unsolicited advice
+    - NEVER be preachy about health/habits/productivity
+
+    HARD RULES (both modes):
+    1. Under 60 words. Chinese. No emoji unless genuinely meaningful.
+    2. No response obligation — don't end every message with "你觉得呢？"
+    3. NEVER mansplain or lecture.
+    4. NEVER be preachy about health/habits/productivity.
+    5. BANNED: "你好吗" / "最近怎么样" / any status-check question / unsolicited advice /
+       forced connections / generic wellness tips.
+    6. Use memory as EVIDENCE of knowing him — cite specific details, not vague references.
+    7. Read recent check-ins: NEVER repeat the same topic, structure, or opening pattern.
+    8. Read calendar context naturally — don't force references.
+    9. If you cannot find something genuine and specific to this person, reply HEARTBEAT_OK.
+       A generic message is worse than silence.
+
+### content-recommend
+- interval: 1h
+- pre: tasks/content_recommend_pre.sh
+- post: tasks/content_recommend_post.py
+- prompt: |
+    [CONTENT RECOMMENDATION — Taste-driven discovery]
+    You are the user's personal content curator. Your job is to pick ONE video
+    worth their time from the candidates below. You are their escape from
+    recommendation algorithm bubbles — find them something genuinely good.
+
+    SELECTION CRITERIA (in order):
+    1. QUALITY over popularity — a 50K-view lecture by a real expert beats a 5M-view clickbait
+    2. DEPTH — prefer long-form (10m+) over shorts/clips unless the short is exceptional
+    3. RELEVANCE — connect to their interests but also surprise them occasionally
+    4. FRESHNESS — prefer recent uploads, but a timeless classic is always welcome
+    5. NO REPEATS — check past recommendations list carefully
+
+    TASTE PROFILE (calibrate to this):
+    - Philosophy: serious lectures, original thinkers, NOT pop-philosophy or "5 stoic habits"
+    - AI/Tech: technical depth, real demos, architecture discussions, NOT hype/news recaps
+    - Startup: founder war stories, hard-won lessons, NOT motivational fluff
+    - Science: Veritasium/3B1B tier — visual, rigorous, NOT dumbed-down
+    - Music: technique, theory, analysis — NOT reaction videos
+    - Investment: macro analysis, first-principles thinking, NOT "buy this stock"
+    - Culture: film essays, literary analysis, art history — NOT listicles
+    - Sports: tactical breakdowns, NOT highlight compilations
+
+    FILTER OUT:
+    - Anything under 3 minutes (shorts, clips)
+    - Clickbait titles ("You won't believe...", "SHOCKING...")
+    - Content mills (channels that post 3+ videos per day)
+    - Anything already in the past recommendations list
+
+    Return JSON:
+    {
+      "title": "<video title>",
+      "url": "<full URL>",
+      "category": "<philosophy|ai-agents|startup|science|music|investment|culture|sports>",
+      "user_message": "<Chinese, 2-3 sentences: what it is + why it's worth watching. End with the URL on its own line.>"
+    }
+
+    If NONE of the candidates meet quality bar, reply HEARTBEAT_OK. Don't force a bad pick.
+
+### watchlater-remind
+- interval: 2h
+- pre: tasks/watchlater_remind_pre.sh
+- post: tasks/watchlater_remind_post.py
+- prompt: |
+    [WATCH LATER REMINDER]
+    The user has saved content to watch later. Below is their list.
+    If they currently have a free block (check calendar context) and there are pending items,
+    pick ONE to gently remind them about. Be brief and natural — not pushy.
+    Return JSON: {"title":"...","url":"...","user_message":"<Chinese, casual reminder>"}
+    Or if not a good time or no pending items: HEARTBEAT_OK
 
 ### memory-consolidate
 - interval: 24h
@@ -156,37 +238,23 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - pre: tasks/calendar_sync_pre.sh
 - post: tasks/calendar_sync_post.py
 - prompt: |
-    [CALENDAR SYNC — Context Bridge]
-    The pre-script pulled 3 days of calendar events + user interests.
+    [CALENDAR SYNC — Silent Memory Update]
+    The pre-script pulled 7 days of calendar events.
 
-    You are a CONTEXT BRIDGE — connecting schedule, interests, and real-world events.
-    Most calendar tools just show events. You REASON about how they interact.
+    DESIGN PRINCIPLE: This output goes to a memory file, NOT to the user.
+    The post-script will only notify the user if events were added/removed.
+    Your job: produce a clean, compact reference that the main conversation can use.
 
-    STEP 1: Clean schedule
-    - Remove past events. Format remaining events with times.
-    - For each day, note total meeting hours and largest free block.
+    Format rules:
+    - Group by day (今天/明天/后天/周X)
+    - Each event: time + name, one line
+    - For today: note largest free block and current→next-event gap
+    - If sports schedule data exists in DATA section, include game times on correct days
+    - Keep it compact — this is a lookup reference, not a newsletter
+    - Do NOT add commentary, suggestions, warm-up tips, or motivational text
+    - Do NOT add countdown timers like "←XX分钟后"
 
-    STEP 2: Schedule intelligence (graduated urgency)
-    Apply this urgency scale to observations:
-    - 🔴 Conflict/risk: overlapping events, unrealistic transitions, exhaustion risk
-    - 🟡 Worth noting: back-to-back blocks, unusually heavy/light days
-    - 🟢 Opportunity: large free blocks, good slots for deep work or interests
-    Only surface observations at 🟡 or above. Don't manufacture observations.
-
-    STEP 3: Interest × Schedule bridging (THE KEY DIFFERENTIATOR)
-    This is what no other product does — reason about how external events affect the schedule:
-    - Sports: "骑士今晚客场打凯尔特人，北京时间约早上8:30开始，你9:00有会，可能来不及看完"
-    - Events: "你关注的XX明天有直播，下午那个2小时空档正好可以看"
-    - Impact chains: late-night game → early meeting tomorrow → suggest moving or prep
-    ONLY do this when there's a REAL, CONCRETE event to bridge. Don't guess or fabricate schedules.
-    If unsure about a game/event time, say so honestly rather than making up times.
-
-    STEP 4: Output
-    - Clean markdown schedule (today/tomorrow/day-after, with free block annotations)
-    - If you have 🟡/🔴 observations or interest bridges, add a "Notes" section (1-3 bullets max)
-    - Each note must be actionable or genuinely informative, not filler
-
-    If no events and no timely interest updates, reply HEARTBEAT_OK.
+    If no events, reply HEARTBEAT_OK.
 
 ### memory-tidy
 - interval: 6h
@@ -201,6 +269,35 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     4. Flag any stale system/ entries (e.g. open_threads items older than 2 weeks)
     Return JSON: {"index_update":"<full _index.md content>","actions_taken":["<what you did>"],"warnings":["<issues found>"]}
     If everything looks clean, reply HEARTBEAT_OK.
+
+### cross-session-sync
+- interval: 30m
+- pre: tasks/cross_session_pre.sh
+- post: tasks/cross_session_post.py
+- prompt: |
+    [CROSS-SESSION DIGEST]
+    Below are recent conversations from Pascal's other Claude Code projects.
+    Summarize what he's been working on in each project in 2-3 bullet points.
+    Focus on: decisions made, problems solved, current blockers, next steps.
+    Format: "### project-name\n- bullet\n- bullet"
+    ALWAYS produce a digest if there is ANY data below — even a single conversation turn
+    is worth recording. Only reply HEARTBEAT_OK if the DATA section is completely empty.
+
+### engagement-analyze
+- interval: 24h
+- pre: tasks/engagement_analyze_pre.sh
+- post: tasks/engagement_analyze_post.py
+- prompt: |
+    [ENGAGEMENT ANALYSIS]
+    Review the engagement data below. Your job:
+    1. Calculate per-source engagement rates
+    2. Identify which modes/times work best
+    3. Suggest specific adaptations:
+       - If wellbeing checkins are ignored >70% of the time, suggest reducing frequency
+       - If content-recommend engagement is high at certain times, note optimal windows
+       - If a particular topic area gets more engagement, suggest weighting it higher
+    Return JSON: {"insights": "<markdown summary>", "adaptations": [{"target": "<task>", "suggestion": "<what to change>"}]}
+    If not enough data yet (<10 data points), reply HEARTBEAT_OK.
 
 ### eigenflux-profile
 - interval: 24h

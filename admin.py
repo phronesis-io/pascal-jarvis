@@ -296,6 +296,28 @@ select.form-input { cursor: pointer; }
   display: flex; align-items: center; gap: 8px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .radio-group input[type="radio"] { accent-color: var(--accent); }
 
+/* Heartbeat Timeline */
+.hbt-entry { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 8px; transition: border-color 0.15s; }
+.hbt-entry:hover { border-color: var(--border2); }
+.hbt-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.hbt-ts { font-size: 11px; color: var(--dim); font-family: 'SF Mono','Fira Code',monospace; }
+.hbt-badge { font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 4px; }
+.hbt-badge-checkin { color: #4ade80; background: #0a2e1a; }
+.hbt-badge-content-recommend { color: #fdba74; background: #2e1d0a; }
+.hbt-badge-calendar-sync { color: #7dd3fc; background: #0c2d48; }
+.hbt-badge-eigenflux { color: #d8b4fe; background: #220a3e; }
+.hbt-badge-eigenflux-stream { color: #d8b4fe; background: #220a3e; }
+.hbt-badge-other { color: var(--dim); background: var(--surface2); }
+.hbt-text { font-size: 12.5px; line-height: 1.75; color: var(--muted);
+  white-space: pre-wrap; word-wrap: break-word; }
+.hbt-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.hbt-tab { font-family: inherit; font-size: 12px; font-weight: 600; padding: 6px 16px;
+  border-radius: 6px; border: 1px solid var(--border); background: transparent;
+  color: var(--dim); cursor: pointer; transition: all 0.15s; }
+.hbt-tab:hover, .hbt-tab.active { border-color: var(--accent); color: var(--accent); }
+
 /* Toast */
 .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
 .toast { background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px;
@@ -687,6 +709,11 @@ function renderHeartbeat(){
   const el=document.getElementById('heartbeat');
   const tasks=_hbTasks;
   el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2><span class="count">${tasks.length} tasks</span></div>
+    <div style="margin-bottom:24px">
+      <div style="font-size:15px;font-weight:600;margin-bottom:12px;color:var(--accent)">Output Timeline</div>
+      <div id="hbt-panel"><div class="empty-state">Loading timeline...</div></div>
+    </div>
+    <div style="font-size:15px;font-weight:600;margin-bottom:12px;color:var(--accent)">Task Status</div>
     <div style="display:flex;flex-direction:column;gap:10px">${tasks.map((t,i)=>{
       const overdue=t.last_run && t.seconds_until_due<=0;
       const never=!t.last_run;
@@ -725,6 +752,7 @@ function renderHeartbeat(){
           </div>
         </div>
       </div>`}).join('')}</div>`;
+  loadHeartbeatTimeline();
 }
 function toggleHbEdit(i){
   const ed=document.getElementById('hb-edit-'+i);
@@ -756,6 +784,42 @@ function forceRun(name,btn){
     }).catch(()=>{btn.textContent='Run Now';btn.disabled=false;toast('Network error');});
 }
 loadHeartbeat();
+setInterval(()=>{
+  if(document.getElementById('heartbeat').classList.contains('active')) loadHeartbeatTimeline();
+}, 30000);
+
+// ── Heartbeat Timeline ──
+let _hbtData=[], _hbtFilter='all';
+function hbtBadgeClass(src){
+  if(src==='checkin') return 'hbt-badge-checkin';
+  if(src==='content-recommend') return 'hbt-badge-content-recommend';
+  if(src==='calendar-sync') return 'hbt-badge-calendar-sync';
+  if(src==='eigenflux'||src==='eigenflux-stream') return 'hbt-badge-eigenflux';
+  return 'hbt-badge-other';
+}
+function loadHeartbeatTimeline(){
+  fetch('/api/heartbeat-timeline').then(r=>r.json()).then(data=>{
+    _hbtData=data; renderHeartbeatTimeline();
+  }).catch(()=>{});
+}
+function renderHeartbeatTimeline(){
+  const el=document.getElementById('hbt-panel');
+  if(!el) return;
+  const sources=[...new Set(_hbtData.map(e=>e.source))];
+  const filtered=_hbtFilter==='all'?_hbtData:_hbtData.filter(e=>e.source===_hbtFilter);
+  el.innerHTML=`
+    <div class="hbt-tabs">
+      <button class="hbt-tab ${_hbtFilter==='all'?'active':''}" onclick="_hbtFilter='all';renderHeartbeatTimeline()">All (${_hbtData.length})</button>
+      ${sources.map(s=>`<button class="hbt-tab ${_hbtFilter===s?'active':''}" onclick="_hbtFilter='${esc(s)}';renderHeartbeatTimeline()">${esc(s)} (${_hbtData.filter(e=>e.source===s).length})</button>`).join('')}
+    </div>
+    ${filtered.length?filtered.map(e=>`<div class="hbt-entry">
+      <div class="hbt-head">
+        <span class="hbt-ts">${esc(e.ts)}</span>
+        <span class="hbt-badge ${hbtBadgeClass(e.source)}">${esc(e.source)}</span>
+      </div>
+      <div class="hbt-text">${fmtParagraphs(e.text)}</div>
+    </div>`).join(''):'<div class="empty-state">No heartbeat outputs yet</div>'}`;
+}
 
 // ── EigenFlux ──
 function loadEigenFlux(){
@@ -1296,6 +1360,91 @@ def delete_memory(filename: str) -> dict:
 
 # ── Heartbeat status ────────────────────────────────────────────────
 
+def heartbeat_timeline() -> list:
+    """Read heartbeat_outbox.jsonl + checkin/content-recommend logs, return combined timeline."""
+    entries: list[dict] = []
+
+    # 1) heartbeat_outbox.jsonl
+    outbox = ROOT / "heartbeat_outbox.jsonl"
+    if outbox.exists():
+        try:
+            for line in outbox.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    source = obj.get("source", "heartbeat")
+                    entries.append({
+                        "ts": obj.get("ts", ""),
+                        "source": source,
+                        "text": obj.get("text", ""),
+                    })
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+
+    # 2) checkin_log.jsonl
+    checkin_log = MEMORY_DIR / "system" / "checkin_log.jsonl"
+    if checkin_log.exists():
+        try:
+            for line in checkin_log.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    entries.append({
+                        "ts": obj.get("ts", ""),
+                        "source": "checkin",
+                        "text": obj.get("content", ""),
+                    })
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+
+    # 3) content_recommend_log.jsonl
+    recommend_log = MEMORY_DIR / "system" / "content_recommend_log.jsonl"
+    if recommend_log.exists():
+        try:
+            for line in recommend_log.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    text = obj.get("title", "")
+                    if obj.get("url"):
+                        text += "\n" + obj["url"]
+                    if obj.get("category"):
+                        text += f"\n[{obj['category']}]"
+                    entries.append({
+                        "ts": obj.get("ts", ""),
+                        "source": "content-recommend",
+                        "text": text,
+                    })
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+
+    # De-duplicate: outbox may contain checkin/recommend entries too.
+    # Use (ts, first-50-chars-of-text) as dedup key.
+    seen: set[tuple] = set()
+    unique: list[dict] = []
+    for e in entries:
+        key = (e["ts"], e["text"][:50])
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+
+    # Sort by timestamp descending (newest first)
+    unique.sort(key=lambda e: e["ts"], reverse=True)
+    return unique
+
+
 def heartbeat_status() -> dict:
     """Read heartbeat_state.json + HEARTBEAT.md, return structured task status."""
     from core.heartbeat import parse_heartbeat, parse_interval
@@ -1510,6 +1659,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(lark_chats())
         elif path == "/api/settings":
             self._json(load_settings())
+        elif path == "/api/heartbeat-timeline":
+            self._json(heartbeat_timeline())
         elif path == "/api/heartbeat/status":
             self._json(heartbeat_status())
         elif path == "/api/eigenflux/status":

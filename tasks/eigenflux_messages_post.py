@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Post-hook for eigenflux-messages: send replies back to EigenFlux.
+
+Stdin: Claude's response (JSON with reply_actions and user_message).
+Stdout: user_message (forwarded to Pascal via Lark) or empty if nothing to send.
+"""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.card import build_card
+from core.safety import looks_like_error
+
+
+def main() -> int:
+    message = sys.stdin.read().strip()
+    if not message or message == "HEARTBEAT_OK":
+        return 0
+    if looks_like_error(message):
+        print("[eigenflux-messages] skipping — looks like error output", file=sys.stderr)
+        return 0
+
+    # Try to parse as JSON
+    try:
+        data = json.loads(message)
+    except json.JSONDecodeError:
+        # Not JSON — might be a plain text response, pass through
+        print(message)
+        return 0
+
+    reply_actions = data.get("reply_actions", [])
+    user_message = data.get("user_message", "")
+
+    # Send each reply via eigenflux CLI
+    for action in reply_actions:
+        receiver_id = action.get("receiver_id", "")
+        content = action.get("content", "")
+        if not receiver_id or not content:
+            continue
+
+        cmd = [
+            "eigenflux", "msg", "send",
+            "--content", content,
+            "--receiver-id", receiver_id,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                print(
+                    f"[eigenflux-messages] send failed for {receiver_id}: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"[eigenflux-messages] send error: {e}", file=sys.stderr)
+
+    # Output user_message as Lark card
+    if user_message:
+        print(build_card("📡 EigenFlux · 消息", user_message))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
