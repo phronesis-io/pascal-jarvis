@@ -6,7 +6,7 @@
 #
 # - Only triggers during waking hours (9:00-22:00)
 # - Detects transition context from calendar (meeting just ended? big gap ahead?)
-# - Reads last ~5 check-ins to avoid repetition
+# - Reads ALL past check-ins: older ones as topic blocklist, recent 3 as full text
 # - Rotates through value-oriented "modes" by hour
 
 hour=$(date +%H)
@@ -31,10 +31,12 @@ else
   phase="late-evening"
 fi
 
-# Rotate mode — all value-oriented, no empty greeting modes
-MODES=("knowledge-nugget" "curiosity-prompt" "reflection" "micro-challenge" "market-insight" "tech-trend" "philosophy-bite" "callback")
-idx=$(( hour % ${#MODES[@]} ))
-mode="${MODES[$idx]}"
+# Two core modes — alternate by even/odd hour
+if (( hour % 2 == 0 )); then
+  mode="connection"
+else
+  mode="wellbeing"
+fi
 
 # ── Calendar context: transition detection + next-event lookahead ──
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -115,12 +117,14 @@ except Exception as e:
   fi
 fi
 
-# Last 5 check-ins (if any)
+# ALL past check-ins — compressed to topic signatures to prevent repetition.
+# Full text of last 3 for style awareness; older ones as topic-only blocklist.
 log_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/checkin_log.jsonl"
 recent_checkins=""
 if [ -f "$log_file" ]; then
   recent_checkins=$(LOG_FILE="$log_file" python3 -c "
-import json, os
+import json, os, re
+
 entries = []
 path = os.environ['LOG_FILE']
 try:
@@ -135,7 +139,28 @@ try:
                 continue
 except OSError:
     pass
-for e in entries[-5:]:
+
+if not entries:
+    exit(0)
+
+# Older entries: topic keywords only (compact blocklist)
+older = entries[:-3] if len(entries) > 3 else []
+recent = entries[-3:] if len(entries) > 3 else entries
+
+if older:
+    print('=== USED TOPICS (DO NOT REPEAT these subjects) ===')
+    for e in older:
+        ts = e.get('ts', '')
+        topics = e.get('topics', '')
+        if not topics:
+            # fallback: first line of content, truncated
+            first_line = e.get('content', '').split(chr(10))[0][:80]
+            topics = first_line
+        print(f'[{ts}] {topics}')
+    print()
+
+print('=== RECENT CHECK-INS (full text — avoid similar topics, structure, openers) ===')
+for e in recent:
     print(f\"[{e.get('ts','')}]\")
     print(e.get('content','').strip())
     print()

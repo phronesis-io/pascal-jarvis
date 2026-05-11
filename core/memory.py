@@ -24,6 +24,8 @@ Loading strategy:
   - system/others  → NOT loaded (referenced in index)
 """
 
+import re
+from datetime import date
 from pathlib import Path
 
 # Max chars for the entire memory payload to prevent prompt bloat
@@ -41,7 +43,7 @@ _TIMELINE_SKIP = {
 }
 
 # System files that get loaded in full
-_SYSTEM_LOAD = {"todos.md"}
+_SYSTEM_LOAD = {"todos.md", "cross_session_digest.md", "engagement_insights.md"}
 
 
 def load_tiered_memory(memory_dir: str | Path) -> str:
@@ -94,11 +96,29 @@ def load_tiered_memory(memory_dir: str | Path) -> str:
 
 
 def _append_file(parts: list[str], path: Path, title: str):
-    """Read a file and append as a titled section."""
+    """Read a file and append as a titled section.
+
+    For calendar_today.md: if the synced date doesn't match today,
+    prepend a visible warning so Claude knows the data is stale.
+    """
     try:
         content = path.read_text(encoding="utf-8").strip()
-        if content:
-            parts.append(f"## {title}\n{content}")
+        if not content:
+            return
+        # Stale calendar detection
+        if path.name == "calendar_today.md":
+            m = re.search(r"synced (\d{4}-\d{2}-\d{2})", content)
+            if m:
+                synced = m.group(1)
+                today = date.today().isoformat()
+                if synced != today:
+                    content = (
+                        f"⚠️ WARNING: This calendar was last synced on {synced}, "
+                        f"but today is {today}. DO NOT trust event times below — "
+                        f"they are from a PREVIOUS DAY. Wait for next calendar-sync.\n\n"
+                        + content
+                    )
+        parts.append(f"## {title}\n{content}")
     except OSError:
         pass
 

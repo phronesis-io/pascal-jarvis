@@ -39,6 +39,22 @@ lark_send() {
   fi
 }
 
+# lark_send_card <card_json>
+# Send an interactive card message to the configured user ($USER_ID).
+lark_send_card() {
+  local card_json="$1"
+  [ -z "$card_json" ] && return 0
+  [ -z "${USER_ID:-}" ] && return 0
+  if ! lark-cli im +messages-send \
+      --user-id "$USER_ID" \
+      --msg-type interactive \
+      --content "$card_json" \
+      --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null; then
+    echo "[lark] send_card failed" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+    return 1
+  fi
+}
+
 # lark_reply <message_id> <markdown>
 # Reply (markdown) to a specific incoming message.
 lark_reply() {
@@ -105,7 +121,7 @@ lark_remove_reaction() {
 # Stderr (SDK errors) is redirected to the log file.
 lark_subscribe_messages() {
   lark-cli event +subscribe \
-    --event-types im.message.receive_v1 \
+    --event-types im.message.receive_v1,card.action.trigger \
     --compact --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
 }
 

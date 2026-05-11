@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-hook: pull today's + tomorrow's calendar from Lark, inject user interests.
+# Pre-hook: pull 7-day rolling calendar from Lark, inject user interests.
 # Runs every 30m to keep hot/calendar_today.md fresh.
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -8,15 +8,26 @@ MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 # Require lark-cli
 command -v lark-cli &>/dev/null || exit 0
 
-# Today + tomorrow + day-after (3-day window)
-today_iso=$(date -u +%Y-%m-%dT00:00:00Z)
-today_end=$(date -v+1d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d '+1 day' -u +%Y-%m-%dT00:00:00Z)
-tomorrow_end=$(date -v+2d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d '+2 days' -u +%Y-%m-%dT00:00:00Z)
-day3_end=$(date -v+3d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d '+3 days' -u +%Y-%m-%dT00:00:00Z)
+# ── Stale date detection: if calendar_today.md is from a different day, force refresh ──
+calendar_file="$MEMORY_DIR/hot/calendar_today.md"
+if [ -f "$calendar_file" ]; then
+  synced_date=$(grep -o 'synced [0-9-]*' "$calendar_file" 2>/dev/null | head -1 | cut -d' ' -f2)
+  today_date=$(date '+%Y-%m-%d')
+  if [ -n "$synced_date" ] && [ "$synced_date" != "$today_date" ]; then
+    echo "[calendar-sync] Stale date detected ($synced_date vs $today_date), forcing refresh" >&2
+  fi
+fi
 
-today_data=$(lark-cli calendar +agenda --as user --format json --start "$today_iso" --end "$today_end" 2>/dev/null)
-tomorrow_data=$(lark-cli calendar +agenda --as user --format json --start "$today_end" --end "$tomorrow_end" 2>/dev/null)
-day3_data=$(lark-cli calendar +agenda --as user --format json --start "$tomorrow_end" --end "$day3_end" 2>/dev/null)
+# 7-day rolling window
+today_iso=$(date -u +%Y-%m-%dT00:00:00Z)
+
+# Build day boundaries and fetch events for each day
+for i in $(seq 0 6); do
+  day_start=$(date -v+${i}d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+${i} days" -u +%Y-%m-%dT00:00:00Z)
+  day_end=$(date -v+$((i+1))d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+$((i+1)) days" -u +%Y-%m-%dT00:00:00Z)
+  day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>/dev/null)
+  export "DAY${i}_DATA=$day_data"
+done
 
 # Load user interests file (if exists)
 interests_file="$MEMORY_DIR/warm/interests.md"
@@ -25,8 +36,8 @@ if [ -f "$interests_file" ]; then
   interests=$(cat "$interests_file")
 fi
 
-# Format via Python
-export TODAY_DATA="$today_data" TOMORROW_DATA="$tomorrow_data" DAY3_DATA="$day3_data" INTERESTS="$interests"
+# Format via Python (all DAY0_DATA..DAY6_DATA + INTERESTS are already exported)
+export INTERESTS="$interests"
 python3 -c "
 import json, os, sys
 from datetime import datetime, timezone, timedelta
@@ -64,7 +75,15 @@ def parse_events(raw):
                        'status': status})
     return events
 
-def print_day(label, events):
+now = datetime.now(tz)
+print(f'Calendar sync at {now.strftime(\"%H:%M\")} (current time: {now.strftime(\"%Y-%m-%d %A %H:%M\")})')
+print()
+
+day_labels = ['Today', 'Tomorrow'] + [f'Day {i+1}' for i in range(2, 7)]
+for i in range(7):
+    day_dt = now + timedelta(days=i)
+    events = parse_events(os.environ.get(f'DAY{i}_DATA', ''))
+    label = f'{day_labels[i]} ({day_dt.strftime(\"%Y-%m-%d %A\")})'
     print(f'{label}:')
     if events:
         for e in events:
@@ -76,27 +95,65 @@ def print_day(label, events):
             print(line)
     else:
         print('  (no events)')
-
-today = parse_events(os.environ.get('TODAY_DATA', ''))
-tomorrow = parse_events(os.environ.get('TOMORROW_DATA', ''))
-day3 = parse_events(os.environ.get('DAY3_DATA', ''))
-interests = os.environ.get('INTERESTS', '').strip()
-
-# Always output — even empty days are useful context for proactive suggestions
-now = datetime.now(tz)
-print(f'Calendar sync at {now.strftime(\"%H:%M\")} (current time: {now.strftime(\"%Y-%m-%d %A %H:%M\")})')
-print()
-
-print_day(f'Today ({now.strftime(\"%Y-%m-%d %A\")})', today)
-print()
-d1 = now + timedelta(days=1)
-print_day(f'Tomorrow ({d1.strftime(\"%Y-%m-%d %A\")})', tomorrow)
-print()
-d2 = now + timedelta(days=2)
-print_day(f'Day after ({d2.strftime(\"%Y-%m-%d %A\")})', day3)
-
-if interests:
     print()
-    print('=== USER INTERESTS (check for upcoming events) ===')
+
+interests = os.environ.get('INTERESTS', '').strip()
+if interests:
+    print('=== USER INTERESTS (for context only — do NOT fabricate events) ===')
     print(interests)
 " 2>/dev/null
+
+# ── Fetch real NBA schedule for teams in interests ──
+# Only fetches if interests mention NBA/骑士/Cavaliers
+if echo "$interests" | grep -qi 'cavaliers\|骑士\|NBA'; then
+  nba_schedule=$(curl -s --max-time 10 'https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json' 2>/dev/null | python3 -c "
+import json, sys
+from datetime import datetime, timezone, timedelta
+
+try:
+    data = json.load(sys.stdin)
+except:
+    sys.exit(0)
+
+dates = data.get('leagueSchedule', {}).get('gameDates', [])
+tz_cn = timezone(timedelta(hours=8))
+now = datetime.now(timezone.utc)
+
+# Team codes to track (extend as needed)
+teams = {'CLE'}
+games = []
+for gd in dates:
+    for game in gd.get('games', []):
+        home = game.get('homeTeam', {}).get('teamTricode', '')
+        away = game.get('awayTeam', {}).get('teamTricode', '')
+        if not teams & {home, away}:
+            continue
+        dt_str = game.get('gameDateTimeUTC', '')
+        status = game.get('gameStatusText', '')
+        series = game.get('seriesText', '')
+        try:
+            dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+            if dt < now - timedelta(hours=6):
+                continue
+            cn = dt.astimezone(tz_cn)
+            opponent = away if home == 'CLE' else home
+            ha = 'Home' if home == 'CLE' else 'Away'
+            games.append(f'{cn.strftime(\"%m/%d %H:%M\")} CLE vs {opponent} ({ha}) {series} [{status}]')
+        except:
+            pass
+        if len(games) >= 5:
+            break
+    if len(games) >= 5:
+        break
+
+if games:
+    print()
+    print('=== REAL NBA SCHEDULE (verified from nba.com API) ===')
+    for g in games:
+        print(f'  {g}')
+" 2>/dev/null || true)
+  if [ -n "$nba_schedule" ]; then
+    echo ""
+    echo "$nba_schedule"
+  fi
+fi
