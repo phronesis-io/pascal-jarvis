@@ -48,3 +48,13 @@ __pycache__/
 /memory/
 checkin_log.jsonl
 eigenflux/.eigenflux/
+
+# Daemon & watchdog logs
+daemon.log
+watchdog.log
+
+# Runtime data
+engagement_log.jsonl
+heartbeat_outbox.jsonl
+tmp/
+eigenflux/.feed_poll_state

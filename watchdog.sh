@@ -12,7 +12,7 @@
 
 set -uo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
+JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 LOG_FILE="$JARVIS_DIR/watchdog.log"
 HEARTBEAT_LOG="/tmp/jarvis_restart.log"
 MAX_HEARTBEAT_AGE=600  # seconds — if no heartbeat beat in 10 min, consider stuck
