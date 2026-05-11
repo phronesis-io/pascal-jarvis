@@ -175,11 +175,32 @@ def diagnose_and_fix(issues: list[str]) -> str:
     except Exception:
         pass
 
-    # Simple restart: kill everything, start fresh
+    # Kill everything: bot, lark, admin, AND any stuck claude processes from jarvis
     log("INFO", "Killing existing processes...")
     for pattern in ["lark-cli event", "bash.*bot\\.sh", "admin\\.py"]:
         subprocess.run(["pkill", "-f", pattern],
                        capture_output=True, timeout=5)
+
+    # Kill stuck claude processes spawned by bot.sh (the --dangerously-skip-permissions ones)
+    try:
+        r = subprocess.run(["pgrep", "-f", "claude.*dangerously-skip"],
+                           capture_output=True, text=True, timeout=5)
+        for pid in r.stdout.strip().split("\n"):
+            if pid.strip():
+                subprocess.run(["kill", pid.strip()], capture_output=True, timeout=5)
+                log("INFO", f"Killed stuck claude process: {pid.strip()}")
+    except Exception:
+        pass
+
+    # Clean stale session locks
+    import glob
+    for lock in glob.glob(str(JARVIS_DIR / ".session_lock_*")):
+        try:
+            os.remove(lock)
+            log("INFO", f"Removed stale lock: {lock}")
+        except Exception:
+            pass
+
     time.sleep(3)
 
     log("INFO", "Starting bot.sh...")
