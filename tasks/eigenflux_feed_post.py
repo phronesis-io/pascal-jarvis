@@ -62,6 +62,25 @@ def main() -> int:
                 print("[eigenflux-feed] feedback submission failed:", file=LOG)
                 traceback.print_exc(file=LOG)
 
+    # Queue items flagged for deep research
+    research_queue = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent)) / "eigenflux" / "needs_research.jsonl"
+    research_queue.parent.mkdir(parents=True, exist_ok=True)
+    queued = 0
+    for item in fb:
+        if item.get("needs_research") and item.get("action") == "hold" and int(item.get("score", 0)) >= 1:
+            from datetime import datetime, timezone
+            entry = {
+                "item_id": str(item["item_id"]),
+                "queued_at": datetime.now(timezone.utc).isoformat(),
+                "score": int(item["score"]),
+                "reason": item.get("reason", ""),
+            }
+            with open(research_queue, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            queued += 1
+    if queued:
+        print(f"[eigenflux-feed] {queued} items queued for research", file=LOG)
+
     # Output user message as Lark card
     msg = str(data.get("user_message", "")).strip()
     if msg:
