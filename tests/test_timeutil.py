@@ -104,7 +104,7 @@ def test_memory_hourly_post_writes_local_tz_under_TZ_UTC(tmp_path):
     )
     assert result.returncode == 0, result.stderr
 
-    log = (tmp_path / "hourly_log.md").read_text(encoding="utf-8")
+    log = (tmp_path / "timeline" / "hourly_log.md").read_text(encoding="utf-8")
     # Extract the "### YYYY-MM-DD HH:MM" header
     m = re.search(r"### (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", log)
     assert m, f"no header found in log: {log!r}"

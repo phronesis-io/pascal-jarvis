@@ -25,7 +25,7 @@ def test_logs_and_passes_through(tmp_path):
     assert result.returncode == 0
     assert "今天天气不错" in result.stdout
 
-    log = tmp_path / "checkin_log.jsonl"
+    log = tmp_path / "system" / "checkin_log.jsonl"
     assert log.exists()
     entries = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert len(entries) == 1
@@ -38,21 +38,21 @@ def test_preserves_markdown_headers_in_content(tmp_path):
     result = _run(content, tmp_path)
     assert result.returncode == 0
 
-    log = tmp_path / "checkin_log.jsonl"
+    log = tmp_path / "system" / "checkin_log.jsonl"
     entries = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert len(entries) == 1
     assert entries[0]["content"] == content  # fully preserved
 
 
 def test_caps_at_max_entries(tmp_path):
-    for i in range(25):
+    for i in range(45):
         _run(f"message {i}", tmp_path)
-    log = tmp_path / "checkin_log.jsonl"
+    log = tmp_path / "system" / "checkin_log.jsonl"
     entries = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
-    assert len(entries) == 20  # MAX_ENTRIES
+    assert len(entries) == 40  # MAX_ENTRIES
     # Oldest dropped, newest kept
     assert entries[0]["content"] == "message 5"
-    assert entries[-1]["content"] == "message 24"
+    assert entries[-1]["content"] == "message 44"
 
 
 def test_heartbeat_ok_noop(tmp_path):

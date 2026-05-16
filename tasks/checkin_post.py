@@ -139,7 +139,7 @@ def main() -> int:
         print("[checkin] skipping — looks like error output", file=sys.stderr)
         return 0
 
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     # Read existing entries
     entries: list[dict] = []
