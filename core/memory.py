@@ -28,8 +28,10 @@ import re
 from datetime import date
 from pathlib import Path
 
-# Max chars for the entire memory payload to prevent prompt bloat
-MAX_MEMORY_CHARS = 20000
+# Max chars for the entire memory payload.
+# Sonnet has 200K tokens (~800K chars). Even at 40KB we use <5% of context.
+# Cost impact: ~$2.50/day extra at 144 calls/day.
+MAX_MEMORY_CHARS = 40000
 
 # Files in timeline/ that get loaded (archives are excluded)
 _TIMELINE_LOAD = {
@@ -43,7 +45,8 @@ _TIMELINE_SKIP = {
 }
 
 # System files that get loaded in full
-_SYSTEM_LOAD = {"todos.md", "cross_session_digest.md", "engagement_insights.md"}
+# cross_session_digest is warm (large, transient, on-demand read)
+_SYSTEM_LOAD = {"todos.md", "engagement_insights.md"}
 
 
 def load_tiered_memory(memory_dir: str | Path) -> str:

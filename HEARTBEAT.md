@@ -15,6 +15,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-publish, eigenflux-profile | feed+messages yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
 | Analytics | engagement-analyze, cross-session-sync | silent |
+| Team | phronesis-monitor | yes (if relevant) |
+| Maintenance | repos-sync, self-diagnostic, personal-site | silent |
 
 ## EigenFlux
 
@@ -479,3 +481,54 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     
     Under 30 words Chinese. Natural, casual tone. No emojis.
     Return JSON: {"user_message":"<text>"} or HEARTBEAT_OK if not worth sending.
+
+## Team
+
+### phronesis-monitor
+- interval: 10m
+- pre: tasks/phronesis_monitor_pre.sh
+- post: tasks/phronesis_monitor_post.py
+- prompt: |
+    [PHRONESIS GROUP MONITOR]
+    Recent messages from the Phronesis team group chat.
+    Your job: Summarize ONLY if there's something Pascal should know about.
+    Rules:
+    - Skip routine messages (early 到了, 收到, 好的, etc.)
+    - Highlight: decisions made without Pascal, blockers, questions directed at him
+    - Highlight: new info about product, customers, hiring, investors
+    - If nothing noteworthy: HEARTBEAT_OK
+    - If there IS something: brief summary in Chinese, under 80 words
+    - NEVER include the raw messages — only your analysis
+
+## Maintenance
+
+### repos-sync
+- interval: 6h
+- pre: tasks/repos_sync_pre.sh
+- prompt: |
+    [REPOS SYNC]
+    The pre-script pulled all git repos. If any repos had updates, summarize the changes.
+    If all repos are "up to date", reply HEARTBEAT_OK.
+
+### self-diagnostic
+- interval: 12h
+- pre: tasks/self_diagnostic_pre.sh
+- prompt: |
+    [SELF DIAGNOSTIC]
+    Review the system health data below. Flag ONLY genuine issues that need attention:
+    - Stale data (calendar not synced, profile outdated > 7 days)
+    - Failed pulls
+    - Missing files that should exist
+    If everything looks healthy, reply HEARTBEAT_OK.
+    If issues found, return a brief markdown list of problems.
+
+### personal-site
+- interval: 24h
+- pre: tasks/personal_site_pre.sh
+- prompt: |
+    [PERSONAL SITE UPDATE]
+    Review Pascal's current personal site structure and recent achievements.
+    Suggest ONE small, concrete update that would keep the site fresh.
+    Examples: add a new project link, update bio text, add a publication.
+    Return JSON: {"suggestion": "<what to update>", "reason": "<why>"}
+    Or HEARTBEAT_OK if the site looks current and nothing needs changing.

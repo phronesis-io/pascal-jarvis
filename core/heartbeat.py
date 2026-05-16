@@ -74,6 +74,9 @@ class HeartbeatRunner:
     # Tasks that should retry sooner when pre-script returns empty
     EMPTY_RETRY_DELAYS = {
         "checkin": 300,
+        "daily-plan": 1800,       # retry every 30min until window hits
+        "daily-reflect": 1800,    # retry every 30min until window hits
+        "personal-site": 3600,
         "memory-daily": 3600,
         "memory-weekly": 3600,
         "memory-monthly": 3600,
