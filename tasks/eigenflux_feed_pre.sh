@@ -53,5 +53,42 @@ fi
 
 echo "User delivery preference: $pref"
 echo ""
-echo "Items:"
-echo "$items"
+
+# Enrich each item with full details (URL, content) via feed get
+echo "Items (enriched with full details):"
+echo "$items" | while IFS= read -r item_line; do
+  [ -z "$item_line" ] && continue
+  item_id=$(echo "$item_line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('item_id',''))" 2>/dev/null || true)
+  if [ -n "$item_id" ]; then
+    # Fetch full item detail (content + url)
+    full_detail=$(eigenflux_feed_get "$item_id" 2>/dev/null || true)
+    if [ -n "$full_detail" ]; then
+      # Merge full detail into the item
+      merged=$(JV_ITEM="$item_line" JV_DETAIL="$full_detail" python3 -c "
+import json, os, sys
+try:
+    item = json.loads(os.environ['JV_ITEM'])
+    detail = json.loads(os.environ['JV_DETAIL'])
+    full = detail.get('data', {}).get('item', detail.get('data', {}))
+    if full:
+        # Add URL and full content if not already present
+        if full.get('url') and not item.get('url'):
+            item['url'] = full['url']
+        if full.get('source_url') and not item.get('source_url'):
+            item['source_url'] = full['source_url']
+        if full.get('content') and len(full['content']) > len(item.get('content', '')):
+            item['full_content'] = full['content'][:3000]
+        if full.get('notes'):
+            item['notes_detail'] = full['notes'] if isinstance(full['notes'], dict) else full['notes']
+    print(json.dumps(item, ensure_ascii=False))
+except Exception:
+    print(os.environ['JV_ITEM'])
+" 2>/dev/null || echo "$item_line")
+      echo "$merged"
+    else
+      echo "$item_line"
+    fi
+  else
+    echo "$item_line"
+  fi
+done

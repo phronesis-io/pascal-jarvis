@@ -70,9 +70,13 @@ def parse_events(raw):
         location = item.get('location', '')
         desc = item.get('description', '')
         status = item.get('status', '')
+        event_id = item.get('event_id', '')
+        calendar_id = item.get('organizer_calendar_id', '')
         events.append({'time': time_str, 'summary': summary,
                        'location': location, 'description': desc[:200],
-                       'status': status})
+                       'status': status, 'event_id': event_id,
+                       'calendar_id': calendar_id,
+                       'start_iso': start_dt, 'end_iso': end_dt})
     return events
 
 now = datetime.now(tz)
@@ -80,6 +84,7 @@ print(f'Calendar sync at {now.strftime(\"%H:%M\")} (current time: {now.strftime(
 print()
 
 day_labels = ['Today', 'Tomorrow'] + [f'Day {i+1}' for i in range(2, 7)]
+all_events_map = []  # collect event_id mapping for write-back
 for i in range(7):
     day_dt = now + timedelta(days=i)
     events = parse_events(os.environ.get(f'DAY{i}_DATA', ''))
@@ -93,6 +98,17 @@ for i in range(7):
             if e['description']:
                 line += f'  ({e[\"description\"]})'
             print(line)
+            # Collect event mapping for calendar write-back
+            if e.get('event_id'):
+                all_events_map.append({
+                    'event_id': e['event_id'],
+                    'calendar_id': e.get('calendar_id', ''),
+                    'summary': e['summary'],
+                    'time': e['time'],
+                    'date': day_dt.strftime('%Y-%m-%d'),
+                    'start_iso': e.get('start_iso', ''),
+                    'end_iso': e.get('end_iso', ''),
+                })
     else:
         print('  (no events)')
     print()
@@ -101,6 +117,18 @@ interests = os.environ.get('INTERESTS', '').strip()
 if interests:
     print('=== USER INTERESTS (for context only — do NOT fabricate events) ===')
     print(interests)
+
+# Save event mapping file for calendar write-back
+if all_events_map:
+    import pathlib
+    jarvis_dir = os.environ.get('JARVIS_DIR', '')
+    if jarvis_dir:
+        mf = pathlib.Path(jarvis_dir) / 'calendar_event_mapping.json'
+        try:
+            mf.write_text(json.dumps(all_events_map, ensure_ascii=False, indent=2))
+            print(f'[calendar] {len(all_events_map)} events mapped', file=sys.stderr)
+        except Exception:
+            pass
 " 2>/dev/null
 
 # ── Fetch real NBA schedule for teams in interests ──

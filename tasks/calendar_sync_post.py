@@ -67,10 +67,13 @@ def main() -> int:
     ts = now_local_str("%Y-%m-%d %H:%M")
     CALENDAR_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    # Event ID mapping is saved directly by the pre-script to $JARVIS_DIR/calendar_event_mapping.json
+    # (used by calendar_write.sh for write-back)
+
     # Always update the memory file silently
     CALENDAR_FILE.write_text(
         f"---\nname: 今日日程\ndescription: Lark 日历自动同步，含今天和明天的日程\n"
-        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{raw}\n"
+        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{calendar_text}\n"
     )
     print(f"[calendar-sync] Updated memory silently at {ts}", file=sys.stderr)
 

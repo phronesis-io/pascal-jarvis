@@ -38,6 +38,12 @@ else
   mode="wellbeing"
 fi
 
+# Tuesday evening → therapy prep (Wed 10:00 session)
+therapy_prep=""
+if [ "$day" = "Tuesday" ] && [ "$hour" -ge 20 ]; then
+  therapy_prep="THERAPY_PREP: Tomorrow is Pascal's weekly therapy session (Wed 10:00). Review recent conversations, dreams, feelings he shared this week. Compile a brief list of threads he might want to bring up. Present as suggestions, not prescriptions — he chooses what to discuss."
+fi
+
 # ── Calendar context: transition detection + next-event lookahead ──
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 lark_plugin="$JARVIS_DIR/plugins/lark/client.sh"
@@ -177,6 +183,7 @@ fi
 cat <<EOF
 Current time: $now_ts ($day, $date_ymd) — $phase
 Suggested mode this round: $mode
+$therapy_prep
 
 Calendar context:
 $transition_context
