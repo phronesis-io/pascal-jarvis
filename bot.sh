@@ -12,6 +12,19 @@ set -uo pipefail
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export JARVIS_DIR
 
+# ── Single-instance lock (prevent duplicate replies) ────────────────
+PIDFILE="$JARVIS_DIR/.bot.pid"
+if [ -f "$PIDFILE" ]; then
+  old_pid=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    echo "bot.sh is already running (PID $old_pid). Exiting." >&2
+    exit 1
+  fi
+  # Stale pidfile — previous crash
+  rm -f "$PIDFILE"
+fi
+echo $$ > "$PIDFILE"
+
 LOG_FILE="$JARVIS_DIR/jarvis.log"
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
 
@@ -305,6 +318,8 @@ except Exception:
       log_info "[heartbeat] Beat sent"
     elif [ -n "$output" ]; then
       log_warn "[heartbeat] Suppressed error-like output (see log)"
+    else
+      log_info "[heartbeat] Beat sent (idle)"
     fi
 
     sleep "$CHECK_INTERVAL"
@@ -350,7 +365,7 @@ except: pass
 " 2>/dev/null || true)
       [ -n "$new_cursor" ] && cursor="$new_cursor"
 
-      # Format message for Lark delivery
+      # Format message for Lark delivery (enriched with conv_id for reply)
       msg=$(JV_LINE="$line" python3 -c "
 import os, sys, json
 try:
@@ -362,6 +377,7 @@ try:
     for m in messages:
         sender = m.get('sender_name', 'Unknown agent')
         content = m.get('content', '')
+        conv_id = m.get('conv_id', '')
         if content:
             parts.append(f'💬 **{sender}**: {content}')
     if parts:
@@ -372,12 +388,90 @@ except Exception:
 
       if [ -n "$msg" ]; then
         send_to_lark "$msg"
-        # Write to outbox so main session can reference this message
-        local ts_iso
+        # Write to outbox with conv metadata so main session can reply directly
+        local ts_iso _outbox_meta
         ts_iso=$(date '+%Y-%m-%d %H:%M')
-        printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$msg" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"eigenflux-stream\"}" \
+        _outbox_meta=$(JV_LINE="$line" python3 -c "
+import os, json, sys
+try:
+    event = json.loads(os.environ['JV_LINE'])
+    msgs = event.get('data', {}).get('messages', [])
+    if msgs:
+        m = msgs[0]
+        meta = {'conv_id': m.get('conv_id',''), 'sender_id': m.get('sender_id',''), 'sender_name': m.get('sender_name','')}
+        print(json.dumps(meta, ensure_ascii=False))
+except: pass
+" 2>/dev/null || true)
+        printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$msg" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"eigenflux-stream\",\"meta\":${_outbox_meta:-\"{}\"}}" \
           >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
         log_info "[ef-stream] Delivered real-time message"
+
+        # Analyze message through Claude in background, send follow-up if useful
+        local _stream_detail
+        _stream_detail=$(JV_LINE="$line" python3 -c "
+import os, json, sys
+try:
+    event = json.loads(os.environ['JV_LINE'])
+    messages = event.get('data', {}).get('messages', [])
+    for m in messages:
+        sender = m.get('sender_name', 'Unknown')
+        sender_id = m.get('sender_id', '')
+        content = m.get('content', '')
+        item_id = m.get('item_id', '')
+        conv_id = m.get('conv_id', '')
+        print(json.dumps({'sender': sender, 'sender_id': sender_id,
+                          'content': content, 'item_id': item_id,
+                          'conv_id': conv_id}, ensure_ascii=False))
+except: pass
+" 2>/dev/null || true)
+
+        if [ -n "$_stream_detail" ]; then
+          (
+            # Load friend list for context
+            local _friends_ctx=""
+            local _contacts_file
+            _contacts_file=$(find "$HOME/.eigenflux" -name contacts.json 2>/dev/null | head -1)
+            if [ -f "$_contacts_file" ]; then
+              _friends_ctx=$(python3 -c "
+import json, sys
+try:
+    friends = json.load(open('$_contacts_file'))
+    if isinstance(friends, list):
+        names = [f.get('agent_name','') + ' (remark: ' + f.get('remark','') + ')' for f in friends[:20] if f.get('agent_name')]
+        print('Known friends: ' + ', '.join(names))
+except: pass
+" 2>/dev/null || true)
+            fi
+
+            # Background: run a quick Claude analysis of the incoming message
+            local _analysis
+            _analysis=$(claude \
+              --model sonnet \
+              --dangerously-skip-permissions \
+              --no-session-persistence \
+              --disable-slash-commands \
+              -p "[EIGENFLUX REAL-TIME MESSAGE — Quick Analysis]
+A private message just arrived on EigenFlux:
+$_stream_detail
+
+${_friends_ctx}
+
+The raw message was already forwarded to the user. Your job:
+1. Check memory: is this sender someone we know? What's our relationship?
+2. If the message requires a response, suggest what to reply (brief, concrete)
+3. If there's context the user needs (e.g. this relates to a current project), provide it
+
+If the message is routine/no action needed, reply HEARTBEAT_OK.
+Otherwise reply with a brief Chinese note (≤60 words) for the user." \
+              < /dev/null 2>>"$LOG_FILE" || true)
+
+            if [ -n "$_analysis" ] && ! echo "$_analysis" | grep -q "HEARTBEAT_OK"; then
+              send_to_lark "💡 $_analysis"
+              log_info "[ef-stream] Follow-up analysis sent"
+            fi
+          ) &
+        fi
+
         backoff=1
         failures=0
       fi
@@ -548,6 +642,131 @@ No output found for job: $out_id"
         touch "$HEARTBEAT_TRIGGER"
         log_info "[action] Heartbeat triggered"
         ;;
+
+      calendar_create)
+        # Parse params: title=<title>|start=<ISO>|end=<ISO>|desc=<desc>
+        local cal_title="" cal_start="" cal_end="" cal_desc=""
+        cal_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        cal_start=$(echo "$action_params" | sed -n 's/.*start=\([^|]*\).*/\1/p')
+        cal_end=$(echo "$action_params" | sed -n 's/.*end=\([^|]*\).*/\1/p')
+        cal_desc=$(echo "$action_params" | sed -n 's/.*desc=\([^|]*\).*/\1/p')
+        if [ -n "$cal_title" ] && [ -n "$cal_start" ] && [ -n "$cal_end" ]; then
+          # Conflict detection: check if slot is free
+          local is_busy
+          is_busy=$(lark-cli calendar +freebusy --as user --start "$cal_start" --end "$cal_end" 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print('busy' if d.get('busy') else 'free')" 2>/dev/null || echo "free")
+          if [ "$is_busy" = "busy" ]; then
+            action_results="${action_results}
+⚠️ 时间段有冲突，但仍创建了: $cal_title ($cal_start → $cal_end)"
+            log_warn "[action] calendar_create conflict detected: $cal_title at $cal_start"
+          fi
+          local cal_result
+          if [ -n "$cal_desc" ]; then
+            cal_result=$(lark-cli calendar +create --as user --summary "$cal_title" --start "$cal_start" --end "$cal_end" --description "$cal_desc" 2>>"$LOG_FILE" || echo "FAILED")
+          else
+            cal_result=$(lark-cli calendar +create --as user --summary "$cal_title" --start "$cal_start" --end "$cal_end" 2>>"$LOG_FILE" || echo "FAILED")
+          fi
+          if echo "$cal_result" | grep -q "FAILED"; then
+            action_results="${action_results}
+❌ 日程创建失败: $cal_title"
+          else
+            if [ "$is_busy" != "busy" ]; then
+              action_results="${action_results}
+✅ 已创建日程: $cal_title ($cal_start → $cal_end)"
+            fi
+          fi
+          log_info "[action] calendar_create: $cal_title"
+        fi
+        ;;
+
+      calendar_update)
+        # Parse params: event_id=<id>|field=<summary|start|end>|value=<new>
+        local cal_event_id="" cal_field="" cal_value=""
+        cal_event_id=$(echo "$action_params" | sed -n 's/.*event_id=\([^|]*\).*/\1/p')
+        cal_field=$(echo "$action_params" | sed -n 's/.*field=\([^|]*\).*/\1/p')
+        cal_value=$(echo "$action_params" | sed -n 's/.*value=\([^|]*\).*/\1/p')
+        if [ -n "$cal_event_id" ] && [ -n "$cal_field" ] && [ -n "$cal_value" ]; then
+          local update_data=""
+          case "$cal_field" in
+            summary) update_data="{\"summary\":\"$cal_value\"}" ;;
+            start)   update_data="{\"start_time\":{\"timestamp\":\"$cal_value\"}}" ;;
+            end)     update_data="{\"end_time\":{\"timestamp\":\"$cal_value\"}}" ;;
+            *)       update_data="{\"description\":\"$cal_value\"}" ;;
+          esac
+          local update_result
+          update_result=$(lark-cli calendar events patch --as user \
+            --params "{\"event_id\":\"$cal_event_id\"}" \
+            --data "$update_data" 2>>"$LOG_FILE" || echo "FAILED")
+          if echo "$update_result" | grep -q "FAILED"; then
+            action_results="${action_results}
+❌ 日程更新失败: $cal_event_id ($cal_field)"
+          else
+            action_results="${action_results}
+✅ 已更新日程: $cal_field → $cal_value"
+          fi
+          log_info "[action] calendar_update: $cal_event_id $cal_field=$cal_value"
+        fi
+        ;;
+
+      task_create)
+        # Parse params: title=<title>|due=<ISO_optional>
+        local task_title="" task_due=""
+        task_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        task_due=$(echo "$action_params" | sed -n 's/.*due=\([^|]*\).*/\1/p')
+        if [ -n "$task_title" ]; then
+          local task_result
+          if [ -n "$task_due" ]; then
+            task_result=$(lark-cli task +create --as user --summary "$task_title" --due "$task_due" 2>>"$LOG_FILE" || echo "FAILED")
+          else
+            task_result=$(lark-cli task +create --as user --summary "$task_title" 2>>"$LOG_FILE" || echo "FAILED")
+          fi
+          if echo "$task_result" | grep -q "FAILED"; then
+            action_results="${action_results}
+❌ 任务创建失败: $task_title"
+          else
+            action_results="${action_results}
+✅ 已创建任务: $task_title"
+          fi
+          log_info "[action] task_create: $task_title"
+        fi
+        ;;
+
+      task_complete)
+        # Parse params: task_id=<id>
+        local task_id=""
+        task_id=$(echo "$action_params" | sed -n 's/.*task_id=\([^|]*\).*/\1/p')
+        if [ -n "$task_id" ]; then
+          local complete_result
+          complete_result=$(lark-cli task +complete --as user --task-id "$task_id" 2>>"$LOG_FILE" || echo "FAILED")
+          if echo "$complete_result" | grep -q "FAILED"; then
+            action_results="${action_results}
+❌ 任务完成标记失败: $task_id"
+          else
+            action_results="${action_results}
+✅ 任务已完成"
+          fi
+          log_info "[action] task_complete: $task_id"
+        fi
+        ;;
+
+      calendar_delete)
+        # Parse params: event_id=<id>|title=<title>
+        local cal_event_id="" cal_del_title=""
+        cal_event_id=$(echo "$action_params" | sed -n 's/.*event_id=\([^|]*\).*/\1/p')
+        cal_del_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        if [ -n "$cal_event_id" ]; then
+          local del_result
+          del_result=$(lark-cli calendar events delete --as user --event-id "$cal_event_id" 2>>"$LOG_FILE" || echo "FAILED")
+          if echo "$del_result" | grep -q "FAILED"; then
+            action_results="${action_results}
+❌ 日程删除失败: ${cal_del_title:-$cal_event_id}"
+          else
+            action_results="${action_results}
+✅ 已删除日程: ${cal_del_title:-$cal_event_id}"
+          fi
+          log_info "[action] calendar_delete: $cal_event_id"
+        fi
+        ;;
     esac
   done <<< "$actions"
 
@@ -620,6 +839,11 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:job_cancel|id=<id>] — Cancel a background job.
 - [ACTION:job_output|id=<id>] — Get output of a background job.
 - [ACTION:heartbeat] — Trigger an immediate heartbeat cycle (system check).
+- [ACTION:calendar_create|title=<title>|start=<ISO8601>|end=<ISO8601>|desc=<optional>] — Create a calendar event. Use when user confirms a schedule change or asks to add an event. System auto-checks conflicts.
+- [ACTION:calendar_update|event_id=<id>|field=<summary|start|end>|value=<new_value>] — Update a calendar event (reschedule, rename). Use event_id from calendar_event_mapping.json.
+- [ACTION:calendar_delete|event_id=<id>|title=<name>] — Delete a calendar event. Use when user confirms removing an event.
+- [ACTION:task_create|title=<title>|due=<ISO8601_optional>] — Create a Lark Task (todo item).
+- [ACTION:task_complete|task_id=<id>] — Mark a Lark Task as done.
 
 Rules:
 - Include the action marker naturally in your response (it will be stripped before delivery)
@@ -631,6 +855,16 @@ Rules:
 - Always respond naturally in Chinese — the marker is just a signal to the system
 - When a task will take a very long time (experiments, large research, batch processing),
   proactively suggest running it in the background using the bg action.
+- For calendar actions: ALWAYS confirm with the user before creating/deleting events.
+  Present the change clearly, get explicit confirmation (确认/好/可以), then include the action marker.
+  Start/end times must be ISO8601 format (e.g. 2026-05-14T09:00:00+08:00).
+  To find event_id for deletion/update, use \`lark-cli calendar +agenda --as user --format json\` first.
+  Conflicts are auto-detected on create — system will warn but still create.
+- For task actions: create todos when user mentions something they need to do.
+  Don't require explicit confirmation for tasks — they're lightweight.
+- Implementation Intentions: when creating calendar events, gently ask WHY and suggest a trigger.
+  Store in description: [WHY] reason [TRIGGER] when X happens [FIRST_ACTION] do Y first.
+  This doubles follow-through (Gollwitzer, 1999). Don't force it — only when natural.
 
 ## EigenFlux Agent Network
 
@@ -654,6 +888,13 @@ history (recent turns) — those may be stale/outdated from previous days.
 If calendar_today.md says the next event is X, that is the truth.
 If a previous conversation turn mentioned event Y, but calendar_today.md doesn't list it,
 then Y is in the past — do NOT reference it as upcoming.
+
+Calendar WRITE-BACK: You can create and delete events using the calendar_create and
+calendar_delete actions. When you detect a conflict or the user asks for a schedule change:
+1. Describe the proposed change clearly
+2. Wait for user confirmation
+3. Include the ACTION marker in your confirmed response
+The system will execute it and the calendar will be updated immediately.
 
 ## Watch Later (收藏)
 
@@ -684,18 +925,18 @@ $recent_turns"
   local _claude_pid
   if [ -f "$session_file" ]; then
     log_info "[$session_id] Resuming session"
-    (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
+    (cd "$WORK_DIR" && printf '%s' "$content" | with_timeout 600 claude -p \
       --resume "$session_id" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
-      < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+      2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
   else
     log_info "[$session_id] New session"
-    (cd "$WORK_DIR" && with_timeout 600 claude -p "$content" \
+    (cd "$WORK_DIR" && printf '%s' "$content" | with_timeout 600 claude -p \
       --session-id "$session_id" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
-      < /dev/null 2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+      2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
   fi
   _claude_pid=$!
   echo "$_claude_pid" > "$LOCK_FILE"
@@ -850,6 +1091,7 @@ print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
 # Cleanup on exit
 cleanup() {
   log_info "Shutting down..."
+  rm -f "$PIDFILE"
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
   kill "$HEARTBEAT_PID" 2>/dev/null || true

@@ -181,14 +181,17 @@ def diagnose_and_fix(issues: list[str]) -> str:
         subprocess.run(["pkill", "-f", pattern],
                        capture_output=True, timeout=5)
 
-    # Kill stuck claude processes spawned by bot.sh (the --dangerously-skip-permissions ones)
+    # Kill stuck claude processes spawned by bot.sh (tracked via session lock files)
     try:
-        r = subprocess.run(["pgrep", "-f", "claude.*dangerously-skip"],
-                           capture_output=True, text=True, timeout=5)
-        for pid in r.stdout.strip().split("\n"):
-            if pid.strip():
-                subprocess.run(["kill", pid.strip()], capture_output=True, timeout=5)
-                log("INFO", f"Killed stuck claude process: {pid.strip()}")
+        import glob as _glob
+        for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
+            try:
+                pid = Path(lock).read_text().strip()
+                if pid:
+                    subprocess.run(["kill", pid], capture_output=True, timeout=5)
+                    log("INFO", f"Killed stuck claude process from lock: {pid}")
+            except Exception:
+                pass
     except Exception:
         pass
 
