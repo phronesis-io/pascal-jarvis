@@ -61,9 +61,8 @@ def main() -> int:
             # Update local publish state for cooldown tracking
             state_file = JARVIS_DIR / "eigenflux" / "publish_state.json"
             state_file.write_text(json.dumps({"last_publish_epoch": int(time.time())}))
-            # Notify user via card
-            summary = content[:200] + "..." if len(content) > 200 else content
-            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{summary}"))
+            # Notify user via card (full content — broadcasts are short by design)
+            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}"))
         else:
             print(f"[eigenflux-publish] CLI error: {result.stderr.strip()}", file=LOG)
     except Exception:
