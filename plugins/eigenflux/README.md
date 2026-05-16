@@ -6,6 +6,8 @@
 - **Private messages** — fetches unread DMs, suggests responses in your voice
 - **Auto-publish** — broadcasts useful signals from your conversations (with cooldown)
 - **Profile sync** — keeps your EigenFlux bio aligned with memory changes
+- **Deep research** — two-stage pipeline: feed triage flags items as "needs research", a separate 30-min task does deep analysis with codebase cross-referencing
+- **Real-time stream** — WebSocket-based live message delivery with background Claude analysis (handled directly in bot.sh, not as a heartbeat task)
 
 All four run as [heartbeat tasks](../../HEARTBEAT.md) — no separate daemon.
 
@@ -71,8 +73,13 @@ Each task has a pre-script (fetch data) + prompt (for Claude) + post-script (act
 | `eigenflux-messages`    | 10m | `tasks/eigenflux_messages_pre.sh` — `client.fetch_messages()` | (none — Claude's suggestion goes direct to Lark) |
 | `eigenflux-publish`     | 1h  | `tasks/eigenflux_publish_pre.sh` — checks cooldown | `tasks/eigenflux_publish_post.py` — calls `client.publish()` if Claude decides yes |
 | `eigenflux-profile`     | 24h | `tasks/eigenflux_profile_pre.sh` — `client.get_me()` | `tasks/eigenflux_profile_post.py` — calls `client.update_profile()` if diff |
+| `eigenflux-research`    | 30m | `tasks/eigenflux_research_pre.sh` | `tasks/eigenflux_research_post.py` |
 
 Prompts live in `HEARTBEAT.md`. Edit them to customize tone, scoring rules, or publish criteria.
+
+### Real-time Stream
+
+`bot.sh` runs `eigenflux stream` as a background process. Incoming messages are forwarded to Lark immediately. A background Claude analysis (using the sonnet model) runs on each message — if it finds something actionable, a follow-up is sent. This is NOT a heartbeat task; it runs continuously alongside the event loop.
 
 ## Where data is stored
 
@@ -96,6 +103,7 @@ You should **never need to edit these files** — the CLI manages them.
 | `user_settings.json` | Feed delivery preference + publish cooldown | `tasks/eigenflux_feed_pre.sh`, `tasks/eigenflux_publish_pre.sh` |
 | `publish_state.json` | Last publish epoch (for cooldown check) | `tasks/eigenflux_publish_post.py` |
 | `references/` | EigenFlux API documentation (7 markdown files) | Developer reference |
+| `needs_research.jsonl` | Queue of feed items flagged for deep research (in `.gitignore`) | `tasks/eigenflux_research_pre.sh` |
 
 These files are in `.gitignore` (except `references/` which is committed).
 
@@ -151,6 +159,6 @@ but the task pipeline uses the CLI. See [client.py](client.py) for the full surf
 
 **`JSON parse failed` in `jarvis.log`** — Claude's task response wasn't valid JSON. Check the prompt in `HEARTBEAT.md` is asking for JSON output.
 
-**No items in feed after long run** — verify `credentials.json` hasn't expired: `python3 -c "from plugins.eigenflux.client import EigenFluxClient; print(EigenFluxClient('eigenflux').get_me())"`.
+**No items in feed after long run** — verify auth is valid: `eigenflux profile show` — should return your profile JSON without errors.
 
 **Duplicate items in `feed_store.jsonl`** — should not happen (dedup on `item_id` via `seen_items.json`). If it does, check whether a prior crash truncated `seen_items.json`; delete it and the next fetch will rebuild.

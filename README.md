@@ -72,54 +72,89 @@ Then restart jarvis.
 
 ## What is this?
 
-Pascal Jarvis wraps Claude Code with four capabilities it doesn't have out of the box:
+Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
-1. **Heartbeat Loop** — A background scheduler that runs tasks on intervals (feed triage, check-ins, memory consolidation). Tasks are defined in a single `HEARTBEAT.md` file and executed via pre/post shell scripts + a batched Claude call.
+1. **Heartbeat Loop + Guardian Daemon** — A background scheduler runs tasks on configurable intervals (defined in `HEARTBEAT.md`, executed via pre/post shell scripts + a batched Claude call). A guardian daemon (`daemon.py`) monitors the bot process, kills stuck Claude sessions, and auto-restarts on crash.
 
 2. **Tiered Memory System** — Five-layer memory that compresses over time (permanent → monthly → weekly → daily → hourly). Memory is injected into every Claude call, giving it persistent context across sessions.
 
-3. **Built-in Plugins** — Two first-class integrations that ship with the system:
+3. **Daily Rhythm & Calendar** — A suite of time-aware tasks that structure the day:
+   - *Daily plan* — morning overview of calendar, priorities, and open threads (time-gated 8:00-9:30)
+   - *Activity log* — silent background tracker that logs what you're working on
+   - *Daily reflect* — evening review with wins, patterns, and tomorrow prep
+   - *Free-time nudge* — detects idle calendar blocks and sends casual suggestions
+   - *Calendar read/write* — syncs Lark calendar events and can create/update/delete them
+
+4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
-   - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network that feeds the agent fresh signals from other agents and lets it publish back.
+   - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with a two-stage pipeline: feed triage for quick scoring, plus deep research for high-value items.
+   - *Content recommend* and *watchlater remind* — curates and follows up on saved content.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
-4. **Admin Console** — Local web dashboard (`python3 admin.py`) for browsing memory, searching session history, and inspecting the Lark conversation rotation timeline.
+5. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics, engagement analysis, and cross-session context bridging.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  bot.sh (entry point)                                    │
-│  ├── Lark event listener (foreground)                    │
-│  │   └── sources plugins/lark/client.sh → claude -p      │
-│  ├── Heartbeat loop (background) → core/heartbeat.py     │
-│  │   ├── Parse HEARTBEAT.md                              │
-│  │   ├── Run pre-scripts (gather data)                   │
-│  │   ├── Batch Claude call                               │
-│  │   └── Run post-scripts (act on output)                │
-│  └── Admin console (background, optional) → admin.py     │
-│                                                          │
-│  core/                         (system)                  │
-│  ├── config.py      — jarvis.yaml loader                 │
-│  ├── heartbeat.py   — task scheduler                     │
-│  ├── memory.py      — tiered memory loader               │
-│  ├── session.py     — session rotation + fcntl lock      │
-│  ├── search.py      — session history parser             │
-│  └── safety.py      — error-pattern filter               │
-│                                                          │
-│  plugins/                      (built-in)                │
-│  ├── lark/                                               │
-│  │   └── client.sh  — shell helpers sourced by bot.sh    │
-│  └── eigenflux/                                          │
-│      └── client.py  — HTTP client + local persistence    │
-│                                                          │
-│  tasks/                        (pre/post hooks)          │
-│  ├── checkin_*      — hourly free-time check-ins         │
-│  ├── memory_*       — hourly→daily→weekly→monthly        │
-│  │                    consolidation pipeline             │
-│  └── eigenflux_*    — feed, messages, publish, profile   │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  daemon.py (guardian — monitors + restarts bot.sh)           │
+│                                                             │
+│  bot.sh (entry point)                                       │
+│  ├── Lark event listener (foreground)                       │
+│  │   └── sources plugins/lark/client.sh → claude -p         │
+│  ├── Heartbeat loop (background) → core/heartbeat.py        │
+│  │   ├── Parse HEARTBEAT.md                                 │
+│  │   ├── Run pre-scripts (gather data)                      │
+│  │   ├── Batch Claude call                                  │
+│  │   └── Run post-scripts (act on output)                   │
+│  └── Admin console (background, optional) → admin.py        │
+│                                                             │
+│  core/                            (system)                  │
+│  ├── config.py       — jarvis.yaml loader                   │
+│  ├── heartbeat.py    — task scheduler                       │
+│  ├── memory.py       — tiered memory loader                 │
+│  ├── session.py      — session rotation + fcntl lock        │
+│  ├── search.py       — session history parser               │
+│  ├── safety.py       — error-pattern filter                 │
+│  ├── card.py         — Lark card message builder            │
+│  ├── timeutil.py     — timezone / time-range helpers        │
+│  └── jobs.py         — job queue utilities                  │
+│                                                             │
+│  handlers/                        (message handlers)        │
+│  └── handle_image.sh — image message processing             │
+│                                                             │
+│  scripts/                         (ops & dev tools)         │
+│  ├── backup_sessions.sh  — daily session backup             │
+│  ├── memory-viewer.py    — interactive memory browser       │
+│  ├── search_v2.py        — enhanced transcript search       │
+│  ├── session_search.py   — simple session search            │
+│  ├── tail_turns.py       — tail recent conversation turns   │
+│  └── migrate-memory.sh   — one-time memory migration        │
+│                                                             │
+│  plugins/                         (built-in)                │
+│  ├── lark/                                                  │
+│  │   └── client.sh   — shell helpers sourced by bot.sh      │
+│  └── eigenflux/                                             │
+│      └── client.py   — HTTP client + local persistence      │
+│                                                             │
+│  tasks/                           (pre/post hooks)          │
+│  ├── Daily rhythm:                                          │
+│  │   daily_plan, activity_log, daily_reflect, free_time_nudge│
+│  ├── Calendar:                                              │
+│  │   calendar_sync, calendar_write                          │
+│  ├── Memory pipeline:                                       │
+│  │   memory_hourly → daily → weekly → monthly,              │
+│  │   memory_consolidate, memory_tidy                        │
+│  ├── EigenFlux:                                             │
+│  │   feed, messages, publish, profile, research             │
+│  ├── Content:                                               │
+│  │   content_recommend, watchlater_remind                   │
+│  └── Monitoring & ops:                                      │
+│      checkin, engagement_analyze, cross_session_sync,        │
+│      phronesis_monitor, repos_sync, self_diagnostic,         │
+│      personal_site                                          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -225,20 +260,59 @@ Key settings:
 - `claude.heartbeat_model` — model for background tasks (default: `sonnet`, cheaper)
 - `heartbeat.check_interval` — how often to check for due tasks (default: 10s)
 
-## Customizing Tasks
+## Writing Custom Tasks
 
-Edit `HEARTBEAT.md` to add/remove/modify tasks. Each task has:
+Tasks are the building blocks of the heartbeat loop. Each task is defined in `HEARTBEAT.md` and implemented as a pair of scripts.
+
+### Task definition
+
+Add a block to `HEARTBEAT.md`:
 
 ```markdown
 ### task-name
 - interval: 10m          # how often to run
-- pre: tasks/pre.sh      # data gathering script (stdout → Claude input)
-- post: tasks/post.py    # response handler (stdin ← Claude output)
-- prompt: |              # what to ask Claude
+- pre: tasks/task_name_pre.sh    # data gathering script
+- post: tasks/task_name_post.py  # response handler
+- prompt: |
     Your prompt here.
 ```
 
-Pre-scripts that exit with empty stdout cause the task to be skipped (retried later).
+### Naming convention
+
+Tasks follow a strict naming pattern: `tasks/<name>_pre.sh` + `tasks/<name>_post.py`. The pre-script gathers data; the post-script acts on Claude's response.
+
+### Pre-script convention
+
+The pre-script's **stdout becomes Claude's input data** for that task. Key rules:
+
+- **Empty stdout = skip task.** If the pre-script prints nothing, the task is silently skipped and retried at the next interval. This is the primary gating mechanism.
+- **Time-gated tasks**: Check the current hour and exit early. For example, `daily_plan_pre.sh` only runs between 8:00-9:30; outside that window it exits with no output.
+- Pre-scripts typically call APIs, read files, or check system state to assemble context for Claude.
+
+### Post-script convention
+
+The post-script receives **Claude's response on stdin** and can act on it:
+
+- **stdout becomes the Lark message.** If the post-script prints something, it gets sent to the user via Lark.
+- **Silent tasks**: Post-scripts that write nothing to stdout (e.g., `activity_log_post.py`) perform their work silently — writing to files, updating state — without notifying the user.
+- Post-scripts can import from `core/` and `plugins/` to call APIs, update memory, etc.
+
+### The `HEARTBEAT_OK` signal
+
+`HEARTBEAT_OK` is the universal "nothing to do" response. When Claude determines there's no actionable output for a task, it returns this string. Post-scripts should check for it and exit cleanly:
+
+```python
+response = sys.stdin.read().strip()
+if response == "HEARTBEAT_OK":
+    sys.exit(0)
+```
+
+### Example patterns
+
+- **Notify user**: Pre-script gathers data → Claude analyzes → post-script prints a message → sent to Lark
+- **Silent tracking**: Pre-script gathers data → Claude processes → post-script writes to a file, prints nothing
+- **Time-gated**: Pre-script checks `date +%H`, exits if outside window → task skipped entirely
+- **API-gated**: Pre-script calls an API, exits if no new data → task skipped until data appears
 
 ## Plugins
 
@@ -306,6 +380,33 @@ A plugin is just a directory under `plugins/` that provides one or both of:
 2. **Heartbeat tasks** in `HEARTBEAT.md` + matching `tasks/<plugin>_*_pre.sh` / `_post.py` scripts.
 
 Pre-scripts write to stdout (becomes Claude's input data); post-scripts read stdin (Claude's response) and can call the plugin's client library to act on it. If a post-script writes to stdout, that becomes the message sent to Lark. Follow the [EigenFlux plugin structure](plugins/eigenflux/) as a template.
+
+## Scripts
+
+Utility scripts in `scripts/` for operations and debugging:
+
+- **`backup_sessions.sh`** — Daily session file backup with read-only protection. Copies session transcripts to an archive directory so they survive rotation.
+- **`memory-viewer.py`** — Interactive TUI for browsing the tiered memory tree. Useful for inspecting what the agent "knows" without digging through files.
+- **`search_v2.py`** — Enhanced session transcript search with relevance scoring and context display.
+- **`session_search.py`** — Simple session search tool for quick keyword lookups.
+- **`tail_turns.py`** — Tail recent conversation turns, like `tail -f` for live conversations. Helpful for monitoring what the bot is doing.
+- **`migrate-memory.sh`** — One-time migration from flat memory layout to the tiered `hot/warm/timeline/system` structure. Safe to run multiple times (idempotent).
+
+## Guardian Daemon
+
+`daemon.py` is a lightweight supervisor process that keeps the bot alive:
+
+- Monitors `bot.sh` health every 2 minutes — checks PID, heartbeat freshness, and session locks
+- Kills stuck Claude processes by detecting stale session lock files
+- Auto-restarts `bot.sh` on crash (up to 3 attempts with 5-minute cooldown)
+- Logs to `daemon.log` with automatic log rotation
+
+Run with:
+```bash
+python3 daemon.py
+```
+
+The daemon manages `bot.sh` directly — you don't need to run `bot.sh` separately. For production use, point your `launchd` plist at `daemon.py` instead of `bot.sh`.
 
 ## Memory System
 

@@ -4,7 +4,19 @@ Tasks are checked every 10s. Each task runs only when its interval has elapsed.
 All due tasks are batched into a single Claude call.
 If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
-## Tasks
+## Task Index
+
+| Category | Tasks | User-facing? |
+|---|---|---|
+| Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | plan+reflect yes, activity-log silent |
+| Check-in | checkin | yes |
+| Calendar | calendar-sync | silent (updates memory) |
+| Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
+| EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-publish, eigenflux-profile | feed+messages yes, others silent |
+| Content | content-recommend, watchlater-remind | yes |
+| Analytics | engagement-analyze, cross-session-sync | silent |
+
+## EigenFlux
 
 ### eigenflux-feed-triage
 - interval: 10m
@@ -14,12 +26,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     [EIGENFLUX FEED TRIAGE]
     You are Pascal's personal assistant. Your job is DEEP ANALYSIS, not information relay.
 
-    Context about Pascal:
-    - Portfolio: 恒生科技ETF (simplified, doesn't want to spend energy on funds)
-    - Projects: Phronesis/EigenFlux.ai — broadcast network for AI agents (centralized gateway, intent-based push, 3200+ nodes)
-    - Current priorities: recommendation precision (target 70-80%), cold start, signal quality
-    - Role: Chief Scientist (二号位), ex-MiniMax algorithm lead, ex-LLaMA 1 team
-    - Long-term: health, philosophy/cultural exploration, finding meaning
+    Context: Check the user's memory files for their profile, portfolio, projects, priorities,
+    and goals. Use these to judge relevance — don't rely on hardcoded assumptions.
 
     The DATA below is ENRICHED — each item includes `url`/`source_url` and `full_content` when available.
 
@@ -59,10 +67,10 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     1. If a source URL is available, use WebFetch to read the FULL content first. Do NOT rely on summaries alone.
     2. READ the full content carefully. If it's a paper, understand the method and contribution.
     3. CROSS-REFERENCE with EigenFlux's actual codebase:
-       - Repos under ~/Desktop/jarvis/repos/: eigenflux, eigenflux-pgc, openclaw-eigenflux, proactive-eval
+       - Repos: check the work_dir configured in jarvis.yaml for available project repos
        - Check: does this solve a problem we actually have?
        - Be specific: name the file, module, or component where this would apply.
-    4. CHECK Pascal's memory: does this connect to his current priorities (precision 70-80%, cold start, signal quality)?
+    4. CHECK the user's memory files for current priorities and judge relevance against those.
     5. DECIDE:
        - "push": CONCRETE, SPECIFIC application found. Write the action recommendation.
        - "discard": After research, doesn't apply. Explain briefly.
@@ -94,6 +102,30 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - user_message: brief note to Pascal about what was received and how you replied (shown via Lark).
     - If nothing actionable or no reply needed, return: {"reply_actions": [], "user_message": ""}
     - End user_message with: 📡 Powered by EigenFlux
+
+### eigenflux-publish
+- interval: 60m
+- pre: tasks/eigenflux_publish_pre.sh
+- post: tasks/eigenflux_publish_post.py
+- prompt: |
+    [EIGENFLUX RECURRING PUBLISH]
+    Based on our conversation history, do you have any useful signal worth broadcasting?
+    Rules: genuinely useful to other agents, NO private info/credentials, factual only.
+    Return JSON: {"should_publish":true/false,"content":"<text>","notes":{"type":"info","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    If nothing worth sharing, return {"should_publish":false}
+
+### eigenflux-profile
+- interval: 24h
+- pre: tasks/eigenflux_profile_pre.sh
+- post: tasks/eigenflux_profile_post.py
+- prompt: |
+    [EIGENFLUX PROFILE REFRESH]
+    Compare the user's current EigenFlux profile with the latest memory.
+    Has anything changed that should be reflected in their network profile?
+    Return JSON: {"should_update":true/false,"agent_name":"<optional>","bio":"<full bio>","reason":"<brief>"}
+    If no significant changes, return {"should_update":false}
+
+## Check-in & Wellbeing
 
 ### checkin
 - interval: 30m
@@ -163,6 +195,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     9. If you cannot find something genuine and specific to this person, reply HEARTBEAT_OK.
        A generic message is worse than silence.
 
+## Content Curation
+
 ### content-recommend
 - interval: 1h
 - pre: tasks/content_recommend_pre.sh
@@ -217,6 +251,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     pick ONE to gently remind them about. Be brief and natural — not pushy.
     Return JSON: {"title":"...","url":"...","user_message":"<Chinese, casual reminder>"}
     Or if not a good time or no pending items: HEARTBEAT_OK
+
+## Memory Pipeline
 
 ### memory-consolidate
 - interval: 24h
@@ -284,6 +320,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Focus on: milestones, turning points, evolving patterns.
     Keep under 500 words total.
 
+## Calendar
+
 ### calendar-sync
 - interval: 30m
 - pre: tasks/calendar_sync_pre.sh
@@ -307,6 +345,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     If no events, reply HEARTBEAT_OK.
 
+## System Maintenance
+
 ### memory-tidy
 - interval: 6h
 - pre: tasks/memory_tidy_pre.sh
@@ -321,6 +361,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Return JSON: {"index_update":"<full _index.md content>","actions_taken":["<what you did>"],"warnings":["<issues found>"]}
     If everything looks clean, reply HEARTBEAT_OK.
 
+## Cross-project
+
 ### cross-session-sync
 - interval: 30m
 - pre: tasks/cross_session_pre.sh
@@ -333,6 +375,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Format: "### project-name\n- bullet\n- bullet"
     ALWAYS produce a digest if there is ANY data below — even a single conversation turn
     is worth recording. Only reply HEARTBEAT_OK if the DATA section is completely empty.
+
+## Analytics
 
 ### engagement-analyze
 - interval: 24h
@@ -350,27 +394,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Return JSON: {"insights": "<markdown summary>", "adaptations": [{"target": "<task>", "suggestion": "<what to change>"}]}
     If not enough data yet (<10 data points), reply HEARTBEAT_OK.
 
-### eigenflux-profile
-- interval: 24h
-- pre: tasks/eigenflux_profile_pre.sh
-- post: tasks/eigenflux_profile_post.py
-- prompt: |
-    [EIGENFLUX PROFILE REFRESH]
-    Compare the user's current EigenFlux profile with the latest memory.
-    Has anything changed that should be reflected in their network profile?
-    Return JSON: {"should_update":true/false,"agent_name":"<optional>","bio":"<full bio>","reason":"<brief>"}
-    If no significant changes, return {"should_update":false}
-
-### eigenflux-publish
-- interval: 60m
-- pre: tasks/eigenflux_publish_pre.sh
-- post: tasks/eigenflux_publish_post.py
-- prompt: |
-    [EIGENFLUX RECURRING PUBLISH]
-    Based on our conversation history, do you have any useful signal worth broadcasting?
-    Rules: genuinely useful to other agents, NO private info/credentials, factual only.
-    Return JSON: {"should_publish":true/false,"content":"<text>","notes":{"type":"info","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
-    If nothing worth sharing, return {"should_publish":false}
+## Daily Rhythm
 
 ### activity-log
 - interval: 45m

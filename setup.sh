@@ -124,8 +124,9 @@ mkdir -p "$DATA_DIR"
 ok "memory dir: $DATA_DIR"
 
 if [ -d examples/memory ] && [ -z "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
-  cp examples/memory/*.md "$DATA_DIR/" 2>/dev/null || true
-  ok "seeded with $(ls "$DATA_DIR" 2>/dev/null | wc -l | tr -d ' ') example memory files"
+  # Copy tiered directory structure (hot/, warm/, system/) and root files
+  cp -R examples/memory/* "$DATA_DIR/" 2>/dev/null || true
+  ok "seeded with tiered memory structure (hot/ warm/ system/)"
   warn "Edit these files to describe yourself — they shape how the bot treats you"
 else
   ok "memory dir already populated — not overwriting"
