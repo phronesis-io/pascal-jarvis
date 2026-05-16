@@ -3,7 +3,7 @@
 
 A persistent background process that:
 1. Periodically checks Jarvis health (bot.sh, heartbeat, Lark listener)
-2. On failure: notifies Pascal via Lark + uses Claude to diagnose + auto-restarts
+2. On failure: notifies Pascal via Lark + auto-restarts
 3. Stays alive forever — designed to be managed by launchd (KeepAlive)
 
 This is the ONE process that must never die. It's intentionally minimal
@@ -23,10 +23,12 @@ from pathlib import Path
 # ── Config ──
 JARVIS_DIR = Path(__file__).parent
 CHECK_INTERVAL = 120          # seconds between health checks (2 min)
-HEARTBEAT_STALE_THRESHOLD = 900  # 15 min without heartbeat = stale (tasks can take a while)
+HEARTBEAT_STALE_THRESHOLD = 900  # 15 min without heartbeat = stale
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"
+DAEMON_PID_FILE = JARVIS_DIR / ".daemon.pid"
+BOT_PID_FILE = JARVIS_DIR / ".bot.pid"
 MAX_LOG_LINES = 1000
 
 # Lark config (read from jarvis.yaml)
@@ -36,7 +38,6 @@ try:
     cfg = yaml.safe_load((JARVIS_DIR / "jarvis.yaml").read_text())
     USER_ID = cfg.get("lark", {}).get("user_id", "")
 except Exception:
-    # Fallback: parse yaml manually for user_id
     try:
         for line in (JARVIS_DIR / "jarvis.yaml").read_text().splitlines():
             if "user_id" in line:
@@ -58,7 +59,6 @@ def log(level: str, msg: str):
     try:
         with open(LOG_FILE, "a") as f:
             f.write(line)
-        # Rotate if too large
         if LOG_FILE.stat().st_size > 200_000:
             lines = LOG_FILE.read_text().splitlines()
             LOG_FILE.write_text("\n".join(lines[-500:]) + "\n")
@@ -67,7 +67,7 @@ def log(level: str, msg: str):
 
 
 def notify_lark(msg: str):
-    """Send a notification to Pascal via Lark. Uses lark-cli directly."""
+    """Send a notification to Pascal via Lark."""
     if not USER_ID:
         log("WARN", "No USER_ID configured, cannot notify Lark")
         return
@@ -83,18 +83,70 @@ def notify_lark(msg: str):
         log("ERROR", f"Lark notify failed: {e}")
 
 
+def _find_last_heartbeat() -> float | None:
+    """Find the most recent 'Beat sent' timestamp from any log file.
+    Returns age in seconds, or None if not found."""
+    # Check both log locations
+    log_files = [
+        Path("/tmp/jarvis_restart.log"),
+        JARVIS_DIR / "jarvis.log",
+    ]
+    latest_beat = None
+
+    for log_path in log_files:
+        if not log_path.exists():
+            continue
+        try:
+            # Only read last 10KB to avoid memory issues on large logs
+            size = log_path.stat().st_size
+            with open(log_path, "r", errors="ignore") as f:
+                if size > 10_000:
+                    f.seek(size - 10_000)
+                    f.readline()  # skip partial line
+                text = f.read()
+            beats = re.findall(
+                r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Beat sent",
+                text
+            )
+            if beats:
+                beat_time = datetime.strptime(beats[-1], "%Y-%m-%d %H:%M:%S")
+                if latest_beat is None or beat_time > latest_beat:
+                    latest_beat = beat_time
+        except Exception:
+            continue
+
+    if latest_beat:
+        return (datetime.now() - latest_beat).total_seconds()
+    return None
+
+
+def _is_bot_alive() -> bool:
+    """Check if bot.sh is alive via PID file (primary) or pgrep (fallback)."""
+    # Primary: check PID file
+    if BOT_PID_FILE.exists():
+        try:
+            pid = int(BOT_PID_FILE.read_text().strip())
+            os.kill(pid, 0)  # Check if process exists
+            return True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    # Fallback: pgrep
+    try:
+        r = subprocess.run(["pgrep", "-f", "bash.*bot\\.sh"],
+                           capture_output=True, text=True, timeout=5)
+        return bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
 def check_health() -> dict:
     """Run health checks. Returns {"healthy": bool, "issues": [str]}."""
     issues = []
 
-    # 1. Is bot.sh running?
-    try:
-        r = subprocess.run(["pgrep", "-f", "bash.*bot\\.sh"],
-                           capture_output=True, text=True, timeout=5)
-        if not r.stdout.strip():
-            issues.append("bot.sh is not running")
-    except Exception as e:
-        issues.append(f"Cannot check bot.sh: {e}")
+    # 1. Is bot.sh running? (PID file + pgrep)
+    if not _is_bot_alive():
+        issues.append("bot.sh is not running")
 
     # 2. Is Lark listener connected?
     try:
@@ -105,47 +157,38 @@ def check_health() -> dict:
     except Exception as e:
         issues.append(f"Cannot check Lark listener: {e}")
 
-    # 3. Is heartbeat alive? (check log for recent beat)
-    heartbeat_log = Path("/tmp/jarvis_restart.log")
-    if heartbeat_log.exists():
-        try:
-            text = heartbeat_log.read_text(errors="ignore")
-            beats = re.findall(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Beat sent", text)
-            if beats:
-                last_beat_str = beats[-1]
-                last_beat = datetime.strptime(last_beat_str, "%Y-%m-%d %H:%M:%S")
-                age = (datetime.now() - last_beat).total_seconds()
-                if age > HEARTBEAT_STALE_THRESHOLD:
-                    issues.append(f"Heartbeat stale ({int(age)}s since last beat)")
-            # Also check for "Starting" if no beats yet
-            starts = re.findall(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Starting", text)
-            if starts and not beats:
-                last_start_str = starts[-1]
-                last_start = datetime.strptime(last_start_str, "%Y-%m-%d %H:%M:%S")
-                age = (datetime.now() - last_start).total_seconds()
-                if age > HEARTBEAT_STALE_THRESHOLD:
-                    issues.append(f"Heartbeat started but no beats in {int(age)}s")
-        except Exception as e:
-            issues.append(f"Cannot parse heartbeat log: {e}")
-    else:
-        issues.append("No heartbeat log found")
+    # 3. Is heartbeat alive? (check BOTH log files for recent beat)
+    beat_age = _find_last_heartbeat()
+    if beat_age is None:
+        issues.append("No heartbeat found in any log file")
+    elif beat_age > HEARTBEAT_STALE_THRESHOLD:
+        issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
 
-    # 4. Recent fatal errors?
-    jarvis_log = JARVIS_DIR / "jarvis.log"
-    if jarvis_log.exists():
-        try:
-            tail = jarvis_log.read_text(errors="ignore")[-5000:]
-            fatals = re.findall(r"(FATAL|panic|Traceback|unbound variable).*", tail, re.IGNORECASE)
-            if fatals:
-                issues.append(f"Recent errors in jarvis.log: {fatals[-1][:100]}")
-        except Exception:
-            pass
+    # 4. Recent fatal errors? (only flag if other checks pass — avoids noise)
+    if not issues:
+        jarvis_log = JARVIS_DIR / "jarvis.log"
+        if jarvis_log.exists():
+            try:
+                size = jarvis_log.stat().st_size
+                with open(jarvis_log, "r", errors="ignore") as f:
+                    if size > 5000:
+                        f.seek(size - 5000)
+                        f.readline()
+                    tail = f.read()
+                fatals = re.findall(
+                    r"(FATAL|panic|Traceback|unbound variable).*",
+                    tail, re.IGNORECASE
+                )
+                if fatals:
+                    issues.append(f"Recent errors in jarvis.log: {fatals[-1][:100]}")
+            except Exception:
+                pass
 
     return {"healthy": len(issues) == 0, "issues": issues}
 
 
 def diagnose_and_fix(issues: list[str]) -> str:
-    """Use Claude to diagnose the problem and attempt a fix."""
+    """Kill existing processes and restart bot.sh."""
     global last_restart_time, restart_count
 
     now = time.time()
@@ -160,52 +203,46 @@ def diagnose_and_fix(issues: list[str]) -> str:
         msg = f"Reached max restart attempts ({MAX_RESTART_ATTEMPTS}). Manual intervention needed."
         log("ERROR", msg)
         notify_lark(f"⚠️ {msg}\n\nIssues:\n" + "\n".join(f"- {i}" for i in issues))
-        restart_count = 0  # Reset after notifying
-        last_restart_time = now + 600  # Extra cooldown
+        restart_count = 0
+        last_restart_time = now + 600  # 10min extra cooldown
         return msg
 
     log("INFO", f"Attempting fix for: {issues}")
 
-    # Collect diagnostics
-    diag_parts = [f"Issues: {issues}"]
-    try:
-        r = subprocess.run(["tail", "-30", "/tmp/jarvis_restart.log"],
-                           capture_output=True, text=True, timeout=5)
-        diag_parts.append(f"Recent log:\n{r.stdout[-2000:]}")
-    except Exception:
-        pass
-
-    # Kill everything: bot, lark, admin, AND any stuck claude processes from jarvis
+    # Kill existing bot processes
     log("INFO", "Killing existing processes...")
     for pattern in ["lark-cli event", "bash.*bot\\.sh", "admin\\.py"]:
-        subprocess.run(["pkill", "-f", pattern],
-                       capture_output=True, timeout=5)
-
-    # Kill stuck claude processes spawned by bot.sh (tracked via session lock files)
-    try:
-        import glob as _glob
-        for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
-            try:
-                pid = Path(lock).read_text().strip()
-                if pid:
-                    subprocess.run(["kill", pid], capture_output=True, timeout=5)
-                    log("INFO", f"Killed stuck claude process from lock: {pid}")
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Clean stale session locks
-    import glob
-    for lock in glob.glob(str(JARVIS_DIR / ".session_lock_*")):
         try:
-            os.remove(lock)
-            log("INFO", f"Removed stale lock: {lock}")
+            subprocess.run(["pkill", "-f", pattern],
+                           capture_output=True, timeout=5)
         except Exception:
             pass
 
+    # Kill stuck claude processes tracked by session locks
+    import glob as _glob
+    for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
+        try:
+            pid = Path(lock).read_text().strip()
+            if pid:
+                subprocess.run(["kill", pid], capture_output=True, timeout=5)
+                log("INFO", f"Killed stuck claude process from lock: {pid}")
+        except Exception:
+            pass
+
+    # Clean stale session locks and PID file
+    for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
+        try:
+            os.remove(lock)
+        except Exception:
+            pass
+    try:
+        BOT_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
     time.sleep(3)
 
+    # Start bot.sh — output to /tmp/jarvis_restart.log (daemon reads this)
     log("INFO", "Starting bot.sh...")
     try:
         subprocess.Popen(
@@ -213,7 +250,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
             stdout=open("/tmp/jarvis_restart.log", "a"),
             stderr=subprocess.STDOUT,
             cwd=str(JARVIS_DIR),
-            start_new_session=True,  # Detach from daemon
+            start_new_session=True,
         )
     except Exception as e:
         msg = f"Failed to start bot.sh: {e}"
@@ -225,14 +262,14 @@ def diagnose_and_fix(issues: list[str]) -> str:
     restart_count += 1
 
     # Wait and verify
-    time.sleep(8)
+    time.sleep(10)
     post_check = check_health()
     if post_check["healthy"]:
         msg = f"Auto-restart successful (attempt {restart_count})"
         log("INFO", msg)
         notify_lark(f"✅ Jarvis was down. {msg}.\n\nOriginal issues:\n" +
                     "\n".join(f"- {i}" for i in issues))
-        restart_count = 0  # Reset on success
+        restart_count = 0
         return msg
     else:
         msg = f"Restart attempt {restart_count} — still unhealthy: {post_check['issues']}"
@@ -246,47 +283,78 @@ def handle_signal(signum, frame):
     running = False
 
 
+def acquire_singleton():
+    """Ensure only one daemon instance runs. Exit if another is alive."""
+    if DAEMON_PID_FILE.exists():
+        try:
+            old_pid = int(DAEMON_PID_FILE.read_text().strip())
+            os.kill(old_pid, 0)  # Check if alive
+            print(f"Daemon already running (PID {old_pid}). Exiting.", file=sys.stderr)
+            sys.exit(1)
+        except (ValueError, ProcessLookupError):
+            pass  # Stale PID file
+        except PermissionError:
+            print(f"Daemon PID {old_pid} exists but permission denied. Exiting.", file=sys.stderr)
+            sys.exit(1)
+
+    DAEMON_PID_FILE.write_text(str(os.getpid()))
+
+
+def release_singleton():
+    """Remove PID file on exit."""
+    try:
+        DAEMON_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def main():
     global running
+
+    acquire_singleton()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
     log("INFO", "Guardian daemon started")
+    log("INFO", f"  PID: {os.getpid()}")
     log("INFO", f"  JARVIS_DIR: {JARVIS_DIR}")
     log("INFO", f"  USER_ID: {USER_ID[:10]}..." if USER_ID else "  USER_ID: not set")
     log("INFO", f"  Check interval: {CHECK_INTERVAL}s")
 
     consecutive_failures = 0
 
-    while running:
-        try:
-            result = check_health()
+    try:
+        while running:
+            try:
+                result = check_health()
 
-            if result["healthy"]:
-                if consecutive_failures > 0:
-                    log("INFO", f"System recovered after {consecutive_failures} failed checks")
-                    consecutive_failures = 0
-                # Silent — healthy is the default state
-            else:
-                consecutive_failures += 1
-                log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")
+                if result["healthy"]:
+                    if consecutive_failures > 0:
+                        log("INFO", f"System recovered after {consecutive_failures} failed checks")
+                        consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")
 
-                if consecutive_failures >= 2:
-                    # Two consecutive failures → take action
-                    fix_result = diagnose_and_fix(result["issues"])
-                    log("INFO", f"Fix result: {fix_result}")
+                    if consecutive_failures >= 2:
+                        fix_result = diagnose_and_fix(result["issues"])
+                        log("INFO", f"Fix result: {fix_result}")
+                        # Reset consecutive counter after taking action
+                        # (give the restart time to take effect)
+                        consecutive_failures = 0
 
-        except Exception as e:
-            log("ERROR", f"Health check exception: {e}")
+            except Exception as e:
+                log("ERROR", f"Health check exception: {e}")
 
-        # Sleep in small increments so we can respond to signals
-        for _ in range(CHECK_INTERVAL):
-            if not running:
-                break
-            time.sleep(1)
-
-    log("INFO", "Guardian daemon stopped")
+            # Sleep in small increments so we can respond to signals
+            for _ in range(CHECK_INTERVAL):
+                if not running:
+                    break
+                time.sleep(1)
+    finally:
+        release_singleton()
+        log("INFO", "Guardian daemon stopped")
 
 
 if __name__ == "__main__":

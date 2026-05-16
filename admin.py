@@ -1116,15 +1116,21 @@ def lark_chats() -> list:
         kind = "p2p" if conv_key.startswith("ou_") else ("group" if conv_key.startswith("oc_") else "unknown")
 
         sessions = []
+        # Find first counter that actually has a file (skip pre-rotation history)
+        first_existing = None
         for c in range(1, counter + 1):
             sid = str(uuid.uuid5(SESSION_NAMESPACE, f"{conv_key}-{c}"))
             info = _session_info(sid)
-            sessions.append({
-                "counter": c,
-                "session_id": sid,
-                "is_active": (sid == active_sid),
-                **info,
-            })
+            if info.get("exists") and first_existing is None:
+                first_existing = c
+            # Only include from first existing onward (skip leading missing)
+            if first_existing is not None:
+                sessions.append({
+                    "counter": c,
+                    "session_id": sid,
+                    "is_active": (sid == active_sid),
+                    **info,
+                })
 
         # Order by counter (earliest first) — the rotation order
         sessions.sort(key=lambda s: s["counter"])
