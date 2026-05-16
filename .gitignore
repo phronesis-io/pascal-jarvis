@@ -7,6 +7,9 @@ active_sessions.json
 heartbeat_state.json
 jarvis.log
 .memory_cache
+.bot.pid
+.free_time_nudge_state
+calendar_event_mapping.json
 
 # Temp / backup / corrupted artifacts from atomic writes or debugging
 *.bak
@@ -58,3 +61,10 @@ engagement_log.jsonl
 heartbeat_outbox.jsonl
 tmp/
 eigenflux/.feed_poll_state
+eigenflux/needs_research.jsonl
+
+# Task state files
+tasks/.phronesis_last_ts
+
+# Session backups
+session_backups/

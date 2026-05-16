@@ -198,9 +198,12 @@ def format_recent_turns(turns: list[dict], max_msg_chars: int = 400,
         turn_date = line[1:11] if len(line) > 11 and line[0] == "[" else None
         if turn_date and turn_date != prev_date:
             if turn_date == today_str:
-                lines.append(f"--- 今天 {turn_date} ---\n")
+                lines.append(f"\n{'═' * 50}")
+                lines.append(f"📅 今天 {turn_date} — 以下是今天的对话")
+                lines.append(f"⚠️ 上方所有内容都是历史，不要当作今天发生的事")
+                lines.append(f"{'═' * 50}\n")
             else:
-                lines.append(f"--- 过去 {turn_date} (不是今天) ---\n")
+                lines.append(f"\n--- 过去 {turn_date} (不是今天) ---\n")
             prev_date = turn_date
         lines.append(f"{line}\n")
     return "\n".join(lines)
