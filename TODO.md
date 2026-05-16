@@ -1,65 +1,37 @@
 # Jarvis Roadmap
 
-Improvements beyond the current release, organized by priority.
+## Done (recent)
 
-## P1 — One-click plugin setup in Admin
+- Calendar read/write (create, update, delete Lark events from conversation)
+- Daily rhythm system (morning plan, activity log, evening reflect, free-time nudge)
+- EigenFlux two-stage pipeline (feed triage → deep research)
+- Feed item enrichment (full content + URL fetched in pre-script)
+- PID lock for bot.sh (prevent duplicate instances)
+- Image message handling (download + read via Claude)
+- Session backup script with read-only protection
+- Phronesis group chat monitoring
+- Repos sync + self-diagnostic tasks
 
-### Lark setup wizard (in browser)
-- "Connect Lark" button in Admin → runs `lark-cli config init --new` in background
-- Shows the auth URL in a modal → user clicks → browser auth → done
-- Auto-fills `jarvis.yaml` with the user's `open_id`
-- Status: 🟢 Connected / 🔴 Not configured
+## P1 — Hardcoded paths & personal info
 
-### EigenFlux setup wizard (in browser)
-- "Connect EigenFlux" button → email input → runs `eigenflux auth login`
-- Shows "Check email for OTP" → input field → runs `eigenflux auth verify`
-- Profile editor: name + bio → submits via CLI
-- Status indicator with token expiry warning
+- HEARTBEAT.md eigenflux prompts still reference personal context (portfolio, role) — should read from memory
+- Several task scripts have hardcoded /Users/pascal paths (phronesis_monitor_pre.sh, self_diagnostic_pre.sh, repos_sync_pre.sh, backup_sessions.sh) — should use $JARVIS_DIR or config
+- phronesis_monitor_pre.sh has hardcoded chat_id and user open_id
 
-### Progressive onboarding
-- First visit to Admin → guided flow: name → language → connect Lark? → connect EigenFlux? → done
-- Replaces the current "edit jarvis.yaml manually" step
+## P2 — Open source readiness
 
-## P2 — Async & Performance
+- Example memory templates need expansion (hot/warm/system structure, calendar_today placeholder)
+- Task development guide (document pre/post conventions, HEARTBEAT_OK, naming)
+- Admin wizard for plugin setup (Lark + EigenFlux in-browser)
+- Progressive onboarding (first-visit guided flow)
 
-### Feed URL pre-fetch
-- When heartbeat runs `eigenflux-feed-triage`, also call `eigenflux feed get` for each item
-- Cache full content + URL locally so Claude doesn't need to fetch on-demand during conversation
-- Trade-off: more API calls upfront vs faster response when user asks "what was that article?"
+## P3 — Architecture improvements
 
-### Heartbeat parallel tasks
-- Non-pipeline tasks (feed-triage, checkin, messages) can run concurrently
-- Pipeline tasks (hourly → daily → weekly → monthly) remain sequential
-- Reduces total cycle time from `N * claude_time` to `max(claude_time) + pipeline_time`
-
-### Session rotation notification
-- When a session rotates, optionally notify user on Lark: "Context rotated to session #N"
-- Configurable: `notifications.session_rotation: true` in jarvis.yaml
-
-### Memory change notification
-- When `memory_consolidate` queues UPDATE directives, push a summary to Lark
-- User can approve/reject before next session picks them up
-
-## P3 — Router & Capability Awareness
-
-### Lark command router
-Beyond `loop` / `heartbeat`, recognize more shortcuts:
-- `/status` — heartbeat task status + last errors (what Admin Heartbeat tab shows)
-- `/memory` — latest 3 memory entries (quick summary)
-- `/feed` — force-pull EigenFlux feed
-- `/publish <text>` — broadcast to EigenFlux
-- `/profile` — show current EigenFlux profile
-- These are pure convenience — same info available in Admin UI
-
-### Capability boundary declaration
-- In system prompt, explicitly list what the bot CAN and CANNOT do
-- Reduces hallucinated promises ("I'll set a reminder" when no reminder system exists)
-- Update as capabilities grow
-
-### Request classification
-- Detect long-running requests ("write me a research report") vs quick ones ("what time is it")
-- Route to different timeout / model settings
-- Consider: long tasks → background agent, short tasks → inline
+- Heartbeat parallel tasks (non-pipeline tasks can run concurrently)
+- Extract inline Python from bot.sh into proper scripts
+- EigenFlux stream handler configurability (enable/disable, model selection)
+- Session rotation notification (optional Lark notice)
+- Memory change notification (approve/reject before pickup)
 
 ## Not planned (and why)
 
