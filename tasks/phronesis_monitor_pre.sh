@@ -3,7 +3,8 @@
 # Only triggers during waking hours. Outputs recent messages for analysis.
 
 CHAT_ID="oc_REDACTEDREDACTEDREDACTEDREDACTE"
-STATE_FILE="/Users/pascal/Desktop/jarvis/tasks/.phronesis_last_ts"
+JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+STATE_FILE="$JARVIS_DIR/.phronesis_last_ts"
 PASCAL_ID="ou_REDACTEDREDACTEDREDACTEDREDACTE"
 
 hour=$(date +%H)

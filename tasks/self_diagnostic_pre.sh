@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-hook: collect system health data for self-diagnostic
-JARVIS_DIR="/Users/pascal/Desktop/jarvis"
-MEMORY_DIR="$HOME/.claude/projects/-Users-pascal-Desktop-jarvis/memory"
+JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory}"
 
 echo "=== SYSTEM HEALTH CHECK ==="
 echo "Time: $(date '+%Y-%m-%d %H:%M %A')"

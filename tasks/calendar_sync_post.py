@@ -73,7 +73,7 @@ def main() -> int:
     # Always update the memory file silently
     CALENDAR_FILE.write_text(
         f"---\nname: 今日日程\ndescription: Lark 日历自动同步，含今天和明天的日程\n"
-        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{calendar_text}\n"
+        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{raw}\n"
     )
     print(f"[calendar-sync] Updated memory silently at {ts}", file=sys.stderr)
 

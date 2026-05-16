@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repos" / "pascal-jarvis"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error
 
