@@ -9,7 +9,7 @@
 - **Deep research** — two-stage pipeline: feed triage flags items as "needs research", a separate 30-min task does deep analysis with codebase cross-referencing
 - **Real-time stream** — WebSocket-based live message delivery with background Claude analysis (handled directly in bot.sh, not as a heartbeat task)
 
-All four run as [heartbeat tasks](../../HEARTBEAT.md) — no separate daemon.
+The first five run as [heartbeat tasks](../../HEARTBEAT.md); the stream runs continuously in `bot.sh`.
 
 ---
 

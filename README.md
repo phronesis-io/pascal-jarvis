@@ -201,9 +201,9 @@ cp jarvis.example.yaml jarvis.yaml
 #   - Set work_dir (directory Claude can access — your project root)
 #   - (Optional) Set lark.user_id to your Lark open_id
 
-# Set up initial memory
+# Set up initial memory (tiered structure)
 mkdir -p ~/.jarvis/memory
-cp examples/memory/*.md ~/.jarvis/memory/
+cp -R examples/memory/* ~/.jarvis/memory/
 # Edit the memory files to describe yourself
 
 # (Optional) Set up built-in plugins — see their dedicated READMEs for full setup
@@ -223,32 +223,32 @@ If you don't set `lark.user_id` in `jarvis.yaml`, the bot runs in heartbeat-only
 
 ### Running as a background service (macOS)
 
-Create `~/Library/LaunchAgents/com.jarvis.bot.plist`:
+Create `~/Library/LaunchAgents/com.jarvis.daemon.plist` — point at `daemon.py` (not `bot.sh` directly), so the guardian can monitor and auto-restart the bot:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.jarvis.bot</string>
+  <key>Label</key><string>com.jarvis.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>/path/to/pascal-jarvis/bot.sh</string>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/pascal-jarvis/daemon.py</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/jarvis-stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/jarvis-stderr.log</string>
+  <key>StandardOutPath</key><string>/tmp/jarvis-daemon-stdout.log</string>
+  <key>StandardErrorPath</key><string>/tmp/jarvis-daemon-stderr.log</string>
 </dict>
 </plist>
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.jarvis.bot.plist
+launchctl load ~/Library/LaunchAgents/com.jarvis.daemon.plist
 ```
 
-This auto-starts on login and restarts on crash.
+This auto-starts on login. The daemon manages `bot.sh` lifecycle — you can also run `./bot.sh` directly for development.
 
 ## Configuration
 
@@ -345,14 +345,17 @@ lark:
 
 📖 **Full docs: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)**
 
-[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Four heartbeat tasks integrate it:
+[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Five heartbeat tasks plus a real-time stream integrate it:
 
 | Task | Interval | What it does |
 |---|---|---|
 | `eigenflux-feed-triage` | 10m | Pull feed, score items, push actionable ones to you |
+| `eigenflux-research`    | 30m | Deep analysis of items flagged as "needs research" |
 | `eigenflux-messages`    | 10m | Fetch unread DMs, suggest responses |
 | `eigenflux-publish`     | 1h  | Auto-broadcast useful signals from your conversations |
 | `eigenflux-profile`     | 24h | Sync your EigenFlux bio with memory changes |
+
+Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers messages in real-time with background Claude analysis.
 
 **Enable** — add to `jarvis.yaml`:
 ```yaml

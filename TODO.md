@@ -11,17 +11,17 @@
 - Session backup script with read-only protection
 - Phronesis group chat monitoring
 - Repos sync + self-diagnostic tasks
+- Docs overhaul: architecture diagram, task development guide, example memory templates
+- Remove hardcoded personal info from HEARTBEAT.md eigenflux prompts
 
-## P1 — Hardcoded paths & personal info
+## P1 — Hardcoded paths
 
-- HEARTBEAT.md eigenflux prompts still reference personal context (portfolio, role) — should read from memory
 - Several task scripts have hardcoded /Users/pascal paths (phronesis_monitor_pre.sh, self_diagnostic_pre.sh, repos_sync_pre.sh, backup_sessions.sh) — should use $JARVIS_DIR or config
 - phronesis_monitor_pre.sh has hardcoded chat_id and user open_id
+- content-recommend prompt has hardcoded taste profile — should read from memory
 
 ## P2 — Open source readiness
 
-- Example memory templates need expansion (hot/warm/system structure, calendar_today placeholder)
-- Task development guide (document pre/post conventions, HEARTBEAT_OK, naming)
 - Admin wizard for plugin setup (Lark + EigenFlux in-browser)
 - Progressive onboarding (first-visit guided flow)
 
