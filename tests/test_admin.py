@@ -114,8 +114,8 @@ def test_classifies_group_vs_p2p(isolated_paths):
 
 
 def test_lark_chats_missing_session_files_still_returns(isolated_paths):
-    """Session file for a computed historical ID may not exist on disk —
-    the entry should be returned with exists=False rather than omitted."""
+    """When no session files exist on disk, the chat entry is returned but
+    sessions list is empty (leading non-existing sessions are skipped)."""
     tracker = isolated_paths["tracker"]
     tracker.write_text(json.dumps({
         "ou_test": {"session_id": str(uuid.uuid5(NAMESPACE, "ou_test-2")), "counter": 2}
@@ -123,9 +123,9 @@ def test_lark_chats_missing_session_files_still_returns(isolated_paths):
     # No session files written to project dir
     admin_mod._lark_chats_cache.update(key=None, data=[], time=0.0)
     chats = admin_mod.lark_chats()
-    assert len(chats[0]["sessions"]) == 2
-    for s in chats[0]["sessions"]:
-        assert s["exists"] is False
+    # Chat entry exists but sessions list is empty (no files on disk)
+    assert len(chats) == 1
+    assert chats[0]["sessions"] == []
 
 
 def test_auth_blocks_without_token(isolated_paths, monkeypatch):

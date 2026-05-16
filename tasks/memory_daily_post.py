@@ -42,6 +42,8 @@ def main() -> int:
     ts_date = now_local_str("%Y-%m-%d")
 
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    (MEMORY_DIR / "timeline").mkdir(parents=True, exist_ok=True)
+    (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
 
     # Queue UPDATE directives (if any) — must happen before stripping them
     updates = re.findall(r'→ UPDATE:\s*(\S+\.md):\s*(.+)', summary)

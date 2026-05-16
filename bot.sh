@@ -342,10 +342,13 @@ eigenflux_stream_loop() {
   sleep 5  # let heartbeat settle first
   log_info "[ef-stream] Starting real-time message stream..."
 
-  local backoff=1 max_backoff=60 failures=0 max_failures=20 cursor=""
+  local backoff=1 max_backoff=60 failures=0 max_failures=20
+  local cursor_file="/tmp/jarvis-ef-cursor"
 
   while true; do
     local args="stream -f json"
+    local cursor=""
+    [ -f "$cursor_file" ] && cursor=$(cat "$cursor_file" 2>/dev/null)
     [ -n "$cursor" ] && args="$args --cursor $cursor"
 
     log_info "[ef-stream] Spawning: eigenflux $args"
@@ -354,7 +357,7 @@ eigenflux_stream_loop() {
     eigenflux $args 2>>"$LOG_FILE" | while IFS= read -r line; do
       [ -z "$line" ] && continue
 
-      # Extract cursor for reconnect resume
+      # Extract cursor for reconnect resume (persist to file — pipe subshell can't update parent vars)
       new_cursor=$(echo "$line" | python3 -c "
 import sys, json
 try:
@@ -363,7 +366,7 @@ try:
     if c: print(c)
 except: pass
 " 2>/dev/null || true)
-      [ -n "$new_cursor" ] && cursor="$new_cursor"
+      [ -n "$new_cursor" ] && printf '%s' "$new_cursor" > "$cursor_file"
 
       # Format message for Lark delivery (enriched with conv_id for reply)
       msg=$(JV_LINE="$line" python3 -c "
@@ -687,12 +690,19 @@ No output found for job: $out_id"
         cal_value=$(echo "$action_params" | sed -n 's/.*value=\([^|]*\).*/\1/p')
         if [ -n "$cal_event_id" ] && [ -n "$cal_field" ] && [ -n "$cal_value" ]; then
           local update_data=""
-          case "$cal_field" in
-            summary) update_data="{\"summary\":\"$cal_value\"}" ;;
-            start)   update_data="{\"start_time\":{\"timestamp\":\"$cal_value\"}}" ;;
-            end)     update_data="{\"end_time\":{\"timestamp\":\"$cal_value\"}}" ;;
-            *)       update_data="{\"description\":\"$cal_value\"}" ;;
-          esac
+          update_data=$(JV_FIELD="$cal_field" JV_VALUE="$cal_value" python3 -c "
+import os, json
+field = os.environ['JV_FIELD']
+value = os.environ['JV_VALUE']
+if field == 'summary':
+    print(json.dumps({'summary': value}))
+elif field == 'start':
+    print(json.dumps({'start_time': {'timestamp': value}}))
+elif field == 'end':
+    print(json.dumps({'end_time': {'timestamp': value}}))
+else:
+    print(json.dumps({'description': value}))
+" 2>/dev/null || echo "{}")
           local update_result
           update_result=$(lark-cli calendar events patch --as user \
             --params "{\"event_id\":\"$cal_event_id\"}" \
