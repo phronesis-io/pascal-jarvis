@@ -8,6 +8,7 @@ heartbeat_state.json
 jarvis.log
 .memory_cache
 .bot.pid
+.daemon.pid
 .free_time_nudge_state
 calendar_event_mapping.json
 
