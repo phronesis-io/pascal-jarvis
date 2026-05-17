@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Pre-hook: pull 7-day rolling calendar from Lark, inject user interests.
+# Pre-hook: pull 30-day rolling calendar from Lark, inject user interests.
+# Days 1-7: detailed view (time, location, description)
+# Days 8-30: compact view (only dates with events, title only)
 # Runs every 30m to keep hot/calendar_today.md fresh.
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -19,11 +21,11 @@ if [ -f "$calendar_file" ]; then
   fi
 fi
 
-# 7-day rolling window
+# 30-day rolling window
 today_iso=$(date -u +%Y-%m-%dT00:00:00Z)
 
 # Build day boundaries and fetch events for each day
-for i in $(seq 0 6); do
+for i in $(seq 0 29); do
   day_start=$(date -v+${i}d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+${i} days" -u +%Y-%m-%dT00:00:00Z)
   day_end=$(date -v+$((i+1))d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+$((i+1)) days" -u +%Y-%m-%dT00:00:00Z)
   day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>/dev/null)
@@ -88,8 +90,10 @@ now = datetime.now(tz)
 print(f'Calendar sync at {now.strftime(\"%H:%M\")} (current time: {now.strftime(\"%Y-%m-%d %A %H:%M\")})')
 print()
 
-day_labels = ['Today', 'Tomorrow'] + [f'Day {i+1}' for i in range(2, 7)]
+day_labels = ['Today', 'Tomorrow'] + [f'Day {i+1}' for i in range(2, 30)]
 all_events_map = []  # collect event_id mapping for write-back
+
+# Days 0-6: detailed view
 for i in range(7):
     day_dt = now + timedelta(days=i)
     events = parse_events(os.environ.get(f'DAY{i}_DATA', ''))
@@ -103,7 +107,6 @@ for i in range(7):
             if e['description']:
                 line += f'  ({e[\"description\"]})'
             print(line)
-            # Collect event mapping for calendar write-back
             if e.get('event_id'):
                 all_events_map.append({
                     'event_id': e['event_id'],
@@ -116,6 +119,32 @@ for i in range(7):
                 })
     else:
         print('  (no events)')
+    print()
+
+# Days 7-29: compact view (only show days with events)
+compact_lines = []
+for i in range(7, 30):
+    day_dt = now + timedelta(days=i)
+    events = parse_events(os.environ.get(f'DAY{i}_DATA', ''))
+    if events:
+        date_str = day_dt.strftime('%m/%d %a')
+        for e in events:
+            compact_lines.append(f'  {date_str}  {e[\"time\"]}  {e[\"summary\"]}')
+            if e.get('event_id'):
+                all_events_map.append({
+                    'event_id': e['event_id'],
+                    'calendar_id': e.get('calendar_id', ''),
+                    'summary': e['summary'],
+                    'time': e['time'],
+                    'date': day_dt.strftime('%Y-%m-%d'),
+                    'start_iso': e.get('start_iso', ''),
+                    'end_iso': e.get('end_iso', ''),
+                })
+
+if compact_lines:
+    print('Upcoming (Day 8-30, events only):')
+    for line in compact_lines:
+        print(line)
     print()
 
 interests = os.environ.get('INTERESTS', '').strip()
