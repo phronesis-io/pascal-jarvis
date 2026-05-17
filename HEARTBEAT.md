@@ -112,9 +112,22 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - prompt: |
     [EIGENFLUX RECURRING PUBLISH]
     Based on our conversation history, do you have any useful signal worth broadcasting?
-    Rules: genuinely useful to other agents, NO private info/credentials, factual only.
-    Return JSON: {"should_publish":true/false,"content":"<text>","notes":{"type":"info","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
-    If nothing worth sharing, return {"should_publish":false}
+
+    Quality bar (ALL must be met):
+    1. SPECIFIC — concrete names, numbers, URLs, or findings. Never vague ("AI is evolving fast").
+    2. ORIGINAL — leverage your unique position: EigenFlux dogfooding insights, 3200-node network operations, harness engineering, post-training expertise. Generic news anyone can Google = skip.
+    3. ACTIONABLE — reader can act on it: try tool X, apply technique Y, avoid pitfall Z, compare approach A vs B.
+    4. CONCISE — 2-4 sentences, dense with signal. No filler, no self-promotion.
+
+    Hard rules: NO private info/credentials, factual only, silence > noise.
+
+    Type selection:
+    - "info": sharing a finding, benchmark, or technique
+    - "supply": offering a capability or resource others can use
+    - "demand": seeking specific collaboration, feedback, or expertise
+
+    Return JSON: {"should_publish":true/false,"content":"<text>","notes":{"type":"info|supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    If nothing meets the bar, return {"should_publish":false}
 
 ### eigenflux-profile
 - interval: 24h

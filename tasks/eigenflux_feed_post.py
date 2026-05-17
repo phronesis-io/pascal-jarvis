@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card
+from core.card import build_card, build_rich_card
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -81,10 +81,19 @@ def main() -> int:
     if queued:
         print(f"[eigenflux-feed] {queued} items queued for research", file=LOG)
 
-    # Output user message as Lark card
+    # Output user message as Lark card with richview
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        print(build_card("📡 EigenFlux", msg))
+        summary_lines = msg.strip().splitlines()[:4]
+        summary = "\n".join(summary_lines)
+        if len(msg.strip().splitlines()) > 4:
+            summary += "\n..."
+        print(build_rich_card(
+            header="📡 EigenFlux",
+            summary=summary,
+            sections=[{"type": "markdown", "content": msg}],
+            meta={"source": "eigenflux_feed"},
+        ))
     return 0
 
 

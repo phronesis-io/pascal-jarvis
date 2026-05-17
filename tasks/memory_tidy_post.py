@@ -9,6 +9,7 @@ Claude returns a JSON with actions to take:
 }
 
 Or HEARTBEAT_OK if nothing needs fixing.
+Also always runs daily_log auto-archive (14-day TTL) as a side-effect.
 """
 import json
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.safety import looks_like_error
 from core.timeutil import now_local_str
+from tasks.memory_daily_post import _archive_old_daily_entries
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
@@ -26,6 +28,12 @@ INDEX_FILE = MEMORY_DIR / "_index.md"
 
 
 def main() -> int:
+    # Always run daily_log archive check (independent of Claude's response)
+    try:
+        _archive_old_daily_entries(now_local_str("%Y-%m-%d"))
+    except Exception as e:
+        print(f"[memory-tidy] archive check failed: {e}", file=sys.stderr)
+
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
         return 0

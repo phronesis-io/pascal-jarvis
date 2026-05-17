@@ -26,7 +26,13 @@ fi
 echo $$ > "$PIDFILE"
 
 LOG_FILE="$JARVIS_DIR/jarvis.log"
+LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
+
+# ── Log rotation (on startup) ────────────────────────────────────────
+if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+  tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+fi
 
 # ── Logging ──────────────────────────────────────────────────────────
 # All log messages go to jarvis.log AND stderr. They NEVER go to stdout,

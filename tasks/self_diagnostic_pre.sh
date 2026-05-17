@@ -51,14 +51,7 @@ fi
 # 5. Memory health
 echo ""
 echo "--- Memory ---"
-echo "Files: $(ls "$MEMORY_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')"
-pending=$(grep -c "^→ " "$MEMORY_DIR/pending_updates.md" 2>/dev/null || echo "0")
-echo "Pending updates: $pending"
-
-# 6. Recent feedback memories (things Pascal corrected)
-echo ""
-echo "--- Recent Feedback ---"
-for f in "$MEMORY_DIR"/feedback_*.md; do
-  [ -f "$f" ] || continue
-  echo "  $(basename "$f")"
-done
+hot_count=$(ls "$MEMORY_DIR/hot/"*.md 2>/dev/null | wc -l | tr -d ' ')
+warm_count=$(ls "$MEMORY_DIR/warm/"*.md 2>/dev/null | wc -l | tr -d ' ')
+echo "Hot files: $hot_count | Warm files: $warm_count"
+echo "Behavioral rules: $([ -f "$MEMORY_DIR/hot/behavioral_rules.md" ] && echo "✓" || echo "✗")"

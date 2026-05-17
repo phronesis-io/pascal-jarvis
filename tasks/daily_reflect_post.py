@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card
+from core.card import build_card, build_rich_card
 from core.safety import looks_like_error
 from core.timeutil import now_local_str
 
@@ -60,8 +60,23 @@ def main():
         tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in existing) + "\n")
         tmp.replace(PATTERNS_FILE)
 
-    # Output as Lark card
-    print(build_card("🌙 回顾", message))
+    # Output as Lark card with richview for full reflection
+    date_str = now_local_str("%Y-%m-%d")
+    summary_lines = message.strip().splitlines()[:4]
+    summary = "\n".join(summary_lines)
+    if len(message.strip().splitlines()) > 4:
+        summary += "\n..."
+
+    sections = [{"type": "markdown", "content": message}]
+    if patterns:
+        sections.append({"type": "kv", "items": {f"模式 {i+1}": p for i, p in enumerate(patterns)}})
+
+    print(build_rich_card(
+        header="🌙 回顾",
+        summary=summary,
+        sections=sections,
+        meta={"source": "daily_reflect", "date": date_str},
+    ))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# restart.sh — Graceful restart of Jarvis bot (and optionally daemon).
+#
+# Usage:
+#   ./restart.sh          # Restart bot only (daemon stays alive, restarts bot)
+#   ./restart.sh --full   # Restart both daemon and bot
+#   ./restart.sh --status # Just show current process status
+#
+set -euo pipefail
+
+JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+BOT_PID_FILE="$JARVIS_DIR/.bot.pid"
+DAEMON_PID_FILE="$JARVIS_DIR/.daemon.pid"
+LOG="/tmp/jarvis_restart.log"
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
+green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
+dim()   { printf '\033[0;90m%s\033[0m\n' "$*"; }
+
+status() {
+  echo "=== Jarvis Process Status ==="
+  echo ""
+
+  # Daemon
+  if [ -f "$DAEMON_PID_FILE" ]; then
+    daemon_pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null)
+    if kill -0 "$daemon_pid" 2>/dev/null; then
+      green "  daemon.py: running (PID $daemon_pid)"
+    else
+      red "  daemon.py: stale PID file (PID $daemon_pid not alive)"
+    fi
+  else
+    dim "  daemon.py: no PID file"
+    # Check via pgrep
+    daemon_pid=$(pgrep -f "python.*daemon.py" 2>/dev/null | head -1 || true)
+    if [ -n "$daemon_pid" ]; then
+      green "  daemon.py: running (PID $daemon_pid, no PID file)"
+    else
+      red "  daemon.py: not running"
+    fi
+  fi
+
+  # Bot
+  if [ -f "$BOT_PID_FILE" ]; then
+    bot_pid=$(cat "$BOT_PID_FILE" 2>/dev/null)
+    if kill -0 "$bot_pid" 2>/dev/null; then
+      green "  bot.sh:    running (PID $bot_pid)"
+    else
+      red "  bot.sh:    stale PID file (PID $bot_pid not alive)"
+    fi
+  else
+    bot_pid=$(pgrep -f "bash.*bot\\.sh" 2>/dev/null | head -1 || true)
+    if [ -n "$bot_pid" ]; then
+      green "  bot.sh:    running (PID $bot_pid, no PID file)"
+    else
+      red "  bot.sh:    not running"
+    fi
+  fi
+
+  # Lark listener
+  lark_pid=$(pgrep -f "lark-cli event" 2>/dev/null | head -1 || true)
+  if [ -n "$lark_pid" ]; then
+    green "  lark-cli:  running (PID $lark_pid)"
+  else
+    dim "  lark-cli:  not running"
+  fi
+
+  echo ""
+}
+
+kill_bot() {
+  echo "Stopping bot.sh and children..."
+
+  # Kill by PID file first
+  if [ -f "$BOT_PID_FILE" ]; then
+    bot_pid=$(cat "$BOT_PID_FILE" 2>/dev/null)
+    if [ -n "$bot_pid" ] && kill -0 "$bot_pid" 2>/dev/null; then
+      kill -TERM "$bot_pid" 2>/dev/null || true
+    fi
+  fi
+
+  # Kill all bot.sh and lark-cli event processes
+  pkill -f "bash.*bot\\.sh" 2>/dev/null || true
+  pkill -f "lark-cli event" 2>/dev/null || true
+
+  # Kill stuck claude sessions
+  for lock in "$JARVIS_DIR"/.session_lock_*; do
+    [ -f "$lock" ] || continue
+    pid=$(cat "$lock" 2>/dev/null)
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$lock"
+  done
+
+  # Clean PID file
+  rm -f "$BOT_PID_FILE"
+
+  # Wait for processes to die
+  sleep 2
+
+  # Verify
+  if pgrep -f "bash.*bot\\.sh" >/dev/null 2>&1; then
+    echo "  Force killing remaining bot processes..."
+    pkill -9 -f "bash.*bot\\.sh" 2>/dev/null || true
+    sleep 1
+  fi
+
+  green "  Bot stopped."
+}
+
+kill_daemon() {
+  echo "Stopping daemon..."
+  if [ -f "$DAEMON_PID_FILE" ]; then
+    daemon_pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null)
+    if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
+      kill -TERM "$daemon_pid" 2>/dev/null || true
+    fi
+    rm -f "$DAEMON_PID_FILE"
+  fi
+  pkill -f "python.*daemon\\.py" 2>/dev/null || true
+  sleep 2
+  green "  Daemon stopped."
+}
+
+start_bot() {
+  echo "Starting bot.sh..."
+  nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
+  sleep 3
+
+  if pgrep -f "bash.*bot\\.sh" >/dev/null 2>&1; then
+    green "  Bot started. Log: $LOG"
+  else
+    red "  Bot failed to start! Check: tail -20 $LOG"
+    return 1
+  fi
+}
+
+start_daemon() {
+  echo "Starting daemon.py..."
+  cd "$JARVIS_DIR"
+  nohup python3 daemon.py >> "$JARVIS_DIR/daemon.log" 2>&1 &
+  sleep 2
+
+  if pgrep -f "python.*daemon\\.py" >/dev/null 2>&1; then
+    green "  Daemon started."
+  else
+    red "  Daemon failed to start! Check: tail -20 daemon.log"
+    return 1
+  fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  --status|-s)
+    status
+    ;;
+  --full|-f)
+    echo "=== Full Restart (daemon + bot) ==="
+    echo ""
+    kill_bot
+    kill_daemon
+    echo ""
+    start_daemon
+    start_bot
+    echo ""
+    status
+    ;;
+  --help|-h)
+    echo "Usage: ./restart.sh [--full|--status|--help]"
+    echo ""
+    echo "  (no args)   Restart bot only (daemon auto-detects and stays)"
+    echo "  --full      Restart both daemon and bot"
+    echo "  --status    Show current process status"
+    ;;
+  *)
+    echo "=== Bot Restart ==="
+    echo ""
+    kill_bot
+    echo ""
+    start_bot
+    echo ""
+    status
+    ;;
+esac

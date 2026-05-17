@@ -22,7 +22,7 @@ from pathlib import Path
 
 # ── Config ──
 JARVIS_DIR = Path(__file__).parent
-CHECK_INTERVAL = 120          # seconds between health checks (2 min)
+CHECK_INTERVAL = 30           # seconds between health checks
 HEARTBEAT_STALE_THRESHOLD = 900  # 15 min without heartbeat = stale
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
