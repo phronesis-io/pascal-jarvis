@@ -2,6 +2,9 @@
 
 All heartbeat task post-scripts use this to produce single-line card JSON
 that bot.sh routes via lark_send_card().
+
+Supports RichView integration: any card can include a "查看详情" button
+that links to a full-page rendered view via core.richview.publish().
 """
 
 import json
@@ -44,3 +47,36 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None) -> str
         "elements": elements,
     }
     return json.dumps(card, ensure_ascii=False)
+
+
+def build_rich_card(
+    header: str,
+    summary: str,
+    sections: list[dict],
+    meta: dict | None = None,
+    button_text: str = "查看完整内容",
+    extra_buttons: list[dict] | None = None,
+) -> str:
+    """Build a Lark card with an auto-generated RichView link.
+
+    This is the primary way to send rich content: the card shows a summary,
+    and a button links to the full interactive page.
+
+    Args:
+        header: Card header text
+        summary: Brief markdown body shown in the card itself
+        sections: Full content sections passed to richview.publish()
+        meta: Optional metadata for the view
+        button_text: Label for the "view details" button
+        extra_buttons: Additional buttons to show alongside the view link
+
+    Returns:
+        Single-line card JSON string
+    """
+    from core.richview import publish
+
+    url = publish(title=header, sections=sections, meta=meta)
+    buttons = [{"text": button_text, "url": url}]
+    if extra_buttons:
+        buttons.extend(extra_buttons)
+    return build_card(header=header, body=summary, buttons=buttons)

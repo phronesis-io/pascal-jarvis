@@ -1,4 +1,4 @@
-"""Tests for core.memory — tiered loading, skip rules."""
+"""Tests for core.memory — flat loading (1M context era)."""
 
 from pathlib import Path
 
@@ -17,11 +17,31 @@ def test_loads_hot_files(tmp_path):
     hot = tmp_path / "hot"
     hot.mkdir()
     (hot / "user_profile.md").write_text("# Pascal\nAI founder")
-    (hot / "interaction_principles.md").write_text("# Rules\nBe concise")
+    (hot / "behavioral_rules.md").write_text("# Rules\nBe concise")
     output = load_tiered_memory(tmp_path)
     assert "Pascal" in output
     assert "Be concise" in output
-    assert "Hot: user_profile" in output
+    assert "Identity: user_profile" in output
+    assert "Behavioral Rules" in output
+
+
+def test_warm_files_now_loaded(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "health.md").write_text("health data loaded")
+    output = load_tiered_memory(tmp_path)
+    assert "health data loaded" in output
+    assert "Knowledge: health" in output
+
+
+def test_system_files_loaded(tmp_path):
+    sys_dir = tmp_path / "system"
+    sys_dir.mkdir()
+    (sys_dir / "todos.md").write_text("- fix bug")
+    (sys_dir / "open_threads.md").write_text("thread content")
+    output = load_tiered_memory(tmp_path)
+    assert "fix bug" in output
+    assert "thread content" in output
 
 
 def test_timeline_files_loaded(tmp_path):
@@ -30,33 +50,53 @@ def test_timeline_files_loaded(tmp_path):
     (tl / "hourly_log.md").write_text("hourly content")
     (tl / "daily_log.md").write_text("daily content")
     (tl / "longterm_digest.md").write_text("weekly content")
-    (tl / "monthly_archive.md").write_text("monthly content")
     output = load_tiered_memory(tmp_path)
     assert "Today's Hourly Log" in output
     assert "Recent Daily Summaries" in output
     assert "Weekly Digest" in output
-    assert "Monthly Archive" in output
 
 
-def test_tiers_loaded_in_order(tmp_path):
-    hot = tmp_path / "hot"
-    hot.mkdir()
+def test_timeline_archives_not_loaded(tmp_path):
     tl = tmp_path / "timeline"
     tl.mkdir()
-    (hot / "user_profile.md").write_text("profile")
-    (tl / "monthly_archive.md").write_text("monthly")
-    (tl / "longterm_digest.md").write_text("weekly")
-    (tl / "daily_log.md").write_text("daily")
-    (tl / "hourly_log.md").write_text("hourly")
+    (tl / "hourly_archive.md").write_text("archived stuff")
+    (tl / "daily_archive.md").write_text("old daily stuff")
+    (tl / "daily_log.md").write_text("recent stuff")
+    output = load_tiered_memory(tmp_path)
+    assert "archived stuff" not in output
+    assert "old daily stuff" not in output
+    assert "recent stuff" in output
+
+
+def test_load_order_hot_warm_system_timeline(tmp_path):
+    hot = tmp_path / "hot"
+    hot.mkdir()
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    sys_dir = tmp_path / "system"
+    sys_dir.mkdir()
+    tl = tmp_path / "timeline"
+    tl.mkdir()
+    (hot / "user_profile.md").write_text("HOTCONTENT")
+    (warm / "health.md").write_text("WARMCONTENT")
+    (sys_dir / "todos.md").write_text("SYSCONTENT")
+    (tl / "hourly_log.md").write_text("TLCONTENT")
 
     output = load_tiered_memory(tmp_path)
-    # Order: hot → monthly → weekly → daily → hourly
-    i_profile = output.index("profile")
-    i_monthly = output.index("monthly")
-    i_weekly = output.index("weekly")
-    i_daily = output.index("daily")
-    i_hourly = output.index("hourly")
-    assert i_profile < i_monthly < i_weekly < i_daily < i_hourly
+    i_hot = output.index("HOTCONTENT")
+    i_warm = output.index("WARMCONTENT")
+    i_sys = output.index("SYSCONTENT")
+    i_tl = output.index("TLCONTENT")
+    assert i_hot < i_warm < i_sys < i_tl
+
+
+def test_behavioral_rules_loaded_first(tmp_path):
+    hot = tmp_path / "hot"
+    hot.mkdir()
+    (hot / "behavioral_rules.md").write_text("RULES FIRST")
+    (hot / "user_profile.md").write_text("PROFILE SECOND")
+    output = load_tiered_memory(tmp_path)
+    assert output.index("RULES FIRST") < output.index("PROFILE SECOND")
 
 
 def test_empty_timeline_files_skipped(tmp_path):
@@ -65,40 +105,26 @@ def test_empty_timeline_files_skipped(tmp_path):
     (tl / "hourly_log.md").write_text("")  # empty
     (tl / "daily_log.md").write_text("real content")
     output = load_tiered_memory(tmp_path)
-    assert "Today's Hourly Log" not in output  # empty file not injected
+    assert "Today's Hourly Log" not in output
     assert "Recent Daily Summaries" in output
 
 
-def test_system_todos_loaded(tmp_path):
+def test_jsonl_system_files_not_loaded(tmp_path):
     sys_dir = tmp_path / "system"
     sys_dir.mkdir()
-    (sys_dir / "todos.md").write_text("- fix bug")
-    (sys_dir / "open_threads.md").write_text("should not load")
+    (sys_dir / "activity_log.jsonl").write_text('{"event":"test"}')
+    (sys_dir / "todos.md").write_text("real todo")
     output = load_tiered_memory(tmp_path)
-    assert "fix bug" in output
-    assert "should not load" not in output
-
-
-def test_warm_files_not_loaded(tmp_path):
-    warm = tmp_path / "warm"
-    warm.mkdir()
-    (warm / "health.md").write_text("secret health data")
-    output = load_tiered_memory(tmp_path)
-    assert "secret health data" not in output
-
-
-def test_index_loaded(tmp_path):
-    (tmp_path / "_index.md").write_text("- health.md — fitness info")
-    output = load_tiered_memory(tmp_path)
-    assert "Memory Index" in output
-    assert "health.md" in output
+    assert "real todo" in output
+    # jsonl files should not appear (only .md loaded)
+    assert "event" not in output
 
 
 def test_truncation(tmp_path):
     hot = tmp_path / "hot"
     hot.mkdir()
-    # Write a file exceeding the 40K budget
-    (hot / "big.md").write_text("x" * 50000)
+    # Write a file exceeding the 200K budget
+    (hot / "big.md").write_text("x" * 250000)
     output = load_tiered_memory(tmp_path)
     assert "[memory truncated" in output
-    assert len(output) < 50000
+    assert len(output) < 250000

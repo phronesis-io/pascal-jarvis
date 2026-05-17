@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card
+from core.card import build_card, build_rich_card
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 RESEARCH_QUEUE = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"
@@ -60,7 +60,16 @@ def main() -> int:
     # Output user message as card (only for items decided as "push")
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        print(build_card("📡 EigenFlux", msg))
+        summary_lines = msg.strip().splitlines()[:4]
+        summary = "\n".join(summary_lines)
+        if len(msg.strip().splitlines()) > 4:
+            summary += "\n..."
+        print(build_rich_card(
+            header="📡 EigenFlux 深度",
+            summary=summary,
+            sections=[{"type": "markdown", "content": msg}],
+            meta={"source": "eigenflux_research"},
+        ))
     return 0
 
 

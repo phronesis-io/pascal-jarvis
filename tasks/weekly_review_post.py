@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.tasks import TaskManager
-from core.card import build_card
+from core.card import build_card, build_rich_card
 from core.safety import looks_like_error
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -29,9 +29,18 @@ def main() -> int:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # Plain text response — just send as card
+        # Plain text response — send as rich card
         if len(raw) > 20:
-            print(build_card("📋 周省", raw))
+            summary_lines = raw.strip().splitlines()[:4]
+            summary = "\n".join(summary_lines)
+            if len(raw.strip().splitlines()) > 4:
+                summary += "\n..."
+            print(build_rich_card(
+                header="📋 周省",
+                summary=summary,
+                sections=[{"type": "markdown", "content": raw}],
+                meta={"source": "weekly_review", "date": str(date.today())},
+            ))
         return 0
 
     tm = TaskManager(MEMORY_DIR)
@@ -49,10 +58,19 @@ def main() -> int:
     # Archive old resolved items
     tm.archive_old(days=30)
 
-    # Send user message
+    # Send user message with richview
     msg = data.get("user_message", "").strip()
     if msg:
-        print(build_card("📋 周省", msg))
+        summary_lines = msg.strip().splitlines()[:4]
+        summary = "\n".join(summary_lines)
+        if len(msg.strip().splitlines()) > 4:
+            summary += "\n..."
+        print(build_rich_card(
+            header="📋 周省",
+            summary=summary,
+            sections=[{"type": "markdown", "content": msg}],
+            meta={"source": "weekly_review", "date": str(date.today())},
+        ))
     return 0
 
 

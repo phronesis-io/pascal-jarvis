@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hook: queue memory update directives for main session to apply.
+"""Post-hook: apply memory update directives directly to target files.
 
 Outputs the diary portion (non-UPDATE lines) to stdout so bot.sh sends it to Lark.
 """
@@ -14,16 +14,24 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-PENDING_UPDATES = MEMORY_DIR / "system" / "pending_updates.md"
 
 
-def _ensure_pending_header(path: Path) -> None:
-    if not path.exists():
-        path.write_text(
-            "---\nname: Pending Memory Updates\n"
-            "description: Queued memory updates for main session to apply\n"
-            "type: reference\n---\n\n# Pending Memory Updates\n\n## Queue\n"
-        )
+def _apply_update(memory_dir: Path, filename: str, content: str, ts: str) -> None:
+    """Directly append an update directive to the target memory file."""
+    target = memory_dir / filename
+    try:
+        target.resolve().relative_to(memory_dir.resolve())
+    except ValueError:
+        print(f"[memory-consolidate] BLOCKED path traversal: {filename}", file=sys.stderr)
+        return
+    if not target.exists():
+        print(f"[memory-consolidate] skipping update for {filename} — file does not exist", file=sys.stderr)
+        return
+    try:
+        with target.open("a", encoding="utf-8") as f:
+            f.write(f"\n<!-- auto-update {ts} -->\n- {content.strip()}\n")
+    except OSError as e:
+        print(f"[memory-consolidate] failed to write {filename}: {e}", file=sys.stderr)
 
 
 def main() -> int:
@@ -40,11 +48,9 @@ def main() -> int:
 
     updates = re.findall(r'→ UPDATE:\s*(\S+\.md):\s*(.+)', raw)
     if updates:
-        _ensure_pending_header(PENDING_UPDATES)
-        with PENDING_UPDATES.open("a", encoding="utf-8") as f:
-            for filename, content in updates:
-                f.write(f"- [{ts}] {filename}: {content.strip()}\n")
-        print(f"[memory-consolidate] queued {len(updates)} update(s)", file=sys.stderr)
+        for filename, content in updates:
+            _apply_update(MEMORY_DIR, filename, content, ts)
+        print(f"[memory-consolidate] applied {len(updates)} update(s) directly", file=sys.stderr)
 
     # Output diary portion (non-UPDATE lines) — this becomes the Lark message
     diary_lines = [l for l in raw.splitlines() if not l.startswith("→ UPDATE:")]

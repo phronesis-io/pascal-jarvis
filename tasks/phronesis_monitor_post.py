@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card
+from core.card import build_card, build_rich_card
 from core.safety import looks_like_error
 
 
@@ -18,8 +18,17 @@ def main() -> int:
         print("[counsel] skipping — looks like error output", file=sys.stderr)
         return 0
 
-    # Output as card
-    print(build_card("🏛️ Phronesis", raw))
+    # Output as rich card with full content in web view
+    summary_lines = raw.strip().splitlines()[:4]
+    summary = "\n".join(summary_lines)
+    if len(raw.strip().splitlines()) > 4:
+        summary += "\n..."
+    print(build_rich_card(
+        header="🏛️ Phronesis",
+        summary=summary,
+        sections=[{"type": "markdown", "content": raw}],
+        meta={"source": "phronesis_monitor"},
+    ))
     return 0
 
 

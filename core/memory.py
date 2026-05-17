@@ -1,27 +1,23 @@
-"""Tiered memory system for Jarvis Harness.
+"""Flat memory system for Jarvis Harness (1M context era).
 
 Directory layout:
   memory/
-  ├── _index.md          — compact index of all files (always loaded)
-  ├── hot/               — always loaded in full (~6K chars budget)
-  ├── warm/              — only name+description loaded; Claude reads on demand
-  ├── timeline/          — time-based logs (recent portions loaded)
+  ├── hot/               — identity, behavioral rules, healing frame
+  ├── warm/              — health, cultural, investment, interests, projects
+  ├── timeline/          — time-based logs (recent daily + hourly loaded)
   │   ├── hourly_log.md
   │   ├── daily_log.md
-  │   ├── longterm_digest.md
-  │   └── monthly_archive.md
-  └── system/            — operational files (todos loaded, rest summarized)
+  │   ├── daily_archive.md   (not loaded — old entries)
+  │   └── hourly_archive.md  (not loaded — old entries)
+  └── system/            — todos, open_threads, cross_session_digest
 
-Loading strategy:
-  - hot/*          → full content
-  - _index.md      → full content (tells Claude what's in warm/)
-  - system/todos.md → full content
-  - timeline/hourly_log.md    → full (today only)
-  - timeline/daily_log.md     → full (kept short by daily compression)
-  - timeline/longterm_digest.md → full
-  - timeline/monthly_archive.md → full
-  - warm/*         → NOT loaded (Claude uses Read tool when needed)
-  - system/others  → NOT loaded (referenced in index)
+Loading strategy (1M context — load everything):
+  - hot/*          → full content (rules first for attention priority)
+  - warm/*         → full content (all knowledge base files)
+  - system/*.md    → full content (todos, open_threads, digest, insights)
+  - timeline/hourly_log.md  → full
+  - timeline/daily_log.md   → full (auto-archived after 14 days)
+  - Archives       → NOT loaded (hourly_archive, daily_archive)
 """
 
 import re
@@ -29,14 +25,8 @@ from datetime import date
 from pathlib import Path
 
 # Max chars for the entire memory payload.
-# Sonnet has 200K tokens (~800K chars). Even at 40KB we use <5% of context.
-# Cost impact: ~$2.50/day extra at 144 calls/day.
-MAX_MEMORY_CHARS = 40000
-
-# Files in timeline/ that get loaded (archives are excluded)
-_TIMELINE_LOAD = {
-    "hourly_log.md", "daily_log.md", "longterm_digest.md", "monthly_archive.md",
-}
+# With 1M context (~4M chars), 200KB is <5% and covers all memory comfortably.
+MAX_MEMORY_CHARS = 200000
 
 # Files in timeline/ that are archives (never loaded into prompt)
 _TIMELINE_SKIP = {
@@ -44,16 +34,13 @@ _TIMELINE_SKIP = {
     "longterm_digest.bak.md", "monthly_archive.bak.md",
 }
 
-# System files that get loaded in full
-# cross_session_digest is warm (large, transient, on-demand read)
-_SYSTEM_LOAD = {"todos.md", "engagement_insights.md"}
 
 
 def load_tiered_memory(memory_dir: str | Path) -> str:
-    """Load memory tiers into a single string for system prompt injection.
+    """Load all memory into a single string for system prompt injection.
 
-    Returns a string with hot files, index, active system files, and timeline.
-    Warm files are NOT included — Claude reads them on demand via Read tool.
+    With 1M context, everything is loaded unconditionally.
+    Order matters for attention: rules first, identity, knowledge, system, timeline last.
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -61,37 +48,39 @@ def load_tiered_memory(memory_dir: str | Path) -> str:
 
     parts: list[str] = []
 
-    # 1. Hot files — always loaded in full
+    # 1. Hot files — behavioral rules, identity, healing frame (highest priority)
     hot_dir = memory_dir / "hot"
     if hot_dir.is_dir():
+        # Load behavioral_rules first for attention priority
+        rules = hot_dir / "behavioral_rules.md"
+        if rules.exists():
+            _append_file(parts, rules, "Behavioral Rules")
         for f in sorted(hot_dir.glob("*.md")):
-            _append_file(parts, f, f"Hot: {f.stem}")
+            if f.name != "behavioral_rules.md":
+                _append_file(parts, f, f"Identity: {f.stem}")
 
-    # 2. Index — tells Claude what's available in warm/
-    index_file = memory_dir / "_index.md"
-    if index_file.exists():
-        _append_file(parts, index_file, "Memory Index")
+    # 2. Warm files — full knowledge base (health, interests, projects, etc.)
+    warm_dir = memory_dir / "warm"
+    if warm_dir.is_dir():
+        for f in sorted(warm_dir.glob("*.md")):
+            _append_file(parts, f, f"Knowledge: {f.stem}")
 
-    # 3. System files (only todos loaded in full)
+    # 3. System files — todos, open_threads, digest, insights
     sys_dir = memory_dir / "system"
     if sys_dir.is_dir():
         for f in sorted(sys_dir.glob("*.md")):
-            if f.name in _SYSTEM_LOAD:
-                _append_file(parts, f, f"System: {f.stem}")
+            _append_file(parts, f, f"System: {f.stem}")
 
-    # 4. Timeline files
+    # 4. Timeline files (end of context — recency attention benefit)
     tl_dir = memory_dir / "timeline"
     if tl_dir.is_dir():
-        # Load in specific order for readability
-        for name in ["monthly_archive.md", "longterm_digest.md",
-                     "daily_log.md", "hourly_log.md"]:
-            f = tl_dir / name
-            if f.exists() and f.stat().st_size > 0:
-                _append_file(parts, f, _timeline_title(name))
+        for f in sorted(tl_dir.glob("*.md")):
+            if f.name not in _TIMELINE_SKIP and f.stat().st_size > 0:
+                _append_file(parts, f, _timeline_title(f.name))
 
     result = "\n\n".join(parts)
 
-    # Truncate if over budget (shouldn't happen with well-maintained files)
+    # Truncate if over budget (safety net — shouldn't happen)
     if len(result) > MAX_MEMORY_CHARS:
         result = result[:MAX_MEMORY_CHARS] + "\n\n[memory truncated — over budget]"
 

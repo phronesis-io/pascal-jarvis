@@ -28,6 +28,46 @@ type: reference
 """
 
 
+def _normalize(text: str) -> str:
+    """Normalize text for dedup comparison: lowercase, collapse whitespace, strip timestamps."""
+    import re
+    text = text.lower()
+    text = re.sub(r"\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}", "", text)  # strip timestamps
+    text = re.sub(r"[（）()\"'\s]+", " ", text).strip()
+    return text
+
+
+def _char_ngrams(text: str, n: int = 3) -> set:
+    """Extract character n-grams for language-agnostic comparison."""
+    return {text[i:i+n] for i in range(len(text) - n + 1)} if len(text) >= n else {text}
+
+
+def _is_duplicate(new_raw: str, existing_body: str) -> bool:
+    """Check if new entry is essentially the same as the most recent entry.
+    Uses character trigram Jaccard similarity — works for Chinese+English mixed text.
+    """
+    if not existing_body:
+        return False
+    import re
+    # Extract the first entry's content (up to the next ## header)
+    first_entry_match = re.match(r"\n## [^\n]+\n(.*?)(?=\n## |\Z)", existing_body, re.DOTALL)
+    if not first_entry_match:
+        return False
+    last_content = _normalize(first_entry_match.group(1))
+    new_content = _normalize(new_raw)
+    if not last_content or not new_content:
+        return False
+    # Character trigram Jaccard similarity
+    last_ngrams = _char_ngrams(last_content)
+    new_ngrams = _char_ngrams(new_content)
+    if not new_ngrams or not last_ngrams:
+        return False
+    intersection = len(last_ngrams & new_ngrams)
+    union = len(last_ngrams | new_ngrams)
+    similarity = intersection / union if union else 0
+    return similarity > 0.45
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
@@ -39,9 +79,6 @@ def main() -> int:
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
 
-    ts = now_local_str("%Y-%m-%d %H:%M")
-    new_entry = f"\n## {ts}\n{raw.strip()}\n"
-
     # Read existing entries (skip header)
     existing_body = ""
     if DIGEST_FILE.exists():
@@ -50,6 +87,14 @@ def main() -> int:
         parts = content.split("\n## ", 1)
         if len(parts) > 1:
             existing_body = "\n## " + parts[1]
+
+    # Dedup: skip if new content is essentially the same as last entry
+    if _is_duplicate(raw, existing_body):
+        print("[cross-session] skipping — duplicate of latest entry", file=sys.stderr)
+        return 0
+
+    ts = now_local_str("%Y-%m-%d %H:%M")
+    new_entry = f"\n## {ts}\n{raw.strip()}\n"
 
     # Combine: new entry first, then existing
     combined = new_entry + existing_body

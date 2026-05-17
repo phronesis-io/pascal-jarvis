@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from core import search as core_search
 from core.config import Config
+from core.richview import get_view, list_views
 from core.session import NAMESPACE as SESSION_NAMESPACE
 
 CONFIG = Config(ROOT / "jarvis.yaml")
@@ -1609,6 +1610,207 @@ def eigenflux_status() -> dict:
         return {"authed": False, "error": str(e)}
 
 
+# ── RichView Renderer ────────────────────────────────────────────────
+
+def _render_richview(view: dict) -> str:
+    """Render a view dict into a self-contained HTML page."""
+    import html as html_mod
+    from datetime import datetime
+
+    title = html_mod.escape(view.get("title", "Jarvis View"))
+    created = datetime.fromtimestamp(view["created_at"]).strftime("%Y-%m-%d %H:%M")
+    meta = view.get("meta", {})
+    source = html_mod.escape(meta.get("source", ""))
+
+    # Render sections to HTML
+    body_parts = []
+    for sec in view.get("sections", []):
+        stype = sec.get("type", "markdown")
+        if stype == "markdown":
+            # Simple markdown → HTML (basic conversion)
+            body_parts.append(f'<div class="rv-section rv-md">{_md_to_html(sec.get("content", ""))}</div>')
+        elif stype == "table":
+            headers = sec.get("headers", [])
+            rows = sec.get("rows", [])
+            ths = "".join(f"<th>{html_mod.escape(str(h))}</th>" for h in headers)
+            trs = ""
+            for row in rows:
+                tds = "".join(f"<td>{html_mod.escape(str(c))}</td>" for c in row)
+                trs += f"<tr>{tds}</tr>"
+            body_parts.append(f'<div class="rv-section"><table><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table></div>')
+        elif stype == "kv":
+            items = sec.get("items", {})
+            kvs = "".join(f'<div class="kv-row"><span class="kv-key">{html_mod.escape(str(k))}</span><span class="kv-val">{html_mod.escape(str(v))}</span></div>' for k, v in items.items())
+            body_parts.append(f'<div class="rv-section rv-kv">{kvs}</div>')
+        elif stype == "code":
+            lang = html_mod.escape(sec.get("language", ""))
+            code = html_mod.escape(sec.get("content", ""))
+            body_parts.append(f'<div class="rv-section"><pre><code class="lang-{lang}">{code}</code></pre></div>')
+        elif stype == "timeline":
+            events = sec.get("events", [])
+            evts = ""
+            for ev in events:
+                t = html_mod.escape(str(ev.get("time", "")))
+                txt = html_mod.escape(str(ev.get("text", "")))
+                evts += f'<div class="tl-item"><span class="tl-time">{t}</span><span class="tl-text">{txt}</span></div>'
+            body_parts.append(f'<div class="rv-section rv-timeline">{evts}</div>')
+        elif stype == "chart":
+            # Embed a simple chart config for client-side rendering
+            chart_json = html_mod.escape(json.dumps(sec.get("config", {})))
+            body_parts.append(f'<div class="rv-section rv-chart" data-chart=\'{chart_json}\'><canvas></canvas></div>')
+        elif stype == "html":
+            # Raw HTML passthrough (trust internal callers)
+            body_parts.append(f'<div class="rv-section">{sec.get("content", "")}</div>')
+        else:
+            body_parts.append(f'<div class="rv-section"><pre>{html_mod.escape(json.dumps(sec, indent=2))}</pre></div>')
+
+    body_html = "\n".join(body_parts)
+    source_badge = f'<span class="rv-source">{source}</span>' if source else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+:root {{
+  --bg: #0a0a0f; --surface: #12121a; --border: #2a2a3a;
+  --text: #e8e8f0; --dim: #8888aa; --accent: #a78bfa;
+  --green: #4ade80; --yellow: #facc15; --red: #f87171;
+}}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{
+  font-family: -apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+  background: var(--bg); color: var(--text);
+  padding: 2rem; max-width: 900px; margin: 0 auto;
+  line-height: 1.6;
+}}
+.rv-header {{
+  border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 2rem;
+}}
+.rv-header h1 {{ font-size: 1.5rem; font-weight: 600; }}
+.rv-meta {{ color: var(--dim); font-size: 0.85rem; margin-top: 0.5rem; }}
+.rv-source {{
+  background: var(--accent); color: #000; padding: 2px 8px;
+  border-radius: 4px; font-size: 0.75rem; font-weight: 500;
+}}
+.rv-section {{ margin-bottom: 1.5rem; }}
+.rv-md h1,.rv-md h2,.rv-md h3 {{ margin: 1em 0 0.5em; color: var(--accent); }}
+.rv-md h2 {{ font-size: 1.2rem; }}
+.rv-md p {{ margin: 0.5em 0; }}
+.rv-md ul,.rv-md ol {{ padding-left: 1.5em; margin: 0.5em 0; }}
+.rv-md li {{ margin: 0.25em 0; }}
+.rv-md strong {{ color: #fff; }}
+table {{
+  width: 100%; border-collapse: collapse; font-size: 0.9rem;
+}}
+th, td {{
+  padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border);
+}}
+th {{ color: var(--accent); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+tr:hover td {{ background: var(--surface); }}
+.rv-kv {{ background: var(--surface); border-radius: 8px; padding: 1rem; }}
+.kv-row {{
+  display: flex; justify-content: space-between; padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}}
+.kv-row:last-child {{ border-bottom: none; }}
+.kv-key {{ color: var(--dim); }}
+.kv-val {{ font-weight: 500; }}
+pre {{
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1rem; overflow-x: auto;
+  font-size: 0.85rem; line-height: 1.5;
+}}
+code {{ font-family: 'SF Mono', 'JetBrains Mono', monospace; }}
+.rv-timeline {{ position: relative; padding-left: 1.5rem; border-left: 2px solid var(--border); }}
+.tl-item {{ margin-bottom: 1rem; position: relative; }}
+.tl-item::before {{
+  content: ''; position: absolute; left: -1.75rem; top: 0.5rem;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--bg);
+}}
+.tl-time {{ color: var(--accent); font-size: 0.8rem; font-weight: 500; display: block; }}
+.tl-text {{ display: block; margin-top: 0.2rem; }}
+@media (max-width: 600px) {{
+  body {{ padding: 1rem; }}
+  .kv-row {{ flex-direction: column; gap: 0.2rem; }}
+}}
+</style>
+</head>
+<body>
+<div class="rv-header">
+  <h1>{title}</h1>
+  <div class="rv-meta">{source_badge} {created}</div>
+</div>
+{body_html}
+<script>
+// Chart.js lazy-load for chart sections
+(function() {{
+  const charts = document.querySelectorAll('.rv-chart');
+  if (!charts.length) return;
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+  s.onload = function() {{
+    charts.forEach(el => {{
+      const cfg = JSON.parse(el.dataset.chart || '{{}}');
+      if (cfg.type) new Chart(el.querySelector('canvas'), cfg);
+    }});
+  }};
+  document.body.appendChild(s);
+}})();
+</script>
+</body>
+</html>"""
+
+
+def _md_to_html(md: str) -> str:
+    """Minimal markdown to HTML (no external deps). Handles headers, bold, lists, paragraphs."""
+    import html as html_mod
+    import re
+
+    lines = md.split("\n")
+    out = []
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        # Headers
+        if m := re.match(r"^(#{1,3})\s+(.+)$", stripped):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            level = len(m.group(1))
+            out.append(f"<h{level}>{html_mod.escape(m.group(2))}</h{level}>")
+        # List items
+        elif re.match(r"^[-*]\s+", stripped):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            content = re.sub(r"^[-*]\s+", "", stripped)
+            out.append(f"<li>{html_mod.escape(content)}</li>")
+        # Empty line
+        elif not stripped:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+        # Paragraph
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<p>{html_mod.escape(stripped)}</p>")
+
+    if in_list:
+        out.append("</ul>")
+
+    result = "\n".join(out)
+    # Bold
+    result = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", result)
+    return result
+
+
 # ── Server ───────────────────────────────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1625,6 +1827,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return provided == ADMIN_TOKEN
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # RichView pages bypass auth (accessible from Lark card links)
+        if path.startswith("/view/"):
+            view_id = path.split("/view/")[1].split("/")[0].split("?")[0]
+            self._serve_richview(view_id)
+            return
+
         if not self._check_auth():
             self.send_response(401)
             self.send_header("Content-Type", "application/json")
@@ -1632,8 +1843,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'{"error":"unauthorized"}')
             return
 
-        parsed = urlparse(self.path)
-        path = parsed.path
         params = parse_qs(parsed.query)
 
         if path == "/api/memories":
@@ -1673,11 +1882,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(eigenflux_status())
         elif path == "/api/eigenflux/settings":
             self._json(eigenflux_settings())
+        elif path == "/api/views":
+            self._json(list_views())
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(HTML.encode())
+
+    def _serve_richview(self, view_id: str):
+        """Render a RichView page. No auth required."""
+        view = get_view(view_id)
+        if not view:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h1>View not found or expired</h1>")
+            return
+        html = _render_richview(view)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode())
 
     def _json(self, data, status=200):
         self.send_response(status)

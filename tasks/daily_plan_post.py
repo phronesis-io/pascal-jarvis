@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card
+from core.card import build_card, build_rich_card
 from core.safety import looks_like_error
 from core.timeutil import now_local_str
 
@@ -59,8 +59,20 @@ def main():
     tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n")
     tmp.replace(PLAN_LOG)
 
-    # Output as Lark card
-    print(build_card("🌅 今日", message))
+    # Output as Lark card with richview link for full plan
+    date_str = now_local_str("%Y-%m-%d")
+    # Card shows first 3 lines as summary, full content in richview
+    summary_lines = message.strip().splitlines()[:4]
+    summary = "\n".join(summary_lines)
+    if len(message.strip().splitlines()) > 4:
+        summary += "\n..."
+
+    print(build_rich_card(
+        header="🌅 今日",
+        summary=summary,
+        sections=[{"type": "markdown", "content": message}],
+        meta={"source": "daily_plan", "date": date_str},
+    ))
 
 
 if __name__ == "__main__":

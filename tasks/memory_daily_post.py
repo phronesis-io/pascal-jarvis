@@ -2,11 +2,13 @@
 """Post-hook: save daily summary, archive and clear hourly log.
 
 Also extracts any '→ UPDATE: filename.md: content' directives Claude may have
-emitted and queues them in pending_updates.md for later application.
+emitted and applies them directly to target memory files.
+Entries older than 14 days in daily_log are archived to daily_archive.
 """
 import os
 import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,17 +20,27 @@ MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
 HOURLY_LOG = MEMORY_DIR / "timeline" / "hourly_log.md"
 HOURLY_ARCHIVE = MEMORY_DIR / "timeline" / "hourly_archive.md"
 DAILY_LOG = MEMORY_DIR / "timeline" / "daily_log.md"
-PENDING_UPDATES = MEMORY_DIR / "system" / "pending_updates.md"
+DAILY_ARCHIVE = MEMORY_DIR / "timeline" / "daily_archive.md"
+ARCHIVE_DAYS = 14
 
 
-def _ensure_pending_header(path: Path) -> None:
-    """Create pending_updates.md with frontmatter if missing."""
-    if not path.exists():
-        path.write_text(
-            "---\nname: Pending Memory Updates\n"
-            "description: Queued memory updates for main session to apply\n"
-            "type: reference\n---\n\n# Pending Memory Updates\n\n## Queue\n"
-        )
+def _apply_update(memory_dir: Path, filename: str, content: str, ts: str) -> None:
+    """Directly append an update directive to the target memory file."""
+    target = memory_dir / filename
+    # Path containment check
+    try:
+        target.resolve().relative_to(memory_dir.resolve())
+    except ValueError:
+        print(f"[memory-daily] BLOCKED path traversal attempt: {filename}", file=sys.stderr)
+        return
+    if not target.exists():
+        print(f"[memory-daily] skipping update for {filename} — file does not exist", file=sys.stderr)
+        return
+    try:
+        with target.open("a", encoding="utf-8") as f:
+            f.write(f"\n<!-- auto-update {ts} -->\n- {content.strip()}\n")
+    except OSError as e:
+        print(f"[memory-daily] failed to write {filename}: {e}", file=sys.stderr)
 
 
 def main() -> int:
@@ -45,13 +57,11 @@ def main() -> int:
     (MEMORY_DIR / "timeline").mkdir(parents=True, exist_ok=True)
     (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
 
-    # Queue UPDATE directives (if any) — must happen before stripping them
+    # Apply UPDATE directives directly to target files
     updates = re.findall(r'→ UPDATE:\s*(\S+\.md):\s*(.+)', summary)
     if updates:
-        _ensure_pending_header(PENDING_UPDATES)
-        with PENDING_UPDATES.open("a", encoding="utf-8") as f:
-            for filename, content in updates:
-                f.write(f"- [{ts_date}] {filename}: {content.strip()}\n")
+        for filename, content in updates:
+            _apply_update(MEMORY_DIR, filename, content, ts_date)
 
     # Strip UPDATE lines from the index we'll write to daily_log
     index_lines = [l for l in summary.splitlines() if not l.startswith("→ UPDATE:")]
@@ -68,8 +78,64 @@ def main() -> int:
             f.write(f"\n# Archived {ts_date}\n{HOURLY_LOG.read_text(encoding='utf-8')}\n")
         HOURLY_LOG.write_text("")
 
+    # Auto-archive daily_log entries older than 14 days
+    _archive_old_daily_entries(ts_date)
+
     print(f"[memory] Daily index saved for {ts_date}.", file=sys.stderr)
     return 0
+
+
+def _archive_old_daily_entries(today_str: str) -> None:
+    """Move entries older than ARCHIVE_DAYS from daily_log to daily_archive."""
+    if not DAILY_LOG.exists():
+        return
+    content = DAILY_LOG.read_text(encoding="utf-8")
+    if not content.strip():
+        return
+
+    try:
+        cutoff = datetime.strptime(today_str, "%Y-%m-%d") - timedelta(days=ARCHIVE_DAYS)
+    except ValueError:
+        return
+
+    # Split by ## date headers
+    sections = re.split(r'(^## \d{4}-\d{2}-\d{2})', content, flags=re.MULTILINE)
+
+    keep = []
+    archive = []
+    i = 0
+    # First section (before any ## header) — keep as preamble
+    if sections and not sections[0].startswith("## "):
+        keep.append(sections[0])
+        i = 1
+
+    while i < len(sections) - 1:
+        header = sections[i]
+        body = sections[i + 1] if i + 1 < len(sections) else ""
+        date_match = re.match(r'## (\d{4}-\d{2}-\d{2})', header)
+        if date_match:
+            try:
+                entry_date = datetime.strptime(date_match.group(1), "%Y-%m-%d")
+                if entry_date < cutoff:
+                    archive.append(header + body)
+                else:
+                    keep.append(header + body)
+            except ValueError:
+                keep.append(header + body)
+        else:
+            keep.append(header + body)
+        i += 2
+
+    if not archive:
+        return
+
+    # Append archived entries to daily_archive
+    with DAILY_ARCHIVE.open("a", encoding="utf-8") as f:
+        f.write("".join(archive))
+
+    # Rewrite daily_log with only recent entries
+    DAILY_LOG.write_text("".join(keep), encoding="utf-8")
+    print(f"[memory] Archived {len(archive)} old entries from daily_log", file=sys.stderr)
 
 
 if __name__ == "__main__":
