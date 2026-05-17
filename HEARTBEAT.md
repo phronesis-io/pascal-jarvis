@@ -262,11 +262,11 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - post: tasks/memory_consolidate_post.py
 - prompt: |
     [DAILY MEMORY CONSOLIDATION]
-    Review the memory files and today's context below. Memory is organized as:
-    - hot/ : always-loaded core files (user_profile, feedback_rules, etc.)
-    - warm/ : on-demand reference files (health, cultural, investment, etc.)
-    - system/ : operational files (todos, open_threads, pending_updates)
-    For each update needed, output a line in this exact format:
+    Review the memory files and today's context below. All memory is loaded unconditionally:
+    - hot/ : identity, behavioral rules, healing frame
+    - warm/ : health, cultural, investment, interests, projects
+    - system/ : todos, open_threads
+    Updates are applied DIRECTLY to target files (no queue). For each update needed:
     → UPDATE: <subdir/filename>.md: <what to add or change>
     Then output a brief diary summary of what changed today.
     If nothing new, reply: HEARTBEAT_OK
@@ -428,15 +428,23 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     [DAILY PLAN — 晨间一览]
     Present today's landscape. NOT a todo list — a TERRAIN MAP of the day ahead.
 
-    Include:
-    1. Fixed commitments from calendar (time + name only)
-    2. Largest free block + what time
-    3. Any pending tasks (if data available)
-    4. ONE open question about intention — casual, not KPI-like
-       (e.g., "下午有两小时空档，有没有什么想试的？" or "昨天X还没收尾，今天继续？")
+    Structure:
+    1. PRAXIS (修行): Show today's practices as the ground — not as checkboxes.
+       "地面: 08:30 晨起拉伸 (20min)" — these are WHO you are, not WHAT you do.
+    2. Fixed commitments from calendar (time + name only)
+    3. Committed tasks with time-binding and capacity indicator
+    4. Largest free block + what time
+    5. TRIAGE (if inbox items exist): For each, present three paths:
+       "今天做" / "这周" / "不做" — all three are equally valid choices.
+    6. ONE open question about intention — casual, not KPI-like
 
-    Tone: brief, warm, practical. Under 100 words Chinese.
-    DO NOT: list every event mechanically, give productivity advice, set KPIs, use emojis.
+    CAPACITY CHECK: If committed poiesis > 300min (5h):
+      Gently note: "今天已经排了X小时，还有空间吗？" Never refuse — just surface reality.
+      (道家: 留白是系统呼吸的空间)
+
+    Tone: brief, warm, practical. Under 120 words Chinese.
+    DO NOT: list every event mechanically, give productivity advice, set KPIs, use emojis,
+    guilt-trip about yesterday's incomplete items.
     If it's weekend and calendar is empty: "今天是空的，随你安排" is perfectly fine.
 
     Return JSON: {"user_message": "<markdown text>"}
@@ -532,3 +540,75 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Examples: add a new project link, update bio text, add a publication.
     Return JSON: {"suggestion": "<what to update>", "reason": "<why>"}
     Or HEARTBEAT_OK if the site looks current and nothing needs changing.
+
+## Task System
+
+### task-triage
+- interval: 6h
+- pre: tasks/task_triage_pre.sh
+- post: tasks/task_triage_post.py
+- prompt: |
+    [TASK TRIAGE — Stale detection & decay]
+    Check the DATA below for items needing attention.
+
+    For STALE INBOX items (>48h):
+    - Compose a brief message asking the user to decide: 做/不做/下周？
+    - Tone: casual, no pressure. "这个等了两天了" not "你还没决定".
+
+    For READY TO DECAY items (3+ touches):
+    - Auto-decay them. Include in auto_decay list.
+    - Message tone: "帮你放下了——不是做不到，只是现在不是时候。随时可以捡回来。"
+    - Decay is mercy, never punishment.
+
+    For OVERDUE items:
+    - Just note them for user awareness. No guilt.
+
+    Return JSON: {
+      "user_message": "<markdown, or empty if nothing to say>",
+      "auto_decay": [{"task_id": "<id>", "reason": "<brief>"}]
+    }
+    If nothing needs attention: HEARTBEAT_OK
+
+### weekly-review
+- interval: 7d
+- pre: tasks/weekly_review_pre.sh
+- post: tasks/weekly_review_post.py
+- prompt: |
+    [WEEKLY REVIEW — 周省]
+    This is the only moment where the full landscape is visible.
+    NOT a performance review. A landscape survey. A walk with a wise friend.
+
+    STEPS:
+    1. PRAXIS CHECK: Show streaks. No judgment. Pattern only.
+       "拉伸做了5/7天，冥想2/7。" No "should do better".
+
+    2. STALE SCAN: Any committed items touched 2+ times without completion?
+       Present each with: "还想做吗？要么这周真的排进去，要么放手。"
+       (王阳明: 知而不行非真知 — if you keep not doing it, maybe you don't actually want it)
+
+    3. PROJECT PULSE: For each in-progress project,
+       one sentence on momentum: moving / stuck / dormant.
+       Dormant > 2 weeks: "这个项目沉默了两周。暂停是有意的吗？"
+
+    4. INBOX ZERO: Force-triage any remaining inbox items.
+       48h+ items get surfaced. Decision required.
+
+    5. NEXT WEEK LANDSCAPE: Show calendar density.
+       If >80% filled: "下周很满，想提前砍掉什么吗？" (道家: 留白)
+       If <40% filled: "下周比较松，有没有什么想主动安排的？"
+
+    6. ONE QUESTION: End with one question that reflects their trajectory.
+       Not "what are your goals" but something specific based on the data.
+       (Existentialist authenticity check — "上周花最多时间的事，是你真正想做的吗？")
+
+    Tone: wise friend on a walk, not a coach with a clipboard.
+    Under 200 words Chinese. No emojis except minimal structure markers.
+
+    Return JSON: {
+      "user_message": "<markdown>",
+      "auto_actions": [
+        {"action": "decay", "task_id": "...", "reason": "..."},
+        {"action": "defer", "task_id": "...", "to_date": "..."}
+      ]
+    }
+    Or HEARTBEAT_OK if truly nothing to review.

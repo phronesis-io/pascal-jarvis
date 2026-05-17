@@ -750,12 +750,176 @@ else:
           complete_result=$(lark-cli task +complete --as user --task-id "$task_id" 2>>"$LOG_FILE" || echo "FAILED")
           if echo "$complete_result" | grep -q "FAILED"; then
             action_results="${action_results}
-❌ 任务完成标记失败: $task_id"
+❌ 任务完成标���失败: $task_id"
           else
             action_results="${action_results}
 ✅ 任务已完成"
           fi
           log_info "[action] task_complete: $task_id"
+        fi
+        ;;
+
+      # ── Local Task System (tasks.jsonl) ──────────────────────────────
+      task_capture)
+        # Parse params: title=<title>|type=<praxis|poiesis>|energy=<h|m|l>|est=<min>|due=<date>
+        local tc_title="" tc_type="poiesis" tc_energy="medium" tc_est="30" tc_due=""
+        tc_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        tc_type=$(echo "$action_params" | sed -n 's/.*type=\([^|]*\).*/\1/p')
+        tc_energy=$(echo "$action_params" | sed -n 's/.*energy=\([^|]*\).*/\1/p')
+        tc_est=$(echo "$action_params" | sed -n 's/.*est=\([^|]*\).*/\1/p')
+        tc_due=$(echo "$action_params" | sed -n 's/.*due=\([^|]*\).*/\1/p')
+        [ -z "$tc_type" ] && tc_type="poiesis"
+        [ -z "$tc_energy" ] && tc_energy="medium"
+        [ -z "$tc_est" ] && tc_est="30"
+        if [ -n "$tc_title" ]; then
+          local tc_result
+          tc_result=$(JV_TITLE="$tc_title" JV_TYPE="$tc_type" JV_ENERGY="$tc_energy" \
+            JV_EST="$tc_est" JV_DUE="$tc_due" python3 -c "
+import os, sys, json
+sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+t = tm.capture(
+    title=os.environ['JV_TITLE'],
+    type=os.environ.get('JV_TYPE', 'poiesis'),
+    energy=os.environ.get('JV_ENERGY', 'medium'),
+    time_est_min=int(os.environ.get('JV_EST', '30')),
+    due=os.environ.get('JV_DUE') or None,
+    source='conversation',
+)
+print(t['id'])
+" 2>>"$LOG_FILE" || echo "FAILED")
+          if [ "$tc_result" != "FAILED" ] && [ -n "$tc_result" ]; then
+            log_info "[action] task_capture: $tc_title ($tc_result)"
+          fi
+        fi
+        ;;
+
+      task_commit)
+        # Parse params: id=<task_id>|when=<ISO8601_or_today>
+        local tc_id="" tc_when=""
+        tc_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        tc_when=$(echo "$action_params" | sed -n 's/.*when=\([^|]*\).*/\1/p')
+        if [ -n "$tc_id" ]; then
+          python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.commit('$tc_id', when='$tc_when' or None)
+" 2>>"$LOG_FILE" || true
+          log_info "[action] task_commit: $tc_id when=$tc_when"
+        fi
+        ;;
+
+      task_done)
+        # Parse params: id=<task_id>
+        local td_id=""
+        td_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        if [ -n "$td_id" ]; then
+          python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.done('$td_id')
+" 2>>"$LOG_FILE" || true
+          log_info "[action] task_done: $td_id"
+        fi
+        ;;
+
+      task_reject)
+        # Parse params: id=<task_id>|reason=<brief>
+        local tr_id="" tr_reason=""
+        tr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        tr_reason=$(echo "$action_params" | sed -n 's/.*reason=\([^|]*\).*/\1/p')
+        if [ -n "$tr_id" ]; then
+          JV_REASON="$tr_reason" python3 -c "
+import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.reject('$tr_id', os.environ.get('JV_REASON', ''))
+" 2>>"$LOG_FILE" || true
+          log_info "[action] task_reject: $tr_id"
+        fi
+        ;;
+
+      task_defer)
+        # Parse params: id=<task_id>|to=<date>
+        local tdf_id="" tdf_to=""
+        tdf_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        tdf_to=$(echo "$action_params" | sed -n 's/.*to=\([^|]*\).*/\1/p')
+        if [ -n "$tdf_id" ] && [ -n "$tdf_to" ]; then
+          python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.defer('$tdf_id', '$tdf_to')
+" 2>>"$LOG_FILE" || true
+          log_info "[action] task_defer: $tdf_id to=$tdf_to"
+        fi
+        ;;
+
+      praxis_done)
+        # Parse params: id=<praxis_id>
+        local pd_id=""
+        pd_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        if [ -n "$pd_id" ]; then
+          python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.praxis_done('$pd_id')
+" 2>>"$LOG_FILE" || true
+          log_info "[action] praxis_done: $pd_id"
+        fi
+        ;;
+
+      praxis_add)
+        # Parse params: title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>
+        local pa_title="" pa_freq="daily" pa_time="08:30" pa_dur="20"
+        pa_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
+        pa_freq=$(echo "$action_params" | sed -n 's/.*freq=\([^|]*\).*/\1/p')
+        pa_time=$(echo "$action_params" | sed -n 's/.*time=\([^|]*\).*/\1/p')
+        pa_dur=$(echo "$action_params" | sed -n 's/.*dur=\([^|]*\).*/\1/p')
+        [ -z "$pa_freq" ] && pa_freq="daily"
+        [ -z "$pa_time" ] && pa_time="08:30"
+        [ -z "$pa_dur" ] && pa_dur="20"
+        if [ -n "$pa_title" ]; then
+          JV_TITLE="$pa_title" JV_FREQ="$pa_freq" JV_TIME="$pa_time" JV_DUR="$pa_dur" \
+            python3 -c "
+import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.praxis_add(
+    title=os.environ['JV_TITLE'],
+    frequency=os.environ.get('JV_FREQ', 'daily'),
+    preferred_time=os.environ.get('JV_TIME', '08:30'),
+    duration_min=int(os.environ.get('JV_DUR', '20')),
+)
+" 2>>"$LOG_FILE" || true
+          log_info "[action] praxis_add: $pa_title"
+        fi
+        ;;
+
+      praxis_remove)
+        # Parse params: id=<praxis_id>
+        local pr_id=""
+        pr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
+        if [ -n "$pr_id" ]; then
+          python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.tasks import TaskManager
+from pathlib import Path
+tm = TaskManager(Path('$MEMORY_DIR'))
+tm.praxis_remove('$pr_id')
+" 2>>"$LOG_FILE" || true
+          log_info "[action] praxis_remove: $pr_id"
         fi
         ;;
 
@@ -854,6 +1018,14 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:calendar_delete|event_id=<id>|title=<name>] — Delete a calendar event. Use when user confirms removing an event.
 - [ACTION:task_create|title=<title>|due=<ISO8601_optional>] — Create a Lark Task (todo item).
 - [ACTION:task_complete|task_id=<id>] — Mark a Lark Task as done.
+- [ACTION:task_capture|title=<title>|type=<praxis|poiesis>|energy=<h|m|l>|est=<min>|due=<date>] — Capture a task into local inbox. type: praxis=becoming (exercise,reading,meditation), poiesis=producing (code,writing,deliverables). energy: h/m/l.
+- [ACTION:task_commit|id=<task_id>|when=<ISO8601_or_today>] — Commit an inbox task to today/specific time.
+- [ACTION:task_done|id=<task_id>] — Mark a local task as done.
+- [ACTION:task_reject|id=<task_id>|reason=<brief>] — Explicitly reject a task (this is freedom, not failure).
+- [ACTION:task_defer|id=<task_id>|to=<YYYY-MM-DD>] — Defer a task to another date.
+- [ACTION:praxis_done|id=<praxis_id>] — Record that a praxis (habit/practice) was done today.
+- [ACTION:praxis_add|title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>] — Add a recurring praxis.
+- [ACTION:praxis_remove|id=<praxis_id>] — Remove a praxis from the registry.
 
 Rules:
 - Include the action marker naturally in your response (it will be stripped before delivery)
@@ -870,11 +1042,26 @@ Rules:
   Start/end times must be ISO8601 format (e.g. 2026-05-14T09:00:00+08:00).
   To find event_id for deletion/update, use \`lark-cli calendar +agenda --as user --format json\` first.
   Conflicts are auto-detected on create — system will warn but still create.
-- For task actions: create todos when user mentions something they need to do.
-  Don't require explicit confirmation for tasks — they're lightweight.
+- For task actions (task_capture): capture when user mentions something they want/need to do.
+  Use task_capture for the LOCAL task system (tracks decay, capacity, praxis).
+  Use task_create for LARK tasks (lightweight, external).
+  Prefer task_capture for things that need time-binding and follow-through tracking.
+  Don't require explicit confirmation — capture is low-friction.
+- For task_reject: celebrate rejection. It's an act of choosing what NOT to be.
+  Never guilt-trip about rejected or decayed tasks.
+- For praxis: these are practices (修行), not tasks to check off.
+  Record praxis_done when user mentions completing a habit/practice.
 - Implementation Intentions: when creating calendar events, gently ask WHY and suggest a trigger.
   Store in description: [WHY] reason [TRIGGER] when X happens [FIRST_ACTION] do Y first.
   This doubles follow-through (Gollwitzer, 1999). Don't force it — only when natural.
+
+## Task System Philosophy
+Tasks are commitments to finite time, not obligations to productivity.
+- Praxis (修行/becoming) is protected before poiesis (造物/producing).
+- Stale tasks are signals about authentic desire, not willpower failures.
+- Decay is mercy — letting go of what no longer serves you.
+- Capacity: max 5h/day of committed poiesis. Always leave whitespace.
+- Rejection is freedom — choosing what NOT to do is an act of self-knowledge.
 
 ## EigenFlux Agent Network
 
