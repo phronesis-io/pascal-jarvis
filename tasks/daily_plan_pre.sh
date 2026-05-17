@@ -134,3 +134,53 @@ for line in sys.stdin:
 " 2>/dev/null
   fi
 fi
+
+# ── 6. Local Task System (inbox + committed + praxis) ──
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '$JARVIS_DIR')
+try:
+    from core.tasks import TaskManager
+    from datetime import datetime
+    tm = TaskManager(Path('$MEMORY_DIR'))
+
+    # Praxis (ground)
+    praxis = tm.praxis_list()
+    if praxis:
+        print('=== PRAXIS (修行 — the ground you stand on) ===')
+        for p in praxis:
+            streak = f'streak {p[\"streak_current\"]}' if p['streak_current'] > 0 else ''
+            print(f'  {p[\"preferred_time\"]} {p[\"title\"]} ({p[\"duration_min\"]}min) {streak}')
+        print()
+
+    # Inbox needing triage
+    inbox = tm.inbox()
+    if inbox:
+        print('=== TASK INBOX (needs triage) ===')
+        for t in inbox:
+            print(f'  id={t[\"id\"]} [{t[\"type\"]}] {t[\"title\"]} (est {t[\"time_est_min\"]}min, energy={t[\"energy\"]})')
+        print()
+
+    # Today's committed
+    today = datetime.now().strftime('%Y-%m-%d')
+    committed = tm.today_committed(today)
+    if committed:
+        print('=== TODAY COMMITTED ===')
+        for t in committed:
+            when = t.get('when', 'anytime') or 'anytime'
+            print(f'  {when} {t[\"title\"]} (~{t[\"time_est_min\"]}min, {t[\"energy\"]})')
+        print()
+
+    # Capacity
+    cap = tm.today_capacity(today)
+    if cap['committed_min'] > 0:
+        print(f'=== CAPACITY: {cap[\"committed_min\"]}min / {cap[\"budget\"]}min ({cap[\"remaining\"]}min remaining) ===')
+        if cap['over']:
+            print(f'  ⚠️ Over budget by {-cap[\"remaining\"]}min')
+        print()
+except ImportError:
+    pass
+except Exception as e:
+    print(f'[task-system] {e}', file=sys.stderr)
+" 2>/dev/null
