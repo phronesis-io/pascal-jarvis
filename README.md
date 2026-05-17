@@ -83,7 +83,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
    - *Activity log* — silent background tracker that logs what you're working on
    - *Daily reflect* — evening review with wins, patterns, and tomorrow prep
    - *Free-time nudge* — detects idle calendar blocks and sends casual suggestions
-   - *Calendar read/write* — syncs Lark calendar events and can create/update/delete them
+   - *Calendar read/write* — 30-day rolling window (7 days detailed + 8-30 days compact), with create/update/delete write-back
+   - *Task triage* — philosophical task system (praxis/poiesis capture → commit → decay)
+   - *Weekly review* — end-of-week summary and planning
 
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
@@ -92,7 +94,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
-5. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics, engagement analysis, and cross-session context bridging.
+5. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning checkin frequency, content mix, and delivery windows. Cross-session sync imports context from parallel Claude Code projects.
+
+6. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics, and cross-session context bridging.
 
 ## Architecture
 
@@ -141,8 +145,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  tasks/                           (pre/post hooks)          │
 │  ├── Daily rhythm:                                          │
 │  │   daily_plan, activity_log, daily_reflect, free_time_nudge│
-│  ├── Calendar:                                              │
-│  │   calendar_sync, calendar_write                          │
+│  ├── Calendar & Tasks:                                      │
+│  │   calendar_sync, calendar_write, task_triage,            │
+│  │   weekly_review                                          │
 │  ├── Memory pipeline:                                       │
 │  │   memory_hourly → daily → weekly → monthly,              │
 │  │   memory_consolidate, memory_tidy                        │
