@@ -29,6 +29,7 @@ MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
 CALENDAR_FILE = MEMORY_DIR / "hot" / "calendar_today.md"
 HASH_FILE = MEMORY_DIR / "system" / ".calendar_hash"
 EVENTS_FILE = MEMORY_DIR / "system" / ".calendar_events.json"
+RAW_CACHE = MEMORY_DIR / "system" / ".calendar_raw_output.txt"
 
 
 def extract_events(text: str) -> set[str]:
@@ -70,16 +71,27 @@ def main() -> int:
     # Event ID mapping is saved directly by the pre-script to $JARVIS_DIR/calendar_event_mapping.json
     # (used by calendar_write.sh for write-back)
 
-    # Always update the memory file silently
+    # Use raw pre-script output (actual schedule data) for memory file,
+    # NOT Claude's response which may be just a summary.
+    # The pre-script saves its output to RAW_CACHE via tee.
+    schedule_data = ""
+    if RAW_CACHE.exists():
+        schedule_data = RAW_CACHE.read_text().strip()
+
+    # Fallback to Claude's output if raw cache missing (shouldn't happen)
+    if not schedule_data:
+        schedule_data = raw
+
+    # Always update the memory file silently with FULL schedule data
     CALENDAR_FILE.write_text(
         f"---\nname: 今日日程\ndescription: Lark 日历自动同步，含今天和明天的日程\n"
-        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{raw}\n"
+        f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{schedule_data}\n"
     )
     print(f"[calendar-sync] Updated memory silently at {ts}", file=sys.stderr)
 
     # Detect structural changes (new/removed events)
     EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    new_events = extract_events(raw)
+    new_events = extract_events(schedule_data)
     old_events: set[str] = set()
     if EVENTS_FILE.exists():
         try:

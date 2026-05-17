@@ -21,8 +21,8 @@ echo "Last updated: $profile_ts"
 # 2. Calendar freshness
 echo ""
 echo "--- Calendar ---"
-if [ -f "$MEMORY_DIR/calendar_today.md" ]; then
-  cal_sync=$(grep -o 'synced [0-9-]* [0-9:]*' "$MEMORY_DIR/calendar_today.md" | head -1)
+if [ -f "$MEMORY_DIR/hot/calendar_today.md" ]; then
+  cal_sync=$(grep -o 'synced [0-9-]* [0-9:]*' "$MEMORY_DIR/hot/calendar_today.md" | head -1)
   echo "Last sync: $cal_sync"
 else
   echo "⚠️ No calendar_today.md found"
