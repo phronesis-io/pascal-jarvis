@@ -4,6 +4,7 @@
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
+RAW_CACHE="$MEMORY_DIR/system/.calendar_raw_output.txt"
 
 # Require lark-cli
 command -v lark-cli &>/dev/null || exit 0
@@ -38,6 +39,10 @@ fi
 
 # Format via Python (all DAY0_DATA..DAY6_DATA + INTERESTS are already exported)
 export INTERESTS="$interests"
+mkdir -p "$(dirname "$RAW_CACHE")"
+
+# Use a subshell + tee to save raw output to cache while still printing to stdout
+(
 python3 -c "
 import json, os, sys
 from datetime import datetime, timezone, timedelta
@@ -129,6 +134,7 @@ if all_events_map:
             print(f'[calendar] {len(all_events_map)} events mapped', file=sys.stderr)
         except Exception:
             pass
+
 " 2>/dev/null
 
 # ── Fetch real NBA schedule for teams in interests ──
@@ -185,3 +191,4 @@ if games:
     echo "$nba_schedule"
   fi
 fi
+) | tee "$RAW_CACHE"
