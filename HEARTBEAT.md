@@ -10,7 +10,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 |---|---|---|
 | Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | plan+reflect yes, activity-log silent |
 | Check-in | checkin | yes |
-| Calendar | calendar-sync | silent (updates memory) |
+| Calendar & Tasks | calendar-sync, task-triage, weekly-review | calendar silent, task-triage+weekly yes |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-publish, eigenflux-profile | feed+messages yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
