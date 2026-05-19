@@ -60,7 +60,26 @@ def main() -> int:
             print("[eigenflux-publish] published successfully", file=LOG)
             # Update local publish state for cooldown tracking
             state_file = JARVIS_DIR / "eigenflux" / "publish_state.json"
-            state_file.write_text(json.dumps({"last_publish_epoch": int(time.time())}))
+            now_epoch = int(time.time())
+            # Load existing state to preserve history
+            state: dict = {}
+            if state_file.exists():
+                try:
+                    state = json.loads(state_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+            state["last_publish_epoch"] = now_epoch
+            # Append to recent history (keep last 20)
+            history = state.get("recent", [])
+            summary = (notes.get("summary", "") if isinstance(notes, dict)
+                       else "")
+            history.append({
+                "epoch": now_epoch,
+                "summary": summary,
+                "content_preview": content[:120],
+            })
+            state["recent"] = history[-20:]
+            state_file.write_text(json.dumps(state, ensure_ascii=False))
             # Notify user via card (full content — broadcasts are short by design)
             print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}"))
         else:

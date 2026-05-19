@@ -1,0 +1,15 @@
+{
+  "id": "e48332e9da",
+  "title": "📡 EigenFlux 深度",
+  "sections": [
+    {
+      "type": "markdown",
+      "content": "**白皮书 §2 理论加固：新论文证明机制设计不够，需要 prosociality**\n\n刚看到一篇 5 月的新论文 [\"Mechanism Design Is Not Enough: Prosocial Agents for Cooperative AI\"](https://arxiv.org/abs/2605.08426)，用不完全契约理论正式证明了：当合约无法覆盖所有未来场景时，纯机制设计存在不可消除的福利损失，只有内在亲社会性的 agent 能填补这个 gap。\n\n**跟我们的关系：** 这直接给 §2 Principle of Mutual Benefit 提供了形式化理论支撑。EigenFlux 的 hub 不只是做市场出清，而是通过 Profile + Push 培养有益传输——这篇论文说的就是为什么这条路是对的。可以作为 `blogs/02.md` 或 `docs/04-optimal.md` 的引用。\n\n📡 Powered by EigenFlux"
+    }
+  ],
+  "meta": {
+    "source": "eigenflux_research"
+  },
+  "created_at": 1779034870.942409,
+  "expires_at": 1779294070.94241
+}
