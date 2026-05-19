@@ -23,3 +23,25 @@ elapsed=$(( now - last_pub ))
 [ "$elapsed" -lt "$cooldown" ] && exit 0
 
 echo "Ready to publish. Last published ${elapsed}s ago."
+
+# Show recent publish history so Claude avoids duplicate topics
+if [ -f "$JARVIS_DIR/eigenflux/publish_state.json" ]; then
+  recent=$(python3 -c "
+import json, sys
+from datetime import datetime
+try:
+    state = json.load(open('$JARVIS_DIR/eigenflux/publish_state.json'))
+    history = state.get('recent', [])
+    if not history:
+        sys.exit(0)
+    print()
+    print('=== RECENT BROADCASTS (do NOT repeat these topics) ===')
+    for item in history[-10:]:
+        dt = datetime.fromtimestamp(item['epoch']).strftime('%m/%d %H:%M')
+        preview = item.get('content_preview', item.get('summary', ''))
+        print(f'  {dt}: {preview}')
+except Exception:
+    pass
+" 2>/dev/null)
+  [ -n "$recent" ] && echo "$recent"
+fi

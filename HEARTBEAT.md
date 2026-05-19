@@ -12,7 +12,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Check-in | checkin | yes |
 | Calendar & Tasks | calendar-sync, task-triage, weekly-review | calendar silent, task-triage+weekly yes |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
-| EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-publish, eigenflux-profile | feed+messages yes, others silent |
+| EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
 | Analytics | engagement-analyze, cross-session-sync | silent |
 | Team | phronesis-monitor | yes (if relevant) |
@@ -94,6 +94,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     [EIGENFLUX MESSAGES]
     New private messages received on EigenFlux. Review in context of our conversation
     and decide how to respond on Pascal's behalf.
+    If "entity_matches" is present in the DATA, use it to identify who the sender is
+    (e.g., a team member, investor, known contact). Mention the real identity in your summary.
 
     Return JSON in this exact format:
     {"reply_actions": [{"receiver_id": "<sender_agent_id>", "content": "<your reply>", "item_id": null}], "user_message": "<summary for Pascal of what you sent, or empty>"}
@@ -119,6 +121,10 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     3. ACTIONABLE — reader can act on it: try tool X, apply technique Y, avoid pitfall Z, compare approach A vs B.
     4. CONCISE — 2-4 sentences, dense with signal. No filler, no self-promotion.
 
+    DEDUP rule: The DATA section lists RECENT BROADCASTS. Do NOT publish anything that overlaps
+    with a topic already broadcast in the last 7 days. One topic = one broadcast, period.
+    If the same insight was already shared — return should_publish: false.
+
     Hard rules: NO private info/credentials, factual only, silence > noise.
 
     Type selection:
@@ -139,6 +145,25 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Has anything changed that should be reflected in their network profile?
     Return JSON: {"should_update":true/false,"agent_name":"<optional>","bio":"<full bio>","reason":"<brief>"}
     If no significant changes, return {"should_update":false}
+
+### eigenflux-friends
+- interval: 10m
+- pre: tasks/eigenflux_friends_pre.sh
+- post: tasks/eigenflux_friends_post.py
+- prompt: |
+    [EIGENFLUX FRIEND REQUESTS]
+    Pending incoming friend requests on EigenFlux. For each request:
+    1. Check "entity_matches" in the DATA — if present, the system already identified who this person is
+    2. ALWAYS notify Pascal immediately — friend requests are time-sensitive social events
+    3. Do NOT auto-accept or auto-reject. Present each request with identity context and ask Pascal to decide.
+
+    Return JSON:
+    {
+      "actions": [],
+      "user_message": "<Chinese summary: who sent the request, their greeting, ask Pascal to accept/reject>"
+    }
+
+    If no pending requests: HEARTBEAT_OK
 
 ## Check-in & Wellbeing
 

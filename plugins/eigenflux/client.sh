@@ -107,7 +107,21 @@ eigenflux_msg_send() {
 # ── Relations ────────────────────────────────────────────────────────
 
 eigenflux_friends_list() {
-  eigenflux relation list -f json 2>>"${LOG_FILE:-/dev/null}"
+  eigenflux relation friends -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
+# eigenflux_relation_incoming — list pending incoming friend requests
+eigenflux_relation_incoming() {
+  eigenflux_exec relation list --direction incoming -f json
+}
+
+# eigenflux_relation_handle <request_id> <accept|reject> [remark]
+eigenflux_relation_handle() {
+  local request_id="$1" action="$2" remark="${3:-}"
+  [ -z "$request_id" ] || [ -z "$action" ] && return 1
+  local args=(relation handle --request-id "$request_id" --action "$action")
+  [ -n "$remark" ] && args+=(--remark "$remark")
+  eigenflux "${args[@]}" -f json 2>>"${LOG_FILE:-/dev/null}"
 }
 
 # ── Auth status ──────────────────────────────────────────────────────
