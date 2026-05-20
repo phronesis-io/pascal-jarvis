@@ -6,6 +6,7 @@ Stdout: user_message (forwarded to Pascal via Lark) or empty if nothing to send.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error
+
+PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 
 
 def main() -> int:
@@ -49,7 +52,8 @@ def main() -> int:
             cmd.extend(["--remark", remark])
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30
+                cmd, capture_output=True, text=True, timeout=30,
+                env={**os.environ, "PATH": PATH_ENV},
             )
             if result.returncode != 0:
                 print(
