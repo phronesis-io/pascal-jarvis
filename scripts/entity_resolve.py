@@ -26,7 +26,10 @@ from pathlib import Path
 # ── Locate data files ──────────────────────────────────────────────
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
-MEMORY_DIR = Path(os.path.expanduser("~/.claude/projects/-Users-pascal-Desktop-jarvis/memory"))
+MEMORY_DIR = Path(os.environ.get(
+    "MEMORY_DIR",
+    os.path.expanduser("~/.claude/projects/-Users-pascal-Desktop-jarvis/memory"),
+))
 
 CONTACTS_FILE = JARVIS_DIR / "data" / "contacts.jsonl"
 TEAM_FILE = MEMORY_DIR / "warm" / "team.md"
@@ -162,24 +165,25 @@ def match_entity(name: str, agent_id: str, contacts: list[dict]) -> dict | None:
             }
 
         # 4. Substring match (name contains alias or alias contains name)
+        #    Minimum 3 chars to avoid false positives (e.g. "ai" matching everything)
         for alias in aliases:
-            if name_n and alias and (name_n in alias or alias in name_n):
-                return {
-                    "matched_contact": contact["name"],
-                    "match_type": "substring",
-                    "confidence": "medium",
-                    "matched_alias": alias,
-                    "source": contact.get("source", "contacts.jsonl"),
-                }
+            if name_n and alias and len(name_n) >= 3 and len(alias) >= 3:
+                if name_n in alias or alias in name_n:
+                    return {
+                        "matched_contact": contact["name"],
+                        "match_type": "substring",
+                        "confidence": "medium",
+                        "matched_alias": alias,
+                        "source": contact.get("source", "contacts.jsonl"),
+                    }
 
-        # 5. Pinyin reversal: check if name reversed matches contact name
-        #    e.g., "CiWei" reversed conceptually = "WeiCi" ≈ "Weici"
-        if name_n and len(name_n) >= 4:
-            # Try syllable-level reversal for pinyin-like names
-            # Split by common syllable boundaries or just try halves
+        # 5. Pinyin reversal: try swapping two halves for 2-syllable pinyin names
+        #    e.g., "ciwei" → "weici" ≈ "Weici"
+        #    Only attempt for even-length names 4-10 chars (likely 2-syllable pinyin)
+        if name_n and 4 <= len(name_n) <= 10 and len(name_n) % 2 == 0:
             mid = len(name_n) // 2
             reversed_name = name_n[mid:] + name_n[:mid]
-            if reversed_name == cname:
+            if reversed_name == cname or reversed_name in aliases:
                 return {
                     "matched_contact": contact["name"],
                     "match_type": "pinyin_reversal",
