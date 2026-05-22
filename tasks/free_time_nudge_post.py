@@ -36,6 +36,7 @@ def main():
         return
 
     # Parse JSON response
+    data = None
     try:
         data = json.loads(raw)
         message = data.get("user_message", "")
@@ -50,8 +51,13 @@ def main():
     # Update nudge counter (only when we actually send)
     update_nudge_count()
 
-    # Output as Lark card (lightweight)
-    print(build_card("⏰ 空档", message))
+    # Build Lark card — with watchlater button if present
+    watchlater = data.get("watchlater") if isinstance(data, dict) and data else None
+    buttons = None
+    if watchlater and isinstance(watchlater, dict) and watchlater.get("url"):
+        buttons = [{"text": "去看看", "url": watchlater["url"]}]
+
+    print(build_card("⏰ 空档", message, buttons))
 
 
 if __name__ == "__main__":

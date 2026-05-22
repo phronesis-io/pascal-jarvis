@@ -13,17 +13,25 @@ JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export JARVIS_DIR
 
 # ── Single-instance lock (prevent duplicate replies) ────────────────
+# PID file format: "PID BOOT_TIMESTAMP" — validates both PID liveness AND
+# that the PID belongs to the same boot cycle (guards against PID reuse).
 PIDFILE="$JARVIS_DIR/.bot.pid"
+_BOOT_TS=$(date +%s)
 if [ -f "$PIDFILE" ]; then
-  old_pid=$(cat "$PIDFILE" 2>/dev/null)
+  old_pid=$(awk '{print $1}' "$PIDFILE" 2>/dev/null)
+  old_ts=$(awk '{print $2}' "$PIDFILE" 2>/dev/null)
   if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "bot.sh is already running (PID $old_pid). Exiting." >&2
-    exit 1
+    # Extra check: if PID file is older than 7 days, it's likely a reused PID
+    if [ -n "$old_ts" ] && [ "$(($(date +%s) - old_ts))" -lt 604800 ]; then
+      echo "bot.sh is already running (PID $old_pid, started $(( ($(date +%s) - old_ts) / 60 ))m ago). Exiting." >&2
+      exit 1
+    fi
+    # PID file too old — likely stale (PID reused by another process)
+    echo "WARN: Stale PID file (PID $old_pid, age > 7 days) — overriding" >&2
   fi
-  # Stale pidfile — previous crash
   rm -f "$PIDFILE"
 fi
-echo $$ > "$PIDFILE"
+echo "$$ $_BOOT_TS" > "$PIDFILE"
 
 LOG_FILE="$JARVIS_DIR/jarvis.log"
 LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
@@ -143,7 +151,7 @@ MAX_HANDLERS=5   # max concurrent message handlers
 
 mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
          "$MEMORY_DIR/timeline" "$MEMORY_DIR/system" "$JARVIS_DIR/eigenflux" \
-         "$JOBS_DIR"
+         "$JOBS_DIR" "$JARVIS_DIR/session_compacts"
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
 # Clean up stale session locks from previous crashes/restarts
@@ -201,9 +209,9 @@ PYEOF
 load_memory() {
   local fresh
   fresh=$(python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.memory import load_tiered_memory
-print(load_tiered_memory('$MEMORY_DIR'))
+print(load_tiered_memory(os.environ['MEMORY_DIR']))
 " 2>>"$LOG_FILE")
 
   if [ -n "$fresh" ]; then
@@ -232,7 +240,7 @@ send_to_lark() {
 looks_like_error() {
   JV_TEXT="$1" python3 -c "
 import os, sys
-sys.path.insert(0, '$JARVIS_DIR')
+sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.safety import looks_like_error
 sys.exit(0 if looks_like_error(os.environ.get('JV_TEXT','')) else 1)
 " 2>/dev/null
@@ -276,15 +284,16 @@ heartbeat_loop() {
     # Only non-empty stdout is considered a user message for Lark.
     local output
     output=$(python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.heartbeat import HeartbeatRunner
+jd = os.environ['JARVIS_DIR']
 runner = HeartbeatRunner(
-    jarvis_dir='$JARVIS_DIR',
-    heartbeat_file='$JARVIS_DIR/HEARTBEAT.md',
-    state_file='$JARVIS_DIR/heartbeat_state.json',
-    memory_dir='$MEMORY_DIR',
-    model='$HEARTBEAT_MODEL',
-    work_dir='$WORK_DIR',
+    jarvis_dir=jd,
+    heartbeat_file=os.path.join(jd, 'HEARTBEAT.md'),
+    state_file=os.path.join(jd, 'heartbeat_state.json'),
+    memory_dir=os.environ['MEMORY_DIR'],
+    model=os.environ.get('HEARTBEAT_MODEL', 'sonnet'),
+    work_dir=os.environ.get('WORK_DIR', jd),
 )
 result = runner.run_cycle($( [ -n "$force_flag" ] && echo "force=True" || echo ""))
 if result:
@@ -306,24 +315,27 @@ if result:
       printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$output" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
         >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
       # Record heartbeat send for engagement tracking
+      # Read source from sidecar file written by HeartbeatRunner (accurate attribution)
       local _hb_source
-      _hb_source=$(python3 -c "
-import json, sys
-try:
-    # Detect source from heartbeat state (last task that produced output)
-    with open('$JARVIS_DIR/heartbeat_state.json') as f:
-        state = json.load(f)
-    # Find most recently run task
-    latest = max(state.items(), key=lambda x: x[1].get('last_run', 0))
-    print(latest[0])
-except Exception:
-    print('heartbeat')
-" 2>/dev/null || echo "heartbeat")
-      printf '%s\n' "{\"ts\":\"$ts_iso\",\"source\":\"$_hb_source\",\"type\":\"sent\",\"epoch\":$(date +%s)}" \
-        >> "$JARVIS_DIR/engagement_log.jsonl"
+      local _source_file="$JARVIS_DIR/.heartbeat_last_source"
+      if [ -f "$_source_file" ]; then
+        _hb_source=$(cat "$_source_file" 2>/dev/null)
+        rm -f "$_source_file"
+      else
+        _hb_source="heartbeat"
+      fi
+      # Log each contributing source as a separate engagement entry
+      local _epoch
+      _epoch=$(date +%s)
+      echo "$_hb_source" | tr ',' '\n' | while IFS= read -r _src; do
+        [ -z "$_src" ] && continue
+        printf '%s\n' "{\"ts\":\"$ts_iso\",\"source\":\"$_src\",\"type\":\"sent\",\"epoch\":$_epoch}" \
+          >> "$JARVIS_DIR/engagement_log.jsonl"
+      done
       log_info "[heartbeat] Beat sent"
     elif [ -n "$output" ]; then
       log_warn "[heartbeat] Suppressed error-like output (see log)"
+      rm -f "$JARVIS_DIR/.heartbeat_last_source"  # clean up stale source file
     else
       log_info "[heartbeat] Beat sent (idle)"
     fi
@@ -553,26 +565,13 @@ process_actions() {
 
     case "$action_type" in
       feed_search)
+        # Search the EigenFlux CLI's local feed cache (last ~8 days) plus
+        # the frozen legacy jsonl archive. Aligned with official CLI storage:
+        # ~/.eigenflux/servers/eigenflux/data/broadcasts/<date>/feeds-*.json
         local query="${action_params#query=}"
         local results
-        results=$(JV_QUERY="$query" python3 -c "
-import sys, os
-sys.path.insert(0, '$JARVIS_DIR')
-from plugins.eigenflux.client import EigenFluxClient
-c = EigenFluxClient('eigenflux')
-items = c.search_feed_history(os.environ['JV_QUERY'], limit=5)
-if not items:
-    print('没找到相关内容')
-else:
-    for item in items:
-        title = item.get('title', item.get('content', '')[:60])
-        url = item.get('url', '')
-        ts = item.get('fetched_at', '')[:16]
-        print(f'• [{ts}] {title}')
-        if url:
-            print(f'  {url}')
-        print()
-" 2>/dev/null || echo "搜索失败")
+        results=$(JV_QUERY="$query" python3 -m plugins.eigenflux.feed_search \
+          2>>"$LOG_FILE" || echo "搜索失败")
         if [ -n "$results" ]; then
           action_results="${action_results}
 ${results}"
@@ -782,10 +781,10 @@ else:
           tc_result=$(JV_TITLE="$tc_title" JV_TYPE="$tc_type" JV_ENERGY="$tc_energy" \
             JV_EST="$tc_est" JV_DUE="$tc_due" python3 -c "
 import os, sys, json
-sys.path.insert(0, '$JARVIS_DIR')
+sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
 t = tm.capture(
     title=os.environ['JV_TITLE'],
     type=os.environ.get('JV_TYPE', 'poiesis'),
@@ -808,12 +807,12 @@ print(t['id'])
         tc_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         tc_when=$(echo "$action_params" | sed -n 's/.*when=\([^|]*\).*/\1/p')
         if [ -n "$tc_id" ]; then
-          python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$tc_id" JV_WHEN="$tc_when" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.commit('$tc_id', when='$tc_when' or None)
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.commit(os.environ['JV_ID'], when=os.environ.get('JV_WHEN') or None)
 " 2>>"$LOG_FILE" || true
           log_info "[action] task_commit: $tc_id when=$tc_when"
         fi
@@ -824,12 +823,12 @@ tm.commit('$tc_id', when='$tc_when' or None)
         local td_id=""
         td_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         if [ -n "$td_id" ]; then
-          python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$td_id" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.done('$td_id')
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.done(os.environ['JV_ID'])
 " 2>>"$LOG_FILE" || true
           log_info "[action] task_done: $td_id"
         fi
@@ -841,12 +840,12 @@ tm.done('$td_id')
         tr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         tr_reason=$(echo "$action_params" | sed -n 's/.*reason=\([^|]*\).*/\1/p')
         if [ -n "$tr_id" ]; then
-          JV_REASON="$tr_reason" python3 -c "
-import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$tr_id" JV_REASON="$tr_reason" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.reject('$tr_id', os.environ.get('JV_REASON', ''))
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.reject(os.environ['JV_ID'], os.environ.get('JV_REASON', ''))
 " 2>>"$LOG_FILE" || true
           log_info "[action] task_reject: $tr_id"
         fi
@@ -858,12 +857,12 @@ tm.reject('$tr_id', os.environ.get('JV_REASON', ''))
         tdf_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         tdf_to=$(echo "$action_params" | sed -n 's/.*to=\([^|]*\).*/\1/p')
         if [ -n "$tdf_id" ] && [ -n "$tdf_to" ]; then
-          python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$tdf_id" JV_TO="$tdf_to" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.defer('$tdf_id', '$tdf_to')
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.defer(os.environ['JV_ID'], os.environ['JV_TO'])
 " 2>>"$LOG_FILE" || true
           log_info "[action] task_defer: $tdf_id to=$tdf_to"
         fi
@@ -874,12 +873,12 @@ tm.defer('$tdf_id', '$tdf_to')
         local pd_id=""
         pd_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         if [ -n "$pd_id" ]; then
-          python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$pd_id" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.praxis_done('$pd_id')
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.praxis_done(os.environ['JV_ID'])
 " 2>>"$LOG_FILE" || true
           log_info "[action] praxis_done: $pd_id"
         fi
@@ -898,10 +897,10 @@ tm.praxis_done('$pd_id')
         if [ -n "$pa_title" ]; then
           JV_TITLE="$pa_title" JV_FREQ="$pa_freq" JV_TIME="$pa_time" JV_DUR="$pa_dur" \
             python3 -c "
-import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
 tm.praxis_add(
     title=os.environ['JV_TITLE'],
     frequency=os.environ.get('JV_FREQ', 'daily'),
@@ -918,12 +917,12 @@ tm.praxis_add(
         local pr_id=""
         pr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
         if [ -n "$pr_id" ]; then
-          python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+          JV_ID="$pr_id" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.tasks import TaskManager
 from pathlib import Path
-tm = TaskManager(Path('$MEMORY_DIR'))
-tm.praxis_remove('$pr_id')
+tm = TaskManager(Path(os.environ['MEMORY_DIR']))
+tm.praxis_remove(os.environ['JV_ID'])
 " 2>>"$LOG_FILE" || true
           log_info "[action] praxis_remove: $pr_id"
         fi
@@ -947,6 +946,108 @@ tm.praxis_remove('$pr_id')
           log_info "[action] calendar_delete: $cal_event_id"
         fi
         ;;
+
+      schedule_task)
+        # Register a dynamic task in SQLite scheduler
+        # Parse params: name=<name>|type=<cron|interval|date>|config=<value>|action=<notify|prompt>|message=<text>
+        local sched_result
+        sched_result=$(JV_PARAMS="$action_params" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from dashboard.heartbeat_bridge import register_from_action
+print(register_from_action(os.environ['JV_PARAMS']))
+" 2>>"$LOG_FILE" || echo "FAILED")
+        if [ "$sched_result" != "FAILED" ] && [ -n "$sched_result" ]; then
+          action_results="${action_results}
+✅ $sched_result"
+        else
+          action_results="${action_results}
+❌ 动态任务注册失败"
+        fi
+        log_info "[action] schedule_task: $action_params"
+        ;;
+
+      intent_create)
+        # Create a future intent: name=<name>|when=<ISO8601>|prompt=<text>|purpose=<why>|tags=<comma>
+        local intent_result
+        intent_result=$(JV_PARAMS="$action_params" python3 -c "
+import os, sys, json; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.intentions import create_intent
+params = {}
+for seg in os.environ['JV_PARAMS'].split('|'):
+    if '=' in seg:
+        k, v = seg.split('=', 1)
+        params[k.strip()] = v.strip()
+name = params.get('name', 'unnamed')
+when = params.get('when', '')
+trigger_type = params.get('type', 'date')
+prompt = params.get('prompt', name)
+purpose = params.get('purpose', '')
+tags = [t.strip() for t in params.get('tags', '').split(',') if t.strip()]
+priority = int(params.get('priority', '5'))
+trigger_config = {}
+if trigger_type == 'date':
+    trigger_config = {'datetime': when}
+elif trigger_type == 'cron':
+    trigger_config = {'expression': when}
+elif trigger_type == 'interval':
+    trigger_config = {'seconds': int(when) if when.isdigit() else 600}
+iid = create_intent(
+    name=name, trigger_type=trigger_type, trigger_config=trigger_config,
+    prompt=prompt, purpose=purpose, tags=tags, priority=priority,
+    source='agent', action_type=params.get('action', 'notify'),
+)
+print(f'Intent \"{name}\" created (id: {iid})')
+" 2>>"$LOG_FILE" || echo "FAILED")
+        if [ "$intent_result" != "FAILED" ] && [ -n "$intent_result" ]; then
+          action_results="${action_results}
+✅ $intent_result"
+        else
+          action_results="${action_results}
+❌ Intent 创建失败"
+        fi
+        log_info "[action] intent_create: $action_params"
+        ;;
+
+      intent_cancel)
+        # Cancel an intent: id=<intent_id>|reason=<why>
+        local cancel_result
+        cancel_result=$(JV_PARAMS="$action_params" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.intentions import cancel_intent
+params = {}
+for seg in os.environ['JV_PARAMS'].split('|'):
+    if '=' in seg:
+        k, v = seg.split('=', 1)
+        params[k.strip()] = v.strip()
+ok = cancel_intent(params.get('id', ''), params.get('reason', ''))
+print('Intent cancelled' if ok else 'Intent not found or already done')
+" 2>>"$LOG_FILE" || echo "FAILED")
+        action_results="${action_results}
+${cancel_result}"
+        log_info "[action] intent_cancel: $action_params"
+        ;;
+
+      intent_list)
+        # List active intents
+        local list_result
+        list_result=$(python3 -c "
+import os, sys, json; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.intentions import list_intents
+intents = list_intents(status='pending', limit=20)
+if not intents:
+    print('No active intents')
+else:
+    for i in intents:
+        tc = json.loads(i['trigger_config']) if isinstance(i['trigger_config'], str) else i['trigger_config']
+        when = tc.get('datetime', tc.get('expression', tc.get('seconds', '?')))
+        print(f\"- {i['name']} [{i['trigger_type']}:{when}] (id:{i['id']})\")
+" 2>>"$LOG_FILE" || echo "FAILED")
+        action_results="${action_results}
+📋 Active Intents:
+$list_result"
+        log_info "[action] intent_list"
+        ;;
+
     esac
   done <<< "$actions"
 
@@ -985,10 +1086,22 @@ except Exception:
   recent_turns=$(JV_SDIR="$CLAUDE_PROJECT_DIR" JV_SID="$session_id" \
     JV_COUNTER="$counter" JV_KEY="$conv_key" python3 -c "
 import os, sys
-sys.path.insert(0, '$JARVIS_DIR')
+sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.session import build_recent_turns
 print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
                          int(os.environ['JV_COUNTER']), os.environ['JV_KEY'], 20))
+" 2>>"$LOG_FILE" || echo "")
+
+  # Load session compact (summary from previous session rotation)
+  local session_compact=""
+  session_compact=$(JV_DIR="$JARVIS_DIR" JV_KEY="$conv_key" python3 -c "
+import os, sys
+sys.path.insert(0, os.environ['JV_DIR'])
+from core.compact import read_compact
+c = read_compact(os.environ['JV_DIR'], os.environ['JV_KEY'])
+if c:
+    print('## Previous Session Summary\n\n⚠️ 以下是上一轮对话的压缩摘要，帮助你保持上下文连贯。\n')
+    print(c)
 " 2>>"$LOG_FILE" || echo "")
 
   # Load EigenFlux skill docs (strip YAML frontmatter)
@@ -1032,6 +1145,9 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:praxis_done|id=<praxis_id>] — Record that a praxis (habit/practice) was done today.
 - [ACTION:praxis_add|title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>] — Add a recurring praxis.
 - [ACTION:praxis_remove|id=<praxis_id>] — Remove a praxis from the registry.
+- [ACTION:intent_create|name=<name>|when=<ISO8601_or_cron>|type=<date|cron|interval>|prompt=<context_prompt>|purpose=<why>|tags=<comma_sep>|priority=<1-10>|action=<notify|prompt>] — Create a future intent. The agent will wake at that time with this specific prompt/context.
+- [ACTION:intent_cancel|id=<intent_id>|reason=<why>] — Cancel a pending intent.
+- [ACTION:intent_list] — List all active intents.
 
 Rules:
 - Include the action marker naturally in your response (it will be stripped before delivery)
@@ -1060,6 +1176,14 @@ Rules:
 - Implementation Intentions: when creating calendar events, gently ask WHY and suggest a trigger.
   Store in description: [WHY] reason [TRIGGER] when X happens [FIRST_ACTION] do Y first.
   This doubles follow-through (Gollwitzer, 1999). Don't force it — only when natural.
+- For intent actions: Intents are the agent's way of writing to its own future timeline.
+  Use intent_create when you know something needs to happen at a specific future time:
+  - "30 min before a meeting, prepare context" → intent with date trigger
+  - "Every morning at 9am, check if morning anchor was done" → intent with cron trigger
+  - "In 2 hours, follow up on this conversation" → intent with date trigger
+  Intents are NOT reminders — each carries a unique prompt that gives the future-you
+  full context about what to think about at that moment. Use them proactively.
+  The calendar bridge auto-generates prep intents for calendar events.
 
 ## Task System Philosophy
 Tasks are commitments to finite time, not obligations to productivity.
@@ -1109,6 +1233,8 @@ This will be automatically parsed and saved. Do NOT mention this marker to the u
 
 $memory
 
+$session_compact
+
 $recent_turns"
 
   # Call Claude (runs in WORK_DIR, with optional timeout)
@@ -1156,6 +1282,10 @@ $recent_turns"
 
   if [ -z "$reply" ]; then
     log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
+    # Log the suppressed content for debugging (truncate to 500 chars)
+    if [ -n "$answer" ]; then
+      log_warn "[$session_id] Suppressed content: ${answer:0:500}"
+    fi
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     lark_reply_text "$message_id" \
       "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
@@ -1240,10 +1370,10 @@ $memory"
 
   # Check if job was cancelled (registry may have been updated)
   local current_status
-  current_status=$(JV_JOBS_DIR="$JOBS_DIR" python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+  current_status=$(JV_JOBS_DIR="$JOBS_DIR" JV_JOB_ID="$job_id" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.jobs import JobManager
-j = JobManager('$JOBS_DIR').get_job('$job_id')
+j = JobManager(os.environ['JV_JOBS_DIR']).get_job(os.environ['JV_JOB_ID'])
 print(j['status'] if j else 'unknown')
 " 2>/dev/null || echo "unknown")
 
@@ -1280,7 +1410,7 @@ Task: $content
 Check logs with: job output $job_id"
   fi
   card_json=$(JV_BODY="$card_body" python3 -c "
-import os, sys; sys.path.insert(0, '$JARVIS_DIR')
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.card import build_card
 print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
 " 2>/dev/null) || card_json=""
@@ -1437,13 +1567,30 @@ except Exception:
       if [ -n "$rotated" ]; then
         log_info "Session rotated for $conv_key → $session_id"
         python3 -c "
-import sys; sys.path.insert(0, '$JARVIS_DIR')
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.heartbeat import HeartbeatRunner
-runner = HeartbeatRunner('$JARVIS_DIR', '$JARVIS_DIR/HEARTBEAT.md',
-    '$JARVIS_DIR/heartbeat_state.json', '$MEMORY_DIR', '$HEARTBEAT_MODEL',
-    work_dir='$WORK_DIR')
+jd = os.environ['JARVIS_DIR']
+runner = HeartbeatRunner(jd, os.path.join(jd, 'HEARTBEAT.md'),
+    os.path.join(jd, 'heartbeat_state.json'), os.environ['MEMORY_DIR'],
+    os.environ.get('HEARTBEAT_MODEL', 'sonnet'), work_dir=os.environ.get('WORK_DIR', jd))
 runner.run_cycle(force=True, only_task='memory-hourly')
 " 2>>"$LOG_FILE" >/dev/null || log_warn "Memory hourly on rotation failed"
+
+        # Generate session compact synchronously — must complete before handle_message
+        # reads it, otherwise the new session may see a partial/missing compact.
+        JV_DIR="$JARVIS_DIR" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_KEY="$conv_key" \
+          JV_WORK="$WORK_DIR" python3 -c "
+import sys, os, json
+sys.path.insert(0, os.environ['JV_DIR'])
+from core.compact import generate_compact, get_old_session_id
+tracker = json.load(open(os.path.join(os.environ['JV_DIR'], 'active_sessions.json')))
+counter = tracker.get(os.environ['JV_KEY'], {}).get('counter', 0)
+old_sid = get_old_session_id(os.environ['JV_KEY'], counter)
+if old_sid:
+    generate_compact(os.environ['JV_DIR'], os.environ['JV_SDIR'],
+                     old_sid, os.environ['JV_KEY'], os.environ['JV_WORK'])
+" 2>>"$LOG_FILE" >/dev/null || log_warn "Session compact failed for $conv_key"
+        log_info "Session compact completed for $conv_key"
       fi
 
       log_info "[$session_id] Received: $content"
@@ -1452,7 +1599,7 @@ runner.run_cycle(force=True, only_task='memory-hourly')
       python3 -c "
 import json, time, os, sys
 
-log_path = os.path.join('$JARVIS_DIR', 'engagement_log.jsonl')
+log_path = os.path.join(os.environ['JARVIS_DIR'], 'engagement_log.jsonl')
 if not os.path.exists(log_path):
     sys.exit(0)
 
@@ -1506,7 +1653,9 @@ with open(log_path, 'a', encoding='utf-8') as f:
       reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
 
       # Concurrency guard: wait if too many handlers are running
-      while [ "$(jobs -r 2>/dev/null | wc -l)" -ge "$MAX_HANDLERS" ]; do
+      # Note: `jobs -r` doesn't work reliably inside a pipe subshell.
+      # Use /proc-style check: count active session lock files as a proxy.
+      while [ "$(find "$JARVIS_DIR" -maxdepth 1 -name '.session_lock_*' 2>/dev/null | wc -l)" -ge "$MAX_HANDLERS" ]; do
         sleep 1
       done
 

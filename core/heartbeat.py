@@ -132,8 +132,13 @@ class HeartbeatRunner:
                 timeout=30,
                 cwd=str(self.jarvis_dir),
             )
+            if result.returncode != 0 and result.stderr.strip():
+                print(f"[heartbeat] Script {script_path} stderr: {result.stderr.strip()[:200]}", file=sys.stderr)
             return result.stdout.strip()
-        except (subprocess.TimeoutExpired, Exception) as e:
+        except subprocess.TimeoutExpired:
+            print(f"[heartbeat] Script {script_path} timed out (30s)", file=sys.stderr)
+            return ""
+        except Exception as e:
             print(f"[heartbeat] Script {script_path} error: {e}", file=sys.stderr)
             return ""
 
@@ -164,10 +169,45 @@ You have access to the user's memory below. Use it to personalize your responses
                 timeout=300, stdin=subprocess.DEVNULL,
                 cwd=str(self.work_dir),
             )
+            if result.returncode != 0:
+                print(f"[heartbeat] Claude exited with code {result.returncode}", file=sys.stderr)
+                if result.stderr.strip():
+                    print(f"[heartbeat] Claude stderr: {result.stderr.strip()[:300]}", file=sys.stderr)
             return result.stdout.strip()
-        except (subprocess.TimeoutExpired, Exception) as e:
+        except subprocess.TimeoutExpired:
+            print("[heartbeat] Claude call timed out (300s)", file=sys.stderr)
+            return ""
+        except FileNotFoundError:
+            print("[heartbeat] Claude CLI not found — is it installed?", file=sys.stderr)
+            return ""
+        except Exception as e:
             print(f"[heartbeat] Claude error: {e}", file=sys.stderr)
             return ""
+
+    def _check_dynamic_tasks(self) -> list[str]:
+        """Check SQLite-based dynamic tasks. Returns user-facing messages."""
+        try:
+            from dashboard.heartbeat_bridge import check_dynamic_tasks
+            result = check_dynamic_tasks()
+            if not result:
+                return []
+            import json as _json
+            data = _json.loads(result)
+            messages = []
+            for task in data.get("tasks", []):
+                action_type = task.get("action_type", "")
+                config = task.get("action_config", {})
+                if action_type == "notify":
+                    msg = config.get("message", "")
+                    if msg:
+                        messages.append(msg)
+                # Other action types handled by extensions
+            return messages
+        except ImportError:
+            return []
+        except Exception as e:
+            print(f"[heartbeat] Dynamic task check error: {e}", file=sys.stderr)
+            return []
 
     def run_cycle(self, force: bool = False, only_task: str = ""):
         """Run one heartbeat cycle. Returns user-facing message or empty string."""
@@ -261,14 +301,17 @@ You have access to the user's memory below. Use it to personalize your responses
 
         # Route responses through post-scripts
         user_messages = []
+        producing_tasks = []  # tracks which tasks actually produced user output
         if n == 1:
             task = runnable[0]
             if task["post"]:
                 post_output = self.run_script(task["post"], stdin_data=raw)
                 if post_output:
                     user_messages.append(post_output)
+                    producing_tasks.append(task["name"])
             else:
                 user_messages.append(raw)
+                producing_tasks.append(task["name"])
         else:
             # Multi-task: Claude returns JSON envelope. Extract robustly.
             cleaned = re.sub(r'^```json?\s*', '', raw.strip())
@@ -290,25 +333,41 @@ You have access to the user's memory below. Use it to personalize your responses
                         post_output = self.run_script(task["post"], stdin_data=resp_str)
                         if post_output:
                             user_messages.append(post_output)
+                            producing_tasks.append(task["name"])
                     # Tasks without post-scripts: only show string responses, never raw JSON
                     elif isinstance(resp, str) and resp.strip() and "HEARTBEAT_OK" not in resp:
                         user_messages.append(resp)
+                        producing_tasks.append(task["name"])
                 top_msg = envelope.get("user_message", "")
                 if top_msg and top_msg.strip():
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
-                # NEVER dump raw JSON to user — log and skip
-                print(f"[heartbeat] JSON parse failed, skipping output", file=sys.stderr)
+                # NEVER dump raw JSON to user — log for debugging and skip
+                print(f"[heartbeat] JSON parse failed for {n}-task response, skipping output", file=sys.stderr)
+                print(f"[heartbeat] Raw response (first 300 chars): {raw[:300]}", file=sys.stderr)
 
         # Update state
         for task in runnable:
             state[task["name"]] = {"last_run": now}
         self.save_state(state)
 
+        # Also check dynamic tasks from SQLite scheduler
+        dynamic_msgs = self._check_dynamic_tasks()
+        user_messages.extend(dynamic_msgs)
+
         combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
         beat = self._beat_status(due_tasks, skipped, runnable, tasks)
+
         # Status line → log only. User message → return to Lark.
         if combined.strip():
+            # Write producing sources ONLY when we actually deliver content.
+            # Prevents stale source files from being read by a later cycle.
+            if producing_tasks:
+                try:
+                    source_file = self.jarvis_dir / ".heartbeat_last_source"
+                    source_file.write_text(",".join(producing_tasks))
+                except Exception:
+                    pass
             print(f"[heartbeat] {beat} → delivered", file=sys.stderr)
             return combined
         print(f"[heartbeat] {beat} → OK (no user content)", file=sys.stderr)

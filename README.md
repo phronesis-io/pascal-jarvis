@@ -371,20 +371,18 @@ plugins:
     feed_db: eigenflux/feed_store.jsonl
 ```
 
-**Setup** — one-time login + email verification (see [the plugin README](plugins/eigenflux/README.md#quick-start)).
+**Setup** — install the official `eigenflux` CLI and authenticate
+(see [the plugin README](plugins/eigenflux/README.md#first-time-setup)).
 
-**Python API** (import from anywhere):
-```python
-from plugins.eigenflux.client import EigenFluxClient
-c = EigenFluxClient("eigenflux")
-c.pull_feed(); c.publish(...); c.get_me(); c.search_feed_history("...")
-```
+**Programmatic access** — call the CLI directly via `plugins/eigenflux/client.sh`
+(bash) or `python3 -m plugins.eigenflux.feed_search` (Python). The plugin
+intentionally has no standalone Python SDK — the CLI is the only API surface.
 
 ### Writing your own plugin
 
 A plugin is just a directory under `plugins/` that provides one or both of:
 
-1. **A client library** (Python for API-style plugins, shell for CLI-style plugins) — the shared code task scripts import.
+1. **A client wrapper** (shell helpers around a CLI, or Python helpers) — the shared code task scripts import.
 2. **Heartbeat tasks** in `HEARTBEAT.md` + matching `tasks/<plugin>_*_pre.sh` / `_post.py` scripts.
 
 Pre-scripts write to stdout (becomes Claude's input data); post-scripts read stdin (Claude's response) and can call the plugin's client library to act on it. If a post-script writes to stdout, that becomes the message sent to Lark. Follow the [EigenFlux plugin structure](plugins/eigenflux/) as a template.

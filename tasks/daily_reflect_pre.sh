@@ -5,10 +5,10 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 
-# Time gate: only 21:00-22:30
+# Time gate: 20:30-23:29 (wider window for reflection to actually fire)
 hour=$(date +%H)
 min=$(date +%M)
-if [ "$hour" -lt 21 ] || { [ "$hour" -eq 22 ] && [ "$min" -ge 30 ]; } || [ "$hour" -ge 23 ]; then
+if [ "$hour" -lt 20 ] || { [ "$hour" -eq 20 ] && [ "$min" -lt 30 ]; } || { [ "$hour" -eq 23 ] && [ "$min" -ge 30 ]; }; then
   exit 0
 fi
 

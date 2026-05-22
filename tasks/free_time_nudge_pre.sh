@@ -105,21 +105,28 @@ echo "Free time detected: $free_block"
 echo "Current time: $(date '+%H:%M')"
 echo ""
 
-# Watchlater items
+# Watchlater items (include URL so Claude can recommend with link)
 watchlater="$JARVIS_DIR/watchlater.jsonl"
 if [ -f "$watchlater" ]; then
-  recent=$(tail -3 "$watchlater" 2>/dev/null)
-  if [ -n "$recent" ]; then
-    echo "=== SAVED FOR LATER ==="
-    echo "$recent" | python3 -c "
+  # Show pending (not-yet-watched) items with URLs
+  pending=$(python3 -c "
 import json, sys
-for line in sys.stdin:
+items = []
+for line in open('$watchlater'):
     try:
         e = json.loads(line.strip())
-        print(f'  - {e.get(\"title\", \"\")}')
+        if e.get('status', 'pending') == 'pending':
+            items.append(e)
     except:
         pass
-" 2>/dev/null
+for e in items[-5:]:
+    title = e.get('title', '')
+    url = e.get('url', '')
+    print(f'  - {title} | {url}')
+" 2>/dev/null)
+  if [ -n "$pending" ]; then
+    echo "=== SAVED FOR LATER ==="
+    echo "$pending"
     echo ""
   fi
 fi

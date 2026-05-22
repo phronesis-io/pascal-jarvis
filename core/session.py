@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.textutil import extract_text as _extract_text
+
 NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 
@@ -260,13 +262,5 @@ def build_recent_turns(session_dir: str | Path, session_id: str,
     return format_recent_turns(turns)
 
 
-def _extract_text(content) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for c in content:
-            if isinstance(c, dict) and c.get("type") == "text":
-                parts.append(c.get("text", ""))
-        return "\n".join(parts).strip()
-    return ""
+
+# _extract_text is imported from core.textutil

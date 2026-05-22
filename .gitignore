@@ -9,7 +9,9 @@ jarvis.log
 .memory_cache
 .bot.pid
 .daemon.pid
+.dashboard.pid
 .free_time_nudge_state
+.heartbeat_last_source
 calendar_event_mapping.json
 
 # Temp / backup / corrupted artifacts from atomic writes or debugging
@@ -66,6 +68,18 @@ eigenflux/needs_research.jsonl
 
 # Task state files
 tasks/.phronesis_last_ts
+/.phronesis_last_ts
 
 # Session backups
 session_backups/
+
+# Session compaction artifacts (per-conv-key markdown summaries)
+session_compacts/
+
+# Dashboard runtime: SQLite db + WAL, NiceGUI log, generated richview pages
+/data/
+/dashboard.log
+/views/
+
+# Dashboard Python bytecode (covered by __pycache__/ above, listed for clarity)
+dashboard/__pycache__/

@@ -1,0 +1,89 @@
+/* Jarvis Dashboard — Global styles */
+
+:root {
+    --color-primary: #3b82f6;
+    --color-success: #10b981;
+    --color-warning: #f59e0b;
+    --color-danger: #ef4444;
+    --color-muted: #6b7280;
+    --radius: 8px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+    background: #fafafa;
+    color: #1a1a1a;
+}
+
+/* Cards */
+.q-card {
+    border-radius: var(--radius) !important;
+    box-shadow: var(--shadow-sm) !important;
+    border: 1px solid #f0f0f0;
+}
+
+.q-card:hover {
+    box-shadow: var(--shadow-md) !important;
+}
+
+/* Timeline */
+.timeline-entry {
+    border-left: 2px solid #e5e7eb;
+    padding-left: 1rem;
+    margin-bottom: 0.5rem;
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+    transition: border-color 0.15s;
+}
+
+.timeline-entry:hover {
+    border-left-color: var(--color-primary);
+}
+
+/* Status dots */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Stat cards */
+.stat-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1rem;
+    border: 1px solid #f0f0f0;
+}
+
+/* Badges */
+.q-badge {
+    border-radius: 4px !important;
+    font-weight: 500 !important;
+}
+
+/* Smooth page transitions */
+.nicegui-content {
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .max-w-4xl {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+}

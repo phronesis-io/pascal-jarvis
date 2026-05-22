@@ -23,13 +23,22 @@ done
 echo "  TOTAL: ${hot_total} chars"
 echo ""
 
-# Warm files — list with size
+# Warm files — list with size and staleness
 echo "## warm/"
+now_epoch=$(date +%s)
 for f in "$MEMORY_DIR"/warm/*.md; do
   [ -f "$f" ] || continue
   chars=$(wc -c < "$f" | tr -d ' ')
   name=$(basename "$f")
-  echo "  $name: ${chars} chars"
+  mod_epoch=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
+  if [ -n "$mod_epoch" ]; then
+    stale_days=$(( (now_epoch - mod_epoch) / 86400 ))
+    stale_tag=""
+    [ "$stale_days" -ge 30 ] && stale_tag=" [STALE ${stale_days}d]"
+    echo "  $name: ${chars} chars, modified ${stale_days}d ago${stale_tag}"
+  else
+    echo "  $name: ${chars} chars"
+  fi
 done
 echo ""
 
