@@ -9,6 +9,9 @@
 # YAML config parsing
 PyYAML>=6.0
 
+# Dashboard (NiceGUI-powered agent backend)
+nicegui>=2.0
+
 # Testing (optional — only needed for `pytest tests/`)
 # Install separately if you want to run the test suite:
 #   pip install pytest

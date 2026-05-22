@@ -59,6 +59,14 @@ if [ -f "$todos" ]; then
 fi
 echo ""
 
+# Engagement insights & adaptations (if available)
+insights_file="$MEMORY_DIR/system/engagement_insights.md"
+if [ -f "$insights_file" ]; then
+  echo "=== ENGAGEMENT INSIGHTS ==="
+  cat "$insights_file"
+  echo ""
+fi
+
 # Next week calendar density
 echo "=== NEXT WEEK DENSITY ==="
 calendar_file="$MEMORY_DIR/hot/calendar_today.md"

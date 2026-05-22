@@ -47,6 +47,16 @@ def save_entries(entries: list[dict]) -> None:
     os.replace(tmp, STORE_FILE)
 
 
+def _save_to_sqlite(title: str, url: str, source: str) -> bool:
+    """Also save to the dashboard SQLite store (if available)."""
+    try:
+        from dashboard.db import bookmark_add
+        bookmark_add(title=title, url=url, source=source)
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
     title = ""
     url = ""
@@ -94,6 +104,10 @@ def main() -> int:
     entries = entries[-MAX_ENTRIES:]
 
     save_entries(entries)
+
+    # Dual-write to SQLite dashboard store
+    _save_to_sqlite(title, url, source)
+
     print(f"已收藏: {title or url}")
     return 0
 

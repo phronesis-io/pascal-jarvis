@@ -69,7 +69,13 @@ def publish(
 
     # Write view data
     view_file = VIEWS_DIR / f"{view_id}.json"
-    view_file.write_text(json.dumps(view, ensure_ascii=False, indent=2))
+    try:
+        view_file.write_text(json.dumps(view, ensure_ascii=False, indent=2))
+    except OSError as e:
+        # Disk full, unmounted, etc. — return a fallback URL
+        import sys
+        print(f"[richview] Failed to write view {view_id}: {e}", file=sys.stderr)
+        return ""
 
     # Cleanup old views if over limit
     _cleanup()

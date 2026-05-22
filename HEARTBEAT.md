@@ -11,6 +11,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | plan+reflect yes, activity-log silent |
 | Check-in | checkin | yes |
 | Calendar & Tasks | calendar-sync, task-triage, weekly-review | calendar silent, task-triage+weekly yes |
+| Intentions | intention-check | yes (when intent fires) |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
@@ -281,16 +282,13 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     If NONE of the candidates meet quality bar, reply HEARTBEAT_OK. Don't force a bad pick.
 
 ### watchlater-remind
-- interval: 2h
+- interval: 168h
 - pre: tasks/watchlater_remind_pre.sh
 - post: tasks/watchlater_remind_post.py
 - prompt: |
-    [WATCH LATER REMINDER]
-    The user has saved content to watch later. Below is their list.
-    If they currently have a free block (check calendar context) and there are pending items,
-    pick ONE to gently remind them about. Be brief and natural — not pushy.
-    Return JSON: {"title":"...","url":"...","user_message":"<Chinese, casual reminder>"}
-    Or if not a good time or no pending items: HEARTBEAT_OK
+    [WATCH LATER REMINDER — DISABLED]
+    Merged into free-time-nudge. This task is effectively disabled via long interval.
+    HEARTBEAT_OK
 
 ## Memory Pipeline
 
@@ -384,6 +382,25 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - Do NOT add countdown timers like "←XX分钟后"
 
     If no events, reply HEARTBEAT_OK.
+
+## Intentions
+
+### intention-check
+- interval: 1m
+- pre: tasks/intentions_pre.sh
+- post: tasks/intentions_post.py
+- prompt: |
+    [INTENTION EXECUTION]
+    Due intents are listed below. Each has its own prompt and context.
+    For EACH intent, execute its prompt using its context to produce a response.
+
+    For "notify" action_type intents: write a user-facing message in Chinese.
+    For "prompt" action_type intents: this is an internal action, execute and report result.
+    For calendar-prep intents: check the user's memory for relevant context about the event,
+    then write a concise prep reminder (what to prepare, what to remember, relevant context).
+
+    Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain"}}}
+    If no intents need attention, reply HEARTBEAT_OK.
 
 ## System Maintenance
 
@@ -519,14 +536,16 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - prompt: |
     [FREE TIME NUDGE]
     A free block is approaching or in progress. Your job:
-    - If there are saved watch-later items or in-progress todos that fit, mention ONE casually.
+    - PRIORITY: If there are saved watch-later items in DATA, pick ONE and include its URL.
+      Format: {"user_message":"<text>","watchlater":{"title":"...","url":"..."}}
+    - If no watchlater but in-progress todos fit, mention ONE casually.
     - If nothing fits, just note the free time exists ("接下来两小时没安排").
     - NEVER be pushy. This is information, not a command.
     - 碎片时间 (<30min): only suggest 无门槛 things (short video, stretch, walk).
-    - Longer blocks: can mention pending work if contextually relevant.
+    - Longer blocks: can mention pending work or longer watchlater content.
     
     Under 30 words Chinese. Natural, casual tone. No emojis.
-    Return JSON: {"user_message":"<text>"} or HEARTBEAT_OK if not worth sending.
+    Return JSON: {"user_message":"<text>","watchlater":{"title":"...","url":"..."}} or HEARTBEAT_OK if not worth sending.
 
 ## Team
 
@@ -631,11 +650,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     4. INBOX ZERO: Force-triage any remaining inbox items.
        48h+ items get surfaced. Decision required.
 
-    5. NEXT WEEK LANDSCAPE: Show calendar density.
+    5. ENGAGEMENT REVIEW: If engagement insights exist in DATA, surface the top 1-2
+       adaptation suggestions briefly: "数据显示 X 互动率低，建议 Y". Skip if no insights.
+
+    6. NEXT WEEK LANDSCAPE: Show calendar density.
        If >80% filled: "下周很满，想提前砍掉什么吗？" (道家: 留白)
        If <40% filled: "下周比较松，有没有什么想主动安排的？"
 
-    6. ONE QUESTION: End with one question that reflects their trajectory.
+    7. ONE QUESTION: End with one question that reflects their trajectory.
        Not "what are your goals" but something specific based on the data.
        (Existentialist authenticity check — "上周花最多时间的事，是你真正想做的吗？")
 

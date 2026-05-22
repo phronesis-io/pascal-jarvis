@@ -24,9 +24,19 @@ def test_auth_error_detected():
     assert looks_like_error("Not logged in. Please run /login.") is True
 
 
-def test_each_pattern_triggers():
+def test_each_pattern_triggers_at_line_start():
+    # looks_like_error now requires the pattern at the start of a line
+    # (after optional whitespace) to avoid false positives on legitimate
+    # content that mentions error terms mid-sentence.
     for p in ERROR_PATTERNS:
-        assert looks_like_error(f"prefix {p} suffix" * 2) is True, f"missed: {p}"
+        assert looks_like_error(f"{p}\nmore detail follows" + "x" * 20) is True, f"missed line-start: {p}"
+        assert looks_like_error(f"  {p} indented") is True, f"missed indented: {p}"
+
+
+def test_mid_line_mention_is_safe():
+    # The user can legitimately discuss errors — these should NOT trigger.
+    assert looks_like_error("The API Error was caused by a network blip" + "x" * 50) is False
+    assert looks_like_error("I encountered Traceback handling in my code" + "x" * 50) is False
 
 
 def test_sanitize_returns_fallback_for_errors():

@@ -1,0 +1,400 @@
+"""SQLite database layer with migrations.
+
+Single-file DB with WAL mode for concurrent reads from bot.sh.
+Uses FTS5 for full-text search on bookmarks and logs.
+"""
+
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
+
+MIGRATIONS = [
+    # v1: Core tables
+    """
+    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'user',
+        trigger_type TEXT NOT NULL DEFAULT 'cron',
+        trigger_config TEXT NOT NULL DEFAULT '{}',
+        conditions TEXT DEFAULT '[]',
+        action_type TEXT NOT NULL DEFAULT 'prompt',
+        action_config TEXT NOT NULL DEFAULT '{}',
+        priority INTEGER DEFAULT 5,
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_run_at TEXT,
+        next_run_at TEXT,
+        run_count INTEGER DEFAULT 0,
+        last_result TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS bookmarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT,
+        title TEXT NOT NULL,
+        content TEXT,
+        summary TEXT,
+        tags TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'inbox',
+        source TEXT DEFAULT 'manual',
+        energy_level TEXT,
+        read_time_min INTEGER,
+        surfaced_count INTEGER DEFAULT 0,
+        last_surfaced_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        source TEXT NOT NULL,
+        level TEXT DEFAULT 'info',
+        message TEXT NOT NULL,
+        context TEXT DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS engagement_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        source TEXT,
+        timestamp TEXT NOT NULL,
+        engaged INTEGER DEFAULT 0,
+        gap_seconds REAL,
+        metadata TEXT DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bookmarks_status ON bookmarks(status);
+    CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_log_ts ON agent_log(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_agent_log_source ON agent_log(source);
+    CREATE INDEX IF NOT EXISTS idx_engagement_ts ON engagement_events(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_next ON scheduled_tasks(next_run_at);
+    """,
+    # v2: FTS indices
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
+        title, summary, tags, content='bookmarks', content_rowid='id'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(rowid, title, summary, tags)
+        VALUES (new.id, new.title, new.summary, new.tags);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, summary, tags)
+        VALUES ('delete', old.id, old.title, old.summary, old.tags);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, summary, tags)
+        VALUES ('delete', old.id, old.title, old.summary, old.tags);
+        INSERT INTO bookmarks_fts(rowid, title, summary, tags)
+        VALUES (new.id, new.title, new.summary, new.tags);
+    END;
+    """,
+    # v3: Task execution history
+    """
+    CREATE TABLE IF NOT EXISTS task_executions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT DEFAULT 'running',
+        result TEXT,
+        duration_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_exec_task ON task_executions(task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_exec_started ON task_executions(started_at);
+    """,
+]
+
+_connection: sqlite3.Connection | None = None
+
+
+def get_db() -> sqlite3.Connection:
+    """Get or create the singleton DB connection."""
+    global _connection
+    if _connection is None:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _connection.row_factory = sqlite3.Row
+        _connection.execute("PRAGMA journal_mode=WAL")
+        _connection.execute("PRAGMA synchronous=NORMAL")
+        _connection.execute("PRAGMA foreign_keys=ON")
+        _run_migrations(_connection)
+    return _connection
+
+
+@contextmanager
+def transaction():
+    """Context manager for atomic writes."""
+    db = get_db()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _run_migrations(db: sqlite3.Connection):
+    """Run pending migrations."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS _migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    applied = {row[0] for row in db.execute("SELECT version FROM _migrations")}
+
+    for i, sql in enumerate(MIGRATIONS):
+        if i in applied:
+            continue
+        db.executescript(sql)
+        db.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (?, ?)",
+            (i, time.strftime("%Y-%m-%dT%H:%M:%S")),
+        )
+    db.commit()
+
+
+# ── Bookmark operations ──────────────────────────────────────────────
+
+def bookmark_add(title: str, url: str = "", source: str = "manual",
+                 summary: str = "", tags: list[str] | None = None,
+                 content: str = "") -> int:
+    """Add a bookmark. Returns the new ID."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with transaction() as db:
+        # Deduplicate by URL
+        if url:
+            existing = db.execute(
+                "SELECT id FROM bookmarks WHERE url = ?", (url,)
+            ).fetchone()
+            if existing:
+                return existing[0]
+        cur = db.execute(
+            """INSERT INTO bookmarks (title, url, source, summary, tags, content, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (title, url, source, summary, json.dumps(tags or []), content, now, now),
+        )
+        return cur.lastrowid
+
+
+def bookmark_list(status: str | None = None, limit: int = 50,
+                  offset: int = 0) -> list[dict]:
+    """List bookmarks, optionally filtered by status."""
+    db = get_db()
+    if status:
+        rows = db.execute(
+            "SELECT * FROM bookmarks WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (status, limit, offset),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM bookmarks ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def bookmark_search(query: str, limit: int = 20) -> list[dict]:
+    """Full-text search bookmarks."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT b.* FROM bookmarks b
+           JOIN bookmarks_fts f ON b.id = f.rowid
+           WHERE bookmarks_fts MATCH ? ORDER BY rank LIMIT ?""",
+        (query, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def bookmark_update(bookmark_id: int, **kwargs) -> None:
+    """Update bookmark fields."""
+    allowed = {"status", "summary", "tags", "title", "url", "content",
+               "energy_level", "read_time_min", "surfaced_count", "last_surfaced_at"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if "tags" in updates and isinstance(updates["tags"], list):
+        updates["tags"] = json.dumps(updates["tags"])
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [bookmark_id]
+    with transaction() as db:
+        db.execute(f"UPDATE bookmarks SET {set_clause} WHERE id = ?", values)
+
+
+def bookmark_delete(bookmark_id: int) -> None:
+    """Delete a bookmark."""
+    with transaction() as db:
+        db.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
+
+
+# ── Agent log operations ─────────────────────────────────────────────
+
+def log_event(source: str, message: str, level: str = "info",
+              context: dict | None = None) -> None:
+    """Write an agent log entry."""
+    with transaction() as db:
+        db.execute(
+            "INSERT INTO agent_log (timestamp, source, level, message, context) VALUES (?, ?, ?, ?, ?)",
+            (time.strftime("%Y-%m-%dT%H:%M:%S"), source, level, message,
+             json.dumps(context or {})),
+        )
+
+
+def log_list(source: str | None = None, limit: int = 100,
+             since: str | None = None) -> list[dict]:
+    """Query agent logs."""
+    db = get_db()
+    conditions = []
+    params: list = []
+    if source:
+        conditions.append("source = ?")
+        params.append(source)
+    if since:
+        conditions.append("timestamp >= ?")
+        params.append(since)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(
+        f"SELECT * FROM agent_log {where} ORDER BY timestamp DESC LIMIT ?",
+        params + [limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Scheduled task operations ────────────────────────────────────────
+
+def task_register(task_id: str, name: str, trigger_type: str,
+                  trigger_config: dict, action_type: str = "prompt",
+                  action_config: dict | None = None,
+                  conditions: list | None = None,
+                  category: str = "user", priority: int = 5) -> None:
+    """Register or update a dynamic task."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with transaction() as db:
+        db.execute(
+            """INSERT OR REPLACE INTO scheduled_tasks
+               (id, name, category, trigger_type, trigger_config, conditions,
+                action_type, action_config, priority, enabled, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (task_id, name, category, trigger_type,
+             json.dumps(trigger_config), json.dumps(conditions or []),
+             action_type, json.dumps(action_config or {}), priority, now),
+        )
+
+
+def task_list(category: str | None = None, enabled_only: bool = True) -> list[dict]:
+    """List scheduled tasks."""
+    db = get_db()
+    conditions = []
+    params: list = []
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+    if enabled_only:
+        conditions.append("enabled = 1")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(
+        f"SELECT * FROM scheduled_tasks {where} ORDER BY priority, name",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def task_delete(task_id: str) -> None:
+    """Delete a scheduled task."""
+    with transaction() as db:
+        db.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+
+
+def task_update(task_id: str, **kwargs) -> None:
+    """Update task fields."""
+    allowed = {"enabled", "trigger_config", "conditions", "action_config",
+               "priority", "last_run_at", "next_run_at", "run_count", "last_result", "name"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+    for k in ("trigger_config", "conditions", "action_config"):
+        if k in updates and not isinstance(updates[k], str):
+            updates[k] = json.dumps(updates[k])
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [task_id]
+    with transaction() as db:
+        db.execute(f"UPDATE scheduled_tasks SET {set_clause} WHERE id = ?", values)
+
+
+# ── KV store ─────────────────────────────────────────────────────────
+
+def kv_get(key: str, default: str = "") -> str:
+    """Get a value from the KV store."""
+    db = get_db()
+    row = db.execute("SELECT value FROM kv_store WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def kv_set(key: str, value: str) -> None:
+    """Set a value in the KV store."""
+    with transaction() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, time.strftime("%Y-%m-%dT%H:%M:%S")),
+        )
+
+
+# ── Engagement tracking ──────────────────────────────────────────────
+
+def engagement_record(event_type: str, source: str = "",
+                      engaged: bool = False, gap_seconds: float = 0,
+                      metadata: dict | None = None) -> None:
+    """Record an engagement event."""
+    with transaction() as db:
+        db.execute(
+            """INSERT INTO engagement_events
+               (event_type, source, timestamp, engaged, gap_seconds, metadata)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (event_type, source, time.strftime("%Y-%m-%dT%H:%M:%S"),
+             int(engaged), gap_seconds, json.dumps(metadata or {})),
+        )
+
+
+def engagement_stats(days: int = 7) -> dict:
+    """Get engagement statistics for the last N days."""
+    db = get_db()
+    since = time.strftime("%Y-%m-%dT%H:%M:%S",
+                          time.localtime(time.time() - days * 86400))
+    total = db.execute(
+        "SELECT COUNT(*) FROM engagement_events WHERE timestamp >= ?", (since,)
+    ).fetchone()[0]
+    engaged = db.execute(
+        "SELECT COUNT(*) FROM engagement_events WHERE timestamp >= ? AND engaged = 1",
+        (since,),
+    ).fetchone()[0]
+    by_source = db.execute(
+        """SELECT source, COUNT(*) as total,
+                  SUM(engaged) as engaged_count
+           FROM engagement_events WHERE timestamp >= ?
+           GROUP BY source""",
+        (since,),
+    ).fetchall()
+    return {
+        "total": total,
+        "engaged": engaged,
+        "rate": round(engaged / total * 100, 1) if total else 0,
+        "by_source": [dict(r) for r in by_source],
+    }

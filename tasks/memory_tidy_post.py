@@ -26,6 +26,41 @@ MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
 INDEX_FILE = MEMORY_DIR / "_index.md"
 
+# Dual-directory paths for one-way sync (auto → heartbeat)
+AUTO_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis/memory"
+HEARTBEAT_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory"
+
+
+def _sync_warm_auto_to_heartbeat():
+    """One-way sync: auto-memory warm/ → heartbeat warm/ (auto is source of truth for user profile files)."""
+    auto_warm = AUTO_MEMORY / "warm"
+    hb_warm = HEARTBEAT_MEMORY / "warm"
+    if not auto_warm.exists() or not hb_warm.exists():
+        return
+
+    synced = []
+    for src in auto_warm.glob("*.md"):
+        dst = hb_warm / src.name
+        # Skip if heartbeat version is newer or identical
+        if dst.exists():
+            src_mtime = src.stat().st_mtime
+            dst_mtime = dst.stat().st_mtime
+            if dst_mtime >= src_mtime:
+                continue
+            # Auto is newer — sync
+            src_content = src.read_text(encoding="utf-8")
+            dst_content = dst.read_text(encoding="utf-8")
+            if src_content == dst_content:
+                continue
+        else:
+            src_content = src.read_text(encoding="utf-8")
+
+        dst.write_text(src_content, encoding="utf-8")
+        synced.append(src.name)
+
+    if synced:
+        print(f"[memory-tidy] synced auto→heartbeat warm/: {', '.join(synced)}", file=sys.stderr)
+
 
 def main() -> int:
     # Always run daily_log archive check (independent of Claude's response)
@@ -33,6 +68,12 @@ def main() -> int:
         _archive_old_daily_entries(now_local_str("%Y-%m-%d"))
     except Exception as e:
         print(f"[memory-tidy] archive check failed: {e}", file=sys.stderr)
+
+    # One-way sync: auto → heartbeat for warm/ files
+    try:
+        _sync_warm_auto_to_heartbeat()
+    except Exception as e:
+        print(f"[memory-tidy] warm sync failed: {e}", file=sys.stderr)
 
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:

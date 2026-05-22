@@ -45,6 +45,7 @@ def _char_ngrams(text: str, n: int = 3) -> set:
 def _is_duplicate(new_raw: str, existing_body: str) -> bool:
     """Check if new entry is essentially the same as the most recent entry.
     Uses character trigram Jaccard similarity — works for Chinese+English mixed text.
+    Short texts require higher similarity to avoid false positives.
     """
     if not existing_body:
         return False
@@ -57,6 +58,9 @@ def _is_duplicate(new_raw: str, existing_body: str) -> bool:
     new_content = _normalize(new_raw)
     if not last_content or not new_content:
         return False
+    # Skip dedup for very short texts (< 15 chars) — too little signal
+    if len(new_content) < 15 or len(last_content) < 15:
+        return new_content == last_content  # exact match only for short texts
     # Character trigram Jaccard similarity
     last_ngrams = _char_ngrams(last_content)
     new_ngrams = _char_ngrams(new_content)
@@ -65,7 +69,10 @@ def _is_duplicate(new_raw: str, existing_body: str) -> bool:
     intersection = len(last_ngrams & new_ngrams)
     union = len(last_ngrams | new_ngrams)
     similarity = intersection / union if union else 0
-    return similarity > 0.45
+    # Use length-dependent threshold: shorter texts need higher similarity
+    min_len = min(len(new_content), len(last_content))
+    threshold = 0.65 if min_len < 50 else 0.45
+    return similarity > threshold
 
 
 def main() -> int:
@@ -75,6 +82,17 @@ def main() -> int:
     if looks_like_error(raw):
         print("[cross-session] skipping — output looks like error", file=sys.stderr)
         return 0
+
+    # Skip consecutive "No new data" entries — they waste index space
+    is_no_data = "no new data" in raw.lower() or "no significant" in raw.lower()
+    if is_no_data and DIGEST_FILE.exists():
+        content = DIGEST_FILE.read_text(encoding="utf-8")
+        # Check if the most recent entry is also "no new data"
+        import re as _re
+        first_entry = _re.search(r"\n## [^\n]+\n(.*?)(?=\n## |\Z)", content, _re.DOTALL)
+        if first_entry and "no new data" in first_entry.group(1).lower():
+            print("[cross-session] skipping — consecutive 'No new data' entry", file=sys.stderr)
+            return 0
 
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
