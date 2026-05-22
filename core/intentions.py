@@ -113,11 +113,12 @@ def create_intent(
             priority, chain_next, purpose, tags, created_at, expires_at)
            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (iid, name, source, trigger_type,
-         json.dumps(trigger_config), prompt,
-         json.dumps(context or {}), action_type,
-         json.dumps(action_config or {}), json.dumps(conditions or []),
+         json.dumps(trigger_config, ensure_ascii=False), prompt,
+         json.dumps(context or {}, ensure_ascii=False), action_type,
+         json.dumps(action_config or {}, ensure_ascii=False),
+         json.dumps(conditions or [], ensure_ascii=False),
          priority, chain_next, purpose,
-         json.dumps(tags or []), now, expires_at),
+         json.dumps(tags or [], ensure_ascii=False), now, expires_at),
     )
     db.commit()
     return iid
@@ -183,7 +184,7 @@ def update_intent(intent_id: str, **kwargs) -> bool:
         return False
     for k in ("context", "action_config", "conditions", "tags", "trigger_config"):
         if k in updates and not isinstance(updates[k], str):
-            updates[k] = json.dumps(updates[k])
+            updates[k] = json.dumps(updates[k], ensure_ascii=False)
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values()) + [intent_id]
     db = _get_db()
@@ -412,16 +413,15 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
         # Create prep intent: 30min before for meetings, 2 days before for activities
         intent_tag = f"cal:{current_date}:{start_time}:{title[:20]}"
 
-        # Check if already created (exact JSON array containment)
+        # Check if already created. Use JSON parse (LIKE pre-filter is unreliable
+        # because json.dumps may store Chinese as \uXXXX while intent_tag is raw UTF-8).
         existing = db.execute(
-            "SELECT id, tags FROM intentions WHERE status = 'pending' AND tags LIKE ?",
-            (f'%{intent_tag}%',),
+            "SELECT tags FROM intentions WHERE status = 'pending' AND source = 'calendar'"
         ).fetchall()
-        # Verify exact tag match (LIKE is loose; confirm via JSON parse)
         already_exists = False
         for row in existing:
             try:
-                row_tags = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                row_tags = json.loads(row[0]) if isinstance(row[0], str) else row[0]
                 if intent_tag in row_tags:
                     already_exists = True
                     break
