@@ -304,10 +304,22 @@ if result:
     }
 
     if [ -n "$output" ] && ! looks_like_error "$output"; then
-      if [[ "$output" == '{"config":'* ]]; then
-        lark_send_card "$output"
-      else
-        send_to_lark "$output"
+      # Heartbeat output may contain CARD: prefixed lines (card JSON) and plain text.
+      # Process each type separately to avoid mixing JSON with text.
+      local _remaining_text=""
+      while IFS= read -r _line; do
+        if [[ "$_line" == CARD:* ]]; then
+          lark_send_card "${_line#CARD:}"
+        elif [[ "$_line" == '{"config":'* ]]; then
+          # Legacy format (no CARD: prefix) — still handle for safety
+          lark_send_card "$_line"
+        elif [ -n "$_line" ]; then
+          _remaining_text="${_remaining_text:+$_remaining_text
+}$_line"
+        fi
+      done <<< "$output"
+      if [ -n "$_remaining_text" ]; then
+        send_to_lark "$_remaining_text"
       fi
       # Write to outbox so main session can see what heartbeat sent
       local ts_iso
