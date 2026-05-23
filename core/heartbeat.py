@@ -355,7 +355,20 @@ You have access to the user's memory below. Use it to personalize your responses
         dynamic_msgs = self._check_dynamic_tasks()
         user_messages.extend(dynamic_msgs)
 
-        combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
+        # Separate card JSON from plain text — they use different Lark send paths
+        cards = [m for m in user_messages if m.strip().startswith('{"config":')]
+        texts = [
+            m for m in user_messages
+            if m.strip() and not m.strip().startswith('{"config":')
+        ]
+
+        combined_parts = []
+        for card in cards:
+            combined_parts.append(f"CARD:{card.strip()}")
+        if texts:
+            combined_parts.append("\n\n---\n\n".join(texts))
+
+        combined = "\n".join(combined_parts) if combined_parts else ""
         beat = self._beat_status(due_tasks, skipped, runnable, tasks)
 
         # Status line → log only. User message → return to Lark.
