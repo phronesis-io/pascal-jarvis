@@ -137,6 +137,8 @@ def home_page():
         ui.separator()
         with ui.row().classes("gap-4"):
             ui.link("Tasks", "/tasks").classes("text-blue-600")
+            ui.link("Thinking", "/thinking").classes("text-purple-600")
+            ui.link("Agent Calendar", "/agent-calendar").classes("text-green-600")
             ui.link("Intentions", "/intentions").classes("text-purple-600")
             ui.link("Bookmarks", "/bookmarks").classes("text-blue-600")
             ui.link("Settings", "/settings").classes("text-blue-600")

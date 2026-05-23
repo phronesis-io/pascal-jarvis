@@ -15,6 +15,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
+| Thinking Review | thinking-review | yes (weekly) |
 | Analytics | engagement-analyze, cross-session-sync | silent |
 | Team | phronesis-monitor | yes (if relevant) |
 | Maintenance | repos-sync, self-diagnostic, personal-site | silent |
@@ -564,6 +565,35 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - If nothing noteworthy: HEARTBEAT_OK
     - If there IS something: brief summary in Chinese, under 80 words
     - NEVER include the raw messages — only your analysis
+
+## Thinking Review
+
+### thinking-review
+- interval: 7d
+- prompt: |
+    [THINKING REVIEW — Open Questions & Personal Projects]
+    Scan all files in warm/ with YAML frontmatter type: "question" or type: "project".
+
+    For each QUESTION:
+    1. Check last updated date. If > 3 weeks stale, ask: "这个问题还在想吗？要继续探索、还是先放下？"
+    2. If status is "exploring" for > 2 weeks, suggest: "有没有接近一个方向了？要不要推进到 crystallizing？"
+    3. If status is "decided", suggest spawning a project file.
+
+    For each PROJECT:
+    1. Check last updated date. If > 2 weeks stale, ask: "这个项目沉默了，是暂停还是继续？"
+    2. If next action says "待确认", nudge for an update.
+
+    Tone: gentle nudge, not performance review. Like Bullet Journal migration —
+    the point is to decide "still alive or let go", not to guilt.
+
+    Format: short list, one line per item. Under 150 words Chinese.
+
+    Return JSON: {
+      "user_message": "<markdown summary of items that need attention>",
+      "stale_questions": ["<filename>", ...],
+      "stale_projects": ["<filename>", ...]
+    }
+    Or HEARTBEAT_OK if everything is fresh.
 
 ## Maintenance
 
