@@ -1158,10 +1158,10 @@ lark_subscribe_messages \
       if [ -n "$_has_action" ] && [ "$_has_action" != "null" ]; then
         log_info "[card-action] Raw event: ${line:0:200}"
       fi
-      _card_action=$(echo "$line" | jq -r '.action.value.action // empty' 2>/dev/null)
+      _card_action=$(echo "$line" | jq -r '.action.value.action // .event.action.value.action // empty' 2>/dev/null)
       if [ "$_card_action" = "feedback" ]; then
-        _fb_source=$(echo "$line" | jq -r '.action.value.source // empty' 2>/dev/null)
-        _fb_rating=$(echo "$line" | jq -r '.action.value.rating // empty' 2>/dev/null)
+        _fb_source=$(echo "$line" | jq -r '.action.value.source // .event.action.value.source // empty' 2>/dev/null)
+        _fb_rating=$(echo "$line" | jq -r '.action.value.rating // .event.action.value.rating // empty' 2>/dev/null)
         if [ -n "$_fb_source" ] && [ -n "$_fb_rating" ]; then
           local _fb_ts
           _fb_ts=$(date '+%Y-%m-%d %H:%M')
@@ -1172,8 +1172,8 @@ lark_subscribe_messages \
         continue
       fi
       if [ "$_card_action" = "watchlater" ]; then
-        _wl_title=$(echo "$line" | jq -r '.action.value.title // empty' 2>/dev/null)
-        _wl_url=$(echo "$line" | jq -r '.action.value.url // empty' 2>/dev/null)
+        _wl_title=$(echo "$line" | jq -r '.action.value.title // .event.action.value.title // empty' 2>/dev/null)
+        _wl_url=$(echo "$line" | jq -r '.action.value.url // .event.action.value.url // empty' 2>/dev/null)
         if [ -n "$_wl_url" ]; then
           _wl_result=$(python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_wl_title" "$_wl_url" "button" 2>>"$LOG_FILE")
           log_info "[watchlater] Saved via button: $_wl_title"
@@ -1191,12 +1191,15 @@ lark_subscribe_messages \
         exec "$JARVIS_DIR/bot.sh"
       fi
 
-      content=$(echo "$line" | jq -r '.content // empty' 2>/dev/null)
-      message_id=$(echo "$line" | jq -r '.message_id // empty' 2>/dev/null)
-      chat_type=$(echo "$line" | jq -r '.chat_type // empty' 2>/dev/null)
-      chat_id=$(echo "$line" | jq -r '.chat_id // empty' 2>/dev/null)
-      sender_id=$(echo "$line" | jq -r '.sender_id // empty' 2>/dev/null)
-      msg_type=$(echo "$line" | jq -r '.msg_type // empty' 2>/dev/null)
+      # Parse message fields — support both compact (flat) and raw (nested) formats.
+      # Compact: .content, .message_id, etc.
+      # Raw: .event.message.content, .event.message.message_id, etc.
+      content=$(echo "$line" | jq -r '.content // .event.message.content // empty' 2>/dev/null)
+      message_id=$(echo "$line" | jq -r '.message_id // .event.message.message_id // empty' 2>/dev/null)
+      chat_type=$(echo "$line" | jq -r '.chat_type // .event.message.chat_type // empty' 2>/dev/null)
+      chat_id=$(echo "$line" | jq -r '.chat_id // .event.message.chat_id // empty' 2>/dev/null)
+      sender_id=$(echo "$line" | jq -r '.sender_id // .event.sender.sender_id.open_id // empty' 2>/dev/null)
+      msg_type=$(echo "$line" | jq -r '.msg_type // .event.message.msg_type // empty' 2>/dev/null)
 
       # Log every received event for debugging (even if we skip it)
       if [ -n "$message_id" ]; then
@@ -1230,7 +1233,7 @@ lark_subscribe_messages \
       # Check if APP_ID appears anywhere in the mentions JSON — this is the
       # reliable way to detect a bot mention regardless of display name.
       if [ "$chat_type" != "p2p" ] && [ -n "$APP_ID" ]; then
-        mentions_raw=$(echo "$line" | jq -r '.mentions // ""' 2>/dev/null)
+        mentions_raw=$(echo "$line" | jq -r '.mentions // .event.message.mentions // ""' 2>/dev/null)
         if ! echo "$mentions_raw" | grep -q "$APP_ID" 2>/dev/null; then
           log_info "Group message without @mention — ignoring"
           continue

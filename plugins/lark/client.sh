@@ -135,13 +135,15 @@ lark_remove_reaction() {
 # ── Inbound: event subscription ──────────────────────────────────────
 
 # lark_subscribe_messages
-# Emits NDJSON lines to stdout, one per incoming im.message.receive_v1 event.
+# Emits NDJSON lines to stdout for im.message and card.action events.
 # The caller pipes this into a `while read` loop and parses each line with jq.
+# NOTE: --compact is NOT used because it strips card.action.trigger events
+# (they have no "text" field). Raw JSON is parsed by jq in bot.sh instead.
 # Stderr (SDK errors) is redirected to the log file.
 lark_subscribe_messages() {
   lark-cli event +subscribe \
     --event-types im.message.receive_v1,card.action.trigger \
-    --compact --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
+    --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
 }
 
 # ── Calendar (used by tasks/checkin_pre.sh for free/busy detection) ──
