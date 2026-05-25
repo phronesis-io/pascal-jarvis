@@ -8,8 +8,16 @@ def test_empty_is_error():
     assert looks_like_error("   ") is True
 
 
-def test_too_short_is_error():
-    assert looks_like_error("hi") is True  # < MIN_MEANINGFUL_LENGTH
+def test_whitespace_only_is_error():
+    assert looks_like_error("   ") is True
+    assert looks_like_error("\n\t") is True
+
+
+def test_short_replies_are_safe():
+    """Short legitimate replies must NOT be blocked."""
+    assert looks_like_error("OK") is False
+    assert looks_like_error("好的") is False
+    assert looks_like_error("记住了。") is False
 
 
 def test_normal_text_is_safe():

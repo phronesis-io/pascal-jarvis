@@ -30,9 +30,6 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
     '"type":"error"',
 )
 
-# Minimum length — set very low to avoid blocking legitimate short replies
-# like "好的", "记住了", "OK". Was 5, which blocked valid 4-char Chinese responses.
-MIN_MEANINGFUL_LENGTH = 2
 
 
 def looks_like_error(text: str) -> bool:
@@ -42,7 +39,7 @@ def looks_like_error(text: str) -> bool:
     a line (after optional whitespace) to avoid false positives on legitimate
     content that mentions error-related terms mid-sentence.
     """
-    if not text or len(text.strip()) < MIN_MEANINGFUL_LENGTH:
+    if not text or not text.strip():
         return True
     head = text[:300]
     # Check line-start patterns

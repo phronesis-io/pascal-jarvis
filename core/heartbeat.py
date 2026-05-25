@@ -265,7 +265,8 @@ You have access to the user's memory below. Use it to personalize your responses
             ts = TaskState.from_dict(state.get(task["name"], {}))
             last_run = ts.last_run
             # Circuit breaker: skip tasks that have been auto-disabled
-            if ts.circuit.is_open:
+            # PRIORITY_TASKS are exempt — they're infrastructure that must stay running
+            if ts.circuit.is_open and task["name"] not in self.PRIORITY_TASKS:
                 remaining = ts.circuit.remaining_disable_seconds
                 circuit_tripped.append((task["name"], remaining))
                 continue
