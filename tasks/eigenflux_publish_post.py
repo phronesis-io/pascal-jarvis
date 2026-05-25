@@ -26,7 +26,7 @@ def main() -> int:
     raw = re.sub(r'```\s*$', '', raw)
 
     try:
-        data = json.loads(raw)
+        data = json.loads(extract_json(raw))
     except json.JSONDecodeError as e:
         print(f"[eigenflux-publish] JSON parse failed: {e}", file=LOG)
         return 0

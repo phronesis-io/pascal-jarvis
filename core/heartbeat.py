@@ -91,8 +91,12 @@ class HeartbeatRunner:
 
     # Tasks exempt from batch cap — they run on every cycle regardless.
     # These are critical infrastructure tasks whose pre→post pipeline doesn't
-    # need Claude reasoning, but must stay fresh (e.g. calendar data for other tasks).
-    PRIORITY_TASKS = {"calendar-sync"}
+    # need Claude reasoning, but must stay fresh for other tasks to work.
+    # - calendar-sync: feeds checkin, daily-plan, free-time-nudge
+    # - memory-hourly: feeds daily→weekly→monthly memory pipeline
+    # - activity-log: feeds daily-reflect
+    # - cross-session-sync: feeds memory consolidation
+    PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync"}
 
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).

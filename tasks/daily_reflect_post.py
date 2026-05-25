@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card, build_rich_card
-from core.safety import looks_like_error
+from core.safety import extract_json, looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -23,7 +23,7 @@ def main():
 
     # Parse JSON response
     try:
-        data = json.loads(raw)
+        data = json.loads(extract_json(raw))
         message = data.get("user_message", "")
         patterns = data.get("patterns_noted", [])
     except json.JSONDecodeError:
