@@ -17,7 +17,6 @@ import json
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from core.timeutil import now_local, now_local_str
 

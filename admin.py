@@ -1831,6 +1831,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # Health endpoint (no auth — used by monitoring)
+        if path == "/health" or path == "/healthz":
+            self._serve_health()
+            return
+
         # RichView pages bypass auth (accessible from Lark card links)
         if path.startswith("/view/"):
             view_id = path.split("/view/")[1].split("/")[0].split("?")[0]
@@ -1890,6 +1895,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(HTML.encode())
+
+    def _serve_health(self):
+        """Health check endpoint for monitoring. No auth required."""
+        import time as _t
+        health = {"status": "ok", "timestamp": _t.strftime("%Y-%m-%dT%H:%M:%S")}
+        try:
+            # Check heartbeat state
+            state_file = ROOT / "heartbeat_state.json"
+            if state_file.exists():
+                state = json.loads(state_file.read_text())
+                latest_run = max((v.get("last_run", 0) for v in state.values()), default=0)
+                age = int(_t.time()) - latest_run
+                health["heartbeat_age_seconds"] = age
+                health["heartbeat_stale"] = age > 1200
+            # Check bot.sh PID
+            pid_file = ROOT / ".bot.pid"
+            if pid_file.exists():
+                pid = int(pid_file.read_text().strip().split()[0])
+                try:
+                    os.kill(pid, 0)
+                    health["bot_alive"] = True
+                except (ProcessLookupError, PermissionError):
+                    health["bot_alive"] = False
+                    health["status"] = "degraded"
+            # Check circuit breakers
+            tripped = []
+            if state_file.exists():
+                for name, data in state.items():
+                    circuit = data.get("circuit", {})
+                    if circuit.get("disabled_until", 0) > _t.time():
+                        tripped.append(name)
+            if tripped:
+                health["circuits_open"] = tripped
+                health["status"] = "degraded"
+        except Exception as e:
+            health["status"] = "error"
+            health["error"] = str(e)
+        body = json.dumps(health, ensure_ascii=False).encode()
+        status = 200 if health["status"] == "ok" else 503
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_richview(self, view_id: str):
         """Render a RichView page. No auth required."""

@@ -82,8 +82,9 @@ def main() -> int:
     if not schedule_data:
         schedule_data = raw
 
-    # Always update the memory file silently with FULL schedule data
-    CALENDAR_FILE.write_text(
+    # Always update the memory file silently with FULL schedule data (atomic — read by main session)
+    from core.safety import atomic_write
+    atomic_write(CALENDAR_FILE,
         f"---\nname: 今日日程\ndescription: Lark 日历自动同步，含今天和明天的日程\n"
         f"type: reference\n---\n\n# Calendar (synced {ts})\n\n{schedule_data}\n"
     )
@@ -99,8 +100,8 @@ def main() -> int:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Save current events for next comparison
-    EVENTS_FILE.write_text(json.dumps(list(new_events), ensure_ascii=False))
+    # Save current events for next comparison (atomic)
+    atomic_write(EVENTS_FILE, json.dumps(list(new_events), ensure_ascii=False))
 
     added, removed = detect_changes(old_events, new_events)
 

@@ -48,3 +48,19 @@ def sanitize_for_user(text: str, fallback: str = "") -> str:
     if looks_like_error(text):
         return fallback
     return text
+
+
+def atomic_write(path, content: str, encoding: str = "utf-8"):
+    """Write content to path atomically via tmp + rename.
+
+    Prevents data corruption if the process is killed mid-write.
+    Use for any file that is read by another process (heartbeat state,
+    memory files, engagement logs, etc.).
+    """
+    import os
+    from pathlib import Path
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(content, encoding=encoding)
+    os.replace(tmp, p)
