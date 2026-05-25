@@ -295,6 +295,11 @@ heartbeat_loop() {
       log_info "[heartbeat] Force trigger detected"
     fi
 
+    # Emit heartbeat marker BEFORE Claude call so daemon knows loop is alive
+    # even during long (30-300s) Claude calls. Without this, daemon sees
+    # no "Beat sent" for the duration of the call → false "stale" alert.
+    log_info "[heartbeat] Beat sent (working)"
+
     # CRITICAL: stderr goes to log file, stdout is captured.
     # Only non-empty stdout is considered a user message for Lark.
     local output
