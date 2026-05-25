@@ -119,10 +119,19 @@ def _find_last_heartbeat() -> float | None:
                     f.seek(size - 10_000)
                     f.readline()  # skip partial line
                 text = f.read()
+            # Match both old format [YYYY-MM-DD HH:MM:SS]...Beat sent
+            # and new JSON format {"ts":"YYYY-MM-DDTHH:MM:SS",...,"msg":"Beat sent"...}
             beats = re.findall(
                 r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Beat sent",
                 text
             )
+            # Also check structured JSON logs
+            json_beats = re.findall(
+                r'"ts":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})".*"component":"heartbeat"',
+                text
+            )
+            for tb in json_beats:
+                beats.append(tb.replace("T", " "))
             if beats:
                 beat_time = datetime.strptime(beats[-1], "%Y-%m-%d %H:%M:%S")
                 if latest_beat is None or beat_time > latest_beat:

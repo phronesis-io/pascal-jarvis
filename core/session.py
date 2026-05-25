@@ -264,4 +264,10 @@ def build_recent_turns(session_dir: str | Path, session_id: str,
 
 
 
-# _extract_text is imported from core.textutil
+def get_session_counter(tracker_path: str | Path, conv_key: str) -> int:
+    """Read the session counter for a conv_key from the tracker file."""
+    try:
+        tracker = json.loads(Path(tracker_path).read_text(encoding="utf-8"))
+        return tracker.get(conv_key, {}).get("counter", 0)
+    except (json.JSONDecodeError, OSError):
+        return 0
