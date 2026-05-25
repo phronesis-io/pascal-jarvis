@@ -30,8 +30,9 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
     '"type":"error"',
 )
 
-# If the entire answer is shorter than this, treat it as non-substantive noise.
-MIN_MEANINGFUL_LENGTH = 5
+# Minimum length — set very low to avoid blocking legitimate short replies
+# like "好的", "记住了", "OK". Was 5, which blocked valid 4-char Chinese responses.
+MIN_MEANINGFUL_LENGTH = 2
 
 
 def looks_like_error(text: str) -> bool:
