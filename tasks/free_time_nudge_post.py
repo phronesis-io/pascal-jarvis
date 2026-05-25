@@ -57,7 +57,7 @@ def main():
     if watchlater and isinstance(watchlater, dict) and watchlater.get("url"):
         buttons = [{"text": "去看看", "url": watchlater["url"]}]
 
-    print(build_card("⏰ 空档", message, buttons))
+    print(build_card("⏰ 空档", message, buttons, source="free-time-nudge"))
 
 
 if __name__ == "__main__":

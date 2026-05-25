@@ -141,7 +141,7 @@ def main() -> int:
 
     if parts:
         msg = "日程变动 — " + "；".join(parts)
-        print(build_card("📅 变动", msg))
+        print(build_card("📅 变动", msg, source="calendar-sync"))
         print(f"[calendar-sync] Notified: {msg}", file=sys.stderr)
 
     return 0

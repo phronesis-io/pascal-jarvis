@@ -1141,6 +1141,18 @@ lark_subscribe_messages \
 
       # ── Card action callback (e.g. watchlater button) ──────────────
       _card_action=$(echo "$line" | jq -r '.action.value.action // empty' 2>/dev/null)
+      if [ "$_card_action" = "feedback" ]; then
+        _fb_source=$(echo "$line" | jq -r '.action.value.source // empty' 2>/dev/null)
+        _fb_rating=$(echo "$line" | jq -r '.action.value.rating // empty' 2>/dev/null)
+        if [ -n "$_fb_source" ] && [ -n "$_fb_rating" ]; then
+          local _fb_ts
+          _fb_ts=$(date '+%Y-%m-%d %H:%M')
+          printf '%s\n' "{\"ts\":\"$_fb_ts\",\"source\":\"$_fb_source\",\"type\":\"feedback\",\"rating\":\"$_fb_rating\",\"epoch\":$(date +%s)}" \
+            >> "$JARVIS_DIR/engagement_log.jsonl"
+          log_info "[feedback] $_fb_source: $_fb_rating"
+        fi
+        continue
+      fi
       if [ "$_card_action" = "watchlater" ]; then
         _wl_title=$(echo "$line" | jq -r '.action.value.title // empty' 2>/dev/null)
         _wl_url=$(echo "$line" | jq -r '.action.value.url // empty' 2>/dev/null)

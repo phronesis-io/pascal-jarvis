@@ -10,16 +10,18 @@ that links to a full-page rendered view via core.richview.publish().
 import json
 
 
-def build_card(header: str, body: str, buttons: list[dict] | None = None) -> str:
+def build_card(header: str, body: str, buttons: list[dict] | None = None,
+               source: str = "") -> str:
     """Build a Lark interactive card JSON string (single line).
 
     Args:
         header: Card header text (e.g. "📺 推荐 | Philosophy")
         body: Markdown body text
         buttons: Optional list of {"text": "label", "url": "https://..."} dicts
+        source: Task source name (e.g. "checkin") — if set, adds feedback buttons
 
     Returns:
-        Single-line JSON string starting with {"card":...}
+        Single-line JSON string starting with {"config":...}
     """
     elements = []
     if body:
@@ -39,8 +41,26 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None) -> str
             actions.append(action)
         elements.append({"tag": "action", "actions": actions})
 
-    # Lark interactive message content is the card object directly (no {"card":} wrapper).
-    # We prefix with {"card": for bot.sh detection, then lark_send_card strips it.
+    # Feedback buttons — lightweight quality signal collection.
+    # User taps 👍 (useful) or 🔇 (too much/not useful).
+    # Clicks are handled by bot.sh card callback → engagement_log.
+    if source:
+        feedback_actions = [
+            {
+                "tag": "button",
+                "text": {"content": "👍", "tag": "plain_text"},
+                "type": "default",
+                "value": {"action": "feedback", "source": source, "rating": "useful"},
+            },
+            {
+                "tag": "button",
+                "text": {"content": "🔇", "tag": "plain_text"},
+                "type": "default",
+                "value": {"action": "feedback", "source": source, "rating": "mute"},
+            },
+        ]
+        elements.append({"tag": "action", "actions": feedback_actions})
+
     card = {
         "config": {"wide_screen_mode": True},
         "header": {"title": {"content": header, "tag": "plain_text"}},
@@ -56,6 +76,7 @@ def build_rich_card(
     meta: dict | None = None,
     button_text: str = "查看完整内容",
     extra_buttons: list[dict] | None = None,
+    source: str = "",
 ) -> str:
     """Build a Lark card with an auto-generated RichView link.
 
@@ -79,7 +100,7 @@ def build_rich_card(
     buttons = [{"text": button_text, "url": url}]
     if extra_buttons:
         buttons.extend(extra_buttons)
-    return build_card(header=header, body=summary, buttons=buttons)
+    return build_card(header=header, body=summary, buttons=buttons, source=source)
 
 
 def extract_card_text(card_json: str) -> str:

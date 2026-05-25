@@ -49,7 +49,7 @@ def main() -> int:
         # Never emit raw JSON — extract human-readable text only
         text = re.sub(r'\{[^{}]*\}', '', raw).strip()
         if text and "http" in text:
-            print(build_card("📺 推荐", text))
+            print(build_card("📺 推荐", text, source="content-recommend"))
         return 0
 
     url = data.get("url", "")
@@ -113,7 +113,7 @@ def main() -> int:
         })
 
     # Use build_card for header + body, then add note element manually
-    card_str = build_card(header_text, user_message, buttons if buttons else None)
+    card_str = build_card(header_text, user_message, buttons if buttons else None, source="content-recommend")
     if url:
         # Inject note element before closing the elements array
         card_obj = json.loads(card_str)

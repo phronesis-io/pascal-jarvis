@@ -94,7 +94,8 @@ def main() -> int:
             summary=summary,
             sections=[{"type": "markdown", "content": msg}],
             meta={"source": "eigenflux_feed"},
-        ))
+        source="eigenflux-feed",
+    ))
     return 0
 
 

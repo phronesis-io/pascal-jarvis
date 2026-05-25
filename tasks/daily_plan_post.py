@@ -73,6 +73,7 @@ def main():
         summary=summary,
         sections=[{"type": "markdown", "content": message}],
         meta={"source": "daily_plan", "date": date_str},
+        source="daily-plan",
     ))
 
 

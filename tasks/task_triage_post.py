@@ -29,7 +29,7 @@ def main() -> int:
     except json.JSONDecodeError:
         # If Claude returned plain text instead of JSON, just forward as message
         if len(raw) > 10 and "HEARTBEAT_OK" not in raw:
-            print(build_card("📋 任务提醒", raw))
+            print(build_card("📋 任务提醒", raw, source="task-triage"))
         return 0
 
     tm = TaskManager(MEMORY_DIR)
@@ -44,7 +44,7 @@ def main() -> int:
     # Send user message
     msg = data.get("user_message", "").strip()
     if msg:
-        print(build_card("📋 任务", msg))
+        print(build_card("📋 任务", msg, source="task-triage"))
     return 0
 
 
