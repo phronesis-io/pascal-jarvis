@@ -9,17 +9,25 @@ from __future__ import annotations
 # Matched at LINE START within the first 300 chars to avoid false positives
 # when Claude legitimately discusses technical errors in running text
 # (e.g. "the API Error was caused by...").
+# Patterns checked at line start (startswith)
 ERROR_PATTERNS: tuple[str, ...] = (
     "Not logged in",
     "Please run /login",
     "Invalid authentication",
     "API Error",
-    "authentication_error",
-    "rate_limit",
     "Traceback",
     "usage limit",
     "credit balance",
     "Connection error",
+    "Failed to authenticate",
+)
+
+# Patterns checked anywhere in first 300 chars (substring match)
+# These appear mid-line in JSON error responses
+ERROR_SUBSTRINGS: tuple[str, ...] = (
+    "authentication_error",
+    "rate_limit",
+    '"type":"error"',
 )
 
 # If the entire answer is shorter than this, treat it as non-substantive noise.
@@ -36,10 +44,14 @@ def looks_like_error(text: str) -> bool:
     if not text or len(text.strip()) < MIN_MEANINGFUL_LENGTH:
         return True
     head = text[:300]
+    # Check line-start patterns
     for line in head.splitlines():
         stripped = line.lstrip()
         if any(stripped.startswith(p) for p in ERROR_PATTERNS):
             return True
+    # Check substring patterns (for errors embedded in JSON)
+    if any(p in head for p in ERROR_SUBSTRINGS):
+        return True
     return False
 
 

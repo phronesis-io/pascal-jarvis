@@ -1,6 +1,6 @@
 """Tests for core.safety — error pattern detection."""
 
-from core.safety import ERROR_PATTERNS, looks_like_error, sanitize_for_user
+from core.safety import ERROR_PATTERNS, ERROR_SUBSTRINGS, looks_like_error, sanitize_for_user
 
 
 def test_empty_is_error():
@@ -37,6 +37,28 @@ def test_mid_line_mention_is_safe():
     # The user can legitimately discuss errors — these should NOT trigger.
     assert looks_like_error("The API Error was caused by a network blip" + "x" * 50) is False
     assert looks_like_error("I encountered Traceback handling in my code" + "x" * 50) is False
+
+
+def test_json_auth_error_caught():
+    """Regression: API errors embedded in JSON were leaking to users.
+    e.g. 'Failed to authenticate. API Error: 401 {"type":"error",...}'
+    """
+    err = ('Failed to authenticate. API Error: 401 '
+           '{"type":"error","error":{"type":"authentication_error",'
+           '"message":"Invalid authentication credentials"}}')
+    assert looks_like_error(err) is True
+
+
+def test_json_error_type_caught():
+    """JSON responses with "type":"error" should be caught."""
+    err = '{"type":"error","error":{"type":"rate_limit","message":"too fast"}}'
+    assert looks_like_error(err) is True
+
+
+def test_substring_patterns_in_json():
+    for p in ERROR_SUBSTRINGS:
+        text = f'some prefix {p} and more text' + "x" * 50
+        assert looks_like_error(text) is True, f"missed substring: {p}"
 
 
 def test_sanitize_returns_fallback_for_errors():
