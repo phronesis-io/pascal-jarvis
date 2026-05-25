@@ -399,7 +399,7 @@ print(extract_readable_from_output(os.environ['JV_OUTPUT']))
 
     # ── Periodic status pulse to Lark (every 5 min, not every cycle) ──
     # Lets user see Jarvis is alive without opening the admin dashboard.
-    _status_interval=300  # 5 minutes
+    _status_interval=1800  # 30 min (user batches responses in 10-30min windows)
     _now_epoch=$(date +%s)
     if [ -z "$_last_status_epoch" ]; then
       _last_status_epoch=0
