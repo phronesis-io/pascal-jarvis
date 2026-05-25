@@ -33,12 +33,24 @@ def main() -> int:
     cleaned = re.sub(r"^```json?\s*", "", raw)
     cleaned = re.sub(r"```\s*$", "", cleaned.strip())
 
+    # Try to find JSON substring if direct parse fails
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # If Claude returned plain text instead of JSON, pass it through
-        if "http" in raw:
-            print(raw)
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(cleaned[start:end + 1])
+            except json.JSONDecodeError:
+                data = None
+        else:
+            data = None
+    if data is None:
+        # Never emit raw JSON — extract human-readable text only
+        text = re.sub(r'\{[^{}]*\}', '', raw).strip()
+        if text and "http" in text:
+            print(build_card("📺 推荐", text))
         return 0
 
     url = data.get("url", "")

@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.timeutil import now_local
+
 from nicegui import ui
 
 from ..db import get_db, log_list, engagement_stats, bookmark_list
@@ -49,7 +51,7 @@ def _format_relative_time(iso_str: str) -> str:
     """Format ISO time as relative (e.g., '3m ago')."""
     try:
         dt = datetime.fromisoformat(iso_str)
-        delta = datetime.now() - dt
+        delta = now_local().replace(tzinfo=None) - dt
         if delta.total_seconds() < 60:
             return "just now"
         elif delta.total_seconds() < 3600:

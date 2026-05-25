@@ -4,13 +4,13 @@ import json
 import os
 import re
 import sys
-from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.tasks import TaskManager
 from core.card import build_card, build_rich_card
 from core.safety import looks_like_error
+from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 
@@ -39,7 +39,7 @@ def main() -> int:
                 header="📋 周省",
                 summary=summary,
                 sections=[{"type": "markdown", "content": raw}],
-                meta={"source": "weekly_review", "date": str(date.today())},
+                meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d")},
             ))
         return 0
 
@@ -69,7 +69,7 @@ def main() -> int:
             header="📋 周省",
             summary=summary,
             sections=[{"type": "markdown", "content": msg}],
-            meta={"source": "weekly_review", "date": str(date.today())},
+            meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d")},
         ))
     return 0
 

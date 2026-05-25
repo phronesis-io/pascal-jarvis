@@ -11,9 +11,11 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from .memory import load_tiered_memory
+from .task_protocol import TaskState
 from .timeutil import now_local_str
 
 
@@ -86,6 +88,11 @@ class HeartbeatRunner:
     # Memory pipeline tasks — only one per cycle to prevent races
     PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly", "memory-monthly"}
 
+    # Max tasks to batch into a single Claude call.
+    # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
+    # Remaining tasks will be picked up in the next cycle.
+    MAX_BATCH_SIZE = 4
+
     # Minimum interval between force-triggered runs of the same task, in seconds.
     # Prevents rapid Lark session rotations from hammering memory-hourly.
     FORCE_COOLDOWN_SECONDS = 60
@@ -101,6 +108,12 @@ class HeartbeatRunner:
         self.model = model
         self.persona = persona
         self.work_dir = Path(work_dir) if work_dir else self.jarvis_dir
+        self._cid = ""  # cycle_id, set per run_cycle invocation
+
+    def _log(self, msg: str):
+        """Log to stderr with cycle_id prefix for correlation."""
+        tag = f"[heartbeat:{self._cid}]" if self._cid else "[heartbeat]"
+        print(f"{tag} {msg}", file=sys.stderr)
 
     def load_state(self) -> dict:
         if self.state_file.exists():
@@ -133,13 +146,13 @@ class HeartbeatRunner:
                 cwd=str(self.jarvis_dir),
             )
             if result.returncode != 0 and result.stderr.strip():
-                print(f"[heartbeat] Script {script_path} stderr: {result.stderr.strip()[:200]}", file=sys.stderr)
+                self._log(f"Script {script_path} stderr: {result.stderr.strip()[:200]}")
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            print(f"[heartbeat] Script {script_path} timed out (30s)", file=sys.stderr)
+            self._log(f"Script {script_path} timed out (30s)")
             return ""
         except Exception as e:
-            print(f"[heartbeat] Script {script_path} error: {e}", file=sys.stderr)
+            self._log(f"Script {script_path} error: {e}")
             return ""
 
     def claude_call(self, prompt: str) -> str:
@@ -170,18 +183,18 @@ You have access to the user's memory below. Use it to personalize your responses
                 cwd=str(self.work_dir),
             )
             if result.returncode != 0:
-                print(f"[heartbeat] Claude exited with code {result.returncode}", file=sys.stderr)
+                self._log(f"Claude exited with code {result.returncode}")
                 if result.stderr.strip():
-                    print(f"[heartbeat] Claude stderr: {result.stderr.strip()[:300]}", file=sys.stderr)
+                    self._log(f"Claude stderr: {result.stderr.strip()[:300]}")
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            print("[heartbeat] Claude call timed out (300s)", file=sys.stderr)
+            self._log("Claude call timed out (300s)")
             return ""
         except FileNotFoundError:
-            print("[heartbeat] Claude CLI not found — is it installed?", file=sys.stderr)
+            self._log("Claude CLI not found — is it installed?")
             return ""
         except Exception as e:
-            print(f"[heartbeat] Claude error: {e}", file=sys.stderr)
+            self._log(f"Claude error: {e}")
             return ""
 
     def _check_dynamic_tasks(self) -> list[str]:
@@ -206,22 +219,32 @@ You have access to the user's memory below. Use it to personalize your responses
         except ImportError:
             return []
         except Exception as e:
-            print(f"[heartbeat] Dynamic task check error: {e}", file=sys.stderr)
+            self._log(f"Dynamic task check error: {e}")
             return []
 
     def run_cycle(self, force: bool = False, only_task: str = ""):
         """Run one heartbeat cycle. Returns user-facing message or empty string."""
+        cycle_id = uuid.uuid4().hex[:8]
+        self._cid = cycle_id  # used by _log
+
         tasks = parse_heartbeat(self.heartbeat_file)
         state = self.load_state()
         now = int(time.time())
 
         # Determine which tasks are due
         due_tasks = []
+        circuit_tripped = []  # tasks skipped due to open circuit
         pipeline_picked = False
         for task in tasks:
             if only_task and task["name"] != only_task:
                 continue
-            last_run = state.get(task["name"], {}).get("last_run", 0)
+            ts = TaskState.from_dict(state.get(task["name"], {}))
+            last_run = ts.last_run
+            # Circuit breaker: skip tasks that have been auto-disabled
+            if ts.circuit.is_open:
+                remaining = ts.circuit.remaining_disable_seconds
+                circuit_tripped.append((task["name"], remaining))
+                continue
             # Apply cooldown even when forced, to prevent rapid repeats
             # (e.g. multiple Lark session rotations in quick succession).
             if force and (now - last_run) < self.FORCE_COOLDOWN_SECONDS:
@@ -233,10 +256,26 @@ You have access to the user's memory below. Use it to personalize your responses
                     pipeline_picked = True
                 due_tasks.append(task)
 
+        if circuit_tripped:
+            self._log(f"Circuit open: {[(n, f'{s}s') for n, s in circuit_tripped]}")
+
         if not due_tasks:
             return ""
 
-        # Run pre-scripts
+        # Cap batch size BEFORE pre-scripts to avoid side-effect waste.
+        # Some pre-scripts update state (e.g. poll timestamps) that assumes
+        # their data will be consumed. Running pre-scripts for tasks we'll
+        # defer wastes those state updates and can cause data loss.
+        # Sort by staleness (longest since last run first) to prevent starvation.
+        deferred = []
+        if len(due_tasks) > self.MAX_BATCH_SIZE:
+            due_tasks.sort(key=lambda t: state.get(t["name"], {}).get("last_run", 0))
+            deferred = due_tasks[self.MAX_BATCH_SIZE:]
+            due_tasks = due_tasks[:self.MAX_BATCH_SIZE]
+            self._log(f"Batch capped at {self.MAX_BATCH_SIZE}, "
+                      f"deferred {len(deferred)}: {[t['name'] for t in deferred]}")
+
+        # Run pre-scripts (record failures in circuit breaker)
         task_data = {}
         runnable = []
         skipped = []
@@ -245,7 +284,9 @@ You have access to the user's memory below. Use it to personalize your responses
                 data = self.run_script(task["pre"])
                 if not data:
                     retry_delay = self.EMPTY_RETRY_DELAYS.get(task["name"], task["interval"])
-                    state[task["name"]] = {"last_run": now - task["interval"] + retry_delay}
+                    ts = TaskState.from_dict(state.get(task["name"], {}))
+                    ts.last_run = now - task["interval"] + retry_delay
+                    state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
                     continue
                 task_data[task["name"]] = data
@@ -256,8 +297,7 @@ You have access to the user's memory below. Use it to personalize your responses
         if not runnable:
             if force:
                 self.save_state(state)
-                print(f"[heartbeat] {self._beat_status(due_tasks, skipped, runnable, tasks)}",
-                      file=sys.stderr)
+                self._log(self._beat_status(due_tasks, skipped, runnable, tasks))
             else:
                 self.save_state(state)
             return ""
@@ -287,16 +327,37 @@ You have access to the user's memory below. Use it to personalize your responses
         prompt = "\n".join(parts)
 
         # Call Claude
-        print(f"[heartbeat] Calling Claude with {n} tasks...", file=sys.stderr)
+        self._log(f"Calling Claude with {n} tasks...")
         raw = self.claude_call(prompt)
 
-        if not raw or "HEARTBEAT_OK" in raw:
+        if not raw:
+            # Claude call failed (timeout, network, etc.) — record failure
+            tripped_names = []
             for task in runnable:
-                state[task["name"]] = {"last_run": now}
+                ts = TaskState.from_dict(state.get(task["name"], {}))
+                ts.last_run = now
+                if ts.circuit.record_failure():
+                    tripped_names.append(task["name"])
+                state[task["name"]] = ts.to_dict()
+            self.save_state(state)
+            if tripped_names:
+                self._log(f"Circuit TRIPPED for: {tripped_names}")
+                return f"⚠️ 以下任务连续失败已自动暂停: {', '.join(tripped_names)}。系统会在冷却后自动恢复。"
+            self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
+            return ""
+
+        if raw.strip() == "HEARTBEAT_OK":
+            # Only treat as idle if the ENTIRE response is exactly HEARTBEAT_OK.
+            # A multi-task JSON envelope containing "HEARTBEAT_OK" as a per-task
+            # value must NOT be discarded — other tasks may have real content.
+            for task in runnable:
+                ts = TaskState.from_dict(state.get(task["name"], {}))
+                ts.last_run = now
+                ts.circuit.record_success()
+                state[task["name"]] = ts.to_dict()
             self.save_state(state)
             # Log status to stderr (goes to jarvis.log) — NOT returned to Lark
-            print(f"[heartbeat] {self._beat_status(due_tasks, skipped, runnable, tasks)} → OK",
-                  file=sys.stderr)
+            self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → OK")
             return ""
 
         # Route responses through post-scripts
@@ -343,12 +404,15 @@ You have access to the user's memory below. Use it to personalize your responses
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
                 # NEVER dump raw JSON to user — log for debugging and skip
-                print(f"[heartbeat] JSON parse failed for {n}-task response, skipping output", file=sys.stderr)
-                print(f"[heartbeat] Raw response (first 300 chars): {raw[:300]}", file=sys.stderr)
+                self._log(f"JSON parse failed for {n}-task response, skipping output")
+                self._log(f"Raw response (first 300 chars): {raw[:300]}")
 
-        # Update state
+        # Update state (preserve circuit breaker data, record success)
         for task in runnable:
-            state[task["name"]] = {"last_run": now}
+            ts = TaskState.from_dict(state.get(task["name"], {}))
+            ts.last_run = now
+            ts.circuit.record_success()
+            state[task["name"]] = ts.to_dict()
         self.save_state(state)
 
         # Also check dynamic tasks from SQLite scheduler
@@ -357,10 +421,35 @@ You have access to the user's memory below. Use it to personalize your responses
 
         # Separate card JSON from plain text — they use different Lark send paths
         cards = [m for m in user_messages if m.strip().startswith('{"config":')]
-        texts = [
-            m for m in user_messages
-            if m.strip() and not m.strip().startswith('{"config":')
-        ]
+        texts = []
+        for m in user_messages:
+            m = m.strip()
+            if not m or m.startswith('{"config":'):
+                continue
+            # Safety net: never send raw JSON to user — strip JSON-looking content
+            if (m.startswith('{') and m.endswith('}')) or (m.startswith('[') and m.endswith(']')):
+                try:
+                    json.loads(m)
+                    # It's valid JSON that isn't a card — log and skip
+                    self._log(f"Blocked raw JSON from reaching user: {m[:100]}...")
+                    continue
+                except json.JSONDecodeError:
+                    pass
+            # Also block strings containing a JSON object that makes up >50% of the content
+            # (catches cases like "Here's the result: {"intents": ...}")
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', m)
+            if json_match and len(json_match.group()) > len(m) * 0.5:
+                try:
+                    json.loads(json_match.group())
+                    self._log(f"Blocked embedded JSON from reaching user: {m[:100]}...")
+                    # Extract any non-JSON text and keep it
+                    text_part = m[:json_match.start()].strip()
+                    if text_part:
+                        texts.append(text_part)
+                    continue
+                except json.JSONDecodeError:
+                    pass
+            texts.append(m)
 
         combined_parts = []
         for card in cards:
@@ -381,9 +470,9 @@ You have access to the user's memory below. Use it to personalize your responses
                     source_file.write_text(",".join(producing_tasks))
                 except Exception:
                     pass
-            print(f"[heartbeat] {beat} → delivered", file=sys.stderr)
+            self._log(f"{beat} → delivered")
             return combined
-        print(f"[heartbeat] {beat} → OK (no user content)", file=sys.stderr)
+        self._log(f"{beat} → OK (no user content)")
         return ""
 
     def _beat_status(self, due_tasks, skipped, runnable, all_tasks) -> str:

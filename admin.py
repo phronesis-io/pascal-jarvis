@@ -1236,9 +1236,10 @@ def bot_status() -> dict:
     last_activity_ago = None
     if last_log_ts:
         try:
+            from core.timeutil import now_local
             from datetime import datetime
             dt = datetime.strptime(last_log_ts, "%Y-%m-%d %H:%M:%S")
-            last_activity_ago = int((datetime.now() - dt).total_seconds())
+            last_activity_ago = int((now_local().replace(tzinfo=None) - dt).total_seconds())
         except Exception:
             pass
 

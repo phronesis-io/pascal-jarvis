@@ -21,8 +21,9 @@ Loading strategy (1M context — load everything):
 """
 
 import re
-from datetime import date
 from pathlib import Path
+
+from core.timeutil import now_local
 
 # Max chars for the entire memory payload.
 # With 1M context (~4M chars), 200KB is <5% and covers all memory comfortably.
@@ -102,7 +103,7 @@ def _append_file(parts: list[str], path: Path, title: str):
             m = re.search(r"synced (\d{4}-\d{2}-\d{2})", content)
             if m:
                 synced = m.group(1)
-                today = date.today().isoformat()
+                today = now_local().strftime("%Y-%m-%d")
                 if synced != today:
                     content = (
                         f"⚠️ WARNING: This calendar was last synced on {synced}, "

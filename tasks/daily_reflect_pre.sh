@@ -5,10 +5,15 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 
-# Time gate: 20:30-23:29 (wider window for reflection to actually fire)
+# Load configurable time windows from jarvis.yaml
+eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true
+
+# Time gate (configurable via schedule.daily_reflect_window in jarvis.yaml)
 hour=$(date +%H)
 min=$(date +%M)
-if [ "$hour" -lt 20 ] || { [ "$hour" -eq 20 ] && [ "$min" -lt 30 ]; } || { [ "$hour" -eq 23 ] && [ "$min" -ge 30 ]; }; then
+_rs_h="${REFLECT_START_HOUR:-20}"; _rs_m="${REFLECT_START_MIN:-30}"
+_re_h="${REFLECT_END_HOUR:-23}"; _re_m="${REFLECT_END_MIN:-30}"
+if [ "$hour" -lt "$_rs_h" ] || { [ "$hour" -eq "$_rs_h" ] && [ "$min" -lt "$_rs_m" ]; } || { [ "$hour" -eq "$_re_h" ] && [ "$min" -ge "$_re_m" ]; }; then
   exit 0
 fi
 

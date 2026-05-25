@@ -23,6 +23,18 @@ _DEFAULTS = {
         "check_interval": 10,
         "tasks_file": "HEARTBEAT.md",
     },
+    "schedule": {
+        "working_hours": {"start": 9, "end": 22},
+        "daily_plan_window": {"start": "08:00", "end": "09:30"},
+        "daily_reflect_window": {"start": "20:30", "end": "23:30"},
+        "weekly_review": {"day": 7, "start": 10, "end": 12},
+    },
+    "thresholds": {
+        "free_block_min_minutes": 30,
+        "nudge_max_per_day": 2,
+        "checkin_transition_minutes": 15,
+        "max_batch_size": 4,
+    },
     "admin": {
         "enabled": False,
         "port": 3456,
@@ -92,6 +104,14 @@ class Config:
     @property
     def plugins(self) -> dict:
         return self._raw.get("plugins", {})
+
+    @property
+    def schedule(self) -> dict:
+        return self._raw.get("schedule", {})
+
+    @property
+    def thresholds(self) -> dict:
+        return self._raw.get("thresholds", {})
 
     @property
     def admin(self) -> dict:

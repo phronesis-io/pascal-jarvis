@@ -5,13 +5,16 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 
-# Only during waking hours
+# Load configurable thresholds from jarvis.yaml
+eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true
+
+# Only during waking hours (configurable via schedule.working_hours)
 hour=$(date +%H)
-if [ "$hour" -lt 9 ] || [ "$hour" -ge 21 ]; then
+if [ "$hour" -lt "${WORK_START:-9}" ] || [ "$hour" -ge "${WORK_END:-22}" ]; then
   exit 0
 fi
 
-# Rate limit: max 2 nudges per day
+# Rate limit (configurable via thresholds.nudge_max_per_day)
 STATE_FILE="$JARVIS_DIR/.free_time_nudge_state"
 today=$(date '+%Y-%m-%d')
 nudge_count=0
@@ -22,7 +25,7 @@ if [ -f "$STATE_FILE" ]; then
   fi
 fi
 
-if [ "$nudge_count" -ge 2 ]; then
+if [ "$nudge_count" -ge "${NUDGE_MAX:-2}" ]; then
   exit 0
 fi
 
