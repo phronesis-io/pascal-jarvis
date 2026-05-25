@@ -71,7 +71,7 @@ def main() -> int:
         # Never emit raw JSON — extract human-readable text only
         text = re.sub(r'\{[^{}]*\}', '', raw).strip()
         if text and "http" in text:
-            print(build_card("⏰ 稍后看", text))
+            print(build_card("⏰ 稍后看", text, source="watchlater-remind"))
         return 0
 
     url = data.get("url", "")
@@ -93,7 +93,7 @@ def main() -> int:
     # Build interactive card using shared helper
     header_text = f"📌 收藏提醒 | {title}" if title else "📌 收藏提醒"
     buttons = [{"text": "去看看", "url": url}] if url else None
-    print(build_card(header_text, user_message, buttons))
+    print(build_card(header_text, user_message, buttons, source="watchlater-remind"))
     return 0
 
 

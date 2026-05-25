@@ -70,7 +70,8 @@ def main() -> int:
             summary=summary,
             sections=[{"type": "markdown", "content": msg}],
             meta={"source": "eigenflux_research"},
-        ))
+        source="eigenflux-research",
+    ))
     return 0
 
 

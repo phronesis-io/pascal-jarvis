@@ -28,7 +28,8 @@ def main() -> int:
         summary=summary,
         sections=[{"type": "markdown", "content": raw}],
         meta={"source": "phronesis_monitor"},
-    ))
+    source="phronesis-monitor",
+))
     return 0
 
 

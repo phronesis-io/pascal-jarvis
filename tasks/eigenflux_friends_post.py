@@ -79,7 +79,7 @@ def main() -> int:
 
     # Output user_message as Lark card
     if user_message:
-        print(build_card("📡 EigenFlux · 好友申请", user_message))
+        print(build_card("📡 EigenFlux · 好友申请", user_message, source="eigenflux-friends"))
 
     return 0
 

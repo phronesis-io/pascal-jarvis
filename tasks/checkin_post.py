@@ -184,7 +184,7 @@ def main() -> int:
     header = "🌿 关怀" if is_wellbeing else "💡 联系"
 
     # Output as Lark card (single line)
-    print(build_card(header, message))
+    print(build_card(header, message, source="checkin"))
     return 0
 
 

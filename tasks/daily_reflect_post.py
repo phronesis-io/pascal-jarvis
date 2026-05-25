@@ -76,7 +76,8 @@ def main():
         summary=summary,
         sections=sections,
         meta={"source": "daily_reflect", "date": date_str},
-    ))
+    source="daily-reflect",
+))
 
 
 if __name__ == "__main__":

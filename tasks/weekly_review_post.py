@@ -38,7 +38,7 @@ def main() -> int:
                 header="📋 周省",
                 summary=summary,
                 sections=[{"type": "markdown", "content": raw}],
-                meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d")},
+                meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d", source="weekly-review")},
             ))
         return 0
 
@@ -68,7 +68,7 @@ def main() -> int:
             header="📋 周省",
             summary=summary,
             sections=[{"type": "markdown", "content": msg}],
-            meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d")},
+            meta={"source": "weekly_review", "date": now_local_str("%Y-%m-%d", source="weekly-review")},
         ))
     return 0
 

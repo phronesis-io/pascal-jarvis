@@ -90,7 +90,7 @@ def main():
         # Strip anything that looks like JSON from the output
         text = re.sub(r'\{[^{}]*\}', '', raw).strip()
         if text:
-            print(build_card("🎯 Intent", text))
+            print(build_card("🎯 Intent", text, source="intentions"))
         return
 
     user_messages: list = []
@@ -137,7 +137,7 @@ def main():
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())
         if combined:
-            print(build_card("🎯 Intent", combined))
+            print(build_card("🎯 Intent", combined, source="intentions"))
 
 
 if __name__ == "__main__":

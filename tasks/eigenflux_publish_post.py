@@ -82,7 +82,7 @@ def main() -> int:
             from core.safety import atomic_write
             atomic_write(state_file, json.dumps(state, ensure_ascii=False))
             # Notify user via card (full content — broadcasts are short by design)
-            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}"))
+            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}", source="eigenflux-publish"))
         else:
             print(f"[eigenflux-publish] CLI error: {result.stderr.strip()}", file=LOG)
     except Exception:
