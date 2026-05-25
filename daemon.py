@@ -38,7 +38,7 @@ def _daemon_now() -> datetime:
 # ── Config ──
 JARVIS_DIR = Path(__file__).parent
 CHECK_INTERVAL = 30           # seconds between health checks
-HEARTBEAT_STALE_THRESHOLD = 1200  # 20 min without heartbeat = stale (allows for long Claude calls)
+HEARTBEAT_STALE_THRESHOLD = 1800  # 30 min without heartbeat = stale (Claude calls take 30-90s, cycles ~20min apart)
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"

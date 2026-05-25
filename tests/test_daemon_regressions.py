@@ -56,7 +56,7 @@ def test_stale_threshold_is_1200():
 
     Was 900s (15 min), caused false-positive stale detection → restart spiral.
     """
-    assert daemon_mod.HEARTBEAT_STALE_THRESHOLD == 1200
+    assert daemon_mod.HEARTBEAT_STALE_THRESHOLD == 1800
 
 
 def test_kill_patterns_include_eigenflux():
