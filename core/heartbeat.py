@@ -89,9 +89,15 @@ class HeartbeatRunner:
     # Memory pipeline tasks — only one per cycle to prevent races
     PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly", "memory-monthly"}
 
+    # Tasks exempt from batch cap — they run on every cycle regardless.
+    # These are critical infrastructure tasks whose pre→post pipeline doesn't
+    # need Claude reasoning, but must stay fresh (e.g. calendar data for other tasks).
+    PRIORITY_TASKS = {"calendar-sync"}
+
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
     # Remaining tasks will be picked up in the next cycle.
+    # NOTE: PRIORITY_TASKS bypass this cap entirely.
     MAX_BATCH_SIZE = 4
 
     # Minimum interval between force-triggered runs of the same task, in seconds.
@@ -156,14 +162,14 @@ class HeartbeatRunner:
                 cmd,
                 input=stdin_data,
                 capture_output=True, text=True,
-                timeout=30,
+                timeout=60,
                 cwd=str(self.jarvis_dir),
             )
             if result.returncode != 0 and result.stderr.strip():
                 self._log(f"Script {script_path} stderr: {result.stderr.strip()[:200]}")
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            self._log(f"Script {script_path} timed out (30s)")
+            self._log(f"Script {script_path} timed out (60s)")
             return ""
         except Exception as e:
             self._log(f"Script {script_path} error: {e}")
@@ -276,18 +282,21 @@ You have access to the user's memory below. Use it to personalize your responses
         if not due_tasks:
             return ""
 
+        # Separate priority tasks (exempt from batch cap) from regular tasks
+        priority = [t for t in due_tasks if t["name"] in self.PRIORITY_TASKS]
+        regular = [t for t in due_tasks if t["name"] not in self.PRIORITY_TASKS]
+
         # Cap batch size BEFORE pre-scripts to avoid side-effect waste.
-        # Some pre-scripts update state (e.g. poll timestamps) that assumes
-        # their data will be consumed. Running pre-scripts for tasks we'll
-        # defer wastes those state updates and can cause data loss.
         # Sort by staleness (longest since last run first) to prevent starvation.
         deferred = []
-        if len(due_tasks) > self.MAX_BATCH_SIZE:
-            due_tasks.sort(key=lambda t: state.get(t["name"], {}).get("last_run", 0))
-            deferred = due_tasks[self.MAX_BATCH_SIZE:]
-            due_tasks = due_tasks[:self.MAX_BATCH_SIZE]
+        if len(regular) > self.MAX_BATCH_SIZE:
+            regular.sort(key=lambda t: state.get(t["name"], {}).get("last_run", 0))
+            deferred = regular[self.MAX_BATCH_SIZE:]
+            regular = regular[:self.MAX_BATCH_SIZE]
             self._log(f"Batch capped at {self.MAX_BATCH_SIZE}, "
                       f"deferred {len(deferred)}: {[t['name'] for t in deferred]}")
+
+        due_tasks = priority + regular
 
         # Run pre-scripts (record failures in circuit breaker)
         task_data = {}
