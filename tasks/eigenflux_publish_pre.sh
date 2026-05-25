@@ -14,7 +14,7 @@ if [ -f "$JARVIS_DIR/eigenflux/publish_state.json" ]; then
   last_pub=$(python3 -c "import json; print(json.load(open('$JARVIS_DIR/eigenflux/publish_state.json')).get('last_publish_epoch', 0))" 2>/dev/null || echo "0")
 fi
 
-cooldown=3600
+cooldown=14400  # 4h default (was 1h — reduced from 3.3/day to ~1/day based on 6% engagement)
 if [ -f "$settings_file" ]; then
   cooldown=$(python3 -c "import json; print(json.load(open('$settings_file')).get('publish_cooldown_minutes', 60) * 60)" 2>/dev/null || echo "3600")
 fi
