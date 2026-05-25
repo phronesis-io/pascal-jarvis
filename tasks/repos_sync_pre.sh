@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-hook: git pull all repos under ~/Desktop/jarvis/repos/
-REPOS_DIR="${WORK_DIR:-/Users/pascal/Desktop/jarvis}/repos"
+REPOS_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}/repos"
 
 echo "Repos sync:"
 for repo in "$REPOS_DIR"/*/; do

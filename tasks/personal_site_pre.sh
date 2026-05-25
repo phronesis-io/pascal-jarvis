@@ -2,7 +2,7 @@
 # Pre-hook: gather all context needed for personal site update
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory}"
-WORK_DIR="${WORK_DIR:-/Users/pascal/Desktop/jarvis}"
+WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
 SITE_DIR="$WORK_DIR/repos/huyongyi-cpu.github.io"
 
 # Site repo must exist
