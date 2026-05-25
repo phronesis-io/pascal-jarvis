@@ -1152,7 +1152,12 @@ lark_subscribe_messages \
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
-      # ── Card action callback (e.g. watchlater button) ──────────────
+      # ── Card action callback (e.g. watchlater button, feedback) ──────
+      # Debug: log raw card action events to diagnose button click issues
+      _has_action=$(echo "$line" | jq -r '.action // .event.action // empty' 2>/dev/null)
+      if [ -n "$_has_action" ] && [ "$_has_action" != "null" ]; then
+        log_info "[card-action] Raw event: ${line:0:200}"
+      fi
       _card_action=$(echo "$line" | jq -r '.action.value.action // empty' 2>/dev/null)
       if [ "$_card_action" = "feedback" ]; then
         _fb_source=$(echo "$line" | jq -r '.action.value.source // empty' 2>/dev/null)
