@@ -1,6 +1,6 @@
 """Tests for core.safety — error pattern detection."""
 
-from core.safety import ERROR_PATTERNS, ERROR_SUBSTRINGS, looks_like_error, sanitize_for_user
+from core.safety import ERROR_PATTERNS, ERROR_SUBSTRINGS, extract_json, looks_like_error, sanitize_for_user
 
 
 def test_empty_is_error():
@@ -59,6 +59,32 @@ def test_substring_patterns_in_json():
     for p in ERROR_SUBSTRINGS:
         text = f'some prefix {p} and more text' + "x" * 50
         assert looks_like_error(text) is True, f"missed substring: {p}"
+
+
+def test_extract_json_code_fence():
+    raw = '```json\n{"key": "value"}\n```'
+    assert extract_json(raw) == '{"key": "value"}'
+
+
+def test_extract_json_trailing_text():
+    """Regression: Claude returns JSON in code fence + trailing explanation."""
+    raw = '```json\n{"user_message": "test"}\n```\n\nHere is the explanation.'
+    result = extract_json(raw)
+    import json
+    data = json.loads(result)
+    assert data["user_message"] == "test"
+
+
+def test_extract_json_no_fence():
+    raw = '{"plain": "json"}'
+    assert extract_json(raw) == '{"plain": "json"}'
+
+
+def test_extract_json_preamble_text():
+    raw = 'Here is the result:\n{"key": "value"}\nDone.'
+    result = extract_json(raw)
+    import json
+    assert json.loads(result)["key"] == "value"
 
 
 def test_sanitize_returns_fallback_for_errors():

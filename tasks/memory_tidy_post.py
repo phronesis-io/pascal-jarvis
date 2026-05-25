@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import looks_like_error
+from core.safety import extract_json, looks_like_error
 from core.timeutil import now_local_str
 from tasks.memory_daily_post import _archive_old_daily_entries
 
@@ -83,8 +83,7 @@ def main() -> int:
         return 0
 
     # Try to parse JSON response
-    cleaned = re.sub(r'^```json?\s*', '', raw)
-    cleaned = re.sub(r'```\s*$', '', cleaned.strip())
+    cleaned = extract_json(raw)
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:

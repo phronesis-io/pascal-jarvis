@@ -62,6 +62,30 @@ def sanitize_for_user(text: str, fallback: str = "") -> str:
     return text
 
 
+def extract_json(raw: str) -> str:
+    """Extract JSON object from Claude's response, handling code fences and trailing text.
+
+    Claude often returns JSON wrapped in ```json...``` with optional trailing
+    text after the closing ```. This function robustly extracts the JSON portion.
+
+    Returns the cleaned JSON string, or the original if no JSON found.
+    """
+    import re
+    # Strip code fence markers
+    cleaned = re.sub(r'^```json?\s*', '', raw.strip())
+    cleaned = re.sub(r'```\s*$', '', cleaned.strip())
+    # If there's still a ``` in the middle (trailing text after code fence),
+    # take only the part before it
+    if '```' in cleaned:
+        cleaned = cleaned[:cleaned.index('```')].strip()
+    # Try to find a JSON object
+    json_start = cleaned.find('{')
+    json_end = cleaned.rfind('}')
+    if json_start >= 0 and json_end > json_start:
+        return cleaned[json_start:json_end + 1]
+    return cleaned
+
+
 def atomic_write(path, content: str, encoding: str = "utf-8"):
     """Write content to path atomically via tmp + rename.
 

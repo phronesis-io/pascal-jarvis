@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card, build_rich_card
+from core.safety import extract_json
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 RESEARCH_QUEUE = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"

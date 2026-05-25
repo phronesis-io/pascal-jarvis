@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.tasks import TaskManager
 from core.card import build_card, build_rich_card
-from core.safety import looks_like_error
+from core.safety import extract_json, looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -22,8 +22,7 @@ def main() -> int:
     if looks_like_error(raw):
         return 0
 
-    cleaned = re.sub(r'^```json?\s*', '', raw)
-    cleaned = re.sub(r'```\s*$', '', cleaned)
+    cleaned = extract_json(raw)
 
     # Try JSON parse
     try:

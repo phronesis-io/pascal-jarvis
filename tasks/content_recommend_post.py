@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import looks_like_error
+from core.safety import extract_json, looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -30,8 +30,7 @@ def main() -> int:
         return 0
 
     # Parse Claude's response — expect JSON with url, title, user_message
-    cleaned = re.sub(r"^```json?\s*", "", raw)
-    cleaned = re.sub(r"```\s*$", "", cleaned.strip())
+    cleaned = extract_json(raw)
 
     # Try to find JSON substring if direct parse fails
     try:
