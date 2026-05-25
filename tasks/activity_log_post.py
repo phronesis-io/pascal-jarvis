@@ -8,8 +8,11 @@ Maintains a rolling 7-day log of what Pascal actually did.
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.timeutil import now_local
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 LOG_FILE = MEMORY_DIR / "system" / "activity_log.jsonl"
@@ -33,7 +36,7 @@ def main():
     if not entries:
         return
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_local().strftime("%Y-%m-%d")
 
     # Ensure directory exists
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +64,7 @@ def main():
             existing.append(record)
 
     # Trim to last 7 days
-    cutoff = (datetime.now() - timedelta(days=MAX_DAYS)).strftime("%Y-%m-%d")
+    cutoff = (now_local() - timedelta(days=MAX_DAYS)).strftime("%Y-%m-%d")
     existing = [e for e in existing if e.get("date", "") >= cutoff]
 
     # Atomic write

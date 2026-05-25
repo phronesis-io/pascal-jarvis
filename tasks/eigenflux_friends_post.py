@@ -29,7 +29,21 @@ def main() -> int:
     try:
         data = json.loads(message)
     except json.JSONDecodeError:
-        print(message)
+        start = message.find('{')
+        end = message.rfind('}')
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(message[start:end + 1])
+            except json.JSONDecodeError:
+                data = None
+        else:
+            data = None
+    if data is None:
+        # Never emit raw JSON — only pass through human-readable text
+        import re
+        text = re.sub(r'\{[^{}]*\}', '', message).strip()
+        if text:
+            print(text)
         return 0
 
     actions = data.get("actions", [])

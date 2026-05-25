@@ -20,10 +20,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Inline local-time helper (daemon avoids core/ imports for resilience)
+def _daemon_now() -> datetime:
+    """Current time in system-local timezone, immune to TZ env corruption."""
+    try:
+        link = Path("/etc/localtime").resolve()
+        parts = link.parts
+        for i, p in enumerate(parts):
+            if p == "zoneinfo" and i + 1 < len(parts):
+                tz_name = "/".join(parts[i + 1:])
+                from zoneinfo import ZoneInfo
+                return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        pass
+    return datetime.now()
+
 # ── Config ──
 JARVIS_DIR = Path(__file__).parent
 CHECK_INTERVAL = 30           # seconds between health checks
-HEARTBEAT_STALE_THRESHOLD = 900  # 15 min without heartbeat = stale
+HEARTBEAT_STALE_THRESHOLD = 1200  # 20 min without heartbeat = stale (allows for long Claude calls)
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"
@@ -54,7 +69,7 @@ running = True
 
 def log(level: str, msg: str):
     """Append to daemon.log with rotation."""
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _daemon_now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{level}] {msg}\n"
     try:
         with open(LOG_FILE, "a") as f:
@@ -116,19 +131,19 @@ def _find_last_heartbeat() -> float | None:
             continue
 
     if latest_beat:
-        return (datetime.now() - latest_beat).total_seconds()
+        return (_daemon_now().replace(tzinfo=None) - latest_beat).total_seconds()
     return None
 
 
 def _is_bot_alive() -> bool:
     """Check if bot.sh is alive via PID file (primary) or pgrep (fallback)."""
-    # Primary: check PID file
+    # Primary: check PID file (format: "PID" or "PID BOOT_TS")
     if BOT_PID_FILE.exists():
         try:
-            pid = int(BOT_PID_FILE.read_text().strip())
+            pid = int(BOT_PID_FILE.read_text().strip().split()[0])
             os.kill(pid, 0)  # Check if process exists
             return True
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ValueError, ProcessLookupError, PermissionError, IndexError):
             pass
 
     # Fallback: pgrep
@@ -209,9 +224,10 @@ def diagnose_and_fix(issues: list[str]) -> str:
 
     log("INFO", f"Attempting fix for: {issues}")
 
-    # Kill existing bot processes
+    # Kill existing bot processes (including eigenflux streams which may be
+    # reparented to init/gateway and survive bot.sh cleanup)
     log("INFO", "Killing existing processes...")
-    for pattern in ["lark-cli event", "bash.*bot\\.sh", "admin\\.py"]:
+    for pattern in ["lark-cli event", "bash.*bot\\.sh", "admin\\.py", "eigenflux stream"]:
         try:
             subprocess.run(["pkill", "-f", pattern],
                            capture_output=True, timeout=5)
@@ -245,13 +261,15 @@ def diagnose_and_fix(issues: list[str]) -> str:
     # Start bot.sh — output to /tmp/jarvis_restart.log (daemon reads this)
     log("INFO", "Starting bot.sh...")
     try:
+        log_fd = open("/tmp/jarvis_restart.log", "a")
         subprocess.Popen(
             ["bash", str(JARVIS_DIR / "bot.sh")],
-            stdout=open("/tmp/jarvis_restart.log", "a"),
+            stdout=log_fd,
             stderr=subprocess.STDOUT,
             cwd=str(JARVIS_DIR),
             start_new_session=True,
         )
+        log_fd.close()  # Popen inherits the fd; close our reference
     except Exception as e:
         msg = f"Failed to start bot.sh: {e}"
         log("ERROR", msg)
@@ -261,8 +279,15 @@ def diagnose_and_fix(issues: list[str]) -> str:
     last_restart_time = now
     restart_count += 1
 
-    # Wait and verify
-    time.sleep(10)
+    # Wait for first heartbeat cycle to complete.
+    # The first cycle after restart may batch multiple tasks into one Claude call,
+    # which can take 60-120s. Wait long enough to avoid false-negative health checks
+    # that trigger another restart (creating a restart spiral).
+    # Use small increments so we can respond to SIGTERM during this wait.
+    for _ in range(90):
+        if not running:
+            return "shutdown during restart wait"
+        time.sleep(1)
     post_check = check_health()
     if post_check["healthy"]:
         msg = f"Auto-restart successful (attempt {restart_count})"

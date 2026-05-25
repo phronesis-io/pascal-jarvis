@@ -10,6 +10,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.timeutil import now_local_str
+
 DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
 
 MIGRATIONS = [
@@ -166,7 +168,7 @@ def _run_migrations(db: sqlite3.Connection):
         db.executescript(sql)
         db.execute(
             "INSERT INTO _migrations (version, applied_at) VALUES (?, ?)",
-            (i, time.strftime("%Y-%m-%dT%H:%M:%S")),
+            (i, now_local_str("%Y-%m-%dT%H:%M:%S")),
         )
     db.commit()
 
@@ -177,7 +179,7 @@ def bookmark_add(title: str, url: str = "", source: str = "manual",
                  summary: str = "", tags: list[str] | None = None,
                  content: str = "") -> int:
     """Add a bookmark. Returns the new ID."""
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     with transaction() as db:
         # Deduplicate by URL
         if url:
@@ -230,7 +232,7 @@ def bookmark_update(bookmark_id: int, **kwargs) -> None:
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return
-    updates["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    updates["updated_at"] = now_local_str("%Y-%m-%dT%H:%M:%S")
     if "tags" in updates and isinstance(updates["tags"], list):
         updates["tags"] = json.dumps(updates["tags"])
     set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -253,7 +255,7 @@ def log_event(source: str, message: str, level: str = "info",
     with transaction() as db:
         db.execute(
             "INSERT INTO agent_log (timestamp, source, level, message, context) VALUES (?, ?, ?, ?, ?)",
-            (time.strftime("%Y-%m-%dT%H:%M:%S"), source, level, message,
+            (now_local_str("%Y-%m-%dT%H:%M:%S"), source, level, message,
              json.dumps(context or {})),
         )
 
@@ -286,7 +288,7 @@ def task_register(task_id: str, name: str, trigger_type: str,
                   conditions: list | None = None,
                   category: str = "user", priority: int = 5) -> None:
     """Register or update a dynamic task."""
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     with transaction() as db:
         db.execute(
             """INSERT OR REPLACE INTO scheduled_tasks
@@ -353,7 +355,7 @@ def kv_set(key: str, value: str) -> None:
     with transaction() as db:
         db.execute(
             "INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)",
-            (key, value, time.strftime("%Y-%m-%dT%H:%M:%S")),
+            (key, value, now_local_str("%Y-%m-%dT%H:%M:%S")),
         )
 
 
@@ -368,7 +370,7 @@ def engagement_record(event_type: str, source: str = "",
             """INSERT INTO engagement_events
                (event_type, source, timestamp, engaged, gap_seconds, metadata)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (event_type, source, time.strftime("%Y-%m-%dT%H:%M:%S"),
+            (event_type, source, now_local_str("%Y-%m-%dT%H:%M:%S"),
              int(engaged), gap_seconds, json.dumps(metadata or {})),
         )
 
@@ -376,8 +378,9 @@ def engagement_record(event_type: str, source: str = "",
 def engagement_stats(days: int = 7) -> dict:
     """Get engagement statistics for the last N days."""
     db = get_db()
-    since = time.strftime("%Y-%m-%dT%H:%M:%S",
-                          time.localtime(time.time() - days * 86400))
+    from core.timeutil import now_local
+    from datetime import timedelta
+    since = (now_local() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
     total = db.execute(
         "SELECT COUNT(*) FROM engagement_events WHERE timestamp >= ?", (since,)
     ).fetchone()[0]

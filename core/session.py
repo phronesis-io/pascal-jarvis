@@ -192,7 +192,8 @@ def format_recent_turns(turns: list[dict], max_msg_chars: int = 400,
     formatted.reverse()
 
     # Insert date separators between days
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    from core.timeutil import now_local
+    today_str = now_local().strftime("%Y-%m-%d")
     lines = ["## Recent Turns", ""]
     prev_date = None
     for line in formatted:

@@ -14,11 +14,12 @@ Architecture:
 """
 
 import json
-import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+from core.timeutil import now_local, now_local_str
 
 ROOT = Path(__file__).parent.parent
 
@@ -104,7 +105,7 @@ def create_intent(
     _init()
     db = _get_db()
     iid = intent_id or f"int_{uuid.uuid4().hex[:10]}"
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
 
     db.execute(
         """INSERT OR REPLACE INTO intentions
@@ -205,7 +206,7 @@ def cleanup_expired():
     """Mark expired intents."""
     _init()
     db = _get_db()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     db.execute(
         "UPDATE intentions SET status = 'expired' WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
         (now,),
@@ -226,7 +227,7 @@ def get_due_intents() -> list[dict]:
         "SELECT * FROM intentions WHERE status = 'pending' ORDER BY priority"
     ).fetchall()
 
-    now = datetime.now()
+    now = now_local()
     due = []
 
     for row in pending:
@@ -287,7 +288,7 @@ def mark_triggered(intent_id: str):
     """Mark an intent as triggered (being processed)."""
     _init()
     db = _get_db()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     db.execute(
         "UPDATE intentions SET status = 'triggered', triggered_at = ? WHERE id = ?",
         (now, intent_id),
@@ -307,7 +308,7 @@ def reset_stale_triggered(stale_minutes: int = 10) -> int:
     """
     _init()
     db = _get_db()
-    cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (now_local() - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
     cur = db.execute(
         "UPDATE intentions SET status = 'pending', last_error = ? "
         "WHERE status = 'triggered' AND triggered_at IS NOT NULL AND triggered_at < ?",
@@ -321,7 +322,7 @@ def mark_executed(intent_id: str, result: str = ""):
     """Mark an intent as executed. Handle recurring (cron) reset and chains."""
     _init()
     db = _get_db()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
 
     intent = get_intent(intent_id)
     if not intent:
@@ -407,7 +408,7 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
         event_dt = datetime.fromisoformat(f"{current_date}T{start_time}:00")
 
         # Skip past events
-        if event_dt < datetime.now():
+        if event_dt < now_local():
             continue
 
         # Create prep intent: 30min before for meetings, 2 days before for activities
@@ -431,7 +432,7 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
             continue
 
         # Determine prep time based on event type
-        hours_until = (event_dt - datetime.now()).total_seconds() / 3600
+        hours_until = (event_dt - now_local()).total_seconds() / 3600
 
         if hours_until > 48:
             # Far future — fire at 09:00 the day before the event
@@ -445,7 +446,7 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
             # Too close, skip
             continue
 
-        if prep_dt < datetime.now():
+        if prep_dt < now_local():
             continue
 
         iid = create_intent(

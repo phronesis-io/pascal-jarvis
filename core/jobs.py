@@ -16,6 +16,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.timeutil import now_local_str
+
 
 @contextmanager
 def _locked(path: Path):
@@ -69,7 +71,7 @@ class JobManager:
             "status": "running",
             "pid": None,
             "session_id": f"bg-{job_id}",
-            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": now_local_str("%Y-%m-%d %H:%M:%S"),
             "finished_at": None,
             "output_file": str(job_dir / "output.md"),
             "message_id": message_id,
@@ -95,7 +97,7 @@ class JobManager:
         """Mark a job as finished (completed or failed)."""
         self.update_job(job_id,
                         status=status,
-                        finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        finished_at=now_local_str("%Y-%m-%d %H:%M:%S"),
                         pid=None)
 
     def cancel_job(self, job_id: str) -> bool:
@@ -118,7 +120,7 @@ class JobManager:
                         pass
 
             job["status"] = "cancelled"
-            job["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
             job["pid"] = None
             _atomic_write_json(self.registry_path, registry)
         return True

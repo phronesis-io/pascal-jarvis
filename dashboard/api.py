@@ -14,6 +14,8 @@ from pathlib import Path
 
 from nicegui import app
 
+from core.timeutil import now_local_str
+
 from .db import (
     bookmark_add, bookmark_list, bookmark_search, bookmark_update, bookmark_delete,
     log_event, log_list, task_list, task_register, task_update, task_delete,
@@ -199,6 +201,6 @@ def register_api_routes():
         """Health check."""
         return {
             "status": "ok",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timestamp": now_local_str("%Y-%m-%dT%H:%M:%S"),
             "db": "connected",
         }
