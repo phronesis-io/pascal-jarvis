@@ -1196,15 +1196,19 @@ lark_subscribe_messages \
         exec "$JARVIS_DIR/bot.sh"
       fi
 
-      # Parse message fields — support both compact (flat) and raw (nested) formats.
-      # Compact: .content, .message_id, etc.
-      # Raw: .event.message.content, .event.message.message_id, etc.
-      content=$(echo "$line" | jq -r '.content // .event.message.content // empty' 2>/dev/null)
+      # Parse message fields from raw (non-compact) event format.
+      # Raw format: .event.message.content is a JSON string like '{"text":"hello"}'
+      # We extract .text from that inner JSON to get plain text.
+      _raw_content=$(echo "$line" | jq -r '.content // .event.message.content // empty' 2>/dev/null)
+      # Extract text from JSON content wrapper (e.g. {"text":"hello"} → hello)
+      content=$(echo "$_raw_content" | jq -r '.text // empty' 2>/dev/null)
+      # Fallback: if jq fails (content was already plain text from compact mode), use raw
+      [ -z "$content" ] && content="$_raw_content"
       message_id=$(echo "$line" | jq -r '.message_id // .event.message.message_id // empty' 2>/dev/null)
       chat_type=$(echo "$line" | jq -r '.chat_type // .event.message.chat_type // empty' 2>/dev/null)
       chat_id=$(echo "$line" | jq -r '.chat_id // .event.message.chat_id // empty' 2>/dev/null)
       sender_id=$(echo "$line" | jq -r '.sender_id // .event.sender.sender_id.open_id // empty' 2>/dev/null)
-      msg_type=$(echo "$line" | jq -r '.msg_type // .event.message.msg_type // empty' 2>/dev/null)
+      msg_type=$(echo "$line" | jq -r '.msg_type // .event.message.message_type // empty' 2>/dev/null)
 
       # Log every received event for debugging (even if we skip it)
       if [ -n "$message_id" ]; then
