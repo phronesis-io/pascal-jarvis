@@ -80,3 +80,50 @@ def build_rich_card(
     if extra_buttons:
         buttons.extend(extra_buttons)
     return build_card(header=header, body=summary, buttons=buttons)
+
+
+def extract_card_text(card_json: str) -> str:
+    """Extract human-readable text from a Lark card JSON string.
+
+    Used for outbox entries so the main session Claude sees readable content
+    instead of raw JSON.
+    """
+    try:
+        card = json.loads(card_json)
+        header = card.get("header", {}).get("title", {}).get("content", "")
+        parts = [f"**{header}**"] if header else []
+        for el in card.get("elements", []):
+            text = el.get("text", {}).get("content", "")
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+
+def extract_readable_from_output(raw_output: str) -> str:
+    """Extract readable text from mixed heartbeat output (cards + plain text).
+
+    Handles CARD: prefixed lines, raw card JSON, and plain text.
+    Blocks raw JSON from leaking into the outbox.
+    """
+    parts = []
+    for line in raw_output.split("\n"):
+        stripped = line.strip()
+        card_json = None
+        if stripped.startswith("CARD:"):
+            card_json = stripped[5:]
+        elif stripped.startswith('{"config":'):
+            card_json = stripped
+        if card_json:
+            text = extract_card_text(card_json)
+            if text:
+                parts.append(text)
+        elif stripped:
+            # Block raw JSON from entering outbox
+            try:
+                json.loads(stripped)
+                continue  # valid JSON — skip
+            except (json.JSONDecodeError, ValueError):
+                parts.append(stripped)
+    return "\n\n".join(parts)

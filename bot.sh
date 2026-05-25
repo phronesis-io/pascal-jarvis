@@ -364,40 +364,10 @@ except: sys.exit(1)
       # main session Claude sees human-readable content, not raw JSON.
       local ts_iso _outbox_text
       ts_iso=$(date '+%Y-%m-%d %H:%M')
-      _outbox_text=$(python3 -c "
-import json, sys
-raw = sys.argv[1]
-parts = []
-for line in raw.split('\n'):
-    stripped = line.strip()
-    card_json = None
-    if stripped.startswith('CARD:'):
-        card_json = stripped[5:]
-    elif stripped.startswith('{\"config\":'):
-        card_json = stripped
-    if card_json:
-        try:
-            card = json.loads(card_json)
-            header = card.get('header', {}).get('title', {}).get('content', '')
-            texts = []
-            if header:
-                texts.append(header)
-            for el in card.get('elements', []):
-                t = el.get('text', {}).get('content', '')
-                if t:
-                    texts.append(t)
-            parts.append('\n'.join(texts))
-        except:
-            pass  # skip unparseable card JSON — never leak raw JSON
-    elif stripped:
-        # Block raw JSON from entering outbox
-        try:
-            json.loads(stripped)
-            continue  # valid JSON — skip it
-        except (json.JSONDecodeError, ValueError):
-            parts.append(stripped)
-print('\n\n'.join(parts))
-" "$output" 2>/dev/null)
+      _outbox_text=$(JV_OUTPUT="$output" python3 -c "
+import os; from core.card import extract_readable_from_output
+print(extract_readable_from_output(os.environ['JV_OUTPUT']))
+" 2>/dev/null)
       [ -z "$_outbox_text" ] && _outbox_text="$output"
       printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$_outbox_text" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
         >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
@@ -468,37 +438,19 @@ eigenflux_stream_loop() {
     eigenflux $args 2>>"$LOG_FILE" | while IFS= read -r line; do
       [ -z "$line" ] && continue
 
-      # Extract cursor for reconnect resume (persist to file — pipe subshell can't update parent vars)
-      new_cursor=$(echo "$line" | python3 -c "
-import sys, json
-try:
-    e = json.loads(sys.stdin.read())
-    c = e.get('data', {}).get('next_cursor', '')
-    if c: print(c)
-except: pass
-" 2>/dev/null || true)
+      # Extract cursor for reconnect resume
+      new_cursor=$(JV_LINE="$line" python3 -c "
+import os; from core.ef_stream import parse_cursor
+c = parse_cursor(os.environ['JV_LINE'])
+if c: print(c)
+" 2>>"$LOG_FILE" || true)
       [ -n "$new_cursor" ] && printf '%s' "$new_cursor" > "$cursor_file"
 
-      # Format message for Lark delivery (enriched with conv_id for reply)
+      # Format message for Lark delivery
       msg=$(JV_LINE="$line" python3 -c "
-import os, sys, json
-try:
-    event = json.loads(os.environ['JV_LINE'])
-    messages = event.get('data', {}).get('messages', [])
-    if not messages:
-        sys.exit(0)
-    parts = []
-    for m in messages:
-        sender = m.get('sender_name', 'Unknown agent')
-        content = m.get('content', '')
-        conv_id = m.get('conv_id', '')
-        if content:
-            parts.append(f'💬 **{sender}**: {content}')
-    if parts:
-        print('\n'.join(parts) + '\n\n📡 Powered by EigenFlux')
-except Exception:
-    sys.exit(0)
-" 2>/dev/null || true)
+import os; from core.ef_stream import format_message
+print(format_message(os.environ['JV_LINE']))
+" 2>>"$LOG_FILE" || true)
 
       if [ -n "$msg" ]; then
         send_to_lark "$msg"
@@ -506,16 +458,9 @@ except Exception:
         local ts_iso _outbox_meta
         ts_iso=$(date '+%Y-%m-%d %H:%M')
         _outbox_meta=$(JV_LINE="$line" python3 -c "
-import os, json, sys
-try:
-    event = json.loads(os.environ['JV_LINE'])
-    msgs = event.get('data', {}).get('messages', [])
-    if msgs:
-        m = msgs[0]
-        meta = {'conv_id': m.get('conv_id',''), 'sender_id': m.get('sender_id',''), 'sender_name': m.get('sender_name','')}
-        print(json.dumps(meta, ensure_ascii=False))
-except: pass
-" 2>/dev/null || true)
+import os, json; from core.ef_stream import extract_metadata
+print(json.dumps(extract_metadata(os.environ['JV_LINE']), ensure_ascii=False))
+" 2>>"$LOG_FILE" || true)
         printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$msg" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"eigenflux-stream\",\"meta\":${_outbox_meta:-\"{}\"}}" \
           >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
         log_info "[ef-stream] Delivered real-time message"
@@ -523,21 +468,10 @@ except: pass
         # Analyze message through Claude in background, send follow-up if useful
         local _stream_detail
         _stream_detail=$(JV_LINE="$line" python3 -c "
-import os, json, sys
-try:
-    event = json.loads(os.environ['JV_LINE'])
-    messages = event.get('data', {}).get('messages', [])
-    for m in messages:
-        sender = m.get('sender_name', 'Unknown')
-        sender_id = m.get('sender_id', '')
-        content = m.get('content', '')
-        item_id = m.get('item_id', '')
-        conv_id = m.get('conv_id', '')
-        print(json.dumps({'sender': sender, 'sender_id': sender_id,
-                          'content': content, 'item_id': item_id,
-                          'conv_id': conv_id}, ensure_ascii=False))
-except: pass
-" 2>/dev/null || true)
+import os, json; from core.ef_stream import extract_detail
+for d in extract_detail(os.environ['JV_LINE']):
+    print(json.dumps(d, ensure_ascii=False))
+" 2>>"$LOG_FILE" || log_warn "[ef-stream] Detail extraction failed")
 
         if [ -n "$_stream_detail" ]; then
           (
@@ -577,7 +511,7 @@ The raw message was already forwarded to the user. Your job:
 
 If the message is routine/no action needed, reply HEARTBEAT_OK.
 Otherwise reply with a brief Chinese note (≤60 words) for the user." \
-              < /dev/null 2>>"$LOG_FILE" || true)
+              < /dev/null 2>>"$LOG_FILE" || log_warn "[ef-stream] Background Claude analysis failed")
 
             if [ -n "$_analysis" ] && ! echo "$_analysis" | grep -q "HEARTBEAT_OK"; then
               send_to_lark "💡 $_analysis"
@@ -773,11 +707,8 @@ handle_message() {
   now_ts=$(date '+%Y-%m-%d %H:%M %A')
 
   counter=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
-import json, os
-try:
-    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('counter', 0))
-except Exception:
-    print(0)
+import os; from core.session import get_session_counter
+print(get_session_counter(os.environ['JV_TRACKER'], os.environ['JV_KEY']))
 " 2>>"$LOG_FILE" || echo 0)
 
   recent_turns=$(JV_SDIR="$CLAUDE_PROJECT_DIR" JV_SID="$session_id" \
@@ -1013,7 +944,7 @@ for title, url in matches:
     while IFS=$'\t' read -r _sl_title _sl_url; do
       [ -z "$_sl_url" ] && continue
       python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_sl_title" "$_sl_url" "natural" \
-        2>>"$LOG_FILE" >/dev/null || true
+        2>>"$LOG_FILE" >/dev/null || log_warn "[watchlater] Save failed: $_sl_title"
       log_info "[$session_id] watchlater saved: $_sl_title"
     done <<< "$_sl_extracted"
     # Strip markers from reply
@@ -1058,7 +989,7 @@ $memory"
 
   # Record PID in registry
   JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" set-pid "$job_id" "$_bg_pid" \
-    2>>"$LOG_FILE" || true
+    2>>"$LOG_FILE" || log_warn "[bg:$job_id] Failed to register PID"
 
   # Wait for completion
   wait $_bg_pid 2>/dev/null
@@ -1090,7 +1021,7 @@ print(j['status'] if j else 'unknown')
 
   # Update registry
   JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$job_id" "$status" \
-    2>>"$LOG_FILE" || true
+    2>>"$LOG_FILE" || log_warn "[bg:$job_id] Failed to update job status"
 
   log_info "[bg:$job_id] Finished with status=$status (${#output} chars)"
 
@@ -1305,57 +1236,7 @@ if old_sid:
       log_info "[$session_id] Received: $content"
 
       # ── Engagement tracking: check if this message responds to a heartbeat ──
-      python3 -c "
-import json, time, os, sys
-
-log_path = os.path.join(os.environ['JARVIS_DIR'], 'engagement_log.jsonl')
-if not os.path.exists(log_path):
-    sys.exit(0)
-
-# Read last 'sent' entry
-last_sent = None
-with open(log_path, encoding='utf-8') as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-            if entry.get('type') == 'sent':
-                last_sent = entry
-        except json.JSONDecodeError:
-            continue
-
-if not last_sent:
-    sys.exit(0)
-
-sent_epoch = last_sent.get('epoch', 0)
-now_epoch = int(time.time())
-gap_seconds = now_epoch - sent_epoch
-
-# Only track if sent within last 60 minutes
-if gap_seconds > 3600:
-    sys.exit(0)
-
-# Classify: engaged (<10min), late (10-30min), ignored (>30min)
-if gap_seconds <= 600:
-    reaction = 'engaged'
-elif gap_seconds <= 1800:
-    reaction = 'late_reply'
-else:
-    reaction = 'ignored'
-
-entry = {
-    'ts': time.strftime('%Y-%m-%d %H:%M'),
-    'source': last_sent.get('source', 'unknown'),
-    'type': 'response',
-    'reaction': reaction,
-    'gap_seconds': gap_seconds,
-    'content_head': sys.argv[1][:80] if len(sys.argv) > 1 else '',
-}
-with open(log_path, 'a', encoding='utf-8') as f:
-    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-" "$content" 2>>"$LOG_FILE" || true
+      python3 -m core.engagement "$content" 2>>"$LOG_FILE" || log_warn "Engagement tracking failed"
 
       # Add a reaction to indicate we're working on it
       reaction_result=$(lark_add_reaction "$message_id" "Typing")

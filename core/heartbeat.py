@@ -14,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .log import log as _structured_log
 from .memory import load_tiered_memory
 from .task_protocol import TaskState
 from .timeutil import now_local_str
@@ -112,10 +113,9 @@ class HeartbeatRunner:
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
 
-    def _log(self, msg: str):
-        """Log to stderr with cycle_id prefix for correlation."""
-        tag = f"[heartbeat:{self._cid}]" if self._cid else "[heartbeat]"
-        print(f"{tag} {msg}", file=sys.stderr)
+    def _log(self, msg: str, **kwargs):
+        """Structured log with cycle_id for correlation."""
+        _structured_log("heartbeat", msg, cycle=self._cid, **kwargs)
 
     def _load_tasks(self) -> list[dict]:
         """Parse HEARTBEAT.md with mtime-based cache (avoid re-parsing every 10s)."""
