@@ -364,7 +364,11 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
-                if ts.circuit.record_failure():
+                tripped = ts.circuit.record_failure()
+                # PRIORITY_TASKS: reset circuit immediately — they must never be disabled
+                if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
+                    ts.circuit.disabled_until = 0
+                elif tripped:
                     tripped_names.append(task["name"])
                 state[task["name"]] = ts.to_dict()
             self.save_state(state)
