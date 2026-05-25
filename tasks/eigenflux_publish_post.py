@@ -79,7 +79,8 @@ def main() -> int:
                 "content_preview": content[:120],
             })
             state["recent"] = history[-20:]
-            state_file.write_text(json.dumps(state, ensure_ascii=False))
+            from core.safety import atomic_write
+            atomic_write(state_file, json.dumps(state, ensure_ascii=False))
             # Notify user via card (full content — broadcasts are short by design)
             print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}"))
         else:
