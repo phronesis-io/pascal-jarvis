@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.timeutil import now_local
+from core.safety import extract_json
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 LOG_FILE = MEMORY_DIR / "system" / "activity_log.jsonl"
@@ -26,7 +27,7 @@ def main():
 
     # Parse Claude's JSON response
     try:
-        data = json.loads(raw)
+        data = json.loads(extract_json(raw))
         entries = data.get("entries", [])
     except json.JSONDecodeError:
         # If Claude didn't return valid JSON, skip silently

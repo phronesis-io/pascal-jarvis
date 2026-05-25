@@ -20,11 +20,12 @@ def main():
     if not raw or raw == "HEARTBEAT_OK":
         return
 
-    # Parse JSON response
+    # Parse JSON response (handles code fences + trailing text)
+    from core.safety import extract_json
     try:
-        data = json.loads(raw)
+        data = json.loads(extract_json(raw))
         message = data.get("user_message", "")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         # If plain text (Claude didn't follow JSON format), use as-is
         if looks_like_error(raw):
             return

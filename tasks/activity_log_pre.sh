@@ -30,7 +30,16 @@ window_start = now - timedelta(minutes=45)
 
 cal = open('$calendar_file').read()
 events_in_window = []
+# Only look at TODAY's events — stop when we hit Tomorrow/Day 2/etc
+in_today = False
 for line in cal.split('\n'):
+    if re.match(r'.*([Tt]oday|今天)', line):
+        in_today = True
+        continue
+    if in_today and re.match(r'.*(Tomorrow|明天|Day \d|后天|周)', line):
+        break  # past today's section
+    if not in_today:
+        continue
     m = re.match(r'\s*-?\s*(\d{2}:\d{2})-(\d{2}:\d{2})\s+(.*)', line)
     if not m:
         continue
