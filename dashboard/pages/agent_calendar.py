@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.timeutil import now_local
+
 from nicegui import ui
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
@@ -120,7 +122,7 @@ def _render_timeline_svg(state: dict, tasks: list[dict]):
     timeline_width = width - left_margin - 20
     for h in range(25):
         x = left_margin + (h / 24) * timeline_width
-        hour_label = (datetime.now() - timedelta(hours=24 - h)).strftime("%H")
+        hour_label = (now_local() - timedelta(hours=24 - h)).strftime("%H")
         parts.append(
             f'<line x1="{x:.0f}" y1="{header_height}" '
             f'x2="{x:.0f}" y2="{svg_height - 20}" stroke="#f3f4f6" stroke-width="1"/>'

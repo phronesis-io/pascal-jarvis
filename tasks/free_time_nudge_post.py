@@ -5,12 +5,12 @@ Also updates the daily nudge counter (only counts if message is actually sent)."
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error
+from core.timeutil import now_local_str
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 STATE_FILE = JARVIS_DIR / ".free_time_nudge_state"
@@ -18,7 +18,7 @@ STATE_FILE = JARVIS_DIR / ".free_time_nudge_state"
 
 def update_nudge_count():
     """Increment today's nudge counter after a successful send."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_local_str("%Y-%m-%d")
     count = 0
     if STATE_FILE.exists():
         lines = STATE_FILE.read_text().strip().split("\n")

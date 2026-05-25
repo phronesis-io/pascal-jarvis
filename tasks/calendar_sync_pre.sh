@@ -21,13 +21,25 @@ if [ -f "$calendar_file" ]; then
   fi
 fi
 
-# 30-day rolling window
-today_iso=$(date -u +%Y-%m-%dT00:00:00Z)
+# 30-day rolling window — use Beijing time (UTC+8) for day boundaries
+# so DAY0 matches "Today" in the Python display formatter below.
+# Previously used UTC, causing 8-hour misalignment at midnight Beijing time
+# (e.g., yesterday's 19:30 climbing event labeled as today's).
+day_boundaries=$(python3 -c "
+from datetime import datetime, timedelta, timezone
+tz = timezone(timedelta(hours=8))
+today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+utc = timezone.utc
+for i in range(31):
+    dt = (today + timedelta(days=i)).astimezone(utc)
+    print(dt.strftime('%Y-%m-%dT%H:%M:%SZ'))
+")
+IFS=$'\n' read -r -d '' -a BOUNDS <<< "$day_boundaries" || true
 
 # Build day boundaries and fetch events for each day
 for i in $(seq 0 29); do
-  day_start=$(date -v+${i}d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+${i} days" -u +%Y-%m-%dT00:00:00Z)
-  day_end=$(date -v+$((i+1))d -u +%Y-%m-%dT00:00:00Z 2>/dev/null || date -d "+$((i+1)) days" -u +%Y-%m-%dT00:00:00Z)
+  day_start="${BOUNDS[$i]}"
+  day_end="${BOUNDS[$((i+1))]}"
   day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>/dev/null)
   export "DAY${i}_DATA=$day_data"
 done

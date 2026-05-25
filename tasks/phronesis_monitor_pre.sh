@@ -17,10 +17,10 @@ if [ -f "$STATE_FILE" ]; then
   start_time=$(cat "$STATE_FILE")
 else
   # Default: 15 minutes ago
-  start_time=$(date -v-15M -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d '-15 minutes' -u +%Y-%m-%dT%H:%M:%SZ)
+  start_time=$(TZ=Asia/Shanghai date -v-15M +%Y-%m-%dT%H:%M:%S+08:00 2>/dev/null || TZ=Asia/Shanghai date -d '-15 minutes' +%Y-%m-%dT%H:%M:%S+08:00)
 fi
 
-end_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+end_time=$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)
 
 # Fetch messages
 result=$(lark-cli im +chat-messages-list \

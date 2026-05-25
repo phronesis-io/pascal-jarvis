@@ -13,6 +13,7 @@ import random
 import time
 from datetime import datetime, timedelta
 
+from core.timeutil import now_local_str
 from .db import (
     bookmark_add, bookmark_list, bookmark_search, bookmark_update, get_db
 )
@@ -98,7 +99,7 @@ def get_resurface_candidates(count: int = 5) -> list[dict]:
     result = result[:count]
 
     # Mark as surfaced
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     for item in result:
         bookmark_update(
             item["id"],
