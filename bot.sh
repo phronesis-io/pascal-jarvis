@@ -9,6 +9,10 @@
 
 set -uo pipefail
 
+# Ensure UTF-8 encoding for Chinese content processing
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export JARVIS_DIR
 
@@ -156,6 +160,15 @@ mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
 
 # Clean up stale session locks from previous crashes/restarts
 rm -f "$JARVIS_DIR"/.session_lock_* 2>/dev/null
+
+# Clean up old Claude session files (>30 days, prevents unbounded disk growth)
+if [ -d "$CLAUDE_PROJECT_DIR" ]; then
+  _old_sessions=$(find "$CLAUDE_PROJECT_DIR" -name "*.jsonl" -mtime +30 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$_old_sessions" -gt 0 ]; then
+    find "$CLAUDE_PROJECT_DIR" -name "*.jsonl" -mtime +30 -delete 2>/dev/null
+    log_info "Cleaned $_old_sessions session files older than 30 days"
+  fi
+fi
 
 # ── Load built-in plugins ────────────────────────────────────────────
 # Lark (Feishu) — shell helpers for IM. Other plugins (e.g. eigenflux)
@@ -542,7 +555,7 @@ except: pass
 
             # Background: run a quick Claude analysis of the incoming message
             local _analysis
-            _analysis=$(claude \
+            _analysis=$(with_timeout 120 claude \
               --model sonnet \
               --dangerously-skip-permissions \
               --no-session-persistence \
@@ -1294,7 +1307,9 @@ if old_sid:
         log_info "Session compact completed for $conv_key"
       fi
 
-      log_info "[$session_id] Received: $content"
+      # Sanitize content for log (replace newlines/control chars to prevent log injection)
+      _log_content=$(printf '%s' "$content" | tr '\n\r' '  ' | cut -c1-120)
+      log_info "[$session_id] Received: $_log_content"
 
       # ── Engagement tracking: check if this message responds to a heartbeat ──
       python3 -m core.engagement "$content" 2>>"$LOG_FILE" || log_warn "Engagement tracking failed"

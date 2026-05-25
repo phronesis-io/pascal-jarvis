@@ -129,6 +129,11 @@ start_bot() {
   # Clear Python bytecode cache — prevents AttributeError after code updates
   find "$JARVIS_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+  # Rotate restart log (grows unbounded otherwise — was 1.2MB)
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 500000 ]; then
+    tail -200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+  fi
+
   echo "Starting bot.sh..."
   nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
   sleep 3
