@@ -81,8 +81,10 @@ def main() -> int:
             state["recent"] = history[-20:]
             from core.safety import atomic_write
             atomic_write(state_file, json.dumps(state, ensure_ascii=False))
-            # Notify user via card (full content — broadcasts are short by design)
-            print(build_card("📡 EigenFlux · 广播", f"已发布广播:\n\n{content}", source="eigenflux-publish"))
+            # Silent — user engagement data shows 7% engagement on publish confirmations.
+            # The broadcast itself is valuable (to the network), but the Lark notification
+            # is noise for the user. Log only.
+            print(f"[eigenflux-publish] Published: {content[:80]}", file=sys.stderr)
         else:
             print(f"[eigenflux-publish] CLI error: {result.stderr.strip()}", file=LOG)
     except Exception:
