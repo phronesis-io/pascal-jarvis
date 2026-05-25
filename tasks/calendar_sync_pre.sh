@@ -233,3 +233,24 @@ if games:
   fi
 fi
 ) | tee "$RAW_CACHE"
+
+# Directly update calendar_today.md from pre-script output.
+# This ensures calendar data is fresh even if Claude call fails or
+# the task is batched with others that return HEARTBEAT_OK.
+# The post-script handles change detection and user notification separately.
+if [ -s "$RAW_CACHE" ]; then
+  _sync_ts=$(date '+%Y-%m-%d %H:%M')
+  _tmp_cal="$calendar_file.tmp"
+  cat > "$_tmp_cal" <<CALEOF
+---
+name: 今日日程
+description: Lark 日历自动同步，含今天和明天的日程
+type: reference
+---
+
+# Calendar (synced $_sync_ts)
+
+$(cat "$RAW_CACHE")
+CALEOF
+  mv "$_tmp_cal" "$calendar_file"
+fi
