@@ -5,10 +5,10 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 
-# Time gate: only 8:00-9:30
+# Time gate: 8:00-11:00 (widened from 8:00-9:30 — if user wakes late or
+# system restarts, plan retries every 30min via EMPTY_RETRY_DELAYS until 11:00)
 hour=$(date +%H)
-min=$(date +%M)
-if [ "$hour" -lt 8 ] || { [ "$hour" -eq 9 ] && [ "$min" -ge 30 ]; } || [ "$hour" -ge 10 ]; then
+if [ "$hour" -lt 8 ] || [ "$hour" -ge 11 ]; then
   exit 0
 fi
 
