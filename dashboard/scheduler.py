@@ -29,6 +29,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.timeutil import now_local, now_local_str
+
 from .db import get_db, task_list, task_update
 from .event_bus import bus
 
@@ -55,7 +57,7 @@ def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
 def cron_matches(expression: str, dt: datetime | None = None) -> bool:
     """Check if a cron expression matches the given datetime."""
     if dt is None:
-        dt = datetime.now()
+        dt = now_local()
     parts = expression.strip().split()
     if len(parts) != 5:
         return False
@@ -75,7 +77,7 @@ def cron_matches(expression: str, dt: datetime | None = None) -> bool:
 
 def check_conditions(conditions: list[dict], task: dict) -> bool:
     """Evaluate all conditions for a task. Returns True if all pass."""
-    now = datetime.now()
+    now = now_local()
     for cond in conditions:
         ctype = cond.get("type", "")
 
@@ -131,7 +133,7 @@ def check_conditions(conditions: list[dict], task: dict) -> bool:
 def get_due_tasks() -> list[dict]:
     """Get all tasks that should run now."""
     tasks = task_list(enabled_only=True)
-    now = datetime.now()
+    now = now_local()
     now_ts = int(time.time())
     due = []
 
@@ -174,7 +176,7 @@ def get_due_tasks() -> list[dict]:
 
 def mark_executed(task_id: str, result: str = "") -> None:
     """Mark a task as executed."""
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local_str("%Y-%m-%dT%H:%M:%S")
     db = get_db()
     row = db.execute("SELECT run_count FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
     count = (row[0] or 0) + 1 if row else 1

@@ -41,18 +41,37 @@ lark_send() {
 
 # lark_send_card <card_json>
 # Send an interactive card message to the configured user ($USER_ID).
+# Uses a temp file to pass JSON safely, avoiding shell expansion issues
+# with quotes, $, backticks, etc. in card content.
 lark_send_card() {
   local card_json="$1"
   [ -z "$card_json" ] && return 0
   [ -z "${USER_ID:-}" ] && return 0
+
+  # Write JSON to temp file to avoid shell quoting corruption
+  local _tmpfile
+  _tmpfile=$(mktemp "${TMPDIR:-/tmp}/lark_card.XXXXXX.json")
+  printf '%s' "$card_json" > "$_tmpfile"
+
+  local _rc=0
   if ! lark-cli im +messages-send \
       --user-id "$USER_ID" \
       --msg-type interactive \
-      --content "$card_json" \
+      --content "$(cat "$_tmpfile")" \
       --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null; then
-    echo "[lark] send_card failed" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
-    return 1
+    # Retry once after 1s — transient network/API errors are common
+    sleep 1
+    if ! lark-cli im +messages-send \
+        --user-id "$USER_ID" \
+        --msg-type interactive \
+        --content "$(cat "$_tmpfile")" \
+        --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null; then
+      echo "[lark] send_card failed after retry" >> "${LOG_FILE:-/dev/null}" 2>/dev/null
+      _rc=1
+    fi
   fi
+  rm -f "$_tmpfile"
+  return $_rc
 }
 
 # lark_reply <message_id> <markdown>

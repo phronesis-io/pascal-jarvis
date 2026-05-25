@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from core.timeutil import now_local
+
 from nicegui import ui
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
@@ -30,7 +32,7 @@ def _parse_trigger_when(intent: dict) -> str:
         if dt_str:
             try:
                 dt = datetime.fromisoformat(dt_str)
-                now = datetime.now()
+                now = now_local()
                 delta = dt - now
                 if delta.total_seconds() < 0:
                     return f"已过期 ({dt.strftime('%m/%d %H:%M')})"

@@ -9,8 +9,11 @@
 # - Reads ALL past check-ins: older ones as topic blocklist, recent 3 as full text
 # - Rotates through value-oriented "modes" by hour
 
+JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true
+
 hour=$(date +%H)
-if [ "$hour" -lt 9 ] || [ "$hour" -ge 22 ]; then
+if [ "$hour" -lt "${WORK_START:-9}" ] || [ "$hour" -ge "${WORK_END:-22}" ]; then
   exit 0
 fi
 
@@ -54,9 +57,10 @@ if [ -f "$lark_plugin" ] && command -v lark-cli &>/dev/null; then
   . "$lark_plugin"
 
   # Look back 1h and forward 2h to detect transitions
-  past_iso="$(date -v-1H -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d '-1 hour' -u +%Y-%m-%dT%H:%M:%SZ)"
-  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  future_iso="$(date -v+2H -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d '+2 hours' -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Use Beijing time with +08:00 offset (not UTC) to match local calendar
+  past_iso="$(TZ=Asia/Shanghai date -v-1H +%Y-%m-%dT%H:%M:%S+08:00 2>/dev/null || TZ=Asia/Shanghai date -d '-1 hour' +%Y-%m-%dT%H:%M:%S+08:00)"
+  now_iso="$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)"
+  future_iso="$(TZ=Asia/Shanghai date -v+2H +%Y-%m-%dT%H:%M:%S+08:00 2>/dev/null || TZ=Asia/Shanghai date -d '+2 hours' +%Y-%m-%dT%H:%M:%S+08:00)"
 
   # Get events in the [-1h, +2h] window
   freebusy=$(lark_freebusy "$past_iso" "$future_iso")

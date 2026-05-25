@@ -264,13 +264,15 @@ heartbeat_loop() {
   fi
 
   while true; do
-    # Check for restart trigger in heartbeat loop too (message loop may be idle)
+    # Check for restart trigger in heartbeat loop too (message loop may be idle).
+    # NOTE: heartbeat_loop runs in a subshell (&), so we can't exec from here.
+    # Remove the trigger, then signal the main process to exit cleanly.
+    # The daemon will detect bot.sh is down and restart it.
     if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
       rm -f "$JARVIS_DIR/.restart_trigger"
-      log_info "Restart triggered from heartbeat loop — exec-ing self..."
-      # Kill parent and children, then restart
-      kill 0 2>/dev/null || true
-      exec "$JARVIS_DIR/bot.sh"
+      log_info "Restart trigger detected in heartbeat loop — exiting for daemon restart"
+      kill -TERM 0 2>/dev/null || true
+      return 0
     fi
 
     local force_flag=""
@@ -309,22 +311,95 @@ if result:
       local _remaining_text=""
       while IFS= read -r _line; do
         if [[ "$_line" == CARD:* ]]; then
-          lark_send_card "${_line#CARD:}"
+          local _card_json="${_line#CARD:}"
+          if ! lark_send_card "$_card_json"; then
+            # Card send failed even after retry — extract text fallback
+            log_warn "[heartbeat] Card send failed, falling back to text"
+            local _card_text
+            _card_text=$(python3 -c "
+import json, sys
+try:
+    card = json.loads(sys.argv[1])
+    header = card.get('header', {}).get('title', {}).get('content', '')
+    parts = ['**' + header + '**'] if header else []
+    for el in card.get('elements', []):
+        text = el.get('text', {}).get('content', '')
+        if text:
+            parts.append(text)
+    print('\n\n'.join(parts))
+except Exception as e:
+    print(f'[card parse error: {e}]', file=sys.stderr)
+" "$_card_json" 2>>"$LOG_FILE")
+            if [ -n "$_card_text" ]; then
+              send_to_lark "$_card_text"
+            else
+              log_warn "[heartbeat] Card text extraction failed — content lost"
+              send_to_lark "[卡片发送失败] 请检查 jarvis.log"
+            fi
+          fi
         elif [[ "$_line" == '{"config":'* ]]; then
           # Legacy format (no CARD: prefix) — still handle for safety
           lark_send_card "$_line"
         elif [ -n "$_line" ]; then
-          _remaining_text="${_remaining_text:+$_remaining_text
+          # Safety net: never send raw JSON as plain text to user
+          if python3 -c "
+import json, sys
+try:
+    json.loads(sys.argv[1])
+    sys.exit(0)  # valid JSON — block it
+except: sys.exit(1)
+" "$_line" 2>/dev/null; then
+            log_warn "[heartbeat] Blocked raw JSON from reaching user: ${_line:0:100}..."
+          else
+            _remaining_text="${_remaining_text:+$_remaining_text
 }$_line"
+          fi
         fi
       done <<< "$output"
       if [ -n "$_remaining_text" ]; then
         send_to_lark "$_remaining_text"
       fi
-      # Write to outbox so main session can see what heartbeat sent
-      local ts_iso
+      # Write to outbox so main session can see what heartbeat sent.
+      # Strip CARD: prefix and extract readable text from card JSON so the
+      # main session Claude sees human-readable content, not raw JSON.
+      local ts_iso _outbox_text
       ts_iso=$(date '+%Y-%m-%d %H:%M')
-      printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$output" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
+      _outbox_text=$(python3 -c "
+import json, sys
+raw = sys.argv[1]
+parts = []
+for line in raw.split('\n'):
+    stripped = line.strip()
+    card_json = None
+    if stripped.startswith('CARD:'):
+        card_json = stripped[5:]
+    elif stripped.startswith('{\"config\":'):
+        card_json = stripped
+    if card_json:
+        try:
+            card = json.loads(card_json)
+            header = card.get('header', {}).get('title', {}).get('content', '')
+            texts = []
+            if header:
+                texts.append(header)
+            for el in card.get('elements', []):
+                t = el.get('text', {}).get('content', '')
+                if t:
+                    texts.append(t)
+            parts.append('\n'.join(texts))
+        except:
+            pass  # skip unparseable card JSON — never leak raw JSON
+    elif stripped:
+        # Block raw JSON from entering outbox
+        try:
+            json.loads(stripped)
+            continue  # valid JSON — skip it
+        except (json.JSONDecodeError, ValueError):
+            parts.append(stripped)
+print('\n\n'.join(parts))
+" "$output" 2>/dev/null)
+      [ -z "$_outbox_text" ] && _outbox_text="$output"
+      printf '%s\n' "{\"role\":\"assistant\",\"text\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$_outbox_text" 2>/dev/null),\"ts\":\"$ts_iso\",\"source\":\"heartbeat\"}" \
         >> "$JARVIS_DIR/heartbeat_outbox.jsonl"
       # Record heartbeat send for engagement tracking
       # Read source from sidecar file written by HeartbeatRunner (accurate attribution)
@@ -380,6 +455,12 @@ eigenflux_stream_loop() {
     local cursor=""
     [ -f "$cursor_file" ] && cursor=$(cat "$cursor_file" 2>/dev/null)
     [ -n "$cursor" ] && args="$args --cursor $cursor"
+
+    # Kill any leftover eigenflux stream processes before spawning a new one.
+    # Prevents "Connection replaced by another session" loops where two
+    # connections fight over the same server-side session slot.
+    pkill -f "eigenflux stream" 2>/dev/null || true
+    sleep 2  # let server release the session
 
     log_info "[ef-stream] Spawning: eigenflux $args"
 
@@ -523,8 +604,14 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user." \
 
     failures=$((failures + 1))
     if [ "$failures" -ge "$max_failures" ]; then
-      log_err "[ef-stream] Giving up after $max_failures consecutive failures"
-      return 1
+      # Don't give up permanently — switch to low-frequency retry.
+      # EigenFlux server outages or "Connection replaced" loops should not
+      # permanently kill the stream. Heartbeat polling still handles messages.
+      log_warn "[ef-stream] $max_failures consecutive failures, backing off to 5min retry"
+      sleep 300
+      failures=0   # reset counter to allow normal backoff again
+      backoff=1
+      continue
     fi
 
     log_info "[ef-stream] Reconnecting in ${backoff}s (failure #$failures)"
@@ -566,9 +653,29 @@ process_actions() {
     return
   fi
 
+  # ── Python-handled actions (calendar, task, intent, feed, watchlater, etc.) ──
+  # Delegate to core/actions.py for all non-process-control actions.
+  # This handles: feed_search, watchlater, heartbeat, calendar_*, task_*,
+  # praxis_*, intent_*, schedule_task. Returns cleaned reply with results.
+  reply=$(JV_REPLY="$reply" JV_LOG_FILE="$LOG_FILE" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.actions import ActionProcessor
+ap = ActionProcessor(os.environ['JARVIS_DIR'], os.environ['MEMORY_DIR'],
+                     os.environ.get('JV_JOBS_DIR', 'jobs'), os.environ.get('JV_LOG_FILE', ''))
+print(ap.process(os.environ['JV_REPLY']))
+" 2>>"$LOG_FILE" || printf '%s' "$reply")
+
+  # ── Bash-handled actions (need process control: &, wait, PID tracking) ──
+  # Re-extract remaining markers (Python already stripped the ones it handled)
+  actions=$(echo "$reply" | grep -o '\[ACTION:[^]]*\]' 2>/dev/null || true)
+
+  if [ -z "$actions" ]; then
+    printf '%s' "$reply"
+    return
+  fi
+
   while IFS= read -r marker; do
     [ -z "$marker" ] && continue
-    # Parse action type and params
     local action_body="${marker#\[ACTION:}"
     action_body="${action_body%\]}"
     local action_type="${action_body%%|*}"
@@ -576,32 +683,6 @@ process_actions() {
     [ "$action_params" = "$action_type" ] && action_params=""
 
     case "$action_type" in
-      feed_search)
-        # Search the EigenFlux CLI's local feed cache (last ~8 days) plus
-        # the frozen legacy jsonl archive. Aligned with official CLI storage:
-        # ~/.eigenflux/servers/eigenflux/data/broadcasts/<date>/feeds-*.json
-        local query="${action_params#query=}"
-        local results
-        results=$(JV_QUERY="$query" python3 -m plugins.eigenflux.feed_search \
-          2>>"$LOG_FILE" || echo "搜索失败")
-        if [ -n "$results" ]; then
-          action_results="${action_results}
-${results}"
-        fi
-        ;;
-
-      watchlater)
-        # Parse title and url from params: title=<title>|url=<url>
-        local wl_title="" wl_url=""
-        wl_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        wl_url=$(echo "$action_params" | sed -n 's/.*url=\([^|]*\).*/\1/p')
-        if [ -n "$wl_url" ]; then
-          python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$wl_title" "$wl_url" "action" \
-            2>>"$LOG_FILE" >/dev/null || true
-          log_info "[action] watchlater saved: $wl_title"
-        fi
-        ;;
-
       bg)
         local bg_prompt="${action_params#prompt=}"
         local bg_desc="${bg_prompt:0:80}"
@@ -658,406 +739,10 @@ No output found for job: $out_id"
         fi
         ;;
 
-      heartbeat)
-        touch "$HEARTBEAT_TRIGGER"
-        log_info "[action] Heartbeat triggered"
-        ;;
-
-      calendar_create)
-        # Parse params: title=<title>|start=<ISO>|end=<ISO>|desc=<desc>
-        local cal_title="" cal_start="" cal_end="" cal_desc=""
-        cal_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        cal_start=$(echo "$action_params" | sed -n 's/.*start=\([^|]*\).*/\1/p')
-        cal_end=$(echo "$action_params" | sed -n 's/.*end=\([^|]*\).*/\1/p')
-        cal_desc=$(echo "$action_params" | sed -n 's/.*desc=\([^|]*\).*/\1/p')
-        if [ -n "$cal_title" ] && [ -n "$cal_start" ] && [ -n "$cal_end" ]; then
-          # Conflict detection: check if slot is free
-          local is_busy
-          is_busy=$(lark-cli calendar +freebusy --as user --start "$cal_start" --end "$cal_end" 2>/dev/null \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print('busy' if d.get('busy') else 'free')" 2>/dev/null || echo "free")
-          if [ "$is_busy" = "busy" ]; then
-            action_results="${action_results}
-⚠️ 时间段有冲突，但仍创建了: $cal_title ($cal_start → $cal_end)"
-            log_warn "[action] calendar_create conflict detected: $cal_title at $cal_start"
-          fi
-          local cal_result
-          if [ -n "$cal_desc" ]; then
-            cal_result=$(lark-cli calendar +create --as user --summary "$cal_title" --start "$cal_start" --end "$cal_end" --description "$cal_desc" 2>>"$LOG_FILE" || echo "FAILED")
-          else
-            cal_result=$(lark-cli calendar +create --as user --summary "$cal_title" --start "$cal_start" --end "$cal_end" 2>>"$LOG_FILE" || echo "FAILED")
-          fi
-          if echo "$cal_result" | grep -q "FAILED"; then
-            action_results="${action_results}
-❌ 日程创建失败: $cal_title"
-          else
-            if [ "$is_busy" != "busy" ]; then
-              action_results="${action_results}
-✅ 已创建日程: $cal_title ($cal_start → $cal_end)"
-            fi
-          fi
-          log_info "[action] calendar_create: $cal_title"
-        fi
-        ;;
-
-      calendar_update)
-        # Parse params: event_id=<id>|field=<summary|start|end>|value=<new>
-        local cal_event_id="" cal_field="" cal_value=""
-        cal_event_id=$(echo "$action_params" | sed -n 's/.*event_id=\([^|]*\).*/\1/p')
-        cal_field=$(echo "$action_params" | sed -n 's/.*field=\([^|]*\).*/\1/p')
-        cal_value=$(echo "$action_params" | sed -n 's/.*value=\([^|]*\).*/\1/p')
-        if [ -n "$cal_event_id" ] && [ -n "$cal_field" ] && [ -n "$cal_value" ]; then
-          local update_data=""
-          update_data=$(JV_FIELD="$cal_field" JV_VALUE="$cal_value" python3 -c "
-import os, json
-field = os.environ['JV_FIELD']
-value = os.environ['JV_VALUE']
-if field == 'summary':
-    print(json.dumps({'summary': value}))
-elif field == 'start':
-    print(json.dumps({'start_time': {'timestamp': value}}))
-elif field == 'end':
-    print(json.dumps({'end_time': {'timestamp': value}}))
-else:
-    print(json.dumps({'description': value}))
-" 2>/dev/null || echo "{}")
-          local update_result
-          update_result=$(lark-cli calendar events patch --as user \
-            --params "{\"event_id\":\"$cal_event_id\"}" \
-            --data "$update_data" 2>>"$LOG_FILE" || echo "FAILED")
-          if echo "$update_result" | grep -q "FAILED"; then
-            action_results="${action_results}
-❌ 日程更新失败: $cal_event_id ($cal_field)"
-          else
-            action_results="${action_results}
-✅ 已更新日程: $cal_field → $cal_value"
-          fi
-          log_info "[action] calendar_update: $cal_event_id $cal_field=$cal_value"
-        fi
-        ;;
-
-      task_create)
-        # Parse params: title=<title>|due=<ISO_optional>
-        local task_title="" task_due=""
-        task_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        task_due=$(echo "$action_params" | sed -n 's/.*due=\([^|]*\).*/\1/p')
-        if [ -n "$task_title" ]; then
-          local task_result
-          if [ -n "$task_due" ]; then
-            task_result=$(lark-cli task +create --as user --summary "$task_title" --due "$task_due" 2>>"$LOG_FILE" || echo "FAILED")
-          else
-            task_result=$(lark-cli task +create --as user --summary "$task_title" 2>>"$LOG_FILE" || echo "FAILED")
-          fi
-          if echo "$task_result" | grep -q "FAILED"; then
-            action_results="${action_results}
-❌ 任务创建失败: $task_title"
-          else
-            action_results="${action_results}
-✅ 已创建任务: $task_title"
-          fi
-          log_info "[action] task_create: $task_title"
-        fi
-        ;;
-
-      task_complete)
-        # Parse params: task_id=<id>
-        local task_id=""
-        task_id=$(echo "$action_params" | sed -n 's/.*task_id=\([^|]*\).*/\1/p')
-        if [ -n "$task_id" ]; then
-          local complete_result
-          complete_result=$(lark-cli task +complete --as user --task-id "$task_id" 2>>"$LOG_FILE" || echo "FAILED")
-          if echo "$complete_result" | grep -q "FAILED"; then
-            action_results="${action_results}
-❌ 任务完成标���失败: $task_id"
-          else
-            action_results="${action_results}
-✅ 任务已完成"
-          fi
-          log_info "[action] task_complete: $task_id"
-        fi
-        ;;
-
-      # ── Local Task System (tasks.jsonl) ──────────────────────────────
-      task_capture)
-        # Parse params: title=<title>|type=<praxis|poiesis>|energy=<h|m|l>|est=<min>|due=<date>
-        local tc_title="" tc_type="poiesis" tc_energy="medium" tc_est="30" tc_due=""
-        tc_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        tc_type=$(echo "$action_params" | sed -n 's/.*type=\([^|]*\).*/\1/p')
-        tc_energy=$(echo "$action_params" | sed -n 's/.*energy=\([^|]*\).*/\1/p')
-        tc_est=$(echo "$action_params" | sed -n 's/.*est=\([^|]*\).*/\1/p')
-        tc_due=$(echo "$action_params" | sed -n 's/.*due=\([^|]*\).*/\1/p')
-        [ -z "$tc_type" ] && tc_type="poiesis"
-        [ -z "$tc_energy" ] && tc_energy="medium"
-        [ -z "$tc_est" ] && tc_est="30"
-        if [ -n "$tc_title" ]; then
-          local tc_result
-          tc_result=$(JV_TITLE="$tc_title" JV_TYPE="$tc_type" JV_ENERGY="$tc_energy" \
-            JV_EST="$tc_est" JV_DUE="$tc_due" python3 -c "
-import os, sys, json
-sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-t = tm.capture(
-    title=os.environ['JV_TITLE'],
-    type=os.environ.get('JV_TYPE', 'poiesis'),
-    energy=os.environ.get('JV_ENERGY', 'medium'),
-    time_est_min=int(os.environ.get('JV_EST', '30')),
-    due=os.environ.get('JV_DUE') or None,
-    source='conversation',
-)
-print(t['id'])
-" 2>>"$LOG_FILE" || echo "FAILED")
-          if [ "$tc_result" != "FAILED" ] && [ -n "$tc_result" ]; then
-            log_info "[action] task_capture: $tc_title ($tc_result)"
-          fi
-        fi
-        ;;
-
-      task_commit)
-        # Parse params: id=<task_id>|when=<ISO8601_or_today>
-        local tc_id="" tc_when=""
-        tc_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        tc_when=$(echo "$action_params" | sed -n 's/.*when=\([^|]*\).*/\1/p')
-        if [ -n "$tc_id" ]; then
-          JV_ID="$tc_id" JV_WHEN="$tc_when" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.commit(os.environ['JV_ID'], when=os.environ.get('JV_WHEN') or None)
-" 2>>"$LOG_FILE" || true
-          log_info "[action] task_commit: $tc_id when=$tc_when"
-        fi
-        ;;
-
-      task_done)
-        # Parse params: id=<task_id>
-        local td_id=""
-        td_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        if [ -n "$td_id" ]; then
-          JV_ID="$td_id" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.done(os.environ['JV_ID'])
-" 2>>"$LOG_FILE" || true
-          log_info "[action] task_done: $td_id"
-        fi
-        ;;
-
-      task_reject)
-        # Parse params: id=<task_id>|reason=<brief>
-        local tr_id="" tr_reason=""
-        tr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        tr_reason=$(echo "$action_params" | sed -n 's/.*reason=\([^|]*\).*/\1/p')
-        if [ -n "$tr_id" ]; then
-          JV_ID="$tr_id" JV_REASON="$tr_reason" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.reject(os.environ['JV_ID'], os.environ.get('JV_REASON', ''))
-" 2>>"$LOG_FILE" || true
-          log_info "[action] task_reject: $tr_id"
-        fi
-        ;;
-
-      task_defer)
-        # Parse params: id=<task_id>|to=<date>
-        local tdf_id="" tdf_to=""
-        tdf_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        tdf_to=$(echo "$action_params" | sed -n 's/.*to=\([^|]*\).*/\1/p')
-        if [ -n "$tdf_id" ] && [ -n "$tdf_to" ]; then
-          JV_ID="$tdf_id" JV_TO="$tdf_to" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.defer(os.environ['JV_ID'], os.environ['JV_TO'])
-" 2>>"$LOG_FILE" || true
-          log_info "[action] task_defer: $tdf_id to=$tdf_to"
-        fi
-        ;;
-
-      praxis_done)
-        # Parse params: id=<praxis_id>
-        local pd_id=""
-        pd_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        if [ -n "$pd_id" ]; then
-          JV_ID="$pd_id" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.praxis_done(os.environ['JV_ID'])
-" 2>>"$LOG_FILE" || true
-          log_info "[action] praxis_done: $pd_id"
-        fi
-        ;;
-
-      praxis_add)
-        # Parse params: title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>
-        local pa_title="" pa_freq="daily" pa_time="08:30" pa_dur="20"
-        pa_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        pa_freq=$(echo "$action_params" | sed -n 's/.*freq=\([^|]*\).*/\1/p')
-        pa_time=$(echo "$action_params" | sed -n 's/.*time=\([^|]*\).*/\1/p')
-        pa_dur=$(echo "$action_params" | sed -n 's/.*dur=\([^|]*\).*/\1/p')
-        [ -z "$pa_freq" ] && pa_freq="daily"
-        [ -z "$pa_time" ] && pa_time="08:30"
-        [ -z "$pa_dur" ] && pa_dur="20"
-        if [ -n "$pa_title" ]; then
-          JV_TITLE="$pa_title" JV_FREQ="$pa_freq" JV_TIME="$pa_time" JV_DUR="$pa_dur" \
-            python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.praxis_add(
-    title=os.environ['JV_TITLE'],
-    frequency=os.environ.get('JV_FREQ', 'daily'),
-    preferred_time=os.environ.get('JV_TIME', '08:30'),
-    duration_min=int(os.environ.get('JV_DUR', '20')),
-)
-" 2>>"$LOG_FILE" || true
-          log_info "[action] praxis_add: $pa_title"
-        fi
-        ;;
-
-      praxis_remove)
-        # Parse params: id=<praxis_id>
-        local pr_id=""
-        pr_id=$(echo "$action_params" | sed -n 's/.*id=\([^|]*\).*/\1/p')
-        if [ -n "$pr_id" ]; then
-          JV_ID="$pr_id" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.tasks import TaskManager
-from pathlib import Path
-tm = TaskManager(Path(os.environ['MEMORY_DIR']))
-tm.praxis_remove(os.environ['JV_ID'])
-" 2>>"$LOG_FILE" || true
-          log_info "[action] praxis_remove: $pr_id"
-        fi
-        ;;
-
-      calendar_delete)
-        # Parse params: event_id=<id>|title=<title>
-        local cal_event_id="" cal_del_title=""
-        cal_event_id=$(echo "$action_params" | sed -n 's/.*event_id=\([^|]*\).*/\1/p')
-        cal_del_title=$(echo "$action_params" | sed -n 's/.*title=\([^|]*\).*/\1/p')
-        if [ -n "$cal_event_id" ]; then
-          local del_result
-          del_result=$(lark-cli calendar events delete --as user --event-id "$cal_event_id" 2>>"$LOG_FILE" || echo "FAILED")
-          if echo "$del_result" | grep -q "FAILED"; then
-            action_results="${action_results}
-❌ 日程删除失败: ${cal_del_title:-$cal_event_id}"
-          else
-            action_results="${action_results}
-✅ 已删除日程: ${cal_del_title:-$cal_event_id}"
-          fi
-          log_info "[action] calendar_delete: $cal_event_id"
-        fi
-        ;;
-
-      schedule_task)
-        # Register a dynamic task in SQLite scheduler
-        # Parse params: name=<name>|type=<cron|interval|date>|config=<value>|action=<notify|prompt>|message=<text>
-        local sched_result
-        sched_result=$(JV_PARAMS="$action_params" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from dashboard.heartbeat_bridge import register_from_action
-print(register_from_action(os.environ['JV_PARAMS']))
-" 2>>"$LOG_FILE" || echo "FAILED")
-        if [ "$sched_result" != "FAILED" ] && [ -n "$sched_result" ]; then
-          action_results="${action_results}
-✅ $sched_result"
-        else
-          action_results="${action_results}
-❌ 动态任务注册失败"
-        fi
-        log_info "[action] schedule_task: $action_params"
-        ;;
-
-      intent_create)
-        # Create a future intent: name=<name>|when=<ISO8601>|prompt=<text>|purpose=<why>|tags=<comma>
-        local intent_result
-        intent_result=$(JV_PARAMS="$action_params" python3 -c "
-import os, sys, json; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.intentions import create_intent
-params = {}
-for seg in os.environ['JV_PARAMS'].split('|'):
-    if '=' in seg:
-        k, v = seg.split('=', 1)
-        params[k.strip()] = v.strip()
-name = params.get('name', 'unnamed')
-when = params.get('when', '')
-trigger_type = params.get('type', 'date')
-prompt = params.get('prompt', name)
-purpose = params.get('purpose', '')
-tags = [t.strip() for t in params.get('tags', '').split(',') if t.strip()]
-priority = int(params.get('priority', '5'))
-trigger_config = {}
-if trigger_type == 'date':
-    trigger_config = {'datetime': when}
-elif trigger_type == 'cron':
-    trigger_config = {'expression': when}
-elif trigger_type == 'interval':
-    trigger_config = {'seconds': int(when) if when.isdigit() else 600}
-iid = create_intent(
-    name=name, trigger_type=trigger_type, trigger_config=trigger_config,
-    prompt=prompt, purpose=purpose, tags=tags, priority=priority,
-    source='agent', action_type=params.get('action', 'notify'),
-)
-print(f'Intent \"{name}\" created (id: {iid})')
-" 2>>"$LOG_FILE" || echo "FAILED")
-        if [ "$intent_result" != "FAILED" ] && [ -n "$intent_result" ]; then
-          action_results="${action_results}
-✅ $intent_result"
-        else
-          action_results="${action_results}
-❌ Intent 创建失败"
-        fi
-        log_info "[action] intent_create: $action_params"
-        ;;
-
-      intent_cancel)
-        # Cancel an intent: id=<intent_id>|reason=<why>
-        local cancel_result
-        cancel_result=$(JV_PARAMS="$action_params" python3 -c "
-import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.intentions import cancel_intent
-params = {}
-for seg in os.environ['JV_PARAMS'].split('|'):
-    if '=' in seg:
-        k, v = seg.split('=', 1)
-        params[k.strip()] = v.strip()
-ok = cancel_intent(params.get('id', ''), params.get('reason', ''))
-print('Intent cancelled' if ok else 'Intent not found or already done')
-" 2>>"$LOG_FILE" || echo "FAILED")
-        action_results="${action_results}
-${cancel_result}"
-        log_info "[action] intent_cancel: $action_params"
-        ;;
-
-      intent_list)
-        # List active intents
-        local list_result
-        list_result=$(python3 -c "
-import os, sys, json; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.intentions import list_intents
-intents = list_intents(status='pending', limit=20)
-if not intents:
-    print('No active intents')
-else:
-    for i in intents:
-        tc = json.loads(i['trigger_config']) if isinstance(i['trigger_config'], str) else i['trigger_config']
-        when = tc.get('datetime', tc.get('expression', tc.get('seconds', '?')))
-        print(f\"- {i['name']} [{i['trigger_type']}:{when}] (id:{i['id']})\")
-" 2>>"$LOG_FILE" || echo "FAILED")
-        action_results="${action_results}
-📋 Active Intents:
-$list_result"
-        log_info "[action] intent_list"
+      # All other action types (heartbeat, calendar_*, task_*, praxis_*, intent_*, etc.)
+      # are handled by core/actions.py above. If any marker reaches here, it's unknown.
+      *)
+        log_warn "[action] Unknown action type in bash fallback: $action_type"
         ;;
 
     esac
@@ -1255,11 +940,20 @@ $recent_turns"
   local ANSWER_FILE
   ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
   local waited=0
-  while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 130 ]; do
-    log_info "[$session_id] Session busy, waiting..."
+  while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 620 ]; do
+    # Wait up to 620s (slightly longer than Claude's 600s timeout)
+    # to avoid concurrent access to the same session
+    if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
+      log_info "[$session_id] Session busy, waiting... (${waited}s)"
+    fi
     sleep 5
     waited=$((waited + 5))
   done
+  if [ "$waited" -ge 620 ]; then
+    # Previous handler likely timed out but didn't clean up its lock
+    log_warn "[$session_id] Lock wait timeout (${waited}s) — clearing stale lock"
+    rm -f "$LOCK_FILE"
+  fi
 
   # Run Claude in background so we can record its PID for "stop" command
   local session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -1440,8 +1134,9 @@ cleanup() {
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
   kill "$HEARTBEAT_PID" 2>/dev/null || true
-  # Kill any lingering eigenflux stream subprocesses
-  pkill -P "$STREAM_PID" 2>/dev/null || true
+  # Kill any lingering eigenflux stream processes (may be reparented to
+  # openclaw-gateway or init, so pkill -P doesn't reach them)
+  pkill -f "eigenflux stream" 2>/dev/null || true
   # Kill all background message handlers and jobs
   jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
   wait "$HEARTBEAT_PID" 2>/dev/null || true
@@ -1480,7 +1175,9 @@ lark_subscribe_messages \
       # Check for restart trigger (written by admin panel)
       if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
         rm -f "$JARVIS_DIR/.restart_trigger"
-        log_info "Restart triggered — exec-ing self..."
+        log_info "Restart triggered from message loop — cleaning up and exec-ing self..."
+        # Kill background children before exec to prevent orphan processes
+        kill 0 2>/dev/null || true
         exec "$JARVIS_DIR/bot.sh"
       fi
 
