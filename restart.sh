@@ -126,6 +126,9 @@ kill_daemon() {
 }
 
 start_bot() {
+  # Clear Python bytecode cache — prevents AttributeError after code updates
+  find "$JARVIS_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
   echo "Starting bot.sh..."
   nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
   sleep 3
