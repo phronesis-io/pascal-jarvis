@@ -16,7 +16,13 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from core.timeutil import now_local_str
+try:
+    from core.timeutil import now_local_str
+except ImportError:
+    # When run as a script (python3 core/jobs.py), core/ isn't a package.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from core.timeutil import now_local_str
 
 
 @contextmanager

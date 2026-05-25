@@ -109,11 +109,25 @@ class HeartbeatRunner:
         self.persona = persona
         self.work_dir = Path(work_dir) if work_dir else self.jarvis_dir
         self._cid = ""  # cycle_id, set per run_cycle invocation
+        self._tasks_cache = None   # cached parse result
+        self._tasks_mtime = 0.0    # mtime when cache was built
 
     def _log(self, msg: str):
         """Log to stderr with cycle_id prefix for correlation."""
         tag = f"[heartbeat:{self._cid}]" if self._cid else "[heartbeat]"
         print(f"{tag} {msg}", file=sys.stderr)
+
+    def _load_tasks(self) -> list[dict]:
+        """Parse HEARTBEAT.md with mtime-based cache (avoid re-parsing every 10s)."""
+        try:
+            mtime = self.heartbeat_file.stat().st_mtime
+        except OSError:
+            return self._tasks_cache or []
+        if self._tasks_cache is not None and mtime == self._tasks_mtime:
+            return self._tasks_cache
+        self._tasks_cache = parse_heartbeat(self.heartbeat_file)
+        self._tasks_mtime = mtime
+        return self._tasks_cache
 
     def load_state(self) -> dict:
         if self.state_file.exists():
@@ -227,7 +241,7 @@ You have access to the user's memory below. Use it to personalize your responses
         cycle_id = uuid.uuid4().hex[:8]
         self._cid = cycle_id  # used by _log
 
-        tasks = parse_heartbeat(self.heartbeat_file)
+        tasks = self._load_tasks()
         state = self.load_state()
         now = int(time.time())
 
