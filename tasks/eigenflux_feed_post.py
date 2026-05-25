@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card, build_rich_card
+from core.safety import extract_json
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")

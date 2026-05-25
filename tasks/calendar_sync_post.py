@@ -115,14 +115,28 @@ def main() -> int:
         print(f"[calendar-sync] Initial sync, silent (no old baseline)", file=sys.stderr)
         return 0
 
+    # Don't send notifications outside working hours (user is sleeping)
+    from core.timeutil import now_local
+    hour = now_local().hour
+    if hour < 8 or hour >= 23:
+        print(f"[calendar-sync] Change detected but outside working hours ({hour}:xx), silent", file=sys.stderr)
+        return 0
+
     # Build a short natural-language notification (NOT the full schedule)
+    added_names = [e.split("|", 1)[1] if "|" in e else e for e in list(added)[:3]]
+    removed_names = [e.split("|", 1)[1] if "|" in e else e for e in list(removed)[:3]]
+    # Filter out empty names
+    added_names = [n for n in added_names if n.strip()]
+    removed_names = [n for n in removed_names if n.strip()]
+
+    if not added_names and not removed_names:
+        print(f"[calendar-sync] Cosmetic change only (title rewording), silent", file=sys.stderr)
+        return 0
+
     parts = []
-    if added:
-        # Summarize added events briefly
-        added_names = [e.split("|", 1)[1] if "|" in e else e for e in list(added)[:3]]
+    if added_names:
         parts.append(f"新增: {', '.join(added_names)}")
-    if removed:
-        removed_names = [e.split("|", 1)[1] if "|" in e else e for e in list(removed)[:3]]
+    if removed_names:
         parts.append(f"取消: {', '.join(removed_names)}")
 
     if parts:
