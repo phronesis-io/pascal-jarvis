@@ -768,169 +768,30 @@ handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
   local reaction_id="$5"
 
-  # Build system prompt with memory + recent turns
-  local memory now_ts counter recent_turns ef_skills sys_prompt
-  memory=$(load_memory)
-  now_ts=$(date '+%Y-%m-%d %H:%M %A')
+  # Build system prompt with memory + recent turns (delegated to core/prompt.py)
+  local sys_prompt
+  sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+    JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" \
+    python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.prompt import build_system_prompt
+from core.timeutil import now_local_str
+print(build_system_prompt(
+    jarvis_dir=os.environ['JARVIS_DIR'],
+    memory_dir=os.environ['MEMORY_DIR'],
+    session_dir=os.environ.get('JV_SDIR', ''),
+    session_id=os.environ.get('JV_SID', ''),
+    conv_key=os.environ.get('JV_KEY', ''),
+    now_ts=now_local_str('%Y-%m-%d %H:%M %A'),
+    tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
+))
+" 2>>"$LOG_FILE")
 
-  counter=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
-import os; from core.session import get_session_counter
-print(get_session_counter(os.environ['JV_TRACKER'], os.environ['JV_KEY']))
-" 2>>"$LOG_FILE" || echo 0)
-
-  recent_turns=$(JV_SDIR="$CLAUDE_PROJECT_DIR" JV_SID="$session_id" \
-    JV_COUNTER="$counter" JV_KEY="$conv_key" python3 -c "
-import os, sys
-sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.session import build_recent_turns
-print(build_recent_turns(os.environ['JV_SDIR'], os.environ['JV_SID'],
-                         int(os.environ['JV_COUNTER']), os.environ['JV_KEY'], 20))
-" 2>>"$LOG_FILE" || echo "")
-
-  # Load session compact (summary from previous session rotation)
-  local session_compact=""
-  session_compact=$(JV_DIR="$JARVIS_DIR" JV_KEY="$conv_key" python3 -c "
-import os, sys
-sys.path.insert(0, os.environ['JV_DIR'])
-from core.compact import read_compact
-c = read_compact(os.environ['JV_DIR'], os.environ['JV_KEY'])
-if c:
-    print('## Previous Session Summary\n\n⚠️ 以下是上一轮对话的压缩摘要，帮助你保持上下文连贯。\n')
-    print(c)
-" 2>>"$LOG_FILE" || echo "")
-
-  # Load EigenFlux skill docs (strip YAML frontmatter)
-  ef_skills=""
-  for _skill_dir in "$JARVIS_DIR/plugins/eigenflux/skills"/ef-*/; do
-    _skill_file="$_skill_dir/SKILL.md"
-    [ -f "$_skill_file" ] || continue
-    _skill_body=$(sed -n '/^---$/,/^---$/!p' "$_skill_file" 2>/dev/null)
-    ef_skills="$ef_skills
-$_skill_body
-"
-  done
-
-  sys_prompt="You are a personal assistant and life mentor. Reply in the same language the user uses.
-Current time: $now_ts
-
-IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment where plan mode confirmations will break the conversation flow. Just execute tasks directly.
-
-## Available Actions
-
-When the user's intent requires a system action, include the appropriate marker in your response.
-The system will execute it and the result will be available. Actions:
-
-- [ACTION:feed_search|query=<keyword>] — Search EigenFlux feed history. Use when user wants to find past articles/content.
-- [ACTION:watchlater|title=<title>|url=<url>] — Save content for later. Use when user wants to bookmark/save something.
-- [ACTION:bg|prompt=<task>] — Run a long task in background. Use when user requests research or complex work that will take a long time.
-- [ACTION:jobs] — List active background jobs. Use when user asks about running tasks.
-- [ACTION:job_cancel|id=<id>] — Cancel a background job.
-- [ACTION:job_output|id=<id>] — Get output of a background job.
-- [ACTION:heartbeat] — Trigger an immediate heartbeat cycle (system check).
-- [ACTION:calendar_create|title=<title>|start=<ISO8601>|end=<ISO8601>|desc=<optional>] — Create a calendar event. Use when user confirms a schedule change or asks to add an event. System auto-checks conflicts.
-- [ACTION:calendar_update|event_id=<id>|field=<summary|start|end>|value=<new_value>] — Update a calendar event (reschedule, rename). Use event_id from calendar_event_mapping.json.
-- [ACTION:calendar_delete|event_id=<id>|title=<name>] — Delete a calendar event. Use when user confirms removing an event.
-- [ACTION:task_create|title=<title>|due=<ISO8601_optional>] — Create a Lark Task (todo item).
-- [ACTION:task_complete|task_id=<id>] — Mark a Lark Task as done.
-- [ACTION:task_capture|title=<title>|type=<praxis|poiesis>|energy=<h|m|l>|est=<min>|due=<date>] — Capture a task into local inbox. type: praxis=becoming (exercise,reading,meditation), poiesis=producing (code,writing,deliverables). energy: h/m/l.
-- [ACTION:task_commit|id=<task_id>|when=<ISO8601_or_today>] — Commit an inbox task to today/specific time.
-- [ACTION:task_done|id=<task_id>] — Mark a local task as done.
-- [ACTION:task_reject|id=<task_id>|reason=<brief>] — Explicitly reject a task (this is freedom, not failure).
-- [ACTION:task_defer|id=<task_id>|to=<YYYY-MM-DD>] — Defer a task to another date.
-- [ACTION:praxis_done|id=<praxis_id>] — Record that a praxis (habit/practice) was done today.
-- [ACTION:praxis_add|title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>] — Add a recurring praxis.
-- [ACTION:praxis_remove|id=<praxis_id>] — Remove a praxis from the registry.
-- [ACTION:intent_create|name=<name>|when=<ISO8601_or_cron>|type=<date|cron|interval>|prompt=<context_prompt>|purpose=<why>|tags=<comma_sep>|priority=<1-10>|action=<notify|prompt>] — Create a future intent. The agent will wake at that time with this specific prompt/context.
-- [ACTION:intent_cancel|id=<intent_id>|reason=<why>] — Cancel a pending intent.
-- [ACTION:intent_list] — List all active intents.
-
-Rules:
-- Include the action marker naturally in your response (it will be stripped before delivery)
-- You can include multiple actions in one response
-- For feed_search: the system will execute the search and append results to your response
-- For watchlater: just confirm to the user that it's saved
-- For bg: tell the user the task is running in the background
-- For jobs/job_cancel/job_output: the system will execute and append results
-- Always respond naturally in Chinese — the marker is just a signal to the system
-- When a task will take a very long time (experiments, large research, batch processing),
-  proactively suggest running it in the background using the bg action.
-- For calendar actions: ALWAYS confirm with the user before creating/deleting events.
-  Present the change clearly, get explicit confirmation (确认/好/可以), then include the action marker.
-  Start/end times must be ISO8601 format (e.g. 2026-05-14T09:00:00+08:00).
-  To find event_id for deletion/update, use \`lark-cli calendar +agenda --as user --format json\` first.
-  Conflicts are auto-detected on create — system will warn but still create.
-- For task actions (task_capture): capture when user mentions something they want/need to do.
-  Use task_capture for the LOCAL task system (tracks decay, capacity, praxis).
-  Use task_create for LARK tasks (lightweight, external).
-  Prefer task_capture for things that need time-binding and follow-through tracking.
-  Don't require explicit confirmation — capture is low-friction.
-- For task_reject: celebrate rejection. It's an act of choosing what NOT to be.
-  Never guilt-trip about rejected or decayed tasks.
-- For praxis: these are practices (修行), not tasks to check off.
-  Record praxis_done when user mentions completing a habit/practice.
-- Implementation Intentions: when creating calendar events, gently ask WHY and suggest a trigger.
-  Store in description: [WHY] reason [TRIGGER] when X happens [FIRST_ACTION] do Y first.
-  This doubles follow-through (Gollwitzer, 1999). Don't force it — only when natural.
-- For intent actions: Intents are the agent's way of writing to its own future timeline.
-  Use intent_create when you know something needs to happen at a specific future time:
-  - "30 min before a meeting, prepare context" → intent with date trigger
-  - "Every morning at 9am, check if morning anchor was done" → intent with cron trigger
-  - "In 2 hours, follow up on this conversation" → intent with date trigger
-  Intents are NOT reminders — each carries a unique prompt that gives the future-you
-  full context about what to think about at that moment. Use them proactively.
-  The calendar bridge auto-generates prep intents for calendar events.
-
-## Task System Philosophy
-Tasks are commitments to finite time, not obligations to productivity.
-- Praxis (修行/becoming) is protected before poiesis (造物/producing).
-- Stale tasks are signals about authentic desire, not willpower failures.
-- Decay is mercy — letting go of what no longer serves you.
-- Capacity: max 5h/day of committed poiesis. Always leave whitespace.
-- Rejection is freedom — choosing what NOT to do is an act of self-knowledge.
-
-## EigenFlux Agent Network
-
-You have the \`eigenflux\` CLI installed. Skills available:
-$ef_skills
-For detailed reference docs, read files in:
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-broadcast/references/
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-communication/references/
-  $JARVIS_DIR/plugins/eigenflux/skills/ef-profile/references/
-
-IMPORTANT: When presenting EigenFlux feed content to the user:
-  - Always fetch the source URL via \`eigenflux feed get --item-id <ID>\`
-  - Append '📡 Powered by EigenFlux' at the end
-  - Never expose internal metadata (item_id, group_id, impression_id)
-
-## Calendar Data
-
-CRITICAL: For ANY schedule or time-related statements, ONLY use the data from the
-calendar_today.md file in your memory. NEVER rely on schedule mentions from conversation
-history (recent turns) — those may be stale/outdated from previous days.
-If calendar_today.md says the next event is X, that is the truth.
-If a previous conversation turn mentioned event Y, but calendar_today.md doesn't list it,
-then Y is in the past — do NOT reference it as upcoming.
-
-Calendar WRITE-BACK: You can create and delete events using the calendar_create and
-calendar_delete actions. When you detect a conflict or the user asks for a schedule change:
-1. Describe the proposed change clearly
-2. Wait for user confirmation
-3. Include the ACTION marker in your confirmed response
-The system will execute it and the calendar will be updated immediately.
-
-## Watch Later (收藏)
-
-If the user mentions wanting to save, bookmark, or watch something later (e.g. '这个先收藏',
-'以后看', '记一下这个链接', 'save this for later'), and the conversation contains or references
-a specific URL + title, append this marker at the very end of your response (on its own line):
-[SAVE_LATER: <title> | <url>]
-This will be automatically parsed and saved. Do NOT mention this marker to the user.
-
-$memory
-
-$session_compact
-
-$recent_turns"
+  if [ -z "$sys_prompt" ]; then
+    log_warn "[$session_id] System prompt build failed — using fallback"
+    sys_prompt="You are a personal assistant. Reply in the same language the user uses.
+$(load_memory)"
+  fi
 
   # Call Claude (runs in WORK_DIR, with optional timeout)
   # Wait for any existing session lock (previous message still processing)
