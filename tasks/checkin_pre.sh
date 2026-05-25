@@ -21,6 +21,15 @@ now_ts=$(date '+%H:%M')
 day=$(date '+%A')
 date_ymd=$(date '+%Y-%m-%d')
 
+# Rate limit: max 6 checkins per day (prevents spam on free days)
+log_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/checkin_log.jsonl"
+if [ -f "$log_file" ]; then
+  today_count=$(grep "\"$date_ymd\"" "$log_file" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$today_count" -ge 6 ]; then
+    exit 0
+  fi
+fi
+
 # Time-of-day flavor — rough buckets
 if [ "$hour" -lt 12 ]; then
   phase="morning"

@@ -109,7 +109,7 @@ echo "Current time: $(date '+%H:%M')"
 echo ""
 
 # Watchlater items (include URL so Claude can recommend with link)
-watchlater="$JARVIS_DIR/watchlater.jsonl"
+watchlater="$MEMORY_DIR/system/watchlater.jsonl"
 if [ -f "$watchlater" ]; then
   # Show pending (not-yet-watched) items with URLs
   pending=$(python3 -c "
