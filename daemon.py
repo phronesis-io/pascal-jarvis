@@ -203,6 +203,12 @@ def check_health() -> dict:
                     r"(FATAL|panic|Traceback|unbound variable).*",
                     tail, re.IGNORECASE
                 )
+                # Filter out harmless HTTP server tracebacks (admin.py handles
+                # broken pipe, connection reset, etc. — these are normal for a
+                # web server and should not trigger a bot restart)
+                fatals = [f for f in fatals if "socketserver" not in f.lower()
+                          and "process_request" not in f.lower()
+                          and "BrokenPipeError" not in f]
                 if fatals:
                     issues.append(f"Recent errors in jarvis.log: {fatals[-1][:100]}")
             except Exception:
