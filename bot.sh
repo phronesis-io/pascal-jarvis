@@ -943,6 +943,7 @@ cleanup() {
   rm -f "$PIDFILE"
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
+  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   kill "$HEARTBEAT_PID" 2>/dev/null || true
   # Kill any lingering eigenflux stream processes (may be reparented to
   # openclaw-gateway or init, so pkill -P doesn't reach them)
@@ -956,6 +957,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ── Heartbeat Watchdog (background) ──────────────────────────────────
+# Separate loop that checks heartbeat PID every 30s and restarts if dead.
+# Can't rely on Lark events (they may not arrive) or daemon (30min delay).
+heartbeat_watchdog() {
+  sleep 30  # initial grace period
+  while true; do
+    if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
+      log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting"
+      heartbeat_loop &
+      HEARTBEAT_PID=$!
+      log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
+    fi
+    sleep 30
+  done
+}
+heartbeat_watchdog &
+WATCHDOG_PID=$!
+
 # ── Lark Message Listener (foreground) ────────────────────────────────
 if [ -z "$USER_ID" ]; then
   log_info "No Lark user_id configured. Running heartbeat-only mode."
@@ -966,14 +985,6 @@ fi
 
 lark_subscribe_messages \
   | while IFS= read -r line; do
-      # ── Heartbeat watchdog: restart if subshell died (catches set -u, etc.) ──
-      if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
-        log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting"
-        heartbeat_loop &
-        HEARTBEAT_PID=$!
-        log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
-      fi
-
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
