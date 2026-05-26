@@ -497,13 +497,18 @@ $(load_memory)"
 
   if [ -z "$reply" ]; then
     log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
-    # Log the suppressed content for debugging (truncate to 500 chars)
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
-    lark_reply_text "$message_id" \
-      "Sorry, I couldn't generate a response just now. Please try again in a moment." >/dev/null
+    # Tell user exactly what happened — not a vague "try again"
+    if [ "${#answer}" -eq 0 ]; then
+      lark_reply_text "$message_id" \
+        "Claude 返回了空响应（可能是 API 临时故障或限流）。请稍后重试。" >/dev/null
+    else
+      lark_reply_text "$message_id" \
+        "Claude 的回复被安全过滤器拦截了（可能包含错误信息）。请换个方式重试。" >/dev/null
+    fi
     return
   fi
 
