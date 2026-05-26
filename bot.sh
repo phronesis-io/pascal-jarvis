@@ -966,6 +966,14 @@ fi
 
 lark_subscribe_messages \
   | while IFS= read -r line; do
+      # ── Heartbeat watchdog: restart if subshell died (catches set -u, etc.) ──
+      if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
+        log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting"
+        heartbeat_loop &
+        HEARTBEAT_PID=$!
+        log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
+      fi
+
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
@@ -980,7 +988,6 @@ lark_subscribe_messages \
         _fb_source=$(echo "$line" | jq -r '.action.value.source // .event.action.value.source // empty' 2>/dev/null)
         _fb_rating=$(echo "$line" | jq -r '.action.value.rating // .event.action.value.rating // empty' 2>/dev/null)
         if [ -n "$_fb_source" ] && [ -n "$_fb_rating" ]; then
-          local _fb_ts
           _fb_ts=$(date '+%Y-%m-%d %H:%M')
           printf '%s\n' "{\"ts\":\"$_fb_ts\",\"source\":\"$_fb_source\",\"type\":\"feedback\",\"rating\":\"$_fb_rating\",\"epoch\":$(date +%s)}" \
             >> "$JARVIS_DIR/engagement_log.jsonl"
