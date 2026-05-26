@@ -1078,6 +1078,15 @@ lark_subscribe_messages \
 
       [ -z "$content" ] || [ -z "$message_id" ] && continue
 
+      # ── Dedup: skip if same message_id seen within 10s (Lark sometimes delivers twice) ──
+      _dedup_file="/tmp/jarvis-last-msg"
+      _dedup_key="${message_id}"
+      if [ -f "$_dedup_file" ] && [ "$(cat "$_dedup_file" 2>/dev/null)" = "$_dedup_key" ]; then
+        log_info "Duplicate message skipped: $message_id"
+        continue
+      fi
+      printf '%s' "$_dedup_key" > "$_dedup_file"
+
       # ── Image detection: compact mode sends images as [Image: img_v3_xxx] ──
       if [[ "$content" == "[Image: img_v3_"* ]]; then
         _img_key=$(echo "$content" | sed 's/\[Image: \(.*\)\]/\1/')

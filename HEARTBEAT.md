@@ -570,6 +570,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 ### thinking-review
 - interval: 7d
+- post: tasks/thinking_review_post.py
 - prompt: |
     [THINKING REVIEW — Open Questions & Personal Projects]
     Scan all files in warm/ with YAML frontmatter type: "question" or type: "project".
