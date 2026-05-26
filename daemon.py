@@ -197,31 +197,13 @@ def check_health() -> dict:
         else:
             issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
 
-    # 4. Recent fatal errors? (only flag if other checks pass — avoids noise)
-    if not issues:
-        jarvis_log = JARVIS_DIR / "jarvis.log"
-        if jarvis_log.exists():
-            try:
-                size = jarvis_log.stat().st_size
-                with open(jarvis_log, "r", errors="ignore") as f:
-                    if size > 5000:
-                        f.seek(size - 5000)
-                        f.readline()
-                    tail = f.read()
-                fatals = re.findall(
-                    r"(FATAL|panic|Traceback|unbound variable).*",
-                    tail, re.IGNORECASE
-                )
-                # Filter out harmless HTTP server tracebacks (admin.py handles
-                # broken pipe, connection reset, etc. — these are normal for a
-                # web server and should not trigger a bot restart)
-                fatals = [f for f in fatals if "socketserver" not in f.lower()
-                          and "process_request" not in f.lower()
-                          and "BrokenPipeError" not in f]
-                if fatals:
-                    issues.append(f"Recent errors in jarvis.log: {fatals[-1][:100]}")
-            except Exception:
-                pass
+    # 4. Fatal error detection REMOVED.
+    # The old regex matched "Traceback" anywhere in the log tail, including
+    # inside structured JSON log messages that merely REPORT script errors.
+    # This caused false restarts (e.g. eigenflux_profile_post.py traceback
+    # logged by heartbeat._log → daemon saw "Traceback" → restart).
+    # The bot/heartbeat/lark health checks above are sufficient.
+    # Script-level errors are handled by circuit breaker, not daemon restarts.
 
     return {"healthy": len(issues) == 0, "issues": issues}
 

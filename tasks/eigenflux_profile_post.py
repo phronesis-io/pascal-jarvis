@@ -7,6 +7,9 @@ import subprocess
 import sys
 import traceback
 
+sys.path.insert(0, str(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
+from core.safety import extract_json
+
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 

@@ -10,6 +10,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.safety import extract_json
 from core.card import build_card
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
