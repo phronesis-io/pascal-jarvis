@@ -34,6 +34,13 @@ def main():
     if not message:
         return
 
+    # Strip Claude format artifacts that sometimes leak
+    for noise in ["user_message follows", "user_message:", "以下是"]:
+        message = message.replace(noise, "").strip()
+
+    if not message:
+        return
+
     # Log for plan-vs-reality comparison later
     PLAN_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry = {

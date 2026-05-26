@@ -46,9 +46,16 @@ def main() -> int:
         else:
             data = None
     if data is None:
-        # Never emit raw JSON — extract human-readable text only
+        # Claude returned plain text instead of JSON. Extract URL if present
+        # and build a card with a clickable button.
         text = re.sub(r'\{[^{}]*\}', '', raw).strip()
-        if text and "http" in text:
+        url_match = re.search(r'https?://\S+', text)
+        if text and url_match:
+            url = url_match.group(0)
+            body = text.replace(url, "").strip()
+            buttons = [{"text": "去看看", "url": url}]
+            print(build_card("📺 推荐", body, buttons, source="content-recommend"))
+        elif text:
             print(build_card("📺 推荐", text, source="content-recommend"))
         return 0
 
