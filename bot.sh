@@ -132,7 +132,7 @@ CLAUDE_PROJECT_DIR="$HOME/.claude/projects/$(echo "$WORK_DIR" | sed 's|/|-|g')"
 SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
-export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR
+export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE HEARTBEAT_MODEL CHECK_INTERVAL
 
 log_info "Starting jarvis-harness..."
 log_info "  JARVIS_DIR: $JARVIS_DIR"
