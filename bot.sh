@@ -464,30 +464,51 @@ $(load_memory)"
     rm -f "$LOCK_FILE"
   fi
 
-  # Run Claude in background so we can record its PID for "stop" command
+  # Run Claude with automatic retry on empty response
   local session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
   local _claude_pid
-  if [ -f "$session_file" ]; then
-    log_info "[$session_id] Resuming session"
-    (cd "$WORK_DIR" && printf '%s' "$content" | with_timeout 600 claude -p \
-      --resume "$session_id" \
-      --append-system-prompt "$sys_prompt" \
-      --dangerously-skip-permissions \
-      2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE" || true) &
-  else
-    log_info "[$session_id] New session"
-    (cd "$WORK_DIR" && printf '%s' "$content" | with_timeout 600 claude -p \
-      --session-id "$session_id" \
-      --append-system-prompt "$sys_prompt" \
-      --dangerously-skip-permissions \
-      2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE" || true) &
-  fi
-  _claude_pid=$!
-  echo "$_claude_pid" > "$LOCK_FILE"
-  wait $_claude_pid 2>/dev/null || true
-  local answer
-  answer=$(cat "$ANSWER_FILE" 2>/dev/null)
-  rm -f "$ANSWER_FILE" "$LOCK_FILE"
+  local answer=""
+  local _attempt
+
+  for _attempt in 1 2; do
+    if [ "$_attempt" -eq 2 ]; then
+      log_info "[$session_id] Retry attempt 2 after empty response (sleeping 3s)"
+      sleep 3
+    fi
+
+    # Run Claude in its own process session (setsid) to isolate from
+    # parent process group signals (SIGTERM from lark-cli, daemon, etc.)
+    if [ -f "$session_file" ]; then
+      [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
+      JV_CONTENT="$content" JV_SYS="$sys_prompt" JV_OUT="$ANSWER_FILE" \
+        JV_SID="$session_id" JV_CWD="$WORK_DIR" JV_MODE="resume" \
+        python3 "$JARVIS_DIR/scripts/claude_isolated.py" &
+    else
+      [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
+      JV_CONTENT="$content" JV_SYS="$sys_prompt" JV_OUT="$ANSWER_FILE" \
+        JV_SID="$session_id" JV_CWD="$WORK_DIR" JV_MODE="new" \
+        python3 "$JARVIS_DIR/scripts/claude_isolated.py" &
+    fi
+    _claude_pid=$!
+    echo "$_claude_pid" > "$LOCK_FILE"
+    wait $_claude_pid 2>/dev/null || true
+
+    answer=$(cat "$ANSWER_FILE" 2>/dev/null)
+    local _exit_code
+    _exit_code=$(cat "${ANSWER_FILE}.exit" 2>/dev/null || echo "unknown")
+    local _stderr_content
+    _stderr_content=$(head -5 "${ANSWER_FILE}.stderr" 2>/dev/null | tr '\n' ' ')
+
+    if [ -z "$answer" ]; then
+      log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
+      # On first failure, session file may have been created — update for retry
+      session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
+    else
+      break
+    fi
+  done
+
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.exit" "${ANSWER_FILE}.stderr" "$LOCK_FILE"
 
   # Filter error-like answers — never send them to the user as the "real" reply
   local reply=""
@@ -496,21 +517,15 @@ $(load_memory)"
   fi
 
   if [ -z "$reply" ]; then
-    log_warn "[$session_id] Empty/error answer from Claude (${#answer} chars)"
+    log_warn "[$session_id] Final empty/error answer from Claude (${#answer} chars after 2 attempts)"
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
-    # Log Claude stderr for debugging (captured in ANSWER_FILE's sibling)
-    _stderr_file="${ANSWER_FILE}.stderr"
-    if [ -f "$_stderr_file" ] && [ -s "$_stderr_file" ]; then
-      log_warn "[$session_id] Claude stderr: $(head -3 "$_stderr_file" | tr '\n' ' ')"
-    fi
-    rm -f "$_stderr_file"
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
       lark_reply_text "$message_id" \
-        "Claude 返回了空响应（可能是 API 临时故障或限流）。请稍后重试。" >/dev/null
+        "Claude 连续两次返回空响应（API 可能暂时不稳定）。请稍后重试。" >/dev/null
     else
       lark_reply_text "$message_id" \
         "Claude 的回复被安全过滤器拦截了（可能包含错误信息）。请换个方式重试。" >/dev/null
