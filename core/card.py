@@ -41,25 +41,10 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
             actions.append(action)
         elements.append({"tag": "action", "actions": actions})
 
-    # Feedback buttons — lightweight quality signal collection.
-    # User taps 👍 (useful) or 🔇 (too much/not useful).
-    # Clicks are handled by bot.sh card callback → engagement_log.
-    if source:
-        feedback_actions = [
-            {
-                "tag": "button",
-                "text": {"content": "👍", "tag": "plain_text"},
-                "type": "default",
-                "value": {"action": "feedback", "source": source, "rating": "useful"},
-            },
-            {
-                "tag": "button",
-                "text": {"content": "🔇", "tag": "plain_text"},
-                "type": "default",
-                "value": {"action": "feedback", "source": source, "rating": "mute"},
-            },
-        ]
-        elements.append({"tag": "action", "actions": feedback_actions})
+    # Feedback note — Lark card interactive buttons don't work with WebSocket
+    # subscription (no HTTP callback URL). Instead, show a subtle note.
+    # User engagement is tracked via reply timing (engagement_log.jsonl).
+    # In the future, if an HTTP callback is set up, buttons can be restored.
 
     card = {
         "config": {"wide_screen_mode": True},
