@@ -734,9 +734,33 @@ lark_subscribe_messages \
       # Raw format: .event.message.content is a JSON string like '{"text":"hello"}'
       # We extract .text from that inner JSON to get plain text.
       _raw_content=$(echo "$line" | jq -r '.content // .event.message.content // empty' 2>/dev/null)
-      # Extract text from JSON content wrapper (e.g. {"text":"hello"} → hello)
-      content=$(echo "$_raw_content" | jq -r '.text // empty' 2>/dev/null)
-      # Fallback: if jq fails (content was already plain text from compact mode), use raw
+      # Extract text from content JSON wrapper. Handles:
+      # - Plain text: {"text":"hello"} → hello
+      # - Rich text (post): {"title":"","content":[[{"tag":"text","text":"..."}]]} → concatenated text
+      content=$(echo "$_raw_content" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if isinstance(d, str):
+        print(d)  # already plain text
+    elif 'text' in d:
+        print(d['text'])  # plain text message
+    elif 'content' in d:
+        # Rich text: extract all text tags
+        parts = []
+        for block in d.get('content', []):
+            for item in (block if isinstance(block, list) else [block]):
+                if isinstance(item, dict) and item.get('text'):
+                    parts.append(item['text'])
+        title = d.get('title', '')
+        if title: parts.insert(0, title)
+        print(' '.join(parts))
+    else:
+        print(json.dumps(d))
+except:
+    print(sys.stdin.read() if hasattr(sys.stdin, 'read') else '')
+" 2>/dev/null)
+      # Fallback: if Python fails, use raw content
       [ -z "$content" ] && content="$_raw_content"
       message_id=$(echo "$line" | jq -r '.message_id // .event.message.message_id // empty' 2>/dev/null)
       chat_type=$(echo "$line" | jq -r '.chat_type // .event.message.chat_type // empty' 2>/dev/null)
