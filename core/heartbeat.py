@@ -335,6 +335,48 @@ You have access to the user's memory below. Use it to personalize your responses
                 self.save_state(state)
             return ""
 
+        # ── Tier 0: PRIORITY_TASKS bypass Claude entirely ──────────────
+        # Their pre-script output goes directly to post-script.
+        # This saves Claude API calls and eliminates timeout risk.
+        tier0 = [t for t in runnable if t["name"] in self.PRIORITY_TASKS]
+        tier2 = [t for t in runnable if t["name"] not in self.PRIORITY_TASKS]
+        user_messages = []
+        producing_tasks = []
+
+        for task in tier0:
+            pre_data = task_data.get(task["name"], "")
+            if task["post"] and pre_data:
+                post_output = self.run_script(task["post"], stdin_data=pre_data)
+                if post_output:
+                    user_messages.append(post_output)
+                    producing_tasks.append(task["name"])
+            # Update state — task ran successfully
+            ts = TaskState.from_dict(state.get(task["name"], {}))
+            ts.last_run = now
+            ts.circuit.record_success()
+            state[task["name"]] = ts.to_dict()
+
+        if tier0:
+            self._log(f"Tier 0 direct: {[t['name'] for t in tier0]}")
+
+        # ── Tier 2: regular tasks go through Claude ────────────────────
+        runnable = tier2
+        if not runnable:
+            # Only Tier 0 tasks ran — save state and return any output
+            self.save_state(state)
+            combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
+            if combined.strip():
+                if producing_tasks:
+                    try:
+                        source_file = self.jarvis_dir / ".heartbeat_last_source"
+                        source_file.write_text(",".join(producing_tasks))
+                    except Exception:
+                        pass
+                self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (tier0 only)")
+                return combined
+            self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → OK (tier0 only)")
+            return ""
+
         # Build combined prompt
         n = len(runnable)
         parts = [f"[HEARTBEAT — {n} task{'s' if n > 1 else ''} due]"]
@@ -410,8 +452,7 @@ You have access to the user's memory below. Use it to personalize your responses
             return ""
 
         # Route responses through post-scripts
-        user_messages = []
-        producing_tasks = []  # tracks which tasks actually produced user output
+        # (user_messages and producing_tasks may already have Tier 0 results)
         if n == 1:
             task = runnable[0]
             if task["post"]:

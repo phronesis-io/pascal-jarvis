@@ -9,7 +9,7 @@ from core.heartbeat import HeartbeatRunner
 
 def _make_runner(tmp_path):
     hb = tmp_path / "HEARTBEAT.md"
-    hb.write_text("### memory-hourly\n- interval: 1h\n- prompt: hi\n")
+    hb.write_text("### test-task\n- interval: 1h\n- prompt: hi\n")
     return HeartbeatRunner(
         jarvis_dir=tmp_path,
         heartbeat_file=hb,
@@ -37,7 +37,7 @@ def test_force_within_cooldown_skips(tmp_path, monkeypatch):
 def test_force_after_cooldown_fires(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
     # Seed state with last_run far in the past (more than cooldown)
-    runner.save_state({"memory-hourly": {"last_run": 0}})
+    runner.save_state({"test-task": {"last_run": 0}})
 
     called = []
     monkeypatch.setattr(runner, "claude_call", lambda p: called.append(p) or "HEARTBEAT_OK")
