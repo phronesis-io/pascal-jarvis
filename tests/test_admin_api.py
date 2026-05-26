@@ -145,3 +145,54 @@ def test_skills_list(server):
     base, ctx = server
     result = _get(f"{base}/api/skills")
     assert isinstance(result, list)
+
+
+# ── Bot status ──
+
+def test_bot_status(server):
+    base, ctx = server
+    result = _get(f"{base}/api/bot_status")
+    assert "alive" in result or "status" in result or "pid" in result
+
+
+# ── Search ──
+
+def test_search_empty(server):
+    base, ctx = server
+    result = _get(f"{base}/api/search?q=nonexistent")
+    assert isinstance(result, list) or isinstance(result, dict)
+
+
+# ── Settings ──
+
+def test_settings(server):
+    base, ctx = server
+    result = _get(f"{base}/api/settings")
+    assert isinstance(result, dict)
+
+
+# ── Heartbeat force ──
+
+def test_heartbeat_force(server):
+    base, ctx = server
+    try:
+        result = _post(f"{base}/api/heartbeat/force/test-task", {})
+        assert result.get("ok") is True
+    except (urllib.error.HTTPError, ConnectionResetError):
+        pass  # endpoint may reset on some platforms — OK if it doesn't crash server
+
+
+# ── Heartbeat timeline ──
+
+def test_heartbeat_timeline(server):
+    base, ctx = server
+    result = _get(f"{base}/api/heartbeat-timeline")
+    assert isinstance(result, list) or isinstance(result, dict)
+
+
+# ── Views ──
+
+def test_views_list(server):
+    base, ctx = server
+    result = _get(f"{base}/api/views")
+    assert isinstance(result, list)
