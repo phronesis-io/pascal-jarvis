@@ -415,54 +415,6 @@ print(extract_readable_from_output(os.environ['JV_OUTPUT']))
       log_info "[heartbeat] Beat sent (idle)"
     fi
 
-    # ── Periodic status pulse to Lark (every 30 min, not every cycle) ──
-    # Lets user see Jarvis is alive without opening the admin dashboard.
-    _status_interval=1800
-    _now_epoch=$(date +%s)
-    # Use ${var:-default} to avoid set -u killing the subshell on first access
-    _last_status_epoch="${_last_status_epoch:-0}"
-    if [ $((_now_epoch - _last_status_epoch)) -ge $_status_interval ]; then
-      _status_line=$(python3 -c "
-import json, time, os, sys
-sys.path.insert(0, os.environ.get('JARVIS_DIR', '.'))
-from core.heartbeat import parse_heartbeat
-from core.timeutil import now_local_str
-
-state_file = os.path.join(os.environ.get('JARVIS_DIR', '.'), 'heartbeat_state.json')
-hb_file = os.path.join(os.environ.get('JARVIS_DIR', '.'), 'HEARTBEAT.md')
-try:
-    state = json.load(open(state_file))
-    tasks = parse_heartbeat(hb_file)
-    now = int(time.time())
-    # Find tasks that ran in the last 5 min
-    recent = [(t['name'], now - state.get(t['name'], {}).get('last_run', 0))
-              for t in tasks if now - state.get(t['name'], {}).get('last_run', 0) < 300]
-    recent.sort(key=lambda x: x[1])
-    # Find next task to run
-    upcoming = []
-    for t in tasks:
-        lr = state.get(t['name'], {}).get('last_run', 0)
-        remaining = t['interval'] - (now - lr)
-        if remaining > 0:
-            upcoming.append((t['name'], remaining))
-    upcoming.sort(key=lambda x: x[1])
-    next_task = upcoming[0] if upcoming else ('?', 0)
-
-    ts = now_local_str('%H:%M')
-    ran = ', '.join(n.replace('eigenflux-','ef-').replace('memory-','mem-') for n, _ in recent[:4])
-    if not ran: ran = 'idle'
-    nxt = next_task[0].replace('eigenflux-','ef-').replace('memory-','mem-')
-    nxt_min = next_task[1] // 60
-    print(f'✓ {ts} | {ran} | next: {nxt} {nxt_min}m')
-except Exception as e:
-    print(f'✓ {now_local_str(\"%H:%M\")} | running')
-" 2>/dev/null)
-      if [ -n "$_status_line" ]; then
-        send_to_lark "$_status_line"
-      fi
-      _last_status_epoch=$_now_epoch
-    fi
-
     sleep "$CHECK_INTERVAL"
   done
 }
