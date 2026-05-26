@@ -206,6 +206,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 cmd, capture_output=True, text=True,
                 timeout=300, stdin=subprocess.DEVNULL,
                 cwd=str(self.work_dir),
+                start_new_session=True,  # isolate from parent process group signals
             )
             if result.returncode != 0:
                 self._log(f"Claude exited with code {result.returncode}")
