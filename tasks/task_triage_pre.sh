@@ -21,6 +21,11 @@ overdue = [t for t in committed if t.get('when') and t['when'][:10] < today]
 if not stale and not decay_ready and not overdue:
     sys.exit(0)  # empty stdout = skip task
 
+# Touch stale items so they don't immediately re-trigger next cycle.
+# After 3 touches → ready_to_decay → auto-decay (mercy, not punishment).
+for t in stale:
+    tm.touch(t['id'])
+
 output = []
 if stale:
     output.append('=== STALE INBOX (>48h) ===')
