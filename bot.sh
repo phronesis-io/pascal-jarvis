@@ -473,14 +473,14 @@ $(load_memory)"
       --resume "$session_id" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
-      2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+      2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE" || true) &
   else
     log_info "[$session_id] New session"
     (cd "$WORK_DIR" && printf '%s' "$content" | with_timeout 600 claude -p \
       --session-id "$session_id" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
-      2>>"$LOG_FILE" > "$ANSWER_FILE" || true) &
+      2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE" || true) &
   fi
   _claude_pid=$!
   echo "$_claude_pid" > "$LOCK_FILE"
@@ -500,6 +500,12 @@ $(load_memory)"
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
+    # Log Claude stderr for debugging (captured in ANSWER_FILE's sibling)
+    _stderr_file="${ANSWER_FILE}.stderr"
+    if [ -f "$_stderr_file" ] && [ -s "$_stderr_file" ]; then
+      log_warn "[$session_id] Claude stderr: $(head -3 "$_stderr_file" | tr '\n' ' ')"
+    fi
+    rm -f "$_stderr_file"
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
