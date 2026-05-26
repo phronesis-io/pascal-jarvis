@@ -186,7 +186,16 @@ def check_health() -> dict:
     if beat_age is None:
         issues.append("No heartbeat found in any log file")
     elif beat_age > HEARTBEAT_STALE_THRESHOLD:
-        issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
+        # Check if a user message is being processed (session lock exists).
+        # Long Claude calls for user conversations (5-10 min) block heartbeat.
+        # Restarting during an active conversation KILLS the user's response.
+        import glob as _glob
+        active_locks = _glob.glob(str(JARVIS_DIR / ".session_lock_*"))
+        if active_locks:
+            log("INFO", f"Heartbeat stale ({int(beat_age)}s) but {len(active_locks)} "
+                f"session(s) active — NOT restarting (would kill user's response)")
+        else:
+            issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
 
     # 4. Recent fatal errors? (only flag if other checks pass — avoids noise)
     if not issues:
