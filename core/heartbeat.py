@@ -280,7 +280,9 @@ You have access to the user's memory below. Use it to personalize your responses
             # (e.g. multiple Lark session rotations in quick succession).
             if force and (now - last_run) < self.FORCE_COOLDOWN_SECONDS:
                 continue
-            if force or (now - last_run >= task["interval"]):
+            # Use effective_interval if set by engagement-analyze (auto-tuned)
+            interval = ts.effective_interval if ts.effective_interval > 0 else task["interval"]
+            if force or (now - last_run >= interval):
                 if task["name"] in self.PIPELINE_TASKS:
                     if pipeline_picked:
                         continue

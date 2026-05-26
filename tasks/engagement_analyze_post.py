@@ -77,8 +77,76 @@ def main() -> int:
 
     print(f"[engagement-analyze] wrote insights ({len(content)} chars)", file=sys.stderr)
 
+    # Apply adaptations to heartbeat_state.json effective_interval
+    if adaptations:
+        _apply_adaptations(adaptations)
+
     # No user-facing output — this is a silent background task
     return 0
+
+
+# ── Frequency interval mapping ──
+_INTERVAL_MAP = {
+    "reduce": 2.0,      # double the interval (less frequent)
+    "increase": 0.5,    # halve the interval (more frequent)
+    "maintain": 1.0,    # keep current
+}
+
+
+def _apply_adaptations(adaptations: list[dict]):
+    """Apply frequency adaptations to heartbeat_state.json.
+
+    Each adaptation has: {"target": "task-name", "suggestion": "reduce frequency..."}
+    We parse the suggestion for keywords and adjust effective_interval.
+    """
+    jarvis_dir = Path(os.environ.get("JARVIS_DIR", "."))
+    state_file = jarvis_dir / "heartbeat_state.json"
+    if not state_file.exists():
+        return
+
+    try:
+        state = json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+
+    # Load task intervals from HEARTBEAT.md for reference
+    sys.path.insert(0, str(jarvis_dir))
+    from core.heartbeat import parse_heartbeat
+    tasks_def = {t["name"]: t["interval"] for t in parse_heartbeat(jarvis_dir / "HEARTBEAT.md")}
+
+    changed = []
+    for a in adaptations:
+        target = a.get("target", "")
+        suggestion = a.get("suggestion", "").lower()
+        if target not in tasks_def:
+            continue
+
+        base_interval = tasks_def[target]
+
+        # Determine direction from suggestion text
+        multiplier = 1.0
+        if any(w in suggestion for w in ["reduce", "decrease", "less", "lower", "降低", "减少"]):
+            multiplier = 2.0
+        elif any(w in suggestion for w in ["increase", "more", "higher", "提高", "增加"]):
+            multiplier = 0.5
+
+        if multiplier == 1.0:
+            continue
+
+        new_interval = int(base_interval * multiplier)
+        # Clamp: don't go below 5min or above 48h
+        new_interval = max(300, min(172800, new_interval))
+
+        if target not in state:
+            state[target] = {"last_run": 0}
+        state[target]["effective_interval"] = new_interval
+        changed.append(f"{target}: {base_interval}s → {new_interval}s")
+
+    if changed:
+        tmp = state_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, state_file)
+        print(f"[engagement-analyze] Applied frequency changes: {changed}", file=sys.stderr)
 
 
 if __name__ == "__main__":
