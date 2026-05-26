@@ -145,6 +145,39 @@ def test_deferred_tasks_stay_due_next_cycle(tmp_path, monkeypatch):
     assert call_count[0] == 2  # Claude called again for the deferred tasks
 
 
+def test_tier0_tasks_bypass_claude(tmp_path, monkeypatch):
+    """PRIORITY_TASKS (Tier 0) should pipe pre→post directly, no Claude call."""
+    # calendar-sync is a PRIORITY_TASK
+    hb = (
+        "### calendar-sync\n- interval: 30m\n- pre: tasks/cal_pre.sh\n"
+        "- post: tasks/cal_post.py\n- prompt: sync\n\n"
+        "### checkin\n- interval: 30m\n- prompt: hi\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+
+    # Create dummy pre-script that returns data
+    pre = runner.jarvis_dir / "tasks" / "cal_pre.sh"
+    pre.parent.mkdir(parents=True, exist_ok=True)
+    pre.write_text("#!/bin/bash\necho 'calendar data'")
+    pre.chmod(0o755)
+
+    # Create dummy post-script
+    post = runner.jarvis_dir / "tasks" / "cal_post.py"
+    post.write_text("#!/usr/bin/env python3\nimport sys\ndata=sys.stdin.read()\nif data.strip(): print('calendar updated')")
+    post.chmod(0o755)
+
+    claude_called = []
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p: claude_called.append(p) or "HEARTBEAT_OK")
+
+    result = runner.run_cycle(force=True)
+
+    # Claude should only be called for checkin, NOT calendar-sync
+    if claude_called:
+        assert "calendar-sync" not in claude_called[0]
+        assert "checkin" in claude_called[0]
+
+
 def test_batch_cap_before_prescripts(tmp_path, monkeypatch):
     """Batch cap must happen BEFORE pre-scripts run, to avoid wasting
     pre-script side effects on tasks that will be deferred."""

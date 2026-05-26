@@ -91,10 +91,13 @@ def test_only_task_filter(tmp_path, monkeypatch):
 
 
 def test_pipeline_protection_one_memory_task_per_cycle(tmp_path, monkeypatch):
-    """Only one of the PIPELINE_TASKS may run per cycle to prevent races."""
+    """Only one of the PIPELINE_TASKS may run per cycle to prevent races.
+    memory-hourly is a PRIORITY_TASK (Tier 0) so it bypasses Claude.
+    memory-daily would go to Claude but is blocked by pipeline protection."""
     hb = """
 ### memory-hourly
 - interval: 1h
+- post: tasks/memory_hourly_post.py
 - prompt: h
 
 ### memory-daily
@@ -106,11 +109,9 @@ def test_pipeline_protection_one_memory_task_per_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "claude_call", lambda p: called_with.append(p) or "HEARTBEAT_OK")
 
     runner.run_cycle(force=True)
-    assert len(called_with) == 1
-    prompt = called_with[0]
-    # First pipeline task encountered should be the only one picked
-    assert "memory-hourly" in prompt
-    assert "memory-daily" not in prompt
+    # memory-hourly is Tier 0 (PRIORITY_TASK) → bypasses Claude
+    # memory-daily is blocked by pipeline_picked → not in Claude call either
+    assert len(called_with) == 0  # no Claude call needed
 
 
 def test_empty_pre_script_output_skips_task(tmp_path, monkeypatch):
