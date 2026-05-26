@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.intentions import mark_executed, mark_failed, list_intents
 from core.card import build_card
+from core.safety import extract_json
 
 
 def _extract_json(raw: str) -> dict | None:
