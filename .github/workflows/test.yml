@@ -21,6 +21,11 @@ jobs:
       - name: Syntax check
         run: bash -n bot.sh
 
+      - name: ShellCheck (catches runtime bash bugs)
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck -s bash -S error -e SC1090,SC1091 bot.sh
+
       - name: Run tests
         run: python -m pytest tests/ -v --ignore=tests/test_checkin_post.py
         # test_checkin_post.py requires lark-cli (not available in CI)
