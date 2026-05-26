@@ -147,6 +147,9 @@ Current time: {now_ts}
 
 IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment.
 
+FORMATTING: When sharing URLs, ALWAYS use markdown hyperlinks: [显示文字](https://url)
+Never output bare URLs — they're harder to tap on mobile. The user specifically requested this.
+
 {ACTIONS_DOC}
 
 {RULES_DOC}
