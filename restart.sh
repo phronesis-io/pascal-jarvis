@@ -71,6 +71,20 @@ status() {
 }
 
 kill_bot() {
+  # Check if user has an active conversation — warn before killing
+  active_locks=$(find "$JARVIS_DIR" -maxdepth 1 -name '.session_lock_*' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$active_locks" -gt 0 ]; then
+    echo ""
+    red "  ⚠️  $active_locks active conversation(s) in progress!"
+    red "  Restarting will DESTROY the in-flight Claude response."
+    echo -n "  Continue? [y/N] "
+    read -r _confirm
+    if [ "$_confirm" != "y" ] && [ "$_confirm" != "Y" ]; then
+      echo "  Aborted."
+      exit 0
+    fi
+  fi
+
   echo "Stopping bot.sh and children..."
 
   # Kill by PID file first
