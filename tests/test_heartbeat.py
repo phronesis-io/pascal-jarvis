@@ -109,9 +109,11 @@ def test_pipeline_protection_one_memory_task_per_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "claude_call", lambda p: called_with.append(p) or "HEARTBEAT_OK")
 
     runner.run_cycle(force=True)
-    # memory-hourly is Tier 0 (PRIORITY_TASK) → bypasses Claude
-    # memory-daily is blocked by pipeline_picked → not in Claude call either
-    assert len(called_with) == 0  # no Claude call needed
+    # memory-hourly is PRIORITY (exempt from batch cap) but NOT Tier 0
+    # → goes through Claude. memory-daily blocked by pipeline_picked.
+    assert len(called_with) == 1
+    assert "memory-hourly" in called_with[0]
+    assert "memory-daily" not in called_with[0]
 
 
 def test_empty_pre_script_output_skips_task(tmp_path, monkeypatch):

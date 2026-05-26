@@ -90,13 +90,14 @@ class HeartbeatRunner:
     PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly", "memory-monthly"}
 
     # Tasks exempt from batch cap — they run on every cycle regardless.
-    # These are critical infrastructure tasks whose pre→post pipeline doesn't
-    # need Claude reasoning, but must stay fresh for other tasks to work.
-    # - calendar-sync: feeds checkin, daily-plan, free-time-nudge
-    # - memory-hourly: feeds daily→weekly→monthly memory pipeline
-    # - activity-log: feeds daily-reflect
-    # - cross-session-sync: feeds memory consolidation
+    # These are infrastructure tasks that must stay fresh for others to work.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync"}
+
+    # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
+    # ONLY for tasks where the pre-script already produces the final output
+    # and the post-script just writes it to a file. Tasks that need Claude
+    # to summarize/reason/index MUST NOT be here.
+    TIER0_TASKS = {"calendar-sync"}  # pre-script produces formatted calendar
 
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
@@ -335,11 +336,12 @@ You have access to the user's memory below. Use it to personalize your responses
                 self.save_state(state)
             return ""
 
-        # ── Tier 0: PRIORITY_TASKS bypass Claude entirely ──────────────
-        # Their pre-script output goes directly to post-script.
-        # This saves Claude API calls and eliminates timeout risk.
-        tier0 = [t for t in runnable if t["name"] in self.PRIORITY_TASKS]
-        tier2 = [t for t in runnable if t["name"] not in self.PRIORITY_TASKS]
+        # ── Tier 0: tasks that bypass Claude entirely ──────────────────
+        # Only for tasks where pre-script output is the final product.
+        # Tasks needing Claude reasoning (memory-hourly, activity-log,
+        # cross-session-sync) go through Claude even if they're PRIORITY.
+        tier0 = [t for t in runnable if t["name"] in self.TIER0_TASKS]
+        tier2 = [t for t in runnable if t["name"] not in self.TIER0_TASKS]
         user_messages = []
         producing_tasks = []
 

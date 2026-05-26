@@ -146,25 +146,27 @@ def test_deferred_tasks_stay_due_next_cycle(tmp_path, monkeypatch):
 
 
 def test_tier0_tasks_bypass_claude(tmp_path, monkeypatch):
-    """PRIORITY_TASKS (Tier 0) should pipe pre→post directly, no Claude call."""
-    # calendar-sync is a PRIORITY_TASK
+    """TIER0_TASKS (calendar-sync) should pipe pre→post directly, no Claude.
+    PRIORITY_TASKS that need reasoning (memory-hourly) still go through Claude."""
     hb = (
         "### calendar-sync\n- interval: 30m\n- pre: tasks/cal_pre.sh\n"
         "- post: tasks/cal_post.py\n- prompt: sync\n\n"
+        "### memory-hourly\n- interval: 1h\n- pre: tasks/mem_pre.sh\n"
+        "- post: tasks/mem_post.py\n- prompt: index\n\n"
         "### checkin\n- interval: 30m\n- prompt: hi\n"
     )
     runner = _make_runner(tmp_path, hb)
 
-    # Create dummy pre-script that returns data
-    pre = runner.jarvis_dir / "tasks" / "cal_pre.sh"
-    pre.parent.mkdir(parents=True, exist_ok=True)
-    pre.write_text("#!/bin/bash\necho 'calendar data'")
-    pre.chmod(0o755)
-
-    # Create dummy post-script
-    post = runner.jarvis_dir / "tasks" / "cal_post.py"
-    post.write_text("#!/usr/bin/env python3\nimport sys\ndata=sys.stdin.read()\nif data.strip(): print('calendar updated')")
-    post.chmod(0o755)
+    # Create dummy scripts
+    for name in ["cal_pre.sh", "mem_pre.sh"]:
+        pre = runner.jarvis_dir / "tasks" / name
+        pre.parent.mkdir(parents=True, exist_ok=True)
+        pre.write_text("#!/bin/bash\necho 'data'")
+        pre.chmod(0o755)
+    for name in ["cal_post.py", "mem_post.py"]:
+        post = runner.jarvis_dir / "tasks" / name
+        post.write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.stdin.read().strip())")
+        post.chmod(0o755)
 
     claude_called = []
     monkeypatch.setattr(runner, "claude_call",
@@ -172,10 +174,11 @@ def test_tier0_tasks_bypass_claude(tmp_path, monkeypatch):
 
     result = runner.run_cycle(force=True)
 
-    # Claude should only be called for checkin, NOT calendar-sync
+    # Claude should be called for memory-hourly + checkin, NOT calendar-sync
     if claude_called:
-        assert "calendar-sync" not in claude_called[0]
-        assert "checkin" in claude_called[0]
+        prompt = claude_called[0]
+        assert "calendar-sync" not in prompt  # Tier 0 → bypassed
+        assert "memory-hourly" in prompt  # PRIORITY but not Tier 0 → through Claude
 
 
 def test_batch_cap_before_prescripts(tmp_path, monkeypatch):
