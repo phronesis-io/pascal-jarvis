@@ -415,13 +415,12 @@ print(extract_readable_from_output(os.environ['JV_OUTPUT']))
       log_info "[heartbeat] Beat sent (idle)"
     fi
 
-    # ── Periodic status pulse to Lark (every 5 min, not every cycle) ──
+    # ── Periodic status pulse to Lark (every 30 min, not every cycle) ──
     # Lets user see Jarvis is alive without opening the admin dashboard.
-    _status_interval=1800  # 30 min (user batches responses in 10-30min windows)
+    _status_interval=1800
     _now_epoch=$(date +%s)
-    if [ -z "$_last_status_epoch" ]; then
-      _last_status_epoch=0
-    fi
+    # Use ${var:-default} to avoid set -u killing the subshell on first access
+    _last_status_epoch="${_last_status_epoch:-0}"
     if [ $((_now_epoch - _last_status_epoch)) -ge $_status_interval ]; then
       _status_line=$(python3 -c "
 import json, time, os, sys
