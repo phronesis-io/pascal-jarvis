@@ -210,6 +210,11 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._log(f"Claude exited with code {result.returncode}")
                 if result.stderr.strip():
                     self._log(f"Claude stderr: {result.stderr.strip()[:300]}")
+                # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
+                # event (restart/shutdown), not a task failure. Return a sentinel
+                # so run_cycle doesn't punish tasks via circuit breaker.
+                if result.returncode in (137, 143):  # SIGKILL=137, SIGTERM=143
+                    return "__KILLED__"
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
             self._log("Claude call timed out (300s)")
@@ -357,6 +362,18 @@ You have access to the user's memory below. Use it to personalize your responses
         # Call Claude
         self._log(f"Calling Claude with {n} tasks...")
         raw = self.claude_call(prompt)
+
+        if raw == "__KILLED__":
+            # Claude was killed by SIGTERM/SIGKILL (restart/shutdown).
+            # This is NOT a task failure — don't punish via circuit breaker.
+            # Just update last_run so tasks don't immediately re-fire.
+            for task in runnable:
+                ts = TaskState.from_dict(state.get(task["name"], {}))
+                ts.last_run = now
+                state[task["name"]] = ts.to_dict()
+            self.save_state(state)
+            self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → killed (no penalty)")
+            return ""
 
         if not raw:
             # Claude call failed (timeout, network, etc.) — record failure
