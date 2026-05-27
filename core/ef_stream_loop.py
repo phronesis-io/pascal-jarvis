@@ -2,12 +2,18 @@
 """EigenFlux real-time stream loop — receives PMs and delivers to Lark.
 
 Replaces the bash eigenflux_stream_loop() in bot.sh. Manages:
-  - eigenflux stream subprocess with reconnect/backoff
+  - eigenflux stream subprocess (single instance, gateway-aware)
   - Message formatting and Lark delivery
   - Outbox writing for main session visibility
   - Background Claude analysis for follow-up context
 
 bot.sh launches this as: python3 -m core.ef_stream_loop &
+
+IMPORTANT: `eigenflux stream` is managed by openclaw-gateway. The gateway
+reparents the stream subprocess and auto-restarts it on crash. We must NOT
+pkill or create competing stream processes — that causes "Connection replaced"
+loops. Instead, we spawn ONE stream and read its stdout until it dies, then
+respawn with backoff.
 """
 
 from __future__ import annotations
@@ -105,16 +111,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     log("ef-stream", "Starting real-time message stream")
 
     backoff = 1
-    max_backoff = 60
+    max_backoff = 300
     failures = 0
-    max_failures = 20
 
     while True:
-        # Kill leftover streams
-        subprocess.run(["pkill", "-f", "eigenflux stream"],
-                       capture_output=True, timeout=5)
-        time.sleep(2)
-
         cmd = ["eigenflux", "stream", "-f", "json"]
         cursor = ""
         if cursor_file.exists():
@@ -126,7 +126,8 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
 
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=open(log_file, "a") if log_file else subprocess.DEVNULL,
+                cmd, stdout=subprocess.PIPE,
+                stderr=open(log_file, "a") if log_file else subprocess.DEVNULL,
                 text=True,
             )
 
@@ -134,6 +135,12 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 line = line.strip()
                 if not line:
                     continue
+
+                # "Connection replaced" comes on stdout — detect and break
+                if "Connection replaced" in line:
+                    log("ef-stream", "Connection replaced by another session — backing off")
+                    proc.terminate()
+                    break
 
                 # Extract cursor
                 new_cursor = parse_cursor(line)
@@ -159,15 +166,20 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                         _lark_send(f"💡 {analysis}", user_id)
                         log("ef-stream", "Follow-up analysis sent")
 
+                # Reset backoff on successful message
                 backoff = 1
                 failures = 0
 
-            proc.wait()
+            proc.wait(timeout=10)
             exit_code = proc.returncode
 
         except Exception as e:
             log("ef-stream", f"Stream error: {e}", level="warn")
             exit_code = -1
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
         if exit_code == 4:
             log("ef-stream", "Auth required — token may be expired", level="warn")
@@ -176,13 +188,6 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
             continue
 
         failures += 1
-        if failures >= max_failures:
-            log("ef-stream", f"{max_failures} consecutive failures, backing off to 5min", level="warn")
-            time.sleep(300)
-            failures = 0
-            backoff = 1
-            continue
-
         log("ef-stream", f"Reconnecting in {backoff}s (failure #{failures})")
         time.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
