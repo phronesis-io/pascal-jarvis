@@ -14,12 +14,35 @@ Environment variables (set by bot.sh):
 """
 
 import os
+import signal
 import subprocess
 import sys
+import time
+import traceback
+
+_SIGNAL_LOG = "/tmp/claude_isolated_signals.log"
+
+def _log_signal(signum, frame):
+    """Log any signal received — for debugging exit 143 issues."""
+    try:
+        with open(_SIGNAL_LOG, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} "
+                    f"pgid={os.getpgid(0)} signal={signum} "
+                    f"sid={os.environ.get('JV_SID', '?')}\n")
+    except Exception:
+        pass
+    # Re-raise SIGTERM so subprocess.run sees it
+    if signum == signal.SIGTERM:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
 
 def main():
     # Isolate into own process session — this is the whole point
     os.setsid()
+
+    # Install signal tracing
+    signal.signal(signal.SIGTERM, _log_signal)
+    signal.signal(signal.SIGHUP, _log_signal)
 
     content = os.environ["JV_CONTENT"]
     sys_prompt = os.environ["JV_SYS"]

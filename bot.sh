@@ -476,26 +476,29 @@ $(load_memory)"
       sleep 3
     fi
 
-    # Run Claude in its own process session (setsid) to isolate from
-    # parent process group signals (SIGTERM from lark-cli, daemon, etc.)
     if [ -f "$session_file" ]; then
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
-      JV_CONTENT="$content" JV_SYS="$sys_prompt" JV_OUT="$ANSWER_FILE" \
-        JV_SID="$session_id" JV_CWD="$WORK_DIR" JV_MODE="resume" \
-        python3 "$JARVIS_DIR/scripts/claude_isolated.py" &
+      (trap 'echo "$(date +%H:%M:%S) SIGTERM in subshell pid=$$ sid=$session_id" >> /tmp/claude_subshell_signals.log' TERM
+       cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        --resume "$session_id" \
+        --append-system-prompt "$sys_prompt" \
+        --dangerously-skip-permissions \
+        2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     else
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
-      JV_CONTENT="$content" JV_SYS="$sys_prompt" JV_OUT="$ANSWER_FILE" \
-        JV_SID="$session_id" JV_CWD="$WORK_DIR" JV_MODE="new" \
-        python3 "$JARVIS_DIR/scripts/claude_isolated.py" &
+      (trap 'echo "$(date +%H:%M:%S) SIGTERM in subshell pid=$$ sid=$session_id" >> /tmp/claude_subshell_signals.log' TERM
+       cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        --session-id "$session_id" \
+        --append-system-prompt "$sys_prompt" \
+        --dangerously-skip-permissions \
+        2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     fi
     _claude_pid=$!
     echo "$_claude_pid" > "$LOCK_FILE"
-    wait $_claude_pid 2>/dev/null || true
+    wait $_claude_pid 2>/dev/null
+    local _exit_code=$?
 
     answer=$(cat "$ANSWER_FILE" 2>/dev/null)
-    local _exit_code
-    _exit_code=$(cat "${ANSWER_FILE}.exit" 2>/dev/null || echo "unknown")
     local _stderr_content
     _stderr_content=$(head -5 "${ANSWER_FILE}.stderr" 2>/dev/null | tr '\n' ' ')
 
@@ -508,7 +511,7 @@ $(load_memory)"
     fi
   done
 
-  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.exit" "${ANSWER_FILE}.stderr" "$LOCK_FILE"
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "$LOCK_FILE"
 
   # Filter error-like answers — never send them to the user as the "real" reply
   local reply=""
