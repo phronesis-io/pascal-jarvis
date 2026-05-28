@@ -604,12 +604,40 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 ## Maintenance
 
 ### repos-sync
-- interval: 6h
+- interval: 2h
 - pre: tasks/repos_sync_pre.sh
 - prompt: |
     [REPOS SYNC]
-    The pre-script pulled all git repos. If any repos had updates, summarize the changes.
-    If all repos are "up to date", reply HEARTBEAT_OK.
+    The pre-script pulled all git repos and surfaced commit log, diff stat, new branches.
+
+    If every repo is "up to date" and no new branches, reply HEARTBEAT_OK — do not send a beat.
+
+    Otherwise produce a SUBSTANTIVE analysis (this is the user's main signal on what the
+    EigenFlux team is shipping). For each repo with activity:
+
+    1. **What shipped** — group commits by author; for each commit say what it does in
+       one line, in plain English (not the commit message verbatim). Note any obvious
+       "feature → bug → revert → fix" sequences that reveal real-world iteration.
+    2. **New branches** — flag who started what, and whether it's a fix branch, feature
+       branch, or experiment. Note the tip commit subject.
+    3. **Cross-repo patterns** — if the same person or same feature shows up in 2+ repos
+       (e.g. plugin + openclaw mirroring the same change), call it out — that's the
+       most useful signal.
+    4. **Owner/momentum read** — when someone independently closes multiple loops
+       (ship → break → fix → re-ship) in one day, say so. The user uses this for
+       team-state judgments.
+    5. **Relevance to user's own work** — Pascal owns Jarvis (in pascal-jarvis) and is
+       co-founder of EigenFlux. If a change relates to ongoing Jarvis projects
+       (warm/projects.md) or to EigenFlux architecture (matching, feed, profile,
+       plugins, install), surface the link. Don't force connections.
+
+    Format: ranked by importance (most useful insight first). Use the cross-repo
+    pattern as the headline if there is one. Skip repos with no activity entirely.
+    Length: as long as it needs to be — do not artificially compress.
+
+    DO NOT: just restate commit messages, list every file changed, or pad with
+    "this looks routine" filler. If a repo's activity is genuinely uninteresting
+    (dependency bumps, doc typos), say so in one line and move on.
 
 ### self-diagnostic
 - interval: 12h
