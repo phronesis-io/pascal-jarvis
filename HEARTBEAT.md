@@ -1,8 +1,13 @@
 # Jarvis Heartbeat
 
 Tasks are checked every 10s. Each task runs only when its interval has elapsed.
-All due tasks are batched into a single Claude call.
+All due tasks are batched into a single Claude call (max 4 regular tasks per cycle).
 If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
+
+**Priority tasks** bypass the batch cap and run every cycle when due:
+`calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`, `eigenflux-friends`, `eigenflux-messages`
+
+**Tier 0 tasks** bypass Claude entirely (pre→post direct pipe): `calendar-sync`
 
 ## Task Index
 

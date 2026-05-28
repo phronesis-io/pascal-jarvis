@@ -78,7 +78,15 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 2. **Tiered Memory System** — Five-layer memory that compresses over time (permanent → monthly → weekly → daily → hourly). Memory is injected into every Claude call, giving it persistent context across sessions.
 
-3. **Daily Rhythm & Calendar** — A suite of time-aware tasks that structure the day:
+3. **Multi-format Message Handling** — Beyond plain text, the bot processes:
+   - *Images* — downloaded and passed to Claude for visual understanding
+   - *Files* — downloaded to local storage, contents available via Read tool
+   - *Voice messages* — transcribed via Whisper API, transcript passed to Claude
+   - *Quote replies* — fetches the quoted message and prepends as context
+   - *Interactive cards, stickers, locations, contact/chat shares* — extracted and described
+   - *Merged forwards (合并转发)* — expanded via batch API, content truncated to 5KB
+
+4. **Daily Rhythm & Calendar** — A suite of time-aware tasks that structure the day:
    - *Daily plan* — morning overview of calendar, priorities, and open threads (time-gated 8:00-9:30)
    - *Activity log* — silent background tracker that logs what you're working on
    - *Daily reflect* — evening review with wins, patterns, and tomorrow prep
@@ -94,9 +102,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
-5. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning checkin frequency, content mix, and delivery windows. Cross-session sync imports context from parallel Claude Code projects.
+6. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning checkin frequency, content mix, and delivery windows. Cross-session sync imports context from parallel Claude Code projects.
 
-6. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics, and cross-session context bridging.
+7. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
 
 ## Architecture
 
@@ -105,28 +113,36 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  daemon.py (guardian — monitors + restarts bot.sh)           │
 │                                                             │
 │  bot.sh (entry point)                                       │
+│  ├── Startup: process conflict detection, message replay    │
 │  ├── Lark event listener (foreground)                       │
-│  │   └── sources plugins/lark/client.sh → claude -p         │
-│  ├── Heartbeat loop (background) → core/heartbeat.py        │
+│  │   ├── Text/rich text → claude -p                         │
+│  │   ├── Images → download + visual Claude                  │
+│  │   ├── Audio → download + Whisper transcribe              │
+│  │   ├── Files/video/sticker/card/location → parse + desc   │
+│  │   ├── Quote replies → fetch parent + prepend context     │
+│  │   └── Auto-retry on empty response (2 attempts)          │
+│  ├── Heartbeat loop (background) → core/heartbeat_loop.py   │
 │  │   ├── Parse HEARTBEAT.md                                 │
 │  │   ├── Run pre-scripts (gather data)                      │
+│  │   ├── Priority tasks bypass batch cap                    │
 │  │   ├── Batch Claude call                                  │
 │  │   └── Run post-scripts (act on output)                   │
+│  ├── EigenFlux stream (background) → core/ef_stream_loop.py │
+│  │   └── WebSocket → real-time PM delivery + Claude analysis│
 │  └── Admin console (background, optional) → admin.py        │
 │                                                             │
 │  core/                            (system)                  │
-│  ├── config.py       — jarvis.yaml loader                   │
-│  ├── heartbeat.py    — task scheduler                       │
-│  ├── memory.py       — tiered memory loader                 │
-│  ├── session.py      — session rotation + fcntl lock        │
-│  ├── search.py       — session history parser               │
-│  ├── safety.py       — error-pattern filter                 │
-│  ├── card.py         — Lark card message builder            │
-│  ├── timeutil.py     — timezone / time-range helpers        │
-│  └── jobs.py         — job queue utilities                  │
-│                                                             │
-│  handlers/                        (message handlers)        │
-│  └── handle_image.sh — image message processing             │
+│  ├── config.py           — jarvis.yaml loader               │
+│  ├── heartbeat.py        — task scheduler + priority tasks  │
+│  ├── heartbeat_loop.py   — Python heartbeat runner          │
+│  ├── ef_stream_loop.py   — EigenFlux WebSocket manager      │
+│  ├── memory.py           — tiered memory loader             │
+│  ├── session.py          — session rotation + fcntl lock    │
+│  ├── search.py           — session history parser           │
+│  ├── safety.py           — error-pattern filter             │
+│  ├── card.py             — Lark card message builder        │
+│  ├── timeutil.py         — timezone / time-range helpers    │
+│  └── jobs.py             — job queue utilities              │
 │                                                             │
 │  scripts/                         (ops & dev tools)         │
 │  ├── backup_sessions.sh  — daily session backup             │
@@ -329,9 +345,13 @@ Jarvis ships with **two built-in plugins** that are integrated at the system lev
 
 Chat with your agent from Lark/Feishu on any device. The plugin:
 - Subscribes to incoming messages (`im.message.receive_v1`)
+- Handles all message types: text, rich text, images, files, audio (with Whisper transcription), video, stickers, interactive cards, locations, contact/chat shares, merged forwards
+- Supports quote replies — fetches the quoted message and passes it as context
 - Maps each conversation (`conv_key`) to a stable Claude Code session
 - Auto-rotates sessions when they cross `claude.max_session_size`
+- Auto-retries on empty Claude responses (2 attempts with 3s backoff)
 - Shows transient `Thinking...` indicators during Claude calls
+- Saves in-flight messages on shutdown/restart, notifies user to resend on startup
 - Recognizes shortcut commands (`loop` / `heartbeat` to force-trigger a heartbeat cycle)
 
 **Enable** — add to `jarvis.yaml`:
@@ -356,11 +376,14 @@ lark:
 |---|---|---|
 | `eigenflux-feed-triage` | 10m | Pull feed, score items, push actionable ones to you |
 | `eigenflux-research`    | 30m | Deep analysis of items flagged as "needs research" |
-| `eigenflux-messages`    | 10m | Fetch unread DMs, suggest responses |
+| `eigenflux-messages`    | 10m | Fetch unread DMs, suggest responses (**priority**) |
+| `eigenflux-friends`     | 10m | Detect incoming friend requests (**priority**) |
 | `eigenflux-publish`     | 1h  | Auto-broadcast useful signals from your conversations |
 | `eigenflux-profile`     | 24h | Sync your EigenFlux bio with memory changes |
 
-Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers messages in real-time with background Claude analysis.
+`eigenflux-messages` and `eigenflux-friends` are **priority tasks** — they bypass the batch cap (max 4 regular tasks per cycle) so social signals are never delayed.
+
+Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers messages in real-time with background Claude analysis. The stream is managed exclusively by `ef_stream_loop.py` — the `openclaw-eigenflux` gateway plugin must be disabled to avoid "Connection replaced" conflicts.
 
 **Enable** — add to `jarvis.yaml`:
 ```yaml
@@ -463,7 +486,14 @@ Configure host/port in `jarvis.yaml` under the `admin:` section. Config-driven: 
 - Delete `active_sessions.json` to start fresh sessions in the correct project dir
 
 **`[SDK Error] handle message failed` in logs**
-- Benign — lark-cli receives event types (like `message_read_v1`) it doesn't have a handler for. The bot ignores these.
+- Benign — lark-cli receives event types (like `message_read_v1`, `reaction.created_v1`) it doesn't have a handler for. The bot ignores these.
+
+**EigenFlux stream "Connection replaced" loop**
+- Only one WebSocket connection per agent is allowed. If `openclaw-eigenflux` plugin is loaded, it competes with `ef_stream_loop.py`. Fix: `openclaw plugins disable openclaw-eigenflux && openclaw gateway restart`.
+- The self-diagnostic task checks for competing stream processes on each run.
+
+**Voice messages not transcribed**
+- Requires `OPENAI_API_KEY` environment variable set for Whisper API access. Without it, audio is downloaded but the user is asked to type instead.
 
 **Heartbeat not running tasks**
 - Check `heartbeat_state.json` for last-run timestamps
