@@ -40,10 +40,11 @@ echo "$$ $_BOOT_TS" > "$PIDFILE"
 # ── Process conflict detection ──────────────────────────────────────
 # Detect competing eigenflux stream processes from openclaw-gateway or
 # stale bot instances. Multiple streams cause "Connection replaced" loops.
-_competing_streams=$(pgrep -f "eigenflux stream" 2>/dev/null | wc -l | tr -d ' ')
+# Match only actual eigenflux stream processes (not Claude prompts containing the string)
+_competing_streams=$(ps -eo pid,comm,args | awk '$2 == "eigenflux" && $4 == "stream" {print $1}' | wc -l | tr -d ' ')
 if [ "$_competing_streams" -gt 0 ]; then
-  echo "WARN: Found $_competing_streams competing eigenflux stream process(es) — killing to prevent Connection replaced loop" >&2
-  pkill -f "eigenflux stream" 2>/dev/null || true
+  echo "WARN: Found $_competing_streams competing eigenflux stream process(es) — killing" >&2
+  ps -eo pid,comm,args | awk '$2 == "eigenflux" && $4 == "stream" {print $1}' | xargs kill 2>/dev/null || true
   sleep 1
 fi
 
@@ -282,9 +283,7 @@ _queue_file="$JARVIS_DIR/.message_queue"
 if [ -f "$_queue_file" ] && [ -s "$_queue_file" ] && [ -n "$USER_ID" ]; then
   _dropped=$(wc -l < "$_queue_file" | tr -d ' ')
   log_warn "Found $_dropped interrupted message(s) from restart — notifying user"
-  source "$JARVIS_DIR/plugins/lark/client.sh" 2>/dev/null || true
-  lark_send_text "$USER_ID" \
-    "⚠️ 重启中断了 ${_dropped} 条正在处理的消息，请重新发送。" >/dev/null 2>&1 || true
+  lark_send "⚠️ 重启中断了 ${_dropped} 条正在处理的消息，请重新发送。" 2>/dev/null || true
   rm -f "$_queue_file"
 fi
 
@@ -939,6 +938,8 @@ except:
           _mget_result=$(lark-cli im +messages-mget --message-ids "$message_id" --as bot 2>>"$LOG_FILE")
           _forward_content=$(echo "$_mget_result" | jq -r '.data.messages[0].content // empty' 2>/dev/null)
           if [ -n "$_forward_content" ]; then
+            # Truncate to prevent excessively large content from overwhelming Claude
+            _forward_content="${_forward_content:0:5000}"
             content="[User shared a merged-forward chat record (合并转发). Contents below:]
 $_forward_content"
             log_info "Merge forward expanded ($(echo -n "$_forward_content" | wc -c | tr -d ' ') chars)"

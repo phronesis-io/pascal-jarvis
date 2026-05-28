@@ -62,9 +62,12 @@ echo "Behavioral rules: $([ -f "$MEMORY_DIR/hot/behavioral_rules.md" ] && echo "
 # 6. EigenFlux stream health
 echo ""
 echo "--- EigenFlux Stream ---"
-_stream_count=$(pgrep -f "eigenflux stream" 2>/dev/null | wc -l | tr -d ' ')
+# Match only processes whose command starts with "eigenflux stream"
+# (avoids matching Claude prompts that mention "eigenflux stream" in text)
+_stream_pids=$(ps -eo pid,comm,args | awk '$2 == "eigenflux" && $3 ~ /eigenflux/ && $4 == "stream" {print $1}')
+_stream_count=$(echo "$_stream_pids" | grep -c '[0-9]' 2>/dev/null || echo 0)
 if [ "$_stream_count" -eq 1 ]; then
-  _stream_pid=$(pgrep -f "eigenflux stream" 2>/dev/null | head -1)
+  _stream_pid=$(echo "$_stream_pids" | head -1)
   _stream_uptime=$(ps -p "$_stream_pid" -o etime= 2>/dev/null | tr -d ' ')
   echo "✓ Stream running (PID $_stream_pid, uptime $_stream_uptime)"
 elif [ "$_stream_count" -eq 0 ]; then
@@ -78,7 +81,7 @@ echo ""
 echo "--- CLI Versions ---"
 _claude_ver=$(claude --version 2>/dev/null || echo "not installed")
 _lark_ver=$(lark-cli --version 2>/dev/null | head -1 || echo "not installed")
-_ef_ver=$(eigenflux version 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "not installed")
+_ef_ver=$(eigenflux version 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cli_version', d.get('version','?')))" 2>/dev/null || echo "not installed")
 echo "Claude: $_claude_ver"
 echo "Lark CLI: $_lark_ver"
 echo "EigenFlux: $_ef_ver"
