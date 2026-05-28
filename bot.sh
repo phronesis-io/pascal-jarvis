@@ -691,6 +691,13 @@ print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
 # Cleanup on exit
 cleanup() {
   log_info "Shutting down..."
+  # Save in-flight message sessions so next startup can notify user
+  _queue_file="$JARVIS_DIR/.message_queue"
+  rm -f "$_queue_file"
+  for _lock in "$JARVIS_DIR"/.session_lock_*; do
+    [ -f "$_lock" ] || continue
+    basename "$_lock" | sed 's/^\.session_lock_//' >> "$_queue_file"
+  done
   rm -f "$PIDFILE"
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
@@ -824,6 +831,7 @@ except:
       chat_id=$(echo "$line" | jq -r '.chat_id // .event.message.chat_id // empty' 2>/dev/null)
       sender_id=$(echo "$line" | jq -r '.sender_id // .event.sender.sender_id.open_id // empty' 2>/dev/null)
       msg_type=$(echo "$line" | jq -r '.msg_type // .event.message.message_type // empty' 2>/dev/null)
+      _parent_id=$(echo "$line" | jq -r '.parent_id // .event.message.parent_id // .event.message.upper_message_id // empty' 2>/dev/null)
 
       # Log every received event for debugging (even if we skip it)
       if [ -n "$message_id" ]; then
@@ -840,6 +848,43 @@ except:
         continue
       fi
       printf '%s' "$_dedup_key" > "$_dedup_file"
+
+      # ── Quote reply: fetch the quoted message and prepend as context ──
+      if [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; then
+        _quoted_raw=$(lark-cli im +messages-mget --message-ids "$_parent_id" --as bot 2>>"$LOG_FILE")
+        _quoted_text=$(echo "$_quoted_raw" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    msgs = d.get('data', {}).get('messages', d.get('messages', []))
+    if not msgs: sys.exit(0)
+    m = msgs[0]
+    body = m.get('body', {}).get('content', m.get('content', ''))
+    sender_name = m.get('_sender_name', '')
+    # Parse inner content JSON
+    try:
+        inner = json.loads(body) if isinstance(body, str) else body
+        if isinstance(inner, dict) and 'text' in inner:
+            body = inner['text']
+        elif isinstance(inner, dict) and 'content' in inner:
+            parts = []
+            for block in inner.get('content', []):
+                for item in (block if isinstance(block, list) else [block]):
+                    if isinstance(item, dict) and item.get('text'):
+                        parts.append(item['text'])
+            body = ' '.join(parts)
+    except: pass
+    body = str(body)[:500]
+    prefix = f'[{sender_name}] ' if sender_name else ''
+    print(f'{prefix}{body}')
+except: pass
+" 2>/dev/null)
+        if [ -n "$_quoted_text" ]; then
+          content="[Replying to: ${_quoted_text}]
+${content}"
+          log_info "Quote reply: parent=$_parent_id (${#_quoted_text} chars)"
+        fi
+      fi
 
       # ── Non-text message dispatch (image / file / audio / sticker / share / location / etc) ──
       # In raw (non-compact) mode, content is a JSON string like {"image_key":"...","file_key":"..."}
