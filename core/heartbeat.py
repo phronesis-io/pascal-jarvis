@@ -91,7 +91,8 @@ class HeartbeatRunner:
 
     # Tasks exempt from batch cap — they run on every cycle regardless.
     # These are infrastructure tasks that must stay fresh for others to work.
-    PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync"}
+    PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
+                       "eigenflux-friends", "eigenflux-messages"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output

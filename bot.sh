@@ -37,6 +37,16 @@ if [ -f "$PIDFILE" ]; then
 fi
 echo "$$ $_BOOT_TS" > "$PIDFILE"
 
+# ── Process conflict detection ──────────────────────────────────────
+# Detect competing eigenflux stream processes from openclaw-gateway or
+# stale bot instances. Multiple streams cause "Connection replaced" loops.
+_competing_streams=$(pgrep -f "eigenflux stream" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_competing_streams" -gt 0 ]; then
+  echo "WARN: Found $_competing_streams competing eigenflux stream process(es) — killing to prevent Connection replaced loop" >&2
+  pkill -f "eigenflux stream" 2>/dev/null || true
+  sleep 1
+fi
+
 LOG_FILE="$JARVIS_DIR/jarvis.log"
 LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
@@ -264,6 +274,20 @@ sys.exit(0 if looks_like_error(os.environ.get('JV_TEXT','')) else 1)
 # can be tested. bot.sh only launches it as a background process.
 # All output routing, card/text splitting, outbox writing, engagement
 # tracking, and restart detection is in Python — no more bash set -u traps.
+# ── Replay dropped messages from restart ────────────────────────────
+# If a restart killed in-flight handlers, notify the user so they know
+# to resend. We can't replay the original content (it's lost with the
+# process), but we CAN tell them which sessions were interrupted.
+_queue_file="$JARVIS_DIR/.message_queue"
+if [ -f "$_queue_file" ] && [ -s "$_queue_file" ] && [ -n "$USER_ID" ]; then
+  _dropped=$(wc -l < "$_queue_file" | tr -d ' ')
+  log_warn "Found $_dropped interrupted message(s) from restart — notifying user"
+  source "$JARVIS_DIR/plugins/lark/client.sh" 2>/dev/null || true
+  lark_send_text "$USER_ID" \
+    "⚠️ 重启中断了 ${_dropped} 条正在处理的消息，请重新发送。" >/dev/null 2>&1 || true
+  rm -f "$_queue_file"
+fi
+
 sleep 3  # let config load settle
 python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
 HEARTBEAT_PID=$!
@@ -749,6 +773,16 @@ lark_subscribe_messages \
       if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
         rm -f "$JARVIS_DIR/.restart_trigger"
         log_info "Restart triggered from message loop — cleaning up and exec-ing self..."
+        # Save pending messages so they can be replayed after restart
+        _queue_file="$JARVIS_DIR/.message_queue"
+        rm -f "$_queue_file"
+        for _lock in "$JARVIS_DIR"/.session_lock_*; do
+          [ -f "$_lock" ] || continue
+          _lock_sid=$(basename "$_lock" | sed 's/^\.session_lock_//')
+          log_info "Queuing in-flight message for session $_lock_sid"
+          # We can't recover the content, but we can notify the user
+          echo "$_lock_sid" >> "$_queue_file"
+        done
         # Kill background children before exec to prevent orphan processes
         kill 0 2>/dev/null || true
         exec "$JARVIS_DIR/bot.sh"
@@ -808,26 +842,175 @@ except:
       fi
       printf '%s' "$_dedup_key" > "$_dedup_file"
 
-      # ── Image detection: compact mode sends images as [Image: img_v3_xxx] ──
-      if [[ "$content" == "[Image: img_v3_"* ]]; then
-        _img_key=$(echo "$content" | sed 's/\[Image: \(.*\)\]/\1/')
-        _img_dir="$JARVIS_DIR/tmp/images"
-        mkdir -p "$_img_dir"
-        _img_path="$_img_dir/${_img_key}.png"
-        log_info "Image detected: $_img_key — downloading..."
-        if (cd "$_img_dir" && lark-cli im +messages-resources-download \
-            --message-id "$message_id" \
-            --file-key "$_img_key" \
-            --type image \
-            --output "${_img_key}.png" \
-            --as bot 2>>"$LOG_FILE"); then
-          content="[User sent an image, saved to $_img_path. Use the Read tool to view it and reply about its content.]"
-          log_info "Image downloaded: $_img_path"
-        else
-          content="[User sent an image (key: $_img_key) but download failed. Tell the user the image could not be received.]"
-          log_warn "Image download failed: $_img_key"
-        fi
-      fi
+      # ── Non-text message dispatch (image / file / audio / sticker / share / location / etc) ──
+      # In raw (non-compact) mode, content is a JSON string like {"image_key":"...","file_key":"..."}
+      # Parse based on msg_type from the event envelope.
+      case "$msg_type" in
+        image)
+          _img_key=$(echo "$_raw_content" | jq -r '.image_key // empty' 2>/dev/null)
+          if [ -n "$_img_key" ]; then
+            _img_dir="$JARVIS_DIR/tmp/images"
+            mkdir -p "$_img_dir"
+            _img_path="$_img_dir/${_img_key}.png"
+            log_info "Image detected: $_img_key — downloading..."
+            if (cd "$_img_dir" && lark-cli im +messages-resources-download \
+                --message-id "$message_id" \
+                --file-key "$_img_key" \
+                --type image \
+                --output "${_img_key}.png" \
+                --as bot 2>>"$LOG_FILE"); then
+              content="[User sent an image, saved to $_img_path. Use the Read tool to view it and reply about its content.]"
+              log_info "Image downloaded: $_img_path"
+            else
+              content="[User sent an image (key: $_img_key) but download failed. Tell the user the image could not be received.]"
+              log_warn "Image download failed: $_img_key"
+            fi
+          fi
+          ;;
+        file)
+          _file_key=$(echo "$_raw_content" | jq -r '.file_key // empty' 2>/dev/null)
+          _file_name=$(echo "$_raw_content" | jq -r '.file_name // empty' 2>/dev/null)
+          if [ -n "$_file_key" ]; then
+            _file_dir="$JARVIS_DIR/tmp/files"
+            mkdir -p "$_file_dir"
+            # Sanitize file_name to avoid path traversal; fallback to file_key
+            _file_safe=$(echo "${_file_name:-$_file_key}" | tr -d '/\\' | head -c 200)
+            [ -z "$_file_safe" ] && _file_safe="$_file_key"
+            _file_path="$_file_dir/$_file_safe"
+            log_info "File detected: $_file_key ($_file_name) — downloading..."
+            if (cd "$_file_dir" && lark-cli im +messages-resources-download \
+                --message-id "$message_id" \
+                --file-key "$_file_key" \
+                --type file \
+                --output "$_file_safe" \
+                --as bot 2>>"$LOG_FILE"); then
+              content="[User sent a file: ${_file_name:-(unnamed)}, saved to $_file_path. Use the Read tool to view its contents if relevant to the conversation.]"
+              log_info "File downloaded: $_file_path"
+            else
+              content="[User sent a file: ${_file_name:-$_file_key} but download failed.]"
+              log_warn "File download failed: $_file_key"
+            fi
+          fi
+          ;;
+        audio)
+          _audio_dur=$(echo "$_raw_content" | jq -r '.duration // empty' 2>/dev/null)
+          _audio_key=$(echo "$_raw_content" | jq -r '.file_key // empty' 2>/dev/null)
+          if [ -n "$_audio_key" ]; then
+            _audio_dir="$JARVIS_DIR/tmp/audios"
+            mkdir -p "$_audio_dir"
+            _audio_file="${message_id}.ogg"
+            _audio_path="$_audio_dir/$_audio_file"
+            log_info "Audio detected: $_audio_key (${_audio_dur:-?}ms) — downloading..."
+            if (cd "$_audio_dir" && lark-cli im +messages-resources-download \
+                --message-id "$message_id" \
+                --file-key "$_audio_key" \
+                --type file \
+                --output "$_audio_file" \
+                --as bot 2>>"$LOG_FILE"); then
+              if [ -n "$OPENAI_API_KEY" ] && command -v curl >/dev/null 2>&1; then
+                log_info "Transcribing audio via Whisper API..."
+                _transcript=$(curl -sS --max-time 60 \
+                  -X POST https://api.openai.com/v1/audio/transcriptions \
+                  -H "Authorization: Bearer $OPENAI_API_KEY" \
+                  -F "file=@$_audio_path" \
+                  -F "model=whisper-1" \
+                  -F "language=zh" 2>>"$LOG_FILE" | jq -r '.text // empty' 2>/dev/null)
+                if [ -n "$_transcript" ]; then
+                  content="[User sent a voice message (${_audio_dur:-?}ms). Transcript: $_transcript]"
+                  log_info "Audio transcribed: ${_transcript:0:60}..."
+                else
+                  content="[User sent a voice message (${_audio_dur:-?}ms), saved to $_audio_path. Whisper transcription returned empty — ask the user to type if needed.]"
+                  log_warn "Whisper API returned empty transcript"
+                fi
+              else
+                content="[User sent a voice message (${_audio_dur:-?}ms), saved to $_audio_path. Transcription needs OPENAI_API_KEY (not configured) — ask the user to type the content.]"
+                log_info "Audio downloaded but OPENAI_API_KEY not set"
+              fi
+            else
+              content="[User sent a voice message but download failed.]"
+              log_warn "Audio download failed: $_audio_key"
+            fi
+          else
+            content="[User sent a voice message but file_key was missing.]"
+          fi
+          ;;
+        merge_forward)
+          log_info "Merge forward detected — fetching content via mget"
+          _mget_result=$(lark-cli im +messages-mget --message-ids "$message_id" --as bot 2>>"$LOG_FILE")
+          _forward_content=$(echo "$_mget_result" | jq -r '.data.messages[0].content // empty' 2>/dev/null)
+          if [ -n "$_forward_content" ]; then
+            content="[User shared a merged-forward chat record (合并转发). Contents below:]
+$_forward_content"
+            log_info "Merge forward expanded ($(echo -n "$_forward_content" | wc -c | tr -d ' ') chars)"
+          else
+            content="[User shared a merged-forward chat record but couldn't fetch contents via mget.]"
+            log_warn "Merge forward mget returned empty"
+          fi
+          ;;
+        media)
+          _media_name=$(echo "$_raw_content" | jq -r '.file_name // empty' 2>/dev/null)
+          content="[User sent a video: ${_media_name:-(unnamed)}. Video processing is not yet supported — ask the user to describe it if relevant.]"
+          log_info "Video message received (no processing)"
+          ;;
+        sticker)
+          content="[User sent a sticker.]"
+          log_info "Sticker received"
+          ;;
+        share_chat)
+          _shared_chat=$(echo "$_raw_content" | jq -r '.chat_id // empty' 2>/dev/null)
+          content="[User shared a group/chat card (chat_id: $_shared_chat).]"
+          log_info "Chat card shared: $_shared_chat"
+          ;;
+        share_user)
+          _shared_user=$(echo "$_raw_content" | jq -r '.user_id // .open_id // empty' 2>/dev/null)
+          content="[User shared a contact card (user_id: $_shared_user). Use lark-cli contact to look them up if needed.]"
+          log_info "User card shared: $_shared_user"
+          ;;
+        location)
+          _loc_name=$(echo "$_raw_content" | jq -r '.name // empty' 2>/dev/null)
+          _loc_lng=$(echo "$_raw_content" | jq -r '.longitude // empty' 2>/dev/null)
+          _loc_lat=$(echo "$_raw_content" | jq -r '.latitude // empty' 2>/dev/null)
+          content="[User shared a location: ${_loc_name:-(unnamed)} (lat=$_loc_lat, lng=$_loc_lng)]"
+          log_info "Location shared: $_loc_name"
+          ;;
+        interactive)
+          # Cards are structured JSON. Recursively extract any text-bearing fields.
+          _card_text=$(echo "$_raw_content" | python3 -c "
+import json, sys
+TEXT_KEYS = {'text', 'plain_text', 'content', 'title', 'tag_name', 'value'}
+def extract(d, parts, depth=0):
+    if depth > 20: return
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if k in TEXT_KEYS and isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+            else:
+                extract(v, parts, depth+1)
+    elif isinstance(d, list):
+        for item in d:
+            extract(item, parts, depth+1)
+try:
+    d = json.loads(sys.stdin.read())
+    parts = []
+    extract(d, parts)
+    # Dedup adjacent duplicates and truncate
+    seen = []
+    for p in parts:
+        if not seen or seen[-1] != p:
+            seen.append(p)
+    print(' | '.join(seen)[:1500])
+except Exception as e:
+    pass
+" 2>/dev/null)
+          if [ -n "$_card_text" ]; then
+            content="[User sent an interactive card. Extracted text: $_card_text]"
+          else
+            content="[User sent an interactive card (no extractable text). Raw head: ${_raw_content:0:200}]"
+          fi
+          log_info "Interactive card received (text len=${#_card_text})"
+          ;;
+        # text and post are already extracted by the Python parser above — fall through.
+      esac
 
       # In group chats, only respond when the bot is @mentioned.
       # Check if APP_ID appears anywhere in the mentions JSON — this is the

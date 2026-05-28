@@ -58,3 +58,27 @@ hot_count=$(ls "$MEMORY_DIR/hot/"*.md 2>/dev/null | wc -l | tr -d ' ')
 warm_count=$(ls "$MEMORY_DIR/warm/"*.md 2>/dev/null | wc -l | tr -d ' ')
 echo "Hot files: $hot_count | Warm files: $warm_count"
 echo "Behavioral rules: $([ -f "$MEMORY_DIR/hot/behavioral_rules.md" ] && echo "✓" || echo "✗")"
+
+# 6. EigenFlux stream health
+echo ""
+echo "--- EigenFlux Stream ---"
+_stream_count=$(pgrep -f "eigenflux stream" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_stream_count" -eq 1 ]; then
+  _stream_pid=$(pgrep -f "eigenflux stream" 2>/dev/null | head -1)
+  _stream_uptime=$(ps -p "$_stream_pid" -o etime= 2>/dev/null | tr -d ' ')
+  echo "✓ Stream running (PID $_stream_pid, uptime $_stream_uptime)"
+elif [ "$_stream_count" -eq 0 ]; then
+  echo "⚠️ Stream NOT running — real-time messages will not be received"
+else
+  echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
+fi
+
+# 7. CLI versions
+echo ""
+echo "--- CLI Versions ---"
+_claude_ver=$(claude --version 2>/dev/null || echo "not installed")
+_lark_ver=$(lark-cli --version 2>/dev/null | head -1 || echo "not installed")
+_ef_ver=$(eigenflux version 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "not installed")
+echo "Claude: $_claude_ver"
+echo "Lark CLI: $_lark_ver"
+echo "EigenFlux: $_ef_ver"
