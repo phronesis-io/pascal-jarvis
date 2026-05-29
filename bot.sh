@@ -1092,6 +1092,35 @@ except Exception as e:
       # ONLY stop/cancel bypass Claude — everything else goes through LLM + action markers
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
 
+      # "发" — confirm pending EigenFlux broadcast; "不发" — cancel it
+      if [ "$content" = "发" ] || [ "$content" = "不发" ]; then
+        _pending_dir="$JARVIS_DIR/eigenflux/pending_publish"
+        _latest_pending=$(ls -t "$_pending_dir"/*.json 2>/dev/null | head -1)
+        if [ -z "$_latest_pending" ]; then
+          lark_reply_text "$message_id" "没有待确认的广播。" >/dev/null
+        elif [ "$content" = "发" ]; then
+          _pub_data=$(cat "$_latest_pending")
+          _pub_content=$(echo "$_pub_data" | jq -r '.content // empty')
+          _pub_notes=$(echo "$_pub_data" | jq -c '.notes // {}')
+          _pub_url=$(echo "$_pub_data" | jq -r '.url // empty')
+          _pub_cmd=(eigenflux publish --content "$_pub_content" --notes "$_pub_notes" --accept-reply -f json)
+          [ -n "$_pub_url" ] && _pub_cmd+=(--url "$_pub_url")
+          if "${_pub_cmd[@]}" 2>>"$LOG_FILE"; then
+            lark_reply_text "$message_id" "✅ 已广播" >/dev/null
+            log_info "[eigenflux-publish] User confirmed, published: ${_pub_content:0:60}"
+          else
+            lark_reply_text "$message_id" "❌ 广播失败，请查看日志" >/dev/null
+            log_warn "[eigenflux-publish] CLI failed on user-confirmed publish"
+          fi
+          rm -f "$_latest_pending"
+        else
+          rm -f "$_latest_pending"
+          lark_reply_text "$message_id" "已取消广播。" >/dev/null
+          log_info "[eigenflux-publish] User rejected pending broadcast"
+        fi
+        continue
+      fi
+
       # "stop" / "cancel" — kill the running Claude process for this session (safety bypass)
       if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
         _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "

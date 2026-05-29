@@ -44,53 +44,37 @@ def main() -> int:
     notes_str = json.dumps(notes) if isinstance(notes, dict) else str(notes)
     url = data.get("url", "")
 
-    cmd = ["eigenflux", "publish",
-           "--content", content,
-           "--notes", notes_str,
-           "--accept-reply",
-           "-f", "json"]
-    if url:
-        cmd.extend(["--url", url])
+    # Save pending broadcast for user confirmation (don't publish directly)
+    pending_dir = JARVIS_DIR / "eigenflux" / "pending_publish"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending_id = f"{int(time.time())}_{os.getpid()}"
+    pending_file = pending_dir / f"{pending_id}.json"
 
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            env={**os.environ, "PATH": PATH_ENV},
-        )
-        if result.returncode == 0:
-            print("[eigenflux-publish] published successfully", file=LOG)
-            # Update local publish state for cooldown tracking
-            state_file = JARVIS_DIR / "eigenflux" / "publish_state.json"
-            now_epoch = int(time.time())
-            # Load existing state to preserve history
-            state: dict = {}
-            if state_file.exists():
-                try:
-                    state = json.loads(state_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-            state["last_publish_epoch"] = now_epoch
-            # Append to recent history (keep last 20)
-            history = state.get("recent", [])
-            summary = (notes.get("summary", "") if isinstance(notes, dict)
-                       else "")
-            history.append({
-                "epoch": now_epoch,
-                "summary": summary,
-                "content_preview": content[:120],
-            })
-            state["recent"] = history[-20:]
-            from core.safety import atomic_write
-            atomic_write(state_file, json.dumps(state, ensure_ascii=False))
-            # Silent — user engagement data shows 7% engagement on publish confirmations.
-            # The broadcast itself is valuable (to the network), but the Lark notification
-            # is noise for the user. Log only.
-            print(f"[eigenflux-publish] Published: {content[:80]}", file=sys.stderr)
-        else:
-            print(f"[eigenflux-publish] CLI error: {result.stderr.strip()}", file=LOG)
-    except Exception:
-        print("[eigenflux-publish] publish raised:", file=LOG)
-        traceback.print_exc(file=LOG)
+    pending_data = {
+        "id": pending_id,
+        "content": content,
+        "notes": notes,
+        "url": url,
+        "created_at": int(time.time()),
+    }
+    from core.safety import atomic_write
+    atomic_write(pending_file, json.dumps(pending_data, ensure_ascii=False))
+
+    # Send to user for confirmation via Lark
+    summary = notes.get("summary", "") if isinstance(notes, dict) else ""
+    btype = notes.get("type", "info") if isinstance(notes, dict) else "info"
+    domains = notes.get("domains", []) if isinstance(notes, dict) else []
+    domain_str = ", ".join(domains) if domains else ""
+
+    preview = f"**📡 EigenFlux 广播待确认**\n\n"
+    preview += f"**类型**: {btype}"
+    if domain_str:
+        preview += f" | **领域**: {domain_str}"
+    preview += f"\n\n{content}\n\n"
+    preview += f"回复「发」确认广播，回复「不发」取消。"
+
+    print(preview)
+    print(f"[eigenflux-publish] Pending approval: {pending_id} — {content[:80]}", file=sys.stderr)
 
     return 0
 
