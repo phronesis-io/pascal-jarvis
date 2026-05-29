@@ -69,9 +69,10 @@ def _is_duplicate(new_raw: str, existing_body: str) -> bool:
     intersection = len(last_ngrams & new_ngrams)
     union = len(last_ngrams | new_ngrams)
     similarity = intersection / union if union else 0
-    # Use length-dependent threshold: shorter texts need higher similarity
-    min_len = min(len(new_content), len(last_content))
-    threshold = 0.65 if min_len < 50 else 0.45
+    # Use high threshold — only skip near-exact duplicates.
+    # Previous threshold (0.45) was too aggressive: ongoing work on the same
+    # project produces similar-looking digests that are actually different updates.
+    threshold = 0.75
     return similarity > threshold
 
 
