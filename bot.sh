@@ -501,16 +501,14 @@ $(load_memory)"
 
     if [ -f "$session_file" ]; then
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
-      (trap 'echo "$(date +%H:%M:%S) SIGTERM in subshell pid=$$ sid=$session_id" >> /tmp/claude_subshell_signals.log' TERM
-       cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+      (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --resume "$session_id" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
         2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     else
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
-      (trap 'echo "$(date +%H:%M:%S) SIGTERM in subshell pid=$$ sid=$session_id" >> /tmp/claude_subshell_signals.log' TERM
-       cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+      (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --session-id "$session_id" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
@@ -518,8 +516,12 @@ $(load_memory)"
     fi
     _claude_pid=$!
     echo "$_claude_pid" > "$LOCK_FILE"
+    # Watchdog: kill Claude if it runs longer than 600s (macOS has no timeout cmd)
+    (sleep 600 && kill $_claude_pid 2>/dev/null && log_warn "[$session_id] Claude killed by 600s watchdog") &
+    _watchdog_pid=$!
     wait $_claude_pid 2>/dev/null
     local _exit_code=$?
+    kill $_watchdog_pid 2>/dev/null 2>&1; wait $_watchdog_pid 2>/dev/null
 
     answer=$(cat "$ANSWER_FILE" 2>/dev/null)
     local _stderr_content
