@@ -516,16 +516,17 @@ $(load_memory)"
     fi
     _claude_pid=$!
     echo "$_claude_pid" > "$LOCK_FILE"
-    # Progress heartbeat: tell user every 2min what Claude is doing
-    # Extracts recent tool calls from session file for transparency
-    # Also acts as watchdog: kills Claude after 600s (5 ticks × 120s)
-    (for _tick in 1 2 3 4 5; do
-      sleep 120
-      if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
-      if [ "$_tick" -lt 5 ]; then
-        # Extract last 3 tool call descriptions from session file
-        _session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
-        _activity=$(python3 -c "
+    # Live activity stream: poll session file every 20s, send new tool calls to user
+    # Also acts as watchdog: kills Claude after 600s
+    (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
+     _last_tool_count=0
+     _elapsed=0
+     while [ "$_elapsed" -lt 600 ]; do
+       sleep 20
+       _elapsed=$((_elapsed + 20))
+       if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
+       # Extract tool call descriptions, compare with last snapshot
+       _new_tools=$(python3 -c "
 import json, sys
 descs = []
 try:
@@ -547,20 +548,30 @@ try:
                         else: d = name
                     descs.append(d[:60])
 except: pass
-for d in descs[-3:]:
-    print(f'• {d}')
-" 2>/dev/null)
-        if [ -n "$_activity" ]; then
-          lark_reply_text "$message_id" "⏳ 处理中（$((_tick * 2))分钟）最近动作：
-$_activity" >/dev/null 2>&1 || true
-        else
-          lark_reply_text "$message_id" "⏳ 仍在处理中（$((_tick * 2))分钟）..." >/dev/null 2>&1 || true
-        fi
-      else
-        kill $_claude_pid 2>/dev/null
-        log_warn "[$session_id] Claude killed by 600s watchdog"
-      fi
-    done) &
+# Output: total_count then new descriptions (after offset)
+offset = int(sys.argv[1]) if len(sys.argv)>1 else 0
+print(len(descs))
+for d in descs[offset:]:
+    print(d)
+" "$_last_tool_count" 2>/dev/null)
+       _new_count=$(echo "$_new_tools" | head -1)
+       _new_descs=$(echo "$_new_tools" | tail -n +2)
+       if [ -n "$_new_descs" ] && [ "$_new_count" -gt "$_last_tool_count" ] 2>/dev/null; then
+         _formatted=$(echo "$_new_descs" | while IFS= read -r _d; do
+           [ -n "$_d" ] && echo "• $_d"
+         done)
+         if [ -n "$_formatted" ]; then
+           lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1 || true
+         fi
+         _last_tool_count="$_new_count"
+       fi
+     done
+     # Watchdog timeout
+     if kill -0 $_claude_pid 2>/dev/null; then
+       kill $_claude_pid 2>/dev/null
+       log_warn "[$session_id] Claude killed by 600s watchdog"
+     fi
+    ) &
     _watchdog_pid=$!
     wait $_claude_pid 2>/dev/null
     local _exit_code=$?
