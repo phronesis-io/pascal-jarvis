@@ -519,7 +519,18 @@ $(load_memory)"
     # Live activity stream: poll session file every 20s, send new tool calls to user
     # Also acts as watchdog: kills Claude after 600s
     (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
-     _last_tool_count=0
+     # Snapshot current tool count so we only report NEW tools from this call
+     _last_tool_count=$(python3 -c "
+import json
+n=0
+try:
+    with open('$CLAUDE_PROJECT_DIR/${session_id}.jsonl') as f:
+        for line in f:
+            for b in (json.loads(line).get('message',{}).get('content',[]) or []):
+                if isinstance(b,dict) and b.get('type')=='tool_use': n+=1
+except: pass
+print(n)
+" 2>/dev/null || echo 0)
      _elapsed=0
      while [ "$_elapsed" -lt 600 ]; do
        sleep 20
