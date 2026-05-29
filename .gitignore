@@ -83,3 +83,4 @@ session_compacts/
 
 # Dashboard Python bytecode (covered by __pycache__/ above, listed for clarity)
 dashboard/__pycache__/
+eigenflux/pending_publish/

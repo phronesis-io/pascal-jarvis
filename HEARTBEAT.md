@@ -308,6 +308,25 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - hot/ : identity, behavioral rules, healing frame
     - warm/ : health, cultural, investment, interests, projects
     - system/ : todos, open_threads
+
+    Three input streams to reconcile (NOT just this session's chat):
+    1. Today's Lark conversation history
+    2. CROSS-SESSION DIGEST — work Pascal did in other Claude Code sessions today.
+       This never shows up in this chat, so it is the #1 source of memory staleness.
+    3. REPO ACTIVITY (last 24h, all authors) — what shipped, including teammates'.
+
+    Your job is COMPLETE situational awareness, so absorb durable work-state into the
+    right project files — don't let it live only in the rolling digest:
+    - A tracked project advanced (new phase, milestone, decision) → UPDATE its file
+      (warm/projects.md, warm/project_eigenflux_tech_roadmap.md, etc.).
+    - A NEW work line or repo appeared that isn't tracked yet → add it.
+    - Teammates' work counts as context. Record what they shipped under the relevant
+      project/team file (warm/team.md, roadmap). "It's not Pascal's own commit" is NOT
+      a reason to skip it — completeness of context is priority 1. (Don't fabricate
+      relevance; just record what is actually happening.)
+
+    This is autonomous internal work — do NOT triage memory upkeep back to Pascal.
+
     Updates are applied DIRECTLY to target files (no queue). For each update needed:
     → UPDATE: <subdir/filename>.md: <what to add or change>
     Then output a brief diary summary of what changed today.
