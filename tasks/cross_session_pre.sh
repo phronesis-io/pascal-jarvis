@@ -26,7 +26,7 @@ echo "$recent_files" | python3 -c "
 import json, sys, os
 from datetime import datetime
 
-MAX_TOTAL = 4000
+MAX_TOTAL = 8000
 output_parts = []
 
 for filepath in sys.stdin:
