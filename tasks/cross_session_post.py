@@ -83,6 +83,23 @@ def main() -> int:
         print("[cross-session] skipping — output looks like error", file=sys.stderr)
         return 0
 
+    # Parse JSON envelope: {"digest": "...", "user_message": "..."}
+    user_message = ""
+    import json as _json
+    try:
+        envelope = _json.loads(raw)
+        if isinstance(envelope, dict) and "digest" in envelope:
+            user_message = envelope.get("user_message", "").strip()
+            raw = envelope["digest"].strip()
+            if not raw:
+                return 0
+    except (_json.JSONDecodeError, TypeError):
+        pass  # Not JSON — treat raw as plain digest (backward compatible)
+
+    # If there's a user-facing message, print to stdout (sent to Lark)
+    if user_message:
+        print(f"📡 跨 Session 动态：{user_message}")
+
     # Skip consecutive "No new data" entries — they waste index space
     is_no_data = "no new data" in raw.lower() or "no significant" in raw.lower()
     if is_no_data and DIGEST_FILE.exists():

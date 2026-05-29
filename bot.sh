@@ -516,8 +516,18 @@ $(load_memory)"
     fi
     _claude_pid=$!
     echo "$_claude_pid" > "$LOCK_FILE"
-    # Watchdog: kill Claude if it runs longer than 600s (macOS has no timeout cmd)
-    (sleep 600 && kill $_claude_pid 2>/dev/null && log_warn "[$session_id] Claude killed by 600s watchdog") &
+    # Progress heartbeat: tell user every 2min that Claude is still working
+    # Also acts as watchdog: kills Claude after 600s (5 ticks × 120s)
+    (for _tick in 1 2 3 4 5; do
+      sleep 120
+      if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
+      if [ "$_tick" -lt 5 ]; then
+        lark_reply_text "$message_id" "⏳ 仍在处理中（$((_tick * 2))分钟）..." >/dev/null 2>&1 || true
+      else
+        kill $_claude_pid 2>/dev/null
+        log_warn "[$session_id] Claude killed by 600s watchdog"
+      fi
+    done) &
     _watchdog_pid=$!
     wait $_claude_pid 2>/dev/null
     local _exit_code=$?

@@ -427,17 +427,31 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 ## Cross-project
 
 ### cross-session-sync
-- interval: 30m
+- interval: 10m
 - pre: tasks/cross_session_pre.sh
 - post: tasks/cross_session_post.py
 - prompt: |
     [CROSS-SESSION DIGEST]
     Below are recent conversations from Pascal's other Claude Code projects.
-    Summarize what he's been working on in each project in 2-3 bullet points.
-    Focus on: decisions made, problems solved, current blockers, next steps.
-    Format: "### project-name\n- bullet\n- bullet"
-    ALWAYS produce a digest if there is ANY data below — even a single conversation turn
-    is worth recording. Only reply HEARTBEAT_OK if the DATA section is completely empty.
+    Pascal works across many tmux sessions simultaneously — this is his PRIMARY
+    work context during the day. Treat this as essential situational awareness.
+
+    Produce TWO outputs:
+
+    1. **Digest** (always): Summarize each project in 2-3 bullets.
+       Focus on: decisions made, problems solved, current blockers, next steps.
+       Format: "### project-name\n- bullet\n- bullet"
+
+    2. **User message** (when warranted): If any session contains something the
+       Lark bot session should know about — a blocker Pascal mentioned, a decision
+       that affects Jarvis/EigenFlux, a request that cross-references this session,
+       or an error/incident — include a "user_message" field with a brief Chinese
+       note (≤80 words) for the user.
+
+    Return JSON: {"digest": "...", "user_message": "..."} or just {"digest": "..."}
+    if nothing needs the user's attention.
+    ALWAYS produce a digest if there is ANY data below. Only reply HEARTBEAT_OK
+    if the DATA section is completely empty.
 
 ## Analytics
 
