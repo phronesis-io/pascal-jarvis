@@ -217,6 +217,26 @@ def cleanup_expired():
 # Trigger evaluation
 # ---------------------------------------------------------------------------
 
+def _coerce(dt: datetime) -> datetime:
+    """Make `dt` comparable to now_local() regardless of tz-awareness.
+
+    Stored timestamps (created_at, trigger datetime) are local-time strings
+    written WITHOUT an offset, so datetime.fromisoformat() returns a *naive*
+    datetime — while now_local() is tz-aware. Comparing the two raises
+    TypeError, which previously crashed the entire due-check whenever an
+    interval intent was pending, and silently skipped naive-target date
+    intents via the surrounding try/except. This aligns `dt` to now_local()'s
+    awareness (works in both directions, so it's safe if now_local ever
+    becomes naive).
+    """
+    ref = now_local()
+    if ref.tzinfo is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=ref.tzinfo)
+    if ref.tzinfo is None and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 def get_due_intents() -> list[dict]:
     """Find all pending intents whose trigger condition is met NOW."""
     _init()
@@ -247,7 +267,7 @@ def get_due_intents() -> list[dict]:
             target = trigger_config.get("datetime", "")
             if target:
                 try:
-                    target_dt = datetime.fromisoformat(target)
+                    target_dt = _coerce(datetime.fromisoformat(target))
                     triggered = now >= target_dt
                 except (ValueError, TypeError):
                     pass  # Skip intents with malformed datetime
@@ -258,13 +278,13 @@ def get_due_intents() -> list[dict]:
             triggered = cron_matches(expr, now)
             # Prevent re-triggering within same minute
             if triggered and intent.get("executed_at"):
-                last = datetime.fromisoformat(intent["executed_at"])
+                last = _coerce(datetime.fromisoformat(intent["executed_at"]))
                 if (now - last).total_seconds() < 60:
                     triggered = False
 
         elif trigger_type == "interval":
             seconds = trigger_config.get("seconds", 600)
-            created = datetime.fromisoformat(intent["created_at"])
+            created = _coerce(datetime.fromisoformat(intent["created_at"]))
             triggered = (now - created).total_seconds() >= seconds
 
         elif trigger_type == "event":
@@ -404,7 +424,7 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
         title = event_match.group(3).strip()
         details = event_match.group(4) or ""
 
-        event_dt = datetime.fromisoformat(f"{current_date}T{start_time}:00")
+        event_dt = _coerce(datetime.fromisoformat(f"{current_date}T{start_time}:00"))
 
         # Skip past events
         if event_dt < now_local():
