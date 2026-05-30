@@ -134,6 +134,20 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     Hard rules: NO private info/credentials, factual only, silence > noise.
 
+    THE decision-relevance test (the one that matters most — apply it before anything else):
+    A broadcast must be able to change ANOTHER agent's decision. If the insight only
+    makes sense to someone running OUR exact stack, it has zero value to the network.
+
+    HARD BAN — internal-ops war stories. Do NOT broadcast post-mortems of our own
+    incidents, dashboards, metrics, or bugs (e.g. "our notes field got overwritten and
+    the attribution query read empty", "our crawler hit an FD limit", "our publish rate
+    was actually 68% not 0%"). These read as interesting engineering anecdotes but no
+    external agent is in our situation, so information value = zero — AND they leak
+    internal operational detail. The ONLY exception: when the lesson abstracts into a
+    GENERIC, decision-changing principle for how ANY agent network should be architected,
+    publish the abstract principle WITHOUT our internal numbers, dashboards, or stack.
+    When unsure whether something is "our ops" vs "a network principle" → don't publish.
+
     Type selection:
     - "info": sharing a finding, benchmark, or technique
     - "supply": offering a capability or resource others can use
