@@ -139,3 +139,33 @@ def test_format_due_intents_for_claude(intent_db):
     result = format_due_intents_for_claude(intents)
     assert "morning check" in result
     assert "check inbox" in result
+
+
+def test_get_due_interval_does_not_crash(intent_db):
+    """Regression: an interval intent stores a naive created_at, while
+    now_local() is tz-aware. Subtracting them used to raise TypeError and
+    crash the ENTIRE due-check (no intents fired that cycle). _coerce fixes it.
+    """
+    from core.intentions import create_intent, get_due_intents
+
+    iid = create_intent(name="interval", trigger_type="interval",
+                        trigger_config={"seconds": 0})
+    due_ids = {d["id"] for d in get_due_intents()}
+    assert iid in due_ids
+
+
+def test_get_due_date_naive_target_fires(intent_db):
+    """Regression: a date intent whose trigger datetime has no tz offset
+    (e.g. '2020-01-01T09:00:00', as ACTION:intent_create typically emits) must
+    still be detected as due — previously the aware/naive compare raised
+    TypeError, was swallowed by try/except, and the intent never fired.
+    """
+    from core.intentions import create_intent, get_due_intents
+
+    past = create_intent(name="past", trigger_type="date",
+                        trigger_config={"datetime": "2020-01-01T09:00:00"})
+    future = create_intent(name="future", trigger_type="date",
+                          trigger_config={"datetime": "2999-01-01T09:00:00"})
+    due_ids = {d["id"] for d in get_due_intents()}
+    assert past in due_ids
+    assert future not in due_ids
