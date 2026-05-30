@@ -16,6 +16,16 @@ from core.session import (
 import uuid
 
 
+@pytest.fixture(autouse=True)
+def _isolate_jarvis_dir(monkeypatch):
+    """build_recent_turns() merges the heartbeat outbox from $JARVIS_DIR.
+    Pascal's shell exports JARVIS_DIR, so without this the tests read the real
+    production outbox and its 10 live check-ins evict the test fixtures from the
+    window. Unset it so build_recent_turns only sees the tmp_path session files.
+    """
+    monkeypatch.delenv("JARVIS_DIR", raising=False)
+
+
 def _write_session(session_dir: Path, sid: str, turns: list[dict]):
     path = session_dir / f"{sid}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
