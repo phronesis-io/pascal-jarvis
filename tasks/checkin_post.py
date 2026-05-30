@@ -133,7 +133,11 @@ def is_duplicate(new_topics: str, entries: list[dict]) -> bool:
 
 def main() -> int:
     message = sys.stdin.read().strip()
-    if not message or message == "HEARTBEAT_OK":
+    # Suppress on the silence sentinel even if the model wrapped it with a header
+    # line and/or trailing reasoning. A real check-in never contains this token,
+    # so a substring check is safe — and far more robust than an exact match,
+    # which leaked "🌿 关怀 / HEARTBEAT_OK + internal reasoning" cards to the user.
+    if not message or "HEARTBEAT_OK" in message:
         return 0
     if looks_like_error(message):
         print("[checkin] skipping — looks like error output", file=sys.stderr)
