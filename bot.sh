@@ -505,6 +505,7 @@ $(load_memory)"
         --resume "$session_id" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
+        --output-format json \
         2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     else
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
@@ -512,6 +513,7 @@ $(load_memory)"
         --session-id "$session_id" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
+        --output-format json \
         2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     fi
     _claude_pid=$!
@@ -588,7 +590,25 @@ for d in descs[offset:]:
     local _exit_code=$?
     kill $_watchdog_pid 2>/dev/null 2>&1; wait $_watchdog_pid 2>/dev/null
 
-    answer=$(cat "$ANSWER_FILE" 2>/dev/null)
+    # Extract the final assistant text from the --output-format json envelope:
+    # one object {"result": "<final text>", "subtype": "success", ...}. Parsing
+    # .result is immune to stdout pollution from a task-notification / sub-agent
+    # resume dump — the root cause of the 124k-char leak on 2026-05-30 (a
+    # background task completed mid-resume and its full envelope went to stdout,
+    # which the old `cat` blasted at the user). On any parse failure or non-
+    # success subtype we yield "" so the empty-answer retry path takes over.
+    answer=$(JV_AF="$ANSWER_FILE" python3 -c "
+import json, os, sys
+try:
+    obj = json.load(open(os.environ['JV_AF']))
+    r = obj.get('result')
+    if obj.get('subtype') == 'success' and isinstance(r, str):
+        sys.stdout.write(r)
+    elif isinstance(r, str):
+        sys.stdout.write(r)  # surface error text → looks_like_error filters it
+except Exception:
+    pass
+" 2>/dev/null)
     local _stderr_content
     _stderr_content=$(head -5 "${ANSWER_FILE}.stderr" 2>/dev/null | tr '\n' ' ')
 
