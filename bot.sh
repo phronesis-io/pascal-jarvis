@@ -650,6 +650,18 @@ for title, url in matches:
 
   log_info "[$session_id] Replied (${#reply} chars)"
 
+  # ── Oversized-reply guard ──
+  # A normal reply is at most a few thousand chars. Anything far larger means
+  # something leaked into stdout (e.g. a sub-agent's full report after a
+  # task-notification resume) — never blast that at the user. Cap, note, warn.
+  REPLY_MAX_CHARS=${REPLY_MAX_CHARS:-6000}
+  if [ "${#reply}" -gt "$REPLY_MAX_CHARS" ]; then
+    log_warn "[$session_id] Oversized reply (${#reply} chars) capped to $REPLY_MAX_CHARS — head: ${reply:0:200}"
+    reply="${reply:0:$REPLY_MAX_CHARS}
+
+…（回复过长已截断，可能是后台任务输出泄漏，已记录日志）"
+  fi
+
   # Remove the "working on it" reaction and send the real reply
   [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
   if ! lark_reply "$message_id" "$reply"; then
