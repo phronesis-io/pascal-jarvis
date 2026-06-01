@@ -2,6 +2,8 @@
 
 ## Done (recent)
 
+- Background jobs — long tasks run in independent Claude sessions with start/finish cards (`jobs` / `job output <id>` / `cancel <id>`)
+- NiceGUI dashboard (port 3457) — home, tasks, bookmarks, intentions, thinking stream, agent calendar, settings; SQLite-backed
 - 30-day calendar window (7d detailed + 8-30d compact, NBA schedule API)
 - Philosophical task system (praxis/poiesis capture → commit → decay)
 - Weekly review task
@@ -45,4 +47,4 @@
 | Mobile admin UI | Lark IS the mobile interface; admin is for desktop config |
 | Export/import | Git is the backup mechanism; memory files are plain markdown |
 | Multi-user support | This is a personal agent — one user, one bot, one config |
-| Database backend | Flat files (JSONL + markdown) are simpler, debuggable, git-friendly |
+| Database backend for memory | Memory stays flat files (JSONL + markdown) — simpler, debuggable, git-friendly. (The dashboard keeps its own SQLite store for bookmarks/cached views; core agent state does not.) |
