@@ -43,8 +43,9 @@ status() {
   fi
 
   # Bot
+  # PID file format is "PID BOOT_TIMESTAMP" — read only the first field.
   if [ -f "$BOT_PID_FILE" ]; then
-    bot_pid=$(cat "$BOT_PID_FILE" 2>/dev/null)
+    bot_pid=$(awk '{print $1}' "$BOT_PID_FILE" 2>/dev/null)
     if kill -0 "$bot_pid" 2>/dev/null; then
       green "  bot.sh:    running (PID $bot_pid)"
     else
@@ -87,9 +88,9 @@ kill_bot() {
 
   echo "Stopping bot.sh and children..."
 
-  # Kill by PID file first
+  # Kill by PID file first (format is "PID BOOT_TIMESTAMP" — read first field only)
   if [ -f "$BOT_PID_FILE" ]; then
-    bot_pid=$(cat "$BOT_PID_FILE" 2>/dev/null)
+    bot_pid=$(awk '{print $1}' "$BOT_PID_FILE" 2>/dev/null)
     if [ -n "$bot_pid" ] && kill -0 "$bot_pid" 2>/dev/null; then
       kill -TERM "$bot_pid" 2>/dev/null || true
     fi
