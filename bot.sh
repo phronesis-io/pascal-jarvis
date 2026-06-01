@@ -367,8 +367,29 @@ print(ap.process(os.environ['JV_REPLY']))
         if [ -n "$job_id" ]; then
           log_info "[bg:$job_id] Started via action: $bg_desc"
           run_background_job "$job_id" "$conv_key" "$bg_prompt" "$message_id" &
+          # Push a "started" card immediately so the user SEES the bg job kick
+          # off (the completion card comes later from run_background_job).
+          # Body via JV_BODY env to avoid shell expansion of backticks/$ —
+          # same safe pattern as the completion card below.
+          local _bg_start_body _bg_start_card
+          _bg_start_body="正在后台独立运行，不占用我们的对话；跑完我会把结果卡片发给你。
+
+**任务**：$bg_desc
+**Job ID**：\`$job_id\`
+
+查进度发「jobs」，查结果发「job output $job_id」，取消发「cancel $job_id」"
+          _bg_start_card=$(JV_BODY="$_bg_start_body" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.card import build_card
+print(build_card('🚀 后台任务已启动', os.environ['JV_BODY']))
+" 2>>"$LOG_FILE") || _bg_start_card=""
+          if [ -n "$_bg_start_card" ]; then
+            lark_send_card "$_bg_start_card"
+          else
+            send_to_lark "🚀 后台任务已启动：$bg_desc （Job $job_id）"
+          fi
           action_results="${action_results}
-⏳ Job ID: \`$job_id\`"
+🚀 已在后台启动：$bg_desc"
         fi
         ;;
 
@@ -519,7 +540,7 @@ $(load_memory)"
     _claude_pid=$!
     echo "$_claude_pid" > "$LOCK_FILE"
     # Live activity stream: poll session file every 20s, send new tool calls to user
-    # Also acts as watchdog: kills Claude after 600s
+    # Also acts as watchdog: kills Claude after 6000s
     (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
      # Snapshot current tool count so we only report NEW tools from this call
      _last_tool_count=$(python3 -c "
@@ -534,7 +555,7 @@ except: pass
 print(n)
 " 2>/dev/null || echo 0)
      _elapsed=0
-     while [ "$_elapsed" -lt 600 ]; do
+     while [ "$_elapsed" -lt 6000 ]; do
        sleep 20
        _elapsed=$((_elapsed + 20))
        if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
@@ -582,7 +603,7 @@ for d in descs[offset:]:
      # Watchdog timeout
      if kill -0 $_claude_pid 2>/dev/null; then
        kill $_claude_pid 2>/dev/null
-       log_warn "[$session_id] Claude killed by 600s watchdog"
+       log_warn "[$session_id] Claude killed by 6000s watchdog"
      fi
     ) &
     _watchdog_pid=$!
@@ -637,8 +658,13 @@ except Exception:
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      lark_reply_text "$message_id" \
-        "Claude 连续两次返回空响应（API 可能暂时不稳定）。请稍后重试。" >/dev/null
+      if [ "${_exit_code:-0}" -eq 143 ]; then
+        lark_reply_text "$message_id" \
+          "任务运行超过看门狗上限被中断（exit 143，不是 API 问题）。进度已存入 session，直接说「继续」即可接着干。" >/dev/null
+      else
+        lark_reply_text "$message_id" \
+          "Claude 连续两次返回空响应（API 可能暂时不稳定）。请稍后重试。" >/dev/null
+      fi
     else
       lark_reply_text "$message_id" \
         "Claude 的回复被安全过滤器拦截了（可能包含错误信息）。请换个方式重试。" >/dev/null
@@ -693,7 +719,11 @@ for title, url in matches:
 # Runs a Claude task in an independent session, notifies on completion.
 run_background_job() {
   local job_id="$1" conv_key="$2" content="$3" message_id="$4"
-  local bg_session_id="bg-${job_id}"
+  # claude CLI requires --session-id to be a valid UUID; the old "bg-<jobid>"
+  # scheme is rejected ("Invalid session ID. Must be a valid UUID.").
+  local bg_session_id
+  bg_session_id="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z')"
+  [ -z "$bg_session_id" ] && bg_session_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
   local output_file="$JOBS_DIR/${job_id}/output.md"
   local log_file_job="$JOBS_DIR/${job_id}/log.txt"
 
