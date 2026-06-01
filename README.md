@@ -68,6 +68,16 @@ Then restart jarvis.
 - With `lark.user_id` set → Lark bot live
 - Without → heartbeat-only mode (memory consolidation + EigenFlux still run)
 
+For day-to-day operation, use the helper instead of starting `bot.sh` by hand —
+it handles the single-instance lock, clears stale Python bytecode, and warns you
+before killing an in-flight conversation:
+
+```bash
+./restart.sh            # graceful restart of the bot (daemon stays up)
+./restart.sh --full     # restart both the guardian daemon and the bot
+./restart.sh --status   # show daemon / bot / lark-cli process status
+```
+
 ---
 
 ## What is this?
@@ -142,7 +152,8 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  ├── safety.py           — error-pattern filter             │
 │  ├── card.py             — Lark card message builder        │
 │  ├── timeutil.py         — timezone / time-range helpers    │
-│  └── jobs.py             — job queue utilities              │
+│  └── jobs.py             — background-job registry + runner │
+│  (+ actions, tasks, engagement, intentions, prompt, … )     │
 │                                                             │
 │  scripts/                         (ops & dev tools)         │
 │  ├── backup_sessions.sh  — daily session backup             │
@@ -335,6 +346,31 @@ if response == "HEARTBEAT_OK":
 - **Time-gated**: Pre-script checks `date +%H`, exits if outside window → task skipped entirely
 - **API-gated**: Pre-script calls an API, exits if no new data → task skipped until data appears
 
+## Background Jobs
+
+Long-running requests (deep research, multi-step builds) don't have to block the
+conversation. When a task would take a while, the bot can spin it off into an
+**independent background job** — a separate Claude session that runs in its own
+process and notifies you with a result card when it finishes. Your foreground
+chat stays responsive the whole time.
+
+From Lark you control jobs with three commands:
+
+| Command | What it does |
+|---|---|
+| `jobs` | List running/recent jobs with their status |
+| `job output <id>` | Show the full result of a job |
+| `cancel <id>` | Cancel a running job |
+
+When a job starts you get a "🚀 后台任务已启动" card with its `<id>`; when it
+finishes (or is killed by the watchdog) you get a completion card. Job state
+lives under `jobs/` (gitignored runtime data) and is managed by `core/jobs.py`.
+
+The key invariant — **one conversation = one session file = at most one Claude
+process at a time** — and how apparent parallelism is achieved across three
+separate execution lanes is documented in
+[docs/concurrency_and_bg_jobs.md](docs/concurrency_and_bg_jobs.md).
+
 ## Plugins
 
 Jarvis ships with **two built-in plugins** that are integrated at the system level. Each has a dedicated README with full setup, API, and troubleshooting.
@@ -467,9 +503,14 @@ Your content here.
 
 Types: `user`, `feedback`, `project`, `reference`
 
-## Admin Console
+## Admin Console & Dashboard
 
-A local web dashboard for browsing memories, searching session history, and viewing skills/settings.
+Two local web UIs ship with Jarvis, on adjacent ports:
+
+### Admin console — `admin.py` (port 3456)
+
+A lightweight console for browsing memories, searching session history, and
+viewing skills/settings.
 
 ```bash
 python3 admin.py
@@ -477,6 +518,20 @@ python3 admin.py
 ```
 
 Configure host/port in `jarvis.yaml` under the `admin:` section. Config-driven: it reads `memory_dir` and derives the sessions path from `work_dir`, so it always matches your bot's view.
+
+### Dashboard — `dashboard/` (port 3457)
+
+A richer [NiceGUI](https://nicegui.io) app with live pages for home, tasks,
+bookmarks, intentions, "thinking" stream, agent calendar, and settings. It keeps
+its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
+
+```bash
+./dashboard/start.sh             # foreground
+./dashboard/start.sh --bg        # background (daemonized)
+./dashboard/start.sh --status    # check if running → http://127.0.0.1:3457
+./dashboard/start.sh --stop      # stop the background process
+./dashboard/start.sh --install-launchd   # macOS auto-start on login
+```
 
 ## Troubleshooting
 
@@ -504,6 +559,19 @@ Configure host/port in `jarvis.yaml` under the `admin:` section. Config-driven: 
 ```bash
 python3 -m pytest tests/
 ```
+
+## Developer Documentation
+
+Deeper design notes live in [`docs/`](docs/):
+
+- [docs/design_task_system.md](docs/design_task_system.md) — the philosophical task
+  system (praxis/poiesis capture → commit → decay): data model, lifecycle, and rationale.
+- [docs/concurrency_and_bg_jobs.md](docs/concurrency_and_bg_jobs.md) — how the bot
+  stays responsive while running long tasks: the three execution lanes and the
+  one-conversation-one-session-file rule.
+
+Operational reference for the heartbeat tasks themselves lives in `HEARTBEAT.md`;
+the roadmap and explicitly-out-of-scope ideas are in `TODO.md`.
 
 ## License
 
