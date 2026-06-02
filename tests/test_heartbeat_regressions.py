@@ -39,6 +39,33 @@ def test_heartbeat_ok_exact_match_passes_through():
     assert "HEARTBEAT_OK" == "HEARTBEAT_OK".strip()
 
 
+# ── Dangling-placeholder guard (2026-06-02 broken EigenFlux 撞名 card) ────
+
+
+@pytest.mark.parametrize("body", [
+    # The actual broken card: hook ending on a bare ellipsis, no payload.
+    "**📡 EigenFlux**\n\n💡 **撞名预警**\n\n刚发现一个同名先发项目已经占位了：\n\n...",
+    "Something interesting surfaced:\n…",          # unicode ellipsis
+    "线索：\n．．．",                                  # fullwidth dots
+    "hook with no body:\n...   ",                   # trailing whitespace tolerated
+])
+def test_dangling_placeholder_detected(body):
+    from core.heartbeat import _is_dangling_placeholder
+    assert _is_dangling_placeholder(body) is True
+
+
+@pytest.mark.parametrize("body", [
+    "完整的一条消息，正常结尾。",
+    "Here's the finding: github.com/foo/bar collides with your project.",
+    "三个要点：\n1. A\n2. B\n3. C",
+    "He trailed off... but then finished the thought on this same line.",
+    "结尾有省略号但后面还有字……所以不算残卡。",
+])
+def test_complete_message_not_flagged(body):
+    from core.heartbeat import _is_dangling_placeholder
+    assert _is_dangling_placeholder(body) is False
+
+
 def test_heartbeat_ok_substring_in_json_not_discarded(tmp_path, monkeypatch):
     """A JSON envelope containing 'HEARTBEAT_OK' as a per-task value
     must NOT cause the entire response to be discarded.

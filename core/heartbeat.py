@@ -30,6 +30,26 @@ def parse_interval(s: str) -> int:
     return val * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
 
 
+def _is_dangling_placeholder(text: str) -> bool:
+    """True if a heartbeat teases a hook but never delivers the payload.
+
+    The 2026-06-02 EigenFlux 撞名 card ended on a bare '...' line: the
+    generator wrote a hook ("…just found a same-name project:") and the body
+    after it was never filled in. Such "wolf!" messages create anxiety with
+    zero information, so the send gate drops them rather than deliver a
+    half-baked card.
+
+    Detection is deliberately narrow to avoid false positives: the LAST
+    non-empty line must consist solely of an ellipsis (ASCII '...', the '…'
+    char, or fullwidth '．．．'). A real message almost never ends on a line
+    that is nothing but dots.
+    """
+    last_line = next(
+        (ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), ""
+    )
+    return bool(re.fullmatch(r"\.{3,}|…+|．{3,}", last_line))
+
+
 def parse_heartbeat(path: str | Path) -> list[dict]:
     """Parse HEARTBEAT.md into task definitions."""
     text = Path(path).read_text(encoding="utf-8")
@@ -545,6 +565,12 @@ You have access to the user's memory below. Use it to personalize your responses
                     continue
                 except json.JSONDecodeError:
                     pass
+            # Drop dangling-placeholder heartbeats: a hook with no payload
+            # (last line is a bare ellipsis). See _is_dangling_placeholder /
+            # the 2026-06-02 broken EigenFlux 撞名 card.
+            if _is_dangling_placeholder(m):
+                self._log(f"Blocked incomplete placeholder heartbeat: {m[:80]!r}")
+                continue
             texts.append(m)
 
         combined_parts = []
