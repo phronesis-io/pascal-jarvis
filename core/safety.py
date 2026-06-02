@@ -84,6 +84,34 @@ def extract_json(raw: str) -> str:
     return cleaned
 
 
+def salvage_field(raw: str, field: str = "user_message"):
+    """Best-effort extract a string field's value from broken JSON.
+
+    Models sometimes emit invalid JSON by using unescaped ASCII double-quotes
+    inside a string value (common in Chinese, e.g. `不是"放下"`), which makes
+    `json.loads` fail. Rather than dumping the raw JSON object to the user
+    (leaking system fields like auto_decay), recover just the human-facing
+    value by anchoring on the next JSON key or the closing brace.
+
+    Returns the value string, or None if the field isn't present.
+    """
+    import re
+    m = re.search(
+        r'"' + re.escape(field) + r'"\s*:\s*"(.*?)"\s*(?:,\s*"\w+"\s*:|\}\s*$)',
+        raw,
+        re.DOTALL,
+    )
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def salvage_task_ids(raw: str):
+    """Extract all task_id values from broken JSON so decay still applies."""
+    import re
+    return re.findall(r'"task_id"\s*:\s*"([^"]+)"', raw)
+
+
 def atomic_write(path, content: str, encoding: str = "utf-8"):
     """Write content to path atomically via tmp + rename.
 

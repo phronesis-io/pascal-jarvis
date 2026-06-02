@@ -735,6 +735,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
       "user_message": "<markdown, or empty if nothing to say>",
       "auto_decay": [{"task_id": "<id>", "reason": "<brief>"}]
     }
+    JSON MUST be valid: inside string values never use bare ASCII double
+    quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
     If nothing needs attention: HEARTBEAT_OK
 
 ### weekly-review
@@ -782,4 +784,6 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
         {"action": "defer", "task_id": "...", "to_date": "..."}
       ]
     }
+    JSON MUST be valid: inside string values never use bare ASCII double
+    quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
     Or HEARTBEAT_OK if truly nothing to review.

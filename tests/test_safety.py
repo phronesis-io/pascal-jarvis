@@ -1,6 +1,14 @@
 """Tests for core.safety — error pattern detection."""
 
-from core.safety import ERROR_PATTERNS, ERROR_SUBSTRINGS, extract_json, looks_like_error, sanitize_for_user
+from core.safety import (
+    ERROR_PATTERNS,
+    ERROR_SUBSTRINGS,
+    extract_json,
+    looks_like_error,
+    salvage_field,
+    salvage_task_ids,
+    sanitize_for_user,
+)
 
 
 def test_empty_is_error():
@@ -102,3 +110,45 @@ def test_sanitize_returns_fallback_for_errors():
 def test_sanitize_returns_original_for_safe():
     safe = "Real reply from Claude."
     assert sanitize_for_user(safe) == safe
+
+
+# --- salvage from broken JSON (unescaped inner quotes) -----------------------
+
+# The real-world failure: model put bare ASCII quotes inside the value, so
+# json.loads raises and the old code dumped the whole object to the user.
+BROKEN = (
+    '{\n"user_message": "三个 PGC 项可以归档了——不是"放下"，是"已经做完了"。",\n'
+    '"auto_decay": [\n'
+    '{"task_id": "t_20260531_001", "reason": "上线完成"},\n'
+    '{"task_id": "t_20260531_002", "reason": "分支已并 main"}\n]\n}'
+)
+
+
+def test_broken_json_is_unparseable():
+    import json
+    try:
+        json.loads(extract_json(BROKEN))
+        assert False, "expected JSONDecodeError"
+    except json.JSONDecodeError:
+        pass
+
+
+def test_salvage_field_recovers_message_with_inner_quotes():
+    msg = salvage_field(BROKEN, "user_message")
+    assert msg.startswith("三个 PGC")
+    assert '"放下"' in msg  # inner quotes preserved
+    assert "已经做完了" in msg
+    assert "auto_decay" not in msg  # stops before the next key
+
+
+def test_salvage_task_ids_recovers_all_ids():
+    assert salvage_task_ids(BROKEN) == ["t_20260531_001", "t_20260531_002"]
+
+
+def test_salvage_field_missing_returns_none():
+    assert salvage_field('{"other": "x"}', "user_message") is None
+
+
+def test_salvage_field_handles_value_at_end():
+    raw = '{"user_message": "结束语带"引号"。"}'
+    assert salvage_field(raw, "user_message") == '结束语带"引号"。'
