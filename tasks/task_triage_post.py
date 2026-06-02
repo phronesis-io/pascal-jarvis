@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.tasks import TaskManager
 from core.card import build_card
-from core.safety import extract_json, looks_like_error
+from core.safety import extract_json, looks_like_error, salvage_field, salvage_task_ids
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 
@@ -27,10 +27,20 @@ def main() -> int:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # If Claude returned plain text instead of JSON, just forward as message
-        if len(raw) > 10 and "HEARTBEAT_OK" not in raw:
-            print(build_card("📋 任务提醒", raw, source="task-triage"))
-        return 0
+        # Broken JSON — most often the model used unescaped quotes inside a
+        # string value. If this is clearly the structured object, salvage the
+        # human message + decay ids (never dump raw JSON: it leaks auto_decay).
+        if '"user_message"' in raw or '"auto_decay"' in raw:
+            data = {
+                "user_message": salvage_field(raw, "user_message") or "",
+                "auto_decay": [{"task_id": t, "reason": ""} for t in salvage_task_ids(raw)],
+            }
+        elif len(raw) > 10 and "HEARTBEAT_OK" not in raw:
+            # Genuine plain-text response → forward as a message
+            print(build_card("📋 任务", raw, source="task-triage"))
+            return 0
+        else:
+            return 0
 
     tm = TaskManager(MEMORY_DIR)
 
