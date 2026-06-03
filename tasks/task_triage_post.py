@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Post-hook: apply triage decisions (decay stale items, notify user)."""
-import json
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.tasks import TaskManager
 from core.card import build_card
-from core.safety import extract_json, looks_like_error, salvage_field, salvage_task_ids
+from core.safety import looks_like_error, parse_json_response, salvage_field, salvage_task_ids
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 
@@ -21,12 +19,8 @@ def main() -> int:
     if looks_like_error(raw):
         return 0
 
-    # Try to parse JSON response (handles code fences + trailing text)
-    cleaned = extract_json(raw)
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
+    data = parse_json_response(raw)
+    if data is None:
         # Broken JSON — most often the model used unescaped quotes inside a
         # string value. If this is clearly the structured object, salvage the
         # human message + decay ids (never dump raw JSON: it leaks auto_decay).

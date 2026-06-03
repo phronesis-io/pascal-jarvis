@@ -84,6 +84,44 @@ def extract_json(raw: str) -> str:
     return cleaned
 
 
+def parse_json_response(raw: str):
+    """Extract and parse a JSON *object* from a Claude response.
+
+    This folds together the boilerplate every heartbeat post-hook was
+    duplicating: extract_json() to peel off code fences / preamble, then
+    json.loads(). Returns the parsed dict, or None if the payload is empty,
+    isn't valid JSON, or doesn't parse to an object.
+
+    Never raises. On a None return, callers decide what to do with the raw
+    string — suppress it, forward it as plain text, or recover a human message
+    from *broken* JSON via salvage_field()/salvage_task_ids() (see
+    task_triage_post / weekly_review_post). Centralizing the happy path here is
+    what keeps "never dump raw JSON to the user" a single decision instead of
+    one reimplemented per file.
+    """
+    import json
+    if not raw or not raw.strip():
+        return None
+    try:
+        result = json.loads(extract_json(raw))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def summarize(text: str, max_lines: int = 4) -> str:
+    """First `max_lines` lines of `text`, with a trailing "..." if truncated.
+
+    The canonical card-summary truncation shared by every rich-card post-hook
+    (phronesis, eigenflux, weekly_review, daily_plan, daily_reflect, ...).
+    """
+    lines = text.strip().splitlines()
+    summary = "\n".join(lines[:max_lines])
+    if len(lines) > max_lines:
+        summary += "\n..."
+    return summary
+
+
 def salvage_field(raw: str, field: str = "user_message"):
     """Best-effort extract a string field's value from broken JSON.
 
