@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from core.card import extract_card_text, extract_readable_from_output
+from core.card import extract_card_text, extract_readable_from_output, linkify_bare_urls
 from core.heartbeat import HeartbeatRunner
 from core.log import log
 from core.safety import looks_like_error
@@ -66,6 +66,7 @@ def _lark_send_text(text: str, user_id: str) -> bool:
     """Send plain text to Lark."""
     if not user_id or not text:
         return False
+    text = linkify_bare_urls(text)
     try:
         r = subprocess.run(
             ["lark-cli", "im", "+messages-send",

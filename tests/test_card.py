@@ -2,7 +2,35 @@
 
 import json
 
-from core.card import build_card, extract_card_text, extract_readable_from_output
+from core.card import build_card, extract_card_text, extract_readable_from_output, linkify_bare_urls
+
+
+def test_linkify_bare_url():
+    out = linkify_bare_urls("看这个 https://www.youtube.com/watch?v=SJYj57TUKjc 不错")
+    assert "[🔗 youtube.com](https://www.youtube.com/watch?v=SJYj57TUKjc)" in out
+
+
+def test_linkify_leaves_existing_markdown_links():
+    src = "见 [原文](https://dev.to/x) 和 https://arxiv.org/abs/1"
+    out = linkify_bare_urls(src)
+    assert out.count("[原文](https://dev.to/x)") == 1  # untouched, not double-wrapped
+    assert "[🔗 arxiv.org](https://arxiv.org/abs/1)" in out
+
+
+def test_linkify_preserves_trailing_punctuation():
+    out = linkify_bare_urls("链接：https://example.com。")
+    assert "(https://example.com)" in out  # period not swallowed into URL
+    assert out.rstrip().endswith("。")
+
+
+def test_linkify_noop_without_url():
+    assert linkify_bare_urls("没有链接的纯文本") == "没有链接的纯文本"
+
+
+def test_build_card_linkifies_body():
+    result = build_card("H", "watch https://youtu.be/abc now")
+    card = json.loads(result)
+    assert "[🔗 youtu.be](https://youtu.be/abc)" in card["elements"][0]["text"]["content"]
 
 
 def test_build_card_basic():
