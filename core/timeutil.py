@@ -68,6 +68,41 @@ def now_local_str(fmt: str = "%Y-%m-%d %H:%M") -> str:
     return now_local().strftime(fmt)
 
 
+_ZH_WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def _zh_weekday(dt: datetime) -> str:
+    return _ZH_WEEKDAYS[dt.weekday()]
+
+
+def msg_timestamp_prefix() -> str:
+    """Inline timestamp to prepend to an incoming user message body.
+
+    Why: the authoritative 'Current time' is injected once at session start
+    and into the system prompt, but the user's message body itself carries no
+    time. In a long, all-day conversation (mixed with heartbeat cards and
+    quoted old cards) Claude can anchor on a stale in-conversation timestamp.
+    Prefixing each incoming message with the *real* current time fixes that.
+
+    Home (system TZ == Asia/Shanghai): single clean line
+        '[2026-06-03 10:12 周三]'
+    Abroad (system TZ != Shanghai, e.g. Mac auto-switched): dual display
+        '[当地 06-03 09:00 周三 / 上海 22:00]'
+    Shanghai is always shown when abroad so nothing drifts vs the calendar.
+    """
+    local = now_local()
+    # Single-line at home, or whenever TZ detection failed (safe default).
+    if _TZ_NAME == "Asia/Shanghai" or _LOCAL_TZ is None:
+        return f"[{local.strftime('%Y-%m-%d %H:%M')} {_zh_weekday(local)}]"
+    try:
+        from zoneinfo import ZoneInfo
+        sh = local.astimezone(ZoneInfo("Asia/Shanghai"))
+        return (f"[当地 {local.strftime('%m-%d %H:%M')} {_zh_weekday(local)}"
+                f" / 上海 {sh.strftime('%H:%M')}]")
+    except Exception:
+        return f"[{local.strftime('%Y-%m-%d %H:%M')} {_zh_weekday(local)}]"
+
+
 def system_tz_name() -> str | None:
     """Expose the detected IANA timezone name (for diagnostics)."""
     return _TZ_NAME

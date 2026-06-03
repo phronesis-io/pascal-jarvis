@@ -462,6 +462,17 @@ handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
   local reaction_id="$5"
 
+  # Prepend an authoritative current-time line to the user's message body.
+  # The system prompt already carries 'Current time', but the message body
+  # itself has none — in a long all-day thread Claude can anchor on a stale
+  # in-conversation timestamp. Single line at home (Shanghai), dual when abroad.
+  local msg_ts
+  msg_ts=$(python3 -c "import os,sys; sys.path.insert(0,os.environ['JARVIS_DIR']); from core.timeutil import msg_timestamp_prefix; print(msg_timestamp_prefix())" 2>>"$LOG_FILE")
+  if [ -n "$msg_ts" ]; then
+    content="$msg_ts
+$content"
+  fi
+
   # Build system prompt with memory + recent turns (delegated to core/prompt.py)
   local sys_prompt
   sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
