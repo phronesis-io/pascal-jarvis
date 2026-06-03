@@ -130,7 +130,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  │   ├── Audio → download + Whisper transcribe              │
 │  │   ├── Files/video/sticker/card/location → parse + desc   │
 │  │   ├── Quote replies → fetch parent + prepend context     │
-│  │   └── Auto-retry on empty response (2 attempts)          │
+│  │   └── Auto-retry on empty response (4 attempts, silent) │
 │  ├── Heartbeat loop (background) → core/heartbeat_loop.py   │
 │  │   ├── Parse HEARTBEAT.md                                 │
 │  │   ├── Run pre-scripts (gather data)                      │
