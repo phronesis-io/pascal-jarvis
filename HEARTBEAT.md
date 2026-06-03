@@ -124,13 +124,29 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - post: tasks/eigenflux_publish_post.py
 - prompt: |
     [EIGENFLUX RECURRING PUBLISH]
-    Based on our conversation history, do you have any useful signal worth broadcasting?
+    DEFAULT IS SILENCE. Publishing almost nothing is the correct, expected outcome.
+    Most cycles → {"should_publish":false}. Do NOT hunt for something to say.
 
-    Quality bar (ALL must be met):
-    1. SPECIFIC — concrete names, numbers, URLs, or findings. Never vague ("AI is evolving fast").
-    2. ORIGINAL — leverage your unique position: EigenFlux dogfooding insights, 3200-node network operations, harness engineering, post-training expertise. Generic news anyone can Google = skip.
-    3. ACTIONABLE — reader can act on it: try tool X, apply technique Y, avoid pitfall Z, compare approach A vs B.
-    4. CONCISE — 2-4 sentences, dense with signal. No filler, no self-promotion.
+    ONLY publish a genuine SUPPLY or DEMAND that is concretely tied to Pascal /
+    EigenFlux's REAL current situation (read his memory: projects, team needs,
+    EigenFlux roadmap, what he's hiring for, what capability we can offer):
+    - SUPPLY: a real capability/resource WE can actually provide to other agents
+      right now (e.g. EigenFlux network access, a dataset/tool we own, expertise
+      we'll actually deliver on).
+    - DEMAND: a specific collaboration / hire / expertise / data source WE are
+      actually looking for right now.
+
+    HARD BAN — do NOT broadcast "info": no relaying papers, news, benchmarks,
+    findings, or "interesting things we read" (that arXiv 'Economy of Minds'
+    broadcast was exactly this mistake). Reading something interesting is NEVER
+    a reason to broadcast. Inbound info belongs in feed-triage, not outbound.
+
+    Quality bar for a supply/demand (ALL must be met):
+    1. RELEVANT TO PASCAL — it maps to a real, current need or offering in his
+       memory. If you can't point to the specific project/need, don't publish.
+    2. SPECIFIC — concrete ask/offer with names, numbers, scope. Never vague.
+    3. ACTIONABLE — another agent can respond with a concrete supply/demand match.
+    4. CONCISE — 2-4 sentences, dense. No filler, no self-promotion, no thought-leadership.
 
     DEDUP rule: The DATA section lists RECENT BROADCASTS. Do NOT publish anything that overlaps
     with a topic already broadcast in the last 7 days. One topic = one broadcast, period.
@@ -152,10 +168,9 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     publish the abstract principle WITHOUT our internal numbers, dashboards, or stack.
     When unsure whether something is "our ops" vs "a network principle" → don't publish.
 
-    Type selection:
-    - "info": sharing a finding, benchmark, or technique
-    - "supply": offering a capability or resource others can use
-    - "demand": seeking specific collaboration, feedback, or expertise
+    Type selection (only these two — "info" is banned):
+    - "supply": offering a capability or resource WE can actually deliver
+    - "demand": seeking specific collaboration, hire, data, or expertise WE actually need
 
     CRITICAL: URL FORMAT RULE
     When your content references any URL (papers, articles, sources, links):
@@ -170,8 +185,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     user can open the source even if you forgot to embed it in content. Use an
     empty string only if the broadcast genuinely has no source.
 
-    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"info|supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
-    If nothing meets the bar, return {"should_publish":false}
+    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    If nothing meets the bar (the usual case), return {"should_publish":false}
 
 ### eigenflux-profile
 - interval: 24h

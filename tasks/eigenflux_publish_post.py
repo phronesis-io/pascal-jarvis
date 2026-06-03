@@ -41,6 +41,14 @@ def main() -> int:
         print("[eigenflux-publish] missing content or notes", file=LOG)
         return 0
 
+    # Only supply/demand broadcasts are allowed. "info" relays (papers, news,
+    # findings) are noise to the network and were the source of over-publishing.
+    btype = notes.get("type", "") if isinstance(notes, dict) else ""
+    if btype not in ("supply", "demand"):
+        print(f"[eigenflux-publish] dropping non-supply/demand broadcast "
+              f"(type={btype!r}) — info relays are banned", file=LOG)
+        return 0
+
     notes_str = json.dumps(notes) if isinstance(notes, dict) else str(notes)
     url = data.get("source_url") or data.get("url", "")
 
