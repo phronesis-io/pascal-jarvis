@@ -53,6 +53,31 @@ def _extract_json(raw: str) -> dict | None:
     return None
 
 
+# Bare status / ack tokens an internal "prompt"-type intent may report as its
+# result (e.g. "sent"). These are for the log, never a user-facing card.
+_STATUS_TOKENS = {
+    "sent", "done", "ok", "okay", "noted", "hello", "hi", "hey",
+    "success", "succeeded", "completed", "complete", "executed", "executing",
+    "notified", "silent", "notify", "chain", "failed", "none", "null", "n/a",
+    "已发送", "已发", "发送成功", "完成", "已完成", "好的", "收到", "无", "成功",
+}
+
+
+def _is_contentless(response: str) -> bool:
+    """True if response is a bare status/ack token with no real content.
+
+    Internal "prompt"-type intents sometimes report a status word like "sent";
+    those must never be joined into a user-facing card. Real notifications and
+    calendar preps are always full sentences, so this only catches degenerate
+    one-token outputs — it won't suppress legitimate short messages with
+    actual substance.
+    """
+    s = response.strip().strip(".。!！?？ \t\n").lower()
+    if not s:
+        return True
+    return s in _STATUS_TOKENS
+
+
 def _resolve_single_triggered_id() -> str:
     """Find the only currently-triggered intent (single-intent fallback path).
 
@@ -73,7 +98,7 @@ def _apply_action(intent_id: str, response: str, action: str,
         return
     # notify | silent | chain | (anything else) → executed
     mark_executed(intent_id, result=response)
-    if action != "silent" and response:
+    if action != "silent" and response and not _is_contentless(response):
         user_messages.append(response)
 
 
@@ -88,9 +113,17 @@ def main():
         # Never emit raw JSON to the user.
         print("[intentions_post] Non-JSON response. "
               "Stuck intents will auto-reset.", file=sys.stderr)
-        # Strip anything that looks like JSON from the output
-        text = re.sub(r'\{[^{}]*\}', '', raw).strip()
-        if text:
+        # If it's a malformed intents envelope (e.g. {"intents": {"id": , ...}}),
+        # bail entirely — stripping braces would still leak fragments. The
+        # stale-triggered sweeper recovers the intents.
+        if '"intents"' in raw or '"response"' in raw or raw.lstrip().startswith('{'):
+            print("[intentions_post] Looks like malformed JSON envelope — "
+                  "suppressing to avoid leaking raw JSON to the user.",
+                  file=sys.stderr)
+            return
+        # Strip simple {...} blobs (incl. nested) from otherwise-prose output.
+        text = re.sub(r'\{.*\}', '', raw, flags=re.DOTALL).strip()
+        if text and not _is_contentless(text):
             print(build_card("🎯 Intent", text, source="intentions"))
         return
 
@@ -132,7 +165,7 @@ def main():
                   "cannot resolve target ID. Stale-triggered sweeper will recover.",
                   file=sys.stderr)
             resp = data.get("response", "")
-            if resp and data.get("action") != "silent":
+            if resp and data.get("action") != "silent" and not _is_contentless(resp):
                 user_messages.append(resp)
 
     if user_messages:
