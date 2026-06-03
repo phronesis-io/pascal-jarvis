@@ -94,9 +94,13 @@ def test_archive_old_entries(tmp_path):
     tl = tmp_path / "timeline"
     tl.mkdir()
     (tmp_path / "system").mkdir()
-    # Write entries: one recent, one old
+    # Dates relative to *today* so the test doesn't rot once a hardcoded
+    # "recent" date drifts past the 14-day archive threshold.
+    from datetime import date, timedelta
+    recent = (date.today() - timedelta(days=2)).strftime("%Y-%m-%d")
+    old = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
     (tl / "daily_log.md").write_text(
-        "## 2026-04-01\n- very old entry\n\n## 2026-05-16\n- recent entry\n"
+        f"## {old}\n- very old entry\n\n## {recent}\n- recent entry\n"
     )
     result = _run("- Today's summary", tmp_path)
     assert result.returncode == 0
