@@ -434,9 +434,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     For EACH intent, execute its prompt using its context to produce a response.
 
     For "notify" action_type intents: write a user-facing message in Chinese.
-    For "prompt" action_type intents: this is an internal action, execute and report result.
+    For "prompt" action_type intents: this is an INTERNAL action. Execute it, then
+    set action to "silent" — the result is for the log, NOT the user. Never surface
+    a bare status word ("sent", "done", "ok") as a notify response.
     For calendar-prep intents: check the user's memory for relevant context about the event,
     then write a concise prep reminder (what to prepare, what to remember, relevant context).
+
+    Each response must be a real, full-sentence message the user can act on, or else
+    action: silent. Do NOT emit one-word acknowledgements as notify cards.
 
     Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain"}}}
     If no intents need attention, reply HEARTBEAT_OK.
