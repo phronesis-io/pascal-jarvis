@@ -7,12 +7,11 @@ Stdout: empty (this is a silent background task, no user message).
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import extract_json, looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -28,18 +27,9 @@ def main() -> int:
         return 0
 
     # Parse Claude's response — expect JSON with insights and adaptations
-    cleaned = extract_json(raw)
-
-    # Try to extract JSON from the response
-    json_start = cleaned.find("{")
-    json_end = cleaned.rfind("}")
-    if json_start >= 0 and json_end > json_start:
-        cleaned = cleaned[json_start : json_end + 1]
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        print(f"[engagement-analyze] failed to parse JSON response", file=sys.stderr)
+    data = parse_json_response(raw)
+    if data is None:
+        print("[engagement-analyze] failed to parse JSON response", file=sys.stderr)
         return 0
 
     insights = data.get("insights", "")

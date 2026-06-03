@@ -2,7 +2,6 @@
 """Post-hook: publish to EigenFlux via CLI if Claude decided to."""
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -10,7 +9,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import extract_json
+from core.safety import parse_json_response
 from core.card import build_card
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
@@ -23,13 +22,9 @@ def main() -> int:
     if not raw:
         return 0
 
-    raw = re.sub(r'^```json?\s*', '', raw)
-    raw = re.sub(r'```\s*$', '', raw)
-
-    try:
-        data = json.loads(extract_json(raw))
-    except json.JSONDecodeError as e:
-        print(f"[eigenflux-publish] JSON parse failed: {e}", file=LOG)
+    data = parse_json_response(raw)
+    if data is None:
+        print("[eigenflux-publish] JSON parse failed", file=LOG)
         return 0
 
     if not data.get("should_publish"):

@@ -5,14 +5,13 @@ Stdin: Claude's response (JSON with reply_actions and user_message).
 Stdout: user_message (forwarded to Pascal via Lark) or empty if nothing to send.
 """
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import looks_like_error
+from core.safety import looks_like_error, parse_json_response
 
 
 def main() -> int:
@@ -23,19 +22,7 @@ def main() -> int:
         print("[eigenflux-messages] skipping — looks like error output", file=sys.stderr)
         return 0
 
-    # Try to parse as JSON — with fallback substring extraction
-    try:
-        data = json.loads(message)
-    except json.JSONDecodeError:
-        start = message.find('{')
-        end = message.rfind('}')
-        if start >= 0 and end > start:
-            try:
-                data = json.loads(message[start:end + 1])
-            except json.JSONDecodeError:
-                data = None
-        else:
-            data = None
+    data = parse_json_response(message)
     if data is None:
         # Never emit raw JSON — only pass through human-readable text
         import re

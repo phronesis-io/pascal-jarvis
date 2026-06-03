@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
@@ -85,17 +85,14 @@ def main() -> int:
         return 0
 
     # Parse JSON envelope: {"digest": "...", "user_message": "..."}
+    # Not JSON → envelope is None, treat raw as a plain digest (backward compatible).
     user_message = ""
-    import json as _json
-    try:
-        envelope = _json.loads(raw)
-        if isinstance(envelope, dict) and "digest" in envelope:
-            user_message = envelope.get("user_message", "").strip()
-            raw = envelope["digest"].strip()
-            if not raw:
-                return 0
-    except (_json.JSONDecodeError, TypeError):
-        pass  # Not JSON — treat raw as plain digest (backward compatible)
+    envelope = parse_json_response(raw)
+    if envelope is not None and "digest" in envelope:
+        user_message = envelope.get("user_message", "").strip()
+        raw = envelope["digest"].strip()
+        if not raw:
+            return 0
 
     # If there's a user-facing message, print to stdout (sent to Lark)
     if user_message:

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import extract_json, looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -30,21 +30,7 @@ def main() -> int:
         return 0
 
     # Parse Claude's response — expect JSON with url, title, user_message
-    cleaned = extract_json(raw)
-
-    # Try to find JSON substring if direct parse fails
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find('{')
-        end = cleaned.rfind('}')
-        if start >= 0 and end > start:
-            try:
-                data = json.loads(cleaned[start:end + 1])
-            except json.JSONDecodeError:
-                data = None
-        else:
-            data = None
+    data = parse_json_response(raw)
     if data is None:
         # Claude returned plain text instead of JSON. Extract URL if present
         # and build a card with a clickable button.
