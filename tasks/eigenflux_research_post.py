@@ -2,13 +2,12 @@
 """Post-hook: process research decisions, clear queue, output actionable items as card."""
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card, build_rich_card
-from core.safety import extract_json
+from core.safety import parse_json_response, summarize
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 RESEARCH_QUEUE = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"
@@ -21,13 +20,9 @@ def main() -> int:
     if not raw or "HEARTBEAT_OK" in raw:
         return 0
 
-    raw = re.sub(r'^```json?\s*', '', raw)
-    raw = re.sub(r'```\s*$', '', raw)
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[eigenflux-research] JSON parse failed: {e}", file=LOG)
+    data = parse_json_response(raw)
+    if data is None:
+        print("[eigenflux-research] JSON parse failed", file=LOG)
         return 0
 
     decisions = data.get("decisions", [])
@@ -61,13 +56,9 @@ def main() -> int:
     # Output user message as card (only for items decided as "push")
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        summary_lines = msg.strip().splitlines()[:4]
-        summary = "\n".join(summary_lines)
-        if len(msg.strip().splitlines()) > 4:
-            summary += "\n..."
         print(build_rich_card(
             header="📡 EigenFlux 深度",
-            summary=summary,
+            summary=summarize(msg),
             sections=[{"type": "markdown", "content": msg}],
             meta={"source": "eigenflux_research"},
         source="eigenflux-research",

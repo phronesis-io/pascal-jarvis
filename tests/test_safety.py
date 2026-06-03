@@ -5,9 +5,11 @@ from core.safety import (
     ERROR_SUBSTRINGS,
     extract_json,
     looks_like_error,
+    parse_json_response,
     salvage_field,
     salvage_task_ids,
     sanitize_for_user,
+    summarize,
 )
 
 
@@ -152,3 +154,69 @@ def test_salvage_field_missing_returns_none():
 def test_salvage_field_handles_value_at_end():
     raw = '{"user_message": "结束语带"引号"。"}'
     assert salvage_field(raw, "user_message") == '结束语带"引号"。'
+
+
+# --- parse_json_response (the shared extract+loads boundary) ------------------
+
+
+def test_parse_json_response_plain_object():
+    assert parse_json_response('{"user_message": "hi"}') == {"user_message": "hi"}
+
+
+def test_parse_json_response_code_fence_and_trailing():
+    raw = '```json\n{"a": 1}\n```\n\nHere is why.'
+    assert parse_json_response(raw) == {"a": 1}
+
+
+def test_parse_json_response_preamble():
+    assert parse_json_response('Sure!\n{"a": 1}\nDone.') == {"a": 1}
+
+
+def test_parse_json_response_empty_is_none():
+    assert parse_json_response("") is None
+    assert parse_json_response("   \n ") is None
+
+
+def test_parse_json_response_broken_is_none():
+    # Unescaped inner quotes — callers fall back to salvage_field on None.
+    assert parse_json_response(BROKEN) is None
+
+
+def test_parse_json_response_non_object_is_none():
+    # A bare list/string/number is valid JSON but not the expected envelope;
+    # returning None keeps callers' `.get(...)` from blowing up on a non-dict.
+    assert parse_json_response('[1, 2, 3]') is None
+    assert parse_json_response('"just a string"') is None
+    assert parse_json_response('42') is None
+
+
+def test_parse_json_response_plain_text_is_none():
+    assert parse_json_response("好的，已经记下了。") is None
+
+
+# --- summarize (the shared card-summary truncation) --------------------------
+
+
+def test_summarize_short_text_unchanged():
+    assert summarize("line1\nline2") == "line1\nline2"
+
+
+def test_summarize_exactly_max_lines_no_ellipsis():
+    text = "\n".join(f"l{i}" for i in range(4))
+    assert summarize(text) == text
+    assert not summarize(text).endswith("...")
+
+
+def test_summarize_truncates_with_ellipsis():
+    text = "\n".join(f"l{i}" for i in range(10))
+    result = summarize(text)
+    assert result == "l0\nl1\nl2\nl3\n..."
+
+
+def test_summarize_respects_max_lines_arg():
+    text = "\n".join(f"l{i}" for i in range(5))
+    assert summarize(text, max_lines=2) == "l0\nl1\n..."
+
+
+def test_summarize_strips_surrounding_whitespace():
+    assert summarize("\n\n  hello  \n\n") == "hello"

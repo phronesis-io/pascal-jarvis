@@ -15,7 +15,6 @@ Fallbacks:
     executed (the stale-triggered sweeper in intentions_pre.sh will recover).
 """
 
-import json
 import re
 import sys
 from pathlib import Path
@@ -25,32 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.intentions import mark_executed, mark_failed, list_intents
 from core.card import build_card
-from core.safety import extract_json
-
-
-def _extract_json(raw: str) -> dict | None:
-    """Try to extract a JSON object from raw text that may contain preamble or markdown."""
-    # 1. Direct parse
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    # 2. Strip markdown code fences
-    cleaned = re.sub(r'^```json?\s*', '', raw.strip())
-    cleaned = re.sub(r'```\s*$', '', cleaned.strip())
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    # 3. Find JSON substring (handles preamble text from Claude)
-    start = cleaned.find('{')
-    end = cleaned.rfind('}')
-    if start >= 0 and end > start:
-        try:
-            return json.loads(cleaned[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+from core.safety import parse_json_response
 
 
 # Bare status / ack tokens an internal "prompt"-type intent may report as its
@@ -107,7 +81,7 @@ def main():
     if not raw:
         return
 
-    data = _extract_json(raw)
+    data = parse_json_response(raw)
     if data is None:
         # Plain text with no extractable JSON — emit only if it looks human-readable.
         # Never emit raw JSON to the user.

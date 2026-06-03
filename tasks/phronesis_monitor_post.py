@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card, build_rich_card
-from core.safety import looks_like_error
+from core.safety import looks_like_error, summarize
 
 
 def main() -> int:
@@ -29,13 +29,9 @@ def main() -> int:
         return 0
 
     # Output as rich card with full content in web view
-    summary_lines = raw.strip().splitlines()[:4]
-    summary = "\n".join(summary_lines)
-    if len(raw.strip().splitlines()) > 4:
-        summary += "\n..."
     print(build_rich_card(
         header="🏛️ Phronesis",
-        summary=summary,
+        summary=summarize(raw),
         sections=[{"type": "markdown", "content": raw}],
         meta={"source": "phronesis_monitor"},
     source="phronesis-monitor",
