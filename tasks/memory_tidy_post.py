@@ -11,14 +11,12 @@ Claude returns a JSON with actions to take:
 Or HEARTBEAT_OK if nothing needs fixing.
 Also always runs daily_log auto-archive (14-day TTL) as a side-effect.
 """
-import json
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import extract_json, looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 from tasks.memory_daily_post import _archive_old_daily_entries
 
@@ -83,12 +81,10 @@ def main() -> int:
         return 0
 
     # Try to parse JSON response
-    cleaned = extract_json(raw)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
+    data = parse_json_response(raw)
+    if data is None:
         # If not JSON, Claude might have returned plain text actions
-        print(f"[memory-tidy] non-JSON response, skipping auto-apply", file=sys.stderr)
+        print("[memory-tidy] non-JSON response, skipping auto-apply", file=sys.stderr)
         return 0
 
     # Update index if provided

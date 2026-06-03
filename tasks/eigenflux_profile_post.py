@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Post-hook: update EigenFlux profile via CLI if Claude decided to."""
-import json
 import os
-import re
 import subprocess
 import sys
 import traceback
 
 sys.path.insert(0, str(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
-from core.safety import extract_json
+from core.safety import parse_json_response
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -19,13 +17,9 @@ def main() -> int:
     if not raw or "HEARTBEAT_OK" in raw:
         return 0
 
-    raw = re.sub(r'^```json?\s*', '', raw)
-    raw = re.sub(r'```\s*$', '', raw)
-
-    try:
-        data = json.loads(extract_json(raw))
-    except json.JSONDecodeError as e:
-        print(f"[eigenflux-profile] JSON parse failed: {e}", file=LOG)
+    data = parse_json_response(raw)
+    if data is None:
+        print("[eigenflux-profile] JSON parse failed", file=LOG)
         return 0
 
     if not data.get("should_update"):

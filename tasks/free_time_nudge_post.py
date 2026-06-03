@@ -2,14 +2,13 @@
 """Post-hook: send a casual free-time nudge. Short, non-pushy.
 Also updates the daily nudge counter (only counts if message is actually sent)."""
 
-import json
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import extract_json, looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
@@ -36,11 +35,10 @@ def main():
         return
 
     # Parse JSON response
-    data = None
-    try:
-        data = json.loads(extract_json(raw))
+    data = parse_json_response(raw)
+    if data is not None:
         message = data.get("user_message", "")
-    except json.JSONDecodeError:
+    else:
         if looks_like_error(raw):
             return
         message = raw
