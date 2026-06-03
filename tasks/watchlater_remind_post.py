@@ -5,7 +5,6 @@ Stdin: Claude's JSON response with title, url, user_message.
 Stdout: Lark interactive card JSON (or plain text).
 """
 
-import json
 import os
 import re
 import sys
@@ -14,33 +13,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error, parse_json_response
+from core.jsonl import read_jsonl, write_jsonl
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 STORE_FILE = MEMORY_DIR / "system" / "watchlater.jsonl"
-
-
-def load_entries() -> list[dict]:
-    entries = []
-    if STORE_FILE.exists():
-        for line in STORE_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
-
-
-def save_entries(entries: list[dict]) -> None:
-    STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_FILE.with_suffix(".jsonl.tmp")
-    tmp.write_text(
-        "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, STORE_FILE)
 
 
 def main() -> int:
@@ -69,12 +45,12 @@ def main() -> int:
 
     # Mark item as "reminded" in the store
     if url:
-        entries = load_entries()
+        entries = read_jsonl(STORE_FILE)
         for entry in entries:
             if entry.get("url") == url and entry.get("status") == "pending":
                 entry["status"] = "reminded"
                 break
-        save_entries(entries)
+        write_jsonl(STORE_FILE, entries)
 
     # Build interactive card using shared helper
     header_text = f"📌 收藏提醒 | {title}" if title else "📌 收藏提醒"

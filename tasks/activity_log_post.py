@@ -5,7 +5,6 @@ This is a SILENT task — never outputs to user.
 Maintains a rolling 7-day log of what Pascal actually did.
 """
 
-import json
 import os
 import sys
 from datetime import timedelta
@@ -14,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.timeutil import now_local
 from core.safety import parse_json_response
+from core.jsonl import read_jsonl, write_jsonl
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 LOG_FILE = MEMORY_DIR / "system" / "activity_log.jsonl"
@@ -38,18 +38,7 @@ def main():
 
     today = now_local().strftime("%Y-%m-%d")
 
-    # Ensure directory exists
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    # Read existing entries
-    existing = []
-    if LOG_FILE.exists():
-        for line in LOG_FILE.read_text(errors="ignore").strip().split("\n"):
-            if line.strip():
-                try:
-                    existing.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    existing = read_jsonl(LOG_FILE)
 
     # Add new entries with today's date
     for entry in entries:
@@ -67,10 +56,7 @@ def main():
     cutoff = (now_local() - timedelta(days=MAX_DAYS)).strftime("%Y-%m-%d")
     existing = [e for e in existing if e.get("date", "") >= cutoff]
 
-    # Atomic write
-    tmp = LOG_FILE.with_name(LOG_FILE.name + ".tmp")
-    tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in existing) + "\n")
-    tmp.replace(LOG_FILE)
+    write_jsonl(LOG_FILE, existing)
 
     # SILENT — no output to stdout (nothing sent to user)
 
