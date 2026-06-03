@@ -42,7 +42,7 @@ def main() -> int:
         return 0
 
     notes_str = json.dumps(notes) if isinstance(notes, dict) else str(notes)
-    url = data.get("url", "")
+    url = data.get("source_url") or data.get("url", "")
 
     # Save pending broadcast for user confirmation (don't publish directly)
     pending_dir = JARVIS_DIR / "eigenflux" / "pending_publish"
@@ -71,6 +71,12 @@ def main() -> int:
     if domain_str:
         preview += f" | **领域**: {domain_str}"
     preview += f"\n\n{content}\n\n"
+    # Render the source as a tappable link. The broadcast body often names a
+    # source (e.g. "arXiv 2606.02859") without a clickable URL — surface it so
+    # the user can actually open it from the card. (Never a bare URL.)
+    src = url or (notes.get("source") if isinstance(notes, dict) else "") or ""
+    if src.startswith("http"):
+        preview += f"🔗 来源：[{src}]({src})\n\n"
     preview += f"回复「发」确认广播，回复「不发」取消。"
 
     print(preview)
