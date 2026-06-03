@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error, parse_json_response
+from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -54,17 +55,7 @@ def main() -> int:
         return 0
 
     # Check for duplicate URL
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    entries: list[dict] = []
-    if LOG_FILE.exists():
-        for line in LOG_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    entries = read_jsonl(LOG_FILE)
 
     # Block if same URL was already recommended
     if url:
@@ -81,13 +72,7 @@ def main() -> int:
         "category": category,
     })
     entries = entries[-MAX_ENTRIES:]
-
-    tmp = LOG_FILE.with_suffix(".jsonl.tmp")
-    tmp.write_text(
-        "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, LOG_FILE)
+    write_jsonl(LOG_FILE, entries)
 
     # Build interactive card for Lark
     header_text = "📺 推荐"

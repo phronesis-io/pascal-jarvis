@@ -10,7 +10,6 @@ Stdin: the check-in message Claude generated (markdown).
 Stdout: same message if passes dedup, empty if blocked.
 """
 
-import json
 import os
 import re
 import sys
@@ -20,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error
+from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -143,19 +143,8 @@ def main() -> int:
         print("[checkin] skipping — looks like error output", file=sys.stderr)
         return 0
 
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     # Read existing entries
-    entries: list[dict] = []
-    if LOG_FILE.exists():
-        for line in LOG_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    entries = read_jsonl(LOG_FILE)
 
     # Extract topics from new message
     topics = extract_topics(message)
@@ -172,14 +161,7 @@ def main() -> int:
         "topics": topics,
     })
     entries = entries[-MAX_ENTRIES:]
-
-    # Atomic write
-    tmp = LOG_FILE.with_suffix(".jsonl.tmp")
-    tmp.write_text(
-        "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, LOG_FILE)
+    write_jsonl(LOG_FILE, entries)
 
     # Determine checkin mode: wellbeing or connection
     wellbeing_keywords = ("身体", "感受", "状态", "休息", "睡", "累", "疲", "健康", "压力")
