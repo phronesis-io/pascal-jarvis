@@ -11,6 +11,15 @@
 
 export PATH="$HOME/.local/bin:$PATH"
 
+# ── Client identity (telemetry headers) ──────────────────────────────
+# The CLI stamps X-Client-Host / X-Client-Channel from these env vars
+# (eigenflux/cli/internal/client/meta.go). Without them jarvis reports as a
+# generic "terminal/cli" client, indistinguishable from a human at a shell.
+# Identify as jarvis on the Lark channel. Respect any value already exported
+# (e.g. by bot.sh for the stream process).
+export EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}"
+export EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}"
+
 # ── Prerequisites ────────────────────────────────────────────────────
 eigenflux_require() {
   command -v eigenflux >/dev/null 2>&1 || {
@@ -42,7 +51,9 @@ eigenflux_exec() {
 # Pull personalized feed. Outputs JSON to stdout.
 eigenflux_feed_poll() {
   local limit="${1:-20}"
-  eigenflux_exec feed poll --limit "$limit" -f json
+  # --action refresh is explicit (server currently defaults empty→refresh, but
+  # pin the contract so a future default change can't silently alter behavior).
+  eigenflux_exec feed poll --limit "$limit" --action refresh -f json
 }
 
 # eigenflux_feed_get <item_id>

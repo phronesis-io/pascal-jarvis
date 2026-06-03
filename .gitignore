@@ -33,6 +33,10 @@ eigenflux/publish_state.json
 eigenflux/publish_state.json.tmp
 eigenflux/impression_id.txt
 eigenflux/user_settings.json
+eigenflux/preinstall_state.json
+eigenflux/.cli_upgrade_result
+eigenflux/preinstall_cli_upgrade.log
+eigenflux/parity_todo.md
 
 # Python
 __pycache__/

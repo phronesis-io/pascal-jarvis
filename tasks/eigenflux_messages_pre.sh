@@ -9,7 +9,7 @@ eigenflux_require || exit 0
 
 result=$(eigenflux_msg_fetch 20)
 if [ "$result" = "AUTH_REQUIRED" ]; then
-  echo "AUTH_REQUIRED: EigenFlux token expired."
+  echo "AUTH_REQUIRED: EigenFlux token expired. User needs to run: eigenflux auth login"
   exit 0
 fi
 [ -z "$result" ] && exit 0
