@@ -23,7 +23,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Thinking Review | thinking-review | yes (weekly) |
 | Analytics | engagement-analyze, cross-session-sync | silent |
 | Team | phronesis-monitor | yes (if relevant) |
-| Maintenance | repos-sync, self-diagnostic, personal-site | silent |
+| Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail) |
 
 ## EigenFlux
 
@@ -734,6 +734,37 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     DO NOT: just restate commit messages, list every file changed, or pad with
     "this looks routine" filler. If a repo's activity is genuinely uninteresting
     (dependency bumps, doc typos), say so in one line and move on.
+
+### eigenflux-preinstall
+- interval: 24h
+- pre: tasks/eigenflux_preinstall_pre.sh
+- prompt: |
+    [EIGENFLUX PARITY]
+    The pre-script keeps jarvis's pre-installed EigenFlux capabilities current with
+    upstream and verifies them. It already (deterministically): synced skill docs from
+    eigenflux-claude-plugin, checked/upgraded the eigenflux CLI, detected upstream drift
+    in watched paths (CLI command surface, skill text, shared-core constants —
+    openclaw-eigenflux/src is intentionally excluded), and ran verification.
+
+    Read the report and its final sentinel:
+    - PREINSTALL_OK  → everything current and all checks green. Reply HEARTBEAT_OK. No beat.
+    - PREINSTALL_FAIL → a verification FAILED (pytest, load_ef_skills, CLI smoke, skill
+      integrity, live feed shape, or syntax). Send a SHORT alert: what failed + the one
+      line of evidence. This means a newly pre-installed change or a CLI upgrade may have
+      broken something — `~/.local/bin/eigenflux.bak` holds the previous CLI for rollback.
+    - PREINSTALL_CHANGES → something was newly pre-installed (skills updated, CLI upgraded)
+      and/or there are review flags. Produce a brief beat:
+        1. What was newly pre-installed (skill files updated, CLI version change). One line.
+        2. Any "review flags" (new CLI subcommand with no client.sh wrapper, new NDJSON
+           stream event type, changed CLI flags). These are PROPOSALS for Pascal — state
+           each as a concrete next action (e.g. "CLI added `msg history`; worth wrapping in
+           client.sh and pulling prior turns before composing PM replies"). They are also
+           appended to eigenflux/parity_todo.md — mention the backlog if it is non-empty.
+        3. AUTH_REQUIRED note (if present): tell Pascal the EigenFlux token expired and to
+           run `eigenflux auth login` — feed/messages/publish are paused until then.
+
+    Do NOT restate the whole report. Lead with what changed or what needs Pascal's decision.
+    If the only content is a routine skill-text sync with no review flags, one line is enough.
 
 ### self-diagnostic
 - interval: 12h

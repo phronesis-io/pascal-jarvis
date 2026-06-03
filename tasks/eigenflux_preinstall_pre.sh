@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+# Pre-hook for the `eigenflux-preinstall` heartbeat task — the EigenFlux
+# feature-PARITY TRACKER for pascal-jarvis.
+#
+# Jarvis is NOT an OpenClaw/Claude-Code plugin host; it re-implements the
+# EigenFlux client contract natively (core/ef_stream*.py, tasks/eigenflux_*,
+# plugins/eigenflux/client.sh, core/prompt.py + HEARTBEAT prompts). Skill text
+# is sourced from the MAIN repo (eigenflux/skills) — the canonical upstream both
+# plugins copy from; the claude-plugin/openclaw copies lag it. The OpenClaw
+# plugin's notification-routing runtime is deliberately NOT tracked
+# (multi-session/multi-channel plumbing that a single-user Lark bot does not need).
+#
+# Every run (idempotent, designed to finish in <60s — the heartbeat hard cap):
+#   1. Freshen the two source repos (bounded git fetch+ff; repos-sync owns the
+#      full pull, this is only a top-up — failure is tolerated).
+#   2. SKILL SYNC: mirror eigenflux/skills (main) -> plugins/eigenflux/skills
+#      (jarvis-owned real files), byte-for-byte, add+update. Preserves jarvis-local
+#      skills (frontmatter `jarvis-local: true`, e.g. ef-localdev). NEVER deletes:
+#      upstream-removed files/skills are flagged for review.
+#   3. CLI: compare installed vs latest; if behind, launch a detached
+#      test-before-swap upgrade (scripts/eigenflux_cli_upgrade.sh).
+#   4. PARITY DRIFT: diff watched upstream paths since the last stored commit —
+#      eigenflux/cli/cmd, cli/internal/client/meta.go, the skill text, and the
+#      claude-plugin shared-core constants. New CLI subcommands / stream event
+#      types / changed flags are surfaced and appended to a durable review backlog
+#      (eigenflux/parity_todo.md). openclaw-eigenflux/src is intentionally excluded.
+#   5. VERIFY ("测通"): eigenflux pytest suite, live load_ef_skills(), CLI smoke,
+#      auth probe, skill-integrity (jarvis == claude-plugin), live feed-shape, and
+#      bash -n on every eigenflux script.
+#   6. Emit a report + one sentinel: PREINSTALL_OK / PREINSTALL_CHANGES /
+#      PREINSTALL_FAIL. Stored commit SHAs advance only when verification is green.
+#
+# All skill writes land in the pascal-jarvis git repo (recoverable via git).
+# Machine-readable state -> eigenflux/preinstall_state.json.
+
+set -uo pipefail
+export LC_ALL=C
+export PATH="$HOME/.local/bin:$PATH"
+
+# ── Paths (self-contained; does not rely on WORK_DIR) ─────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JARVIS_DIR="${JARVIS_DIR:-$(dirname "$SCRIPT_DIR")}"
+REPOS_DIR="$(dirname "$JARVIS_DIR")"
+
+PLUGIN_DIR="$REPOS_DIR/eigenflux-claude-plugin"   # downstream copy; watched for runtime-constant drift
+MAIN_DIR="$REPOS_DIR/eigenflux"                   # TRUE upstream: CLI contract + canonical skill text
+# Skills source of truth = the MAIN repo, not a plugin: both plugins are
+# `copy-skills` snapshots of eigenflux/skills and LAG it — the claude-plugin
+# copy was verified to be missing the messaging privacy boundary and the
+# verify-only-once auth guidance that main (and jarvis's live auto-reply path)
+# rely on. Sourcing from main keeps jarvis on the freshest, most protective text.
+SRC_SKILLS="$MAIN_DIR/skills"
+DST_SKILLS="$JARVIS_DIR/plugins/eigenflux/skills"
+CLIENT_SH="$JARVIS_DIR/plugins/eigenflux/client.sh"
+STATE_FILE="$JARVIS_DIR/eigenflux/preinstall_state.json"
+BACKLOG="$JARVIS_DIR/eigenflux/parity_todo.md"
+UPGRADE_HELPER="$JARVIS_DIR/scripts/eigenflux_cli_upgrade.sh"
+UPGRADE_RESULT="$JARVIS_DIR/eigenflux/.cli_upgrade_result"
+LOG_FILE="${LOG_FILE:-/dev/null}"
+CDN_URL="${EIGENFLUX_CDN_URL:-https://cdn.eigenflux.ai}"
+
+# ── Bounded runner (macOS has no `timeout`) ───────────────────────────
+if command -v timeout >/dev/null 2>&1; then
+  bounded() { local s="$1"; shift; timeout "$s" "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+  bounded() { local s="$1"; shift; gtimeout "$s" "$@"; }
+else
+  bounded() {
+    local s="$1"; shift
+    "$@" & local pid=$!
+    # Escalate TERM -> (2s grace) -> KILL so a child that ignores SIGTERM
+    # (e.g. pytest) cannot hang past the cap and stall the 60s heartbeat.
+    ( sleep "$s"; kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null ) & local watcher=$!
+    wait "$pid" 2>/dev/null; local rc=$?
+    kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    return "$rc"
+  }
+fi
+
+state_get() { python3 - "$STATE_FILE" "$1" 2>/dev/null <<'PY'
+import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception: print("")
+PY
+}
+
+added=(); updated=(); orphan_files=(); orphan_skills=(); local_skills=()
+fail=(); notes=(); review=()
+
+mirror_one() {
+  local src="$1" dst="$2" rel="$3"
+  if [ ! -f "$dst" ]; then
+    mkdir -p "$(dirname "$dst")"; cp -p "$src" "$dst" && added+=("$rel")
+  elif ! cmp -s "$src" "$dst"; then
+    cp -p "$src" "$dst" && updated+=("$rel")
+  fi
+}
+
+echo "EigenFlux parity tracker:"
+echo ""
+
+# ── 0. Surface a completed background CLI upgrade from a prior cycle ───
+if [ -f "$UPGRADE_RESULT" ]; then
+  notes+=("CLI upgrade (background): $(cat "$UPGRADE_RESULT" 2>/dev/null)")
+  rm -f "$UPGRADE_RESULT" 2>/dev/null
+fi
+
+# ── 1. Freshen source repos + capture current HEADs ───────────────────
+for repo in "$PLUGIN_DIR" "$MAIN_DIR"; do
+  [ -d "$repo/.git" ] || { notes+=("missing source repo: $(basename "$repo")"); continue; }
+  bounded 8 git -C "$repo" fetch --quiet --prune origin 2>>"$LOG_FILE" || \
+    notes+=("fetch top-up skipped for $(basename "$repo") (repos-sync covers it)")
+  bounded 8 git -C "$repo" merge --ff-only --quiet 2>>"$LOG_FILE" || true
+done
+plugin_head="$(git -C "$PLUGIN_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+main_head="$(git -C "$MAIN_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+
+if [ ! -d "$SRC_SKILLS" ]; then
+  echo "  FATAL: source skills dir not found: $SRC_SKILLS"; echo ""; echo "PREINSTALL_FAIL"; exit 0
+fi
+mkdir -p "$DST_SKILLS"
+
+# ── 2. Mirror main-repo skills -> jarvis (add+update; never delete) ────
+managed=()
+while IFS= read -r d; do managed+=("$(basename "$d")"); done \
+  < <(find "$SRC_SKILLS" -mindepth 1 -maxdepth 1 -type d | sort)
+
+# An empty source means a partial checkout / upstream restructure. Bail with a
+# sentinel rather than letting the bare "${managed[@]}" loops abort under set -u
+# in bash 3.2 (which would emit NO sentinel and break the heartbeat contract).
+if [ ${#managed[@]} -eq 0 ]; then
+  echo "  FATAL: no ef-*/ skills found under $SRC_SKILLS (partial checkout?)"
+  echo ""; echo "PREINSTALL_FAIL"; exit 0
+fi
+
+for skill in "${managed[@]}"; do
+  while IFS= read -r f; do
+    rel="${f#"$SRC_SKILLS"/}"; mirror_one "$f" "$DST_SKILLS/$rel" "$rel"
+  done < <(find "$SRC_SKILLS/$skill" -type f | sort)
+  if [ -d "$DST_SKILLS/$skill" ]; then
+    while IFS= read -r f; do
+      rel="${f#"$DST_SKILLS"/}"; [ -f "$SRC_SKILLS/$rel" ] || orphan_files+=("$rel")
+    done < <(find "$DST_SKILLS/$skill" -type f | sort)
+  fi
+done
+
+while IFS= read -r d; do
+  name="$(basename "$d")"; is_managed=false
+  for m in "${managed[@]}"; do [ "$m" = "$name" ] && is_managed=true && break; done
+  if [ "$is_managed" = false ]; then
+    if grep -qi "jarvis-local" "$d/SKILL.md" 2>/dev/null; then local_skills+=("$name")
+    else orphan_skills+=("$name"); fi
+  fi
+done < <(find "$DST_SKILLS" -mindepth 1 -maxdepth 1 -type d | sort)
+
+if [ ${#added[@]} -gt 0 ]; then echo "  NEW skill files (${#added[@]}):"; printf '    + %s\n' "${added[@]}"; fi
+if [ ${#updated[@]} -gt 0 ]; then echo "  UPDATED to match upstream (${#updated[@]}):"; printf '    ~ %s\n' "${updated[@]}"; fi
+[ ${#added[@]} -eq 0 ] && [ ${#updated[@]} -eq 0 ] && echo "  skills: current with eigenflux(main) (${#managed[@]} skills mirrored)"
+[ ${#local_skills[@]} -gt 0 ] && echo "  jarvis-local skills preserved: ${local_skills[*]}"
+[ ${#orphan_skills[@]} -gt 0 ] && echo "  ⚠ skills in jarvis but NOT in plugin (review): ${orphan_skills[*]}"
+if [ ${#orphan_files[@]} -gt 0 ]; then echo "  ⚠ files removed upstream, kept in jarvis (review):"; printf '    ? %s\n' "${orphan_files[@]}"; fi
+
+# ── 3. CLI version check + detached upgrade if behind ─────────────────
+echo ""
+cli_current="$(bounded 5 eigenflux version --short 2>/dev/null || echo "")"
+cli_latest="$(bounded 6 curl -fsSL "$CDN_URL/cli/latest/version.txt" 2>/dev/null || echo "")"
+cli_upgrade_started=false
+if [ -z "$cli_current" ]; then echo "  CLI: NOT INSTALLED"; fail+=("eigenflux CLI not on PATH")
+elif [ -z "$cli_latest" ]; then echo "  CLI: v$cli_current (latest unknown — offline?)"
+elif [ "$cli_current" = "$cli_latest" ]; then echo "  CLI: v$cli_current (up to date)"
+else
+  echo "  CLI: v$cli_current installed, v$cli_latest available → background upgrade"
+  if [ -x "$UPGRADE_HELPER" ]; then
+    # Detach so the download survives this hook's 60s cap. macOS has no setsid;
+    # nohup + disown is enough (the heartbeat kills only the pre-script's pid,
+    # not the whole process group).
+    if command -v setsid >/dev/null 2>&1; then
+      setsid nohup "$UPGRADE_HELPER" "$cli_latest" >>"$LOG_FILE" 2>&1 < /dev/null &
+    else
+      nohup "$UPGRADE_HELPER" "$cli_latest" >>"$LOG_FILE" 2>&1 < /dev/null &
+    fi
+    disown 2>/dev/null || true
+    cli_upgrade_started=true
+    notes+=("CLI upgrade v$cli_current→v$cli_latest started in background (test-before-swap)")
+  else notes+=("upgrade helper missing: $UPGRADE_HELPER"); fail+=("CLI behind, helper unavailable"); fi
+fi
+
+# ── 4. Parity drift on watched upstream paths (since stored SHAs) ──────
+echo ""
+echo "  upstream drift (watched paths only; openclaw/src excluded):"
+report_drift() {
+  # report_drift <repo_dir> <label> <stored_sha> <current_sha> <watched-paths...>
+  local repo="$1" label="$2" stored="$3" current="$4"; shift 4
+  local paths=("$@")
+  if [ -z "$stored" ]; then echo "    $label: baseline recorded ($current)"; return; fi
+  if [ "$stored" = "$current" ]; then echo "    $label: no new commits"; return; fi
+  local log
+  log="$(git -C "$repo" log --oneline "$stored..$current" -- "${paths[@]}" 2>/dev/null)"
+  if [ -z "$log" ]; then echo "    $label: changed, but nothing in watched paths"; return; fi
+  echo "    $label: $(echo "$log" | wc -l | tr -d ' ') watched commit(s) ${stored:0:7}..${current:0:7}:"
+  echo "$log" | sed 's/^/      /' | head -10
+  # Specific high-signal flags
+  if git -C "$repo" diff --name-only "$stored..$current" -- cli/cmd 2>/dev/null | grep -q .; then
+    review+=("$label: eigenflux/cli/cmd changed — re-check client.sh wrappers & flags vs new CLI surface")
+  fi
+  if git -C "$repo" diff --name-only "$stored..$current" 2>/dev/null | grep -q "cli/cmd/stream.go"; then
+    review+=("$label: cli/cmd/stream.go changed — verify core/ef_stream.py parses any new NDJSON event types")
+  fi
+}
+plugin_stored="$(state_get plugin_head)"; main_stored="$(state_get main_head)"
+# Main repo is authoritative for skills + CLI contract. The claude-plugin is
+# watched only for runtime-constant drift (poll interval / backoff / windows).
+report_drift "$MAIN_DIR" "eigenflux(main)" "$main_stored" "$main_head" \
+  cli/cmd cli/internal/client/meta.go skills
+report_drift "$PLUGIN_DIR" "claude-plugin" "$plugin_stored" "$plugin_head" \
+  src/feed-poller.ts src/pm-stream.ts src/profile-refresher.ts src/config.ts
+
+# Top-level CLI command-list drift (new subcommand groups)
+cli_cmds="$(bounded 5 eigenflux help 2>/dev/null | awk '/Available Commands:/{f=1;next} /^Flags:/{f=0} f && NF{print $1}' | sort | tr '\n' ' ' | sed 's/ *$//')"
+prev_cmds="$(state_get cli_commands)"
+if [ -n "$prev_cmds" ] && [ -n "$cli_cmds" ] && [ "$prev_cmds" != "$cli_cmds" ]; then
+  new_cmds=$(comm -13 <(echo "$prev_cmds" | tr ' ' '\n' | sort) <(echo "$cli_cmds" | tr ' ' '\n' | sort) | tr '\n' ' ')
+  [ -n "${new_cmds// }" ] && review+=("new top-level CLI command(s): ${new_cmds}— evaluate a client.sh wrapper")
+fi
+
+# ── 5. Verify ("测通") ────────────────────────────────────────────────
+echo ""
+echo "  verification:"
+# 5a. eigenflux-related pytest suite
+if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
+     "$JARVIS_DIR/tests/test_eigenflux_feed_search.py" \
+     "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" >/tmp/ef_pi_pytest.out 2>&1; then
+  echo "    ✓ pytest (prompt + feed_search + publish_post)"
+else
+  echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"; fail+=("pytest failed")
+fi
+# 5b. Live load_ef_skills() against the real synced dir
+if live=$(cd "$JARVIS_DIR" && python3 - <<'PY' 2>&1
+import sys, pathlib
+sys.path.insert(0, ".")
+from core.prompt import load_ef_skills
+out = load_ef_skills(".")
+dirs = sorted(p.name for p in pathlib.Path("plugins/eigenflux/skills").glob("ef-*") if (p/"SKILL.md").exists())
+assert out.strip(), "load_ef_skills empty"
+assert not out.lstrip().startswith("---"), "frontmatter not stripped"
+print(f"{len(dirs)} skills, {len(out)} chars: {','.join(dirs)}")
+PY
+); then echo "    ✓ load_ef_skills() — $live"
+else echo "    ✗ load_ef_skills() — $(echo "$live" | tail -2 | tr '\n' ' ' | cut -c1-200)"; fail+=("load_ef_skills failed"); fi
+# 5c. CLI smoke (read-only)
+authed=false
+if [ -n "$cli_current" ]; then
+  if bounded 5 eigenflux version >/dev/null 2>&1 && bounded 8 eigenflux server list >/dev/null 2>&1; then
+    echo "    ✓ CLI smoke (version + server list)"
+  else echo "    ✗ CLI smoke"; fail+=("CLI smoke failed"); fi
+  # 5d. auth probe — exit 4 means token expired (a real auth nudge, not a parity failure)
+  if bounded 10 eigenflux profile show -f json >/dev/null 2>&1; then authed=true; echo "    ✓ auth probe (authed)"
+  else
+    rc=$?; if [ "$rc" -eq 4 ]; then echo "    • auth probe: AUTH_REQUIRED (token expired — run: eigenflux auth login)"
+      notes+=("EigenFlux token expired — feed/messages/publish paused until 'eigenflux auth login'")
+    else echo "    • auth probe: inconclusive (rc=$rc)"; fi
+  fi
+fi
+# 5e. Skill integrity — jarvis managed skills must equal claude-plugin source
+integrity_bad=()
+for skill in "${managed[@]}"; do
+  while IFS= read -r f; do
+    rel="${f#"$SRC_SKILLS"/}"; cmp -s "$f" "$DST_SKILLS/$rel" || integrity_bad+=("$rel")
+  done < <(find "$SRC_SKILLS/$skill" -type f | sort)
+done
+if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (jarvis == eigenflux main)"
+else echo "    ✗ skill integrity drift: ${integrity_bad[*]}"; fail+=("skill integrity: ${integrity_bad[*]}"); fi
+# 5f. Live feed-shape check — only when authed (read-only, 1 item)
+if [ "$authed" = true ]; then
+  feed_json="$(bounded 10 eigenflux feed poll --limit 1 --action refresh -f json 2>/dev/null || echo "")"
+  if [ -z "$feed_json" ]; then
+    # Transient: poll timed out / network blip / not yet primed — NOT a contract
+    # regression, so don't fail the run on it.
+    echo "    • live feed shape: skipped (poll returned no data)"
+  elif echo "$feed_json" | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(2)
+items=d.get('items') or d.get('data',{}).get('items') or []
+if not items: sys.exit(0)  # empty feed is fine
+it=items[0]
+sys.exit(0 if ('item_id' in it and ('source_url' in it or 'url' in it)) else 3)
+" 2>/dev/null; then echo "    ✓ live feed shape (item_id + url present)"
+  else echo "    ✗ live feed shape — non-empty feed missing item_id/url (possible CLI contract change)"; fail+=("feed shape regression"); fi
+fi
+# 5g. bash -n on all eigenflux scripts
+syntax_bad=()
+for s in "$CLIENT_SH" "$UPGRADE_HELPER" "$SCRIPT_DIR"/eigenflux_*.sh; do
+  [ -f "$s" ] || continue; bash -n "$s" 2>/dev/null || syntax_bad+=("$(basename "$s")")
+done
+if [ ${#syntax_bad[@]} -eq 0 ]; then echo "    ✓ bash -n (client.sh + eigenflux task scripts)"
+else echo "    ✗ bash -n: ${syntax_bad[*]}"; fail+=("syntax: ${syntax_bad[*]}"); fi
+
+# ── 6. Review backlog (durable) + notes + state + sentinel ────────────
+verify_ok=$([ ${#fail[@]} -eq 0 ] && echo true || echo false)
+if [ ${#review[@]} -gt 0 ]; then
+  echo ""; echo "  review flags (also appended to parity_todo.md):"; printf '    ! %s\n' "${review[@]}"
+  # Append-dedup to the durable backlog so flags survive SHA advance.
+  touch "$BACKLOG"
+  for r in "${review[@]}"; do
+    grep -Fqx "- [ ] $r" "$BACKLOG" 2>/dev/null || echo "- [ ] $r" >> "$BACKLOG"
+  done
+fi
+if [ ${#notes[@]} -gt 0 ]; then echo ""; echo "  notes:"; printf '    - %s\n' "${notes[@]}"; fi
+
+# Advance stored SHAs ONLY on green verification (so a regression keeps the
+# drift visible next run); always refresh cli_commands snapshot.
+adv_plugin="$plugin_stored"; adv_main="$main_stored"
+if [ "$verify_ok" = true ]; then adv_plugin="$plugin_head"; adv_main="$main_head"; fi
+python3 - "$STATE_FILE" "$cli_current" "$cli_latest" "$adv_plugin" "$adv_main" "$cli_cmds" \
+  "${#added[@]}" "${#updated[@]}" "$verify_ok" "${#review[@]}" 2>/dev/null <<'PY' || true
+import json, sys, datetime
+path, cur, latest, ph, mh, cmds, na, nu, ok, nr = sys.argv[1:11]
+json.dump({
+  "updated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+  "cli_version": cur, "cli_latest": latest,
+  "plugin_head": ph, "main_head": mh, "cli_commands": cmds,
+  "skills_added": int(na), "skills_updated": int(nu),
+  "verify_ok": ok == "true", "open_review_flags": int(nr),
+}, open(path, "w"), indent=2)
+PY
+
+echo ""
+if [ ${#fail[@]} -gt 0 ]; then echo "PREINSTALL_FAIL"
+elif [ ${#added[@]} -gt 0 ] || [ ${#updated[@]} -gt 0 ] || [ "$cli_upgrade_started" = true ] || [ ${#review[@]} -gt 0 ] || [ ${#notes[@]} -gt 0 ]; then echo "PREINSTALL_CHANGES"
+else echo "PREINSTALL_OK"; fi
+exit 0

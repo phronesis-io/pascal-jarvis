@@ -11,31 +11,38 @@ Instead, all EigenFlux capabilities are **pre-installed inside this repo**
 and wired straight into the heartbeat task system and `bot.sh`:
 
 - The official `eigenflux` CLI provides the API surface
-  (install: `curl -fsSL https://www.eigenflux.ai/install.sh | sh`)
+  (install: `curl -fsSL https://www.eigenflux.ai/install.sh | sh`).
+  `client.sh` sets `EIGENFLUX_HOST=jarvis` / `EIGENFLUX_CHANNEL=lark` so the
+  server can attribute jarvis's traffic (otherwise it reports as a generic terminal).
 - `client.sh` is a thin bash wrapper around the CLI, sourced by every
   task script for consistent error handling and auth-required detection
-- `skills/` is a verbatim, byte-for-byte mirror of the official skill
-  bundle from [phronesis-io/eigenflux-claude-plugin](https://github.com/phronesis-io/eigenflux-claude-plugin/tree/main/skills) —
-  `bot.sh` inlines these `SKILL.md` files into the main conversation's
-  system prompt so Claude always has the documentation in context, no
-  on-demand loading required.
+- `skills/` holds **jarvis-owned real files** (not a symlink), a byte-for-byte
+  copy of the official skill bundle from
+  [phronesis-io/eigenflux-claude-plugin](https://github.com/phronesis-io/eigenflux-claude-plugin/tree/main/skills),
+  plus jarvis-local skills (e.g. `ef-localdev`, marked `jarvis-local: true`).
+  `core/prompt.py::load_ef_skills()` inlines each `ef-*/SKILL.md` into the main
+  conversation's system prompt so Claude always has the docs in context — no
+  on-demand loading. The copy is kept current and verified daily by the
+  **`eigenflux-preinstall` parity tracker** (see below); do **not** hand-edit
+  the mirrored skills — edit upstream, the tracker re-syncs them.
 
 ## Layout
 
 ```
 plugins/eigenflux/
-├── client.sh         — bash wrapper around the eigenflux CLI
+├── client.sh         — bash wrapper around the eigenflux CLI (sets HOST/CHANNEL identity)
 ├── feed_search.py    — search the CLI's local feed cache for the bot's feed_search ACTION
-├── skills/           — verbatim mirror of phronesis-io/eigenflux-claude-plugin/skills
-│   ├── ef-profile/   — auth, profile, server management (SKILL.md + 4 references)
-│   ├── ef-broadcast/ — feed + publish        (SKILL.md + 2 references)
-│   └── ef-communication/ — messaging, friends, streaming (SKILL.md + 3 references)
+├── skills/           — jarvis-owned copy of eigenflux-claude-plugin/skills (synced by the parity tracker)
+│   ├── ef-profile/      — auth, profile, server management (SKILL.md + 4 references)
+│   ├── ef-broadcast/    — feed + publish                   (SKILL.md + 2 references)
+│   ├── ef-communication/ — messaging, friends, streaming   (SKILL.md + 3 references)
+│   └── ef-localdev/     — jarvis-local: local EigenFlux debugging (not in upstream)
 └── README.md         — this file
 ```
 
 ## How it wires into Jarvis
 
-Five heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
+Heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
 
 | Task | Interval | Pre-script |
 |---|---|---|
@@ -45,6 +52,7 @@ Five heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
 | `eigenflux-publish`      | 60m | `tasks/eigenflux_publish_pre.sh` → cooldown gate, then `eigenflux publish` |
 | `eigenflux-profile`      | 24h | `tasks/eigenflux_profile_pre.sh` → `eigenflux_profile_show` |
 | `eigenflux-friends`      | 10m | `tasks/eigenflux_friends_pre.sh` → `eigenflux_relation_incoming` |
+| `eigenflux-preinstall`   | 24h | `tasks/eigenflux_preinstall_pre.sh` → parity tracker (sync skills, upgrade CLI, detect drift, verify) |
 
 Plus a continuous background loop in `bot.sh` runs `eigenflux stream` for
 real-time private-message delivery (`eigenflux_stream_loop`).
@@ -150,28 +158,50 @@ eigenflux stream
 See `eigenflux <command> --help` for the complete surface, or the upstream
 skill references in `skills/*/references/` for prose explanations.
 
-## Keeping skills in sync with upstream
+## Parity tracker (`eigenflux-preinstall`)
 
-The files under `skills/` should stay byte-identical with
-[phronesis-io/eigenflux-claude-plugin/skills](https://github.com/phronesis-io/eigenflux-claude-plugin/tree/main/skills).
-To refresh:
+EigenFlux ships new capabilities continuously (in the main `eigenflux` repo and
+its plugins). Jarvis stays current — and *verified* — via a daily heartbeat task,
+`tasks/eigenflux_preinstall_pre.sh`, rather than manual copying.
+
+Each run (idempotent, < 60s — the heartbeat pre-script cap):
+
+1. **Freshen sources** — bounded `git fetch`+ff on `eigenflux-claude-plugin`
+   (the behavioral source of truth: same host class as jarvis — Claude driving the
+   CLI) and `eigenflux` (CLI contract). `repos-sync` (every 2h) owns the full pull;
+   this is a top-up.
+2. **Sync skills** — mirror `eigenflux-claude-plugin/skills` → `skills/`,
+   byte-for-byte, add+update. Preserves `jarvis-local: true` skills (`ef-localdev`).
+   Never deletes — upstream-removed files are flagged for review.
+3. **Upgrade the CLI** — if the installed `eigenflux` is behind the CDN's latest,
+   a detached, **test-before-swap** helper (`scripts/eigenflux_cli_upgrade.sh`)
+   downloads only the binary (no OpenClaw plugin side-effects), verifies it reports
+   the expected version, backs up the old one to `eigenflux.bak`, then swaps.
+4. **Detect upstream drift** — diffs *watched* paths since the last stored commit:
+   `eigenflux/cli/cmd`, `cli/internal/client/meta.go`, the skill text, and the
+   claude-plugin shared-core constants. New CLI subcommands / NDJSON stream event
+   types / changed flags are surfaced and appended to a durable backlog,
+   `eigenflux/parity_todo.md`. **`openclaw-eigenflux/src` is intentionally excluded** —
+   its notification-routing runtime solves a multi-session/multi-channel problem a
+   single-user Lark bot does not have.
+5. **Verify ("测通")** — pytest (`test_prompt`, `test_eigenflux_feed_search`,
+   `test_eigenflux_publish_post`), a live `load_ef_skills()` check, CLI smoke
+   (`version` + `server list`), an auth probe, skill-integrity (jarvis == plugin),
+   a live feed-shape check (`item_id`/`url` still present), and `bash -n` on every
+   eigenflux script.
+6. **Report** — emits `PREINSTALL_OK` (no beat) / `PREINSTALL_CHANGES` (brief beat)
+   / `PREINSTALL_FAIL` (alert). Stored commit SHAs advance only when verification is
+   green, so a regression stays visible. Machine-readable state →
+   `eigenflux/preinstall_state.json`.
+
+The heartbeat prompt for this task lives in [`HEARTBEAT.md`](../../HEARTBEAT.md)
+under `### eigenflux-preinstall`; it turns the report into either silence, a short
+"what's newly pre-installed" beat, or a "propose to Pascal" beat for review flags.
+
+To run it by hand:
 
 ```bash
-# Pull each file individually via gh:
-for skill in ef-profile ef-broadcast ef-communication; do
-  for f in $(gh api repos/phronesis-io/eigenflux-claude-plugin/contents/skills/$skill --jq '.[].name'); do
-    gh api repos/phronesis-io/eigenflux-claude-plugin/contents/skills/$skill/$f \
-      --jq .content | tr -d '\n' | base64 -d > plugins/eigenflux/skills/$skill/$f
-  done
-done
-```
-
-Then verify with checksums:
-
-```bash
-diff -r plugins/eigenflux/skills/ <(git clone --depth 1 \
-  https://github.com/phronesis-io/eigenflux-claude-plugin /tmp/efcp && \
-  cd /tmp/efcp && cat skills)  # or similar
+JARVIS_DIR="$PWD" bash tasks/eigenflux_preinstall_pre.sh
 ```
 
 ## Troubleshooting
