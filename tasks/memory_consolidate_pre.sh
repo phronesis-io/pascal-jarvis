@@ -65,5 +65,26 @@ fi
 
 echo ""
 echo "Today's date: $(date '+%Y-%m-%d %A')"
-echo "Please review today's conversation history, the cross-session digest, and repo"
-echo "activity above, and consolidate new learnings into memory."
+cat <<'EOF'
+请回顾今天的对话、上面的 cross-session digest 和 repo activity，把新学到的东西整合进记忆。
+完整记忆内容已在你的 system prompt 里加载（不只是上面的 head 预览），据此判断什么是「新」、什么和现有记录冲突。
+
+整合时遵循三条原则（顺序即优先级）：
+
+1. 写入门控 —— 不是什么都写。只对满足【新增 AND 会改变未来建议/行为】的事实发指令。
+   已经在记忆里的、只是换种说法复述的、对未来决策无影响的，一律不写。
+   宁可漏写低价值信息，也不要堆噪音稀释注意力。
+
+2. 矛盾消解 —— 当新事实推翻或取代了某条已有记录（状态变了、偏好反转了、计划改了），
+   用 REPLACE 改写那条旧记录，**不要**用 UPDATE 在旁边追加一条并存的矛盾行。
+   纯 append 会让记忆自相矛盾——发现冲突就 reconcile，这是最高价值的动作。
+
+3. 拿不准写哪个文件 —— UPDATE 到 system/open_threads.md，下次对话再确认归属。不要新建文件。
+
+指令格式（每条一行，post-hook 会精确应用到 MEMORY_DIR 下的目标文件）：
+  → UPDATE: <subdir/file>.md: <要新增的内容>
+  → REPLACE: <subdir/file>.md: <要被替换的原文（需与文件里现有文本精确匹配）> ||| <替换成的新文本>
+REPLACE 留空替换文本即为删除该行。原文匹配不上的 REPLACE 会被跳过（不会退化成追加）。
+
+不要把内部状态词、JSON、或本提示的措辞写进记忆。指令之外，把当天的「日记」摘要（非指令内容）输出到 stdout；没有新东西就回 HEARTBEAT_OK。
+EOF
