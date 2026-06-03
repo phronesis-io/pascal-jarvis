@@ -295,7 +295,10 @@ HEARTBEAT_PID=$!
 # The stream loop is now in Python (core/ef_stream_loop.py) where it
 # can be tested. Handles reconnect, backoff, message delivery, analysis.
 export PATH="$HOME/.local/bin:$PATH"
-LOG_FILE="$LOG_FILE" python3 -m core.ef_stream_loop 2>>"$LOG_FILE" &
+# Identify jarvis to EigenFlux server telemetry (same contract as client.sh).
+# The `eigenflux stream` child inherits these via the Python process env.
+EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}" EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}" \
+  LOG_FILE="$LOG_FILE" python3 -m core.ef_stream_loop 2>>"$LOG_FILE" &
 STREAM_PID=$!
 log_info "Heartbeat started (PID: $HEARTBEAT_PID)"
 log_info "EigenFlux stream started (PID: $STREAM_PID)"
@@ -1280,6 +1283,13 @@ except Exception:
       fi
 
       # ── Normal message → dispatch to background handler ──────────────
+      # Acknowledge IMMEDIATELY with a "working on it" reaction, before any
+      # synchronous work (engagement spawn, session compact) runs. The reaction
+      # only needs message_id, which we already have, so the user sees instant
+      # feedback instead of waiting on a cold Python import.
+      reaction_result=$(lark_add_reaction "$message_id" "Typing")
+      reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
+
       session_result=$(get_session_id "$conv_key" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
       rotated=$(echo "$session_result" | grep ROTATED || true)
@@ -1317,12 +1327,9 @@ if old_sid:
       _log_content=$(printf '%s' "$content" | tr '\n\r' '  ' | cut -c1-120)
       log_info "[$session_id] Received: $_log_content"
 
-      # ── Engagement tracking: check if this message responds to a heartbeat ──
-      python3 -m core.engagement "$content" 2>>"$LOG_FILE" || log_warn "Engagement tracking failed"
-
-      # Add a reaction to indicate we're working on it
-      reaction_result=$(lark_add_reaction "$message_id" "Typing")
-      reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
+      # ── Engagement tracking (background — independent of the reply, must not
+      # block the ack or dispatch; a fresh Python import here costs ~0.5-2s) ──
+      python3 -m core.engagement "$content" >/dev/null 2>>"$LOG_FILE" &
 
       # Concurrency guard: wait if too many handlers are running
       # Note: `jobs -r` doesn't work reliably inside a pipe subshell.
