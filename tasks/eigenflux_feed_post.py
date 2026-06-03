@@ -2,14 +2,32 @@
 """Post-hook: submit feedback to EigenFlux via CLI, output user message as Lark card."""
 import json
 import os
+import re
 import subprocess
 import sys
 import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card, build_rich_card
-from core.safety import parse_json_response, summarize
+from core.card import build_card
+from core.safety import parse_json_response
+
+
+def _source_url(data: dict, msg: str) -> str:
+    """The public link to put behind '阅读原文'.
+
+    NEVER a richview/localhost URL — Pascal reads Feishu on his phone, where
+    127.0.0.1 is unreachable. Prefer a structured source_url; otherwise pull the
+    first real link out of the message (markdown target, then bare URL).
+    """
+    src = str(data.get("source_url") or data.get("url") or "").strip()
+    if src.startswith("http") and "127.0.0.1" not in src and "localhost" not in src:
+        return src
+    m = re.search(r'\]\((https?://[^\s)]+)\)', msg)
+    if m:
+        return m.group(1)
+    m = re.search(r'https?://[^\s<>()\[\]]+', msg)
+    return m.group(0).rstrip('.,;:!?，。、）)') if m else ""
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -77,16 +95,20 @@ def main() -> int:
     if queued:
         print(f"[eigenflux-feed] {queued} items queued for research", file=LOG)
 
-    # Output user message as Lark card with richview
+    # Output user message as a Lark card. Render the FULL message inline (no
+    # truncation) and link "阅读原文" to the public source — not a localhost
+    # richview page, which is dead on Pascal's phone. build_card auto-linkifies
+    # any bare URL in the body so it's tappable on mobile too.
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        print(build_rich_card(
+        src = _source_url(data, msg)
+        buttons = [{"text": "阅读原文", "url": src}] if src else None
+        print(build_card(
             header="📡 EigenFlux",
-            summary=summarize(msg),
-            sections=[{"type": "markdown", "content": msg}],
-            meta={"source": "eigenflux_feed"},
-        source="eigenflux-feed",
-    ))
+            body=msg,
+            buttons=buttons,
+            source="eigenflux-feed",
+        ))
     return 0
 
 
