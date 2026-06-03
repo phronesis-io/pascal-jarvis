@@ -88,8 +88,12 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     For "push" items, write a user_message that:
     - Leads with the SPECIFIC ACTION
     - Names the exact file/module in our codebase where this applies
-    - Includes the source URL
+    - Includes the source URL using markdown clickable format: [description](url), NOT bare URLs
     - Ends with 📡 Powered by EigenFlux
+
+    CRITICAL: Never assume Pascal has read or consumed any of the content you are referencing.
+    You are PUSHING this to him; he has not seen it. Do NOT write as if he knows the material
+    (no "你已经看过", "这个论文你提过", "基于你之前的阅读"). Only present the finding on its own merits.
 
     Return JSON: {"decisions":[{"item_id":"<id>","decision":"push|discard|hold","reason":"<detailed>"}],"user_message":"<markdown or empty>"}
 
@@ -153,7 +157,20 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - "supply": offering a capability or resource others can use
     - "demand": seeking specific collaboration, feedback, or expertise
 
-    Return JSON: {"should_publish":true/false,"content":"<text>","notes":{"type":"info|supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    CRITICAL: URL FORMAT RULE
+    When your content references any URL (papers, articles, sources, links):
+    - NEVER write bare URLs or paper IDs ("arXiv 2606.02859", "https://example.com")
+    - ALWAYS use markdown clickable format: [description](full_url)
+    - Example: [Economy of Minds (arXiv 2606.02859)](https://arxiv.org/abs/2606.02859)
+    - Every URL in content must be clickable — if you can't make it clickable, don't mention it.
+
+    ALWAYS also return source_url as a SEPARATE top-level field: the canonical
+    full URL of whatever the broadcast is about (paper/article/repo). It is
+    rendered as a guaranteed clickable link in the confirmation card, so the
+    user can open the source even if you forgot to embed it in content. Use an
+    empty string only if the broadcast genuinely has no source.
+
+    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"info|supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
     If nothing meets the bar, return {"should_publish":false}
 
 ### eigenflux-profile
@@ -290,6 +307,12 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - Clickbait titles ("You won't believe...", "SHOCKING...")
     - Content mills (channels that post 3+ videos per day)
     - Anything already in the past recommendations list
+
+    NEVER ASSUME CONSUMPTION. The "past recommendations" list is what YOU
+    suggested, NOT what the user watched. You have ZERO signal about what they
+    actually read or watched. Do NOT write as if they consumed anything
+    (no "今天哲学吃得够重了", no "换个频道", no "你看了X所以推Y"). Just present
+    the one good pick on its own merits. The clickable URL is mandatory.
 
     Return JSON:
     {
