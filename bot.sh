@@ -528,9 +528,9 @@ $(load_memory)"
   local answer=""
   local _attempt
 
-  for _attempt in 1 2; do
-    if [ "$_attempt" -eq 2 ]; then
-      log_info "[$session_id] Retry attempt 2 after empty response (sleeping 3s)"
+  for _attempt in 1 2 3 4; do
+    if [ "$_attempt" -gt 1 ]; then
+      log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
       sleep 3
     fi
 
@@ -649,6 +649,12 @@ except Exception:
 
     if [ -z "$answer" ]; then
       log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
+      # A watchdog kill (143) means the task simply ran long — retrying just
+      # burns another full 6000s timeout and likely dies the same way. Stop the
+      # retry loop now; the 143 path below tells the user to resume with 「继续」.
+      if [ "${_exit_code:-0}" -eq 143 ]; then
+        break
+      fi
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
     else
@@ -665,7 +671,7 @@ except Exception:
   fi
 
   if [ -z "$reply" ]; then
-    log_warn "[$session_id] Final empty/error answer from Claude (${#answer} chars after 2 attempts)"
+    log_warn "[$session_id] Final empty/error answer from Claude (${#answer} chars after ${_attempt:-?} attempts)"
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
@@ -676,8 +682,12 @@ except Exception:
         lark_reply_text "$message_id" \
           "任务运行超过看门狗上限被中断（exit 143，不是 API 问题）。进度已存入 session，直接说「继续」即可接着干。" >/dev/null
       else
-        lark_reply_text "$message_id" \
-          "Claude 连续两次返回空响应（API 可能暂时不稳定）。请稍后重试。" >/dev/null
+        # Transient empty response (API blip). We already retried silently up to
+        # 4x with backoff above. Nagging "请稍后重试" just forces the user to tell
+        # us to retry by hand — exactly the boring loop they asked us to remove.
+        # Stay silent: the reaction is cleared above so the turn visibly ends,
+        # and the user can resend if they were actually waiting on a reply.
+        log_warn "[$session_id] Empty after $_attempt attempts — staying silent (user opted out of the retry nag)"
       fi
     else
       lark_reply_text "$message_id" \
