@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+from core.card import linkify_bare_urls
 from core.ef_stream import extract_detail, extract_metadata, format_message, parse_cursor
 from core.log import log
 
@@ -33,6 +34,7 @@ from core.log import log
 def _lark_send(text: str, user_id: str) -> bool:
     if not user_id or not text:
         return False
+    text = linkify_bare_urls(text)
     try:
         r = subprocess.run(
             ["lark-cli", "im", "+messages-send",

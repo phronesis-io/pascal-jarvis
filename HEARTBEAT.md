@@ -334,7 +334,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
       "title": "<video title>",
       "url": "<full URL>",
       "category": "<philosophy|ai-agents|startup|science|music|investment|culture|sports>",
-      "user_message": "<Chinese, 2-3 sentences: what it is + why it's worth watching. End with the URL on its own line.>"
+      "user_message": "<Chinese, 2-3 sentences: what it is + why it's worth watching. End with a CLICKABLE markdown link on its own line: [▶️ 打开](full_url) — NEVER a bare URL (Feishu won't make bare URLs tappable).>"
     }
 
     If NONE of the candidates meet quality bar, reply HEARTBEAT_OK. Don't force a bad pick.
@@ -379,8 +379,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     This is autonomous internal work — do NOT triage memory upkeep back to Pascal.
 
-    Updates are applied DIRECTLY to target files (no queue). For each update needed:
-    → UPDATE: <subdir/filename>.md: <what to add or change>
+    Gate what you write: only emit a directive for a fact that is BOTH new AND
+    changes future advice/behavior. Skip restatements of what memory already holds —
+    noise dilutes attention. Updates apply DIRECTLY to target files (no queue):
+    → UPDATE: <subdir/filename>.md: <new fact to append>
+    → REPLACE: <subdir/filename>.md: <existing text, matched verbatim> ||| <new text>
+    Use REPLACE (not UPDATE) when a fact supersedes an existing line — reconcile the
+    contradiction in place instead of appending a parallel, conflicting entry. An empty
+    replacement deletes the matched text; an unmatched REPLACE is skipped (never appended).
     Then output a brief diary summary of what changed today.
     If nothing new, reply: HEARTBEAT_OK
 
