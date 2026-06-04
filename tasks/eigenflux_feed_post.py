@@ -29,6 +29,23 @@ def _source_url(data: dict, msg: str) -> str:
     m = re.search(r'https?://[^\s<>()\[\]]+', msg)
     return m.group(0).rstrip('.,;:!?，。、）)') if m else ""
 
+
+def _distinct_links(msg: str) -> list[str]:
+    """All distinct http(s) links in the body (markdown targets + bare URLs).
+
+    Used to decide whether a single bottom "阅读原文" button makes sense. A
+    multi-item digest (the FYI/知会 tier) carries one inline link per item, so a
+    single footer button would point to only one of them and mislead.
+    """
+    found = re.findall(r'\]\((https?://[^\s)]+)\)', msg)
+    found += re.findall(r'(?<![(\[])\bhttps?://[^\s<>()\[\]]+', msg)
+    seen: list[str] = []
+    for u in found:
+        u = u.rstrip('.,;:!?，。、）)')
+        if u not in seen:
+            seen.append(u)
+    return seen
+
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 
@@ -101,8 +118,15 @@ def main() -> int:
     # any bare URL in the body so it's tappable on mobile too.
     msg = str(data.get("user_message", "")).strip()
     if msg:
-        src = _source_url(data, msg)
-        buttons = [{"text": "阅读原文", "url": src}] if src else None
+        # A single "阅读原文" button only makes sense when the card has ONE
+        # source. Multi-item digests (FYI/知会) carry a per-item inline link
+        # each; the footer button would point to just the first item and
+        # mislead, so suppress it and let the inline links do the navigation.
+        if len(_distinct_links(msg)) >= 2:
+            buttons = None
+        else:
+            src = _source_url(data, msg)
+            buttons = [{"text": "阅读原文", "url": src}] if src else None
         print(build_card(
             header="📡 EigenFlux",
             body=msg,
