@@ -115,10 +115,28 @@ eigenflux_msg_send() {
   eigenflux msg send "$@" -f json 2>>"${LOG_FILE:-/dev/null}"
 }
 
+# eigenflux_msg_history <conv_id> [limit]
+# Prior turns of a conversation — lets a reply be composed with context, not
+# just the single inbound packet. Read-only; empty output on auth failure.
+eigenflux_msg_history() {
+  local conv_id="$1" limit="${2:-10}"
+  [ -z "$conv_id" ] && return 1
+  eigenflux msg history --conv-id "$conv_id" --limit "$limit" -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
 # ── Relations ────────────────────────────────────────────────────────
 
 eigenflux_friends_list() {
   eigenflux relation friends -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
+# eigenflux_relation_apply <--to-email <e> | --to-uid <id>> [--greeting <m>] [--remark <r>]
+# Send an OUTBOUND friend request (the ef-communication skill advertises
+# "add a friend" / the `eigenflux#<email>` invite, but there was no wrapper).
+# Explicit/interactive use only — never call autonomously from a heartbeat.
+eigenflux_relation_apply() {
+  [ $# -eq 0 ] && return 1
+  eigenflux relation apply "$@" -f json 2>>"${LOG_FILE:-/dev/null}"
 }
 
 # eigenflux_relation_incoming — list pending incoming friend requests
@@ -133,6 +151,37 @@ eigenflux_relation_handle() {
   local args=(relation handle --request-id "$request_id" --action "$action")
   [ -n "$remark" ] && args+=(--remark "$remark")
   eigenflux "${args[@]}" -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
+# ── Settings sync (CLI 0.0.8+) ───────────────────────────────────────
+# Two-way agent/console settings sync (last writer wins via the backend
+# agent_settings row). Synced keys: recurring_publish, auto_reply_pm,
+# feed_poll_interval, feed_delivery_preference.
+
+# eigenflux_settings_sync [--mode skill] — reconcile local config KV with the
+# backend. The CLI already runs this automatically after every `feed poll`, so
+# console edits land within one poll interval; the wrapper is for an immediate,
+# explicit reconcile. Pushes a pending local change up, else pulls backend down.
+eigenflux_settings_sync() {
+  eigenflux settings sync "$@" -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
+# eigenflux_settings_push [--mode skill] [--force] — report agent-side settings
+# (runtime mode + feed_delivery_preference) to the backend; no-ops when unchanged.
+eigenflux_settings_push() {
+  eigenflux settings push "$@" -f json 2>>"${LOG_FILE:-/dev/null}"
+}
+
+# eigenflux_auto_reply_pm — echo "true"/"false": may the agent auto-reply to PMs?
+# Console-controllable, synced down by `settings sync` after each feed poll. Per
+# the upstream agent contract, ONLY an explicit "false" disables auto-reply;
+# unset/unknown defaults to "true". The key name contains no "false", so a
+# substring test is safe whether the CLI prints a bare value or a JSON wrapper.
+eigenflux_auto_reply_pm() {
+  case "$(eigenflux config get --key auto_reply_pm 2>/dev/null)" in
+    *false*) echo "false" ;;
+    *)       echo "true" ;;
+  esac
 }
 
 # ── Auth status ──────────────────────────────────────────────────────

@@ -14,6 +14,26 @@ from core.card import build_card
 from core.safety import looks_like_error, parse_json_response
 
 
+def _auto_reply_pm_enabled() -> bool:
+    """Honor EigenFlux's `auto_reply_pm` switch before sending any autonomous PM
+    reply. The switch is console-controllable and synced down to the local config
+    after every feed poll. Per the upstream agent contract, only an explicit
+    `false` suppresses auto-reply; unset/unknown/`true` all default to ON.
+
+    This is the single choke point where Jarvis replies to a PM *sender* (the
+    real-time stream path only surfaces messages to Pascal), so gating here is
+    sufficient to make the whole bot honor the switch.
+    """
+    try:
+        r = subprocess.run(
+            ["eigenflux", "config", "get", "--key", "auto_reply_pm"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "false" not in (r.stdout or "").lower()
+    except Exception:
+        return True  # fail open: never silently swallow replies on a probe error
+
+
 def main() -> int:
     message = sys.stdin.read().strip()
     if not message or message == "HEARTBEAT_OK":
@@ -33,6 +53,15 @@ def main() -> int:
 
     reply_actions = data.get("reply_actions", [])
     user_message = data.get("user_message", "")
+
+    # Honor the auto_reply_pm switch: when off, do NOT reply to the sender —
+    # surface to Pascal and let him decide. Annotate so he knows replies were held.
+    if reply_actions and not _auto_reply_pm_enabled():
+        held = len(reply_actions)
+        reply_actions = []
+        note = f"（EigenFlux auto_reply_pm 已关闭：{held} 条自动回复已暂停，需要回复请告诉我。）"
+        user_message = f"{user_message}\n\n{note}".strip() if user_message else note
+        print(f"[eigenflux-messages] auto_reply_pm=false — held {held} repl(y/ies)", file=sys.stderr)
 
     # Send each reply via eigenflux CLI
     for action in reply_actions:
