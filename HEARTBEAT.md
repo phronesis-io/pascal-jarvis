@@ -33,35 +33,45 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 - post: tasks/eigenflux_feed_post.py
 - prompt: |
     [EIGENFLUX FEED TRIAGE]
-    You are Pascal's personal assistant. Your job is DEEP ANALYSIS, not information relay.
+    You have TWO separate jobs. Do NOT conflate them:
+    (A) SCORE every item — this is a signal that trains the network's matching for Pascal.
+    (B) DECIDE what reaches Pascal — push / 知会(fyi) / silent.
+    A relevant item Pascal needn't ACT on still gets a positive score AND a one-line
+    heads-up. It is NOT discarded. The old prompt black-holed relevant signal and
+    starved Pascal — fix that.
 
     Context: Check the user's memory files for their profile, portfolio, projects, priorities,
     and goals. Use these to judge relevance — don't rely on hardcoded assumptions.
 
     The DATA below is ENRICHED — each item includes `url`/`source_url` and `full_content` when available.
 
-    TRIAGE RULES:
-    1. For each item, ask: does this CONCRETELY affect his holdings, his product, or his goals?
-    2. "Tangentially related to AI/agents" is NOT enough. The bar is: can you write a SPECIFIC action?
-    3. Papers/research: DEFAULT to "hold" with needs_research: true, unless you can articulate exactly how it applies.
-    4. Do NOT say "建议快速扫一遍" or "值得关注" — if YOU can't explain why it matters, don't push it.
-    5. For "push" items with a URL: use WebFetch to read the source content BEFORE writing your recommendation.
-       Do NOT push based on title/summary alone — verify the content supports your recommendation.
+    STEP 1 — SCORE (trains matching; be honest, not stingy. Scoring a relevant item low
+    is a BUG: it teaches the network to stop sending good matches, and Pascal goes blind):
+    - score reflects RELEVANCE to Pascal's world, NOT whether you deliver it.
+    - 2 = high-value: directly about his product (EigenFlux/agent infra), holdings, or active projects
+    - 1 = relevant: his domains (multi-agent, recsys, LLM post-training, harness, his portfolio sectors)
+    - 0 = off-topic but not junk
+    - -1 = spam / pure marketing / unrelated to him
 
-    For each item, assign:
-    - score: -1 (spam), 0 (neutral), 1 (valuable), 2 (high-value)
-    - action: "push" (SPECIFIC, CONCRETE action recommendation), "hold" (needs deeper research), "discard" (irrelevant)
+    STEP 2 — DELIVERY (decoupled from score):
+    - "push": he should ACT. HIGH bar, keep it rare. WebFetch the URL, verify content, then
+      write a message leading with the SPECIFIC action ("建议让鱼刺看X的Section 4，因为…"),
+      why it matters for EigenFlux's CURRENT challenges, + source link. Never hand him the
+      research you should have done.
+    - "fyi": relevant, worth knowing, no concrete action today. ONE line + link. This is the
+      知会 tier — its whole job is that Pascal stops feeling blind. Default for score>=1 that
+      isn't push-worthy. Cap ~5 per cycle: pick the MOST relevant, mark the rest silent.
+    - "hold": genuinely needs deep research first → set needs_research: true (score>=1 only).
+      The research task picks it up later.
+    - "silent": scored (for the network) but not delivered this cycle. Use for the surplus
+      relevant items beyond the 知会 cap, and for score<=0.
 
-    For "push" items, write a user_message that:
-    - Leads with the SPECIFIC ACTION ("建议让鱼刺看X的Section 4，因为Y可以直接用在Z上")
-    - Explains WHY in terms of EigenFlux's CURRENT challenges
-    - Includes the source URL so user can click through
-    - Never asks Pascal to do the research you should have done
+    Compose user_message in two sections (omit a section if it's empty; if BOTH empty, return ""):
+    🎯 行动 — push items, detailed, action-first, with link
+    📡 知会 — fyi items, one short line each + link
+    Keep push few and deep; let 知会 carry the breadth. End with 📡 Powered by EigenFlux.
 
-    For "hold" items with score >= 1, add "needs_research": true — the research task will do deep work later.
-    Keep it concise. 1 well-researched actionable item > 10 "值得关注". End with 📡 Powered by EigenFlux.
-
-    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|hold|discard>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>"}
+    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>"}
 
 ### eigenflux-research
 - interval: 30m
@@ -189,7 +199,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     If nothing meets the bar (the usual case), return {"should_publish":false}
 
 ### eigenflux-profile
-- interval: 24h
+- interval: 1h
 - pre: tasks/eigenflux_profile_pre.sh
 - post: tasks/eigenflux_profile_post.py
 - prompt: |
