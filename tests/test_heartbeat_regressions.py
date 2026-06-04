@@ -101,6 +101,64 @@ def test_heartbeat_ok_with_whitespace(tmp_path, monkeypatch):
     assert result == ""
 
 
+# ── Card + top-level user_message duplication (2026-06-04) ─────────
+# Bug: in the multi-task envelope path a task's post-script emits a card AND
+# the envelope's top-level user_message was appended as text, so one push said
+# the same thing twice (card + a paragraph repeating it). Fix: suppress
+# top_msg when any task already produced a card.
+
+_FAKE_CARD = (
+    '{"config": {"wide_screen_mode": true}, '
+    '"header": {"title": {"tag": "plain_text", "content": "推荐"}}, '
+    '"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "CARD_BODY_HERE"}}]}'
+)
+
+
+def _write_card_post(runner) -> None:
+    script = Path(runner.jarvis_dir) / "fake_card_post.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"print({_FAKE_CARD!r})\n"
+    )
+
+
+def test_card_present_suppresses_duplicate_top_message(tmp_path, monkeypatch):
+    """A task card must not be echoed by the top-level user_message."""
+    hb = (
+        "### rec\n- interval: 1h\n- prompt: p\n- post: fake_card_post.py\n\n"
+        "### other\n- interval: 1h\n- prompt: q\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    _write_card_post(runner)
+    envelope = json.dumps({
+        "tasks": {"rec": "raw rec data", "other": "HEARTBEAT_OK"},
+        "user_message": "DUPLICATE_PARAGRAPH that just repeats the card",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    result = runner.run_cycle(force=True)
+
+    assert "CARD:" in result and "CARD_BODY_HERE" in result
+    assert "DUPLICATE_PARAGRAPH" not in result
+
+
+def test_top_message_kept_when_no_card(tmp_path, monkeypatch):
+    """With no card in the cycle, the top-level user_message is the message."""
+    hb = (
+        "### a\n- interval: 1h\n- prompt: p\n\n"
+        "### b\n- interval: 1h\n- prompt: q\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {"a": "HEARTBEAT_OK", "b": "HEARTBEAT_OK"},
+        "user_message": "A genuine companion note with no card",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    result = runner.run_cycle(force=True)
+
+    assert "genuine companion note" in result
+
+
 # ── MAX_BATCH_SIZE cap ─────────────────────────────────────────────
 
 

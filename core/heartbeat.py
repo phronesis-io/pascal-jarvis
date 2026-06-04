@@ -515,8 +515,14 @@ You have access to the user's memory below. Use it to personalize your responses
                     elif isinstance(resp, str) and resp.strip() and "HEARTBEAT_OK" not in resp:
                         user_messages.append(resp)
                         producing_tasks.append(task["name"])
+                # The top-level user_message is Claude's conversational summary.
+                # If a task already produced a card, that card IS the message —
+                # appending top_msg here would say the same thing twice (a card
+                # plus a paragraph repeating it). Only surface top_msg when no
+                # card carries the content; otherwise the card stands alone.
                 top_msg = envelope.get("user_message", "")
-                if top_msg and top_msg.strip():
+                has_card = any(m.strip().startswith('{"config":') for m in user_messages)
+                if top_msg and top_msg.strip() and not has_card:
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
                 # NEVER dump raw JSON to user — log for debugging and skip
