@@ -2,7 +2,32 @@
 
 import json
 
-from core.card import build_card, extract_card_text, extract_readable_from_output, linkify_bare_urls
+import core.richview
+from core.card import (
+    _sections_to_markdown,
+    _url_is_reachable,
+    build_card,
+    build_rich_card,
+    extract_card_text,
+    extract_readable_from_output,
+    linkify_bare_urls,
+)
+
+
+def _card_body(card_json: str) -> str:
+    card = json.loads(card_json)
+    for el in card["elements"]:
+        if el.get("tag") == "div":
+            return el["text"]["content"]
+    return ""
+
+
+def _card_buttons(card_json: str) -> list:
+    card = json.loads(card_json)
+    for el in card["elements"]:
+        if el.get("tag") == "action":
+            return el["actions"]
+    return []
 
 
 def test_linkify_bare_url():
@@ -97,3 +122,77 @@ def test_extract_readable_blocks_raw_json():
     result = extract_readable_from_output(output)
     assert "internal" not in result
     assert "visible text" in result
+
+
+def test_url_is_reachable():
+    assert _url_is_reachable("https://views.example.com/view/abc")
+    assert not _url_is_reachable("http://127.0.0.1:3456/view/abc")
+    assert not _url_is_reachable("http://localhost:3456/view/abc")
+    assert not _url_is_reachable("")
+
+
+def test_sections_to_markdown_flattens_kv_and_markdown():
+    md = _sections_to_markdown([
+        {"type": "markdown", "content": "今天的计划"},
+        {"type": "kv", "items": {"模式 1": "回避", "模式 2": "紧绷"}},
+    ])
+    assert "今天的计划" in md
+    assert "**模式 1**：回避" in md
+    assert "**模式 2**：紧绷" in md
+
+
+def test_rich_card_localhost_renders_full_content_inline(monkeypatch):
+    # Localhost view is unreachable from Lark → full content must be in the card,
+    # not hidden behind a dead "查看完整内容" link.
+    monkeypatch.setattr(core.richview, "publish",
+                        lambda **kw: "http://127.0.0.1:3456/view/deadbeef")
+    full = "完整的今日计划：康复处方、臀肌激活、周会准备，全都在这里。"
+    result = build_rich_card(
+        header="🌅 今日",
+        summary="完整的今日…",  # truncated summary that used to be all he saw
+        sections=[{"type": "markdown", "content": full}],
+        source="daily-plan",
+    )
+    assert full in _card_body(result)  # full content inline
+    # No dead richview link button
+    assert not any("查看完整内容" in b["text"]["content"] for b in _card_buttons(result))
+
+
+def test_rich_card_public_url_keeps_summary_and_link(monkeypatch):
+    monkeypatch.setattr(core.richview, "publish",
+                        lambda **kw: "https://views.example.com/view/abc")
+    result = build_rich_card(
+        header="🌅 今日",
+        summary="简短摘要",
+        sections=[{"type": "markdown", "content": "完整内容"}],
+    )
+    assert _card_body(result) == "简短摘要"
+    btns = _card_buttons(result)
+    assert btns[0]["text"]["content"] == "查看完整内容"
+    assert btns[0]["url"] == "https://views.example.com/view/abc"
+
+
+def test_rich_card_preserves_extra_buttons_inline(monkeypatch):
+    monkeypatch.setattr(core.richview, "publish",
+                        lambda **kw: "http://127.0.0.1:3456/view/x")
+    result = build_rich_card(
+        header="📺 推荐",
+        summary="s",
+        sections=[{"type": "markdown", "content": "body"}],
+        extra_buttons=[{"text": "收藏", "value": {"action": "save"}}],
+    )
+    btns = _card_buttons(result)
+    assert any(b["text"]["content"] == "收藏" for b in btns)
+
+
+def test_rich_card_truncates_overlong_content(monkeypatch):
+    monkeypatch.setattr(core.richview, "publish",
+                        lambda **kw: "http://127.0.0.1:3456/view/x")
+    long_body = "字" * 9000
+    result = build_rich_card(
+        header="周报", summary="s",
+        sections=[{"type": "markdown", "content": long_body}],
+    )
+    body = _card_body(result)
+    assert len(body) < 9000
+    assert "已截断" in body

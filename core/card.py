@@ -19,6 +19,13 @@ _BARE_URL_RE = re.compile(r"(?<![(\[<])\bhttps?://[^\s<>()\[\]]+")
 # Trailing punctuation that shouldn't be swallowed into the link target.
 _TRAIL_PUNCT = ".,;:!?，。、）)"
 
+# Hosts a Lark client (phone/desktop) cannot open — a richview link on one of
+# these is dead, so we render the full content inline instead.
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1", ""}
+# Lark interactive card content cap is ~8000 chars; stay under it for JSON
+# overhead and the header.
+_CARD_BODY_LIMIT = 7000
+
 
 def linkify_bare_urls(text: str) -> str:
     """Convert bare URLs to markdown links so Lark renders them tappable.
@@ -100,6 +107,50 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     return json.dumps(card, ensure_ascii=False)
 
 
+def _url_is_reachable(url: str) -> bool:
+    """True if a Lark client could open this URL (i.e. not a localhost view)."""
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host not in _LOCAL_HOSTS
+
+
+def _sections_to_markdown(sections: list[dict] | None) -> str:
+    """Flatten richview sections into one markdown string for inline display.
+
+    Used when the richview link is unreachable from the user's Lark client, so
+    the full content is shown in the card itself instead of behind a dead link.
+    """
+    parts: list[str] = []
+    for sec in sections or []:
+        stype = sec.get("type", "markdown")
+        if stype == "kv":
+            items = sec.get("items", {}) or {}
+            parts.append("\n".join(f"**{k}**：{v}" for k, v in items.items()))
+        elif stype == "timeline":
+            events = sec.get("events", []) or []
+            parts.append("\n".join(
+                f"`{e.get('time', '')}` {e.get('text', '')}" for e in events))
+        elif stype == "table":
+            lines = []
+            headers = sec.get("headers", []) or []
+            if headers:
+                lines.append(" | ".join(str(h) for h in headers))
+            lines.extend(" | ".join(str(c) for c in row)
+                         for row in sec.get("rows", []) or [])
+            parts.append("\n".join(lines))
+        elif stype == "code":
+            parts.append(f"```{sec.get('language', '')}\n{sec.get('content', '')}\n```")
+        else:  # markdown / heading / unknown
+            content = sec.get("content", "")
+            if content:
+                parts.append(content)
+    return "\n\n".join(p for p in parts if p)
+
+
 def build_rich_card(
     header: str,
     summary: str,
@@ -109,14 +160,16 @@ def build_rich_card(
     extra_buttons: list[dict] | None = None,
     source: str = "",
 ) -> str:
-    """Build a Lark card with an auto-generated RichView link.
+    """Build a Lark card carrying full rich content.
 
-    This is the primary way to send rich content: the card shows a summary,
-    and a button links to the full interactive page.
+    When the RichView page is publicly reachable, the card shows a short
+    summary and links to the full interactive page. When it is served from
+    localhost (the link a Lark client can't open), the full content is rendered
+    inline instead — so nothing is hidden behind a dead link.
 
     Args:
         header: Card header text
-        summary: Brief markdown body shown in the card itself
+        summary: Brief markdown body shown when the full view is reachable
         sections: Full content sections passed to richview.publish()
         meta: Optional metadata for the view
         button_text: Label for the "view details" button
@@ -128,10 +181,24 @@ def build_rich_card(
     from core.richview import publish
 
     url = publish(title=header, sections=sections, meta=meta)
-    buttons = [{"text": button_text, "url": url}]
-    if extra_buttons:
-        buttons.extend(extra_buttons)
-    return build_card(header=header, body=summary, buttons=buttons, source=source)
+
+    if _url_is_reachable(url):
+        buttons = [{"text": button_text, "url": url}]
+        if extra_buttons:
+            buttons.extend(extra_buttons)
+        return build_card(header=header, body=summary, buttons=buttons, source=source)
+
+    # Localhost / unreachable view: render the full content inline so the user
+    # can read everything in the card, and drop the dead "查看完整内容" link.
+    body = _sections_to_markdown(sections) or summary
+    if len(body) > _CARD_BODY_LIMIT:
+        body = body[:_CARD_BODY_LIMIT].rstrip() + "\n\n…（内容较长，已截断）"
+    return build_card(
+        header=header,
+        body=body,
+        buttons=list(extra_buttons) if extra_buttons else None,
+        source=source,
+    )
 
 
 def extract_card_text(card_json: str) -> str:
