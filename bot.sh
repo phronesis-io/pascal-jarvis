@@ -16,6 +16,14 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export JARVIS_DIR
 
+# Anchor CWD to JARVIS_DIR. The bg helpers run as `python3 -m core.X`, which
+# resolves `core/` from the CWD — if bot.sh is launched (or self-exec'd) from
+# any other directory (e.g. a restart kicked off from WORK_DIR), every helper
+# dies with `ModuleNotFoundError: No module named 'core'`, taking heartbeat and
+# the ef-stream down and spiralling into a restart loop. Anchoring here makes
+# that impossible regardless of how/where we were launched.
+cd "$JARVIS_DIR" || { echo "FATAL: cannot cd to JARVIS_DIR ($JARVIS_DIR)" >&2; exit 1; }
+
 # ── Single-instance lock (prevent duplicate replies) ────────────────
 # PID file format: "PID BOOT_TIMESTAMP" — validates both PID liveness AND
 # that the PID belongs to the same boot cycle (guards against PID reuse).
@@ -527,6 +535,7 @@ $(load_memory)"
   local _claude_pid
   local answer=""
   local _attempt
+  local _watchdog_killed=0  # set to 1 only when the 6000s watchdog did the kill
 
   for _attempt in 1 2 3 4; do
     if [ "$_attempt" -gt 1 ]; then
@@ -614,8 +623,12 @@ for d in descs[offset:]:
          _last_tool_count="$_new_count"
        fi
      done
-     # Watchdog timeout
+     # Watchdog timeout. Drop a marker so the parent can tell a genuine 6000s
+     # timeout apart from a SIGTERM that came from a restart / external kill —
+     # both surface as exit 143, but only the real timeout should tell the user
+     # to resume with 「继续」.
      if kill -0 $_claude_pid 2>/dev/null; then
+       : > "${ANSWER_FILE}.watchdog"
        kill $_claude_pid 2>/dev/null
        log_warn "[$session_id] Claude killed by 6000s watchdog"
      fi
@@ -624,6 +637,8 @@ for d in descs[offset:]:
     wait $_claude_pid 2>/dev/null
     local _exit_code=$?
     kill $_watchdog_pid 2>/dev/null 2>&1; wait $_watchdog_pid 2>/dev/null
+    # Did the 6000s watchdog do this kill, or was it a restart / external SIGTERM?
+    [ -f "${ANSWER_FILE}.watchdog" ] && _watchdog_killed=1
 
     # Extract the final assistant text from the --output-format json envelope:
     # one object {"result": "<final text>", "subtype": "success", ...}. Parsing
@@ -649,9 +664,10 @@ except Exception:
 
     if [ -z "$answer" ]; then
       log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
-      # A watchdog kill (143) means the task simply ran long — retrying just
-      # burns another full 6000s timeout and likely dies the same way. Stop the
-      # retry loop now; the 143 path below tells the user to resume with 「继续」.
+      # exit 143 = SIGTERM: either the 6000s watchdog (task ran long) or a
+      # restart/external kill. Either way, retrying in-loop is pointless (the
+      # process is already gone), so stop now. The user-facing message below
+      # branches on whether the watchdog marker is present.
       if [ "${_exit_code:-0}" -eq 143 ]; then
         break
       fi
@@ -662,7 +678,7 @@ except Exception:
     fi
   done
 
-  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "$LOCK_FILE"
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "$LOCK_FILE"
 
   # Filter error-like answers — never send them to the user as the "real" reply
   local reply=""
@@ -678,9 +694,18 @@ except Exception:
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      if [ "${_exit_code:-0}" -eq 143 ]; then
+      if [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ]; then
+        # Genuine 6000s watchdog timeout: the task really ran long. Resuming
+        # with 「继续」 is the right recovery.
         lark_reply_text "$message_id" \
           "任务运行超过看门狗上限被中断（exit 143，不是 API 问题）。进度已存入 session，直接说「继续」即可接着干。" >/dev/null
+      elif [ "${_exit_code:-0}" -eq 143 ]; then
+        # 143 WITHOUT the watchdog marker = a restart / external SIGTERM killed
+        # the in-flight Claude. Telling the user to say 「继续」 here is exactly
+        # the bug that produced the restart-loop nag: 「继续」 re-runs whatever
+        # was interrupted (often the very restart). Stay silent — the post-restart
+        # startup path already notifies "重启中断了，请重发" from the message queue.
+        log_warn "[$session_id] exit=143 without watchdog marker — restart/external kill, staying silent"
       else
         # Transient empty response (API blip). We already retried silently up to
         # 4x with backoff above. Nagging "请稍后重试" just forces the user to tell
@@ -1262,7 +1287,15 @@ except Exception as e:
         continue
       fi
 
-      # "stop" / "cancel" — kill the running Claude process for this session (safety bypass)
+      # "stop" / "cancel" — kill the running Claude process for this session (safety bypass).
+      # Accept Chinese stop words too: Pascal naturally types「结束/停/停止/停下/取消」,
+      # and previously those fell through to the LLM path — so a runaway/looping
+      # session could never be halted by the user (the exact "我说结束它不理" bug).
+      # Match the whole message only, so "取消那个日程" won't be treated as a stop.
+      _content_trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      case "$_content_trimmed" in
+        结束|停|停止|停下|取消|停一下|别跑了) content_lower="stop" ;;
+      esac
       if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
         _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
 import json, os
