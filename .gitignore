@@ -37,6 +37,7 @@ eigenflux/preinstall_state.json
 eigenflux/.cli_upgrade_result
 eigenflux/preinstall_cli_upgrade.log
 eigenflux/parity_todo.md
+eigenflux/.profile_refresh_state
 
 # Python
 __pycache__/

@@ -229,8 +229,10 @@ echo "  verification:"
 # 5a. eigenflux-related pytest suite
 if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
      "$JARVIS_DIR/tests/test_eigenflux_feed_search.py" \
-     "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" >/tmp/ef_pi_pytest.out 2>&1; then
-  echo "    ✓ pytest (prompt + feed_search + publish_post)"
+     "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" \
+     "$JARVIS_DIR/tests/test_ef_stream.py" \
+     "$JARVIS_DIR/tests/test_eigenflux_messages_post.py" >/tmp/ef_pi_pytest.out 2>&1; then
+  echo "    ✓ pytest (prompt + feed_search + publish_post + ef_stream + messages_post)"
 else
   echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"; fail+=("pytest failed")
 fi
@@ -253,6 +255,14 @@ if [ -n "$cli_current" ]; then
   if bounded 5 eigenflux version >/dev/null 2>&1 && bounded 8 eigenflux server list >/dev/null 2>&1; then
     echo "    ✓ CLI smoke (version + server list)"
   else echo "    ✗ CLI smoke"; fail+=("CLI smoke failed"); fi
+  # 5c-bis. settings command present (CLI 0.0.8+) + client.sh wrapper exists.
+  # Read-only: `settings --help` does not touch the backend. The wrapper check
+  # closes the "new top-level command → evaluate a wrapper" parity gap.
+  if bounded 5 eigenflux settings --help >/dev/null 2>&1; then
+    if grep -q "eigenflux_settings_sync" "$CLIENT_SH" 2>/dev/null; then
+      echo "    ✓ settings command + client.sh wrapper present"
+    else echo "    ✗ settings command present but no client.sh wrapper"; fail+=("settings wrapper missing"); fi
+  else echo "    • settings: not available (CLI < 0.0.8?)"; fi
   # 5d. auth probe — exit 4 means token expired (a real auth nudge, not a parity failure)
   if bounded 10 eigenflux profile show -f json >/dev/null 2>&1; then authed=true; echo "    ✓ auth probe (authed)"
   else
@@ -287,6 +297,18 @@ it=items[0]
 sys.exit(0 if ('item_id' in it and ('source_url' in it or 'url' in it)) else 3)
 " 2>/dev/null; then echo "    ✓ live feed shape (item_id + url present)"
   else echo "    ✗ live feed shape — non-empty feed missing item_id/url (possible CLI contract change)"; fail+=("feed shape regression"); fi
+fi
+# 5f-bis. Report runtime mode to the backend (CLI 0.0.8+ settings). Jarvis is a
+# native skill-based integration (not the OpenClaw plugin host) → mode "skill".
+# Idempotent: `settings push` no-ops when unchanged. Best-effort telemetry — a
+# failure here never fails parity. The pull direction (console edits → local
+# config, incl. auto_reply_pm) already rides the feed poll above.
+if [ "$authed" = true ] && bounded 5 eigenflux settings --help >/dev/null 2>&1; then
+  if bounded 10 eigenflux settings push --mode skill >/dev/null 2>&1; then
+    echo "    ✓ settings push (--mode skill reported)"
+  else
+    echo "    • settings push: skipped (transient)"
+  fi
 fi
 # 5g. bash -n on all eigenflux scripts
 syntax_bad=()
