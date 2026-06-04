@@ -150,6 +150,12 @@ start_bot() {
   fi
 
   echo "Starting bot.sh..."
+  # cd into JARVIS_DIR first: bot.sh's bg helpers run as `python3 -m core.X`,
+  # which need CWD=JARVIS_DIR to import `core/`. Without this, a restart kicked
+  # off from another directory (e.g. Claude running restart.sh from WORK_DIR)
+  # brings the bot up broken and triggers a restart loop. (bot.sh now also
+  # anchors its own CWD, but keep this as defense in depth.)
+  cd "$JARVIS_DIR" || { red "  FATAL: cannot cd to JARVIS_DIR"; return 1; }
   nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
   sleep 3
 
