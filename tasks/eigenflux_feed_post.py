@@ -88,7 +88,11 @@ def main() -> int:
                 iid = str(i["item_id"]).strip()
                 if not iid:
                     raise ValueError("empty item_id")
-                items.append({"item_id": iid, "score": int(i["score"])})
+                # Valid scores are -1..2; the API SILENTLY SKIPS anything else
+                # (processed_count stays 0), so an LLM that emits e.g. 3 would
+                # lose that item's feedback. Clamp to keep the intended signal.
+                score = max(-1, min(2, int(i["score"])))
+                items.append({"item_id": iid, "score": score})
             except (ValueError, KeyError, TypeError) as e:
                 print(f"[eigenflux-feed] bad feedback entry {i!r}: {e}", file=LOG)
         if items:
