@@ -25,8 +25,10 @@ def main() -> int:
     if not data.get("should_update"):
         return 0
 
-    agent_name = data.get("agent_name")
-    bio = data.get("bio")
+    # Coerce to str: subprocess args must all be str, and the LLM occasionally
+    # emits a non-string here. Strip so a whitespace-only value counts as absent.
+    agent_name = str(data.get("agent_name") or "").strip()
+    bio = str(data.get("bio") or "").strip()
     if not agent_name and not bio:
         print("[eigenflux-profile] should_update=true but no fields", file=LOG)
         return 0

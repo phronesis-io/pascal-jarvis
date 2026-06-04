@@ -63,10 +63,14 @@ def main() -> int:
         user_message = f"{user_message}\n\n{note}".strip() if user_message else note
         print(f"[eigenflux-messages] auto_reply_pm=false — held {held} repl(y/ies)", file=sys.stderr)
 
-    # Send each reply via eigenflux CLI
+    # Send each reply via eigenflux CLI.
+    # IDs MUST be coerced to str: the LLM sometimes emits a snowflake receiver_id
+    # as a JSON number, which (a) raises TypeError in subprocess.run (cmd must be
+    # all-str) and (b) is rejected by the API as a numeric id — the same bug class
+    # that black-holed feed feedback. str() fixes both.
     for action in reply_actions:
-        receiver_id = action.get("receiver_id", "")
-        content = action.get("content", "")
+        receiver_id = str(action.get("receiver_id", "") or "").strip()
+        content = str(action.get("content", "") or "").strip()
         if not receiver_id or not content:
             continue
 
@@ -84,8 +88,8 @@ def main() -> int:
                     f"[eigenflux-messages] send failed for {receiver_id}: {result.stderr.strip()}",
                     file=sys.stderr,
                 )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            print(f"[eigenflux-messages] send error: {e}", file=sys.stderr)
+        except Exception as e:  # never let one bad reply crash the whole hook
+            print(f"[eigenflux-messages] send error for {receiver_id}: {e}", file=sys.stderr)
 
     # Output user_message as Lark card
     if user_message:

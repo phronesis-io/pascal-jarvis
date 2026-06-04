@@ -298,6 +298,26 @@ sys.exit(0 if ('item_id' in it and ('source_url' in it or 'url' in it)) else 3)
 " 2>/dev/null; then echo "    ✓ live feed shape (item_id + url present)"
   else echo "    ✗ live feed shape — non-empty feed missing item_id/url (possible CLI contract change)"; fail+=("feed shape regression"); fi
 fi
+# 5f-ter. Feedback WRITE round-trip — actually EXERCISE the submit path, which a
+# read-only smoke can't. This is the bug that black-holed every feedback: the API
+# requires item_id as a STRING and 400s on a numeric one ("Mismatch type string
+# with value number"). We probe with a junk string id + neutral score (0): it
+# never touches a real item's score, runs even when the feed is empty, and a
+# present processed_count proves the string-typed contract holds end-to-end.
+if [ "$authed" = true ]; then
+  fb_resp="$(bounded 10 eigenflux feed feedback --items '[{"item_id":"1","score":0}]' -f json 2>&1)"
+  # The CLI prints a human 'Feedback submitted...' line before the JSON; parse
+  # from the first '{' so that leading message doesn't break the JSON check.
+  if echo "$fb_resp" | python3 -c "import json,sys
+raw=sys.stdin.read(); i=raw.find('{')
+try: d=json.loads(raw[i:]) if i>=0 else {}
+except Exception: d={}
+sys.exit(0 if d.get('processed_count') is not None else 1)" 2>/dev/null; then
+    echo "    ✓ feedback write round-trip (string item_id accepted, processed_count returned)"
+  else
+    echo "    ✗ feedback write REJECTED — $(echo "$fb_resp" | tr '\n' ' ' | cut -c1-160)"; fail+=("feedback write regression")
+  fi
+fi
 # 5f-bis. Report runtime mode to the backend (CLI 0.0.8+ settings). Jarvis is a
 # native skill-based integration (not the OpenClaw plugin host) → mode "skill".
 # Idempotent: `settings push` no-ops when unchanged. Best-effort telemetry — a
