@@ -107,3 +107,20 @@ def test_feedback_numeric_item_id_coerced_to_string(tmp_path):
     assert items is not None, "script never called `eigenflux feed feedback`"
     assert isinstance(items[0]["item_id"], str), "numeric item_id must be cast to string"
     assert items[0]["item_id"] == "320503928905007104"
+
+
+def test_feedback_out_of_range_score_clamped(tmp_path):
+    """The API silently SKIPS scores outside -1..2 (processed_count stays 0), so
+    an out-of-range LLM score must be clamped client-side, not dropped."""
+    payload = json.dumps({
+        "feedback": [
+            {"item_id": "1", "score": 5, "action": "push"},     # → clamp to 2
+            {"item_id": "2", "score": -9, "action": "silent"},  # → clamp to -1
+        ],
+        "user_message": "",
+    })
+    items = _run_with_fake_cli(payload, tmp_path)
+    assert items is not None
+    by_id = {it["item_id"]: it["score"] for it in items}
+    assert by_id["1"] == 2
+    assert by_id["2"] == -1
