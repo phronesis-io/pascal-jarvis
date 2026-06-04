@@ -93,3 +93,17 @@ def test_feedback_item_id_sent_as_string(tmp_path):
     assert isinstance(items[0]["item_id"], str), "item_id must be a string, not a number"
     assert items[0]["item_id"] == "320503928905007104"
     assert items[0]["score"] == 1
+
+
+def test_feedback_numeric_item_id_coerced_to_string(tmp_path):
+    """The real failure mode: the LLM emits item_id as a JSON NUMBER. It must
+    still reach the CLI as a string — a numeric item_id 400s with 'Mismatch type
+    string with value number' and black-holes the whole submission."""
+    payload = json.dumps({
+        "feedback": [{"item_id": 320503928905007104, "score": 1, "action": "silent"}],
+        "user_message": "",
+    })
+    items = _run_with_fake_cli(payload, tmp_path)
+    assert items is not None, "script never called `eigenflux feed feedback`"
+    assert isinstance(items[0]["item_id"], str), "numeric item_id must be cast to string"
+    assert items[0]["item_id"] == "320503928905007104"
