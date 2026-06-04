@@ -53,3 +53,43 @@ def test_bare_source_url_field_still_buttons_when_single(tmp_path):
     out = _run(payload, tmp_path)
     assert "阅读原文" in out
     assert "https://example.com/only" in out
+
+
+def _run_with_fake_cli(payload: str, tmp_path):
+    """Run the post script with a fake `eigenflux` on PATH that captures argv.
+
+    Returns the parsed `--items` payload the script tried to submit.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    capture = tmp_path / "items.json"
+    fake = bindir / "eigenflux"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "a = sys.argv[1:]\n"
+        "if '--items' in a:\n"
+        "    open(r'%s','w').write(a[a.index('--items')+1])\n"
+        "print(json.dumps({'processed_count': 1, 'skipped_count': 0}))\n"
+        % capture
+    )
+    fake.chmod(0o755)
+    env = {"JARVIS_DIR": str(tmp_path), "PATH": f"{bindir}:/usr/bin:/bin"}
+    subprocess.run([sys.executable, str(SCRIPT)], input=payload,
+                   capture_output=True, text=True, env=env)
+    return json.loads(capture.read_text()) if capture.exists() else None
+
+
+def test_feedback_item_id_sent_as_string(tmp_path):
+    """Regression: the API rejects a numeric item_id with HTTP 400. The script
+    cast item_id to int, so every feedback submission was silently black-holed.
+    item_id must reach the CLI as a JSON string."""
+    payload = json.dumps({
+        "feedback": [{"item_id": "320503928905007104", "score": 1, "action": "silent"}],
+        "user_message": "",
+    })
+    items = _run_with_fake_cli(payload, tmp_path)
+    assert items is not None, "script never called `eigenflux feed feedback`"
+    assert isinstance(items[0]["item_id"], str), "item_id must be a string, not a number"
+    assert items[0]["item_id"] == "320503928905007104"
+    assert items[0]["score"] == 1

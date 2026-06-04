@@ -82,13 +82,26 @@ def main() -> int:
         items = []
         for i in fb:
             try:
-                items.append({"item_id": int(i["item_id"]), "score": int(i["score"])})
+                # item_id MUST be a string — the API rejects a numeric item_id with
+                # HTTP 400 "bind body failed, Mismatch type string with value number",
+                # which silently black-holed every feedback submission.
+                iid = str(i["item_id"]).strip()
+                if not iid:
+                    raise ValueError("empty item_id")
+                items.append({"item_id": iid, "score": int(i["score"])})
             except (ValueError, KeyError, TypeError) as e:
                 print(f"[eigenflux-feed] bad feedback entry {i!r}: {e}", file=LOG)
         if items:
             try:
                 resp = run_eigenflux("feed", "feedback", "--items", json.dumps(items))
-                print(f"[eigenflux-feed] {len(items)} items scored", file=LOG)
+                # Be honest about success: only the API's processed_count proves the
+                # scores landed. Logging "N scored" unconditionally masked the 400.
+                processed = resp.get("processed_count")
+                if processed is not None:
+                    print(f"[eigenflux-feed] {processed} items scored "
+                          f"(skipped {resp.get('skipped_count', 0)})", file=LOG)
+                else:
+                    print(f"[eigenflux-feed] feedback REJECTED by API, resp={resp!r}", file=LOG)
             except Exception:
                 print("[eigenflux-feed] feedback submission failed:", file=LOG)
                 traceback.print_exc(file=LOG)
