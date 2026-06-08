@@ -52,6 +52,7 @@ def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
     memory_dir.mkdir()
     jarvis_dir = tmp_path / "jarvis"
     jarvis_dir.mkdir()
+    kwargs.setdefault("idle_judge", False)  # never hit the network in unit tests
     return HeartbeatRunner(
         jarvis_dir=jarvis_dir,
         heartbeat_file=hb,
@@ -181,3 +182,42 @@ def test_multi_task_envelope_parsing(tmp_path, monkeypatch):
     result = runner.run_cycle(force=True)
     assert "response for a" in result
     assert "response for b" in result
+
+
+def test_idle_sentinel_detection():
+    """Standalone HEARTBEAT_OK line = idle; prose mention = not idle."""
+    from core.heartbeat import _has_idle_sentinel
+    leaked = "**🎯 Intent**\n\nNothing worth notifying Pascal.\n\nHEARTBEAT_OK"
+    assert _has_idle_sentinel(leaked)
+    assert _has_idle_sentinel("HEARTBEAT_OK")
+    assert not _has_idle_sentinel("明天下午多了个会，要不要挪一下？")
+    # Token mentioned inside prose (this very topic) must NOT be killed.
+    assert not _has_idle_sentinel("当模型输出 HEARTBEAT_OK 时就不该打扰你")
+
+
+def test_single_task_idle_sentinel_suppressed(tmp_path, monkeypatch):
+    """Single-task path: reasoning text ending in HEARTBEAT_OK is dropped, not sent."""
+    hb = "### intent-check\n- interval: 1h\n- prompt: check\n"
+    runner = _make_runner(tmp_path, hb)
+    leaked = "The only due intent is a test. Not worth notifying.\n\nHEARTBEAT_OK"
+    monkeypatch.setattr(runner, "claude_call", lambda p: leaked)
+    result = runner.run_cycle(force=True)
+    assert "test" not in result and "HEARTBEAT_OK" not in result
+
+
+def test_idle_judge_drops_noise(tmp_path, monkeypatch):
+    """Judge ON + NOISE verdict → message dropped."""
+    hb = "### t\n- interval: 1h\n- prompt: hi\n"
+    runner = _make_runner(tmp_path, hb, idle_judge=True)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "现在没什么要紧的")
+    monkeypatch.setattr(runner, "_judge_is_idle_noise", lambda m: True)
+    assert "现在没什么要紧的" not in runner.run_cycle(force=True)
+
+
+def test_idle_judge_delivers_on_conservative_verdict(tmp_path, monkeypatch):
+    """Judge ON + DELIVER verdict (fail-open default) → message kept."""
+    hb = "### t\n- interval: 1h\n- prompt: hi\n"
+    runner = _make_runner(tmp_path, hb, idle_judge=True)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "明天的会改到三点了")
+    monkeypatch.setattr(runner, "_judge_is_idle_noise", lambda m: False)
+    assert "明天的会改到三点了" in runner.run_cycle(force=True)

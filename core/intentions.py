@@ -14,6 +14,7 @@ Architecture:
 """
 
 import json
+import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -161,14 +162,28 @@ def get_intent(intent_id: str) -> dict | None:
 
 
 def cancel_intent(intent_id: str, reason: str = "") -> bool:
+    """Retire an intent from ANY state (pending/triggered/executed/expired).
+
+    Previously this only accepted pending/triggered, so 'executed' residue —
+    e.g. junk one-shot intents that already fired (the 2026-06-08 test-intent
+    storm) — could not be cleared through the agent and needed a raw DB DELETE.
+    The agent now has one reliable verb to make any intent go away. Cancelling
+    an already-cancelled intent returns True idempotently. Returns False only
+    when the intent does not exist.
+
+    Note: cancel marks status='cancelled' but keeps the row (audit trail). To
+    physically remove rows use delete_intent / the `purge` CLI.
+    """
     _init()
     db = _get_db()
     row = db.execute("SELECT status FROM intentions WHERE id = ?", (intent_id,)).fetchone()
-    if not row or row[0] not in ("pending", "triggered"):
+    if not row:
         return False
+    if row[0] == "cancelled":
+        return True
     db.execute(
         "UPDATE intentions SET status = 'cancelled', last_error = ? WHERE id = ?",
-        (reason, intent_id),
+        (reason or f"cancelled (was {row[0]})", intent_id),
     )
     db.commit()
     return True
@@ -315,26 +330,76 @@ def mark_triggered(intent_id: str):
     db.commit()
 
 
+def _is_overdue_oneshot(intent: dict, ref: datetime | None = None) -> bool:
+    """True if `intent` is a one-shot `date` intent whose trigger time is past.
+
+    Such an intent can never usefully fire again: get_due_intents marks any
+    past-dated `date` intent as due, so resetting it to 'pending' makes it
+    re-fire immediately. Used by reset_stale_triggered to break the resurrection
+    loop (see that function's docstring).
+    """
+    if intent.get("trigger_type") != "date":
+        return False
+    try:
+        cfg = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
+    except (json.JSONDecodeError, TypeError):
+        return False
+    target = (cfg or {}).get("datetime", "")
+    if not target:
+        return False
+    try:
+        target_dt = _coerce(datetime.fromisoformat(target))
+    except (ValueError, TypeError):
+        return False
+    return target_dt < (ref or now_local())
+
+
 def reset_stale_triggered(stale_minutes: int = 10) -> int:
     """Recover intents stuck in 'triggered' state.
 
     If a heartbeat cycle crashes between mark_triggered and mark_executed
     (Claude timeout, JSON parse failure, post-script crash, etc.) the intent
-    stays 'triggered' forever and never re-fires. This bumps them back to
-    'pending' after `stale_minutes` so they get another chance.
+    stays 'triggered' forever and never re-fires. This bumps recoverable ones
+    back to 'pending' after `stale_minutes` so they get another chance.
 
-    Returns count of reset intents.
+    EXCEPTION — the resurrection loop: a one-shot `date` intent whose trigger
+    time is already in the past must NOT be reset to 'pending'. get_due_intents
+    treats any past-dated `date` intent as due, so it would re-fire instantly,
+    and if execution keeps failing it re-sticks in 'triggered' → it reappears
+    every single cycle forever. This is exactly the 2026-06-08 storm: junk
+    intents dated 2026-01-01 resurrected on every heartbeat. Those are marked
+    'expired' instead (with a last_error breadcrumb), terminating the loop.
+
+    Returns the count of intents reset to 'pending' (expired ones are NOT
+    counted — they were retired, not recovered).
     """
     _init()
     db = _get_db()
     cutoff = (now_local() - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
-    cur = db.execute(
-        "UPDATE intentions SET status = 'pending', last_error = ? "
+    stuck = db.execute(
+        "SELECT * FROM intentions "
         "WHERE status = 'triggered' AND triggered_at IS NOT NULL AND triggered_at < ?",
-        (f"auto-reset after {stale_minutes}m stuck in triggered", cutoff),
-    )
+        (cutoff,),
+    ).fetchall()
+
+    now = now_local()
+    reset = 0
+    for row in stuck:
+        intent = dict(row)
+        if _is_overdue_oneshot(intent, now):
+            db.execute(
+                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                ("auto-expired: overdue one-shot stuck in triggered "
+                 "(would resurrection-loop if reset to pending)", intent["id"]),
+            )
+        else:
+            db.execute(
+                "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
+                (f"auto-reset after {stale_minutes}m stuck in triggered", intent["id"]),
+            )
+            reset += 1
     db.commit()
-    return cur.rowcount
+    return reset
 
 
 def mark_executed(intent_id: str, result: str = ""):
@@ -514,6 +579,71 @@ def format_due_intents_for_claude(intents: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Always-on snapshot — keeps ALL active intents in context every cycle
+# ---------------------------------------------------------------------------
+
+def _intent_when(it: dict) -> str:
+    """Human-readable trigger time for an intent row."""
+    try:
+        cfg = json.loads(it["trigger_config"]) if isinstance(it["trigger_config"], str) else it["trigger_config"]
+    except Exception:
+        cfg = {}
+    t = it.get("trigger_type")
+    if t == "date":
+        return cfg.get("datetime", "?")
+    if t == "cron":
+        return f"cron {cfg.get('expression', '?')}"
+    if t == "interval":
+        return f"every {cfg.get('seconds', '?')}s"
+    return str(t)
+
+
+def snapshot_active_intents(memory_dir: str | Path) -> int:
+    """Write all active (pending + triggered) intents to hot/active_intents.md.
+
+    This makes the FULL set of future commitments present in every reasoning
+    cycle — both the main conversation (build_system_prompt) and the heartbeat
+    (claude_call) read hot/*.md via load_tiered_memory. Without this, intents
+    are only visible at the moment they fire (intention-check), so the agent
+    reasons without awareness of what it has already committed to.
+
+    Returns the number of intents written.
+    """
+    _init()
+    intents = list_intents(status="pending", limit=200)
+    intents += list_intents(status="triggered", limit=50)
+
+    dated = sorted(
+        [i for i in intents if i.get("trigger_type") == "date"],
+        key=_intent_when,
+    )
+    recurring = [i for i in intents if i.get("trigger_type") != "date"]
+
+    def _line(i: dict) -> str:
+        label = i.get("purpose") or (i.get("prompt", "")[:60])
+        return f"- **{_intent_when(i)}** · {i['name']} — {label}  `[{i['id']}]`"
+
+    lines = [
+        f"# 活跃 Intents（共 {len(intents)} 条 · 自动刷新）",
+        "",
+        "> **这不是待办清单，是给 Pascal 的成长加顺风。** 指针 = 长得更快，不是做完更多。",
+        "> 不追「做没做」；没完成 ≠ 失败 = 探索信号（悄悄喂疗愈观察，绝不算账）。只有极少数真有后果的硬约束（高铁票类）才硬提醒。",
+        "> 我是这些 intent 的 **owner**：主动复盘、明显漂移（日期对不上日历/stale/重复）自己修，只有真正不确定且影响结果的才问 Pascal。",
+        "",
+        "## 定时（一次性，按时间排序）",
+    ]
+    lines += [_line(i) for i in dated] or ["- （无）"]
+    lines += ["", "## 循环 / 周期"]
+    lines += [_line(i) for i in recurring] or ["- （无）"]
+    lines.append("")
+
+    out = Path(memory_dir) / "hot" / "active_intents.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return len(intents)
+
+
+# ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
 
@@ -528,3 +658,103 @@ def intent_stats() -> dict:
         ).fetchone()[0]
         stats[status] = count
     return stats
+
+
+# ---------------------------------------------------------------------------
+# CLI — synchronous, verifiable intent ops for in-turn Bash tool calls.
+#
+# The whole point: the agent runs these with Bash DURING its turn, reads the
+# printed result, and only then reports "done" — instead of firing a
+# [ACTION:intent_*] marker it can never observe. Run from JARVIS_DIR:
+#
+#   python3 -m core.intentions list [status]
+#   python3 -m core.intentions due
+#   python3 -m core.intentions get <id>
+#   python3 -m core.intentions cancel <id> [reason...]
+#   python3 -m core.intentions delete <id>
+#   python3 -m core.intentions stats
+#   python3 -m core.intentions reset-stale [stale_minutes]
+#   python3 -m core.intentions purge <executed|expired|cancelled>
+# ---------------------------------------------------------------------------
+
+_TERMINAL_STATES = ("executed", "expired", "cancelled")
+
+
+def _cli_fmt(it: dict) -> str:
+    return f"{it['id']}  [{it['status']:9}] {_intent_when(it):24}  {it['name']}"
+
+
+def _cli(argv: list[str]) -> int:
+    cmd = argv[0] if argv else "list"
+    rest = argv[1:]
+
+    if cmd == "list":
+        status = rest[0] if rest else None
+        rows = list_intents(status=status, limit=500)
+        if status is None:  # default view = pending + triggered (the active set)
+            rows = [r for r in rows if r["status"] in ("pending", "triggered")]
+        print(f"{len(rows)} intent(s)" + (f" status={status}" if status else " (active)"))
+        for r in rows:
+            print(_cli_fmt(r))
+        return 0
+
+    if cmd == "due":
+        rows = get_due_intents()
+        print(f"{len(rows)} due now")
+        for r in rows:
+            print(_cli_fmt(r))
+        return 0
+
+    if cmd == "get":
+        if not rest:
+            print("usage: get <id>", file=sys.stderr); return 2
+        it = get_intent(rest[0])
+        if not it:
+            print(f"not found: {rest[0]}"); return 1
+        print(json.dumps(it, ensure_ascii=False, indent=2))
+        return 0
+
+    if cmd == "cancel":
+        if not rest:
+            print("usage: cancel <id> [reason...]", file=sys.stderr); return 2
+        ok = cancel_intent(rest[0], " ".join(rest[1:]))
+        print(f"cancelled {rest[0]}" if ok else f"not found: {rest[0]}")
+        return 0 if ok else 1
+
+    if cmd == "delete":
+        if not rest:
+            print("usage: delete <id>", file=sys.stderr); return 2
+        delete_intent(rest[0])
+        print(f"deleted {rest[0]} (gone={get_intent(rest[0]) is None})")
+        return 0
+
+    if cmd == "stats":
+        print(json.dumps(intent_stats(), ensure_ascii=False))
+        return 0
+
+    if cmd == "reset-stale":
+        mins = int(rest[0]) if rest and rest[0].isdigit() else 10
+        n = reset_stale_triggered(stale_minutes=mins)
+        print(f"reset {n} stale intent(s) to pending (overdue one-shots expired)")
+        return 0
+
+    if cmd == "purge":
+        status = rest[0] if rest else ""
+        if status not in _TERMINAL_STATES:
+            print(f"purge needs a terminal status {_TERMINAL_STATES}; got {status!r} "
+                  "(refuses to delete pending/triggered)", file=sys.stderr)
+            return 2
+        rows = list_intents(status=status, limit=10000)
+        for r in rows:
+            delete_intent(r["id"])
+        print(f"purged {len(rows)} intent(s) with status={status}")
+        return 0
+
+    print(f"unknown command: {cmd}\n"
+          "commands: list|due|get|cancel|delete|stats|reset-stale|purge", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, str(ROOT))
+    sys.exit(_cli(sys.argv[1:]))

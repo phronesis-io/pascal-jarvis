@@ -369,14 +369,34 @@ if __name__ == "__main__":
     jarvis_dir = os.environ.get("JARVIS_DIR", ".")
     sys.path.insert(0, jarvis_dir)
 
-    reply = os.environ.get("JV_REPLY", "")
-    if not reply:
-        reply = sys.stdin.read()
-
     ap = ActionProcessor(
         jarvis_dir=jarvis_dir,
         memory_dir=os.environ.get("MEMORY_DIR", "memory"),
         jobs_dir=os.environ.get("JV_JOBS_DIR", "jobs"),
         log_file=os.environ.get("JV_LOG_FILE", ""),
     )
+
+    # ── Synchronous single-action mode (for in-turn Bash tool calls) ──
+    #   python3 -m core.actions do <action_type> [key=val ...]
+    # Runs exactly ONE action through the SAME _do_* handler the marker path
+    # uses (single source of truth) and prints its result immediately, so the
+    # agent can VERIFY the outcome in the same turn instead of firing a
+    # fire-and-forget [ACTION:...] marker it can never observe.
+    #   e.g. python3 -m core.actions do intent_cancel id=int_xxx reason=junk
+    #        python3 -m core.actions do calendar_create title=Sync start=... end=...
+    if len(sys.argv) >= 3 and sys.argv[1] == "do":
+        action_type = sys.argv[2]
+        params_raw = "|".join(sys.argv[3:])  # "id=x reason=y" → "id=x|reason=y"
+        handler = getattr(ap, f"_do_{action_type}", None)
+        if handler is None:
+            print(f"ERROR: unknown action '{action_type}'", file=sys.stderr)
+            sys.exit(2)
+        result = handler(params_raw)
+        print(result if result else f"OK: {action_type} ran (handler returned no text)")
+        sys.exit(0)
+
+    # ── Legacy marker-processing mode (bot.sh post-hook) ──
+    reply = os.environ.get("JV_REPLY", "")
+    if not reply:
+        reply = sys.stdin.read()
     print(ap.process(reply))

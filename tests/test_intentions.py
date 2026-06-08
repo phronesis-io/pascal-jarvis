@@ -68,12 +68,19 @@ def test_cancel_intent(intent_db):
 
 
 def test_cancel_already_executed(intent_db):
-    from core.intentions import cancel_intent, create_intent, mark_executed, mark_triggered
+    """New contract: cancel_intent retires from ANY state, so executed residue
+    (e.g. the 2026-06-08 junk-intent storm) can be cleared without a raw DELETE.
+    Previously executed intents were uncancellable."""
+    from core.intentions import cancel_intent, create_intent, get_intent, mark_executed, mark_triggered
 
     iid = create_intent(name="done", trigger_type="date", trigger_config={})
     mark_triggered(iid)
     mark_executed(iid, result="ok")
-    assert not cancel_intent(iid)  # can't cancel executed intent
+    assert cancel_intent(iid)  # executed intents are now cancellable
+    assert get_intent(iid)["status"] == "cancelled"
+    # Idempotent on already-cancelled; False only when the intent doesn't exist.
+    assert cancel_intent(iid)
+    assert not cancel_intent("int_does_not_exist")
 
 
 def test_mark_triggered_and_executed(intent_db):
@@ -107,6 +114,35 @@ def test_reset_stale_triggered(intent_db):
     count = reset_stale_triggered(stale_minutes=10)
     assert count == 1
     assert get_intent(iid)["status"] == "pending"
+
+
+def test_reset_stale_overdue_oneshot_expires_not_resurrects(intent_db):
+    """Regression (2026-06-08 resurrection loop): a one-shot `date` intent whose
+    trigger time is in the PAST must NOT be reset to pending when stuck in
+    triggered — get_due_intents would re-fire it instantly and it would re-stick,
+    reappearing every cycle forever. It must be marked 'expired' instead.
+    """
+    from core.intentions import (create_intent, mark_triggered,
+                                   reset_stale_triggered, get_intent)
+
+    overdue = create_intent(name="junk", trigger_type="date",
+                            trigger_config={"datetime": "2026-01-01T09:00:00"})
+    future = create_intent(name="real", trigger_type="date",
+                           trigger_config={"datetime": "2999-01-01T09:00:00"})
+    mark_triggered(overdue)
+    mark_triggered(future)
+
+    import core.intentions as mod
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET triggered_at = datetime('now', '-20 minutes')")
+    conn.commit()
+    conn.close()
+
+    # Overdue one-shot → expired (NOT counted as reset). Future one-shot → pending.
+    count = reset_stale_triggered(stale_minutes=10)
+    assert count == 1                                    # only the future one recovered
+    assert get_intent(overdue)["status"] == "expired"   # loop terminated
+    assert get_intent(future)["status"] == "pending"    # legit crash recovery
 
 
 def test_intent_stats(intent_db):
