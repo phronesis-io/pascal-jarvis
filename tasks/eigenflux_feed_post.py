@@ -9,8 +9,10 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.card import build_card
 from core.safety import parse_json_response
+import _ef_delivery as efd
 
 
 def _source_url(data: dict, msg: str) -> str:
@@ -66,7 +68,30 @@ def run_eigenflux(*args: str, stdin_data: str | None = None) -> dict:
         return {}
 
 
+def _emit_morning_digest() -> None:
+    """If we've crossed into the morning flush window with an overnight backlog,
+    drain it into ONE consolidated card. Runs every feed-triage cycle but the
+    date stamp makes it fire only once per day."""
+    if not efd.should_flush():
+        return
+    held = efd.drain()
+    efd.mark_flushed()
+    if not held:
+        return
+    body, n_total = efd.render_digest_body(held)
+    print(f"[eigenflux-feed] morning digest: flushed {n_total} held lines "
+          f"from {len(held)} night cards", file=LOG)
+    print(build_card(
+        header="📡 EigenFlux · 早报",
+        body=body,
+        source="eigenflux-feed-digest",
+    ))
+
+
 def main() -> int:
+    # Flush last night's held EigenFlux backlog first (once per morning).
+    _emit_morning_digest()
+
     raw = sys.stdin.read().strip()
     if not raw:
         return 0
@@ -135,6 +160,14 @@ def main() -> int:
     # any bare URL in the body so it's tappable on mobile too.
     msg = str(data.get("user_message", "")).strip()
     if msg:
+        # Quiet-hours gate: at night, hold non-urgent EigenFlux pushes for the
+        # morning digest instead of pinging Pascal. Only items the triage marked
+        # urgent break through. The gate is wall-clock based, not LLM judgment.
+        urgent = bool(data.get("urgent", False))
+        if efd.in_quiet_hours() and not urgent:
+            efd.hold(msg, source="eigenflux-feed")
+            print("[eigenflux-feed] quiet hours — held for morning digest", file=LOG)
+            return 0
         # A single "阅读原文" button only makes sense when the card has ONE
         # source. Multi-item digests (FYI/知会) carry a per-item inline link
         # each; the footer button would point to just the first item and

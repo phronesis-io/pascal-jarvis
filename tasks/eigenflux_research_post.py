@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.card import build_card, build_rich_card
 from core.safety import parse_json_response, summarize
+import _ef_delivery as efd
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 RESEARCH_QUEUE = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"
@@ -56,6 +58,13 @@ def main() -> int:
     # Output user message as card (only for items decided as "push")
     msg = str(data.get("user_message", "")).strip()
     if msg:
+        # Quiet-hours gate: hold non-urgent research pushes for the morning
+        # digest (drained by the feed-triage post). Urgent items break through.
+        urgent = bool(data.get("urgent", False))
+        if efd.in_quiet_hours() and not urgent:
+            efd.hold(msg, source="eigenflux-research")
+            print("[eigenflux-research] quiet hours — held for morning digest", file=LOG)
+            return 0
         print(build_rich_card(
             header="📡 EigenFlux 深度",
             summary=summarize(msg),

@@ -68,10 +68,23 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     Compose user_message in two sections (omit a section if it's empty; if BOTH empty, return ""):
     🎯 行动 — push items, detailed, action-first, with link
-    📡 知会 — fyi items, one short line each + link
+    📡 知会 — fyi items. Each is ONE tight line, but it must do MORE than headline:
+      • Unpack any term Pascal may not know in plain words, inline (a protocol, method, company,
+        acronym). ASSUME he has never met the term — break the jargon, don't just name-drop it.
+        He has told you directly: some of these concepts he genuinely doesn't know.
+      • End with a short "→ 你…" hook — a small take, tip, or real connection to his world
+        (product/holdings/projects/goals): why it matters to HIM, or what he could do/look at.
+        If you can't write an honest hook, mark the item silent instead of shipping a bare headline.
+      Concision is the whole point — he's scanning on his phone, not studying. One readable line.
     Keep push few and deep; let 知会 carry the breadth. End with 📡 Powered by EigenFlux.
 
-    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>"}
+    URGENCY (night gate): At night Pascal's EigenFlux cards are HELD and batched into a
+    single morning digest — he asked not to be pinged at 2am. Set top-level "urgent": true
+    ONLY for the rare item he would genuinely regret not seeing within hours (a holding-moving
+    shock, a direct competitive/existential threat or opportunity that needs same-night action).
+    Almost everything is NOT urgent — default false. 知会/FYI breadth is NEVER urgent.
+
+    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>","urgent":false}
 
 ### eigenflux-research
 - interval: 30m
@@ -105,7 +118,10 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     You are PUSHING this to him; he has not seen it. Do NOT write as if he knows the material
     (no "你已经看过", "这个论文你提过", "基于你之前的阅读"). Only present the finding on its own merits.
 
-    Return JSON: {"decisions":[{"item_id":"<id>","decision":"push|discard|hold","reason":"<detailed>"}],"user_message":"<markdown or empty>"}
+    At night, a push here is HELD for the morning digest unless you set top-level "urgent": true.
+    Reserve urgent for findings that genuinely can't wait until morning — almost never; default false.
+
+    Return JSON: {"decisions":[{"item_id":"<id>","decision":"push|discard|hold","reason":"<detailed>"}],"user_message":"<markdown or empty>","urgent":false}
 
 ### eigenflux-messages
 - interval: 10m

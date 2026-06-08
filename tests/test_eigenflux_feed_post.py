@@ -14,7 +14,10 @@ SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "eigenflux_feed_post
 
 
 def _run(payload: str, tmp_path) -> str:
-    env = {"JARVIS_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    # Force "awake" so these card-rendering assertions are time-independent;
+    # the quiet-hours hold/digest behavior is covered in test_ef_delivery.py.
+    env = {"JARVIS_DIR": str(tmp_path), "PATH": "/usr/bin:/bin",
+           "JARVIS_EF_QUIET_OVERRIDE": "awake"}
     r = subprocess.run([sys.executable, str(SCRIPT)], input=payload,
                        capture_output=True, text=True, env=env)
     return r.stdout
