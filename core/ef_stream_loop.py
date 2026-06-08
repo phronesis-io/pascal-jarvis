@@ -136,7 +136,7 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user."""
 
     try:
         p = subprocess.Popen(
-            ["claude", "--model", "sonnet", "--dangerously-skip-permissions",
+            ["claude", "--model", "opus", "--dangerously-skip-permissions",
              "--no-session-persistence", "--disable-slash-commands", "-p", prompt],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             stdin=subprocess.DEVNULL,
