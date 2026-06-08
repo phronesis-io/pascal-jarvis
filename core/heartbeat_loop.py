@@ -159,8 +159,9 @@ def _trim_file(path: Path, max_lines: int):
         os.replace(tmp, path)
 
 
-def run_loop(jarvis_dir: str, memory_dir: str, model: str = "sonnet",
-             work_dir: str = "", check_interval: int = 10, user_id: str = ""):
+def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
+             work_dir: str = "", check_interval: int = 10, user_id: str = "",
+             claude_timeout: int = 600):
     """Main heartbeat loop. Runs forever until killed."""
     jd = Path(jarvis_dir)
     heartbeat_trigger = Path("/tmp/jarvis-heartbeat-trigger")
@@ -176,6 +177,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "sonnet",
         memory_dir=memory_dir,
         model=model,
         work_dir=work_dir or jarvis_dir,
+        claude_timeout=claude_timeout,
     )
 
     log("heartbeat", f"Starting ({check_interval}s cycle)")
@@ -230,8 +232,9 @@ if __name__ == "__main__":
     run_loop(
         jarvis_dir=jarvis_dir,
         memory_dir=os.environ.get("MEMORY_DIR", "memory"),
-        model=os.environ.get("HEARTBEAT_MODEL", "sonnet"),
+        model=os.environ.get("HEARTBEAT_MODEL", "opus"),
         work_dir=os.environ.get("WORK_DIR", ""),
         check_interval=int(os.environ.get("CHECK_INTERVAL", "10")),
         user_id=os.environ.get("USER_ID", ""),
+        claude_timeout=int(os.environ.get("HEARTBEAT_TIMEOUT", "600")),
     )

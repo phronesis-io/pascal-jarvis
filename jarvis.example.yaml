@@ -46,11 +46,18 @@ claude:
   # Main conversation model. Empty = default (Opus, most capable).
   # Override if you want a cheaper model for IM replies.
   main_model: ""
-  # Heartbeat background tasks use this (cheaper is fine — they're batched).
-  heartbeat_model: "sonnet"
+  # Heartbeat background tasks use this. Default opus — max capability;
+  # set a cheaper model here if you'd rather batch them down.
+  heartbeat_model: "opus"
   # Auto-rotate Claude Code session files when they exceed this size (bytes).
   # 500KB is a good balance between context retention and API latency.
   max_session_size: 512000
+  # Max seconds a single heartbeat Claude call may run. Raised from the old
+  # hard-coded 300s so heartbeat tasks can fan out subagents (Task/Agent) and
+  # wait for them. Higher = more room for parallel work, but one slow cycle
+  # blocks other due tasks for longer. (Conversation replies use a separate
+  # 6000s watchdog in bot.sh.)
+  heartbeat_timeout: 600
 
 
 # ── Memory System ──────────────────────────────────────────────────

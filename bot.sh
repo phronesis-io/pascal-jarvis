@@ -135,7 +135,8 @@ emit("DATA_DIR", c.data_dir)
 emit("WORK_DIR", c.work_dir)
 emit("MEMORY_DIR", c.memory_dir)
 emit("MAX_SESSION_SIZE", c.claude.get("max_session_size", 512000))
-emit("HEARTBEAT_MODEL", c.claude.get("heartbeat_model", "sonnet"))
+emit("HEARTBEAT_MODEL", c.claude.get("heartbeat_model", "opus"))
+emit("HEARTBEAT_TIMEOUT", c.claude.get("heartbeat_timeout", 600))
 emit("CHECK_INTERVAL", c.heartbeat.get("check_interval", 10))
 emit("ADMIN_ENABLED", str(bool(c.admin.get("enabled", False))).lower())
 emit("ADMIN_HOST", c.admin.get("host", "127.0.0.1"))
@@ -151,7 +152,7 @@ CLAUDE_PROJECT_DIR="$HOME/.claude/projects/$(echo "$WORK_DIR" | sed 's|/|-|g')"
 SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
-export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE HEARTBEAT_MODEL CHECK_INTERVAL
+export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
 
 log_info "Starting jarvis-harness..."
 log_info "  JARVIS_DIR: $JARVIS_DIR"
@@ -898,10 +899,28 @@ trap cleanup EXIT INT TERM
 # Can't rely on Lark events (they may not arrive) or daemon (30min delay).
 heartbeat_watchdog() {
   sleep 30  # initial grace period
+  local _fails=0 _last_fail=0
   while true; do
     if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
-      log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting"
-      heartbeat_loop &
+      local _now
+      _now=$(date +%s)
+      # Reset the failure counter once the heartbeat has stayed up for 10min,
+      # so isolated crashes don't accumulate toward the breaker forever.
+      if [ $((_now - _last_fail)) -gt 600 ]; then _fails=0; fi
+      _fails=$((_fails + 1))
+      _last_fail=$_now
+      # Circuit breaker: several crashes inside a short window almost always
+      # mean a systemic fault (syntax error, OOM, bad config). Hot-restarting
+      # every 30s just spams the log and burns CPU — back off hard instead.
+      if [ "$_fails" -ge 4 ]; then
+        log_warn "[watchdog] Heartbeat crashed ${_fails}x within 10min — backing off 300s before retry"
+        sleep 300
+      fi
+      log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting (fail #${_fails})"
+      # Heartbeat is a Python module now (it used to be a bash function named
+      # heartbeat_loop — calling that here was a no-op that never restarted it).
+      # Relaunch exactly like the initial launch above, inheriting exported env.
+      python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
       HEARTBEAT_PID=$!
       log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
     fi
@@ -1345,7 +1364,7 @@ from core.heartbeat import HeartbeatRunner
 jd = os.environ['JARVIS_DIR']
 runner = HeartbeatRunner(jd, os.path.join(jd, 'HEARTBEAT.md'),
     os.path.join(jd, 'heartbeat_state.json'), os.environ['MEMORY_DIR'],
-    os.environ.get('HEARTBEAT_MODEL', 'sonnet'), work_dir=os.environ.get('WORK_DIR', jd))
+    os.environ.get('HEARTBEAT_MODEL', 'opus'), work_dir=os.environ.get('WORK_DIR', jd))
 runner.run_cycle(force=True, only_task='memory-hourly')
 " 2>>"$LOG_FILE" >/dev/null || log_warn "Memory hourly on rotation failed"
 

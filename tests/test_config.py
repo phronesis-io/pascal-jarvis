@@ -16,7 +16,7 @@ def test_defaults_when_no_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg = Config(None)
-    assert cfg.claude["heartbeat_model"] == "sonnet"
+    assert cfg.claude["heartbeat_model"] == "opus"
     assert cfg.claude["max_session_size"] == 512000
     assert cfg.heartbeat["check_interval"] == 10
 

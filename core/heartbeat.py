@@ -50,6 +50,24 @@ def _is_dangling_placeholder(text: str) -> bool:
     return bool(re.fullmatch(r"\.{3,}|…+|．{3,}", last_line))
 
 
+def _has_idle_sentinel(text: str) -> bool:
+    """True if HEARTBEAT_OK appears as a standalone line in the message.
+
+    The exact-match check (`raw.strip() == "HEARTBEAT_OK"`) only fires when the
+    ENTIRE response is the sentinel. But the model sometimes writes its reasoning
+    ("this is test noise, not worth notifying Pascal") and THEN emits
+    HEARTBEAT_OK on its own line — the reasoning leaks into output and the
+    half-message gets delivered as a card (2026-06-08: a 🎯 Intent card reached
+    Pascal despite ending in HEARTBEAT_OK). When the sentinel is present the
+    model has decided nothing needs attention; the surrounding text is leaked
+    scratch work, so the whole message is dropped.
+
+    Standalone-line match (not bare substring) avoids dropping a legitimate
+    message that merely mentions the token in prose.
+    """
+    return any(ln.strip() == "HEARTBEAT_OK" for ln in text.splitlines())
+
+
 def parse_heartbeat(path: str | Path) -> list[dict]:
     """Parse HEARTBEAT.md into task definitions."""
     text = Path(path).read_text(encoding="utf-8")
@@ -132,8 +150,9 @@ class HeartbeatRunner:
 
     def __init__(self, jarvis_dir: str | Path, heartbeat_file: str | Path,
                  state_file: str | Path, memory_dir: str | Path,
-                 model: str = "sonnet", persona: str = "Jarvis",
-                 work_dir: str | Path | None = None):
+                 model: str = "opus", persona: str = "Jarvis",
+                 work_dir: str | Path | None = None,
+                 idle_judge: bool = True, claude_timeout: int = 300):
         self.jarvis_dir = Path(jarvis_dir)
         self.heartbeat_file = Path(heartbeat_file)
         self.state_file = Path(state_file)
@@ -141,6 +160,12 @@ class HeartbeatRunner:
         self.model = model
         self.persona = persona
         self.work_dir = Path(work_dir) if work_dir else self.jarvis_dir
+        # Max seconds for a single heartbeat Claude call. Configurable so tasks
+        # can fan out subagents and wait; see config claude.heartbeat_timeout.
+        self.claude_timeout = claude_timeout
+        # Cheap-model idle-noise second net. On in prod; tests pass False to
+        # avoid real network calls. See _judge_is_idle_noise.
+        self.idle_judge = idle_judge
         self._cid = ""  # cycle_id, set per run_cycle invocation
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
@@ -209,6 +234,15 @@ class HeartbeatRunner:
 Current time: {now_ts}
 You have access to the user's memory below. Use it to personalize your responses.
 
+## Acting
+- For heavy or parallelizable work, you may spawn subagents with the Task/Agent
+  tool — they block and return results to you, so you can fan out, wait, and
+  synthesize within this run.
+- Before claiming a Jarvis action is done, verify it via Bash with the synchronous
+  CLIs (run from JARVIS_DIR), then report the observed result:
+    python3 -m core.intentions list|due|get <id>|cancel <id>|delete <id>|stats|purge <status>
+    python3 -m core.actions do <type> key=val ...
+
 {memory}"""
 
         cmd = [
@@ -225,7 +259,7 @@ You have access to the user's memory below. Use it to personalize your responses
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
-                timeout=300, stdin=subprocess.DEVNULL,
+                timeout=self.claude_timeout, stdin=subprocess.DEVNULL,
                 cwd=str(self.work_dir),
                 start_new_session=True,  # isolate from parent process group signals
             )
@@ -240,7 +274,7 @@ You have access to the user's memory below. Use it to personalize your responses
                     return "__KILLED__"
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            self._log("Claude call timed out (300s)")
+            self._log(f"Claude call timed out ({self.claude_timeout}s)")
             return ""
         except FileNotFoundError:
             self._log("Claude CLI not found — is it installed?")
@@ -248,6 +282,56 @@ You have access to the user's memory below. Use it to personalize your responses
         except Exception as e:
             self._log(f"Claude error: {e}")
             return ""
+
+    def _judge_is_idle_noise(self, message: str) -> bool:
+        """Cheap-model second net for leaked idle-reasoning that has no sentinel.
+
+        The deterministic `_has_idle_sentinel` rule only catches messages that
+        carry the literal HEARTBEAT_OK token. But the model sometimes leaks its
+        internal "nothing needs attention right now" reasoning as plain prose,
+        with no token — those slip through and reach Pascal as empty noise.
+
+        A heartbeat output that produces actual text is the rare case, so paying
+        for one haiku classification here is cheap. Conservative by design:
+        returns True (drop) ONLY on a confident NOISE verdict. Any error,
+        timeout, or ambiguous answer falls open to DELIVER — never silently
+        swallow possibly-real content because the judge failed.
+        """
+        judge_prompt = (
+            "A background heartbeat process produced the text below, possibly to "
+            "send to the user. Classify it:\n"
+            "- DELIVER: a real message carrying information, a reminder, a "
+            "question, a suggestion, or any content meant for the user.\n"
+            "- NOISE: the model's leaked internal reasoning or an idle "
+            "'nothing needs attention / no action needed / staying quiet' note "
+            "not meant for delivery.\n\n"
+            "Reply with EXACTLY one word: DELIVER or NOISE. When in doubt, "
+            "answer DELIVER.\n\n"
+            "--- TEXT ---\n" + message
+        )
+        cmd = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            "--model", "haiku",
+            "-p", judge_prompt,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=60, stdin=subprocess.DEVNULL,
+                cwd=str(self.work_dir),
+                start_new_session=True,
+            )
+            if result.returncode != 0:
+                return False  # fail-open: deliver
+            verdict = result.stdout.strip().upper()
+            # Only drop on a clean, confident NOISE verdict.
+            return verdict == "NOISE" or verdict.endswith("NOISE")
+        except Exception as e:
+            self._log(f"Idle-noise judge error (failing open): {e}")
+            return False
 
     def _check_dynamic_tasks(self) -> list[str]:
         """Check SQLite-based dynamic tasks. Returns user-facing messages."""
@@ -486,6 +570,9 @@ You have access to the user's memory below. Use it to personalize your responses
                 if post_output:
                     user_messages.append(post_output)
                     producing_tasks.append(task["name"])
+            elif _has_idle_sentinel(raw):
+                # Model wrote reasoning then emitted HEARTBEAT_OK — idle, drop it.
+                self._log(f"Single-task idle (HEARTBEAT_OK in body): {raw[:80]!r}")
             else:
                 user_messages.append(raw)
                 producing_tasks.append(task["name"])
@@ -576,6 +663,16 @@ You have access to the user's memory below. Use it to personalize your responses
             # the 2026-06-02 broken EigenFlux 撞名 card.
             if _is_dangling_placeholder(m):
                 self._log(f"Blocked incomplete placeholder heartbeat: {m[:80]!r}")
+                continue
+            # Final net: any message carrying the idle sentinel is leaked scratch
+            # work, not content for the user. Catches paths the per-task guards miss.
+            if _has_idle_sentinel(m):
+                self._log(f"Blocked HEARTBEAT_OK-tainted message: {m[:80]!r}")
+                continue
+            # Second net (cheap model): catch leaked idle-reasoning that carries
+            # NO sentinel. Conservative + fail-open (see _judge_is_idle_noise).
+            if self.idle_judge and self._judge_is_idle_noise(m):
+                self._log(f"Haiku judge dropped idle-noise message: {m[:80]!r}")
                 continue
             texts.append(m)
 
