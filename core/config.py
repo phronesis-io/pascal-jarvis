@@ -10,8 +10,13 @@ _DEFAULTS = {
     "lark": {"user_id": "", "app_id": ""},
     "claude": {
         "main_model": "",
-        "heartbeat_model": "sonnet",
+        "heartbeat_model": "opus",
         "max_session_size": 512000,
+        # Max seconds a single heartbeat Claude call may run. Raised from the
+        # old hard-coded 300s so heartbeat tasks have room to fan out subagents
+        # (Task/Agent) and wait for them. Bumping this lengthens the worst-case
+        # time one cycle blocks other due tasks — keep it bounded.
+        "heartbeat_timeout": 600,
     },
     "memory": {
         "dir": "memory",
