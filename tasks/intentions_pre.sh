@@ -14,7 +14,7 @@ sys.path.insert(0, os.environ['JARVIS_DIR'])
 
 from core.intentions import (
     get_due_intents, mark_triggered, generate_calendar_intents,
-    reset_stale_triggered,
+    reset_stale_triggered, snapshot_active_intents,
 )
 from pathlib import Path
 
@@ -31,6 +31,14 @@ if cal_file.exists():
         generate_calendar_intents(cal_file.read_text())
     except Exception as e:
         print(f"[intentions] Calendar bridge error: {e}", file=sys.stderr)
+
+# 1b. Refresh the always-on snapshot so EVERY reasoning cycle (main convo +
+#     heartbeat) sees the full set of active intents, not just due ones.
+#     Must run BEFORE the no-due early-exit below.
+try:
+    snapshot_active_intents(os.environ['MEMORY_DIR'])
+except Exception as e:
+    print(f"[intentions] Snapshot error: {e}", file=sys.stderr)
 
 # 2. Check for due intents
 due = get_due_intents()
