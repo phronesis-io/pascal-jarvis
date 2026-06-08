@@ -1,7 +1,7 @@
 """Session compaction — summarizes old sessions on rotation.
 
 When a session file exceeds max_size and rotates, this module extracts
-all turns from the old session and calls Claude (haiku) to produce a
+all turns from the old session and calls Claude (opus) to produce a
 compact summary. The summary is stored per-conv_key and injected into
 the new session's system prompt so context is preserved across rotations.
 """
@@ -94,7 +94,7 @@ def read_compact(jarvis_dir: str | Path, conv_key: str) -> str:
 def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
                      old_session_id: str, conv_key: str,
                      work_dir: str | Path | None = None) -> str:
-    """Generate a compact summary of an old session using Claude haiku.
+    """Generate a compact summary of an old session using Claude opus.
 
     Runs synchronously. Returns the compact text, also saves to disk.
     """
@@ -109,10 +109,10 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
 
     prompt = COMPACT_PROMPT + content
 
-    # Call Claude via CLI (haiku for speed and cost)
+    # Call Claude via CLI (opus — Pascal 2026-06-07: 全部用最好的模型，不计 token)
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "haiku",
+            ["claude", "-p", "--model", "opus",
              "--dangerously-skip-permissions"],
             input=prompt,
             capture_output=True,

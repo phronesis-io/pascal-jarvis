@@ -60,6 +60,33 @@ def _sync_warm_auto_to_heartbeat():
         print(f"[memory-tidy] synced auto→heartbeat warm/: {', '.join(synced)}", file=sys.stderr)
 
 
+def _sync_open_threads_auto_to_heartbeat():
+    """One-way sync: auto-memory open_threads.md → heartbeat system/open_threads.md.
+
+    Named exception to the "system/ files stay independent" rule (CLAUDE.md):
+    open_threads drives the heartbeat's proactive follow-ups, so the heartbeat
+    copy must track the live thread state the main conversation maintains in
+    auto-memory. Auto is the source of truth (that's where main-convo edits
+    land); heartbeat gets a read-only copy. Note the path remap — auto keeps it
+    at memory root, heartbeat loads it from system/ (load_tiered_memory only
+    reads system/*.md, never root files).
+    """
+    src = AUTO_MEMORY / "open_threads.md"
+    dst = HEARTBEAT_MEMORY / "system" / "open_threads.md"
+    if not src.exists():
+        return
+    src_content = src.read_text(encoding="utf-8")
+    if dst.exists():
+        # Skip if heartbeat copy is newer or already identical
+        if dst.stat().st_mtime >= src.stat().st_mtime:
+            return
+        if dst.read_text(encoding="utf-8") == src_content:
+            return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src_content, encoding="utf-8")
+    print("[memory-tidy] synced auto→heartbeat: open_threads.md", file=sys.stderr)
+
+
 def main() -> int:
     # Always run daily_log archive check (independent of Claude's response)
     try:
@@ -72,6 +99,12 @@ def main() -> int:
         _sync_warm_auto_to_heartbeat()
     except Exception as e:
         print(f"[memory-tidy] warm sync failed: {e}", file=sys.stderr)
+
+    # One-way sync: auto → heartbeat for open_threads.md (named system/ exception)
+    try:
+        _sync_open_threads_auto_to_heartbeat()
+    except Exception as e:
+        print(f"[memory-tidy] open_threads sync failed: {e}", file=sys.stderr)
 
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
