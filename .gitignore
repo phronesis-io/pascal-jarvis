@@ -13,6 +13,7 @@ jarvis.log
 .free_time_nudge_state
 .heartbeat_last_source
 calendar_event_mapping.json
+.harness_evolve_state
 
 # Temp / backup / corrupted artifacts from atomic writes or debugging
 *.bak
@@ -70,6 +71,7 @@ heartbeat_outbox.jsonl
 tmp/
 jobs/
 eigenflux/.feed_poll_state
+eigenflux/.feed_backlog_flushed
 eigenflux/needs_research.jsonl
 
 # Task state files
