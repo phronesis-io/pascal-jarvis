@@ -516,6 +516,20 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Return JSON: {"index_update":"<full _index.md content>","actions_taken":["<what you did>"],"warnings":["<issues found>"]}
     If everything looks clean, reply HEARTBEAT_OK.
 
+## Self-Evolution
+
+### harness-evolve
+- interval: 24h
+- pre: tasks/harness_evolve_pre.sh
+- post: tasks/harness_evolve_post.py
+- prompt: |
+    [HARNESS SELF-EVOLUTION]
+    每日自进化任务。基于输入里的「增量」（新反馈/行为信号/提交）+ system prompt
+    里已加载的完整记忆，判断 harness 是否要演化。完整规则、分级（A 卫生自动落 /
+    B 提案走飞书审批）、三道质量闸、和 JSON 输出格式都在下面的输入里——严格按那个
+    JSON 契约输出，别加额外文字。这是自主内务，分析过程不要 triage 给 Pascal；
+    只有 B 级提案才发飞书。没有任何变更就回 HEARTBEAT_OK。
+
 ## Cross-project
 
 ### cross-session-sync
