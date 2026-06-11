@@ -155,9 +155,11 @@ def _is_bot_alive() -> bool:
         except (ValueError, ProcessLookupError, PermissionError, IndexError):
             pass
 
-    # Fallback: pgrep
+    # Fallback: pgrep, anchored to this repo's bot.sh — a wide pattern would
+    # see another project's bot.sh as "healthy" while ours is down.
+    import re as _re
     try:
-        r = subprocess.run(["pgrep", "-f", "bash.*bot\\.sh"],
+        r = subprocess.run(["pgrep", "-f", f"bash.*{_re.escape(str(JARVIS_DIR))}/bot\\.sh"],
                            capture_output=True, text=True, timeout=5)
         return bool(r.stdout.strip())
     except Exception:
@@ -238,7 +240,8 @@ def diagnose_and_fix(issues: list[str]) -> str:
     # anchored (invoked by bare name) — those stay broad but are specific
     # subcommands unlikely to exist outside this bot.
     log("INFO", "Killing existing processes...")
-    _jd = str(JARVIS_DIR).replace(".", "\\.")
+    import re as _re
+    _jd = _re.escape(str(JARVIS_DIR))
     for pattern in ["lark-cli event",
                     f"bash.*{_jd}/bot\\.sh",
                     # path-anchored, interpreter-agnostic (shows up as

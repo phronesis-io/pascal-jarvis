@@ -527,12 +527,29 @@ $(load_memory)"
   # concurrently, corrupting the session jsonl. The placeholder content is
   # non-numeric on purpose: every reader does kill -0/"kill $pid || true",
   # so it degrades safely until the real Claude PID overwrites it below.
+  #
+  # Stale-lock policy: if the lock holds a NUMERIC pid that is dead, the
+  # previous handler crashed without cleanup — reclaim immediately. While the
+  # holder is alive we wait up to 6200s (the in-flight Claude call is governed
+  # by the 6000s watchdog below, NOT the 600s claude timeout — a fixed 620s
+  # cutoff here used to break the lock of legitimately long-running handlers,
+  # recreating the very corruption this lock prevents).
   until (set -C; echo acquiring > "$LOCK_FILE") 2>/dev/null; do
-    if [ "$waited" -ge 620 ]; then
-      # Wait up to 620s (slightly longer than Claude's 600s timeout);
-      # past that the previous handler likely died without cleaning up.
-      log_warn "[$session_id] Lock wait timeout (${waited}s) — clearing stale lock"
+    _lock_holder=$(cat "$LOCK_FILE" 2>/dev/null)
+    case "$_lock_holder" in
+      ''|*[!0-9]*) : ;;  # empty or placeholder — treat as alive (just acquired)
+      *)
+        if ! kill -0 "$_lock_holder" 2>/dev/null; then
+          log_warn "[$session_id] Lock holder PID $_lock_holder is dead — reclaiming stale lock"
+          rm -f "$LOCK_FILE"
+          waited=0
+          continue
+        fi ;;
+    esac
+    if [ "$waited" -ge 6200 ]; then
+      log_warn "[$session_id] Lock wait exceeded watchdog ceiling (${waited}s) — force-clearing"
       rm -f "$LOCK_FILE"
+      waited=0
       continue
     fi
     if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
@@ -1434,7 +1451,7 @@ jd = os.environ['JARVIS_DIR']
 runner = HeartbeatRunner(jd, os.path.join(jd, 'HEARTBEAT.md'),
     os.path.join(jd, 'heartbeat_state.json'), os.environ['MEMORY_DIR'],
     os.environ.get('HEARTBEAT_MODEL', 'opus'), work_dir=os.environ.get('WORK_DIR', jd))
-runner.run_cycle(force=True, only_task='memory-hourly')
+runner.run_cycle(force=True, only_task='memory-hourly', lock_wait=120)
 " 2>>"$LOG_FILE" >/dev/null || log_warn "Memory hourly on rotation failed"
 
         # Generate session compact synchronously — must complete before handle_message

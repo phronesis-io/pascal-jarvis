@@ -52,7 +52,12 @@ def channel_watermark_report(jarvis_dir: str | Path,
     for task in parse_heartbeat(hb):
         name = task["name"]
         ts = state.get(name, {})
-        interval = overrides.get(name) or task["interval"]
+        # Same precedence as run_cycle: override → legacy effective_interval
+        # in state → HEARTBEAT.md default. Ignoring the legacy field made
+        # legitimately slowed-down tasks look STARVED.
+        interval = (overrides.get(name)
+                    or ts.get("effective_interval", 0)
+                    or task["interval"])
         last_run = ts.get("last_run", 0)
         disabled_until = ts.get("circuit", {}).get("disabled_until", 0)
 

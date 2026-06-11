@@ -51,6 +51,13 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
                 if attempt:
                     log("heartbeat", f"Card send succeeded on retry {attempt}")
                 return True
+        except subprocess.TimeoutExpired:
+            # A local timeout does NOT mean the server didn't get it — on a
+            # slow link the message may already be delivered; retrying here
+            # would duplicate it. Treat as failed-but-final.
+            log("heartbeat", "lark_send_card timed out — not retrying (may have sent)",
+                level="warn")
+            return False
         except Exception as e:
             log("heartbeat", f"lark_send_card attempt {attempt} failed: {e}", level="warn")
     return False
@@ -79,6 +86,11 @@ def _lark_send_text(text: str, user_id: str) -> bool:
                 if attempt:
                     log("heartbeat", f"Text send succeeded on retry {attempt}")
                 return True
+        except subprocess.TimeoutExpired:
+            # Local timeout ≠ undelivered; retrying risks a duplicate message.
+            log("heartbeat", "lark_send_text timed out — not retrying (may have sent)",
+                level="warn")
+            return False
         except Exception:
             pass
     return False
@@ -184,8 +196,12 @@ NIGHT_QUEUE_MAX = 20
 
 def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
     if minutes_of_day is None:
-        t = time.localtime()
-        minutes_of_day = t.tm_hour * 60 + t.tm_min
+        # now_local(), not time.localtime(): launchd/cron children may carry
+        # TZ=UTC, which would shift the quiet window by hours. timeutil reads
+        # the system tz — same source as the ts strings written everywhere.
+        from core.timeutil import now_local
+        t = now_local()
+        minutes_of_day = t.hour * 60 + t.minute
     return minutes_of_day >= QUIET_START_MIN or minutes_of_day < QUIET_END_MIN
 
 
@@ -202,8 +218,14 @@ def _is_urgent(source_str: str) -> bool:
     return bool(URGENT_SOURCES & {s.strip() for s in source_str.split(",") if s.strip()})
 
 
+NIGHT_ENTRY_MAX_CHARS = 600     # per queued message, keeps the digest sendable
+NIGHT_DIGEST_MAX_CHARS = 3800   # total digest budget (Lark text limit headroom)
+
+
 def _queue_for_morning(output: str, jarvis_dir: Path):
     readable = extract_readable_from_output(output) or output
+    if len(readable) > NIGHT_ENTRY_MAX_CHARS:
+        readable = readable[:NIGHT_ENTRY_MAX_CHARS] + "…(截断)"
     source = _peek_source(jarvis_dir)
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
     entry = {"ts": now_local_str("%Y-%m-%d %H:%M"),
@@ -218,24 +240,54 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
     queue_path = jarvis_dir / NIGHT_QUEUE_FILE
     if not queue_path.exists():
         return False
-    entries = []
-    for line in queue_path.read_text().splitlines()[-NIGHT_QUEUE_MAX:]:
+    all_lines = queue_path.read_text().splitlines()
+    if len(all_lines) > NIGHT_QUEUE_MAX:
+        # No silent caps: say what was dropped
+        log("heartbeat", f"Night queue overflow: dropping {len(all_lines) - NIGHT_QUEUE_MAX} "
+            f"oldest of {len(all_lines)} entries", level="warn")
+    entries, seen_texts = [], set()
+    for line in all_lines[-NIGHT_QUEUE_MAX:]:
         try:
-            entries.append(json.loads(line))
+            e = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
+        # Same content queued twice overnight (e.g. a task re-emitting) reads
+        # as a bug to the user — keep the first occurrence only.
+        if e.get("text") in seen_texts:
+            continue
+        seen_texts.add(e.get("text"))
+        entries.append(e)
     if not entries:
         queue_path.unlink(missing_ok=True)
         return False
 
     parts = [f"🌙 **夜间积累的 {len(entries)} 条消息**"]
+    used = len(parts[0])
+    dropped = 0
     for e in entries:
-        parts.append(f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{e.get('text', '')}")
+        piece = f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{e.get('text', '')}"
+        if used + len(piece) > NIGHT_DIGEST_MAX_CHARS:
+            dropped += 1
+            continue
+        parts.append(piece)
+        used += len(piece)
+    if dropped:
+        parts.append(f"\n（另有 {dropped} 条因长度省略）")
+        log("heartbeat", f"Night digest length cap: dropped {dropped} entries", level="warn")
     digest = "\n".join(parts)
 
     if _lark_send_text(digest, user_id):
         queue_path.unlink(missing_ok=True)
         _write_outbox(digest, jarvis_dir)
+        # Engagement accounting: queued sends bypassed _record_engagement, so
+        # without this the morning digest is invisible to engagement-analyze.
+        ts = now_local_str("%Y-%m-%d %H:%M")
+        epoch = int(time.time())
+        with open(jarvis_dir / "engagement_log.jsonl", "a") as f:
+            for source in sorted({e.get("source", "heartbeat") for e in entries}):
+                f.write(json.dumps({"ts": ts, "source": source, "type": "sent",
+                                    "via": "night-digest", "epoch": epoch},
+                                   ensure_ascii=False) + "\n")
         log("heartbeat", f"Flushed night queue ({len(entries)} entries)")
         return True
     log("heartbeat", "Night queue flush failed — will retry next cycle", level="warn")
@@ -257,8 +309,12 @@ def _is_duplicate_send(output: str, jarvis_dir: Path) -> bool:
     outbox = jarvis_dir / "heartbeat_outbox.jsonl"
     if not outbox.exists():
         return False
+    from datetime import datetime
+    from core.timeutil import now_local
     readable = extract_readable_from_output(output) or output
-    now = time.time()
+    # Compare in the same clock that wrote the ts strings (now_local_str),
+    # NOT time.mktime — a TZ env mismatch would shift the window by hours.
+    now_dt = now_local().replace(tzinfo=None)
     try:
         lines = outbox.read_text().splitlines()[-30:]
     except OSError:
@@ -271,10 +327,10 @@ def _is_duplicate_send(output: str, jarvis_dir: Path) -> bool:
         if entry.get("text") != readable:
             continue
         try:
-            sent = time.mktime(time.strptime(entry.get("ts", ""), "%Y-%m-%d %H:%M"))
-        except (ValueError, OverflowError):
+            sent_dt = datetime.strptime(entry.get("ts", ""), "%Y-%m-%d %H:%M")
+        except ValueError:
             continue
-        if now - sent < DEDUP_WINDOW_SECONDS:
+        if (now_dt - sent_dt).total_seconds() < DEDUP_WINDOW_SECONDS:
             return True
     return False
 
@@ -332,7 +388,9 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
 
     # Trim logs on startup
     _trim_file(jd / "heartbeat_outbox.jsonl", 20)
-    _trim_file(jd / "engagement_log.jsonl", 500)
+    # 2000, not 500: read/reaction receipt events (REQ-15) share this file and
+    # would otherwise crowd the sent/response history out of the window.
+    _trim_file(jd / "engagement_log.jsonl", 2000)
 
     runner = HeartbeatRunner(
         jarvis_dir=jarvis_dir,
@@ -377,7 +435,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         if not _in_quiet_hours():
             _flush_night_queue(jd, user_id)
 
-        if output and not looks_like_error(output):
+        if output and not looks_like_error(output, proactive=True):
             if _is_duplicate_send(output, jd):
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
@@ -387,10 +445,19 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             else:
                 delivered = _route_output(output, user_id, jd)
                 _note_delivery(jd, delivered, user_id)
-                _write_outbox(output, jd)
-                _record_engagement(jd)
-                print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
-                      file=sys.stderr)
+                if delivered:
+                    _write_outbox(output, jd)
+                    _record_engagement(jd)
+                    print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
+                          file=sys.stderr)
+                else:
+                    # Do NOT write outbox/engagement on failure: an outbox
+                    # entry would make the dedup window suppress the retry
+                    # (REQ-04 cancelling REQ-11), and a "sent" record would
+                    # poison engagement stats with messages never delivered.
+                    (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+                    log("heartbeat", "Delivery failed — output not recorded as sent",
+                        level="warn")
         elif output:
             log("heartbeat", "Suppressed error-like output", level="warn")
             (jd / ".heartbeat_last_source").unlink(missing_ok=True)

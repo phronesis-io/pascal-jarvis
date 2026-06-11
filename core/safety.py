@@ -28,11 +28,16 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
     "authentication_error",
     "rate_limit",
     '"type":"error"',
-    # 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours
-    # as "**Intent** | Failed to authenticate. API Error: 403 Request not
-    # allowed" — the markdown header defeated the line-start check. These
-    # exact API-failure phrases are specific enough that a false positive in
-    # the first 300 chars of real content is effectively impossible.
+)
+
+# Checked ONLY for proactive (heartbeat) messages, where these phrases in the
+# first 300 chars are effectively always an error surface.
+# 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours as
+# "**Intent** | Failed to authenticate. API Error: 403 Request not allowed" —
+# the markdown header defeated the line-start check. They are NOT applied to
+# interactive replies: when Pascal debugs this very bot, a legitimate answer
+# may quote "API Error: 403" verbatim in its opening lines.
+PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "Failed to authenticate. API Error",
     "API Error: 401",
     "API Error: 403",
@@ -44,12 +49,16 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
 
 
 
-def looks_like_error(text: str) -> bool:
+def looks_like_error(text: str, proactive: bool = False) -> bool:
     """Return True if `text` looks like an error surface rather than real content.
 
     Only checks the first 300 chars. Patterns must appear at the start of
     a line (after optional whitespace) to avoid false positives on legitimate
     content that mentions error-related terms mid-sentence.
+
+    proactive=True (heartbeat user messages) additionally applies the
+    anywhere-in-head API-failure substrings — proactive notes never
+    legitimately open with those, while interactive replies might quote them.
     """
     if not text or not text.strip():
         return True
@@ -61,6 +70,8 @@ def looks_like_error(text: str) -> bool:
             return True
     # Check substring patterns (for errors embedded in JSON)
     if any(p in head for p in ERROR_SUBSTRINGS):
+        return True
+    if proactive and any(p in head for p in PROACTIVE_ERROR_SUBSTRINGS):
         return True
     return False
 

@@ -108,13 +108,30 @@ class TestDatabase:
         assert len(tasks) == 1
         assert tasks[0]["name"] == "Wake up"
 
-    def test_engagement_stats(self):
-        db_module.engagement_record("checkin", "test", engaged=True)
-        db_module.engagement_record("checkin", "test", engaged=False)
+    def test_engagement_stats(self, tmp_path, monkeypatch):
+        # Stats read engagement_log.jsonl (the source of truth written by the
+        # bot), NOT the engagement_events table — the table only ever received
+        # writes from an uncalled dashboard endpoint and froze on 2026-05-21.
+        import json as _json
+        import time as _time
+        monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+        epoch = int(_time.time())
+        ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(epoch))
+        lines = [
+            {"ts": ts, "source": "checkin", "type": "sent", "epoch": epoch},
+            {"ts": ts, "source": "checkin", "type": "sent", "epoch": epoch},
+            {"ts": ts, "source": "checkin", "type": "response", "reaction": "engaged"},
+            {"ts": ts, "source": "checkin", "type": "response", "reaction": "ignored"},
+        ]
+        (tmp_path / "engagement_log.jsonl").write_text(
+            "\n".join(_json.dumps(e) for e in lines) + "\n")
+
         stats = db_module.engagement_stats(7)
         assert stats["total"] == 2
         assert stats["engaged"] == 1
         assert stats["rate"] == 50.0
+        assert stats["by_source"] == [
+            {"source": "checkin", "total": 2, "engaged_count": 1}]
 
 
 class TestScheduler:

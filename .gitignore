@@ -7,6 +7,7 @@ active_sessions.json
 heartbeat_state.json
 heartbeat_state.lock
 interval_overrides.json
+interval_overrides_meta.json
 night_queue.jsonl
 .delivery_state.json
 jarvis.log

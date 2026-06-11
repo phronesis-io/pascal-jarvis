@@ -77,6 +77,9 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
         If you can't write an honest hook, mark the item silent instead of shipping a bare headline.
       Concision is the whole point — he's scanning on his phone, not studying. One readable line.
     Keep push few and deep; let 知会 carry the breadth. End with 📡 Powered by EigenFlux.
+    HARD LENGTH CAP: user_message total ≤ 900 characters. Engagement data shows
+    long cards (up to 1276 chars) get late replies or none — phone-scannable wins.
+    If a push item can't fit, lead with the 2-3 line core + link and trust the link.
 
     URGENCY (night gate): At night Pascal's EigenFlux cards are HELD and batched into a
     single morning digest — he asked not to be pinged at 2am. Set top-level "urgent": true

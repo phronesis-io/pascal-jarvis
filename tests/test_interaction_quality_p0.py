@@ -67,18 +67,25 @@ def test_run_cycle_runs_after_lock_released(tmp_path, monkeypatch):
 def test_wrapped_403_error_is_caught():
     # Exact shape that reached the user 7 times on 2026-06-10
     text = "**Intent** | Failed to authenticate. API Error: 403 Request not allowed"
-    assert looks_like_error(text)
+    assert looks_like_error(text, proactive=True)
 
 
 def test_wrapped_error_with_emoji_header_is_caught():
     text = "**🎯 Intent**\n\nFailed to authenticate. API Error: 403 Request not allowed"
-    assert looks_like_error(text)
+    assert looks_like_error(text, proactive=True)
 
 
 def test_legitimate_message_mentioning_api_late_is_not_flagged():
     text = ("今晚 Doctor Stretch 20:00 开始。课后我会给你一条闭环卡，"
             "记得记录今天拉到的位置和感受，回来按卡片提示回复就行。")
-    assert not looks_like_error(text)
+    assert not looks_like_error(text, proactive=True)
+
+
+def test_interactive_reply_quoting_api_error_passes():
+    # Pascal debugging this very bot: the reply legitimately quotes the error.
+    text = '你日志里的 "API Error: 403 Request not allowed" 是认证层返回的，原因是…'
+    assert not looks_like_error(text)            # interactive path
+    assert looks_like_error(text, proactive=True)  # proactive gate stays strict
 
 
 # ── REQ-04: outbox content dedup ─────────────────────────────────────
@@ -162,7 +169,20 @@ def test_apply_adaptations_writes_sidecar_with_chinese_keyword(tmp_path, monkeyp
 
     overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
     assert overrides == {"free-time-nudge": 7200}
-    # Repeated suggestion compounds from the current override
+
+    # Immediate repeat is blocked by the recompound cooldown (a few repeated
+    # suggestions on the same data must not geometrically run to the clamp)
+    _apply_adaptations([
+        {"target": "free-time-nudge", "suggestion": "reduce frequency further"},
+    ])
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides == {"free-time-nudge": 7200}
+
+    # After the cooldown expires, the suggestion compounds from the override
+    meta_file = tmp_path / "interval_overrides_meta.json"
+    meta = json.loads(meta_file.read_text())
+    meta["free-time-nudge"] -= 4 * 86400
+    meta_file.write_text(json.dumps(meta))
     _apply_adaptations([
         {"target": "free-time-nudge", "suggestion": "reduce frequency further"},
     ])

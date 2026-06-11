@@ -34,7 +34,7 @@ status() {
   else
     dim "  daemon.py: no PID file"
     # Check via pgrep
-    daemon_pid=$(pgrep -f "python.*daemon.py" 2>/dev/null | head -1 || true)
+    daemon_pid=$(pgrep -f "$JARVIS_DIR/daemon\\.py" 2>/dev/null | head -1 || true)
     if [ -n "$daemon_pid" ]; then
       green "  daemon.py: running (PID $daemon_pid, no PID file)"
     else
@@ -52,7 +52,7 @@ status() {
       red "  bot.sh:    stale PID file (PID $bot_pid not alive)"
     fi
   else
-    bot_pid=$(pgrep -f "bash.*bot\\.sh" 2>/dev/null | head -1 || true)
+    bot_pid=$(pgrep -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null | head -1 || true)
     if [ -n "$bot_pid" ]; then
       green "  bot.sh:    running (PID $bot_pid, no PID file)"
     else
@@ -104,7 +104,7 @@ kill_bot() {
   fi
 
   # Kill all bot.sh and lark-cli event processes
-  pkill -f "bash.*bot\\.sh" 2>/dev/null || true
+  pkill -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null || true
   pkill -f "lark-cli event" 2>/dev/null || true
 
   # Kill stuck claude sessions
@@ -124,9 +124,9 @@ kill_bot() {
   sleep 2
 
   # Verify
-  if pgrep -f "bash.*bot\\.sh" >/dev/null 2>&1; then
+  if pgrep -f "bash.*$JARVIS_DIR/bot\\.sh" >/dev/null 2>&1; then
     echo "  Force killing remaining bot processes..."
-    pkill -9 -f "bash.*bot\\.sh" 2>/dev/null || true
+    pkill -9 -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null || true
     sleep 1
   fi
 
@@ -142,7 +142,7 @@ kill_daemon() {
     fi
     rm -f "$DAEMON_PID_FILE"
   fi
-  pkill -f "python.*daemon\\.py" 2>/dev/null || true
+  pkill -f "$JARVIS_DIR/daemon\\.py" 2>/dev/null || true
   sleep 2
   green "  Daemon stopped."
 }
@@ -166,7 +166,7 @@ start_bot() {
   nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
   sleep 3
 
-  if pgrep -f "bash.*bot\\.sh" >/dev/null 2>&1; then
+  if pgrep -f "bash.*$JARVIS_DIR/bot\\.sh" >/dev/null 2>&1; then
     green "  Bot started. Log: $LOG"
   else
     red "  Bot failed to start! Check: tail -20 $LOG"
@@ -177,10 +177,10 @@ start_bot() {
 start_daemon() {
   echo "Starting daemon.py..."
   cd "$JARVIS_DIR"
-  nohup python3 daemon.py >> "$JARVIS_DIR/daemon.log" 2>&1 &
+  nohup python3 "$JARVIS_DIR/daemon.py" >> "$JARVIS_DIR/daemon.log" 2>&1 &
   sleep 2
 
-  if pgrep -f "python.*daemon\\.py" >/dev/null 2>&1; then
+  if pgrep -f "$JARVIS_DIR/daemon\\.py" >/dev/null 2>&1; then
     green "  Daemon started."
   else
     red "  Daemon failed to start! Check: tail -20 daemon.log"

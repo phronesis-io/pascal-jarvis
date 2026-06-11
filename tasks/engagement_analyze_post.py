@@ -95,13 +95,24 @@ def _apply_adaptations(adaptations: list[dict]):
     at the end of the cycle. HeartbeatRunner.load_interval_overrides() reads
     the sidecar each cycle.
     """
+    import time
+
     jarvis_dir = Path(os.environ.get("JARVIS_DIR", "."))
     overrides_file = jarvis_dir / "interval_overrides.json"
+    meta_file = jarvis_dir / "interval_overrides_meta.json"
+    # Re-compound cooldown: the analyzer often repeats the same suggestion on
+    # largely the same data for days; without a cooldown a few repeats
+    # geometrically run any task to the 48h clamp.
+    RECOMPOUND_COOLDOWN = 3 * 86400
 
     try:
         overrides = json.loads(overrides_file.read_text())
     except (json.JSONDecodeError, OSError):
         overrides = {}
+    try:
+        meta = json.loads(meta_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        meta = {}
 
     # Load task intervals from HEARTBEAT.md for reference
     sys.path.insert(0, str(jarvis_dir))
@@ -130,6 +141,10 @@ def _apply_adaptations(adaptations: list[dict]):
 
         if multiplier == 1.0:
             continue
+        if target in overrides and time.time() - meta.get(target, 0) < RECOMPOUND_COOLDOWN:
+            print(f"[engagement-analyze] {target}: adjusted recently, skipping recompound",
+                  file=sys.stderr)
+            continue
 
         # Compound from the current override (if any) so repeated suggestions
         # keep adapting, but clamp: don't go below 5min or above 48h
@@ -139,12 +154,16 @@ def _apply_adaptations(adaptations: list[dict]):
         if new_interval == current:
             continue
         overrides[target] = new_interval
+        meta[target] = int(time.time())
         changed.append(f"{target}: {current}s → {new_interval}s")
 
     if changed:
         tmp = overrides_file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(overrides, indent=2))
         os.replace(tmp, overrides_file)
+        tmp_meta = meta_file.with_suffix(".json.tmp")
+        tmp_meta.write_text(json.dumps(meta, indent=2))
+        os.replace(tmp_meta, meta_file)
         print(f"[engagement-analyze] Applied frequency changes: {changed}", file=sys.stderr)
 
 

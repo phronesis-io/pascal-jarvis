@@ -375,7 +375,8 @@ You have access to the user's memory below. Use it to personalize your responses
             self._log(f"Dynamic task check error: {e}")
             return []
 
-    def run_cycle(self, force: bool = False, only_task: str = ""):
+    def run_cycle(self, force: bool = False, only_task: str = "",
+                  lock_wait: float = 0):
         """Run one heartbeat cycle. Returns user-facing message or empty string.
 
         Cross-process exclusive: the resident heartbeat_loop and the session
@@ -385,16 +386,26 @@ You have access to the user's memory below. Use it to personalize your responses
         other's last_run/circuit updates — the root cause behind recurring
         "Heartbeat stale" daemon restarts. flock is released automatically on
         process death, so a crashed cycle can't wedge the lock.
+
+        lock_wait: seconds to keep retrying for the lock before giving up.
+        The resident loop uses 0 (skip and retry next tick); the rotation
+        path passes a positive value so memory-hourly isn't silently dropped
+        whenever the loop happens to be mid-cycle.
         """
         lock_path = self.state_file.with_suffix(".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + lock_wait
         with open(lock_path, "w") as lock_f:
-            try:
-                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                self._log("Another heartbeat cycle holds the lock — skipping",
-                          only_task=only_task or "")
-                return ""
+            while True:
+                try:
+                    fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        self._log("Another heartbeat cycle holds the lock — skipping",
+                                  only_task=only_task or "", waited=lock_wait)
+                        return ""
+                    time.sleep(2)
             try:
                 return self._run_cycle_locked(force, only_task)
             finally:

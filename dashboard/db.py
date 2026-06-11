@@ -5,6 +5,7 @@ Uses FTS5 for full-text search on bookmarks and logs.
 """
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -376,28 +377,53 @@ def engagement_record(event_type: str, source: str = "",
 
 
 def engagement_stats(days: int = 7) -> dict:
-    """Get engagement statistics for the last N days."""
-    db = get_db()
-    from core.timeutil import now_local
-    from datetime import timedelta
-    since = (now_local() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
-    total = db.execute(
-        "SELECT COUNT(*) FROM engagement_events WHERE timestamp >= ?", (since,)
-    ).fetchone()[0]
-    engaged = db.execute(
-        "SELECT COUNT(*) FROM engagement_events WHERE timestamp >= ? AND engaged = 1",
-        (since,),
-    ).fetchone()[0]
-    by_source = db.execute(
-        """SELECT source, COUNT(*) as total,
-                  SUM(engaged) as engaged_count
-           FROM engagement_events WHERE timestamp >= ?
-           GROUP BY source""",
-        (since,),
-    ).fetchall()
+    """Get engagement statistics for the last N days.
+
+    Reads engagement_log.jsonl — the source of truth written by the bot/
+    heartbeat. The engagement_events TABLE only ever received writes through
+    a dashboard HTTP endpoint nobody calls (3 rows, all from 2026-05-21), so
+    stats computed from it showed a frozen snapshot while the jsonl kept
+    growing. The table and its API stay for compatibility; stats don't use it.
+    """
+    import time as _time
+    from collections import defaultdict
+
+    jarvis_dir = Path(os.environ.get("JARVIS_DIR",
+                                     Path(__file__).resolve().parent.parent))
+    log_path = Path(jarvis_dir) / "engagement_log.jsonl"
+    cutoff = _time.time() - days * 86400
+
+    total = engaged = 0
+    by_source: dict[str, dict] = defaultdict(lambda: {"total": 0, "engaged_count": 0})
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        epoch = e.get("epoch", 0)
+        if not epoch:
+            # "response" entries carry only a "ts" string, no epoch
+            try:
+                epoch = _time.mktime(_time.strptime(e.get("ts", ""), "%Y-%m-%d %H:%M"))
+            except (ValueError, OverflowError):
+                continue
+        if epoch < cutoff:
+            continue
+        etype = e.get("type")
+        source = e.get("source", "")
+        if etype == "sent":
+            total += 1
+            by_source[source]["total"] += 1
+        elif etype == "response" and e.get("reaction") in ("engaged", "late_reply"):
+            engaged += 1
+            by_source[source]["engaged_count"] += 1
     return {
         "total": total,
         "engaged": engaged,
         "rate": round(engaged / total * 100, 1) if total else 0,
-        "by_source": [dict(r) for r in by_source],
+        "by_source": [{"source": s, **v} for s, v in sorted(by_source.items())],
     }

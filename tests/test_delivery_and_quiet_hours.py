@@ -141,3 +141,20 @@ def test_send_text_gives_up_after_retries(monkeypatch):
 
     assert not hbl._lark_send_text("hello", "ou_test")
     assert len(attempts) == 1 + len(hbl.SEND_RETRY_DELAYS)
+
+
+def test_flush_dedups_and_records_engagement(tmp_path, monkeypatch):
+    for text in ["重复内容", "重复内容", "另一条"]:
+        (tmp_path / ".heartbeat_last_source").write_text("content-recommend")
+        _queue_for_morning(text, tmp_path)
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert _flush_night_queue(tmp_path, "ou_test")
+
+    assert sent[0].count("重复内容") == 1  # duplicate collapsed
+    assert "2 条消息" in sent[0]
+    # queued sources are visible to engagement-analyze after the flush
+    elog = (tmp_path / "engagement_log.jsonl").read_text()
+    entries = [json.loads(l) for l in elog.splitlines()]
+    assert any(e["type"] == "sent" and e["source"] == "content-recommend"
+               and e.get("via") == "night-digest" for e in entries)
