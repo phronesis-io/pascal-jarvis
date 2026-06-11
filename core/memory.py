@@ -37,11 +37,18 @@ _TIMELINE_SKIP = {
 
 
 
-def load_tiered_memory(memory_dir: str | Path) -> str:
+def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound") -> str:
     """Load all memory into a single string for system prompt injection.
 
     With 1M context, everything is loaded unconditionally.
     Order matters for attention: rules first, identity, knowledge, system, timeline last.
+
+    purpose: "inbound" (default — full view, behavior unchanged) or
+    "outbound" — sensitivity gate for tasks whose output leaves Pascal's
+    world (eigenflux-publish, auto-replies): system/inbox_private_*.md /
+    inbox_secret_*.md perception buffers are skipped so ingested private
+    content (mail, DMs) can never ride into an outward-facing context.
+    (Perception PRD §3.4/§6 — sensitivity model steps 1-2.)
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -70,6 +77,9 @@ def load_tiered_memory(memory_dir: str | Path) -> str:
     sys_dir = memory_dir / "system"
     if sys_dir.is_dir():
         for f in sorted(sys_dir.glob("*.md")):
+            if purpose == "outbound" and (f.name.startswith("inbox_private")
+                                          or f.name.startswith("inbox_secret")):
+                continue
             _append_file(parts, f, f"System: {f.stem}")
 
     # 4. Timeline files (end of context — recency attention benefit)

@@ -368,6 +368,18 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     If NONE of the candidates meet quality bar, reply HEARTBEAT_OK. Don't force a bad pick.
 
+### perception-collect
+- interval: 15m
+- pre: tasks/perception_collect_pre.sh
+- prompt: |
+    [PERCEPTION COLLECT]
+    DATA is a deterministic perception-layer collection summary
+    (docs/prd_perception_ingestion.md). Signals already landed in
+    memory/system/inbox_*.md — you do NOT need to relay them.
+    Reply HEARTBEAT_OK unless DATA shows "errors=" greater than 0 with the
+    same source failing repeatedly (notes mention it) — then report one line
+    naming the failing source.
+
 ## Memory Pipeline
 
 ### memory-consolidate
