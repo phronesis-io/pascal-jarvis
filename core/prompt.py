@@ -49,6 +49,7 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:praxis_add|title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>] — Add praxis.
 - [ACTION:praxis_remove|id=<praxis_id>] — Remove praxis.
 - [ACTION:intent_create|name=<name>|when=<ISO8601_or_cron>|type=<date|cron|interval>|prompt=<text>|purpose=<why>|tags=<csv>|priority=<1-10>|action=<notify|prompt>|category=<hard|context|healing|external|autonomous>|input=<触发时给的上下文/材料>|decision=<要做的判断 是否/A还是B>|close=<一句话二元闭环问题>] — Create intent. 每条 intent 应带 category + close（一句话「做了吗」闭环问题）；category=context（会议/prep）可省 close；category=healing/autonomous 永远只记录不催。省略 category 时按 tag/内容自动归类。
+  ⚠️ 「阅读/观看/听某内容」类不要建 intent——历史数据：过期 intent 中一半是这类，"提醒看两篇文章"建两次过期两次。改用 [ACTION:watchlater]（free-time-nudge 会在空闲时段消化，过期静默回收，不积压）。例外：内容有硬截止（开会前必读）才建 intent。若用户要求重建一条之前过期的同名阅读类 intent，提示改用 watchlater。
 - [ACTION:intent_close|id=<intent_id>|outcome=<done|recorded|na>|result=<一句话结果>] — 记录某条 awaiting intent 的闭环结果（result 放最后，可含空格）。
 - [ACTION:intent_cancel|id=<intent_id>|reason=<why>] — Cancel intent.
 - [ACTION:intent_list] — List active intents.

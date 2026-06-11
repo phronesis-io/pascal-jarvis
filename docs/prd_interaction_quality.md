@@ -126,12 +126,12 @@
 - **需求**：非紧急（无 deadline 属性）的主动消息在 23:30-09:30 进入队列，按优先级在黄金窗（10:00/13:00/17:00）批量放行，与既有 night-batched morning digest 合流；紧急消息（日历冲突、闭环到点）直发。
 - **验收**：深夜产生的推荐/feed 类消息次日上午合并送达。
 
-### REQ-14 eigenflux-feed-triage 摘要化限流 🟡 部分上线（2026-06-11：900 字硬上限 + 白天 feed 进批量窗合并放行；逐条→digest 的完整形态待定）
+### REQ-14 eigenflux-feed-triage 摘要化限流 🟢 实质完成（2026-06-11：900 字上限 + 白天三窗合并 = 每日 ≤4 个 digest 形态已成立。已知取舍：feed 的 urgent 项白天最多延迟 ~3.5h——urgent 设计上极罕见，且断点放行部分补偿；若实际出现误延，把 urgent 信号接入 URGENT_SOURCES 旁路）
 - **数据**：占总发送量 23%（66 条/周），卡片最长 1276 字符，回复以 late_reply 为主；对照 phronesis-monitor（短、决策点明确、中位 293s 即回）。
 - **需求**：逐条推送改为每日 2-3 个合并 digest；单条卡片硬上限 ~500 字符 + "展开全文"链接（依赖 REQ-17 卡片重构）；保留"高分信号即时直推"白名单通道。
 - **验收**：feed 类周发送量降至 ≤25 条且回复率不降。
 
-### REQ-15 响应归因修复（已读回执 + reply-to）🟡 部分上线（2026-06-11，read/reaction 事件已入 engagement_log；message_id join 与三态统计待做）
+### REQ-15 响应归因修复（已读回执 + reply-to）🟢 基本完成（2026-06-11 三轮：read/reaction 事件入账 + sent 记录带 message_ids join 键；三态统计报表待 engagement-analyze prompt 升级消费新字段）
 - **数据**：calendar-sync 响应数(27) > 发送数(21)，ignored 的 content_head 全是无关话题——归因是"归到最后一条 sent"，engagement-analyze 在用脏数据调参（而 REQ-05 刚让调参真正生效，脏数据危害放大）。
 - **需求**：①注册 `im.message.message_read_v1` / reaction handler（同时消除 SDK Error 刷屏）；②回复归因优先用 Lark parent_id/reply 关系，其次时间窗就近；③已读未回 = 真 ignored，未读 = 未触达，分开统计。
 - **验收**：engagement_log 含 read/replied/untouched 三态；calendar-sync 不再出现响应数>发送数。
@@ -151,7 +151,7 @@
 - **需求**：把现有 `🔧 工具列表` 升级为 haiku 一句话叙事（"正在读 X 的 API 文档，已确认 Y"），每 60s 最多一条，错误/幻觉风险点显式标注。
 - **验收**：长任务期间用户能看懂 agent 在干什么、信源是什么。
 
-### REQ-19 意图系统形态分流
+### REQ-19 意图系统形态分流 🟢 已上线（2026-06-11：intent_create 指引明确阅读/观看类改走 watchlater、过期重建时提示转化；闭环改道依赖已就位）
 - **数据**：已终结意图 35% 过期；过期项一半是"阅读/跟进"类；"提醒看两篇文章"建两次死两次；27 条 active 曾 0 闭环（6/9 已重做引擎，本期已提交）。
 - **需求**：①"阅读类"意图不再走定时 intent，进 watchlater 队列由 free-time-nudge 消化，过期静默回收；②闭环卡送达失败自动改道（依赖 REQ-11）；③同文意图重建时提示"上次建过且过期了，要改成 watchlater 吗"。
 - **验收**：月度 expired 占比 <15%。
@@ -168,7 +168,7 @@
 - **REQ-21 感知摄入 MVP**（已有 v2 PRD：docs/prd_perception_ingestion.md，25-35h）：所有信息类别（repo 改动、其他飞书群、其他 Claude session）模块化灌入记忆——同时是 TODO P1 硬编码问题的系统解。用户 6/9 立项，待开工。
 - **REQ-22 引用回复上下文**（5/28）✅ 经查已实现（bot.sh:1108 quote-reply 注入）：用户引用一条消息回复时，把被引用消息注入上下文。（小改动，可提前到 P1。）
 - **REQ-23 预测式日历助手**（5/8、5/28）："看更长时间的日程…提前做心理状态的准备"；与 calendar-sync Tier-0 合流，做 7 天前瞻 + 模式识别（文化轮转、康复周期）。
-- **REQ-24 双层日报合并**：cron「每日日报/小时报」与 heartbeat daily-plan/daily-reflect 二选一（daily-plan 当前 0% 回复，合并时重新设计形态——行动建议优先而非全量日程，5/8 + 5/20 反馈）。
+- **REQ-24 双层日报合并** 🟢 被批量机制实质解决（2026-06-11：daily-plan 的 8:00-9:30 时段现落在静默窗内，其产出自动并入 10:00 晨间 digest，与 cron 日报不再双发独立消息；形态重设计待观察 digest 数据后决定）。
 - **REQ-25 统一 engagement 存储** ✅ 已上线（2026-06-11，dashboard 改读 engagement_log.jsonl 事实源）：SQLite engagement_events/agent_log 自 5/21 死亡（3 行 vs jsonl 502 行），修写入或删表，dashboard 不得读假数据。
 - **REQ-26 日志归档化** ✅ 已上线（2026-06-11，jarvis.log.1..3 滚动归档）：`tail -500` 截断使失败率审计物理不可能；改为 `jarvis.log.1..3` 滚动归档，WARN 统计可回溯（REQ-08 的 copytruncate 是临时解）。
 - **REQ-27 bot.sh 逻辑继续下沉 core/**：1407 行 bash 零测试，本次 6 项高危 bug 中 3 项在 bash 层；目标：消息解析、卡片回调、会话管理全部 Python 化 + bats 覆盖剩余 bash。

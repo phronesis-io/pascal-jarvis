@@ -50,6 +50,9 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
             if r.returncode == 0:
                 if attempt:
                     log("heartbeat", f"Card send succeeded on retry {attempt}")
+                mid = _extract_message_id(r.stdout)
+                if mid:
+                    _LAST_SENT_IDS.append(mid)
                 return True
         except subprocess.TimeoutExpired:
             # A local timeout does NOT mean the server didn't get it — on a
@@ -66,6 +69,22 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
 # Retry sleeps between send attempts (REQ-11). Transient lark-cli/network
 # hiccups were surfacing as silent message loss the user discovered by hand.
 SEND_RETRY_DELAYS = (2, 5)
+
+# message_ids of sends in the current cycle (REQ-15): _record_engagement
+# drains this into the "sent" entries so read-receipt events
+# (message_id_list) can be joined precisely instead of by time proximity.
+_LAST_SENT_IDS: list = []
+
+
+def _extract_message_id(stdout: str) -> str:
+    try:
+        obj = json.loads(stdout or "")
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if isinstance(obj, dict):
+        mid = obj.get("message_id") or (obj.get("data") or {}).get("message_id")
+        return mid if isinstance(mid, str) else ""
+    return ""
 
 
 def _lark_send_text(text: str, user_id: str) -> bool:
@@ -85,6 +104,9 @@ def _lark_send_text(text: str, user_id: str) -> bool:
             if r.returncode == 0:
                 if attempt:
                     log("heartbeat", f"Text send succeeded on retry {attempt}")
+                mid = _extract_message_id(r.stdout)
+                if mid:
+                    _LAST_SENT_IDS.append(mid)
                 return True
         except subprocess.TimeoutExpired:
             # Local timeout ≠ undelivered; retrying risks a duplicate message.
@@ -361,11 +383,15 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
         # without this the morning digest is invisible to engagement-analyze.
         ts = now_local_str("%Y-%m-%d %H:%M")
         epoch = int(time.time())
+        digest_ids = list(_LAST_SENT_IDS)
+        _LAST_SENT_IDS.clear()
         with open(jarvis_dir / "engagement_log.jsonl", "a") as f:
             for source in sorted({e.get("source", "heartbeat") for e in entries}):
-                f.write(json.dumps({"ts": ts, "source": source, "type": "sent",
-                                    "via": "night-digest", "epoch": epoch},
-                                   ensure_ascii=False) + "\n")
+                row = {"ts": ts, "source": source, "type": "sent",
+                       "via": "night-digest", "epoch": epoch}
+                if digest_ids:
+                    row["message_ids"] = digest_ids
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
         log("heartbeat", f"Flushed night queue ({len(entries)} entries)")
         return True
     log("heartbeat", "Night queue flush failed — will retry next cycle", level="warn")
@@ -437,12 +463,18 @@ def _record_engagement(jarvis_dir: Path):
     else:
         sources = "heartbeat"
 
+    sent_ids = list(_LAST_SENT_IDS)
+    _LAST_SENT_IDS.clear()
+
     elog = jarvis_dir / "engagement_log.jsonl"
     with open(elog, "a") as f:
         for src in sources.split(","):
             src = src.strip()
             if src:
                 entry = {"ts": ts, "source": src, "type": "sent", "epoch": epoch}
+                if sent_ids:
+                    # join key for read-receipt events (REQ-15)
+                    entry["message_ids"] = sent_ids
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -550,6 +582,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     # (REQ-04 cancelling REQ-11), and a "sent" record would
                     # poison engagement stats with messages never delivered.
                     (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+                    _LAST_SENT_IDS.clear()  # drop ids from partial successes
                     log("heartbeat", "Delivery failed — output not recorded as sent",
                         level="warn")
         elif output:

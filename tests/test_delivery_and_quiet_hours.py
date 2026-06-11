@@ -116,6 +116,8 @@ def test_send_text_retries_then_succeeds(monkeypatch):
     attempts = []
 
     class _R:
+        stdout = ""
+
         def __init__(self, rc):
             self.returncode = rc
 
@@ -209,3 +211,11 @@ def test_breakpoint_release_flushes_outside_quiet_hours(tmp_path, monkeypatch):
 def test_no_flush_with_empty_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(hbl, "_user_recently_active", lambda now=None: True)
     assert not hbl._should_flush(tmp_path, minutes_of_day=15 * 60)
+
+
+def test_extract_message_id_shapes():
+    assert hbl._extract_message_id('{"message_id":"om_abc"}') == "om_abc"
+    assert hbl._extract_message_id('{"data":{"message_id":"om_xyz"}}') == "om_xyz"
+    assert hbl._extract_message_id("not json") == ""
+    assert hbl._extract_message_id("") == ""
+    assert hbl._extract_message_id('{"message_id":123}') == ""
