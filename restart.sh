@@ -74,10 +74,17 @@ status() {
 kill_bot() {
   # Check if user has an active conversation — warn before killing
   active_locks=$(find "$JARVIS_DIR" -maxdepth 1 -name '.session_lock_*' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$active_locks" -gt 0 ]; then
+  if [ "$active_locks" -gt 0 ] && [ "$ASSUME_YES" -ne 1 ]; then
     echo ""
     red "  ⚠️  $active_locks active conversation(s) in progress!"
     red "  Restarting will DESTROY the in-flight Claude response."
+    if [ ! -t 0 ]; then
+      # Non-interactive caller (cron, admin trigger, Claude): `read` would hit
+      # EOF and set -e would abort with no message. Refuse loudly instead.
+      red "  Non-interactive session — refusing to kill an in-flight conversation."
+      red "  Re-run with --yes to force."
+      exit 1
+    fi
     echo -n "  Continue? [y/N] "
     read -r _confirm
     if [ "$_confirm" != "y" ] && [ "$_confirm" != "Y" ]; then
@@ -183,6 +190,19 @@ start_daemon() {
 
 # ── Main ─────────────────────────────────────────────────────────────
 
+# --yes anywhere in argv skips the in-flight-conversation confirmation
+# (needed by non-interactive callers: admin restart trigger, automation).
+ASSUME_YES=0
+_args=()
+for _a in "$@"; do
+  if [ "$_a" = "--yes" ] || [ "$_a" = "-y" ]; then
+    ASSUME_YES=1
+  else
+    _args+=("$_a")
+  fi
+done
+set -- "${_args[@]:-}"
+
 case "${1:-}" in
   --status|-s)
     status
@@ -199,11 +219,12 @@ case "${1:-}" in
     status
     ;;
   --help|-h)
-    echo "Usage: ./restart.sh [--full|--status|--help]"
+    echo "Usage: ./restart.sh [--full|--status|--help] [--yes]"
     echo ""
     echo "  (no args)   Restart bot only (daemon auto-detects and stays)"
     echo "  --full      Restart both daemon and bot"
     echo "  --status    Show current process status"
+    echo "  --yes, -y   Skip the in-flight-conversation confirmation"
     ;;
   *)
     echo "=== Bot Restart ==="

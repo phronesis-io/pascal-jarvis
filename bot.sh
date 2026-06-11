@@ -516,20 +516,26 @@ $(load_memory)"
   local ANSWER_FILE
   ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
   local waited=0
-  while [ -f "$LOCK_FILE" ] && [ "$waited" -lt 620 ]; do
-    # Wait up to 620s (slightly longer than Claude's 600s timeout)
-    # to avoid concurrent access to the same session
+  # Acquire the lock atomically (noclobber) BEFORE spawning Claude. A plain
+  # "wait for the file to vanish, write it later" check lets two
+  # near-simultaneous messages both pass and resume the same session
+  # concurrently, corrupting the session jsonl. The placeholder content is
+  # non-numeric on purpose: every reader does kill -0/"kill $pid || true",
+  # so it degrades safely until the real Claude PID overwrites it below.
+  until (set -C; echo acquiring > "$LOCK_FILE") 2>/dev/null; do
+    if [ "$waited" -ge 620 ]; then
+      # Wait up to 620s (slightly longer than Claude's 600s timeout);
+      # past that the previous handler likely died without cleaning up.
+      log_warn "[$session_id] Lock wait timeout (${waited}s) — clearing stale lock"
+      rm -f "$LOCK_FILE"
+      continue
+    fi
     if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
       log_info "[$session_id] Session busy, waiting... (${waited}s)"
     fi
     sleep 5
     waited=$((waited + 5))
   done
-  if [ "$waited" -ge 620 ]; then
-    # Previous handler likely timed out but didn't clean up its lock
-    log_warn "[$session_id] Lock wait timeout (${waited}s) — clearing stale lock"
-    rm -f "$LOCK_FILE"
-  fi
 
   # Run Claude with automatic retry on empty response
   local session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -899,8 +905,24 @@ trap cleanup EXIT INT TERM
 # Can't rely on Lark events (they may not arrive) or daemon (30min delay).
 heartbeat_watchdog() {
   sleep 30  # initial grace period
-  local _fails=0 _last_fail=0
+  local _fails=0 _last_fail=0 _ticks=0
   while true; do
+    # Hourly housekeeping (120 ticks × 30s). Startup-only rotation isn't
+    # enough: a bot that stays up for weeks grows jarvis.log and tmp/ without
+    # bound (tmp/ held 5.5MB of stale media downloads with no cleanup at all).
+    _ticks=$((_ticks + 1))
+    if [ $((_ticks % 120)) -eq 0 ]; then
+      if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+        # copytruncate, not tail+mv: the python children hold O_APPEND fds
+        # from `2>>` redirects — a rename would silently divert their logs
+        # to the replaced inode until the next restart.
+        tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" \
+          && cat "$LOG_FILE.tmp" > "$LOG_FILE" \
+          && rm -f "$LOG_FILE.tmp"
+        log_info "[watchdog] Rotated jarvis.log (exceeded ${LOG_MAX_BYTES} bytes)"
+      fi
+      find "$JARVIS_DIR/tmp" -type f -mtime +7 -delete 2>/dev/null || true
+    fi
     if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
       local _now
       _now=$(date +%s)
@@ -955,7 +977,11 @@ lark_subscribe_messages \
         _fb_rating=$(echo "$line" | jq -r '.action.value.rating // .event.action.value.rating // empty' 2>/dev/null)
         if [ -n "$_fb_source" ] && [ -n "$_fb_rating" ]; then
           _fb_ts=$(date '+%Y-%m-%d %H:%M')
-          printf '%s\n' "{\"ts\":\"$_fb_ts\",\"source\":\"$_fb_source\",\"type\":\"feedback\",\"rating\":\"$_fb_rating\",\"epoch\":$(date +%s)}" \
+          # source/rating come from the Lark card payload — build the JSON
+          # with jq so embedded quotes can't produce a corrupt line.
+          jq -cn --arg ts "$_fb_ts" --arg source "$_fb_source" --arg rating "$_fb_rating" \
+            --argjson epoch "$(date +%s)" \
+            '{ts:$ts,source:$source,type:"feedback",rating:$rating,epoch:$epoch}' \
             >> "$JARVIS_DIR/engagement_log.jsonl"
           log_info "[feedback] $_fb_source: $_fb_rating"
         fi
@@ -986,9 +1012,12 @@ lark_subscribe_messages \
           # We can't recover the content, but we can notify the user
           echo "$_lock_sid" >> "$_queue_file"
         done
-        # Kill background children before exec to prevent orphan processes
-        kill 0 2>/dev/null || true
-        exec "$JARVIS_DIR/bot.sh"
+        # Delegate to restart.sh: it kills the whole bot tree (including this
+        # pipeline subshell) and starts a fresh instance. The old
+        # `kill 0; exec bot.sh` here TERM'd our own process group — the exec
+        # rarely survived and recovery silently depended on the daemon.
+        nohup "$JARVIS_DIR/restart.sh" --yes >/dev/null 2>&1 &
+        exit 0
       fi
 
       # Parse message fields from raw (non-compact) event format.
@@ -1148,7 +1177,7 @@ ${content}"
                 --type file \
                 --output "$_audio_file" \
                 --as bot 2>>"$LOG_FILE"); then
-              if [ -n "$OPENAI_API_KEY" ] && command -v curl >/dev/null 2>&1; then
+              if [ -n "${OPENAI_API_KEY:-}" ] && command -v curl >/dev/null 2>&1; then
                 log_info "Transcribing audio via Whisper API..."
                 _transcript=$(curl -sS --max-time 60 \
                   -X POST https://api.openai.com/v1/audio/transcriptions \

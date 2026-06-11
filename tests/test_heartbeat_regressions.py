@@ -20,6 +20,10 @@ def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
     memory_dir.mkdir()
     jarvis_dir = tmp_path / "jarvis"
     jarvis_dir.mkdir()
+    # idle_judge=False: the judge makes a REAL haiku call — with it on, unit
+    # tests are slow, network-dependent, and flaky (the judge sometimes drops
+    # the synthetic user_message as idle noise).
+    kwargs.setdefault("idle_judge", False)
     return HeartbeatRunner(
         jarvis_dir=jarvis_dir,
         heartbeat_file=hb,

@@ -5,6 +5,7 @@ which tasks are due, runs their pre-scripts to gather data, batches them into
 a single Claude call, and routes responses through post-scripts.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -191,6 +192,22 @@ class HeartbeatRunner:
             return json.loads(self.state_file.read_text())
         return {}
 
+    def load_interval_overrides(self) -> dict:
+        """Auto-tuned intervals from engagement-analyze (W3.1).
+
+        Kept in a sidecar file instead of heartbeat_state.json: the post-hook
+        runs as a child process mid-cycle, so anything it wrote into the state
+        file was clobbered when run_cycle saved its own in-memory copy at the
+        end of the cycle — which is why two months of "reduce frequency"
+        suggestions never took effect.
+        """
+        f = self.jarvis_dir / "interval_overrides.json"
+        try:
+            data = json.loads(f.read_text())
+            return {k: int(v) for k, v in data.items() if int(v) > 0}
+        except (OSError, ValueError, TypeError):
+            return {}
+
     def save_state(self, state: dict):
         """Atomic write: temp + rename prevents corrupted state on crash."""
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -240,8 +257,8 @@ You have access to the user's memory below. Use it to personalize your responses
   synthesize within this run.
 - Before claiming a Jarvis action is done, verify it via Bash with the synchronous
   CLIs (run from JARVIS_DIR), then report the observed result:
-    python3 -m core.intentions list|due|get <id>|cancel <id>|delete <id>|stats|purge <status>
-    python3 -m core.actions do <type> key=val ...
+    python3 -m core.intentions list|due|awaiting|get <id>|cancel <id>|close <id> [outcome] [result...]|delete <id>|stats|purge <status>
+    python3 -m core.actions do <type> key=val ...   (e.g. do intent_close id=<parent> outcome=done result=<一句>)
 
 {memory}"""
 
@@ -359,12 +376,37 @@ You have access to the user's memory below. Use it to personalize your responses
             return []
 
     def run_cycle(self, force: bool = False, only_task: str = ""):
-        """Run one heartbeat cycle. Returns user-facing message or empty string."""
+        """Run one heartbeat cycle. Returns user-facing message or empty string.
+
+        Cross-process exclusive: the resident heartbeat_loop and the session
+        rotation path (bot.sh runs `run_cycle(force=True, only_task=...)` in
+        its own process) both call this. Without the lock, both load the full
+        state dict, run concurrently, and the last save_state() clobbers the
+        other's last_run/circuit updates — the root cause behind recurring
+        "Heartbeat stale" daemon restarts. flock is released automatically on
+        process death, so a crashed cycle can't wedge the lock.
+        """
+        lock_path = self.state_file.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_f:
+            try:
+                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self._log("Another heartbeat cycle holds the lock — skipping",
+                          only_task=only_task or "")
+                return ""
+            try:
+                return self._run_cycle_locked(force, only_task)
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
+
+    def _run_cycle_locked(self, force: bool = False, only_task: str = ""):
         cycle_id = uuid.uuid4().hex[:8]
         self._cid = cycle_id  # used by _log
 
         tasks = self._load_tasks()
         state = self.load_state()
+        interval_overrides = self.load_interval_overrides()
         now = int(time.time())
 
         # Determine which tasks are due
@@ -386,8 +428,10 @@ You have access to the user's memory below. Use it to personalize your responses
             # (e.g. multiple Lark session rotations in quick succession).
             if force and (now - last_run) < self.FORCE_COOLDOWN_SECONDS:
                 continue
-            # Use effective_interval if set by engagement-analyze (auto-tuned)
-            interval = ts.effective_interval if ts.effective_interval > 0 else task["interval"]
+            # Auto-tuned interval precedence: sidecar override (W3.1) →
+            # legacy effective_interval in state → HEARTBEAT.md default
+            interval = interval_overrides.get(task["name"]) \
+                or (ts.effective_interval if ts.effective_interval > 0 else task["interval"])
             if force or (now - last_run >= interval):
                 if task["name"] in self.PIPELINE_TASKS:
                     if pipeline_picked:

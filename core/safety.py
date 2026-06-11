@@ -28,6 +28,18 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
     "authentication_error",
     "rate_limit",
     '"type":"error"',
+    # 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours
+    # as "**Intent** | Failed to authenticate. API Error: 403 Request not
+    # allowed" — the markdown header defeated the line-start check. These
+    # exact API-failure phrases are specific enough that a false positive in
+    # the first 300 chars of real content is effectively impossible.
+    "Failed to authenticate. API Error",
+    "API Error: 401",
+    "API Error: 403",
+    "API Error: 429",
+    "API Error: 500",
+    "API Error: 529",
+    "Request not allowed",
 )
 
 

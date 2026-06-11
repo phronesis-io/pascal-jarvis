@@ -5,6 +5,8 @@ jarvis.yaml
 # Runtime state (bot + heartbeat + session tracking)
 active_sessions.json
 heartbeat_state.json
+heartbeat_state.lock
+interval_overrides.json
 jarvis.log
 .memory_cache
 .bot.pid

@@ -115,6 +115,43 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path):
         _lark_send_text("\n".join(remaining_text_parts), user_id)
 
 
+DEDUP_WINDOW_SECONDS = 6 * 3600
+
+
+def _is_duplicate_send(output: str, jarvis_dir: Path) -> bool:
+    """True if an identical message already went out within the dedup window.
+
+    Compares against recent heartbeat_outbox.jsonl entries. Guards against
+    repeat spam: the same error card went out 7 times in 12 hours on
+    2026-06-10, and users have reported duplicate checkins before. Content
+    must match exactly — legitimate messages are timestamped/contextual and
+    practically never repeat verbatim.
+    """
+    outbox = jarvis_dir / "heartbeat_outbox.jsonl"
+    if not outbox.exists():
+        return False
+    readable = extract_readable_from_output(output) or output
+    now = time.time()
+    try:
+        lines = outbox.read_text().splitlines()[-30:]
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if entry.get("text") != readable:
+            continue
+        try:
+            sent = time.mktime(time.strptime(entry.get("ts", ""), "%Y-%m-%d %H:%M"))
+        except (ValueError, OverflowError):
+            continue
+        if now - sent < DEDUP_WINDOW_SECONDS:
+            return True
+    return False
+
+
 def _write_outbox(output: str, jarvis_dir: Path):
     """Write heartbeat output to outbox for main session visibility."""
     ts = now_local_str("%Y-%m-%d %H:%M")
@@ -210,11 +247,16 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             output = ""
 
         if output and not looks_like_error(output):
-            _route_output(output, user_id, jd)
-            _write_outbox(output, jd)
-            _record_engagement(jd)
-            print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
-                  file=sys.stderr)
+            if _is_duplicate_send(output, jd):
+                log("heartbeat", "Suppressed duplicate send (identical message "
+                    f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
+                (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+            else:
+                _route_output(output, user_id, jd)
+                _write_outbox(output, jd)
+                _record_engagement(jd)
+                print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
+                      file=sys.stderr)
         elif output:
             log("heartbeat", "Suppressed error-like output", level="warn")
             (jd / ".heartbeat_last_source").unlink(missing_ok=True)

@@ -16,6 +16,7 @@ def _make_runner(tmp_path):
         state_file=tmp_path / "state.json",
         memory_dir=tmp_path / "memory",
         model="sonnet",
+        idle_judge=False,  # never hit the network in unit tests
     )
 
 

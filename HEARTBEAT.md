@@ -215,7 +215,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     If nothing meets the bar (the usual case), return {"should_publish":false}
 
 ### eigenflux-profile
-- interval: 1h
+- interval: 24h
 - pre: tasks/eigenflux_profile_pre.sh
 - post: tasks/eigenflux_profile_post.py
 - prompt: |
@@ -365,15 +365,6 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
     If NONE of the candidates meet quality bar, reply HEARTBEAT_OK. Don't force a bad pick.
 
-### watchlater-remind
-- interval: 168h
-- pre: tasks/watchlater_remind_pre.sh
-- post: tasks/watchlater_remind_post.py
-- prompt: |
-    [WATCH LATER REMINDER — DISABLED]
-    Merged into free-time-nudge. This task is effectively disabled via long interval.
-    HEARTBEAT_OK
-
 ## Memory Pipeline
 
 ### memory-consolidate
@@ -510,10 +501,24 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     For calendar-prep intents: check the user's memory for relevant context about the event,
     then write a concise prep reminder (what to prepare, what to remember, relevant context).
 
+    INPUT/DECISION/CLOSURE (the three pieces): if an intent carries INPUT, surface it as
+    prep material; if it carries DECISION, put the yes/no or A/B judgment to Pascal; if it
+    carries CLOSURE, that is the one-line "did you do it?" question.
+
+    CLOSURE FOLLOW-UPS (a row whose prompt says "闭环跟进" / has a parent):
+    - category external/hard: ask Pascal the closure question directly (notify). When he has
+      ALREADY answered (in context/memory), instead record it: add a "closure" object and set
+      action "silent". Do NOT both ask and record.
+    - category healing/autonomous: NEVER proactively ask, NEVER card. Only if Pascal already
+      volunteered the result, record it with closure + action "silent". Otherwise action "silent"
+      with no content. 闭环≠催促 — capture quietly, never nag.
+
     Each response must be a real, full-sentence message the user can act on, or else
     action: silent. Do NOT emit one-word acknowledgements as notify cards.
 
-    Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain"}}}
+    Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain",
+      "closure": {"parent": "<parent_id>", "outcome": "done|recorded|na", "result": "<one line>"}}}}
+    (omit "closure" unless you are recording a result.)
     If no intents need attention, reply HEARTBEAT_OK.
 
 ## System Maintenance
@@ -716,14 +721,20 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     [THINKING REVIEW — Open Questions & Personal Projects]
     Scan all files in warm/ with YAML frontmatter type: "question" or type: "project".
 
+    Question rule (Pascal's 5/26 feedback): every question MUST be answerable
+    in one sentence or one tap — give concrete options, never open-ended
+    "有没有接近方向" style prompts.
+
     For each QUESTION:
-    1. Check last updated date. If > 3 weeks stale, ask: "这个问题还在想吗？要继续探索、还是先放下？"
-    2. If status is "exploring" for > 2 weeks, suggest: "有没有接近一个方向了？要不要推进到 crystallizing？"
+    1. Check last updated date. If > 3 weeks stale, ask a binary: "「<标题>」还想吗？回 1 继续 / 2 放下"
+    2. If status is "exploring" for > 2 weeks, surface ONE concrete next step
+       pulled from the file content and ask yes/no: "下一步做 <具体动作> 吗？回 yes 我建 intent / no 先放着"
     3. If status is "decided", suggest spawning a project file.
 
     For each PROJECT:
-    1. Check last updated date. If > 2 weeks stale, ask: "这个项目沉默了，是暂停还是继续？"
-    2. If next action says "待确认", nudge for an update.
+    1. Check last updated date. If > 2 weeks stale, ask a binary: "「<标题>」暂停还是继续？回 暂停/继续"
+    2. If next action says "待确认", state the pending decision as a one-line
+       choice between named options, not an open question.
 
     Tone: gentle nudge, not performance review. Like Bullet Journal migration —
     the point is to decide "still alive or let go", not to guilt.

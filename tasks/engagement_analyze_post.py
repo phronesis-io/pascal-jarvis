@@ -84,20 +84,24 @@ _INTERVAL_MAP = {
 
 
 def _apply_adaptations(adaptations: list[dict]):
-    """Apply frequency adaptations to heartbeat_state.json.
+    """Apply frequency adaptations to interval_overrides.json.
 
     Each adaptation has: {"target": "task-name", "suggestion": "reduce frequency..."}
-    We parse the suggestion for keywords and adjust effective_interval.
+    We parse the suggestion for keywords and adjust the override interval.
+
+    Overrides live in a sidecar file, NOT heartbeat_state.json: this hook runs
+    as a child process in the middle of a heartbeat cycle, so writes to the
+    state file were silently clobbered when run_cycle saved its in-memory copy
+    at the end of the cycle. HeartbeatRunner.load_interval_overrides() reads
+    the sidecar each cycle.
     """
     jarvis_dir = Path(os.environ.get("JARVIS_DIR", "."))
-    state_file = jarvis_dir / "heartbeat_state.json"
-    if not state_file.exists():
-        return
+    overrides_file = jarvis_dir / "interval_overrides.json"
 
     try:
-        state = json.loads(state_file.read_text())
+        overrides = json.loads(overrides_file.read_text())
     except (json.JSONDecodeError, OSError):
-        return
+        overrides = {}
 
     # Load task intervals from HEARTBEAT.md for reference
     sys.path.insert(0, str(jarvis_dir))
@@ -113,29 +117,34 @@ def _apply_adaptations(adaptations: list[dict]):
 
         base_interval = tasks_def[target]
 
-        # Determine direction from suggestion text
+        # Determine direction from suggestion text. ("降频" was the exact word
+        # the insights used for two months while the old list only knew
+        # 降低/减少 — keep both Chinese and English variants broad.)
         multiplier = 1.0
-        if any(w in suggestion for w in ["reduce", "decrease", "less", "lower", "降低", "减少"]):
+        if any(w in suggestion for w in ["reduce", "decrease", "less", "fewer",
+                                         "lower", "降低", "减少", "降频", "减半"]):
             multiplier = 2.0
-        elif any(w in suggestion for w in ["increase", "more", "higher", "提高", "增加"]):
+        elif any(w in suggestion for w in ["increase", "more", "higher",
+                                           "提高", "增加", "加频"]):
             multiplier = 0.5
 
         if multiplier == 1.0:
             continue
 
-        new_interval = int(base_interval * multiplier)
-        # Clamp: don't go below 5min or above 48h
-        new_interval = max(300, min(172800, new_interval))
+        # Compound from the current override (if any) so repeated suggestions
+        # keep adapting, but clamp: don't go below 5min or above 48h
+        current = overrides.get(target) or base_interval
+        new_interval = max(300, min(172800, int(current * multiplier)))
 
-        if target not in state:
-            state[target] = {"last_run": 0}
-        state[target]["effective_interval"] = new_interval
-        changed.append(f"{target}: {base_interval}s → {new_interval}s")
+        if new_interval == current:
+            continue
+        overrides[target] = new_interval
+        changed.append(f"{target}: {current}s → {new_interval}s")
 
     if changed:
-        tmp = state_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        os.replace(tmp, state_file)
+        tmp = overrides_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(overrides, indent=2))
+        os.replace(tmp, overrides_file)
         print(f"[engagement-analyze] Applied frequency changes: {changed}", file=sys.stderr)
 
 
