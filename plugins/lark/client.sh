@@ -139,9 +139,13 @@ lark_remove_reaction() {
 # Does NOT use --compact: card.action.trigger events have no "text" field,
 # so compact mode strips them entirely. Instead, bot.sh extracts content text
 # from the raw JSON wrapper (.event.message.content → parse inner JSON → .text).
+# Read-receipt and reaction events are subscribed for engagement attribution
+# (read = the user saw it; reaction = lightweight engagement) — they were
+# already being pushed to the app and spamming "[SDK Error] ... not found
+# handler" before they had handlers here.
 lark_subscribe_messages() {
   lark-cli event +subscribe \
-    --event-types im.message.receive_v1,card.action.trigger \
+    --event-types im.message.receive_v1,card.action.trigger,im.message.message_read_v1,im.message.reaction.created_v1,im.message.reaction.deleted_v1 \
     --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
 }
 

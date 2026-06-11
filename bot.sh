@@ -965,6 +965,36 @@ lark_subscribe_messages \
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
+      # ── Read receipts & reactions (REQ-15 engagement attribution) ────
+      # read = user saw the message; reaction = lightweight engagement.
+      # Recorded to engagement_log so analysis can tell "read but ignored"
+      # from "never seen" instead of guessing from reply timing.
+      _etype=$(echo "$line" | jq -r '.header.event_type // .event_type // empty' 2>/dev/null)
+      case "$_etype" in
+        im.message.message_read_v1)
+          _read_ids=$(echo "$line" | jq -c '.event.message_id_list // []' 2>/dev/null)
+          jq -cn --arg ts "$(date '+%Y-%m-%d %H:%M')" \
+            --argjson ids "${_read_ids:-[]}" --argjson epoch "$(date +%s)" \
+            '{ts:$ts,type:"read",message_ids:$ids,epoch:$epoch}' \
+            >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
+          continue ;;
+        im.message.reaction.created_v1)
+          # Ignore the bot's own reactions (e.g. the "Typing" indicator)
+          _re_op=$(echo "$line" | jq -r '.event.operator_type // empty' 2>/dev/null)
+          if [ "$_re_op" != "app" ]; then
+            _re_mid=$(echo "$line" | jq -r '.event.message_id // empty' 2>/dev/null)
+            _re_emoji=$(echo "$line" | jq -r '.event.reaction_type.emoji_type // empty' 2>/dev/null)
+            jq -cn --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg mid "$_re_mid" \
+              --arg emoji "$_re_emoji" --argjson epoch "$(date +%s)" \
+              '{ts:$ts,type:"reaction",message_id:$mid,emoji:$emoji,epoch:$epoch}' \
+              >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
+            log_info "[engagement] reaction $_re_emoji on ${_re_mid:0:20}"
+          fi
+          continue ;;
+        im.message.reaction.deleted_v1)
+          continue ;;
+      esac
+
       # ── Card action callback (e.g. watchlater button, feedback) ──────
       # Debug: log raw card action events to diagnose button click issues
       _has_action=$(echo "$line" | jq -r '.action // .event.action // empty' 2>/dev/null)

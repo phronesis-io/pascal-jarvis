@@ -34,6 +34,16 @@ def integration_env(tmp_path):
     # Minimal heartbeat state
     (tmp_path / "heartbeat_state.json").write_text("{}")
 
+    # Stub `claude` binary: these tests verify process lifecycle (imports,
+    # signals, state persistence), not the model. With the real CLI, test
+    # outcomes tracked live API latency — a slow API day (75s for a haiku
+    # call on 2026-06-11) failed the 10s test windows.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text("#!/bin/sh\ncat >/dev/null\necho HEARTBEAT_OK\n")
+    stub.chmod(0o755)
+
     # Env vars
     env = os.environ.copy()
     env["JARVIS_DIR"] = str(tmp_path)
@@ -43,6 +53,7 @@ def integration_env(tmp_path):
     env["HEARTBEAT_MODEL"] = "haiku"
     env["USER_ID"] = ""  # no Lark (headless mode)
     env["PYTHONPATH"] = str(REPO)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
 
     return {"root": tmp_path, "memory": memory, "env": env}
 

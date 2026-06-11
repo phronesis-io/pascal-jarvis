@@ -34,53 +34,63 @@ from core.timeutil import now_local_str
 
 
 def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
-    """Send a Lark interactive card. Returns True on success."""
+    """Send a Lark interactive card, with retries. Returns True on success."""
     if not user_id:
         return False
-    try:
-        tmp = Path(f"/tmp/lark_card_{os.getpid()}.json")
-        tmp.write_text(card_json)
-        r = subprocess.run(
-            ["lark-cli", "im", "+messages-send",
-             "--user-id", user_id, "--msg-type", "interactive",
-             "--content", card_json, "--as", "bot"],
-            capture_output=True, text=True, timeout=15,
-        )
-        tmp.unlink(missing_ok=True)
-        if r.returncode != 0:
-            # Retry once
-            time.sleep(1)
+    for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
             r = subprocess.run(
                 ["lark-cli", "im", "+messages-send",
                  "--user-id", user_id, "--msg-type", "interactive",
                  "--content", card_json, "--as", "bot"],
                 capture_output=True, text=True, timeout=15,
             )
-        return r.returncode == 0
-    except Exception as e:
-        log("heartbeat", f"lark_send_card failed: {e}", level="warn")
-        return False
+            if r.returncode == 0:
+                if attempt:
+                    log("heartbeat", f"Card send succeeded on retry {attempt}")
+                return True
+        except Exception as e:
+            log("heartbeat", f"lark_send_card attempt {attempt} failed: {e}", level="warn")
+    return False
+
+
+# Retry sleeps between send attempts (REQ-11). Transient lark-cli/network
+# hiccups were surfacing as silent message loss the user discovered by hand.
+SEND_RETRY_DELAYS = (2, 5)
 
 
 def _lark_send_text(text: str, user_id: str) -> bool:
-    """Send plain text to Lark."""
+    """Send plain text to Lark, with retries on transient failure."""
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
-    try:
-        r = subprocess.run(
-            ["lark-cli", "im", "+messages-send",
-             "--user-id", user_id, "--markdown", text, "--as", "bot"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
+    for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            r = subprocess.run(
+                ["lark-cli", "im", "+messages-send",
+                 "--user-id", user_id, "--markdown", text, "--as", "bot"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0:
+                if attempt:
+                    log("heartbeat", f"Text send succeeded on retry {attempt}")
+                return True
+        except Exception:
+            pass
+    return False
 
 
-def _route_output(output: str, user_id: str, jarvis_dir: Path):
-    """Route heartbeat output to Lark: cards via card API, text via markdown."""
+def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
+    """Route heartbeat output to Lark: cards via card API, text via markdown.
+
+    Returns True if every part was delivered (used by the delivery ledger).
+    """
     remaining_text_parts = []
+    results = []
 
     for line in output.split("\n"):
         line = line.strip()
@@ -89,17 +99,20 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path):
 
         if line.startswith("CARD:"):
             card_json = line[5:]
-            if not _lark_send_card(card_json, user_id, ""):
+            if _lark_send_card(card_json, user_id, ""):
+                results.append(True)
+            else:
                 # Fallback to text
                 text = extract_card_text(card_json)
                 if text:
-                    _lark_send_text(text, user_id)
+                    results.append(_lark_send_text(text, user_id))
                 else:
                     log("heartbeat", "Card send + text extraction both failed", level="warn")
+                    results.append(False)
 
         elif line.startswith('{"config":'):
             # Legacy card format
-            _lark_send_card(line, user_id, "")
+            results.append(_lark_send_card(line, user_id, ""))
 
         else:
             # Block raw JSON from reaching user
@@ -112,7 +125,121 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path):
             remaining_text_parts.append(line)
 
     if remaining_text_parts:
-        _lark_send_text("\n".join(remaining_text_parts), user_id)
+        results.append(_lark_send_text("\n".join(remaining_text_parts), user_id))
+
+    return all(results) if results else True
+
+
+# ── Delivery ledger + aggregate alert (REQ-11) ──────────────────────
+# Past failures were invisible: the bot generated a reply, the send died, and
+# the user found out by sending "hi" to probe for life. Track consecutive
+# failures and tell the user ONCE, instead of going silent.
+
+DELIVERY_STATE_FILE = ".delivery_state.json"
+DELIVERY_ALERT_THRESHOLD = 3
+DELIVERY_ALERT_COOLDOWN = 2 * 3600
+
+
+def _note_delivery(jarvis_dir: Path, ok: bool, user_id: str = "",
+                   now: float | None = None):
+    """Track consecutive delivery failures; alert the user past the threshold."""
+    now = now if now is not None else time.time()
+    state_path = jarvis_dir / DELIVERY_STATE_FILE
+    try:
+        st = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        st = {}
+
+    if ok:
+        if st.get("consec_fails", 0) >= DELIVERY_ALERT_THRESHOLD:
+            log("heartbeat", f"Delivery recovered after {st['consec_fails']} failures")
+        st["consec_fails"] = 0
+    else:
+        st["consec_fails"] = st.get("consec_fails", 0) + 1
+        log("heartbeat", f"Delivery failure #{st['consec_fails']}", level="warn")
+        if (st["consec_fails"] >= DELIVERY_ALERT_THRESHOLD
+                and now - st.get("last_alert", 0) > DELIVERY_ALERT_COOLDOWN):
+            alert = (f"⚠️ 最近 {st['consec_fails']} 条消息可能没有送达"
+                     "（发送链路在重试后仍失败）。我会继续重试；"
+                     "如果你看到这条说明链路已部分恢复。")
+            if _lark_send_text(alert, user_id):
+                st["last_alert"] = now
+
+    tmp = state_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(st))
+    os.replace(tmp, state_path)
+
+
+# ── Quiet hours queue (REQ-13) ───────────────────────────────────────
+# 0:00–9:00 sends had a ≤6% reply rate vs 70%+ in daytime windows. Non-urgent
+# proactive messages generated at night are queued and delivered as one
+# digest after the window opens. Urgent sources bypass the queue.
+
+QUIET_START_MIN = 23 * 60 + 30   # 23:30
+QUIET_END_MIN = 9 * 60 + 30      # 09:30
+URGENT_SOURCES = {"intention-check", "calendar-sync", "checkin"}
+NIGHT_QUEUE_FILE = "night_queue.jsonl"
+NIGHT_QUEUE_MAX = 20
+
+
+def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
+    if minutes_of_day is None:
+        t = time.localtime()
+        minutes_of_day = t.tm_hour * 60 + t.tm_min
+    return minutes_of_day >= QUIET_START_MIN or minutes_of_day < QUIET_END_MIN
+
+
+def _peek_source(jarvis_dir: Path) -> str:
+    """Read the source sidecar WITHOUT consuming it (that's _record_engagement's job)."""
+    try:
+        return (jarvis_dir / ".heartbeat_last_source").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _is_urgent(source_str: str) -> bool:
+    """True if any of the (comma-separated) sources is an urgent one."""
+    return bool(URGENT_SOURCES & {s.strip() for s in source_str.split(",") if s.strip()})
+
+
+def _queue_for_morning(output: str, jarvis_dir: Path):
+    readable = extract_readable_from_output(output) or output
+    source = _peek_source(jarvis_dir)
+    (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
+    entry = {"ts": now_local_str("%Y-%m-%d %H:%M"),
+             "text": readable, "source": source or "heartbeat"}
+    with open(jarvis_dir / NIGHT_QUEUE_FILE, "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    log("heartbeat", f"Queued for morning (quiet hours, source={source or 'heartbeat'})")
+
+
+def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
+    """Send queued night messages as one digest. Returns True if flushed."""
+    queue_path = jarvis_dir / NIGHT_QUEUE_FILE
+    if not queue_path.exists():
+        return False
+    entries = []
+    for line in queue_path.read_text().splitlines()[-NIGHT_QUEUE_MAX:]:
+        try:
+            entries.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    if not entries:
+        queue_path.unlink(missing_ok=True)
+        return False
+
+    parts = [f"🌙 **夜间积累的 {len(entries)} 条消息**"]
+    for e in entries:
+        parts.append(f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{e.get('text', '')}")
+    digest = "\n".join(parts)
+
+    if _lark_send_text(digest, user_id):
+        queue_path.unlink(missing_ok=True)
+        _write_outbox(digest, jarvis_dir)
+        log("heartbeat", f"Flushed night queue ({len(entries)} entries)")
+        return True
+    log("heartbeat", "Night queue flush failed — will retry next cycle", level="warn")
+    return False
 
 
 DEDUP_WINDOW_SECONDS = 6 * 3600
@@ -246,13 +373,20 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             log("heartbeat", f"Cycle exception: {e}", level="error")
             output = ""
 
+        # Morning flush: deliver anything queued during quiet hours
+        if not _in_quiet_hours():
+            _flush_night_queue(jd, user_id)
+
         if output and not looks_like_error(output):
             if _is_duplicate_send(output, jd):
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
                 (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+            elif _in_quiet_hours() and not _is_urgent(_peek_source(jd)):
+                _queue_for_morning(output, jd)
             else:
-                _route_output(output, user_id, jd)
+                delivered = _route_output(output, user_id, jd)
+                _note_delivery(jd, delivered, user_id)
                 _write_outbox(output, jd)
                 _record_engagement(jd)
                 print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
