@@ -70,6 +70,13 @@ if [ "$_stream_count" -eq 1 ]; then
   _stream_pid=$(echo "$_stream_pids" | head -1)
   _stream_uptime=$(ps -p "$_stream_pid" -o etime= 2>/dev/null | tr -d ' ')
   echo "✓ Stream running (PID $_stream_pid, uptime $_stream_uptime)"
+  # Process alive ≠ connected: on 2026-06-11 the stream retried 'Connect
+  # failed: EOF' for an extended outage while this check showed green.
+  _recent_fails=$(tail -50 "$JARVIS_DIR/jarvis.log" 2>/dev/null | grep -c 'Connect failed' || true)
+  _recent_ok=$(tail -50 "$JARVIS_DIR/jarvis.log" 2>/dev/null | grep -c 'Connected\. Streaming' || true)
+  if [ "${_recent_fails:-0}" -ge 3 ] && [ "${_recent_ok:-0}" -eq 0 ]; then
+    echo "⚠️ Stream process alive but CONNECTION FAILING (${_recent_fails} recent retries, 0 successes) — EigenFlux messages are NOT flowing (likely server-side outage)"
+  fi
 elif [ "$_stream_count" -eq 0 ]; then
   echo "⚠️ Stream NOT running — real-time messages will not be received"
 else
