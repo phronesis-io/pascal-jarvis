@@ -61,7 +61,12 @@ LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
 
 # ── Log rotation (on startup) ────────────────────────────────────────
+# Archive 3 generations before truncating — destroyed history made
+# failure-rate audits impossible.
 if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+  mv -f "$LOG_FILE.2" "$LOG_FILE.3" 2>/dev/null || true
+  mv -f "$LOG_FILE.1" "$LOG_FILE.2" 2>/dev/null || true
+  cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
   tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
 fi
 
@@ -913,13 +918,18 @@ heartbeat_watchdog() {
     _ticks=$((_ticks + 1))
     if [ $((_ticks % 120)) -eq 0 ]; then
       if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+        # Archive before truncating: tail-only rotation made WARN-rate audits
+        # impossible (history was simply destroyed). Keep 3 generations.
+        mv -f "$LOG_FILE.2" "$LOG_FILE.3" 2>/dev/null || true
+        mv -f "$LOG_FILE.1" "$LOG_FILE.2" 2>/dev/null || true
+        cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
         # copytruncate, not tail+mv: the python children hold O_APPEND fds
         # from `2>>` redirects — a rename would silently divert their logs
         # to the replaced inode until the next restart.
         tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" \
           && cat "$LOG_FILE.tmp" > "$LOG_FILE" \
           && rm -f "$LOG_FILE.tmp"
-        log_info "[watchdog] Rotated jarvis.log (exceeded ${LOG_MAX_BYTES} bytes)"
+        log_info "[watchdog] Rotated jarvis.log (archived to jarvis.log.1)"
       fi
       find "$JARVIS_DIR/tmp" -type f -mtime +7 -delete 2>/dev/null || true
     fi

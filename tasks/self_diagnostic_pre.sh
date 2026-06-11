@@ -76,7 +76,14 @@ else
   echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
 fi
 
-# 7. CLI versions
+# 7. Channel watermarks (REQ-12) — flags starved tasks / open circuits /
+#    delivery failures so dead channels are caught here, not by the user.
+echo ""
+(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" python3 -m core.watermarks 2>/dev/null) \
+  || echo "--- Channel Watermarks ---
+  ⚠️ watermark check itself failed to run"
+
+# 8. CLI versions
 echo ""
 echo "--- CLI Versions ---"
 _claude_ver=$(claude --version 2>/dev/null || echo "not installed")

@@ -231,9 +231,20 @@ def diagnose_and_fix(issues: list[str]) -> str:
     log("INFO", f"Attempting fix for: {issues}")
 
     # Kill existing bot processes (including eigenflux streams which may be
-    # reparented to init/gateway and survive bot.sh cleanup)
+    # reparented to init/gateway and survive bot.sh cleanup).
+    # Patterns are anchored to JARVIS_DIR where possible so we never kill
+    # unrelated processes on the same machine (a hand-run lark-cli listener,
+    # another project's admin.py, ...). lark-cli/eigenflux can't be path-
+    # anchored (invoked by bare name) — those stay broad but are specific
+    # subcommands unlikely to exist outside this bot.
     log("INFO", "Killing existing processes...")
-    for pattern in ["lark-cli event", "bash.*bot\\.sh", "admin\\.py", "eigenflux stream"]:
+    _jd = str(JARVIS_DIR).replace(".", "\\.")
+    for pattern in ["lark-cli event",
+                    f"bash.*{_jd}/bot\\.sh",
+                    # path-anchored, interpreter-agnostic (shows up as
+                    # ".../Python .../admin.py" under homebrew python)
+                    f"{_jd}/admin\\.py",
+                    "eigenflux stream"]:
         try:
             subprocess.run(["pkill", "-f", pattern],
                            capture_output=True, timeout=5)

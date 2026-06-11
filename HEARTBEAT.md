@@ -818,12 +818,15 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     If the only content is a routine skill-text sync with no review flags, one line is enough.
 
 ### self-diagnostic
-- interval: 12h
+- interval: 4h
 - pre: tasks/self_diagnostic_pre.sh
 - prompt: |
     [SELF DIAGNOSTIC]
     Review the system health data below. Flag ONLY genuine issues that need attention:
     - Stale data (calendar not synced, profile outdated > 7 days)
+    - STARVED channels / open circuits / delivery failures in the
+      "Channel Watermarks" section — these mean the user has silently
+      stopped receiving a category of messages; always report them
     - Failed pulls
     - Missing files that should exist
     If everything looks healthy, reply HEARTBEAT_OK.

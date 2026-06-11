@@ -10,6 +10,7 @@ interval_overrides.json
 night_queue.jsonl
 .delivery_state.json
 jarvis.log
+jarvis.log.[0-9]
 .memory_cache
 .bot.pid
 .daemon.pid
