@@ -647,7 +647,26 @@ for d in descs[offset:]:
            [ -n "$_d" ] && echo "• $_d"
          done)
          if [ -n "$_formatted" ]; then
-           lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1 || true
+           # REQ-18 (user-designed 5/29): narrate progress with a fast cheap
+           # model instead of dumping raw tool names — "它搜了什么网站、有没有
+           # 真的去看，还是在幻觉，对用户是非常重要的信息". Throttled to ≥60s
+           # between narrations; raw list is the fallback on any failure.
+           _now_s=$(date +%s)
+           if [ $((_now_s - ${_last_narrate:-0})) -ge 60 ]; then
+             _narration=$(with_timeout 12 claude -p \
+               "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
+$_formatted" \
+               --model haiku --no-session-persistence --disable-slash-commands \
+               --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
+             _last_narrate=$_now_s
+           else
+             _narration=""
+           fi
+           if [ -n "$_narration" ] && [ "${#_narration}" -lt 200 ]; then
+             lark_reply_text "$message_id" "🔧 $_narration" >/dev/null 2>&1 || true
+           else
+             lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1 || true
+           fi
          fi
          _last_tool_count="$_new_count"
        fi
