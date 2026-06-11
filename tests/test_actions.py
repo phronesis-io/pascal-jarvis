@@ -89,12 +89,59 @@ def test_multiple_actions(tmp_path):
 
 
 def test_intent_create(tmp_path):
-    """Intent create should not crash even without the DB (graceful error)."""
+    """Intent create should not crash even without the DB (graceful error).
+
+    create_intent writes to the real intentions DB (dashboard.db is path-fixed),
+    so this test self-cleans the row it creates — otherwise every run leaves a
+    junk 'test' intent in live data.
+    """
+    import re as _re
+    from core import intentions as _mod
     ap = _make_processor(tmp_path)
     reply = "[ACTION:intent_create|name=test|when=2026-01-01T09:00:00|type=date|prompt=hello]"
     result = ap.process(reply)
     # Should produce either success or graceful error, not crash
     assert "Intent" in result or "❌" in result
+    m = _re.search(r"id:\s*(int_\w+)", result)
+    if m:
+        _mod.delete_intent(m.group(1))
+
+
+def test_auto_category():
+    from core.actions import _auto_category
+    assert _auto_category("health,rehab", "每日康复", "") == "healing"
+    assert _auto_category("reading", "读 x402", "") == "healing"
+    assert _auto_category("", "tushare token 到期", "续费") == "hard"
+    assert _auto_category("social", "约学妹 review", "") == "external"
+    assert _auto_category("", "每日日报", "夜工成果") == "autonomous"
+    assert _auto_category("calendar-prep", "Prep: 周会", "") == "context"
+    assert _auto_category("", "随便", "") == "none"
+
+
+def test_intent_close_multiword_result(tmp_path):
+    """The `do` CLI joins argv with '|'; _do_intent_close must reconstruct a
+    multi-word result instead of truncating at the first space. Verifies the
+    write path against the real intentions DB (record_closure round-trip)."""
+    import sys
+    from core import intentions as mod
+    from core.intentions import create_intent, get_intent, mark_triggered, mark_executed
+    ap = _make_processor(tmp_path)
+
+    pid = create_intent(name="约学妹", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="约上了吗？")
+    mark_triggered(pid); mark_executed(pid)   # spawns awaiting follow-up
+
+    # Simulate the `do` CLI path: argv joined with '|'
+    raw = "|".join([f"id={pid}", "outcome=done", "result=招到", "候选人", "下周面"])
+    out = ap._do_intent_close(raw)
+    assert out == "Closure recorded"
+    p = get_intent(pid)
+    assert p["closure_status"] == "done"
+    assert p["closure_result"] == "招到 候选人 下周面"   # full multi-word, not truncated
+    # cleanup so we don't leave residue in the shared real DB
+    mod.delete_intent(pid)
+    mod.delete_intent(f"{pid}__fu")
 
 
 def test_unknown_actions_preserved_for_bash(tmp_path):

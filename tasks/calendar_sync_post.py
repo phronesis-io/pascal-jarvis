@@ -33,21 +33,47 @@ RAW_CACHE = MEMORY_DIR / "system" / ".calendar_raw_output.txt"
 
 
 def extract_events(text: str) -> set[str]:
-    """Extract a set of event identifiers (date + time + title keywords).
+    """Extract stable event identifiers as date|time|title.
 
-    Used to detect structural changes (new/removed events) vs cosmetic changes
-    (rewording, time-until countdown, etc.)
+    Normalises both the detailed (Day 0-6) and compact (Upcoming) sections to
+    the same MM/DD|HH:MM|title key so that an event moving between sections as
+    the rolling window advances does NOT produce a false cancel+add pair.
     """
     events = set()
-    # Match lines with times: "HH:MM something" or "**HH:MM** something"
-    for m in re.finditer(r"(\d{1,2}:\d{2})\s+(.+?)(?:\n|$)", text):
-        time = m.group(1)
-        title = re.sub(r"[（(].*?[）)]", "", m.group(2)).strip()[:30]
-        events.add(f"{time}|{title}")
-    # Also match "周X" day headers with events
-    for m in re.finditer(r"(周[一二三四五六日])\s*.*?(\d{1,2}:\d{2})", text):
-        events.add(f"{m.group(1)}|{m.group(2)}")
+    current_date_mmdd = ""  # "06/13" extracted from the section header
+
+    for line in text.split("\n"):
+        # Section headers: "Day 3 (2026-06-13 Saturday):" or "Today (2026-06-10 Wednesday):"
+        date_m = re.search(r"\((\d{4})-(\d{2})-(\d{2})", line)
+        if date_m:
+            current_date_mmdd = f"{date_m.group(2)}/{date_m.group(3)}"
+            continue
+
+        # Compact upcoming line: "  06/13 Sat  14:00-15:00  Title ..."
+        compact_m = re.match(r"\s+(\d{2}/\d{2})\s+\S+\s+(\d{1,2}:\d{2})-\d{1,2}:\d{2}\s+(.+)", line)
+        if compact_m:
+            mm_dd = compact_m.group(1)
+            time = compact_m.group(2)
+            title = _normalise_title(compact_m.group(3))
+            events.add(f"{mm_dd}|{time}|{title}")
+            continue
+
+        # Detailed event line under a known date header: "  14:00-15:00  Title ..."
+        if current_date_mmdd:
+            detail_m = re.match(r"\s+(\d{1,2}:\d{2})-\d{1,2}:\d{2}\s+(.+)", line)
+            if detail_m:
+                time = detail_m.group(1)
+                title = _normalise_title(detail_m.group(2))
+                events.add(f"{current_date_mmdd}|{time}|{title}")
+
     return events
+
+
+def _normalise_title(raw: str) -> str:
+    """Strip location (@…) and parenthetical description, truncate to 30 chars."""
+    t = re.sub(r"\s*@.+", "", raw)          # drop "@ 华山路…"
+    t = re.sub(r"\s*[（(].*", "", t)         # drop "(description…"
+    return t.strip()[:30]
 
 
 def detect_changes(old_events: set[str], new_events: set[str]) -> tuple[set, set]:
@@ -96,7 +122,16 @@ def main() -> int:
     old_events: set[str] = set()
     if EVENTS_FILE.exists():
         try:
-            old_events = set(json.loads(EVENTS_FILE.read_text()))
+            stored = json.loads(EVENTS_FILE.read_text())
+            loaded = set(stored)
+            # Migration guard: old format was "time|title" (2 parts).
+            # New format is "MM/DD|time|title" (3 parts).
+            # If old file uses the 2-part format, discard it to avoid a false
+            # flood of "removed" + "added" on the first run after this fix.
+            if loaded and any(e.count("|") < 2 for e in loaded):
+                print("[calendar-sync] Old event format detected, resetting baseline", file=sys.stderr)
+                loaded = set()
+            old_events = loaded
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -123,8 +158,15 @@ def main() -> int:
         return 0
 
     # Build a short natural-language notification (NOT the full schedule)
-    added_names = [e.split("|", 1)[1] if "|" in e else e for e in list(added)[:3]]
-    removed_names = [e.split("|", 1)[1] if "|" in e else e for e in list(removed)[:3]]
+    def _event_label(e: str) -> str:
+        """'06/13|14:00|复动肌骨 康复课' → '14:00 复动肌骨 康复课'"""
+        parts = e.split("|")
+        if len(parts) >= 3:
+            return f"{parts[1]} {parts[2]}"
+        return parts[-1]
+
+    added_names = [_event_label(e) for e in list(added)[:3]]
+    removed_names = [_event_label(e) for e in list(removed)[:3]]
     # Filter out empty names
     added_names = [n for n in added_names if n.strip()]
     removed_names = [n for n in removed_names if n.strip()]

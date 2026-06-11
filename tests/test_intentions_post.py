@@ -53,6 +53,31 @@ def test_apply_action_keeps_real_message(monkeypatch):
     assert msgs == ["14:00 开会，记得带电脑"]
 
 
+def test_apply_action_records_closure_and_does_not_card(monkeypatch):
+    """A follow-up with a closure sub-object records onto the parent and never
+    surfaces a card — even with action=notify (recording is internal)."""
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    calls = []
+    monkeypatch.setattr(ip, "record_closure",
+                        lambda parent, outcome="done", result="": calls.append((parent, outcome, result)))
+    msgs = []
+    ip._apply_action("int_fu", response="约了周四下午", action="notify",
+                     user_messages=msgs,
+                     closure={"parent": "int_parent", "outcome": "done", "result": "约了周四下午"})
+    assert calls == [("int_parent", "done", "约了周四下午")]
+    assert msgs == []   # closure row never cards
+
+
+def test_apply_action_no_closure_still_cards(monkeypatch):
+    """A follow-up still ASKING (no closure field) cards its question normally."""
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "record_closure", lambda *a, **k: None)
+    msgs = []
+    ip._apply_action("int_fu", response="你之前说今天约学妹，约上了吗？",
+                     action="notify", user_messages=msgs)
+    assert msgs == ["你之前说今天约学妹，约上了吗？"]
+
+
 def test_malformed_intents_envelope_not_emitted(monkeypatch, capsys):
     """The 09:00 leak: {"intents": {"id": , ...}} is invalid JSON and must
     not be carded as raw text."""

@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.intentions import mark_executed, mark_failed, list_intents
+from core.intentions import mark_executed, mark_failed, list_intents, record_closure
 from core.card import build_card
 from core.safety import parse_json_response
 
@@ -65,13 +65,29 @@ def _resolve_single_triggered_id() -> str:
 
 
 def _apply_action(intent_id: str, response: str, action: str,
-                  user_messages: list) -> None:
-    """Mark the intent and optionally surface a user message."""
+                  user_messages: list, closure: dict | None = None) -> None:
+    """Mark the intent and optionally surface a user message.
+
+    If a `closure` sub-object is present, this row is a FOLLOW-UP recording a
+    result onto its parent — record_closure does the write and the row NEVER
+    cards (recording is internal; healing/autonomous follow-ups are silent by
+    construction, and even an external follow-up that records must not also
+    nag). A follow-up that is still *asking* (no answer yet) carries no closure
+    field, so its response cards normally.
+    """
     if action == "failed":
         mark_failed(intent_id, error=response)
         return
     # notify | silent | chain | (anything else) → executed
     mark_executed(intent_id, result=response)
+    if closure and isinstance(closure, dict) and closure.get("parent"):
+        try:
+            record_closure(str(closure["parent"]).strip(),
+                           outcome=closure.get("outcome", "done"),
+                           result=closure.get("result", ""))
+        except Exception as e:
+            print(f"[intentions_post] closure record failed: {e}", file=sys.stderr)
+        return  # closure rows never card
     if action != "silent" and response and not _is_contentless(response):
         user_messages.append(response)
 
@@ -114,6 +130,7 @@ def main():
                     response=result.get("response", ""),
                     action=result.get("action", "notify"),
                     user_messages=user_messages,
+                    closure=result.get("closure"),
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing {intent_id}: {e}",
@@ -129,6 +146,7 @@ def main():
                     response=data.get("response", ""),
                     action=data.get("action", "notify"),
                     user_messages=user_messages,
+                    closure=data.get("closure"),
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing single intent: {e}",

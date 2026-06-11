@@ -48,7 +48,8 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:praxis_done|id=<praxis_id>] — Record praxis done.
 - [ACTION:praxis_add|title=<title>|freq=<daily|weekly>|time=<HH:MM>|dur=<min>] — Add praxis.
 - [ACTION:praxis_remove|id=<praxis_id>] — Remove praxis.
-- [ACTION:intent_create|name=<name>|when=<ISO8601_or_cron>|type=<date|cron|interval>|prompt=<text>|purpose=<why>|tags=<csv>|priority=<1-10>|action=<notify|prompt>] — Create intent.
+- [ACTION:intent_create|name=<name>|when=<ISO8601_or_cron>|type=<date|cron|interval>|prompt=<text>|purpose=<why>|tags=<csv>|priority=<1-10>|action=<notify|prompt>|category=<hard|context|healing|external|autonomous>|input=<触发时给的上下文/材料>|decision=<要做的判断 是否/A还是B>|close=<一句话二元闭环问题>] — Create intent. 每条 intent 应带 category + close（一句话「做了吗」闭环问题）；category=context（会议/prep）可省 close；category=healing/autonomous 永远只记录不催。省略 category 时按 tag/内容自动归类。
+- [ACTION:intent_close|id=<intent_id>|outcome=<done|recorded|na>|result=<一句话结果>] — 记录某条 awaiting intent 的闭环结果（result 放最后，可含空格）。
 - [ACTION:intent_cancel|id=<intent_id>|reason=<why>] — Cancel intent.
 - [ACTION:intent_list] — List active intents.
 
@@ -86,9 +87,12 @@ For intent / calendar / task actions you intend to confirm, prefer the synchrono
 CLIs over markers — run with Bash from JARVIS_DIR and read the printed result:
   - `python3 -m core.actions do <type> key=val ...`  → runs ONE action, prints result
        (e.g. `... do intent_cancel id=int_xxx reason=junk`,
+              `... do intent_close id=int_xxx outcome=done result=约了周四下午`,
               `... do calendar_create title=X start=<ISO> end=<ISO>`)
-  - `python3 -m core.intentions list [status] | due | get <id> | cancel <id> [reason]`
-    `| delete <id> | stats | reset-stale | purge <executed|expired|cancelled>`
+  - `python3 -m core.intentions list [status] | due | awaiting | get <id> | cancel <id> [reason]`
+    `| close <id> [done|recorded|na] [result...] | delete <id> | stats | reset-stale | purge <...>`
+When Pascal tells you he did (or didn't) something an intent was tracking, close the loop:
+`do intent_close id=<parent> outcome=done result=<他说的一句>` — capture the result, never nag.
 Only after the command confirms success do you report it as done.
 """
 

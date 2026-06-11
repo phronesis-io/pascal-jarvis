@@ -205,3 +205,194 @@ def test_get_due_date_naive_target_fires(intent_db):
     due_ids = {d["id"] for d in get_due_intents()}
     assert past in due_ids
     assert future not in due_ids
+
+
+# ===========================================================================
+# Closure model (Intent 系统重做) — Input/Decision/Output + closure lifecycle.
+# ===========================================================================
+
+def test_migrate_adds_columns_idempotent(intent_db):
+    """_ensure_table() runs _migrate(); calling it again is a no-op, columns
+    present either way. (CREATE TABLE IF NOT EXISTS would NOT add them.)"""
+    import core.intentions as mod
+    mod._ensure_table()  # second call — must not raise
+    conn = mod._get_db()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(intentions)").fetchall()}
+    conn.close()
+    for c in ("category", "input_ctx", "decision", "closure_question",
+              "closure_status", "closure_result", "closure_touches",
+              "closure_followup_id", "parent_intent_id"):
+        assert c in cols, f"missing closure column {c}"
+
+
+def test_stats_keeps_five_keys(intent_db):
+    """closure_status is orthogonal — intent_stats stays the canonical 5 keys."""
+    from core.intentions import intent_stats
+    assert set(intent_stats()) == {"pending", "triggered", "executed", "expired", "cancelled"}
+
+
+def test_create_validates_action_type_and_category(intent_db):
+    """The dirty-data class (action_type='cron') is rejected at the source."""
+    from core.intentions import create_intent
+    with pytest.raises(ValueError):
+        create_intent(name="x", trigger_type="date", trigger_config={}, action_type="cron")
+    with pytest.raises(ValueError):
+        create_intent(name="x", trigger_type="date", trigger_config={}, category="bogus")
+
+
+def test_snap_to_golden():
+    from core.intentions import snap_to_golden
+    from datetime import datetime
+    assert snap_to_golden(datetime(2026, 6, 10, 14, 0)).hour == 14          # in window → unchanged
+    assert snap_to_golden(datetime(2026, 6, 10, 9, 30)).hour == 11          # early → same-day 11
+    d = snap_to_golden(datetime(2026, 6, 10, 22, 0))                        # dead zone → next day 11
+    assert d.hour == 11 and d.day == 11
+    d2 = snap_to_golden(datetime(2026, 6, 10, 5, 0))                        # 05:00 → same-day 11
+    assert d2.hour == 11 and d2.day == 10
+
+
+def _fire(iid):
+    """Run an intent through trigger → executed."""
+    from core.intentions import mark_triggered, mark_executed
+    mark_triggered(iid)
+    mark_executed(iid, result="fired")
+
+
+def test_external_closure_spawns_notify_followup(intent_db):
+    """One-shot external moment → on execute spawns an awaiting follow-up that
+    cards (may_notify), linked both ways, deterministic id."""
+    from core.intentions import create_intent, get_intent
+    pid = create_intent(name="约学妹", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="约上了吗？")
+    _fire(pid)
+    parent = get_intent(pid)
+    assert parent["closure_status"] == "awaiting"
+    fu_id = parent["closure_followup_id"]
+    assert fu_id == f"{pid}__fu"
+    fu = get_intent(fu_id)
+    assert fu is not None
+    assert fu["action_type"] == "notify"          # external may_notify
+    assert fu["parent_intent_id"] == pid
+    assert fu["closure_question"] == "约上了吗？"
+
+
+def test_healing_closure_followup_is_silent(intent_db):
+    """Healing follow-up must be silent (prompt) — never a card."""
+    from core.intentions import create_intent, get_intent
+    pid = create_intent(name="读 x402", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-10T20:00:00"},
+                        category="healing", closure_question="选中率多少？")
+    _fire(pid)
+    fu = get_intent(get_intent(pid)["closure_followup_id"])
+    assert fu["action_type"] == "prompt"          # healing never cards
+
+
+def test_cron_moment_does_not_spawn_followup(intent_db):
+    """Recurring intents must NOT proliferate follow-ups per fire (nag-mountain)."""
+    from core.intentions import create_intent, get_intent, mark_triggered, mark_executed
+    pid = create_intent(name="每日康复", trigger_type="cron",
+                        trigger_config={"expression": "0 21 * * *"},
+                        category="healing", closure_question="找到感觉了吗？")
+    for _ in range(3):
+        mark_triggered(pid)
+        mark_executed(pid)
+    p = get_intent(pid)
+    assert p["closure_status"] == "none"
+    assert p["closure_followup_id"] is None
+
+
+def test_followup_not_respawned_on_reexec(intent_db):
+    """Guard: a parent already 'awaiting' does not spawn a second follow-up."""
+    from core.intentions import create_intent, get_intent, list_intents
+    pid = create_intent(name="m", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="?")
+    _fire(pid)
+    _fire(pid)  # second execute — guard (closure_status='awaiting') must skip
+    followups = [i for i in list_intents(status="pending", limit=500)
+                 if i.get("parent_intent_id") == pid]
+    assert len(followups) == 1
+
+
+def test_record_closure_writes_and_cancels_followup(intent_db):
+    from core.intentions import create_intent, get_intent, record_closure
+    pid = create_intent(name="约学妹", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="约上了吗？")
+    _fire(pid)
+    fu_id = get_intent(pid)["closure_followup_id"]
+    assert record_closure(pid, outcome="done", result="约了周四下午") is True
+    parent = get_intent(pid)
+    assert parent["closure_status"] == "done"
+    assert parent["closure_result"] == "约了周四下午"
+    assert get_intent(fu_id)["status"] == "cancelled"   # no double-ask
+
+
+def test_record_closure_idempotent_and_noop(intent_db):
+    from core.intentions import create_intent, record_closure
+    # no follow-up (closure_status='none') — still records, no crash on NULL fu
+    pid = create_intent(name="plain", trigger_type="date", trigger_config={})
+    assert record_closure(pid, outcome="done", result="x") is True
+    # second call → already terminal → no-op False
+    assert record_closure(pid, outcome="recorded", result="y") is False
+    # unknown id → no-op False
+    assert record_closure("int_nope") is False
+
+
+def test_record_closure_whitelists_outcome(intent_db):
+    from core.intentions import create_intent, get_intent, record_closure
+    pid = create_intent(name="p", trigger_type="date", trigger_config={})
+    record_closure(pid, outcome="DROP TABLE", result="z")  # polluted → coerced to 'done'
+    assert get_intent(pid)["closure_status"] == "done"
+
+
+def test_get_closure_due_excludes_healing_includes_external(intent_db):
+    """Healing never re-surfaced; external re-surfaced once its follow-up drained."""
+    from core.intentions import create_intent, get_intent, get_closure_due, mark_triggered, mark_executed
+    ext = create_intent(name="ext", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="?")
+    heal = create_intent(name="heal", trigger_type="date",
+                         trigger_config={"datetime": "2026-06-11T10:00:00"},
+                         category="healing", closure_question="?")
+    _fire(ext); _fire(heal)
+    # follow-ups still pending → not yet due
+    assert get_closure_due() == []
+    # drain the external follow-up (it fired, no answer) → now re-askable
+    fu = get_intent(ext)["closure_followup_id"]
+    mark_triggered(fu); mark_executed(fu)
+    due_ids = {d["id"] for d in get_closure_due()}
+    assert ext in due_ids
+    assert heal not in due_ids                      # healing structurally excluded
+
+
+def test_snapshot_awaiting_excludes_healing(intent_db, tmp_path):
+    """The 待闭环 wall shows external; healing/autonomous never appear (no visible
+    'you didn't do it' ledger). Old '不追做没做' wording is gone."""
+    from core.intentions import create_intent, snapshot_active_intents
+    ext = create_intent(name="约学妹", trigger_type="date",
+                       trigger_config={"datetime": "2026-06-11T10:00:00"},
+                       category="external", closure_question="约上了吗？")
+    heal = create_intent(name="读 x402", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-10T20:00:00"},
+                        category="healing", closure_question="选中率多少？")
+    _fire(ext); _fire(heal)
+    snapshot_active_intents(tmp_path)
+    text = (tmp_path / "hot" / "active_intents.md").read_text()
+    assert "待闭环" in text
+    assert "约上了吗？" in text          # external surfaced
+    assert "选中率多少？" not in text     # healing never on the wall
+    assert "不追「做没做」" not in text   # old wording replaced
+
+
+def test_cancel_awaiting_parent_sets_na_and_cancels_followup(intent_db):
+    from core.intentions import create_intent, get_intent, cancel_intent
+    pid = create_intent(name="p", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-11T10:00:00"},
+                        category="external", closure_question="?")
+    _fire(pid)
+    fu_id = get_intent(pid)["closure_followup_id"]
+    cancel_intent(pid, "no longer relevant")
+    assert get_intent(pid)["closure_status"] == "na"
+    assert get_intent(fu_id)["status"] == "cancelled"

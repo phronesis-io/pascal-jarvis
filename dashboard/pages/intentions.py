@@ -123,6 +123,12 @@ def intentions_page():
                             if intent.get("prompt"):
                                 prompt_preview = intent["prompt"][:120] + ("..." if len(intent["prompt"]) > 120 else "")
                                 ui.label(prompt_preview).classes("text-xs text-gray-400 mt-1")
+                            # ⚠无闭环 drift: a chasing-category row with no closure
+                            # question. healing/autonomous/context/none excluded —
+                            # the dashboard never flags health/learning as "missing".
+                            if (not (intent.get("closure_question") or "").strip()
+                                    and intent.get("category") in ("hard", "external")):
+                                ui.badge("⚠ 无闭环", color="orange").classes("text-xs mt-1")
                             if tags:
                                 with ui.row().classes("gap-1 mt-1"):
                                     for tag in tags[:3]:
@@ -141,6 +147,30 @@ def intentions_page():
             ui.label("No pending intents. The agent will create them from calendar events and conversations.").classes(
                 "text-gray-400 text-sm italic"
             )
+
+        # 🔄 待闭环 — moments that fired and await a result. Exclude healing/
+        # autonomous: the dashboard never scores health/learning follow-through.
+        awaiting = mod.awaiting_closures()
+        ui.separator()
+        ui.label("🔄 待闭环 (awaiting result · 不催)").classes("text-lg font-semibold mt-2")
+        if awaiting:
+            for intent in awaiting:
+                with ui.card().classes("intent-card w-full").style("border-left:3px solid #f59e0b"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        with ui.column().classes("gap-0 flex-1"):
+                            ui.label(intent["name"]).classes("font-medium text-sm")
+                            ui.label(intent.get("closure_question") or intent.get("purpose", "")).classes(
+                                "text-xs text-amber-600")
+                        ui.badge(intent.get("category", "?"), color="amber").props("outline").classes("text-xs")
+
+                        async def close_click(iid=intent["id"]):
+                            mod.record_closure(iid, outcome="done", result="closed from dashboard")
+                            ui.notify("Closure recorded", type="positive")
+                            ui.navigate.reload()
+
+                        ui.button("✓ done", on_click=close_click).props("flat dense size=xs color=green")
+        else:
+            ui.label("No open loops awaiting a result.").classes("text-gray-400 text-sm italic")
 
         # Recently executed
         ui.separator()

@@ -28,6 +28,40 @@ def parse_params(raw: str) -> dict[str, str]:
     return params
 
 
+def _auto_category(tags_csv: str = "", name: str = "", prompt: str = "") -> str:
+    """Heuristic intent category when the author omits it. Maps to the 5-category
+    taxonomy in behavioral_rules.md §5.
+
+    name+tags are the AUTHOR-INTENT signal (matched strongly); the prompt is only
+    consulted for unambiguous deadline words (greedy single chars like 读/听 in a
+    prompt produce false positives — a work follow-up that merely *mentions*
+    reading is not a learning intent). Order matters: hard/autonomous/external are
+    decided before healing so a work/follow-up row is never silently swallowed into
+    the never-nag bucket. Truly ambiguous → 'none' (no follow-up, behaves as today,
+    bounds blast radius). Migration re-uses this and shows a --dry-run diff to review.
+    """
+    strong = f"{tags_csv} {name}".lower()   # tags + name = what the author meant
+    def s(*ks):
+        return any(k in strong for k in ks)
+
+    # hard from name/tags only — a prompt that merely *mentions* 到期/续费 (e.g. a
+    # daily report told to "watch for expirations") is not itself a hard constraint.
+    if s("票", "续费", "关煤气", "gas", "deadline", "到期", "renew", "expire", "expiry"):
+        return "hard"
+    if s("日报", "夜工", "夜间", "深工", "report", "复盘", "小时报", "自主", "autonomous"):
+        return "autonomous"
+    if s("external", "follow-up", "followup", "social", "meet", "饭", "约",
+         "面试", "跟进", "对外", "bluedoor", "adapter", "婚礼"):
+        return "external"
+    if s("health", "rehab", "healing", "reading", "learning", "康复", "疗愈",
+         "哲学", "学习", "臀", "拉伸", "阅读", "读", "听", "冥想", "戒断",
+         "训练", "anchor", "课", "讲"):
+        return "healing"
+    if s("calendar-prep", "prep"):
+        return "context"
+    return "none"
+
+
 def _run_cmd(cmd: list[str], timeout: int = 15, log_file: str = "") -> str:
     """Run a shell command, return stdout. Errors → 'FAILED'."""
     try:
@@ -310,18 +344,53 @@ class ActionProcessor:
         elif trigger_type == "interval":
             trigger_config = {"seconds": int(when) if when.isdigit() else 600}
 
+        # category drives closure intensity. Auto-classify when the author omits
+        # it (healing wins ambiguous health/learning ties; ambiguous → none =
+        # no follow-up, behaves as today, bounds blast radius).
+        category = (p.get("category", "").strip()
+                    or _auto_category(p.get("tags", ""), name, p.get("prompt", "")))
+
         try:
             from core.intentions import create_intent
             iid = create_intent(
                 name=name, trigger_type=trigger_type, trigger_config=trigger_config,
                 prompt=p.get("prompt", name), purpose=p.get("purpose", ""),
                 tags=[t.strip() for t in p.get("tags", "").split(",") if t.strip()],
-                priority=int(p.get("priority", "5")),
+                priority=int(p.get("priority", "5")) if p.get("priority", "5").isdigit() else 5,
                 source="agent", action_type=p.get("action", "notify"),
+                category=category, input_ctx=p.get("input", ""),
+                decision=p.get("decision", ""), closure_question=p.get("close", ""),
             )
-            return f'✅ Intent "{name}" created (id: {iid})'
+            return f'✅ Intent "{name}" created (id: {iid}, cat: {category})'
         except Exception as e:
             return f"❌ Intent 创建失败: {e}"
+
+    def _do_intent_close(self, raw: str) -> str:
+        """Record a closure result on an awaiting intent. Both a marker and the
+        synchronous `do intent_close` CLI verb (§7 verify-the-write-path).
+
+        result= may contain spaces. The `do` CLI joins argv with '|' before the
+        handler sees it, so we rebuild result from its segment to the end and map
+        '|'→' '. result MUST be the last key. (Marker path: result is a single
+        spaces-preserving segment, so the same logic is a no-op there.)
+        """
+        p = parse_params(raw)
+        iid = str(p.get("id", "")).strip()
+        if not iid:
+            return ""
+        outcome = p.get("outcome", "done").strip()
+        result = ""
+        segs = raw.split("|")
+        for i, seg in enumerate(segs):
+            if seg.strip().startswith("result="):
+                result = "|".join(segs[i:]).split("=", 1)[1].replace("|", " ").strip()
+                break
+        try:
+            from core.intentions import record_closure
+            ok = record_closure(iid, outcome=outcome, result=result)
+            return "Closure recorded" if ok else "Intent not found or already closed"
+        except Exception:
+            return "FAILED"
 
     def _do_intent_cancel(self, raw: str) -> str:
         p = parse_params(raw)

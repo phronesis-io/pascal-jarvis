@@ -67,6 +67,12 @@ for intent in due:
         "action_config": json.loads(intent["action_config"]) if isinstance(intent["action_config"], str) else intent["action_config"],
         "tags": tags,
         "source": intent["source"],
+        # ── closure model — INPUT/DECISION must reach Claude, else 3 件套缺 2 ──
+        "category": intent.get("category", "none"),
+        "input_ctx": intent.get("input_ctx", ""),
+        "decision": intent.get("decision", ""),
+        "closure_question": intent.get("closure_question", ""),
+        "parent_intent_id": intent.get("parent_intent_id"),
     })
 
 print(json.dumps(output, ensure_ascii=False))
