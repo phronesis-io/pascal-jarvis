@@ -182,16 +182,32 @@ def _note_delivery(jarvis_dir: Path, ok: bool, user_id: str = "",
     os.replace(tmp, state_path)
 
 
-# ── Quiet hours queue (REQ-13) ───────────────────────────────────────
-# 0:00–9:00 sends had a ≤6% reply rate vs 70%+ in daytime windows. Non-urgent
-# proactive messages generated at night are queued and delivered as one
-# digest after the window opens. Urgent sources bypass the queue.
+# ── Quiet hours + daytime batching queue (REQ-13) ───────────────────
+# Empirics (docs/research/engagement_hourly_baseline.md): 0-9h replies ≤6-9%,
+# 9h still ~6%, golden windows 10-11/14/18/21h at 70%+. Literature (Fitz 2019
+# RCT): ~3 notification batches/day beats both hourly and full suppression;
+# defer-to-breakpoint beats wall-clock delivery (Iqbal & Bailey CHI'08,
+# Fischer MobileHCI'11). Mechanism:
+# - quiet hours (23:30-10:00): every non-urgent message queues
+# - daytime: general-interest sources (feed/recommendations) queue too,
+#   flushed as one digest at the batch windows; task-relevant sources
+#   (checkin, intents, calendar, team monitor) still send immediately
+# - breakpoint release: if the user messaged within the last 5 minutes
+#   (they're at the phone — a natural breakpoint), flush early
 
 QUIET_START_MIN = 23 * 60 + 30   # 23:30
-QUIET_END_MIN = 9 * 60 + 30      # 09:30
+QUIET_END_MIN = 10 * 60          # 10:00 (was 09:30; 9h replies were still ~6%)
 URGENT_SOURCES = {"intention-check", "calendar-sync", "checkin"}
+# General-interest content per Iqbal & Bailey: tolerates coarse batching with
+# the least frustration cost. These are also the highest-volume noise sources.
+GENERAL_INTEREST_SOURCES = {"eigenflux-feed-triage", "content-recommend",
+                            "personal-site"}
+BATCH_WINDOWS_MIN = (10 * 60, 13 * 60 + 30, 17 * 60 + 30)  # 10:00/13:30/17:30
+BREAKPOINT_RECENCY_SECONDS = 300
+LAST_MSG_MARKER = "/tmp/jarvis-last-msg"  # touched by bot.sh on every inbound msg
 NIGHT_QUEUE_FILE = "night_queue.jsonl"
 NIGHT_QUEUE_MAX = 20
+BATCH_FLUSH_STAMP = ".batch_last_flush"
 
 
 def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
@@ -216,6 +232,67 @@ def _peek_source(jarvis_dir: Path) -> str:
 def _is_urgent(source_str: str) -> bool:
     """True if any of the (comma-separated) sources is an urgent one."""
     return bool(URGENT_SOURCES & {s.strip() for s in source_str.split(",") if s.strip()})
+
+
+def _sources_of(source_str: str) -> set:
+    return {s.strip() for s in source_str.split(",") if s.strip()}
+
+
+def _should_queue(jarvis_dir: Path, minutes_of_day: int | None = None) -> bool:
+    """Decide whether the current output goes to the batch queue.
+
+    Quiet hours: everything non-urgent queues. Daytime: only when ALL sources
+    are general-interest (mixed task-relevant content sends immediately).
+    """
+    sources = _sources_of(_peek_source(jarvis_dir))
+    if _in_quiet_hours(minutes_of_day):
+        return not bool(sources & URGENT_SOURCES)
+    return bool(sources) and sources <= GENERAL_INTEREST_SOURCES
+
+
+def _user_recently_active(now: float | None = None) -> bool:
+    """True if the user sent a message within the breakpoint window —
+    they're at the phone, so a delivery now interrupts nothing."""
+    now = now if now is not None else time.time()
+    try:
+        return now - os.path.getmtime(LAST_MSG_MARKER) < BREAKPOINT_RECENCY_SECONDS
+    except OSError:
+        return False
+
+
+def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
+                  now: float | None = None) -> bool:
+    """Flush the batch queue when a batch window has opened since the last
+    flush, or on a user-activity breakpoint. Never during quiet hours."""
+    queue_path = jarvis_dir / NIGHT_QUEUE_FILE
+    if not queue_path.exists():
+        return False
+    if _in_quiet_hours(minutes_of_day):
+        return False
+    if _user_recently_active(now):
+        return True
+    if minutes_of_day is None:
+        from core.timeutil import now_local
+        t = now_local()
+        minutes_of_day = t.hour * 60 + t.minute
+    now = now if now is not None else time.time()
+    try:
+        last_flush = float((jarvis_dir / BATCH_FLUSH_STAMP).read_text().strip())
+    except (OSError, ValueError):
+        last_flush = 0.0
+    # Minutes since midnight of the last flush, same-day comparison: if the
+    # last flush was >24h ago any window counts.
+    passed_windows = [w for w in BATCH_WINDOWS_MIN if minutes_of_day >= w]
+    if not passed_windows:
+        return False
+    latest_window = max(passed_windows)
+    seconds_since_window = (minutes_of_day - latest_window) * 60
+    return now - last_flush > seconds_since_window + 60
+
+
+def _stamp_flush(jarvis_dir: Path, now: float | None = None):
+    now = now if now is not None else time.time()
+    (jarvis_dir / BATCH_FLUSH_STAMP).write_text(str(now))
 
 
 NIGHT_ENTRY_MAX_CHARS = 600     # per queued message, keeps the digest sendable
@@ -261,7 +338,7 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
         queue_path.unlink(missing_ok=True)
         return False
 
-    parts = [f"🌙 **夜间积累的 {len(entries)} 条消息**"]
+    parts = [f"📦 **攒批的 {len(entries)} 条消息**"]
     used = len(parts[0])
     dropped = 0
     for e in entries:
@@ -278,6 +355,7 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
 
     if _lark_send_text(digest, user_id):
         queue_path.unlink(missing_ok=True)
+        _stamp_flush(jarvis_dir)
         _write_outbox(digest, jarvis_dir)
         # Engagement accounting: queued sends bypassed _record_engagement, so
         # without this the morning digest is invisible to engagement-analyze.
@@ -431,8 +509,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             log("heartbeat", f"Cycle exception: {e}", level="error")
             output = ""
 
-        # Morning flush: deliver anything queued during quiet hours
-        if not _in_quiet_hours():
+        # Batch flush: a window opened, or the user is at the phone
+        if _should_flush(jd):
             _flush_night_queue(jd, user_id)
 
         if output and not looks_like_error(output, proactive=True):
@@ -440,7 +518,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
                 (jd / ".heartbeat_last_source").unlink(missing_ok=True)
-            elif _in_quiet_hours() and not _is_urgent(_peek_source(jd)):
+            elif _should_queue(jd):
                 _queue_for_morning(output, jd)
             else:
                 delivered = _route_output(output, user_id, jd)

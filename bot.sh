@@ -816,12 +816,33 @@ Current time: $now_ts
 
 $memory"
 
-  # Run Claude with independent session
-  (cd "$WORK_DIR" && with_timeout 3600 claude -p "$content" \
-    --session-id "$bg_session_id" \
-    --append-system-prompt "$sys_prompt" \
-    --dangerously-skip-permissions \
-    < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+  # Inherit conversation context (REQ-16 MVP-1): fork from the conversation's
+  # active session if it has a transcript — the job sees the full dialog
+  # history without polluting the main session, and reuses the prompt cache.
+  # Falls back to a fresh session for conversations with no history.
+  local _main_sid=""
+  _main_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
+import json, os
+try:
+    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
+  if [ -n "$_main_sid" ] && [ -f "$CLAUDE_PROJECT_DIR/${_main_sid}.jsonl" ]; then
+    log_info "[bg:$job_id] Forking from session $_main_sid"
+    (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
+      --resume "$_main_sid" --fork-session \
+      --append-system-prompt "$sys_prompt" \
+      --dangerously-skip-permissions \
+      < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+  else
+    (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
+      --session-id "$bg_session_id" \
+      --append-system-prompt "$sys_prompt" \
+      --dangerously-skip-permissions \
+      < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+  fi
   local _bg_pid=$!
 
   # Record PID in registry
@@ -861,6 +882,16 @@ print(j['status'] if j else 'unknown')
     2>>"$LOG_FILE" || log_warn "[bg:$job_id] Failed to update job status"
 
   log_info "[bg:$job_id] Finished with status=$status (${#output} chars)"
+
+  # Queue the result for context merge (REQ-16): the conversation's next
+  # message gets this summary prepended, so the dialog "knows" what the job
+  # found instead of the result living only in a notification card.
+  if [ "$status" = "completed" ]; then
+    jq -cn --arg key "$conv_key" --arg job "$job_id" \
+      --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg summary "${output:0:1500}" \
+      '{conv_key:$key,job_id:$job,ts:$ts,summary:$summary}' \
+      >> "$JOBS_DIR/pending_merge.jsonl" 2>>"$LOG_FILE" || true
+  fi
 
   # Notify user via card
   local card_body card_json
@@ -1485,6 +1516,42 @@ if old_sid:
       while [ "$(find "$JARVIS_DIR" -maxdepth 1 -name '.session_lock_*' 2>/dev/null | wc -l)" -ge "$MAX_HANDLERS" ]; do
         sleep 1
       done
+
+      # ── Merge completed background-job results into this conversation
+      # (REQ-16): prepend summaries so the dialog knows what jobs found,
+      # instead of the result living only in a notification card.
+      _pm_file="$JOBS_DIR/pending_merge.jsonl"
+      if [ -f "$_pm_file" ]; then
+        _pm_text=$(JV_PM="$_pm_file" JV_KEY="$conv_key" python3 -c "
+import json, os
+path, key = os.environ['JV_PM'], os.environ['JV_KEY']
+keep, mine = [], []
+try:
+    for line in open(path):
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        (mine if e.get('conv_key') == key else keep).append(e)
+except OSError:
+    raise SystemExit
+if mine:
+    # Small append-vs-rewrite race window with a job finishing right now is
+    # acceptable: a lost merge degrades to card-only delivery.
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        for e in keep:
+            f.write(json.dumps(e, ensure_ascii=False) + '\n')
+    os.replace(tmp, path)
+    for e in mine:
+        print(f\"[后台任务 {e.get('job_id','')} 已完成 @ {e.get('ts','')}]\n{e.get('summary','')}\n\")
+" 2>>"$LOG_FILE")
+        if [ -n "$_pm_text" ]; then
+          content="${_pm_text}
+${content}"
+          log_info "Merged pending bg-job result(s) into conversation"
+        fi
+      fi
 
       # Dispatch to background — main loop continues immediately
       handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" &

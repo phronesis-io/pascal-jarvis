@@ -10,6 +10,7 @@ interval_overrides.json
 interval_overrides_meta.json
 night_queue.jsonl
 .delivery_state.json
+.batch_last_flush
 jarvis.log
 jarvis.log.[0-9]
 .memory_cache

@@ -27,8 +27,8 @@ from core.heartbeat_loop import (
 def test_quiet_hours_boundaries():
     assert _in_quiet_hours(23 * 60 + 30)      # 23:30 — starts
     assert _in_quiet_hours(0)                 # midnight
-    assert _in_quiet_hours(9 * 60 + 29)       # 09:29 — still quiet
-    assert not _in_quiet_hours(9 * 60 + 30)   # 09:30 — opens
+    assert _in_quiet_hours(9 * 60 + 59)       # 09:59 — still quiet (9h replies ~6%)
+    assert not _in_quiet_hours(10 * 60)       # 10:00 — opens (golden window)
     assert not _in_quiet_hours(13 * 60)       # 13:00 — golden window
     assert not _in_quiet_hours(23 * 60 + 29)  # 23:29 — still open
 
@@ -158,3 +158,54 @@ def test_flush_dedups_and_records_engagement(tmp_path, monkeypatch):
     entries = [json.loads(l) for l in elog.splitlines()]
     assert any(e["type"] == "sent" and e["source"] == "content-recommend"
                and e.get("via") == "night-digest" for e in entries)
+
+
+# ── Daytime batching + breakpoint release (R3 research round) ────────
+
+
+def test_should_queue_general_interest_in_daytime(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("eigenflux-feed-triage")
+    assert hbl._should_queue(tmp_path, minutes_of_day=14 * 60)  # 14:00 daytime
+
+
+def test_should_not_queue_task_relevant_in_daytime(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("phronesis-monitor")
+    assert not hbl._should_queue(tmp_path, minutes_of_day=14 * 60)
+    # mixed batch containing task-relevant content sends immediately
+    (tmp_path / ".heartbeat_last_source").write_text("eigenflux-feed-triage, phronesis-monitor")
+    assert not hbl._should_queue(tmp_path, minutes_of_day=14 * 60)
+
+
+def test_should_queue_everything_nonurgent_at_night(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("phronesis-monitor")
+    assert hbl._should_queue(tmp_path, minutes_of_day=2 * 60)  # 02:00
+    (tmp_path / ".heartbeat_last_source").write_text("intention-check")
+    assert not hbl._should_queue(tmp_path, minutes_of_day=2 * 60)  # urgent bypasses
+
+
+def test_should_flush_at_window_and_not_before(tmp_path, monkeypatch):
+    monkeypatch.setattr(hbl, "_user_recently_active", lambda now=None: False)
+    (tmp_path / hbl.NIGHT_QUEUE_FILE).write_text('{"text":"x"}\n')
+    now = time.time()
+    # last flush long ago; 13:29 is before the 13:30 window (and past 10:00,
+    # but a 10:00 flush already happened — stamp it 30min ago)
+    hbl._stamp_flush(tmp_path, now=now - 1800)
+    assert not hbl._should_flush(tmp_path, minutes_of_day=13 * 60 + 29, now=now)
+    # 13:31 — the 13:30 window opened after the last flush
+    assert hbl._should_flush(tmp_path, minutes_of_day=13 * 60 + 31, now=now)
+    # but not twice: flush stamped just now → no re-flush at 13:35
+    hbl._stamp_flush(tmp_path, now=now)
+    assert not hbl._should_flush(tmp_path, minutes_of_day=13 * 60 + 35, now=now + 240)
+
+
+def test_breakpoint_release_flushes_outside_quiet_hours(tmp_path, monkeypatch):
+    (tmp_path / hbl.NIGHT_QUEUE_FILE).write_text('{"text":"x"}\n')
+    monkeypatch.setattr(hbl, "_user_recently_active", lambda now=None: True)
+    assert hbl._should_flush(tmp_path, minutes_of_day=15 * 60)
+    # never during quiet hours, even if the user is active
+    assert not hbl._should_flush(tmp_path, minutes_of_day=2 * 60)
+
+
+def test_no_flush_with_empty_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(hbl, "_user_recently_active", lambda now=None: True)
+    assert not hbl._should_flush(tmp_path, minutes_of_day=15 * 60)

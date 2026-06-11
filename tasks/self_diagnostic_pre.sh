@@ -83,6 +83,16 @@ else
   echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
 fi
 
+# 7a. Card callback support watch: lark-cli 1.0.44 can't consume
+#     card.action.trigger (larksuite/cli#1051) — callback buttons are disabled
+#     across the product. Flag loudly the moment an upgrade adds support so
+#     they can be re-enabled (PRD REQ-17).
+if lark-cli event list 2>/dev/null | grep -qi 'card'; then
+  echo ""
+  echo "🎉 lark-cli now lists card events — card callback buttons can be re-enabled!"
+  echo "   (re-add the 收藏 button in tasks/content_recommend_post.py, add card.action.trigger consumption; see PRD REQ-17)"
+fi
+
 # 7. Channel watermarks (REQ-12) — flags starved tasks / open circuits /
 #    delivery failures so dead channels are caught here, not by the user.
 echo ""

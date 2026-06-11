@@ -121,12 +121,12 @@
 - **需求**：每条推送通道（feed/checkin/推荐/好友请求/phronesis）维护 `last_success_ts` 水位；超过 2× 期望周期未成功 → self-diagnostic 任务自动诊断并上报一条聚合告警。
 - **验收**：kill eigenflux stream 进程，≤1 个心跳周期内用户收到断流告警。
 
-### REQ-13 夜间静默 + 黄金窗排队 ✅ 已上线（2026-06-11，夜队+晨间 digest；黄金窗分时段放行为后续细化）
+### REQ-13 夜间静默 + 黄金窗排队 ✅ 已上线并完成黄金窗细化（2026-06-11 二轮：静默至 10:00、白天批量窗 10:00/13:30/17:30、断点放行；依据 docs/research/interruption_engineering.md）
 - **数据**：0-9 点回复率 ≤6%，黄金窗 70%+；eigenflux 已有 quiet-hours gate（commit 3967f94），但 heartbeat 主链路没有。
 - **需求**：非紧急（无 deadline 属性）的主动消息在 23:30-09:30 进入队列，按优先级在黄金窗（10:00/13:00/17:00）批量放行，与既有 night-batched morning digest 合流；紧急消息（日历冲突、闭环到点）直发。
 - **验收**：深夜产生的推荐/feed 类消息次日上午合并送达。
 
-### REQ-14 eigenflux-feed-triage 摘要化限流
+### REQ-14 eigenflux-feed-triage 摘要化限流 🟡 部分上线（2026-06-11：900 字硬上限 + 白天 feed 进批量窗合并放行；逐条→digest 的完整形态待定）
 - **数据**：占总发送量 23%（66 条/周），卡片最长 1276 字符，回复以 late_reply 为主；对照 phronesis-monitor（短、决策点明确、中位 293s 即回）。
 - **需求**：逐条推送改为每日 2-3 个合并 digest；单条卡片硬上限 ~500 字符 + "展开全文"链接（依赖 REQ-17 卡片重构）；保留"高分信号即时直推"白名单通道。
 - **验收**：feed 类周发送量降至 ≤25 条且回复率不降。
@@ -136,12 +136,12 @@
 - **需求**：①注册 `im.message.message_read_v1` / reaction handler（同时消除 SDK Error 刷屏）；②回复归因优先用 Lark parent_id/reply 关系，其次时间窗就近；③已读未回 = 真 ignored，未读 = 未触达，分开统计。
 - **验收**：engagement_log 含 read/replied/untouched 三态；calendar-sync 不再出现响应数>发送数。
 
-### REQ-16 长任务异步化（任务卡片）
+### REQ-16 长任务异步化（任务卡片）🟡 MVP-1 已上线（2026-06-11：bg job --fork-session 继承会话上下文 + pending_merge 结果归并 + 超时对齐 6000s；MVP-2 自动提升见 docs/research/req16_async_design.md）
 - **数据**：4/23 最严厉投诉"3 小时阻塞完全没法接受"；exit 143 watchdog 中断反复出现。
 - **需求**：①预计 >2 分钟的工作自动转后台 job（jobs/ 目录已有雏形），会话立即释放；②发一张任务卡（进行中/完成/失败 + 耗时）；③完成后结果卡 + 中间过程摘要（REQ-18）。
 - **验收**：跑一个 10 分钟任务期间，用户消息照常秒级响应。
 
-### REQ-17 卡片体系重构
+### REQ-17 卡片体系重构 🟡 根因已实锤+止血（2026-06-11：lark-cli 不支持 card.action.trigger（larksuite/cli#1051），回传按钮全端从未工作过；已停发收藏按钮、self-diagnostic 盯升级；完整清单 docs/research/card_callback_root_cause.md）
 - **数据**：按钮"在手机上从来没有成功过"（5/27）、内容截断（5/16、6/3）、JSON 直出（5/6）。
 - **需求**：①所有按钮回调端到端测试纳入 CI（含移动端真机 checklist）；②长内容自动转"摘要卡 + 跳转 admin 页面全文"（用户 5/17 已主动提出"卡片即应用"方案，admin 面板已在 3456 端口）；③卡片渲染前 schema 校验，原始 JSON 一律拦截（部分已有，补 CARD: 路径）。
 - **验收**：移动端按钮成功率 100%；不再出现 "..." 截断投诉。
