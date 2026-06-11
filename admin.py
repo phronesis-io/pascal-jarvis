@@ -901,10 +901,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return True
         provided = self.headers.get("X-Admin-Token") or ""
         if not provided:
-            # Also accept ?token=... for convenience in browsers
+            # Also accept ?token=... for convenience in browsers. Note query
+            # tokens leak into access logs/history — header is preferred.
             parsed = urlparse(self.path)
             provided = parse_qs(parsed.query).get("token", [""])[0]
-        return provided == ADMIN_TOKEN
+        # Constant-time compare: == leaks match length via timing
+        import hmac
+        return hmac.compare_digest(provided, ADMIN_TOKEN)
 
     def do_GET(self):
         parsed = urlparse(self.path)

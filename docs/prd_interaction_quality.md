@@ -156,7 +156,7 @@
 - **需求**：①"阅读类"意图不再走定时 intent，进 watchlater 队列由 free-time-nudge 消化，过期静默回收；②闭环卡送达失败自动改道（依赖 REQ-11）；③同文意图重建时提示"上次建过且过期了，要改成 watchlater 吗"。
 - **验收**：月度 expired 占比 <15%。
 
-### REQ-20 记忆体系修缮
+### REQ-20 记忆体系修缮 🟢 核心两项已上线（2026-06-11：①memory-tidy 单向同步扩展到根目录 feedback_*.md，heartbeat 侧悬空 wikilink 变为可解析；②heartbeat MEMORY.md 索引缺口已补。残留：矛盾规则 supersede 机制、digest 内容级去重——由 memory-tidy 的 LLM 步骤按其现有 prompt 渐进处理）
 - **数据**：24+ 根目录 feedback 文件对 heartbeat 侧是悬空 wikilink；MEMORY.md 漏索引；diet_tracking 与 checkin 规则明文矛盾；digest 同事件重复 5 遍。
 - **需求**：①memory-tidy 同步范围扩到根目录 feedback_*.md；②索引一致性检查进 memory-tidy（文件↔索引双向 diff）；③矛盾规则显式 supersede 机制（保留一方，另一方标记废弃原因）；④digest 内容级去重（同事件保最新）。
 - **验收**：heartbeat 会话内随机抽 10 个 wikilink 全部可解析。
@@ -173,7 +173,7 @@
 - **REQ-26 日志归档化** ✅ 已上线（2026-06-11，jarvis.log.1..3 滚动归档）：`tail -500` 截断使失败率审计物理不可能；改为 `jarvis.log.1..3` 滚动归档，WARN 统计可回溯（REQ-08 的 copytruncate 是临时解）。
 - **REQ-27 bot.sh 逻辑继续下沉 core/**：1407 行 bash 零测试，本次 6 项高危 bug 中 3 项在 bash 层；目标：消息解析、卡片回调、会话管理全部 Python 化 + bats 覆盖剩余 bash。
 - **REQ-28 daemon pkill 收窄** ✅ 已上线（2026-06-11，daemon+restart.sh 全部路径锚定）：按 PID 文件 + cwd 匹配，不再误杀同机其他 lark-cli/eigenflux 进程。
-- **REQ-29 admin 面板安全加固**：token 改 hmac.compare_digest、禁 query-string token；梳理与 session_dashboard.py 的 3456 端口冲突。
+- **REQ-29 admin 面板安全加固** 🟢 已上线（2026-06-11：token 比较改 hmac.compare_digest；query token 保留但注明日志泄漏风险（当前 bind 127.0.0.1 且未配 token）。端口冲突实况：admin.py 占 3456，CLAUDE.md 提到的 session_dashboard.py 未在运行——文档侧口径待 Pascal 改 CLAUDE.md 或迁端口）。
 
 ---
 

@@ -60,6 +60,34 @@ def _sync_warm_auto_to_heartbeat():
         print(f"[memory-tidy] synced auto→heartbeat warm/: {', '.join(synced)}", file=sys.stderr)
 
 
+def _sync_root_feedback_auto_to_heartbeat():
+    """One-way sync: auto-memory root feedback_*.md → heartbeat root.
+
+    Heartbeat-side memories wikilink 24+ feedback files that only exist in
+    auto-memory's ROOT (the old sync covered warm/ only) — on the heartbeat
+    side those behavioral-rule references were dangling pointers. Root files
+    are not auto-loaded by load_tiered_memory (deliberate: 24 rule files
+    would bloat every prompt); the sync makes the wikilinks RESOLVABLE via
+    on-demand Read when a heartbeat session follows one. Newer-wins, same as
+    warm/.
+    """
+    if not AUTO_MEMORY.exists() or not HEARTBEAT_MEMORY.exists():
+        return
+    synced = []
+    for src in AUTO_MEMORY.glob("feedback_*.md"):
+        dst = HEARTBEAT_MEMORY / src.name
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            continue
+        content = src.read_text(encoding="utf-8")
+        if dst.exists() and dst.read_text(encoding="utf-8") == content:
+            continue
+        dst.write_text(content, encoding="utf-8")
+        synced.append(src.name)
+    if synced:
+        print(f"[memory-tidy] synced auto→heartbeat root feedback: {', '.join(synced)}",
+              file=sys.stderr)
+
+
 def _sync_open_threads_auto_to_heartbeat():
     """One-way sync: auto-memory open_threads.md → heartbeat system/open_threads.md.
 
@@ -105,6 +133,12 @@ def main() -> int:
         _sync_open_threads_auto_to_heartbeat()
     except Exception as e:
         print(f"[memory-tidy] open_threads sync failed: {e}", file=sys.stderr)
+
+    # One-way sync: auto → heartbeat for root feedback_*.md (wikilink targets)
+    try:
+        _sync_root_feedback_auto_to_heartbeat()
+    except Exception as e:
+        print(f"[memory-tidy] root feedback sync failed: {e}", file=sys.stderr)
 
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
