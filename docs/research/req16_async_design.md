@@ -16,8 +16,8 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | MVP-1 | `--resume --fork-session` 继承上下文 + pending_merge 归并 + 超时 3600→6000 | ✅ 2026-06-11 已实现上线 |
-| MVP-2 | watchdog 120s 自动提升 + 释放锁 + 后续消息 fork（**消掉原始痛点的关键刀**） | 待做（动主消息路径，需专门 session 实现+真机验证） |
-| MVP-3 | 进度卡 PATCH + sweeper 对账 | 待做 |
+| MVP-2 | watchdog 120s 自动提升 + 释放锁 + 会话强制轮转（**消掉原始痛点的关键刀**） | ✅ 2026-06-11 已实现上线。实现取舍：后续消息走 fresh session（force_rotate，uuid5 counter+1）而非 fork——`--fork-session` 无法 pin 新 session id，会破坏 tracker 连续性；fresh session 由 memory + compact + pending_merge 提供连续性。轮转失败则保锁不放（宁可阻塞不可写坏 transcript）。 |
+| MVP-3 | sweeper 对账（每 60s，dead PID → lost + 告警卡，5min grace） | ✅ 2026-06-11 已实现上线。进度卡原地 PATCH 未做（现有 🔧 工具流 20s 一条已覆盖大半价值，PATCH 需捕获 message_id，残留到 REQ-18 一起做）。 |
 
 衔接点：bot.sh:537（锁）、:610（watchdog/提升点）、:798（run_background_job）、core/jobs.py（progress/card_message_id/sweep）、core/heartbeat_loop.py（sweeper）。
 

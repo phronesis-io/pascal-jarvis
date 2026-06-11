@@ -110,6 +110,26 @@ class SessionManager:
     def get_counter(self, conv_key: str) -> int:
         return self._read().get(conv_key, {}).get("counter", 0)
 
+    def force_rotate(self, conv_key: str) -> str:
+        """Rotate the conversation to a fresh session id immediately.
+
+        Used by background-job auto-promotion (REQ-16 MVP-2): the promoted
+        Claude process keeps writing the old transcript, so new messages must
+        not resume it. Returns the new session id.
+        """
+        with _locked(self.tracker_path):
+            try:
+                tracker = json.loads(self.tracker_path.read_text() or "{}") \
+                    if self.tracker_path.exists() else {}
+            except json.JSONDecodeError:
+                tracker = {}
+            entry = tracker.get(conv_key, {})
+            counter = entry.get("counter", 0) + 1
+            sid = str(uuid.uuid5(NAMESPACE, f"{conv_key}-{counter}"))
+            tracker[conv_key] = {"session_id": sid, "counter": counter}
+            _atomic_write_json(self.tracker_path, tracker)
+        return sid
+
 
 def _utc_to_local(ts_raw: str) -> str:
     """Convert a UTC ISO timestamp (e.g. '2026-04-23T03:10:33.939Z') to local time.

@@ -651,6 +651,37 @@ for d in descs[offset:]:
          fi
          _last_tool_count="$_new_count"
        fi
+       # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
+       # background job. Release the conversation instead of blocking it —
+       # "一跑跑3个小时我就用不了这个机器人" was the single harshest complaint
+       # in the interaction audit. The conversation rotates to a fresh session
+       # so new messages never resume the transcript this Claude still writes;
+       # the result comes back via the normal reply + pending_merge.
+       if [ "$_elapsed" -ge 120 ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
+         _bg_job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
+           JV_DESC="auto-promoted: ${content:0:120}" JV_MSG_ID="$message_id" \
+           python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE")
+         if [ -n "$_bg_job_id" ]; then
+           JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" set-pid "$_bg_job_id" "$_claude_pid" \
+             2>>"$LOG_FILE" || true
+           printf '%s' "$_bg_job_id" > "${ANSWER_FILE}.promoted"
+           if JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" JV_SDIR="$CLAUDE_PROJECT_DIR" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.session import SessionManager
+sm = SessionManager(os.environ['JV_TRACKER'], os.environ['JV_SDIR'])
+sm.force_rotate(os.environ['JV_KEY'])
+" 2>>"$LOG_FILE"; then
+             rm -f "$LOCK_FILE"
+             lark_reply_text "$message_id" "⏳ 这个任务跑得比较久，已自动转后台（job \`$_bg_job_id\`）。会话已释放，可以继续找我聊别的；做完我会把结果发回来。发 jobs 可查进度，发 cancel $_bg_job_id 可取消。" >/dev/null 2>&1 || true
+             log_info "[$session_id] Promoted to background job $_bg_job_id after ${_elapsed}s — lock released"
+           else
+             # Rotation failed: keep the lock (conversation stays busy) so a
+             # follow-up message can't resume the transcript mid-write.
+             rm -f "${ANSWER_FILE}.promoted"
+             log_warn "[$session_id] Promotion rotate failed — keeping lock, job $_bg_job_id orphaned to sweeper"
+           fi
+         fi
+       fi
      done
      # Watchdog timeout. Drop a marker so the parent can tell a genuine 6000s
      # timeout apart from a SIGTERM that came from a restart / external kill —
@@ -693,6 +724,12 @@ except Exception:
 
     if [ -z "$answer" ]; then
       log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
+      # Promoted to background: never retry — the conversation has moved on
+      # (rotated session), so a silent re-run would race the new session's
+      # traffic and double-bill a task the user already saw go background.
+      if [ -f "${ANSWER_FILE}.promoted" ]; then
+        break
+      fi
       # exit 143 = SIGTERM: either the 6000s watchdog (task ran long) or a
       # restart/external kill. Either way, retrying in-loop is pointless (the
       # process is already gone), so stop now. The user-facing message below
@@ -707,12 +744,33 @@ except Exception:
     fi
   done
 
-  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "$LOCK_FILE"
+  local _promoted_job=""
+  [ -f "${ANSWER_FILE}.promoted" ] && _promoted_job=$(cat "${ANSWER_FILE}.promoted" 2>/dev/null)
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "${ANSWER_FILE}.promoted" "$LOCK_FILE"
 
   # Filter error-like answers — never send them to the user as the "real" reply
   local reply=""
   if [ -n "$answer" ] && ! looks_like_error "$answer"; then
     reply="$answer"
+  fi
+
+  # Promoted-job bookkeeping (REQ-16 MVP-2): close the registry entry and, on
+  # success, queue the result for merge into the conversation's NEW session
+  # (it rotated away at promotion time and hasn't seen this answer).
+  if [ -n "$_promoted_job" ]; then
+    if [ -n "$reply" ]; then
+      JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$_promoted_job" completed \
+        2>>"$LOG_FILE" || true
+      jq -cn --arg key "$conv_key" --arg job "$_promoted_job" \
+        --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg summary "${reply:0:1500}" \
+        '{conv_key:$key,job_id:$job,ts:$ts,summary:$summary}' \
+        >> "$JOBS_DIR/pending_merge.jsonl" 2>>"$LOG_FILE" || true
+      log_info "[$session_id] Promoted job $_promoted_job completed (${#reply} chars)"
+    else
+      JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$_promoted_job" failed \
+        2>>"$LOG_FILE" || true
+      log_warn "[$session_id] Promoted job $_promoted_job finished empty/error"
+    fi
   fi
 
   if [ -z "$reply" ]; then
@@ -723,7 +781,12 @@ except Exception:
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      if [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ]; then
+      if [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ] && [ -n "$_promoted_job" ]; then
+        # Promoted job hit the 6000s ceiling. 「继续」 would land in the NEW
+        # (rotated) session and not resume this work — say so honestly.
+        lark_reply_text "$message_id" \
+          "后台任务 \`$_promoted_job\` 运行超过看门狗上限（100 分钟）被中断。它的中间产出已存在原 session 里；要接着做的话告诉我任务内容，我重新起一个。" >/dev/null
+      elif [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ]; then
         # Genuine 6000s watchdog timeout: the task really ran long. Resuming
         # with 「继续」 is the right recovery.
         lark_reply_text "$message_id" \

@@ -482,7 +482,23 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
 
     log("heartbeat", f"Starting ({check_interval}s cycle)")
 
+    ticks = 0
     while True:
+        ticks += 1
+        # Background-job sweeper (REQ-16 MVP-3, ~every 60s): a job whose
+        # handler died (crash/restart) would otherwise stay "running" forever
+        # and the user waits on a result that will never come.
+        if ticks % max(1, 60 // max(1, check_interval)) == 0:
+            try:
+                from core.jobs import JobManager
+                lost = JobManager(jd / "jobs").sweep_lost()
+                for job_id in lost:
+                    log("heartbeat", f"Swept lost background job {job_id}", level="warn")
+                    _lark_send_text(
+                        f"⚠️ 后台任务 `{job_id}` 异常终止（进程已不在，可能因重启/崩溃）。"
+                        f"需要的话告诉我任务内容，我重新跑一个。", user_id)
+            except Exception as e:
+                log("heartbeat", f"Job sweep error: {e}", level="warn")
         # Check restart trigger
         restart_trigger = jd / ".restart_trigger"
         if restart_trigger.exists():

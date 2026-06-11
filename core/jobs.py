@@ -171,6 +171,46 @@ class JobManager:
             return {"job_id": job_id, **job}
         return None
 
+    def sweep_lost(self, grace_seconds: int = 300) -> list[str]:
+        """Reconcile the registry with reality (REQ-16 MVP-3).
+
+        A job marked running whose PID is dead did not go through the normal
+        finish path (handler crashed, restart killed it). Mark it lost and
+        return the ids so the caller can notify the user — otherwise the job
+        silently never completes and the user waits forever. Jobs younger
+        than grace_seconds are skipped (the PID may not be registered yet).
+        """
+        lost = []
+        now = time.time()
+        with _locked(self.registry_path):
+            registry = self._read_registry()
+            for job_id, job in registry.items():
+                if job.get("status") != "running":
+                    continue
+                try:
+                    started = time.mktime(time.strptime(
+                        job.get("started_at", ""), "%Y-%m-%d %H:%M:%S"))
+                except (ValueError, OverflowError):
+                    started = 0
+                if now - started < grace_seconds:
+                    continue
+                pid = job.get("pid")
+                alive = False
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                        alive = True
+                    except (ProcessLookupError, PermissionError):
+                        alive = False
+                if not alive:
+                    job["status"] = "lost"
+                    job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
+                    job["pid"] = None
+                    lost.append(job_id)
+            if lost:
+                _atomic_write_json(self.registry_path, registry)
+        return lost
+
     def cleanup_old_jobs(self, max_age_days: int = 7) -> int:
         """Remove jobs older than max_age_days. Returns count removed."""
         import shutil
@@ -270,6 +310,10 @@ if __name__ == "__main__":
             print(json.dumps(job, indent=2, ensure_ascii=False))
         else:
             print("not_found")
+
+    elif cmd == "sweep":
+        for jid in jm.sweep_lost():
+            print(jid)
 
     elif cmd == "cleanup":
         n = jm.cleanup_old_jobs()
