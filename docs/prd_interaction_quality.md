@@ -2,7 +2,8 @@
 
 - 版本：v1.0（2026-06-11）
 - 作者：Claude（基于全量过往交互审计）
-- 状态：P0 已实现并上线；P1/P2 为路线图
+- 状态：P0 全部上线；P1 中 REQ-11/12/13/25/26/28 已上线、REQ-15 部分上线、REQ-22 验证已存在；其余为路线图（多数需 Pascal 形态决策）
+- 补充：2026-06-11 对今日全部改动做了对抗性审查（2 高/5 中/6 低全部修复或显式记录残留），commit 39dc8c6
 
 ---
 
@@ -106,7 +107,7 @@
 
 ## 3. P1 需求（下一期，按 ROI 排序）
 
-### REQ-11 端到端送达保障（Delivery ACK）
+### REQ-11 端到端送达保障（Delivery ACK）✅ 已上线（2026-06-11，重试+账本+聚合告警；message_id 级 ACK 见 L4 残留）
 - **数据**：≥15 次空响应投诉、3 次"后台已回前端没收到"、闭环卡因 403 静默违约。
 - **需求**：
   1. `lark_send_*` 返回 message_id 并写入送达账本（sent_at / confirmed / failed）；
@@ -115,12 +116,12 @@
   4. 连续 N 次发送失败 → 给用户一条聚合告警（"过去 2 小时有 3 条消息可能没送到"），而不是让用户发 "hi" 探活。
 - **验收**：人为断网 10 分钟，恢复后消息补达且用户收到一条（且仅一条）说明。
 
-### REQ-12 推送管道水位监控（每通道心跳）
+### REQ-12 推送管道水位监控（每通道心跳）✅ 已上线（2026-06-11，core/watermarks.py + self-diagnostic 4h）
 - **数据**：eigenflux feed 断流 4 次全靠用户发现；用户 5/6 明确要求"每小时自检"。
 - **需求**：每条推送通道（feed/checkin/推荐/好友请求/phronesis）维护 `last_success_ts` 水位；超过 2× 期望周期未成功 → self-diagnostic 任务自动诊断并上报一条聚合告警。
 - **验收**：kill eigenflux stream 进程，≤1 个心跳周期内用户收到断流告警。
 
-### REQ-13 夜间静默 + 黄金窗排队
+### REQ-13 夜间静默 + 黄金窗排队 ✅ 已上线（2026-06-11，夜队+晨间 digest；黄金窗分时段放行为后续细化）
 - **数据**：0-9 点回复率 ≤6%，黄金窗 70%+；eigenflux 已有 quiet-hours gate（commit 3967f94），但 heartbeat 主链路没有。
 - **需求**：非紧急（无 deadline 属性）的主动消息在 23:30-09:30 进入队列，按优先级在黄金窗（10:00/13:00/17:00）批量放行，与既有 night-batched morning digest 合流；紧急消息（日历冲突、闭环到点）直发。
 - **验收**：深夜产生的推荐/feed 类消息次日上午合并送达。
@@ -130,7 +131,7 @@
 - **需求**：逐条推送改为每日 2-3 个合并 digest；单条卡片硬上限 ~500 字符 + "展开全文"链接（依赖 REQ-17 卡片重构）；保留"高分信号即时直推"白名单通道。
 - **验收**：feed 类周发送量降至 ≤25 条且回复率不降。
 
-### REQ-15 响应归因修复（已读回执 + reply-to）
+### REQ-15 响应归因修复（已读回执 + reply-to）🟡 部分上线（2026-06-11，read/reaction 事件已入 engagement_log；message_id join 与三态统计待做）
 - **数据**：calendar-sync 响应数(27) > 发送数(21)，ignored 的 content_head 全是无关话题——归因是"归到最后一条 sent"，engagement-analyze 在用脏数据调参（而 REQ-05 刚让调参真正生效，脏数据危害放大）。
 - **需求**：①注册 `im.message.message_read_v1` / reaction handler（同时消除 SDK Error 刷屏）；②回复归因优先用 Lark parent_id/reply 关系，其次时间窗就近；③已读未回 = 真 ignored，未读 = 未触达，分开统计。
 - **验收**：engagement_log 含 read/replied/untouched 三态；calendar-sync 不再出现响应数>发送数。
@@ -165,13 +166,13 @@
 ## 4. P2 需求（路线图）
 
 - **REQ-21 感知摄入 MVP**（已有 v2 PRD：docs/prd_perception_ingestion.md，25-35h）：所有信息类别（repo 改动、其他飞书群、其他 Claude session）模块化灌入记忆——同时是 TODO P1 硬编码问题的系统解。用户 6/9 立项，待开工。
-- **REQ-22 引用回复上下文**（5/28）：用户引用一条消息回复时，把被引用消息注入上下文。（小改动，可提前到 P1。）
+- **REQ-22 引用回复上下文**（5/28）✅ 经查已实现（bot.sh:1108 quote-reply 注入）：用户引用一条消息回复时，把被引用消息注入上下文。（小改动，可提前到 P1。）
 - **REQ-23 预测式日历助手**（5/8、5/28）："看更长时间的日程…提前做心理状态的准备"；与 calendar-sync Tier-0 合流，做 7 天前瞻 + 模式识别（文化轮转、康复周期）。
 - **REQ-24 双层日报合并**：cron「每日日报/小时报」与 heartbeat daily-plan/daily-reflect 二选一（daily-plan 当前 0% 回复，合并时重新设计形态——行动建议优先而非全量日程，5/8 + 5/20 反馈）。
-- **REQ-25 统一 engagement 存储**：SQLite engagement_events/agent_log 自 5/21 死亡（3 行 vs jsonl 502 行），修写入或删表，dashboard 不得读假数据。
-- **REQS-26 日志归档化**：`tail -500` 截断使失败率审计物理不可能；改为 `jarvis.log.1..3` 滚动归档，WARN 统计可回溯（REQ-08 的 copytruncate 是临时解）。
+- **REQ-25 统一 engagement 存储** ✅ 已上线（2026-06-11，dashboard 改读 engagement_log.jsonl 事实源）：SQLite engagement_events/agent_log 自 5/21 死亡（3 行 vs jsonl 502 行），修写入或删表，dashboard 不得读假数据。
+- **REQ-26 日志归档化** ✅ 已上线（2026-06-11，jarvis.log.1..3 滚动归档）：`tail -500` 截断使失败率审计物理不可能；改为 `jarvis.log.1..3` 滚动归档，WARN 统计可回溯（REQ-08 的 copytruncate 是临时解）。
 - **REQ-27 bot.sh 逻辑继续下沉 core/**：1407 行 bash 零测试，本次 6 项高危 bug 中 3 项在 bash 层；目标：消息解析、卡片回调、会话管理全部 Python 化 + bats 覆盖剩余 bash。
-- **REQ-28 daemon pkill 收窄**：按 PID 文件 + cwd 匹配，不再误杀同机其他 lark-cli/eigenflux 进程。
+- **REQ-28 daemon pkill 收窄** ✅ 已上线（2026-06-11，daemon+restart.sh 全部路径锚定）：按 PID 文件 + cwd 匹配，不再误杀同机其他 lark-cli/eigenflux 进程。
 - **REQ-29 admin 面板安全加固**：token 改 hmac.compare_digest、禁 query-string token；梳理与 session_dashboard.py 的 3456 端口冲突。
 
 ---
