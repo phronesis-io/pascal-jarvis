@@ -93,6 +93,24 @@ def test_rotation_keeps_one_generation(tmp_path, monkeypatch):
     assert "task-9" in tasks
 
 
+def test_rotation_skipped_while_another_writer_holds_lock(tmp_path, monkeypatch):
+    """Concurrent-rotation guard: emit() has multi-process writers (resident
+    loop delivery emits, bot.sh rotation-path cycle, overlap_lock skips), and
+    a double rotation would clobber the fresh `.1` archive with a near-empty
+    live file. While another writer holds the rotation lock, rotation is
+    skipped — but the event itself must still be appended."""
+    monkeypatch.setattr(se, "MAX_BYTES", 10)
+    live = tmp_path / SCHED_EVENT_FILE
+    live.write_text(json.dumps({"ts": "2026-06-12 08:00:00", "event": "task_spawn",
+                                "task": "old", "run_id": "r"}) + "\n")
+    assert live.stat().st_size > 10
+    with open(tmp_path / (SCHED_EVENT_FILE + ".lock"), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        emit(tmp_path, "task_spawn", task="new", run_id="r2")
+    assert not (tmp_path / (SCHED_EVENT_FILE + ".1")).exists()  # no rotation
+    assert [e["task"] for e in _read_events(tmp_path)] == ["old", "new"]
+
+
 # ── query / replay ───────────────────────────────────────────────────
 
 def _seed(tmp_path):

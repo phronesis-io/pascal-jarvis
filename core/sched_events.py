@@ -16,8 +16,12 @@ Design (borrowed from Kron's scheduler event log, self-hosted here):
   circuit_open / empty_pre / batch_deferred / duplicate_send / ...),
   batch_flush (entry count). Every entry carries ts / event / task / run_id
   (run_id == the heartbeat cycle_id, the existing correlation key).
-- Hot-path append (same convention as engagement_log.jsonl): writers are
-  serialized by the heartbeat flock, so plain `open(path, "a")` is safe.
+- Hot-path append: emit() has MULTI-PROCESS writers — the resident loop's
+  delivery-layer emits run outside the cycle flock, bot.sh's session-rotation
+  cycle is a separate process, and the overlap_lock skip is by definition
+  emitted by a process that failed to take the cycle lock. One-line O_APPEND
+  writes are atomic in practice at these sizes; rotation (the only
+  read-modify step) is serialized by its own flock in _rotate_if_oversized.
 - emit() NEVER raises — a broken event log must not take down the scheduler.
   Failures degrade to a stderr warning.
 - Size-guarded: when the file exceeds MAX_BYTES it is rotated to `.1`
@@ -32,6 +36,7 @@ Replay CLI:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -45,10 +50,29 @@ TS_FMT = "%Y-%m-%d %H:%M:%S"  # second precision — replay needs ordering
 
 
 def _rotate_if_oversized(path: Path) -> None:
-    """Keep one `.1` generation once the live file exceeds MAX_BYTES."""
+    """Keep one `.1` generation once the live file exceeds MAX_BYTES.
+
+    Serialized via a sidecar flock: emit() has multi-process writers, and an
+    unserialized double-rotation would clobber the freshly-rotated archive
+    with a near-empty live file (writer A rotates and appends; writer B, which
+    passed the size check just before, rotates A's tiny new file over the
+    archive). Non-blocking: if another process holds the lock it is already
+    doing the rotation — skip and just append.
+    """
     try:
-        if path.exists() and path.stat().st_size > MAX_BYTES:
-            os.replace(path, path.with_name(path.name + ".1"))
+        if not (path.exists() and path.stat().st_size > MAX_BYTES):
+            return
+        with open(path.with_name(path.name + ".lock"), "w") as lock_f:
+            try:
+                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return  # another writer is mid-rotation
+            try:
+                # Re-check under the lock — the racing writer may have rotated.
+                if path.exists() and path.stat().st_size > MAX_BYTES:
+                    os.replace(path, path.with_name(path.name + ".1"))
+            finally:
+                fcntl.flock(lock_f, fcntl.LOCK_UN)
     except OSError:
         pass  # rotation is best-effort; the append below still proceeds
 

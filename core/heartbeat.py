@@ -15,6 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
 from .sched_events import emit as sched_emit
@@ -211,6 +212,19 @@ class HeartbeatRunner:
             self._log(f"Silent task {task_name}: output suppressed "
                       f"(log-only, never delivered): {message[:80]!r}")
             self._event("task_skip", task=task_name, reason="silent_output")
+            # "Logs are the product": daily-plan persists its own JSONL via its
+            # post-script, but thinking-review / self-diagnostic have no log of
+            # their own — without this archive their full output would vanish
+            # (jarvis.log keeps only the 80-char prefix above). Capped rolling
+            # file; called only under the cycle flock, so append_jsonl's
+            # read-modify-write is safe.
+            try:
+                append_jsonl(self.jarvis_dir / "silent_outputs.jsonl",
+                             {"ts": now_local_str("%Y-%m-%d %H:%M"),
+                              "task": task_name, "text": message},
+                             keep_last=100)
+            except Exception as e:
+                self._log(f"silent_outputs archive failed: {e}")
             return
         user_messages.append(message)
         producing_tasks.append(task_name)
@@ -742,10 +756,14 @@ You have access to the user's memory below. Use it to personalize your responses
                 # card carries the content; otherwise the card stands alone.
                 top_msg = envelope.get("user_message", "")
                 has_card = any(m.strip().startswith('{"config":') for m in user_messages)
-                # If every task in this call is silent, the summary can only
-                # describe silent-task content — drop it (SILENT_TASKS).
-                all_silent = all(t["name"] in self.SILENT_TASKS for t in runnable)
-                if top_msg and top_msg.strip() and not has_card and not all_silent:
+                # SILENT_TASKS hard guarantee: the prompt asks for user_message
+                # as "combined markdown" across ALL tasks in the call, so when
+                # ANY task in the batch is silent the summary may carry its
+                # content (the 6/12 daily-plan leak, one hop later). Drop the
+                # summary in that case — non-silent tasks still deliver through
+                # their own per-task slices above.
+                any_silent = any(t["name"] in self.SILENT_TASKS for t in runnable)
+                if top_msg and top_msg.strip() and not has_card and not any_silent:
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
                 # NEVER dump raw JSON to user — log for debugging and skip

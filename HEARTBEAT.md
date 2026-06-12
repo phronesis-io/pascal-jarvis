@@ -29,8 +29,12 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 `daily-plan`, `self-diagnostic`, `thinking-review`. Enforced IN CODE via
 `HeartbeatRunner.SILENT_TASKS` (core/heartbeat.py) + `SILENT_SOURCES` delivery
 backstop (core/heartbeat_loop.py): their output goes to logs only — never sent,
-never batched into the digest. Do NOT "fix" this by re-surfacing them; changing
-the list requires editing SILENT_TASKS, not this doc.
+never batched into the digest, and in a mixed batch the envelope's combined
+user_message summary is dropped too (it may describe silent content). Full
+suppressed text is archived in `silent_outputs.jsonl` (rolling, last 100); the
+audit trail is `sched_events.jsonl` (task_skip reason=silent_output). Do NOT
+"fix" this by re-surfacing them; changing the list requires editing
+SILENT_TASKS, not this doc.
 
 ## EigenFlux
 

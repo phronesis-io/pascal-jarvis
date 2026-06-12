@@ -283,3 +283,41 @@ def test_all_silent_batch_drops_summary_too(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
     assert runner.run_cycle(force=True) == ""
     assert not (runner.jarvis_dir / ".heartbeat_last_source").exists()
+
+
+def test_mixed_batch_summary_never_leaks_silent_content(tmp_path, monkeypatch):
+    """user_message is a COMBINED summary across all tasks in the call, so in
+    a mixed batch it can carry silent-task content even though the per-task
+    slice was dropped (the 6/12 leak, one hop later). With ANY silent task in
+    the batch the summary must be dropped; non-silent tasks still deliver
+    through their own slices."""
+    hb = (
+        "### daily-plan\n- interval: 24h\n- prompt: plan\n\n"
+        "### task-b\n- interval: 1h\n- prompt: b\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {"daily-plan": "🌅 今日 plan card", "task-b": "response for b"},
+        "user_message": "今日计划：14:30 周会；另外 task-b 的结果如下。",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    result = runner.run_cycle(force=True)
+    assert "response for b" in result          # non-silent slice delivered
+    assert "周会" not in result                 # summary (with plan) dropped
+    assert "今日计划" not in result
+    assert (runner.jarvis_dir / ".heartbeat_last_source").read_text() == "task-b"
+
+
+def test_silent_task_full_output_archived(tmp_path, monkeypatch):
+    """Suppressed output is preserved in FULL (silent_outputs.jsonl) — the
+    80-char jarvis.log prefix alone would destroy thinking-review /
+    self-diagnostic products, which have no post-script log of their own."""
+    hb = "### self-diagnostic\n- interval: 4h\n- prompt: diag\n"
+    runner = _make_runner(tmp_path, hb)
+    long_report = "⚠️ 系统体检发现问题：" + "watermark STARVED 详情 " * 20
+    monkeypatch.setattr(runner, "claude_call", lambda p: long_report)
+    assert runner.run_cycle(force=True) == ""  # still never delivered
+    archive = runner.jarvis_dir / "silent_outputs.jsonl"
+    rows = [json.loads(l) for l in archive.read_text().splitlines()]
+    assert rows[-1]["task"] == "self-diagnostic"
+    assert rows[-1]["text"] == long_report  # full text, not a prefix
