@@ -35,7 +35,7 @@ perception:
       schedule: { interval: 30m }
       perceive: { buffer: inbox_ops.md }
 
-    # A Lark group chat (find the chat id via: lark-cli im +chats-list)
+    # A Lark group chat (find the chat id via: lark-cli im +chat-search --query 群名)
     - id: team_chat
       type: lark_chat
       enabled: false

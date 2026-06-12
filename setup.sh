@@ -90,7 +90,7 @@ fi
 
 # ── 3. Executable bits ───────────────────────────────────────────────
 step "Making shell scripts executable"
-chmod +x bot.sh setup.sh tasks/*.sh plugins/lark/client.sh 2>/dev/null || true
+chmod +x bot.sh setup.sh restart.sh scripts/*.sh tasks/*.sh plugins/lark/client.sh 2>/dev/null || true
 ok "bot.sh, tasks/*.sh, plugins/lark/client.sh"
 
 # ── 4. jarvis.yaml ───────────────────────────────────────────────────

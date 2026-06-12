@@ -48,7 +48,7 @@ claude:
   main_model: ""
   # Heartbeat background tasks use this. Default opus — max capability;
   # set a cheaper model here if you'd rather batch them down.
-  heartbeat_model: "opus"
+  heartbeat_model: "sonnet"   # cheaper default for new installs; "opus" = highest quality, noticeably higher cost
   # Auto-rotate Claude Code session files when they exceed this size (bytes).
   # 500KB is a good balance between context retention and API latency.
   max_session_size: 512000

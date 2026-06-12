@@ -8,7 +8,11 @@ Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI
 
 If you're reading this via an AI assistant (Claude Code, Cursor, etc), paste this to it:
 
-> Clone `https://github.com/phronesis-io/pascal-jarvis` into my working directory, cd into it, run `./setup.sh`, then walk me through the plugin setup and editing `jarvis.yaml`.
+> Clone `https://github.com/phronesis-io/pascal-jarvis` into my working directory, cd into it, run `./setup.sh`, then follow `docs/INSTALL.md` phase by phase — run `./scripts/doctor.sh` after each phase and fix any FAIL until green. Relay every step marked 🧑 NEEDS HUMAN to me verbatim.
+
+Two things make the agent-driven install smooth:
+- **[docs/INSTALL.md](docs/INSTALL.md)** — phase-by-phase guide written FOR the installing agent: every step has a verification command, every human-only action (browser auth, console clicks, secrets) is marked 🧑 with exact click paths, and there's a troubleshooting table of real failure modes.
+- **`./scripts/doctor.sh`** — one-command health check: 20+ PASS/WARN/FAIL probes (deps, auth states, config, runtime), each FAIL printed with its exact fix command. The agent loops run→fix→rerun until green.
 
 The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It:
 
@@ -297,7 +301,7 @@ All config lives in `jarvis.yaml`. See `jarvis.example.yaml` for the full schema
 Key settings:
 - `data_dir` — where sessions and memory are stored
 - `lark.user_id` — your Lark/Feishu open_id (skip for headless)
-- `claude.heartbeat_model` — model for background tasks (default: `sonnet`, cheaper)
+- `claude.heartbeat_model` — model for background tasks. The example config ships `sonnet` (cheaper — recommended while trying things out); switch to `opus` for the highest-quality proactive work. Note the heartbeat calls Claude continuously, so this is your main cost lever.
 - `heartbeat.check_interval` — how often to check for due tasks (default: 10s)
 
 ## Writing Custom Tasks
