@@ -261,3 +261,93 @@ def test_lark_mail_error_isolated_per_mailbox(monkeypatch):
     assert [s["event_id"] for s in signals] == ["MID9"]
     assert state["error_type"] == "network"  # surfaced for error accounting
     assert "broken@x.com" not in state["cursors"]  # no fake cursor on failure
+
+
+# ── imap_mail adapter (163) ──────────────────────────────────────────
+
+
+def _imap_secret(tmp_path):
+    p = tmp_path / "163.json"
+    p.write_text(json.dumps({
+        "email": "u@163.com", "imap_host": "imap.163.com",
+        "imap_port": 993, "auth_code": "SECRET"}))
+    return str(p)
+
+
+def test_imap_missing_secret_never_raises():
+    from sources import imap_mail
+    signals, state = imap_mail.collect({"secret_file": "/nope/x.json"}, {})
+    assert signals == []
+    assert state["error_type"] == "no_secret"
+
+
+def test_imap_first_run_then_incremental(tmp_path, monkeypatch):
+    from sources import imap_mail
+    cfg = {"secret_file": _imap_secret(tmp_path)}
+
+    def fetch1(secret, folder, since_uid, first_run):
+        assert first_run and since_uid == 0
+        return ([{"uid": 10, "from": "szy <notifications@github.com>",
+                  "subject": "PR #45", "date_iso": "2026-06-12T09:00:00+0800"}],
+                10, 555)
+    monkeypatch.setattr(imap_mail, "_fetch_new", fetch1)
+    signals, state = imap_mail.collect(cfg, {})
+    assert len(signals) == 1
+    assert signals[0]["event_id"] == "imap:u@163.com:555:10"
+    assert "正文未注入" in signals[0]["body"] and signals[0]["url"] == ""
+    assert state == {"uidvalidity": 555, "last_uid": 10, "error_type": None}
+
+    # incremental: only UID > last_uid surfaces, cursor advances
+    def fetch2(secret, folder, since_uid, first_run):
+        assert not first_run and since_uid == 10
+        return ([{"uid": 12, "from": "bank@cmb.com", "subject": "账单",
+                  "date_iso": "2026-06-12T10:00:00+0800"}], 12, 555)
+    monkeypatch.setattr(imap_mail, "_fetch_new", fetch2)
+    signals, state = imap_mail.collect(cfg, state)
+    assert [s["payload"]["uid"] for s in signals] == [12]
+    assert state["last_uid"] == 12
+
+
+def test_imap_exclude_and_error_passthrough(tmp_path, monkeypatch):
+    from sources import imap_mail
+    cfg = {"secret_file": _imap_secret(tmp_path),
+           "exclude_from": ["mailmaster@163.com"]}
+
+    def fetch(secret, folder, since_uid, first_run):
+        return ([{"uid": 5, "from": "mailmaster@163.com", "subject": "系统",
+                  "date_iso": "2026-06-12T08:00:00+0800"},
+                 {"uid": 6, "from": "real@x.com", "subject": "Hi",
+                  "date_iso": "2026-06-12T08:01:00+0800"}], 6, 1)
+    monkeypatch.setattr(imap_mail, "_fetch_new", fetch)
+    signals, state = imap_mail.collect(cfg, {})
+    assert [s["payload"]["uid"] for s in signals] == [6]  # mailmaster filtered
+    assert state["last_uid"] == 6  # cursor still advances past excluded
+
+    def boom(secret, folder, since_uid, first_run):
+        raise RuntimeError("connect")
+    monkeypatch.setattr(imap_mail, "_fetch_new", boom)
+    signals, state = imap_mail.collect(cfg, {"last_uid": 6, "uidvalidity": 1})
+    assert signals == [] and state["error_type"] == "connect"
+    assert state["last_uid"] == 6  # prior cursor preserved on failure
+
+
+def test_imap_uidvalidity_reset_resyncs(tmp_path, monkeypatch):
+    from sources import imap_mail
+    cfg = {"secret_file": _imap_secret(tmp_path)}
+
+    def fetch(secret, folder, since_uid, first_run):
+        return ([{"uid": 3, "from": "a@x.com", "subject": "x",
+                  "date_iso": "2026-06-12T08:00:00+0800"}], 3, 999)
+    monkeypatch.setattr(imap_mail, "_fetch_new", fetch)
+    # prior uidvalidity 555 != new 999 → drop batch, resync cursor, flag reset
+    signals, state = imap_mail.collect(cfg, {"uidvalidity": 555, "last_uid": 40})
+    assert signals == []
+    assert state["error_type"] == "uidvalidity_reset"
+    assert state["uidvalidity"] == 999 and state["last_uid"] == 3
+
+
+def test_imap_decode_hdr_handles_mime_and_garbage():
+    from sources import imap_mail
+    assert imap_mail._decode_hdr("=?utf-8?B?5oub5ZWG?=") == "招商"
+    assert imap_mail._decode_hdr("plain text") == "plain text"
+    assert imap_mail._decode_hdr("") == ""
