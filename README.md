@@ -110,7 +110,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
    - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with a two-stage pipeline: feed triage for quick scoring, plus deep research for high-value items.
-   - *Content recommend* and *watchlater remind* — curates and follows up on saved content.
+   - *Content recommend* and *watch-later* — curates content for you; saved items resurface through free-time nudges when your calendar shows an idle block.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
