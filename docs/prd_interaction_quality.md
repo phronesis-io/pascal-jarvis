@@ -141,7 +141,7 @@
 - **需求**：①预计 >2 分钟的工作自动转后台 job（jobs/ 目录已有雏形），会话立即释放；②发一张任务卡（进行中/完成/失败 + 耗时）；③完成后结果卡 + 中间过程摘要（REQ-18）。
 - **验收**：跑一个 10 分钟任务期间，用户消息照常秒级响应。
 
-### REQ-17 卡片体系重构 🟡 根因已实锤+止血（2026-06-11：lark-cli 不支持 card.action.trigger（larksuite/cli#1051），回传按钮全端从未工作过；已停发收藏按钮、self-diagnostic 盯升级；完整清单 docs/research/card_callback_root_cause.md）
+### REQ-17 卡片体系重构 🟢 回调通路 LIVE（2026-06-12 17:38 端到端验证：app 发版 + 单连接 sidecar，按钮首次真实工作，watchlater button 落账实证；后续：卡片即应用形态设计）原 🟡 根因已实锤+止血（2026-06-11：lark-cli 不支持 card.action.trigger（larksuite/cli#1051），回传按钮全端从未工作过；已停发收藏按钮、self-diagnostic 盯升级；完整清单 docs/research/card_callback_root_cause.md）
 - **数据**：按钮"在手机上从来没有成功过"（5/27）、内容截断（5/16、6/3）、JSON 直出（5/6）。
 - **需求**：①所有按钮回调端到端测试纳入 CI（含移动端真机 checklist）；②长内容自动转"摘要卡 + 跳转 admin 页面全文"（用户 5/17 已主动提出"卡片即应用"方案，admin 面板已在 3456 端口）；③卡片渲染前 schema 校验，原始 JSON 一律拦截（部分已有，补 CARD: 路径）。
 - **验收**：移动端按钮成功率 100%；不再出现 "..." 截断投诉。
