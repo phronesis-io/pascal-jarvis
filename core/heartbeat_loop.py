@@ -56,11 +56,16 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
                 return True
         except subprocess.TimeoutExpired:
             # A local timeout does NOT mean the server didn't get it — on a
-            # slow link the message may already be delivered; retrying here
-            # would duplicate it. Treat as failed-but-final.
-            log("heartbeat", "lark_send_card timed out — not retrying (may have sent)",
+            # slow link the message is usually already delivered. Returning
+            # False here made _route_output re-send the content as TEXT (a
+            # duplicate), skip the outbox (so dedup couldn't stop the task's
+            # next re-emission → third copy), and count a delivery failure
+            # toward the user alert. Assume delivered: worst case one message
+            # is silently lost on a true network drop, vs guaranteed
+            # duplicates the other way.
+            log("heartbeat", "lark_send_card timed out — assuming delivered, no retry",
                 level="warn")
-            return False
+            return True
         except Exception as e:
             log("heartbeat", f"lark_send_card attempt {attempt} failed: {e}", level="warn")
     return False
@@ -109,10 +114,11 @@ def _lark_send_text(text: str, user_id: str) -> bool:
                     _LAST_SENT_IDS.append(mid)
                 return True
         except subprocess.TimeoutExpired:
-            # Local timeout ≠ undelivered; retrying risks a duplicate message.
-            log("heartbeat", "lark_send_text timed out — not retrying (may have sent)",
+            # Local timeout ≠ undelivered; assume delivered (see card variant
+            # for the duplicate-vs-loss tradeoff analysis).
+            log("heartbeat", "lark_send_text timed out — assuming delivered, no retry",
                 level="warn")
-            return False
+            return True
         except Exception:
             pass
     return False
@@ -265,7 +271,16 @@ def _should_queue(jarvis_dir: Path, minutes_of_day: int | None = None) -> bool:
 
     Quiet hours: everything non-urgent queues. Daytime: only when ALL sources
     are general-interest (mixed task-relevant content sends immediately).
+
+    .urgent_send flag (written by a task post-script, e.g. an urgent:true
+    EigenFlux item that already cleared its own night gate) bypasses the
+    queue entirely for this cycle — the task-name sidecar can't carry
+    per-item urgency, so this flag does.
     """
+    urgent_flag = jarvis_dir / ".urgent_send"
+    if urgent_flag.exists():
+        urgent_flag.unlink(missing_ok=True)
+        return False
     sources = _sources_of(_peek_source(jarvis_dir))
     if _in_quiet_hours(minutes_of_day):
         return not bool(sources & URGENT_SOURCES)

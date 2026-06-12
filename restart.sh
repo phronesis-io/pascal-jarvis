@@ -107,10 +107,10 @@ kill_bot() {
   pkill -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null || true
   pkill -f "lark-cli event" 2>/dev/null || true
 
-  # Kill stuck claude sessions
+  # Kill stuck claude sessions (lock format: "<pid> <token>")
   for lock in "$JARVIS_DIR"/.session_lock_*; do
     [ -f "$lock" ] || continue
-    pid=$(cat "$lock" 2>/dev/null)
+    pid=$(awk '{print $1}' "$lock" 2>/dev/null)
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || true
     fi

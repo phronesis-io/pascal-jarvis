@@ -854,6 +854,11 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     - Missing files that should exist
     If everything looks healthy, reply HEARTBEAT_OK.
     If issues found, return a brief markdown list of problems.
+    NEVER quote raw error strings verbatim (e.g. "API Error: 403",
+    "Failed to authenticate") in your report — describe them in Chinese
+    ("403 认证错误") instead. The proactive error gate suppresses messages
+    whose opening contains those exact phrases, and it would eat the very
+    outage report you are writing.
 
 ### personal-site
 - interval: 24h

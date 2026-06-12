@@ -255,11 +255,13 @@ def diagnose_and_fix(issues: list[str]) -> str:
             pass
 
     # Kill stuck claude processes tracked by session locks
+    # (lock format: "<pid> <token>" — first field is the pid)
     import glob as _glob
     for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
         try:
-            pid = Path(lock).read_text().strip()
-            if pid:
+            content = Path(lock).read_text().strip()
+            pid = content.split()[0] if content else ""
+            if pid.isdigit():
                 subprocess.run(["kill", pid], capture_output=True, timeout=5)
                 log("INFO", f"Killed stuck claude process from lock: {pid}")
         except Exception:

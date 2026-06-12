@@ -15,7 +15,7 @@ The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It
 1. Checks for `python3` / `jq` / `pip3` (prints install commands if missing)
 2. Installs `pyyaml` (with `--break-system-packages` fallback for modern macOS/Debian)
 3. Makes shell scripts executable
-4. Copies `jarvis.example.yaml → jarvis.yaml` if missing (never overwrites)
+4. Copies `jarvis.example.yaml → jarvis.yaml` and `sources.example.yaml → sources.yaml` if missing (never overwrites)
 5. Seeds the memory directory with example templates
 6. Runs the test suite as a sanity check
 7. Prints clear "next steps" — including the plugin wizards below
@@ -76,6 +76,8 @@ before killing an in-flight conversation:
 ./restart.sh            # graceful restart of the bot (daemon stays up)
 ./restart.sh --full     # restart both the guardian daemon and the bot
 ./restart.sh --status   # show daemon / bot / lark-cli process status
+./restart.sh --yes      # skip the in-flight-conversation confirmation
+                        # (required for non-interactive callers: cron, scripts)
 ```
 
 ---
@@ -112,9 +114,15 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
-6. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning checkin frequency, content mix, and delivery windows. Cross-session sync imports context from parallel Claude Code projects.
+5. **Background Jobs & Auto-Promotion** — Any Claude call running longer than ~2 minutes is automatically promoted to a background job: the conversation is released immediately (you can keep chatting), the long task keeps running, and its result is delivered as a reply *and* merged into the conversation's context. Send `jobs` to list them, `cancel <id>` to kill one; a sweeper reconciles jobs whose process died so you're never left waiting on a ghost.
 
-7. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
+6. **Attention Engineering** — Proactive messages respect your attention budget: quiet hours (23:30–10:00) queue everything non-urgent into a single morning digest; general-interest content (feeds, recommendations) batches into 3 daytime windows; if you just sent a message (you're at the phone), pending batches release immediately. Identical content is never sent twice within 6 hours, and infrastructure errors never reach you raw — repeated delivery failures surface as one aggregated alert instead.
+
+7. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source* — no new scripts. Signals are deduplicated across sources, buffered into memory (so the next Claude call "knows"), and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. A new source type = one `sources/<type>.py` adapter implementing `collect(cfg, state)`.
+
+8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). A daily harness-evolve task reviews accumulated feedback and lands hygiene improvements automatically. Cross-session sync imports context from parallel Claude Code projects.
+
+9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
 
 ## Architecture
 

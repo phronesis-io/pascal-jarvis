@@ -59,11 +59,14 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
                 known[path] = {"mtime": mtime, "hash": digest}
                 continue
 
+            if not first_run and len(signals) >= MAX_SIGNALS_PER_RUN:
+                # Over cap: do NOT record state — leave the file looking
+                # changed so the next pass emits it. Recording first made
+                # capped changes permanently invisible.
+                continue
             known[path] = {"mtime": mtime, "hash": digest}
             if first_run:
                 continue  # baseline pass: record, don't flood
-            if len(signals) >= MAX_SIGNALS_PER_RUN:
-                continue
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
                     body = f.read(2048)

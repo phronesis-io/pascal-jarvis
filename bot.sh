@@ -100,7 +100,21 @@ with_timeout() {
   if [ -n "$TIMEOUT_CMD" ]; then
     "$TIMEOUT_CMD" "$secs" "$@"
   else
-    "$@"
+    # Pure-bash fallback. macOS ships no coreutils timeout, so this branch
+    # used to run the command with NO limit — a placebo for every caller
+    # (6000s bg jobs, 12s narration; a hung narration could wedge the
+    # watchdog loop). Run in bg, kill past the deadline.
+    # The killer's stdout MUST be detached: inside $(...) substitution it
+    # would otherwise hold the pipe open for the full sleep.
+    "$@" &
+    local _wt_cmd_pid=$!
+    ( sleep "$secs"; kill "$_wt_cmd_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local _wt_killer_pid=$!
+    wait "$_wt_cmd_pid"
+    local _wt_rc=$?
+    kill "$_wt_killer_pid" 2>/dev/null
+    wait "$_wt_killer_pid" 2>/dev/null
+    return $_wt_rc
   fi
 }
 
@@ -203,40 +217,23 @@ fi
 
 # ── Session management ────────────────────────────────────────────────
 # Passes conv_key via env to avoid shell-injection into the Python source.
+# Delegates to core.session.SessionManager: the old embedded copy did an
+# UNLOCKED, non-atomic read-modify-write of the tracker, racing
+# force_rotate's flock+atomic writes (a concurrent rotation could be
+# clobbered, and a torn write parsed as {} reset every counter). Same
+# uuid5(NAMESPACE, key-counter) scheme, so session ids are unchanged.
 get_session_id() {
   local conv_key="$1"
   JV_TRACKER="$SESSION_TRACKER" JV_SDIR="$CLAUDE_PROJECT_DIR" \
     JV_MAX="$MAX_SESSION_SIZE" JV_KEY="$conv_key" python3 <<'PYEOF'
-import json, uuid, os, sys
-
-tracker_path = os.environ["JV_TRACKER"]
-session_dir  = os.environ["JV_SDIR"]
-max_size     = int(os.environ["JV_MAX"])
-conv_key     = os.environ["JV_KEY"]
-
-try:
-    tracker = json.load(open(tracker_path))
-except Exception:
-    tracker = {}
-
-entry = tracker.get(conv_key, {})
-sid = entry.get('session_id', '')
-session_file = os.path.join(session_dir, f'{sid}.jsonl') if sid else ''
-
-needs_new = False
-if not sid:
-    needs_new = True
-elif os.path.exists(session_file) and os.path.getsize(session_file) > max_size:
-    needs_new = True
+import os, sys
+sys.path.insert(0, os.environ["JARVIS_DIR"])
+from core.session import SessionManager
+sm = SessionManager(os.environ["JV_TRACKER"], os.environ["JV_SDIR"],
+                    max_size=int(os.environ["JV_MAX"]))
+sid, rotated = sm.get_session(os.environ["JV_KEY"])
+if rotated:
     print("ROTATED", file=sys.stderr)
-
-if needs_new:
-    counter = entry.get('counter', 0) + 1
-    sid = str(uuid.uuid5(uuid.UUID('a1b2c3d4-e5f6-7890-abcd-ef1234567890'), f'{conv_key}-{counter}'))
-    tracker[conv_key] = {'session_id': sid, 'counter': counter}
-    with open(tracker_path, 'w') as f:
-        json.dump(tracker, f, indent=2)
-
 print(sid)
 PYEOF
 }
@@ -520,43 +517,65 @@ $(load_memory)"
   local LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
   local ANSWER_FILE
   ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
+  # Lock ownership token: every write to the lock file carries it, and every
+  # destructive operation (overwrite at spawn, cleanup rm) first verifies the
+  # token is still ours. Without ownership checks, a waiter that legitimately
+  # reclaimed a stale lock could be silently dispossessed by the original
+  # handler's blind writes (the 2026-06-11 review found three such races).
+  # Lock file format: "<pid-or-'acquiring'> <token>" — readers that kill the
+  # holder (restart.sh, /stop, staleness checks) take the FIRST field.
+  local _lock_token
+  _lock_token="$$.$(date +%s).$RANDOM"
   local waited=0
-  # Acquire the lock atomically (noclobber) BEFORE spawning Claude. A plain
-  # "wait for the file to vanish, write it later" check lets two
-  # near-simultaneous messages both pass and resume the same session
-  # concurrently, corrupting the session jsonl. The placeholder content is
-  # non-numeric on purpose: every reader does kill -0/"kill $pid || true",
-  # so it degrades safely until the real Claude PID overwrites it below.
-  #
-  # Stale-lock policy: if the lock holds a NUMERIC pid that is dead, the
-  # previous handler crashed without cleanup — reclaim immediately. While the
-  # holder is alive we wait up to 6200s (the in-flight Claude call is governed
-  # by the 6000s watchdog below, NOT the 600s claude timeout — a fixed 620s
-  # cutoff here used to break the lock of legitimately long-running handlers,
-  # recreating the very corruption this lock prevents).
-  until (set -C; echo acquiring > "$LOCK_FILE") 2>/dev/null; do
-    _lock_holder=$(cat "$LOCK_FILE" 2>/dev/null)
-    case "$_lock_holder" in
-      ''|*[!0-9]*) : ;;  # empty or placeholder — treat as alive (just acquired)
-      *)
-        if ! kill -0 "$_lock_holder" 2>/dev/null; then
-          log_warn "[$session_id] Lock holder PID $_lock_holder is dead — reclaiming stale lock"
-          rm -f "$LOCK_FILE"
-          waited=0
-          continue
-        fi ;;
-    esac
-    if [ "$waited" -ge 6200 ]; then
-      log_warn "[$session_id] Lock wait exceeded watchdog ceiling (${waited}s) — force-clearing"
+  while :; do
+    # Acquire atomically (noclobber) BEFORE spawning Claude. Stale-lock
+    # policy: a NUMERIC dead pid → reclaim immediately; an alive holder is
+    # waited out up to 6200s (the 6000s watchdog ceiling governs in-flight
+    # calls — a shorter cutoff here used to break the lock of legitimately
+    # long-running handlers).
+    until (set -C; printf 'acquiring %s' "$_lock_token" > "$LOCK_FILE") 2>/dev/null; do
+      _lock_holder=$(awk '{print $1}' "$LOCK_FILE" 2>/dev/null)
+      case "$_lock_holder" in
+        ''|*[!0-9]*) : ;;  # placeholder — treat as alive (just acquired)
+        *)
+          if ! kill -0 "$_lock_holder" 2>/dev/null; then
+            log_warn "[$session_id] Lock holder PID $_lock_holder is dead — reclaiming stale lock"
+            rm -f "$LOCK_FILE"
+            waited=0
+            continue
+          fi ;;
+      esac
+      if [ "$waited" -ge 6200 ]; then
+        log_warn "[$session_id] Lock wait exceeded watchdog ceiling (${waited}s) — force-clearing"
+        rm -f "$LOCK_FILE"
+        waited=0
+        continue
+      fi
+      if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
+        log_info "[$session_id] Session busy, waiting... (${waited}s)"
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+    # Re-resolve after acquiring: the conversation may have rotated to a new
+    # session while we waited (background-job auto-promotion does this). Our
+    # session_id was resolved at dispatch time — resuming it now would write
+    # into the transcript the promoted Claude is still appending to.
+    _cur_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
+import json, os
+try:
+    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    if [ -n "$_cur_sid" ] && [ "$_cur_sid" != "$session_id" ]; then
+      log_info "[$session_id] Conversation rotated to $_cur_sid while waiting — switching"
       rm -f "$LOCK_FILE"
-      waited=0
+      session_id="$_cur_sid"
+      LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
       continue
     fi
-    if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
-      log_info "[$session_id] Session busy, waiting... (${waited}s)"
-    fi
-    sleep 5
-    waited=$((waited + 5))
+    break
   done
 
   # Run Claude with automatic retry on empty response
@@ -570,6 +589,15 @@ $(load_memory)"
     if [ "$_attempt" -gt 1 ]; then
       log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
       sleep 3
+    fi
+
+    # Ownership check before every spawn: if the lock no longer carries our
+    # token (a waiter reclaimed it as stale, or promotion released it and
+    # someone else acquired), we must NOT touch this session again.
+    if ! grep -q "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
+      log_warn "[$session_id] Lost lock ownership before attempt $_attempt — aborting retries"
+      answer=""
+      break
     fi
 
     if [ -f "$session_file" ]; then
@@ -590,7 +618,7 @@ $(load_memory)"
         2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
     fi
     _claude_pid=$!
-    echo "$_claude_pid" > "$LOCK_FILE"
+    printf '%s %s' "$_claude_pid" "$_lock_token" > "$LOCK_FILE"
     # Live activity stream: poll session file every 20s, send new tool calls to user
     # Also acts as watchdog: kills Claude after 6000s
     (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -653,17 +681,20 @@ for d in descs[offset:]:
            # between narrations; raw list is the fallback on any failure.
            _now_s=$(date +%s)
            if [ $((_now_s - ${_last_narrate:-0})) -ge 60 ]; then
-             _narration=$(with_timeout 12 claude -p \
-               "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
-$_formatted" \
-               --model haiku --no-session-persistence --disable-slash-commands \
-               --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
              _last_narrate=$_now_s
-           else
-             _narration=""
-           fi
-           if [ -n "$_narration" ] && [ "${#_narration}" -lt 200 ]; then
-             lark_reply_text "$message_id" "🔧 $_narration" >/dev/null 2>&1 || true
+             # Narrate in a BACKGROUND fork: an inline call (even with a real
+             # timeout) blocks this poll loop, delaying the 120s promotion
+             # check and the 6000s watchdog by up to 12s per narration.
+             ( _n=$(with_timeout 12 claude -p \
+                 "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
+$_formatted" \
+                 --model haiku --no-session-persistence --disable-slash-commands \
+                 --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
+               if [ -n "$_n" ] && [ "${#_n}" -lt 200 ]; then
+                 lark_reply_text "$message_id" "🔧 $_n" >/dev/null 2>&1
+               else
+                 lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1
+               fi ) >/dev/null 2>&1 &
            else
              lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1 || true
            fi
@@ -690,7 +721,10 @@ from core.session import SessionManager
 sm = SessionManager(os.environ['JV_TRACKER'], os.environ['JV_SDIR'])
 sm.force_rotate(os.environ['JV_KEY'])
 " 2>>"$LOG_FILE"; then
-             rm -f "$LOCK_FILE"
+             # Release only OUR lock (ownership may already have moved)
+             if grep -q "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
+               rm -f "$LOCK_FILE"
+             fi
              lark_reply_text "$message_id" "⏳ 这个任务跑得比较久，已自动转后台（job \`$_bg_job_id\`）。会话已释放，可以继续找我聊别的；做完我会把结果发回来。发 jobs 可查进度，发 cancel $_bg_job_id 可取消。" >/dev/null 2>&1 || true
              log_info "[$session_id] Promoted to background job $_bg_job_id after ${_elapsed}s — lock released"
            else
@@ -716,6 +750,12 @@ sm.force_rotate(os.environ['JV_KEY'])
     wait $_claude_pid 2>/dev/null
     local _exit_code=$?
     kill $_watchdog_pid 2>/dev/null 2>&1; wait $_watchdog_pid 2>/dev/null
+    # Reset the lock to placeholder while we own it: between attempts the
+    # file would otherwise hold a DEAD claude pid, which a waiter's staleness
+    # check reads as "handler crashed" and reclaims mid-retry.
+    if grep -q "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
+      printf 'acquiring %s' "$_lock_token" > "$LOCK_FILE"
+    fi
     # Did the 6000s watchdog do this kill, or was it a restart / external SIGTERM?
     [ -f "${ANSWER_FILE}.watchdog" ] && _watchdog_killed=1
 
@@ -765,7 +805,13 @@ except Exception:
 
   local _promoted_job=""
   [ -f "${ANSWER_FILE}.promoted" ] && _promoted_job=$(cat "${ANSWER_FILE}.promoted" 2>/dev/null)
-  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "${ANSWER_FILE}.promoted" "$LOCK_FILE"
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "${ANSWER_FILE}.promoted"
+  # Remove the lock ONLY if we still own it: after promotion released it (or
+  # a staleness reclaim), it may belong to another live handler — an
+  # unconditional rm here silently unlocked their in-flight session.
+  if grep -q "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
+    rm -f "$LOCK_FILE"
+  fi
 
   # Filter error-like answers — never send them to the user as the "real" reply
   local reply=""
@@ -1524,7 +1570,8 @@ except Exception:
 " 2>/dev/null || echo "")
         _stop_lock="$JARVIS_DIR/.session_lock_${_stop_sid}"
         if [ -f "$_stop_lock" ]; then
-          _stop_pid=$(cat "$_stop_lock" 2>/dev/null)
+          # Lock format is "<pid> <token>" — take the first field
+          _stop_pid=$(awk '{print $1}' "$_stop_lock" 2>/dev/null)
           if [ -n "$_stop_pid" ] && kill -0 "$_stop_pid" 2>/dev/null; then
             pkill -TERM -P "$_stop_pid" 2>/dev/null || true
             kill "$_stop_pid" 2>/dev/null || true

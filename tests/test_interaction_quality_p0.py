@@ -188,3 +188,29 @@ def test_apply_adaptations_writes_sidecar_with_chinese_keyword(tmp_path, monkeyp
     ])
     overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
     assert overrides == {"free-time-nudge": 14400}
+
+
+def test_apply_adaptations_guardrails(tmp_path, monkeypatch):
+    """Infra tasks are exempt from tuning; drift is capped at 4x base.
+    (2026-06-11: the analyzer slowed Tier-0 calendar-sync to 2h in production
+    within hours of the apply path going live.)"""
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "### calendar-sync\n- interval: 30m\n- prompt: p\n\n"
+        "### chatty-task\n- interval: 1h\n- prompt: q\n")
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    from tasks.engagement_analyze_post import _apply_adaptations
+
+    # protected: calendar-sync is TIER0/PRIORITY — suggestion ignored
+    _apply_adaptations([{"target": "calendar-sync", "suggestion": "降频"}])
+    assert not (tmp_path / "interval_overrides.json").exists()
+
+    # cap: repeated reductions stop at 4x the HEARTBEAT.md base (1h → 4h max)
+    meta_file = tmp_path / "interval_overrides_meta.json"
+    for _ in range(5):
+        _apply_adaptations([{"target": "chatty-task", "suggestion": "reduce"}])
+        if meta_file.exists():  # defeat the recompound cooldown for the test
+            meta = json.loads(meta_file.read_text())
+            meta["chatty-task"] = 0
+            meta_file.write_text(json.dumps(meta))
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides["chatty-task"] == 4 * 3600

@@ -1,5 +1,6 @@
 # Config (personal)
 jarvis.yaml
+sources.yaml
 .claude/
 
 # Runtime state (bot + heartbeat + session tracking)

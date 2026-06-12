@@ -74,6 +74,8 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
 
     signals = []
     messages = (data.get("data") or {}).get("messages") or data.get("messages") or []
+    page_full = len(messages) >= MAX_SIGNALS_PER_RUN
+    last_msg_iso = ""
     for msg in messages[:MAX_SIGNALS_PER_RUN]:
         sender = ((msg.get("sender") or {}).get("id")
                   or (msg.get("sender") or {}).get("sender_id", {}).get("open_id", ""))
@@ -87,11 +89,12 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
         except (TypeError, ValueError):
             ts = now
         text = _extract_text(msg)
+        last_msg_iso = _iso(ts)
         if not text.strip():
             continue
         signals.append({
             "event_id": msg_id,
-            "ts": _iso(ts),
+            "ts": last_msg_iso,
             "title": text[:80],
             "summary": text[:200],
             "body": text[:2048],
@@ -100,4 +103,10 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
             "payload": {"chat_id": chat_id},
         })
 
-    return signals, {"last_ts": end_iso, "error_type": None}
+    # Cursor advance: a FULL page means more messages may exist in the
+    # window beyond what we fetched — advance only to the last processed
+    # message's ts so the next pass resumes there (seen-store dedups the
+    # boundary overlap). Unconditionally jumping to end_iso silently and
+    # permanently dropped everything past the first page in a busy chat.
+    next_cursor = (last_msg_iso or end_iso) if page_full else end_iso
+    return signals, {"last_ts": next_cursor, "error_type": None}

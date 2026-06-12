@@ -116,14 +116,24 @@ def _apply_adaptations(adaptations: list[dict]):
 
     # Load task intervals from HEARTBEAT.md for reference
     sys.path.insert(0, str(jarvis_dir))
-    from core.heartbeat import parse_heartbeat
+    from core.heartbeat import HeartbeatRunner, parse_heartbeat
     tasks_def = {t["name"]: t["interval"] for t in parse_heartbeat(jarvis_dir / "HEARTBEAT.md")}
+    # Infrastructure tasks are exempt from engagement tuning: they are silent
+    # by design, so 0% engagement is their NORMAL state, not a signal to slow
+    # them. 2026-06-11 the analyzer slowed Tier-0 calendar-sync to 2h within
+    # hours of the apply path going live — stale-calendar complaints (5/25)
+    # would have recurred with nothing reporting why.
+    protected = HeartbeatRunner.PRIORITY_TASKS | HeartbeatRunner.TIER0_TASKS
 
     changed = []
     for a in adaptations:
         target = a.get("target", "")
         suggestion = a.get("suggestion", "").lower()
         if target not in tasks_def:
+            continue
+        if target in protected:
+            print(f"[engagement-analyze] {target}: protected infrastructure task, "
+                  "skipping frequency adaptation", file=sys.stderr)
             continue
 
         base_interval = tasks_def[target]
@@ -147,9 +157,12 @@ def _apply_adaptations(adaptations: list[dict]):
             continue
 
         # Compound from the current override (if any) so repeated suggestions
-        # keep adapting, but clamp: don't go below 5min or above 48h
+        # keep adapting, but clamp: don't go below 5min or above 48h, and
+        # never drift beyond 4x/0.25x of the HEARTBEAT.md base — auto-tuning
+        # adjusts cadence, it must not be able to effectively disable a task.
         current = overrides.get(target) or base_interval
         new_interval = max(300, min(172800, int(current * multiplier)))
+        new_interval = max(base_interval // 4, min(base_interval * 4, new_interval))
 
         if new_interval == current:
             continue

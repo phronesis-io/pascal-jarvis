@@ -905,9 +905,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # tokens leak into access logs/history — header is preferred.
             parsed = urlparse(self.path)
             provided = parse_qs(parsed.query).get("token", [""])[0]
-        # Constant-time compare: == leaks match length via timing
+        # Constant-time compare: == leaks match length via timing.
+        # Compare BYTES: compare_digest raises TypeError on non-ASCII str,
+        # and `provided` is fully caller-controlled.
         import hmac
-        return hmac.compare_digest(provided, ADMIN_TOKEN)
+        return hmac.compare_digest(provided.encode("utf-8", "replace"),
+                                   ADMIN_TOKEN.encode("utf-8", "replace"))
 
     def do_GET(self):
         parsed = urlparse(self.path)

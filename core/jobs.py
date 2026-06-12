@@ -100,11 +100,24 @@ class JobManager:
             _atomic_write_json(self.registry_path, registry)
 
     def finish_job(self, job_id: str, status: str = "completed") -> None:
-        """Mark a job as finished (completed or failed)."""
-        self.update_job(job_id,
-                        status=status,
-                        finished_at=now_local_str("%Y-%m-%d %H:%M:%S"),
-                        pid=None)
+        """Mark a job as finished (completed or failed).
+
+        Only transitions jobs that are still running: the sweeper may have
+        marked it lost (or the user cancelled) moments earlier, and a blind
+        overwrite turned 'lost' back into 'completed' after the user was
+        already told the job died.
+        """
+        with _locked(self.registry_path):
+            registry = self._read_registry()
+            job = registry.get(job_id)
+            if not job:
+                return
+            if job.get("status") != "running":
+                return
+            job["status"] = status
+            job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
+            job["pid"] = None
+            _atomic_write_json(self.registry_path, registry)
 
     def cancel_job(self, job_id: str) -> bool:
         """Cancel a running job by killing its process."""

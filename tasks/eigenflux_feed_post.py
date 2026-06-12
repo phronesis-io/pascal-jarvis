@@ -168,6 +168,16 @@ def main() -> int:
             efd.hold(msg, source="eigenflux-feed")
             print("[eigenflux-feed] quiet hours — held for morning digest", file=LOG)
             return 0
+        if urgent:
+            # Tell the downstream heartbeat send layer to bypass ITS batch
+            # queue too: it only sees the task-name sidecar, and
+            # eigenflux-feed-triage is a batchable source by default — without
+            # this an urgent 2am item clears this gate only to be re-held in
+            # night_queue until the 10:00 digest.
+            try:
+                (Path(os.environ.get("JARVIS_DIR", ".")) / ".urgent_send").touch()
+            except OSError:
+                pass
         # A single "阅读原文" button only makes sense when the card has ONE
         # source. Multi-item digests (FYI/知会) carry a per-item inline link
         # each; the footer button would point to just the first item and

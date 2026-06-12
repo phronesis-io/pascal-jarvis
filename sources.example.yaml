@@ -1,0 +1,61 @@
+# Perception source registry — copy to sources.yaml and edit.
+# (docs/prd_perception_ingestion.md; setup.sh copies this automatically)
+#
+# Adding an information source = adding a block here. No new scripts.
+# Adapter types live in sources/<type>.py and are discovered by dynamic
+# import; bundled adapters: file_watch, git_repo, lark_chat, lark_mail.
+# The bot works fine with no sources enabled — this whole layer is optional.
+
+perception:
+  defaults:
+    sensitivity: internal
+    interval: 15m
+
+  sources:
+    # Watch documents/reports for changes (first run baselines silently)
+    - id: reports
+      type: file_watch
+      enabled: true
+      label: "Docs and reports"
+      collect:
+        globs:
+          - "~/path/to/your/workdir/*REPORT*.md"
+          - "~/path/to/your/repos/your-jarvis/docs/*.md"
+      schedule: { interval: 30m }
+      perceive: { buffer: inbox_ops.md }
+
+    # New commits across your local repos (read-only git log, no fetching)
+    - id: repos_commits
+      type: git_repo
+      enabled: false
+      label: "Local repos new commits"
+      collect:
+        repos_dir: "~/path/to/your/repos"
+        exclude: ["your-jarvis-repo"]   # its commits come from your own sessions
+      schedule: { interval: 30m }
+      perceive: { buffer: inbox_ops.md }
+
+    # A Lark group chat (find the chat id via: lark-cli im +chats-list)
+    - id: team_chat
+      type: lark_chat
+      enabled: false
+      label: "Team group chat"
+      collect:
+        chat_id: "oc_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        exclude_open_id: "ou_YOUR_OWN_OPEN_ID"
+      schedule: { interval: 10m }
+      perceive: { buffer: inbox_team.md }
+
+    # Lark mailbox new-mail metadata (from/subject only; bodies stay out of
+    # context). The inbox_private_* buffer name keeps it away from
+    # outward-facing tasks via the sensitivity gate.
+    - id: lark_mail
+      type: lark_mail
+      enabled: false
+      label: "Lark mailbox"
+      collect:
+        mailboxes: ["me"]
+        exclude_from: ["dmarc", "mail-noreply@feishu.cn"]
+      schedule: { interval: 15m }
+      sensitivity: private
+      perceive: { buffer: inbox_private_mail.md }

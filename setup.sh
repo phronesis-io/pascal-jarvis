@@ -104,6 +104,13 @@ else
   warn "You MUST edit jarvis.yaml before running the bot. See next steps below."
 fi
 
+if [ -f sources.yaml ]; then
+  ok "sources.yaml already exists — not overwriting"
+else
+  cp sources.example.yaml sources.yaml
+  ok "sources.yaml created from sources.example.yaml (perception layer — optional, edit to enable sources)"
+fi
+
 # ── 5. Seed memory directory ─────────────────────────────────────────
 step "Seeding memory directory"
 
