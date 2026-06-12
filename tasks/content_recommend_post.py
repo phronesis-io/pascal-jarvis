@@ -100,7 +100,8 @@ def main() -> int:
         card_obj = json.loads(card_str)
         card_obj["elements"].append({
             "tag": "note",
-            "elements": [{"tag": "plain_text", "content": "回复'收藏'也可以稍后看"}],
+            "elements": [{"tag": "plain_text",
+                          "content": "点任意表情👍即可收藏稍后看；回复'收藏'也行"}],
         })
         card_str = json.dumps(card_obj, ensure_ascii=False)
 

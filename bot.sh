@@ -1175,6 +1175,58 @@ lark_subscribe_messages \
               '{ts:$ts,type:"reaction",message_id:$mid,emoji:$emoji,epoch:$epoch}' \
               >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
             log_info "[engagement] reaction $_re_emoji on ${_re_mid:0:20}"
+            # ── One-tap watch-later (一键收藏, asked 5/06): reacting with ANY
+            # emoji on one of OUR url-bearing messages saves it. This is the
+            # card-button replacement that needs NO callback config — reaction
+            # events already flow over this connection. Backgrounded: mget is
+            # a network call and the event loop must not block.
+            ( _wl_raw=$(lark-cli im +messages-mget --message-ids "$_re_mid" --as bot 2>>"$LOG_FILE")
+              _wl_info=$(echo "$_wl_raw" | python3 -c "
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+    msgs = d.get('data', {}).get('messages', d.get('messages', []))
+    if not msgs:
+        raise SystemExit
+    m = msgs[0]
+    sender = m.get('sender', {}) or {}
+    stype = sender.get('sender_type') or sender.get('type') or ''
+    if stype not in ('app', 'bot'):
+        raise SystemExit  # only saves from OUR messages, never someone else's
+    body = m.get('body', {}).get('content', m.get('content', '')) or ''
+    try:
+        inner = json.loads(body) if isinstance(body, str) else body
+    except Exception:
+        inner = {}
+    if isinstance(inner, dict):
+        text = inner.get('text') or json.dumps(inner, ensure_ascii=False)
+    else:
+        text = str(body)
+    urls = re.findall(r'https?://[^\s\)\]\"\'，。；]+', text)
+    if not urls:
+        raise SystemExit
+    title = ''
+    for line in text.splitlines():
+        line = re.sub(r'[#*\[\]\`>|]', '', line).strip()
+        if line and not line.lower().startswith('http'):
+            title = line[:80]
+            break
+    print(json.dumps({'title': title or urls[0][:60], 'url': urls[0]}, ensure_ascii=False))
+except SystemExit:
+    pass
+except Exception:
+    pass
+" 2>>"$LOG_FILE")
+              if [ -n "$_wl_info" ]; then
+                _wl_t=$(echo "$_wl_info" | jq -r .title)
+                _wl_u=$(echo "$_wl_info" | jq -r .url)
+                if python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_wl_t" "$_wl_u" "reaction" \
+                     >/dev/null 2>>"$LOG_FILE"; then
+                  lark_reply_text "$_re_mid" "✅ 已收藏「${_wl_t:0:40}」，空闲时段会提醒你。（对带链接的消息点任意表情都会收藏）" >/dev/null 2>&1 || true
+                  log_info "[watchlater] Saved via reaction: ${_wl_t:0:60}"
+                fi
+              fi
+            ) >/dev/null 2>&1 &
           fi
           continue ;;
         im.message.reaction.deleted_v1)
