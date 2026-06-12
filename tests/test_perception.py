@@ -197,3 +197,67 @@ def test_outbound_memory_skips_private_inbox(tmp_path):
     outbound = load_tiered_memory(memory, purpose="outbound")
     assert "私密邮件内容" not in outbound
     assert "团队动态" in outbound  # internal stays visible
+
+
+# ── lark_mail adapter ────────────────────────────────────────────────
+
+
+def _mail_msgs(*rows):
+    return [{"date": d, "from": f, "subject": s, "message_id": m}
+            for d, f, s, m in rows]
+
+
+def test_lark_mail_collects_and_advances_cursor(monkeypatch):
+    from sources import lark_mail
+    calls = []
+
+    def fake_triage(mailbox, folder):
+        calls.append(mailbox)
+        return _mail_msgs(
+            ("2026-06-12 12:00", "alice@x.com", "Hello", "MID1"),
+            ("2020-01-01 00:00", "old@x.com", "Ancient", "MID0"),
+        )
+
+    monkeypatch.setattr(lark_mail, "_triage", fake_triage)
+    signals, state = lark_mail.collect({"mailboxes": ["me"]}, {})
+    assert calls == ["me"]
+    # ancient message is behind the 24h first-run lookback cursor
+    assert [s["event_id"] for s in signals] == ["MID1"]
+    assert signals[0]["title"].startswith("📧 Hello")
+    assert "alice@x.com" in signals[0]["summary"]
+    # body is metadata-only: never ingests mail content
+    assert "MID1" in signals[0]["body"] and "Hello" in signals[0]["body"]
+    assert state["cursors"]["me"] == "2026-06-12 12:00"
+    assert state["error_type"] is None
+
+    # second run with same payload: cursor admits the boundary message
+    # (stable event_id → runtime seen-store dedups; overlap-then-dedup)
+    signals2, _ = lark_mail.collect({"mailboxes": ["me"]}, state)
+    assert [s["event_id"] for s in signals2] == ["MID1"]
+
+
+def test_lark_mail_exclude_from_filters_but_advances_cursor(monkeypatch):
+    from sources import lark_mail
+    monkeypatch.setattr(lark_mail, "_triage", lambda mb, f: _mail_msgs(
+        ("2026-06-12 12:00", "noreply-dmarc-support@google.com", "Report", "MIDD"),
+    ))
+    signals, state = lark_mail.collect(
+        {"mailboxes": ["me"], "exclude_from": ["dmarc"]}, {})
+    assert signals == []
+    assert state["cursors"]["me"] == "2026-06-12 12:00"
+
+
+def test_lark_mail_error_isolated_per_mailbox(monkeypatch):
+    from sources import lark_mail
+
+    def fake_triage(mailbox, folder):
+        if mailbox == "broken@x.com":
+            raise RuntimeError("network")
+        return _mail_msgs(("2026-06-12 12:00", "a@x.com", "Hi", "MID9"))
+
+    monkeypatch.setattr(lark_mail, "_triage", fake_triage)
+    signals, state = lark_mail.collect(
+        {"mailboxes": ["broken@x.com", "me"]}, {})
+    assert [s["event_id"] for s in signals] == ["MID9"]
+    assert state["error_type"] == "network"  # surfaced for error accounting
+    assert "broken@x.com" not in state["cursors"]  # no fake cursor on failure
