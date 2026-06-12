@@ -31,6 +31,48 @@ def _fmt_age(seconds: float) -> str:
     return f"{int(seconds / 60)}min"
 
 
+# A queue entry is only "stuck" once a batch window has been open this long
+# without a flush — one heartbeat cycle plus headroom. Anything younger is the
+# queue working as designed (waiting for a window or a user-activity breakpoint).
+QUEUE_OVERDUE_GRACE_SECONDS = 15 * 60
+
+
+def _queue_status_line(jd: Path, queue_depth: int, now: float) -> str:
+    """Describe the batch queue: held entries are normal (quiet hours hold for
+    the morning digest, daytime general-interest holds for the next batch
+    window), and only a flush that failed to fire after a window opened is a
+    warning. The old unconditional 'pending morning flush' wording made normal
+    daytime batching read as a stuck queue in self-diagnostic."""
+    from datetime import datetime
+
+    from core.heartbeat_loop import (BATCH_FLUSH_STAMP, BATCH_WINDOWS_MIN,
+                                     _in_quiet_hours)
+    # Derive time-of-day from the report's `now` (system-local tz, same clock
+    # as the flush stamp) so tests can pin the wall clock.
+    t = datetime.fromtimestamp(now)
+    mod = t.hour * 60 + t.minute
+    if _in_quiet_hours(mod):
+        return (f"  Batch queue: {queue_depth} message(s) held for the "
+                f"morning digest (quiet hours — normal)")
+    try:
+        last_flush = float((jd / BATCH_FLUSH_STAMP).read_text().strip())
+    except (OSError, ValueError):
+        last_flush = 0.0
+    passed = [w for w in BATCH_WINDOWS_MIN if mod >= w]
+    if passed:
+        since_window = (mod - max(passed)) * 60
+        flush_predates_window = now - last_flush > since_window + 60
+        if flush_predates_window and since_window > QUEUE_OVERDUE_GRACE_SECONDS:
+            return (f"  ⚠️ Batch queue: {queue_depth} message(s) STUCK — the "
+                    f"{max(passed) // 60:02d}:{max(passed) % 60:02d} window opened "
+                    f"{_fmt_age(since_window)} ago without a flush")
+    nxt = next((w for w in BATCH_WINDOWS_MIN if w > mod), None)
+    when = (f"{nxt // 60:02d}:{nxt % 60:02d}" if nxt is not None
+            else f"tomorrow {BATCH_WINDOWS_MIN[0] // 60:02d}:00")
+    return (f"  Batch queue: {queue_depth} message(s) awaiting next batch "
+            f"window ({when}) or user activity — normal")
+
+
 def channel_watermark_report(jarvis_dir: str | Path,
                              heartbeat_file: str | Path | None = None,
                              now: float | None = None) -> str:
@@ -80,6 +122,7 @@ def channel_watermark_report(jarvis_dir: str | Path,
         queue_depth = len(night_queue.read_text().splitlines())
     except OSError:
         queue_depth = 0
+    queue_line = _queue_status_line(jd, queue_depth, now) if queue_depth else ""
 
     lines = ["--- Channel Watermarks ---"]
     if starved:
@@ -88,8 +131,8 @@ def channel_watermark_report(jarvis_dir: str | Path,
         lines.extend(circuits)
     if consec_fails > 0:
         lines.append(f"  ⚠️ Lark delivery: {consec_fails} consecutive send failures")
-    if queue_depth > 0:
-        lines.append(f"  Night queue: {queue_depth} message(s) pending morning flush")
+    if queue_line:
+        lines.append(queue_line)
     if len(lines) == 1:
         lines.append("  ✓ All task channels within expected cadence")
     return "\n".join(lines)

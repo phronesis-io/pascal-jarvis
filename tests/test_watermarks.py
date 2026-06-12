@@ -74,6 +74,13 @@ def test_open_circuit_flagged(tmp_path):
     assert "circuit OPEN" in report
 
 
+def _epoch_at(hour, minute=0):
+    """Epoch seconds for today at hour:minute, system-local tz."""
+    from datetime import datetime
+    return datetime.now().replace(hour=hour, minute=minute,
+                                  second=0, microsecond=0).timestamp()
+
+
 def test_delivery_failures_and_night_queue_surface(tmp_path):
     now = time.time()
     _setup(tmp_path, HB,
@@ -82,7 +89,54 @@ def test_delivery_failures_and_night_queue_surface(tmp_path):
            night_queue_lines=['{"text":"a"}', '{"text":"b"}'])
     report = channel_watermark_report(tmp_path, now=now)
     assert "4 consecutive send failures" in report
-    assert "Night queue: 2" in report
+    assert "Batch queue: 2" in report
+
+
+def test_queue_during_quiet_hours_is_normal(tmp_path):
+    now = _epoch_at(2, 0)  # 02:00 — quiet hours
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)}, "checkin": {"last_run": int(now)}},
+           night_queue_lines=['{"text":"a"}'])
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "held for the morning digest" in report
+    assert "STUCK" not in report and "⚠️ Batch queue" not in report
+
+
+def test_queue_awaiting_next_window_is_normal(tmp_path):
+    # 12:49 daytime queue entry, last flush 12:33 (after the 10:00 window) —
+    # exactly the 2026-06-12 false alarm: awaiting the 13:30 window, not stuck
+    now = _epoch_at(13, 8)
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)}, "checkin": {"last_run": int(now)}},
+           night_queue_lines=['{"text":"a"}'])
+    (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(12, 33)))
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "awaiting next batch window (13:30)" in report
+    assert "STUCK" not in report
+
+
+def test_queue_stuck_past_window_flagged(tmp_path):
+    # Last flush 09:00, window opened 13:30, it's now 14:00 — flush missed
+    now = _epoch_at(14, 0)
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)}, "checkin": {"last_run": int(now)}},
+           night_queue_lines=['{"text":"a"}'])
+    (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(9, 0)))
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "STUCK" in report and "13:30 window" in report
+
+
+def test_queue_after_last_window_points_to_tomorrow(tmp_path):
+    # 18:00 queue entry at 19:00, flushed at the 17:30 window already —
+    # next chance is tomorrow's first window
+    now = _epoch_at(19, 0)
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)}, "checkin": {"last_run": int(now)}},
+           night_queue_lines=['{"text":"a"}'])
+    (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(18, 30)))
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "tomorrow 10:00" in report
+    assert "STUCK" not in report
 
 
 def test_missing_files_no_crash(tmp_path):

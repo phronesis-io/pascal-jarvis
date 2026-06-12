@@ -331,7 +331,8 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
              "text": readable, "source": source or "heartbeat"}
     with open(jarvis_dir / NIGHT_QUEUE_FILE, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    log("heartbeat", f"Queued for morning (quiet hours, source={source or 'heartbeat'})")
+    reason = "quiet hours" if _in_quiet_hours() else "daytime batching"
+    log("heartbeat", f"Queued for batch ({reason}, source={source or 'heartbeat'})")
 
 
 def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
