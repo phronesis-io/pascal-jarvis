@@ -3,7 +3,7 @@
 #
 # Adding an information source = adding a block here. No new scripts.
 # Adapter types live in sources/<type>.py and are discovered by dynamic
-# import; bundled adapters: file_watch, git_repo, lark_chat, lark_mail.
+# import; bundled adapters: file_watch, git_repo, lark_chat, lark_mail, imap_mail.
 # The bot works fine with no sources enabled — this whole layer is optional.
 
 perception:
@@ -56,6 +56,22 @@ perception:
       collect:
         mailboxes: ["me"]
         exclude_from: ["dmarc", "mail-noreply@feishu.cn"]
+      schedule: { interval: 15m }
+      sensitivity: private
+      perceive: { buffer: inbox_private_mail.md }
+
+    # Generic IMAP-SSL mailbox (e.g. 163/Gmail/Outlook). Metadata only.
+    # Credentials live in a 0600 JSON pointed to by secret_file — NEVER here:
+    #   {"email":"you@163.com","imap_host":"imap.163.com","imap_port":993,
+    #    "auth_code":"<app-password>"}
+    # 163/Coremail needs an IMAP ID handshake (handled by the adapter).
+    - id: imap_mail
+      type: imap_mail
+      enabled: false
+      label: "IMAP mailbox"
+      collect:
+        secret_file: "~/path/to/imap_secret.json"
+        exclude_from: ["mailmaster@163.com", "newsletter"]
       schedule: { interval: 15m }
       sensitivity: private
       perceive: { buffer: inbox_private_mail.md }
