@@ -339,14 +339,32 @@ def _stamp_flush(jarvis_dir: Path, now: float | None = None):
     (jarvis_dir / BATCH_FLUSH_STAMP).write_text(str(now))
 
 
-NIGHT_ENTRY_MAX_CHARS = 600     # per queued message, keeps the digest sendable
+NIGHT_ENTRY_MAX_CHARS = 600     # per-entry floor when many entries share the digest
 NIGHT_DIGEST_MAX_CHARS = 3800   # total digest budget (Lark text limit headroom)
+
+
+def _truncate_entry(text: str, limit: int) -> str:
+    """Cap an entry at `limit`, preferring a newline boundary so we never
+    leave a dangling half markdown link mid-sentence."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nl = cut.rfind("\n")
+    if nl > limit * 0.6:
+        cut = cut[:nl]
+    else:
+        lb = cut.rfind("[")
+        if lb != -1 and ")" not in cut[lb:]:
+            cut = cut[:lb]
+    return cut.rstrip() + "…(截断)"
 
 
 def _queue_for_morning(output: str, jarvis_dir: Path):
     readable = extract_readable_from_output(output) or output
-    if len(readable) > NIGHT_ENTRY_MAX_CHARS:
-        readable = readable[:NIGHT_ENTRY_MAX_CHARS] + "…(截断)"
+    # Store near-full text; the fair per-entry cap is applied at flush time
+    # when the batch size is known (a single queued message used to be cut
+    # to 600 chars even though the whole digest budget was free).
+    readable = _truncate_entry(readable, NIGHT_DIGEST_MAX_CHARS)
     source = _peek_source(jarvis_dir)
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
     sources = _sources_of(source)
@@ -404,8 +422,13 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
     parts = [f"📦 **攒批的 {len(entries)} 条消息**"]
     used = len(parts[0])
     dropped = 0
+    # Fair split of the digest budget: one entry can use almost all of it,
+    # many entries each get at least the old 600-char floor.
+    per_entry = max(NIGHT_ENTRY_MAX_CHARS,
+                    NIGHT_DIGEST_MAX_CHARS // len(entries) - 64)
     for e in entries:
-        piece = f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{e.get('text', '')}"
+        text = _truncate_entry(e.get("text", ""), per_entry)
+        piece = f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{text}"
         if used + len(piece) > NIGHT_DIGEST_MAX_CHARS:
             dropped += 1
             continue

@@ -281,3 +281,44 @@ def test_flush_with_only_silent_entries_sends_nothing(tmp_path, monkeypatch):
     assert not _flush_night_queue(tmp_path, "ou_test")
     assert sent == []
     assert not queue.exists()  # scrubbed queue is cleared, not retried forever
+
+
+# ── Flush-time fair truncation (6/12 feed-triage card cut at 600) ────
+
+
+def test_single_long_entry_not_truncated_at_600(tmp_path, monkeypatch):
+    # One queued message with three bullets (~1500 chars) used to be cut to
+    # 600 at queue time even though the whole 3800 digest budget was free.
+    text = "\n\n".join(f"• 条目{i} " + "内容" * 200 for i in range(3))  # ~1300 chars
+    (tmp_path / ".heartbeat_last_source").write_text("eigenflux-feed-triage")
+    _queue_for_morning(text, tmp_path)
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert _flush_night_queue(tmp_path, "ou_test")
+    assert "截断" not in sent[0]
+    assert "条目2" in sent[0]  # last bullet survives
+
+
+def test_many_entries_share_budget_with_floor(tmp_path, monkeypatch):
+    # Six long entries: each gets at least the 600-char floor, digest stays
+    # within the Lark budget, truncation lands on a newline boundary.
+    for i in range(6):
+        (tmp_path / ".heartbeat_last_source").write_text("checkin")
+        _queue_for_morning(f"头{i}\n" + "\n".join("行" * 50 for _ in range(30)), tmp_path)
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert _flush_night_queue(tmp_path, "ou_test")
+    assert len(sent[0]) <= hbl.NIGHT_DIGEST_MAX_CHARS + 200  # header slack
+    assert "截断" in sent[0]
+
+
+def test_truncate_entry_prefers_newline_boundary():
+    text = "第一行内容\n[原文](https://example.com/very-long-url-path)"
+    cut = hbl._truncate_entry(text, len(text) - 5)
+    # never leaves a dangling half link — cut back to the newline
+    assert "https" not in cut
+    assert cut.endswith("…(截断)")
+
+
+def test_truncate_entry_noop_when_short():
+    assert hbl._truncate_entry("短", 600) == "短"
