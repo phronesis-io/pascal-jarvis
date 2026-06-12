@@ -1180,50 +1180,38 @@ lark_subscribe_messages \
             # card-button replacement that needs NO callback config — reaction
             # events already flow over this connection. Backgrounded: mget is
             # a network call and the event loop must not block.
-            ( _wl_raw=$(lark-cli im +messages-mget --message-ids "$_re_mid" --as bot 2>>"$LOG_FILE")
-              _wl_info=$(echo "$_wl_raw" | python3 -c "
-import json, re, sys
-try:
-    d = json.load(sys.stdin)
-    msgs = d.get('data', {}).get('messages', d.get('messages', []))
-    if not msgs:
-        raise SystemExit
-    m = msgs[0]
-    sender = m.get('sender', {}) or {}
-    stype = sender.get('sender_type') or sender.get('type') or ''
-    if stype not in ('app', 'bot'):
-        raise SystemExit  # only saves from OUR messages, never someone else's
-    body = m.get('body', {}).get('content', m.get('content', '')) or ''
-    try:
-        inner = json.loads(body) if isinstance(body, str) else body
-    except Exception:
-        inner = {}
-    if isinstance(inner, dict):
-        text = inner.get('text') or json.dumps(inner, ensure_ascii=False)
-    else:
-        text = str(body)
-    urls = re.findall(r'https?://[^\s\)\]\"\'，。；]+', text)
-    if not urls:
-        raise SystemExit
-    title = ''
-    for line in text.splitlines():
-        line = re.sub(r'[#*\[\]\`>|]', '', line).strip()
-        if line and not line.lower().startswith('http'):
-            title = line[:80]
-            break
-    print(json.dumps({'title': title or urls[0][:60], 'url': urls[0]}, ensure_ascii=False))
-except SystemExit:
-    pass
-except Exception:
-    pass
-" 2>>"$LOG_FILE")
+            # Extraction lives in core/reaction_save.py — testable against
+            # REAL captured mget shapes (the inline version shipped dead:
+            # imagined fixtures didn't match lark-cli's pre-decoded output).
+            ( _wl_info=$(lark-cli im +messages-mget --message-ids "$_re_mid" --as bot 2>>"$LOG_FILE" \
+                | python3 -m core.reaction_save 2>>"$LOG_FILE")
               if [ -n "$_wl_info" ]; then
-                _wl_t=$(echo "$_wl_info" | jq -r .title)
-                _wl_u=$(echo "$_wl_info" | jq -r .url)
-                if python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_wl_t" "$_wl_u" "reaction" \
-                     >/dev/null 2>>"$LOG_FILE"; then
-                  lark_reply_text "$_re_mid" "✅ 已收藏「${_wl_t:0:40}」，空闲时段会提醒你。（对带链接的消息点任意表情都会收藏）" >/dev/null 2>&1 || true
-                  log_info "[watchlater] Saved via reaction: ${_wl_t:0:60}"
+                _wl_saved=0
+                _wl_dupes=0
+                _wl_count=$(echo "$_wl_info" | jq -r '.items | length')
+                _wl_i=0
+                while [ "$_wl_i" -lt "$_wl_count" ]; do
+                  _wl_t=$(echo "$_wl_info" | jq -r ".items[$_wl_i].title")
+                  _wl_u=$(echo "$_wl_info" | jq -r ".items[$_wl_i].url")
+                  _wl_out=$(python3 "$JARVIS_DIR/tasks/watchlater_save.py" "$_wl_t" "$_wl_u" "reaction" 2>>"$LOG_FILE")
+                  case "$_wl_out" in
+                    *已在*) _wl_dupes=$((_wl_dupes + 1)) ;;
+                    *) _wl_saved=$((_wl_saved + 1)) ;;
+                  esac
+                  _wl_i=$((_wl_i + 1))
+                done
+                _wl_title=$(echo "$_wl_info" | jq -r .title)
+                if [ "$_wl_saved" -gt 0 ]; then
+                  if [ "$_wl_count" -gt 1 ]; then
+                    lark_reply_text "$_re_mid" "✅ 已收藏 ${_wl_saved} 条链接（「${_wl_title:0:40}」等），空闲时段会提醒你。" >/dev/null 2>&1 || true
+                  else
+                    lark_reply_text "$_re_mid" "✅ 已收藏「${_wl_title:0:40}」，空闲时段会提醒你。（对带链接的消息点任意表情都会收藏）" >/dev/null 2>&1 || true
+                  fi
+                  log_info "[watchlater] Saved via reaction: ${_wl_saved} item(s), ${_wl_title:0:50}"
+                elif [ "$_wl_dupes" -gt 0 ]; then
+                  # Already saved (repeat reaction) — stay silent, no confirm
+                  # spam, which also breaks any react-on-confirmation loop.
+                  log_info "[watchlater] Reaction on already-saved content (${_wl_dupes} dupes) — silent"
                 fi
               fi
             ) >/dev/null 2>&1 &

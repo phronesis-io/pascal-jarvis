@@ -19,7 +19,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Intentions | intention-check | yes (when intent fires) |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
-| Content | content-recommend, watchlater-remind | yes |
+| Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
 | Analytics | engagement-analyze, cross-session-sync | silent |
 | Team | phronesis-monitor | yes (if relevant) |

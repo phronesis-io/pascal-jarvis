@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .log import log as _structured_log
 from .memory import load_tiered_memory
+from .sched_events import emit as sched_emit
 from .task_protocol import TaskState
 from .timeutil import now_local_str
 
@@ -180,10 +181,22 @@ class HeartbeatRunner:
         self._cid = ""  # cycle_id, set per run_cycle invocation
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
+        # True iff the LAST claude_call ended in TimeoutExpired — lets the
+        # cycle distinguish task_timeout from a generic failed call when
+        # writing the scheduler event log (both return "" from claude_call).
+        self._call_timed_out = False
 
     def _log(self, msg: str, **kwargs):
         """Structured log with cycle_id for correlation."""
         _structured_log("heartbeat", msg, cycle=self._cid, **kwargs)
+
+    def _event(self, event: str, task: str = "", **fields):
+        """Scheduler event-log entry, correlated by cycle_id (run_id).
+
+        sched_emit never raises by contract — a logging failure must not
+        affect the scheduling path.
+        """
+        sched_emit(self.jarvis_dir, event, task=task, run_id=self._cid, **fields)
 
     def _collect_output(self, task_name: str, message: str,
                         user_messages: list, producing_tasks: list):
@@ -197,6 +210,7 @@ class HeartbeatRunner:
         if task_name in self.SILENT_TASKS:
             self._log(f"Silent task {task_name}: output suppressed "
                       f"(log-only, never delivered): {message[:80]!r}")
+            self._event("task_skip", task=task_name, reason="silent_output")
             return
         user_messages.append(message)
         producing_tasks.append(task_name)
@@ -299,6 +313,7 @@ You have access to the user's memory below. Use it to personalize your responses
         if self.model:
             cmd.extend(["--model", self.model])
 
+        self._call_timed_out = False
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
@@ -317,6 +332,7 @@ You have access to the user's memory below. Use it to personalize your responses
                     return "__KILLED__"
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
+            self._call_timed_out = True
             self._log(f"Claude call timed out ({self.claude_timeout}s)")
             return ""
         except FileNotFoundError:
@@ -430,6 +446,11 @@ You have access to the user's memory below. Use it to personalize your responses
                     if time.time() >= deadline:
                         self._log("Another heartbeat cycle holds the lock — skipping",
                                   only_task=only_task or "", waited=lock_wait)
+                        # run_id="": no cycle_id was assigned (self._cid would
+                        # be the stale id of a PREVIOUS cycle).
+                        sched_emit(self.jarvis_dir, "task_skip",
+                                   task=only_task or "*", run_id="",
+                                   reason="overlap_lock", waited_s=lock_wait)
                         return ""
                     time.sleep(2)
             try:
@@ -460,6 +481,15 @@ You have access to the user's memory below. Use it to personalize your responses
             if ts.circuit.is_open and task["name"] not in self.PRIORITY_TASKS:
                 remaining = ts.circuit.remaining_disable_seconds
                 circuit_tripped.append((task["name"], remaining))
+                # Event-log the skip only when the task was actually DUE —
+                # an open circuit is re-checked every tick (~10s) and a
+                # per-tick event would flood the replay log.
+                _itv = interval_overrides.get(task["name"]) \
+                    or (ts.effective_interval if ts.effective_interval > 0
+                        else task["interval"])
+                if force or (now - last_run >= _itv):
+                    self._event("task_skip", task=task["name"],
+                                reason="circuit_open", retry_in_s=remaining)
                 continue
             # Apply cooldown even when forced, to prevent rapid repeats
             # (e.g. multiple Lark session rotations in quick succession).
@@ -495,6 +525,8 @@ You have access to the user's memory below. Use it to personalize your responses
             regular = regular[:self.MAX_BATCH_SIZE]
             self._log(f"Batch capped at {self.MAX_BATCH_SIZE}, "
                       f"deferred {len(deferred)}: {[t['name'] for t in deferred]}")
+            for t in deferred:
+                self._event("task_skip", task=t["name"], reason="batch_deferred")
 
         due_tasks = priority + regular
 
@@ -511,6 +543,8 @@ You have access to the user's memory below. Use it to personalize your responses
                     ts.last_run = now - task["interval"] + retry_delay
                     state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
+                    self._event("task_skip", task=task["name"],
+                                reason="empty_pre", retry_in_s=retry_delay)
                     continue
                 task_data[task["name"]] = data
             else:
@@ -535,6 +569,8 @@ You have access to the user's memory below. Use it to personalize your responses
         producing_tasks = []
 
         for task in tier0:
+            t0 = time.time()
+            self._event("task_spawn", task=task["name"], tier=0)
             pre_data = task_data.get(task["name"], "")
             if task["post"] and pre_data:
                 post_output = self.run_script(task["post"], stdin_data=pre_data)
@@ -546,6 +582,8 @@ You have access to the user's memory below. Use it to personalize your responses
             ts.last_run = now
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()
+            self._event("task_finish", task=task["name"], status="ok",
+                        duration_s=round(time.time() - t0, 2), tier=0)
 
         if tier0:
             self._log(f"Tier 0 direct: {[t['name'] for t in tier0]}")
@@ -594,7 +632,11 @@ You have access to the user's memory below. Use it to personalize your responses
 
         # Call Claude
         self._log(f"Calling Claude with {n} tasks...")
+        for task in runnable:
+            self._event("task_spawn", task=task["name"], batch=n)
+        call_t0 = time.time()
         raw = self.claude_call(prompt)
+        call_dur = round(time.time() - call_t0, 2)
 
         if raw == "__KILLED__":
             # Claude was killed by SIGTERM/SIGKILL (restart/shutdown).
@@ -604,6 +646,8 @@ You have access to the user's memory below. Use it to personalize your responses
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
                 state[task["name"]] = ts.to_dict()
+                self._event("task_finish", task=task["name"], status="killed",
+                            duration_s=call_dur)
             self.save_state(state)
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → killed (no penalty)")
             return ""
@@ -621,6 +665,12 @@ You have access to the user's memory below. Use it to personalize your responses
                 elif tripped:
                     tripped_names.append(task["name"])
                 state[task["name"]] = ts.to_dict()
+                if self._call_timed_out:
+                    self._event("task_timeout", task=task["name"],
+                                duration_s=call_dur, timeout_s=self.claude_timeout)
+                else:
+                    self._event("task_finish", task=task["name"],
+                                status="failed", duration_s=call_dur)
             self.save_state(state)
             if tripped_names:
                 self._log(f"Circuit TRIPPED for: {tripped_names}")
@@ -637,6 +687,8 @@ You have access to the user's memory below. Use it to personalize your responses
                 ts.last_run = now
                 ts.circuit.record_success()
                 state[task["name"]] = ts.to_dict()
+                self._event("task_finish", task=task["name"], status="idle",
+                            duration_s=call_dur)
             self.save_state(state)
             # Log status to stderr (goes to jarvis.log) — NOT returned to Lark
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → OK")
@@ -706,6 +758,9 @@ You have access to the user's memory below. Use it to personalize your responses
             ts.last_run = now
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()
+            # duration covers claude_call + this task's post-script routing
+            self._event("task_finish", task=task["name"], status="ok",
+                        duration_s=round(time.time() - call_t0, 2))
         self.save_state(state)
 
         # Also check dynamic tasks from SQLite scheduler

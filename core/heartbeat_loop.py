@@ -30,6 +30,7 @@ from core.card import extract_card_text, extract_readable_from_output, linkify_b
 from core.heartbeat import HeartbeatRunner
 from core.log import log
 from core.safety import looks_like_error
+from core.sched_events import emit as sched_emit
 from core.timeutil import now_local_str
 
 
@@ -352,13 +353,19 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
     if sources and sources <= SILENT_SOURCES:
         # Pure silent-task output: never queue, never deliver — log only.
         log("heartbeat", f"Dropped silent-task output instead of queueing (source={source})")
+        sched_emit(jarvis_dir, "task_skip", task=source, reason="silent_output")
         return
     entry = {"ts": now_local_str("%Y-%m-%d %H:%M"),
              "text": readable, "source": source or "heartbeat"}
     with open(jarvis_dir / NIGHT_QUEUE_FILE, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    reason = "quiet hours" if _in_quiet_hours() else "daytime batching"
+    quiet = _in_quiet_hours()
+    reason = "quiet hours" if quiet else "daytime batching"
     log("heartbeat", f"Queued for batch ({reason}, source={source or 'heartbeat'})")
+    # Replay trail: delivery deferred to the batch queue (this is exactly the
+    # hop that made the 6/12 daily-plan incident hard to reconstruct).
+    sched_emit(jarvis_dir, "task_skip", task=source or "heartbeat",
+               reason="queued_quiet_hours" if quiet else "queued_daytime_batch")
 
 
 def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
@@ -427,6 +434,9 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
                     row["message_ids"] = digest_ids
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         log("heartbeat", f"Flushed night queue ({len(entries)} entries)")
+        sched_emit(jarvis_dir, "batch_flush", count=len(entries),
+                   sources=sorted({e.get("source", "heartbeat") for e in entries}),
+                   dropped_len_cap=dropped)
         return True
     log("heartbeat", "Night queue flush failed — will retry next cycle", level="warn")
     return False
@@ -607,10 +617,15 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 # queued (primary filter is HeartbeatRunner._collect_output).
                 log("heartbeat", "Suppressed silent-task output "
                     f"({','.join(sorted(cycle_sources))}) — log-only, never delivered")
+                sched_emit(jd, "task_skip", task=",".join(sorted(cycle_sources)),
+                           reason="silent_output")
                 (jd / ".heartbeat_last_source").unlink(missing_ok=True)
             elif _is_duplicate_send(output, jd):
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
+                sched_emit(jd, "task_skip",
+                           task=",".join(sorted(cycle_sources)) or "heartbeat",
+                           reason="duplicate_send")
                 (jd / ".heartbeat_last_source").unlink(missing_ok=True)
             elif _should_queue(jd):
                 _queue_for_morning(output, jd)

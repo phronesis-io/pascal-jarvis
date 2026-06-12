@@ -189,7 +189,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  ├── EigenFlux:                                             │
 │  │   feed, messages, publish, profile, research             │
 │  ├── Content:                                               │
-│  │   content_recommend, watchlater_remind                   │
+│  │   content_recommend (reaction = one-tap watch-later)    │
 │  └── Monitoring & ops:                                      │
 │      checkin, engagement_analyze, cross_session_sync,        │
 │      phronesis_monitor, repos_sync, self_diagnostic,         │
@@ -414,7 +414,7 @@ lark:
 
 📖 **Full docs: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)**
 
-[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Five heartbeat tasks plus a real-time stream integrate it:
+[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Six heartbeat tasks plus a real-time stream integrate it:
 
 | Task | Interval | What it does |
 |---|---|---|

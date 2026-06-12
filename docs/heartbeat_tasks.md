@@ -103,7 +103,7 @@ tasks, and are not part of this contract.
 | EigenFlux | feed / research / friends / messages / profile / publish | `eigenflux` CLI calls, the publish-confirm flow |
 | Daily rhythm | daily-plan / daily-reflect / activity-log / free-time-nudge / checkin | rich cards, JSONL logs |
 | Task system | task-triage / weekly-review | `core.tasks` store |
-| Standalone | calendar-sync, intentions, content-recommend, watchlater-remind, cross-session, engagement-analyze, phronesis-monitor, thinking-review | — |
+| Standalone | calendar-sync, intentions, content-recommend, cross-session, engagement-analyze, phronesis-monitor, thinking-review, perception-collect | — |
 
 ---
 

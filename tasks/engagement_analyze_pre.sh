@@ -14,7 +14,10 @@ fi
 # json.dumps writes "type": "response" (spaced) — the no-space grep counted
 # 0 against a log with 251 spaced entries, short-circuiting the whole task
 # with INSUFFICIENT_DATA.
-total=$(grep -cE '"type": ?"response"' "$LOG_FILE" 2>/dev/null || echo 0)
+# NOTE: no `|| echo 0` — grep -c PRINTS 0 and exits 1 on zero matches, so
+# the fallback would append a second line and break the numeric comparison.
+total=$(grep -cE '"type": ?"response"' "$LOG_FILE" 2>/dev/null)
+[ -z "$total" ] && total=0
 if [ "$total" -lt 10 ]; then
   # Output minimal info so Claude knows to reply HEARTBEAT_OK
   echo "INSUFFICIENT_DATA: only $total response data points (need 10+)"
@@ -72,8 +75,11 @@ for src in sorted(all_sources):
 # === Delivery-ack attribution (REQ-15: read receipts) ===
 # Honest semantics: im.message.message_read_v1 arrives as BULK catch-up acks
 # (opening the chat acks everything unread at once — real events carry 10+
-# message_ids), so 'acked' means "the chat was opened after this send", a
-# DELIVERY/ATTENTION watermark — NOT "this content was seen and considered".
+# message_ids), so 'acked' means 'the chat was opened after this send', a
+# DELIVERY/ATTENTION watermark — NOT 'this content was seen and considered'.
+# NO DOUBLE QUOTES in comments here: this python code lives inside a bash
+# double-quoted string — an unescaped quote truncates the program silently
+# (it happened: everything below this section vanished from the output).
 # Also: sends batched in one heartbeat cycle share the same message_ids
 # (the cycle's send list), so per-source rows are cycle-granular.
 #   never_acked high => the chat isn't being opened — delivery/timing problem;
@@ -177,4 +183,7 @@ print()
 print('=== RECENT RAW ENTRIES (last 20) ===')
 for e in entries[-20:]:
     print(json.dumps(e, ensure_ascii=False))
-" 2>/dev/null
+"
+# (stderr intentionally NOT silenced: a python traceback here must surface
+#  in the heartbeat log, not vanish — a silent truncation hid the entire
+#  DELIVERY-ACK section once already)

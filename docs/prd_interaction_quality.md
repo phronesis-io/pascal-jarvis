@@ -165,7 +165,7 @@
 
 ## 4. P2 需求（路线图）
 
-- **REQ-21 感知摄入 MVP** 🟢 P0 骨架已上线（2026-06-11，commit a75229e）：registry+runtime+跨源去重+inbox 缓冲+敏感度出口视图，3 个 adapter（file_watch/git_repo/lark_chat）；reports 与 repos_commits 已启用，phronesis 影子待 T2 parity。后续：claude_sessions/cli_stream 迁移、LLM 打分档、reconciler 接通（PRD §10 增量路径）。
+- **REQ-21 感知摄入 MVP** 🟢 P0 骨架已上线（2026-06-11，commit a75229e）：registry+runtime+跨源去重+inbox 缓冲+敏感度出口视图，4 个 adapter（file_watch/git_repo/lark_chat/lark_mail）；reports 与 repos_commits 已启用，phronesis 影子待 T2 parity。后续：claude_sessions/cli_stream 迁移、LLM 打分档、reconciler 接通（PRD §10 增量路径）。
 - **REQ-22 引用回复上下文**（5/28）✅ 经查已实现（bot.sh:1108 quote-reply 注入）：用户引用一条消息回复时，把被引用消息注入上下文。（小改动，可提前到 P1。）
 - **REQ-23 预测式日历助手**（5/8、5/28）："看更长时间的日程…提前做心理状态的准备"；与 calendar-sync Tier-0 合流，做 7 天前瞻 + 模式识别（文化轮转、康复周期）。
 - **REQ-24 双层日报合并** ✅ 被永久静默机制取代（2026-06-12）：旧口径"daily-plan 并入 10:00 digest"已废弃——6/12 事故（daily-plan 基于截断的日历提取断言"周会不在日历上"，经 digest 推送给用户）证明该路径违反行为准则（behavioral_rules.md：daily-plan/self-diagnostic/thinking-review 为 autonomous 内务，长期零响应，永久静默绝不 surface）。现行实现：`HeartbeatRunner.SILENT_TASKS`（core/heartbeat.py，task→message 配对点硬排除）+ `SILENT_SOURCES` 送达层兜底（core/heartbeat_loop.py：直发/入队/digest 冲洗三处）。daily-plan 产出仅写 daily_plan_log.jsonl 供 daily-reflect 对比，不再推送。同次修复：daily_plan_pre.sh 截断正则（未锚定的"周"把事件"周会"误判为日界标题）+ daily-plan prompt 增加日历逐行原文引用、禁止否定性推断的硬约束。
