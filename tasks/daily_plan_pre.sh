@@ -23,16 +23,20 @@ if [ -f "$calendar_file" ]; then
   python3 -c "
 import re
 content = open('$calendar_file').read()
-# Find 'Today' or '今天' section, print until next day header
+# Find 'Today' or '今天' section, print until next day header.
+# Day headers start at column 0 (e.g. 'Tomorrow (2026-06-13 Saturday):',
+# 'Day 3 (...)', 'Upcoming (...)'); event lines are indented. The regex MUST
+# stay anchored — an unanchored '.*(…|周)' once matched the indented event
+# '14:30-16:00  周会' and silently truncated today's section (2026-06-12 bug).
 lines = content.split('\n')
 in_today = False
 for line in lines:
-    if re.match(r'.*([Tt]oday|今天)', line):
+    if re.match(r'([Tt]oday|今天)', line):
         in_today = True
         print(line)
         continue
     if in_today:
-        if re.match(r'.*(Tomorrow|明天|Day \d|后天|周)', line):
+        if re.match(r'(Tomorrow|明天|后天|Day \d|Upcoming|周[一二三四五六日天])', line):
             break
         print(line)
 " 2>/dev/null
@@ -48,15 +52,16 @@ from datetime import datetime
 content = open('$calendar_file').read() if __import__('os').path.exists('$calendar_file') else ''
 lines = content.split('\n')
 
-# Extract today's events
+# Extract today's events. Anchored header regexes — see the comment in the
+# TODAY'S CALENDAR block above (unanchored '周' truncated on the '周会' event).
 events = []
 in_today = False
 for line in lines:
-    if re.match(r'.*([Tt]oday|今天)', line):
+    if re.match(r'([Tt]oday|今天)', line):
         in_today = True
         continue
     if in_today:
-        if re.match(r'.*(Tomorrow|明天|Day \d|后天|周)', line):
+        if re.match(r'(Tomorrow|明天|后天|Day \d|Upcoming|周[一二三四五六日天])', line):
             break
         m = re.match(r'\s*-?\s*(\d{2}:\d{2})-(\d{2}:\d{2})', line)
         if m:

@@ -168,7 +168,7 @@
 - **REQ-21 感知摄入 MVP** 🟢 P0 骨架已上线（2026-06-11，commit a75229e）：registry+runtime+跨源去重+inbox 缓冲+敏感度出口视图，3 个 adapter（file_watch/git_repo/lark_chat）；reports 与 repos_commits 已启用，phronesis 影子待 T2 parity。后续：claude_sessions/cli_stream 迁移、LLM 打分档、reconciler 接通（PRD §10 增量路径）。
 - **REQ-22 引用回复上下文**（5/28）✅ 经查已实现（bot.sh:1108 quote-reply 注入）：用户引用一条消息回复时，把被引用消息注入上下文。（小改动，可提前到 P1。）
 - **REQ-23 预测式日历助手**（5/8、5/28）："看更长时间的日程…提前做心理状态的准备"；与 calendar-sync Tier-0 合流，做 7 天前瞻 + 模式识别（文化轮转、康复周期）。
-- **REQ-24 双层日报合并** 🟢 被批量机制实质解决（2026-06-11：daily-plan 的 8:00-9:30 时段现落在静默窗内，其产出自动并入 10:00 晨间 digest，与 cron 日报不再双发独立消息；形态重设计待观察 digest 数据后决定）。
+- **REQ-24 双层日报合并** ✅ 被永久静默机制取代（2026-06-12）：旧口径"daily-plan 并入 10:00 digest"已废弃——6/12 事故（daily-plan 基于截断的日历提取断言"周会不在日历上"，经 digest 推送给用户）证明该路径违反行为准则（behavioral_rules.md：daily-plan/self-diagnostic/thinking-review 为 autonomous 内务，长期零响应，永久静默绝不 surface）。现行实现：`HeartbeatRunner.SILENT_TASKS`（core/heartbeat.py，task→message 配对点硬排除）+ `SILENT_SOURCES` 送达层兜底（core/heartbeat_loop.py：直发/入队/digest 冲洗三处）。daily-plan 产出仅写 daily_plan_log.jsonl 供 daily-reflect 对比，不再推送。同次修复：daily_plan_pre.sh 截断正则（未锚定的"周"把事件"周会"误判为日界标题）+ daily-plan prompt 增加日历逐行原文引用、禁止否定性推断的硬约束。
 - **REQ-25 统一 engagement 存储** ✅ 已上线（2026-06-11，dashboard 改读 engagement_log.jsonl 事实源）：SQLite engagement_events/agent_log 自 5/21 死亡（3 行 vs jsonl 502 行），修写入或删表，dashboard 不得读假数据。
 - **REQ-26 日志归档化** ✅ 已上线（2026-06-11，jarvis.log.1..3 滚动归档）：`tail -500` 截断使失败率审计物理不可能；改为 `jarvis.log.1..3` 滚动归档，WARN 统计可回溯（REQ-08 的 copytruncate 是临时解）。
 - **REQ-27 bot.sh 逻辑继续下沉 core/**：1407 行 bash 零测试，本次 6 项高危 bug 中 3 项在 bash 层；目标：消息解析、卡片回调、会话管理全部 Python 化 + bats 覆盖剩余 bash。

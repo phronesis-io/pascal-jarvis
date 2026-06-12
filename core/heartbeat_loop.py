@@ -230,6 +230,12 @@ URGENT_SOURCES = {"intention-check", "calendar-sync", "checkin"}
 # the least frustration cost. These are also the highest-volume noise sources.
 GENERAL_INTEREST_SOURCES = {"eigenflux-feed-triage", "content-recommend",
                             "personal-site"}
+# Permanently silent housekeeping tasks: never delivered, never queued — logs
+# only. The exact task→message filter lives in HeartbeatRunner._collect_output
+# (core/heartbeat.py, the single source of truth for the name list); this
+# delivery-layer backstop also scrubs legacy night_queue entries and any
+# pure-silent cycle output that slips through.
+SILENT_SOURCES = HeartbeatRunner.SILENT_TASKS
 BATCH_WINDOWS_MIN = (10 * 60, 13 * 60 + 30, 17 * 60 + 30)  # 10:00/13:30/17:30
 BREAKPOINT_RECENCY_SECONDS = 300
 LAST_MSG_MARKER = "/tmp/jarvis-last-msg"  # touched by bot.sh on every inbound msg
@@ -342,6 +348,11 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
         readable = readable[:NIGHT_ENTRY_MAX_CHARS] + "…(截断)"
     source = _peek_source(jarvis_dir)
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
+    sources = _sources_of(source)
+    if sources and sources <= SILENT_SOURCES:
+        # Pure silent-task output: never queue, never deliver — log only.
+        log("heartbeat", f"Dropped silent-task output instead of queueing (source={source})")
+        return
     entry = {"ts": now_local_str("%Y-%m-%d %H:%M"),
              "text": readable, "source": source or "heartbeat"}
     with open(jarvis_dir / NIGHT_QUEUE_FILE, "a") as f:
@@ -365,6 +376,13 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
         try:
             e = json.loads(line)
         except (json.JSONDecodeError, ValueError):
+            continue
+        # Silent housekeeping output must never reach the user, even via the
+        # digest — scrubs entries queued before the SILENT_TASKS gate existed.
+        entry_sources = _sources_of(e.get("source", ""))
+        if entry_sources and entry_sources <= SILENT_SOURCES:
+            log("heartbeat", f"Scrubbed silent-task entry from night queue "
+                f"(source={e.get('source')})")
             continue
         # Same content queued twice overnight (e.g. a task re-emitting) reads
         # as a bug to the user — keep the first occurrence only.
@@ -583,7 +601,14 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             _flush_night_queue(jd, user_id)
 
         if output and not looks_like_error(output, proactive=True):
-            if _is_duplicate_send(output, jd):
+            cycle_sources = _sources_of(_peek_source(jd))
+            if cycle_sources and cycle_sources <= SILENT_SOURCES:
+                # Backstop: pure silent-task output must never be delivered or
+                # queued (primary filter is HeartbeatRunner._collect_output).
+                log("heartbeat", "Suppressed silent-task output "
+                    f"({','.join(sorted(cycle_sources))}) — log-only, never delivered")
+                (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+            elif _is_duplicate_send(output, jd):
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
                 (jd / ".heartbeat_last_source").unlink(missing_ok=True)

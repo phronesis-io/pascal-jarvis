@@ -221,3 +221,65 @@ def test_idle_judge_delivers_on_conservative_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "claude_call", lambda p: "明天的会改到三点了")
     monkeypatch.setattr(runner, "_judge_is_idle_noise", lambda m: False)
     assert "明天的会改到三点了" in runner.run_cycle(force=True)
+
+
+# ── SILENT_TASKS: permanently silent housekeeping (behavioral_rules.md) ──
+# daily-plan / self-diagnostic / thinking-review output is log-only — it must
+# never be staged for delivery, alone or batched with other tasks. Regression
+# for 2026-06-12: a daily-plan card reached the user via the morning digest.
+
+
+def test_silent_task_output_never_delivered(tmp_path, monkeypatch):
+    """Single silent task: cycle returns empty, no source sidecar written."""
+    hb = "### daily-plan\n- interval: 24h\n- prompt: plan\n"
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "🌅 今日 plan card")
+    assert runner.run_cycle(force=True) == ""
+    assert not (runner.jarvis_dir / ".heartbeat_last_source").exists()
+
+
+def test_all_silent_tasks_suppressed(tmp_path, monkeypatch):
+    """Every name in SILENT_TASKS is suppressed on the single-task path."""
+    for name in sorted(HeartbeatRunner.SILENT_TASKS):
+        sub = tmp_path / name
+        sub.mkdir()
+        runner = _make_runner(sub, f"### {name}\n- interval: 1h\n- prompt: p\n")
+        monkeypatch.setattr(runner, "claude_call", lambda p: "output of a task")
+        assert runner.run_cycle(force=True) == ""
+
+
+def test_silent_task_filtered_from_mixed_batch(tmp_path, monkeypatch):
+    """Multi-task cycle: silent task's slice dropped, normal task delivered."""
+    hb = (
+        "### daily-plan\n- interval: 24h\n- prompt: plan\n\n"
+        "### task-b\n- interval: 1h\n- prompt: b\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {"daily-plan": "🌅 今日 plan card", "task-b": "response for b"},
+        "user_message": "",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    result = runner.run_cycle(force=True)
+    assert "response for b" in result
+    assert "plan card" not in result
+    # sidecar credits only the delivering task → engagement/queue stay clean
+    source = (runner.jarvis_dir / ".heartbeat_last_source").read_text()
+    assert source == "task-b"
+
+
+def test_all_silent_batch_drops_summary_too(tmp_path, monkeypatch):
+    """When every task in the call is silent, the envelope's top-level
+    user_message can only describe silent content — nothing is delivered."""
+    hb = (
+        "### daily-plan\n- interval: 24h\n- prompt: plan\n\n"
+        "### thinking-review\n- interval: 7d\n- prompt: review\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {"daily-plan": "plan text", "thinking-review": "review text"},
+        "user_message": "今天的计划和思考回顾如下…",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    assert runner.run_cycle(force=True) == ""
+    assert not (runner.jarvis_dir / ".heartbeat_last_source").exists()

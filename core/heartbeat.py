@@ -139,6 +139,16 @@ class HeartbeatRunner:
     # to summarize/reason/index MUST NOT be here.
     TIER0_TASKS = {"calendar-sync"}  # pre-script produces formatted calendar
 
+    # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /
+    # self-diagnostic / thinking-review 视为 autonomous 内务：长期零响应，
+    # 永久静默、绝不 surface"). Their pre/post scripts still run — state files
+    # and JSONL logs are the product — but their output NEVER reaches the user:
+    # not as a direct send, not via the batch/night queue. Enforced here at the
+    # exact task→message pairing point (see _collect_output) plus a delivery-
+    # layer backstop in core/heartbeat_loop.py (SILENT_SOURCES). To silence
+    # another task, add its name here — no logic changes needed.
+    SILENT_TASKS = {"daily-plan", "self-diagnostic", "thinking-review"}
+
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
     # Remaining tasks will be picked up in the next cycle.
@@ -174,6 +184,22 @@ class HeartbeatRunner:
     def _log(self, msg: str, **kwargs):
         """Structured log with cycle_id for correlation."""
         _structured_log("heartbeat", msg, cycle=self._cid, **kwargs)
+
+    def _collect_output(self, task_name: str, message: str,
+                        user_messages: list, producing_tasks: list):
+        """Stage a task's output for delivery — unless the task is silent.
+
+        This is the ONLY place with an exact task→message pairing (downstream
+        the cycle output is one merged string plus a comma-separated source
+        sidecar), so SILENT_TASKS enforcement lives here: the output is logged
+        and dropped, never appended for delivery.
+        """
+        if task_name in self.SILENT_TASKS:
+            self._log(f"Silent task {task_name}: output suppressed "
+                      f"(log-only, never delivered): {message[:80]!r}")
+            return
+        user_messages.append(message)
+        producing_tasks.append(task_name)
 
     def _load_tasks(self) -> list[dict]:
         """Parse HEARTBEAT.md with mtime-based cache (avoid re-parsing every 10s)."""
@@ -513,8 +539,8 @@ You have access to the user's memory below. Use it to personalize your responses
             if task["post"] and pre_data:
                 post_output = self.run_script(task["post"], stdin_data=pre_data)
                 if post_output:
-                    user_messages.append(post_output)
-                    producing_tasks.append(task["name"])
+                    self._collect_output(task["name"], post_output,
+                                         user_messages, producing_tasks)
             # Update state — task ran successfully
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
@@ -623,14 +649,14 @@ You have access to the user's memory below. Use it to personalize your responses
             if task["post"]:
                 post_output = self.run_script(task["post"], stdin_data=raw)
                 if post_output:
-                    user_messages.append(post_output)
-                    producing_tasks.append(task["name"])
+                    self._collect_output(task["name"], post_output,
+                                         user_messages, producing_tasks)
             elif _has_idle_sentinel(raw):
                 # Model wrote reasoning then emitted HEARTBEAT_OK — idle, drop it.
                 self._log(f"Single-task idle (HEARTBEAT_OK in body): {raw[:80]!r}")
             else:
-                user_messages.append(raw)
-                producing_tasks.append(task["name"])
+                self._collect_output(task["name"], raw,
+                                     user_messages, producing_tasks)
         else:
             # Multi-task: Claude returns JSON envelope. Extract robustly.
             cleaned = re.sub(r'^```json?\s*', '', raw.strip())
@@ -651,12 +677,12 @@ You have access to the user's memory below. Use it to personalize your responses
                     if task["post"]:
                         post_output = self.run_script(task["post"], stdin_data=resp_str)
                         if post_output:
-                            user_messages.append(post_output)
-                            producing_tasks.append(task["name"])
+                            self._collect_output(task["name"], post_output,
+                                                 user_messages, producing_tasks)
                     # Tasks without post-scripts: only show string responses, never raw JSON
                     elif isinstance(resp, str) and resp.strip() and "HEARTBEAT_OK" not in resp:
-                        user_messages.append(resp)
-                        producing_tasks.append(task["name"])
+                        self._collect_output(task["name"], resp,
+                                             user_messages, producing_tasks)
                 # The top-level user_message is Claude's conversational summary.
                 # If a task already produced a card, that card IS the message —
                 # appending top_msg here would say the same thing twice (a card
@@ -664,7 +690,10 @@ You have access to the user's memory below. Use it to personalize your responses
                 # card carries the content; otherwise the card stands alone.
                 top_msg = envelope.get("user_message", "")
                 has_card = any(m.strip().startswith('{"config":') for m in user_messages)
-                if top_msg and top_msg.strip() and not has_card:
+                # If every task in this call is silent, the summary can only
+                # describe silent-task content — drop it (SILENT_TASKS).
+                all_silent = all(t["name"] in self.SILENT_TASKS for t in runnable)
+                if top_msg and top_msg.strip() and not has_card and not all_silent:
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
                 # NEVER dump raw JSON to user — log for debugging and skip

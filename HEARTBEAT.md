@@ -13,17 +13,24 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 | Category | Tasks | User-facing? |
 |---|---|---|
-| Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | plan+reflect yes, activity-log silent |
+| Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | reflect+nudge yes; daily-plan+activity-log silent |
 | Check-in | checkin | yes |
 | Calendar & Tasks | calendar-sync, task-triage, weekly-review | calendar silent, task-triage+weekly yes |
 | Intentions | intention-check | yes (when intent fires) |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
 | Content | content-recommend, watchlater-remind | yes |
-| Thinking Review | thinking-review | yes (weekly) |
+| Thinking Review | thinking-review | silent (log only) |
 | Analytics | engagement-analyze, cross-session-sync | silent |
 | Team | phronesis-monitor | yes (if relevant) |
-| Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail) |
+| Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
+
+**Permanently silent tasks** (behavioral_rules.md — autonomous 内务，长期零响应):
+`daily-plan`, `self-diagnostic`, `thinking-review`. Enforced IN CODE via
+`HeartbeatRunner.SILENT_TASKS` (core/heartbeat.py) + `SILENT_SOURCES` delivery
+backstop (core/heartbeat_loop.py): their output goes to logs only — never sent,
+never batched into the digest. Do NOT "fix" this by re-surfacing them; changing
+the list requires editing SILENT_TASKS, not this doc.
 
 ## EigenFlux
 
@@ -667,7 +674,17 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Structure:
     1. PRAXIS (修行): Show today's practices as the ground — not as checkboxes.
        "地面: 08:30 晨起拉伸 (20min)" — these are WHO you are, not WHAT you do.
-    2. Fixed commitments from calendar (time + name only)
+    2. Fixed commitments from calendar (time + name only).
+       CALENDAR HARD RULES (non-negotiable):
+       - Quote calendar lines VERBATIM from TODAY'S CALENDAR in DATA — copy
+         time + name exactly as written, line by line. Never paraphrase times,
+         never merge or rename events.
+       - The extract may be INCOMPLETE. NEVER make negative inferences:
+         "日历上没有X" / "X取消了" / "X可能挪了" are all FORBIDDEN. Absence
+         from DATA is absence of data, not absence of the event.
+       - If an expected event seems missing or something doesn't match, do NOT
+         conclude anything — list ALL calendar lines from DATA verbatim and
+         let the reader judge.
     3. Committed tasks with time-binding and capacity indicator
     4. Largest free block + what time
     5. TRIAGE (if inbox items exist): For each, present three paths:

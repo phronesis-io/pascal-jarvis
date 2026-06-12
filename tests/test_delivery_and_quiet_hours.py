@@ -219,3 +219,65 @@ def test_extract_message_id_shapes():
     assert hbl._extract_message_id("not json") == ""
     assert hbl._extract_message_id("") == ""
     assert hbl._extract_message_id('{"message_id":123}') == ""
+
+
+# ── Permanently silent housekeeping tasks (SILENT_SOURCES) ───────────
+# behavioral_rules.md: daily-plan / self-diagnostic / thinking-review never
+# surface — not directly, not via the batch queue. Regression for 2026-06-12:
+# a daily-plan card (built on truncated calendar data) was queued at 08:12
+# and pushed to the user inside the 10:00 digest.
+
+
+def test_silent_source_never_enters_batch_queue(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("daily-plan")
+    _queue_for_morning("🌅 今日 plan card", tmp_path)
+    assert not (tmp_path / NIGHT_QUEUE_FILE).exists()  # dropped, not queued
+    assert not (tmp_path / ".heartbeat_last_source").exists()  # sidecar consumed
+
+
+def test_all_silent_tasks_are_dropped_at_queue(tmp_path):
+    for name in sorted(hbl.SILENT_SOURCES):
+        (tmp_path / ".heartbeat_last_source").write_text(name)
+        _queue_for_morning(f"output of {name}", tmp_path)
+    assert not (tmp_path / NIGHT_QUEUE_FILE).exists()
+
+
+def test_normal_source_still_queues(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("content-recommend")
+    _queue_for_morning("正常推荐内容", tmp_path)
+    lines = (tmp_path / NIGHT_QUEUE_FILE).read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["source"] == "content-recommend"
+
+
+def test_flush_scrubs_legacy_silent_entries(tmp_path, monkeypatch):
+    # Entries queued BEFORE the silence gate existed must not reach the digest
+    queue = tmp_path / NIGHT_QUEUE_FILE
+    queue.write_text(
+        json.dumps({"ts": "2026-06-12 08:12", "text": "🌅 今日 plan card",
+                    "source": "daily-plan"}, ensure_ascii=False) + "\n"
+        + json.dumps({"ts": "2026-06-12 08:30", "text": "深夜推荐",
+                      "source": "content-recommend"}, ensure_ascii=False) + "\n")
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert _flush_night_queue(tmp_path, "ou_test")
+
+    assert len(sent) == 1
+    assert "plan card" not in sent[0]
+    assert "深夜推荐" in sent[0]
+    assert "1 条消息" in sent[0]  # silent entry not counted either
+    # engagement rows must not credit the silent source with a send
+    entries = [json.loads(l) for l in
+               (tmp_path / "engagement_log.jsonl").read_text().splitlines()]
+    assert all(e["source"] != "daily-plan" for e in entries)
+
+
+def test_flush_with_only_silent_entries_sends_nothing(tmp_path, monkeypatch):
+    queue = tmp_path / NIGHT_QUEUE_FILE
+    queue.write_text(json.dumps(
+        {"ts": "2026-06-12 08:12", "text": "plan", "source": "daily-plan"}) + "\n")
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert not _flush_night_queue(tmp_path, "ou_test")
+    assert sent == []
+    assert not queue.exists()  # scrubbed queue is cleared, not retried forever
