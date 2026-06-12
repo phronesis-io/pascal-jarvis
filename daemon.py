@@ -176,7 +176,9 @@ def check_health() -> dict:
 
     # 2. Is Lark listener connected?
     try:
-        r = subprocess.run(["pgrep", "-f", "lark-cli event"],
+        # Either event backend counts as the listener (lark-cli or the
+        # single-connection python sidecar)
+        r = subprocess.run(["pgrep", "-f", "lark-cli event|lark_event_sidecar"],
                            capture_output=True, text=True, timeout=5)
         if not r.stdout.strip():
             issues.append("Lark event listener is not running")
@@ -242,7 +244,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
     log("INFO", "Killing existing processes...")
     import re as _re
     _jd = _re.escape(str(JARVIS_DIR))
-    for pattern in ["lark-cli event",
+    for pattern in ["lark-cli event|lark_event_sidecar",
                     f"bash.*{_jd}/bot\\.sh",
                     # path-anchored, interpreter-agnostic (shows up as
                     # ".../Python .../admin.py" under homebrew python)

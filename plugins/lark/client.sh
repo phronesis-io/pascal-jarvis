@@ -144,9 +144,17 @@ lark_remove_reaction() {
 # already being pushed to the app and spamming "[SDK Error] ... not found
 # handler" before they had handlers here.
 lark_subscribe_messages() {
-  lark-cli event +subscribe \
-    --event-types im.message.receive_v1,card.action.trigger,im.message.message_read_v1,im.message.reaction.created_v1,im.message.reaction.deleted_v1 \
-    --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
+  if [ "${JARVIS_EVENT_BACKEND:-}" = "sidecar" ]; then
+    # Single-connection python sidecar: same NDJSON envelopes PLUS inline
+    # card.action.trigger handling (lark-cli ≤1.0.52 can't consume card
+    # callbacks — larksuite/cli#1051). Requires LARK_APP_SECRET in the
+    # environment. Rollback: unset JARVIS_EVENT_BACKEND and restart.
+    python3 "$JARVIS_DIR/scripts/lark_event_sidecar.py" 2>>"${LOG_FILE:-/dev/null}"
+  else
+    lark-cli event +subscribe \
+      --event-types im.message.receive_v1,card.action.trigger,im.message.message_read_v1,im.message.reaction.created_v1,im.message.reaction.deleted_v1 \
+      --quiet --as bot 2>>"${LOG_FILE:-/dev/null}"
+  fi
 }
 
 # ── Calendar (used by tasks/checkin_pre.sh for free/busy detection) ──

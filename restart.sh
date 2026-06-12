@@ -61,7 +61,7 @@ status() {
   fi
 
   # Lark listener
-  lark_pid=$(pgrep -f "lark-cli event" 2>/dev/null | head -1 || true)
+  lark_pid=$(pgrep -f "lark-cli event|lark_event_sidecar" 2>/dev/null | head -1 || true)
   if [ -n "$lark_pid" ]; then
     green "  lark-cli:  running (PID $lark_pid)"
   else
@@ -105,7 +105,7 @@ kill_bot() {
 
   # Kill all bot.sh and lark-cli event processes
   pkill -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null || true
-  pkill -f "lark-cli event" 2>/dev/null || true
+  pkill -f "lark-cli event|lark_event_sidecar" 2>/dev/null || true
 
   # Kill stuck claude sessions (lock format: "<pid> <token>")
   for lock in "$JARVIS_DIR"/.session_lock_*; do

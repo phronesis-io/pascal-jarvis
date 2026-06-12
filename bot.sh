@@ -150,6 +150,10 @@ def emit(name, value):
     print(f"{name}={shlex.quote(str(value))}")
 emit("USER_ID", c.lark.get("user_id", ""))
 emit("APP_ID", c.lark.get("app_id", ""))
+# Event backend switch + sidecar credentials (jarvis.yaml is gitignored, so
+# the secret never reaches the repo). Empty values keep the lark-cli path.
+emit("JARVIS_EVENT_BACKEND", c.lark.get("event_backend", ""))
+emit("LARK_APP_SECRET", c.lark.get("app_secret", ""))
 emit("DATA_DIR", c.data_dir)
 emit("WORK_DIR", c.work_dir)
 emit("MEMORY_DIR", c.memory_dir)
@@ -172,6 +176,8 @@ SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
 export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+# Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
+export JARVIS_EVENT_BACKEND LARK_APP_SECRET
 
 log_info "Starting jarvis-harness..."
 log_info "  JARVIS_DIR: $JARVIS_DIR"
