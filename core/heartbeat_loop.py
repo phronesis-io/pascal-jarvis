@@ -545,6 +545,11 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     _lark_send_text(
                         f"⚠️ 后台任务 `{job_id}` 异常终止（进程已不在，可能因重启/崩溃）。"
                         f"需要的话告诉我任务内容，我重新跑一个。", user_id)
+                if lost:
+                    # Drop the alert's own message_id: nothing drains the
+                    # tracker here, and a stale id would mis-attribute to the
+                    # NEXT cycle's sent entries (REQ-15 join precision).
+                    _LAST_SENT_IDS.clear()
             except Exception as e:
                 log("heartbeat", f"Job sweep error: {e}", level="warn")
         # Check restart trigger

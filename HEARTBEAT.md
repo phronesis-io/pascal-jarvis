@@ -614,11 +614,22 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     Review the engagement data below. Your job:
     1. Calculate per-source engagement rates
     2. Identify which modes/times work best
-    3. Suggest specific adaptations:
+    3. Use the DELIVERY-ACK ATTRIBUTION section when present: 'acked' only
+       means the chat was opened after the send (a delivery watermark, not
+       content-seen). High never_acked = delivery/timing problem — propose a
+       different send window, NOT a frequency reduction. Acked-but-no-reply
+       is only a WEAK content signal (bulk acks); weigh replies far higher.
+    4. Suggest specific adaptations:
        - If wellbeing checkins are ignored >70% of the time, suggest reducing frequency
        - If content-recommend engagement is high at certain times, note optimal windows
        - If a particular topic area gets more engagement, suggest weighting it higher
-    Return JSON: {"insights": "<markdown summary>", "adaptations": [{"target": "<task>", "suggestion": "<what to change>"}]}
+    Return JSON: {"insights": "<markdown summary>",
+                  "adaptations": [{"target": "<task>",
+                                   "direction": "reduce|increase|keep",
+                                   "suggestion": "<what to change and why>"}]}
+    "direction" is the machine-applied field (frequency only); "suggestion"
+    is the human-readable rationale. Infrastructure tasks (calendar-sync,
+    memory-*) are exempt from frequency changes — don't propose them.
     If not enough data yet (<10 data points), reply HEARTBEAT_OK.
 
 ## Daily Rhythm

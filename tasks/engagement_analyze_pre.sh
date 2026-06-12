@@ -10,7 +10,11 @@ if [ ! -f "$LOG_FILE" ]; then
 fi
 
 # Count data points — need at least 10 to be meaningful
-total=$(grep -c '"type":"response"' "$LOG_FILE" 2>/dev/null || echo 0)
+# Separator-agnostic: jq writes "type":"response" (compact) but python
+# json.dumps writes "type": "response" (spaced) — the no-space grep counted
+# 0 against a log with 251 spaced entries, short-circuiting the whole task
+# with INSUFFICIENT_DATA.
+total=$(grep -cE '"type": ?"response"' "$LOG_FILE" 2>/dev/null || echo 0)
 if [ "$total" -lt 10 ]; then
   # Output minimal info so Claude knows to reply HEARTBEAT_OK
   echo "INSUFFICIENT_DATA: only $total response data points (need 10+)"
@@ -64,6 +68,44 @@ for src in sorted(all_sources):
     total_responses = engaged + ignored
     rate = (engaged / total_responses * 100) if total_responses > 0 else 0
     print(f'{src}: sent={sent}, engaged={engaged}, ignored={ignored}, rate={rate:.0f}%')
+
+# === Delivery-ack attribution (REQ-15: read receipts) ===
+# Honest semantics: im.message.message_read_v1 arrives as BULK catch-up acks
+# (opening the chat acks everything unread at once — real events carry 10+
+# message_ids), so 'acked' means "the chat was opened after this send", a
+# DELIVERY/ATTENTION watermark — NOT "this content was seen and considered".
+# Also: sends batched in one heartbeat cycle share the same message_ids
+# (the cycle's send list), so per-source rows are cycle-granular.
+#   never_acked high => the chat isn't being opened — delivery/timing problem;
+#                       do NOT read it as content disinterest when tuning.
+ack_ids = set()
+reaction_ids = set()
+for e in entries:
+    if e.get('type') == 'read':
+        ack_ids.update(e.get('message_ids') or [])
+    elif e.get('type') == 'reaction' and e.get('message_id'):
+        reaction_ids.add(e['message_id'])
+
+src_tracked = defaultdict(int)
+src_acked = defaultdict(int)
+for e in sent_entries:
+    mids = e.get('message_ids') or []
+    if not mids:
+        continue
+    src = e.get('source', 'unknown')
+    src_tracked[src] += 1
+    if ack_ids.intersection(mids) or reaction_ids.intersection(mids):
+        src_acked[src] += 1
+
+if src_tracked:
+    print()
+    print('=== DELIVERY-ACK ATTRIBUTION (only sends carrying message_ids) ===')
+    print('(acked = chat opened after send, a delivery watermark — NOT content-seen;')
+    print(' never_acked high => delivery/timing problem, not content disinterest)')
+    for src in sorted(src_tracked):
+        n = src_tracked[src]
+        r = src_acked.get(src, 0)
+        print(f'{src}: tracked={n}, acked={r} ({100*r/n:.0f}%), never_acked={n-r}')
 
 # === Time-of-day patterns ===
 print()

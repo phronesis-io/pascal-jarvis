@@ -15,7 +15,9 @@ main bot. Enabling this requires migrating the WHOLE subscription here, or
 waiting for upstream lark-cli support (self-diagnostic watches for that).
 
 Enable checklist (full detail: docs/research/card_callback_root_cause.md):
-  1. pip3 install lark-oapi
+  1. ✅ lark-oapi installed (2026-06-12); API surface + response contract
+     verified by introspection (builder, register_p2_card_action_trigger,
+     ws.Client, P2CardActionTriggerResponse)
   2. 开发者后台 → 事件与回调 → 「回调配置」tab → 订阅方式=长连接 →
      添加 card.action.trigger → 发布新版本（只能 Pascal 在浏览器操作）
   3. EITHER upstream lark-cli adds card support (then delete this file)
@@ -25,8 +27,8 @@ Enable checklist (full detail: docs/research/card_callback_root_cause.md):
   5. export LARK_APP_ID / LARK_APP_SECRET (from lark-cli config) and run:
      python3 scripts/card_callback_sidecar.py
 
-Status: UNTESTED (lark_oapi not installed; cannot go live without step 2
-anyway). Written against lark-oapi >= 1.3 documented API.
+Status: construct-level verified; NOT live-tested (going live requires
+step 2, and a second ws connection must never run alongside lark-cli).
 """
 
 import json
@@ -56,8 +58,15 @@ def _record_feedback(action_value: dict):
 def main() -> int:
     try:
         import lark_oapi as lark
-    except ImportError:
-        print("lark_oapi not installed — run: pip3 install lark-oapi", file=sys.stderr)
+        # Deep SDK-internal path (not a stable public export) — guard it HERE
+        # so a version that relocates the model dies with the friendly message
+        # at startup, not with a raw traceback at go-live.
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+    except ImportError as e:
+        print(f"lark_oapi missing or incompatible ({e}) — run: pip3 install -U lark-oapi",
+              file=sys.stderr)
         return 1
 
     app_id = os.environ.get("LARK_APP_ID", "")
@@ -66,8 +75,10 @@ def main() -> int:
         print("Set LARK_APP_ID / LARK_APP_SECRET (see lark-cli config)", file=sys.stderr)
         return 1
 
-    def on_card_action(data) -> dict:
+    def on_card_action(data) -> "P2CardActionTriggerResponse":
         # Returning promptly from this handler IS the 3-second ACK.
+        # The SDK contract requires a P2CardActionTriggerResponse, not a
+        # bare dict (verified by signature introspection 2026-06-12).
         try:
             value = (data.event.action.value or {}) if data.event and data.event.action else {}
             if isinstance(value, str):
@@ -75,17 +86,19 @@ def main() -> int:
             action = value.get("action", "")
             if action == "feedback":
                 _record_feedback(value)
-                return {"toast": {"type": "success", "content": "已记录"}}
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "success", "content": "已记录"}})
             if action == "watchlater":
                 import subprocess
                 subprocess.run(
                     ["python3", str(JARVIS_DIR / "tasks" / "watchlater_save.py"),
                      str(value.get("title", "")), str(value.get("url", "")), "button"],
                     timeout=5, capture_output=True)
-                return {"toast": {"type": "success", "content": "已收藏，空闲时提醒你"}}
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "success", "content": "已收藏，空闲时提醒你"}})
         except Exception as e:  # never let a handler error break the ws loop
             print(f"card action handler error: {e}", file=sys.stderr)
-        return {}
+        return P2CardActionTriggerResponse({})
 
     handler = (lark.EventDispatcherHandler.builder("", "")
                .register_p2_card_action_trigger(on_card_action)

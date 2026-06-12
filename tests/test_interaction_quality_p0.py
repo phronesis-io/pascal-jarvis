@@ -214,3 +214,22 @@ def test_apply_adaptations_guardrails(tmp_path, monkeypatch):
             meta_file.write_text(json.dumps(meta))
     overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
     assert overrides["chatty-task"] == 4 * 3600
+
+
+def test_apply_adaptations_structured_direction(tmp_path, monkeypatch):
+    """The analyzer's structured 'direction' field is authoritative —
+    keyword parsing of the prose suggestion is only the legacy fallback
+    (去关键词化, 2026-06-12)."""
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "### a\n- interval: 1h\n- prompt: p\n\n### b\n- interval: 1h\n- prompt: q\n")
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    from tasks.engagement_analyze_post import _apply_adaptations
+
+    _apply_adaptations([
+        # direction wins even when the prose contains no keyword at all
+        {"target": "a", "direction": "reduce", "suggestion": "信噪比不佳"},
+        # explicit keep blocks the keyword fallback ("reduce" in prose)
+        {"target": "b", "direction": "keep", "suggestion": "could reduce later"},
+    ])
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides == {"a": 7200}

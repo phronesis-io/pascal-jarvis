@@ -127,8 +127,8 @@ def _apply_adaptations(adaptations: list[dict]):
 
     changed = []
     for a in adaptations:
-        target = a.get("target", "")
-        suggestion = a.get("suggestion", "").lower()
+        target = str(a.get("target") or "")
+        suggestion = str(a.get("suggestion") or "").lower()
         if target not in tasks_def:
             continue
         if target in protected:
@@ -138,12 +138,29 @@ def _apply_adaptations(adaptations: list[dict]):
 
         base_interval = tasks_def[target]
 
-        # Determine direction from suggestion text. ("降频" was the exact word
-        # the insights used for two months while the old list only knew
-        # 降低/减少 — keep both Chinese and English variants broad.)
+        # Direction: the structured field is AUTHORITATIVE when present (the
+        # analyzer's JSON contract carries "direction" since 2026-06-12 —
+        # Pascal's 去关键词化 ask). A present-but-unrecognized value must
+        # SKIP, never fall through to prose keywords: the rationale text can
+        # contain words like "more relevant" and apply the OPPOSITE change.
+        # Keyword parsing of the prose runs ONLY when direction is absent
+        # (older-format responses).
+        direction = str(a.get("direction") or "").strip().lower()
         multiplier = 1.0
-        if any(w in suggestion for w in ["reduce", "decrease", "less", "fewer",
-                                         "lower", "降低", "减少", "降频", "减半"]):
+        if direction:
+            if direction in ("reduce", "decrease", "lower", "降频", "降低", "减少"):
+                multiplier = 2.0
+            elif direction in ("increase", "raise", "加频", "提高", "增加"):
+                multiplier = 0.5
+            elif direction in ("keep", "maintain", "no_change", "hold", "不变", "维持"):
+                continue
+            else:
+                print(f"[engagement-analyze] {target}: unrecognized direction "
+                      f"'{direction}' — skipping (not falling back to prose keywords)",
+                      file=sys.stderr)
+                continue
+        elif any(w in suggestion for w in ["reduce", "decrease", "less", "fewer",
+                                           "lower", "降低", "减少", "降频", "减半"]):
             multiplier = 2.0
         elif any(w in suggestion for w in ["increase", "more", "higher",
                                            "提高", "增加", "加频"]):
