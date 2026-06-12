@@ -85,13 +85,14 @@ def main() -> int:
     buttons = []
     if url:
         buttons.append({"text": "去看看", "url": url})
-        # NO callback ("value") buttons: lark-cli 1.0.44 doesn't consume
-        # card.action.trigger at all (larksuite/cli#1051), so every tap times
-        # out server-side and shows the user "出错了请稍后重试". URL buttons
-        # are pure client-side and work fine. The "回复'收藏'" text fallback
-        # below is the working save path. Re-add the 收藏 button when
-        # `lark-cli event list | grep card` shows support (self-diagnostic
-        # watches for this).
+        # Callback button RE-ENABLED 2026-06-12: the app's callback config is
+        # published and the single-connection sidecar (lark_event_sidecar.py,
+        # JARVIS_EVENT_BACKEND=sidecar) ACKs card.action.trigger inline.
+        # (lark-cli ≤1.0.52 still can't consume it — the sidecar is required.)
+        buttons.append({
+            "text": "收藏",
+            "value": {"action": "watchlater", "title": title, "url": url},
+        })
 
     # Use build_card for header + body, then add note element manually
     card_str = build_card(header_text, user_message, buttons if buttons else None, source="content-recommend")
