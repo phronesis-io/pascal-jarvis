@@ -358,6 +358,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
     (no "今天哲学吃得够重了", no "换个频道", no "你看了X所以推Y"). Just present
     the one good pick on its own merits. The clickable URL is mandatory.
 
+    NEVER FABRICATE CURRENT EVENTS. Any time-sensitive claim in user_message —
+    sports results/standings/"昨晚的比赛", ongoing seasons, breaking news,
+    "X just happened" hooks — must be verified via WebSearch in THIS run before
+    you state it. Memory snapshots about what the user "is following" go stale
+    (teams get eliminated, seasons end). If you cannot verify same-day, pitch
+    the video purely on its own merits with NO current-events framing, or skip
+    it. A fabricated score is worse than no recommendation.
+
     Return JSON:
     {
       "title": "<video title>",
