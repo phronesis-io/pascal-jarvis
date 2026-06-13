@@ -3,7 +3,10 @@
 - 版本：v2.0（2026-06-13）
 - 作者：Claude（基于 55-agent 全模块审计：10 子系统地图 + 8 维度交叉审计 + 对抗验证）
 - 编号：延续 prd_interaction_quality.md（v1.0 用掉 REQ-01~29），本期 REQ-30 起
-- 状态：见各 REQ 标注（本期实施 / 路线图）
+- 状态：**P0 全部上线 + P1 大部上线（2026-06-13）**
+  - ✅ 已实施并上线：REQ-30~52、REQ-58、REQ-53（引擎件：failed 死路/日历 dedup/坏 datetime 拒绝/信封契约单源化/list 值修复——其中 list 值 str() 损坏项与多任务信封一并由 parse-failure 重构覆盖）、REQ-57（部分：EF 游标迁出 /tmp；fsync 助手未做）
+  - ⏳ 留下期：REQ-54/55（dashboard engagement 页 + ops 页）、REQ-56（睡眠建模）、REQ-57（atomicio fsync 助手）、P2 路线图全部
+  - 测试：523 → **638 全绿**（+115）；8 个 commit；重启上线见验证记录
 
 ---
 
