@@ -83,3 +83,21 @@ def _guard_repo_files():
             f"  before: {old}\n  after:  {new}\n"
             f"Check your fixtures — they must use tmp_path, not repo paths."
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_intent_telemetry(monkeypatch):
+    """Intent lifecycle events must never reach the LIVE sched_events.jsonl.
+
+    core.intentions._emit_intent hardcodes the repo root (production processes
+    have no other home), so test intent operations — even against tmp
+    databases — were emitting telemetry into the real event log: the 6/13
+    verification found 688 test-fixture events ('约学妹', '读 x402'…)
+    polluting the dashboard funnel. Tests that WANT to assert on telemetry
+    re-patch this explicitly.
+    """
+    try:
+        import core.intentions as _intents
+        monkeypatch.setattr(_intents, "_emit_intent", lambda *a, **k: None)
+    except ImportError:
+        pass
