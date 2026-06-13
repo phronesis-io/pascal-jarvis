@@ -51,6 +51,81 @@ PORT = int(CONFIG.admin.get("port", 3456))
 # and clients must send `X-Admin-Token: <value>`.
 ADMIN_TOKEN = str(CONFIG.admin.get("token", "") or "")
 
+# ── POST CSRF token (REQ-48 security trio) ──────────────────────────
+# Every POST/DELETE must carry X-Admin-Token. The token is generated at
+# startup (random, written to .admin_token mode 0600) and embedded into the
+# served HTML as a <meta> tag, so the frontend reads it locally while a
+# cross-origin attacker cannot: the custom header forces a CORS preflight
+# that we never answer. Lazy + ROOT-keyed so tests can redirect ROOT.
+_post_token_cache: dict = {"path": None, "token": ""}
+
+# Hosts a browser is allowed to address this admin as. Anything else (DNS
+# rebinding, a LAN name, a public IP) is rejected on state-changing verbs.
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+# Trigger file consumed by core.heartbeat_loop — file CONTENT is the bare
+# task name to force (REQ-37/47②). Module-level so tests can repoint it.
+HEARTBEAT_TRIGGER_PATH = Path("/tmp/jarvis-heartbeat-trigger")
+
+# Known info-level failure signatures: these lines log at INFO but represent
+# real failures (REQ-48①) — /api/logs always flags them regardless of grep.
+LOG_FAILURE_SIGNATURES = (
+    "timed out (60s)",
+    "JSON parse failed",
+    "exited with code 1",
+    "stderr:",
+)
+
+# EigenFlux template preferences (the old radio values). A save replacing a
+# non-empty free-text preference with one of these needs confirm_overwrite.
+EF_TEMPLATE_PREFS = {"Push everything", "Action-only", "Digest", "Silent"}
+
+
+def _get_post_token() -> str:
+    """Read (or create, 0600) ROOT/.admin_token. Empty string on I/O failure
+    — callers fail CLOSED (no token file ⇒ no POSTs), never open."""
+    path = Path(ROOT) / ".admin_token"
+    key = str(path)
+    if _post_token_cache["path"] == key and _post_token_cache["token"]:
+        return _post_token_cache["token"]
+    token = ""
+    try:
+        if path.exists():
+            token = path.read_text(encoding="utf-8").strip()
+        if not token:
+            import secrets
+            token = secrets.token_hex(16)
+            path.write_text(token + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+    except OSError as e:
+        print(f"[admin] cannot read/create .admin_token: {e}", file=sys.stderr)
+        token = ""
+    _post_token_cache.update(path=key, token=token)
+    return token
+
+
+def _pid_dead(pid: int) -> bool:
+    """True when `pid` is gone OR is a zombie (dead, unreaped by its parent).
+
+    kill(pid, 0) succeeding is NOT proof of life: a SIGKILLed process whose
+    parent hasn't wait()ed yet still answers signal 0. stop_task must not
+    refuse to clear a lock (or claim the kill failed) over a corpse.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False  # exists but unreachable (e.g. not ours) — alive
+    try:
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=2)
+        if out.returncode != 0:
+            return True  # ps can't see it — gone between the two checks
+        return out.stdout.strip().upper().startswith("Z")
+    except Exception:
+        return False
+
 # Session tracker (maps Lark conv_key → current session_id + counter)
 SESSION_TRACKER = ROOT / "active_sessions.json"
 
@@ -576,15 +651,38 @@ def heartbeat_status() -> dict:
             "post": task.get("post", ""),
             "prompt": task.get("prompt", "").strip(),
         })
-    return {"tasks": result}
+    # mtime: the concurrent-edit token. The client echoes it back on save and
+    # the server 409s if the file changed underneath (REQ-47⑤).
+    return {"tasks": result, "mtime": heartbeat_path.stat().st_mtime}
 
 
 def save_heartbeat_task(name: str, interval_str: str, pre: str, post: str,
-                        prompt: str) -> dict:
-    """Update a single task in HEARTBEAT.md. Rewrites the file preserving all other tasks."""
+                        prompt: str, expected_mtime=None) -> dict:
+    """Update a single task in HEARTBEAT.md. Rewrites the file preserving all other tasks.
+
+    REQ-47⑤: validates the interval (same grammar core.heartbeat.parse_interval
+    accepts, but strict — parse_interval silently defaults nonsense to 600s,
+    which is exactly the silent-drop class this guards against) and rejects the
+    write with {conflict: True} when the on-disk mtime differs from the one the
+    client loaded (concurrent edit by another process/editor).
+    """
     heartbeat_path = ROOT / "HEARTBEAT.md"
     if not heartbeat_path.exists():
         return {"error": "HEARTBEAT.md not found"}
+
+    m = re.fullmatch(r"(\d+)\s*([smhd])", interval_str.strip())
+    if not m or int(m.group(1)) <= 0:
+        return {"error": f"invalid interval {interval_str!r} — expected <N><s|m|h|d>, e.g. 90s / 10m / 2h / 1d"}
+
+    if expected_mtime is not None:
+        try:
+            expected = float(expected_mtime)
+        except (TypeError, ValueError):
+            return {"error": f"invalid mtime {expected_mtime!r}"}
+        disk_mtime = heartbeat_path.stat().st_mtime
+        if abs(disk_mtime - expected) > 1e-4:
+            return {"error": "HEARTBEAT.md changed on disk since you loaded it — reload before saving",
+                    "conflict": True, "disk_mtime": disk_mtime}
 
     text = heartbeat_path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -625,7 +723,7 @@ def save_heartbeat_task(name: str, interval_str: str, pre: str, post: str,
     tmp.write_text(new_text, encoding="utf-8")
     os.replace(tmp, heartbeat_path)
 
-    return {"ok": True}
+    return {"ok": True, "mtime": heartbeat_path.stat().st_mtime}
 
 
 # ── EigenFlux settings & status ─────────────────────────────────────
@@ -690,7 +788,257 @@ def eigenflux_status() -> dict:
         return {"authed": False, "error": str(e)}
 
 
+# 60s cache for the status subprocess (REQ-48③): the `eigenflux profile show`
+# call can take seconds; without a cache every EigenFlux-tab visit blocks a
+# server thread on it.
+_EF_STATUS_TTL = 60
+_ef_status_cache: dict = {"data": None, "time": 0.0}
+
+
+def eigenflux_status_cached() -> dict:
+    now = time.time()
+    if (_ef_status_cache["data"] is not None
+            and now - _ef_status_cache["time"] < _EF_STATUS_TTL):
+        return _ef_status_cache["data"]
+    data = eigenflux_status()
+    _ef_status_cache.update(data=data, time=now)
+    return data
+
+
+# ── Ops depth: logs / sched events / queues / intents (REQ-48) ──────
+
+def tail_log(file_key: str, lines: int = 200, grep: str = "") -> dict:
+    """Tail jarvis.log or daemon.log with an optional substring filter.
+
+    Every returned line carries a `flagged` bit when it matches a known
+    info-level failure signature — failures that the log level hides.
+    """
+    files = {"jarvis": ROOT / "jarvis.log", "daemon": ROOT / "daemon.log"}
+    path = files.get(file_key)
+    if path is None:
+        return {"error": f"unknown file {file_key!r} — use file=jarvis|daemon"}
+    if not path.exists():
+        return {"file": file_key, "lines": [], "flagged_count": 0, "missing": True}
+
+    lines = max(1, min(int(lines), 2000))
+    size = path.stat().st_size
+    # Tail-read a bounded chunk: enough for `lines` full lines without ever
+    # loading a multi-MB log into memory on a server thread.
+    chunk = min(size, max(256 * 1024, lines * 500))
+    with open(path, "rb") as f:
+        f.seek(size - chunk)
+        raw = f.read().decode("utf-8", errors="ignore")
+    all_lines = raw.splitlines()
+    if size > chunk and all_lines:
+        all_lines = all_lines[1:]  # first line of a mid-file seek is partial
+    if grep:
+        all_lines = [ln for ln in all_lines if grep in ln]
+    tail = all_lines[-lines:]
+    out = [{"text": ln, "flagged": any(sig in ln for sig in LOG_FAILURE_SIGNATURES)}
+           for ln in tail]
+    return {"file": file_key, "lines": out,
+            "flagged_count": sum(1 for e in out if e["flagged"])}
+
+
+def sched_events_tail(task: str = "", limit: int = 500) -> dict:
+    """Tail of sched_events.jsonl (rotated gen included), optional task filter."""
+    from core.sched_events import query as sched_query
+    limit = max(1, min(int(limit), 2000))
+    events = sched_query(ROOT, task=task)
+    return {"events": events[-limit:], "total": len(events)}
+
+
+def _read_jsonl(path: Path, limit: int = 500) -> list[dict]:
+    out: list[dict] = []
+    if not path.exists():
+        return out
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+def queues_overview() -> dict:
+    """Surface the invisible queues: night queue, intent breach queue,
+    running background jobs, Lark delivery state (REQ-48①)."""
+    from datetime import datetime
+    from core.timeutil import now_local
+    now = now_local().replace(tzinfo=None)
+
+    def _age_minutes(ts: str):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return round((now - datetime.strptime(ts, fmt)).total_seconds() / 60)
+            except (ValueError, TypeError):
+                continue
+        return None
+
+    night = [{
+        "ts": e.get("ts", ""),
+        "age_minutes": _age_minutes(str(e.get("ts", ""))),
+        "text": str(e.get("text", ""))[:200],
+    } for e in _read_jsonl(ROOT / "night_queue.jsonl")]
+
+    breach = _read_jsonl(ROOT / "data" / ".intent_breach_queue.jsonl")
+
+    jobs: dict = {"running": [], "counts": {}}
+    reg_path = ROOT / "jobs" / "registry.json"
+    if reg_path.exists():
+        try:
+            registry = json.loads(reg_path.read_text(encoding="utf-8"))
+            for job_id, info in registry.items():
+                status = info.get("status", "unknown")
+                jobs["counts"][status] = jobs["counts"].get(status, 0) + 1
+                if status == "running":
+                    jobs["running"].append({
+                        "id": job_id,
+                        "description": str(info.get("description", ""))[:160],
+                        "started_at": info.get("started_at", ""),
+                        "age_minutes": _age_minutes(str(info.get("started_at", ""))),
+                        "pid": info.get("pid"),
+                    })
+        except (json.JSONDecodeError, OSError) as e:
+            jobs["error"] = str(e)
+
+    delivery: dict = {}
+    ds_path = ROOT / ".delivery_state.json"
+    if ds_path.exists():
+        try:
+            delivery = json.loads(ds_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            delivery = {"error": str(e)}
+
+    return {"night_queue": night, "breach_queue": breach,
+            "jobs": jobs, "delivery_state": delivery}
+
+
+def intents_overview(status: str = "") -> dict:
+    """Intent list + lifecycle/closure stats via core.intentions (REQ-48①)."""
+    from core import intentions
+    rows = intentions.list_intents(status=status or None, limit=500)
+    return {"intents": rows,
+            "stats": intentions.intent_stats(),
+            "closure": intentions.closure_stats()}
+
+
+def rearm_intent(intent_id: str) -> dict:
+    """Re-arm a dead intent: status→pending, attempt→0, fire in ~10 minutes.
+
+    For date/interval/event intents the trigger_config datetime is rewritten;
+    for cron intents the expression is preserved and next_fire_at is pulled
+    forward instead (overwriting a cron's trigger_config with a datetime would
+    destroy the schedule). expires_at is cleared so cleanup_expired does not
+    immediately re-kill the row it just revived.
+    """
+    from datetime import timedelta
+    from core import intentions
+    from core.timeutil import now_local
+
+    intent = intentions.get_intent(intent_id)
+    if not intent:
+        return {"error": "intent not found"}
+    target = (now_local().replace(tzinfo=None) + timedelta(minutes=10)) \
+        .strftime("%Y-%m-%dT%H:%M:%S")
+    if intent.get("trigger_type") == "cron":
+        intentions.update_intent(intent_id, status="pending", expires_at=None)
+        db = intentions._get_db()
+        db.execute("UPDATE intentions SET attempt = 0, next_fire_at = ?, "
+                   "last_error = NULL WHERE id = ?", (target, intent_id))
+        db.commit()
+    else:
+        intentions.update_intent(intent_id, status="pending",
+                                 trigger_config={"datetime": target},
+                                 expires_at=None)
+        # attempt is deliberately NOT in update_intent's allowed set —
+        # reset it directly (spec: rearm restarts the retry budget).
+        db = intentions._get_db()
+        db.execute("UPDATE intentions SET attempt = 0, last_error = NULL "
+                   "WHERE id = ?", (intent_id,))
+        db.commit()
+    return {"ok": True, "id": intent_id, "next_fire": target}
+
+
 # ── RichView Renderer ────────────────────────────────────────────────
+
+# Tag whitelist for model-authored 'html' sections (REQ-48⑤). Everything
+# else — attributes included — is stripped; text content is escaped.
+_HTML_ALLOWED_TAGS = {"b", "i", "em", "strong", "code", "pre", "br", "p",
+                      "ul", "ol", "li", "h1", "h2", "h3", "h4", "a"}
+_HTML_VOID_TAGS = {"br"}
+_HTML_DROP_CONTENT_TAGS = {"script", "style"}
+
+
+def _sanitize_html(content: str) -> str:
+    """Sanitize model-authored HTML: escape everything by default, allow only
+    a small tag whitelist, drop all attributes except http(s) hrefs on <a>.
+
+    RichView pages are served unauthenticated on the SAME origin as the admin
+    API — an unescaped model-authored section is stored XSS with a direct line
+    to the destructive endpoints. Model output is DATA, not markup.
+    """
+    import html as html_mod
+    from html.parser import HTMLParser
+
+    class _Sanitizer(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.out: list[str] = []
+            self._drop_depth = 0  # inside <script>/<style> — drop text too
+
+        def _emit_start(self, tag, attrs):
+            if tag in _HTML_DROP_CONTENT_TAGS:
+                self._drop_depth += 1
+                return
+            if tag not in _HTML_ALLOWED_TAGS:
+                return
+            if tag == "a":
+                href = next((v for k, v in attrs if k == "href"), "") or ""
+                if href.startswith(("http://", "https://")):
+                    self.out.append(
+                        f'<a href="{html_mod.escape(href, quote=True)}" '
+                        f'rel="noopener noreferrer" target="_blank">')
+                else:
+                    self.out.append("<a>")
+            else:
+                self.out.append(f"<{tag}>")  # attributes are never kept
+
+        def handle_starttag(self, tag, attrs):
+            self._emit_start(tag, attrs)
+
+        def handle_startendtag(self, tag, attrs):
+            if tag in _HTML_VOID_TAGS:
+                self.out.append("<br>")
+
+        def handle_endtag(self, tag):
+            if tag in _HTML_DROP_CONTENT_TAGS:
+                self._drop_depth = max(0, self._drop_depth - 1)
+                return
+            if tag in _HTML_ALLOWED_TAGS and tag not in _HTML_VOID_TAGS:
+                self.out.append(f"</{tag}>")
+
+        def handle_data(self, data):
+            if not self._drop_depth:
+                self.out.append(html_mod.escape(data))
+
+        # comments / declarations / processing instructions: dropped
+
+    s = _Sanitizer()
+    try:
+        s.feed(content or "")
+        s.close()
+    except Exception:
+        # Parser blew up on hostile input — fall back to full escape.
+        return html_mod.escape(content or "")
+    return "".join(s.out)
+
 
 def _render_richview(view: dict) -> str:
     """Render a view dict into a self-contained HTML page."""
@@ -739,8 +1087,11 @@ def _render_richview(view: dict) -> str:
             chart_json = html_mod.escape(json.dumps(sec.get("config", {})))
             body_parts.append(f'<div class="rv-section rv-chart" data-chart=\'{chart_json}\'><canvas></canvas></div>')
         elif stype == "html":
-            # Raw HTML passthrough (trust internal callers)
-            body_parts.append(f'<div class="rv-section">{sec.get("content", "")}</div>')
+            # Model-authored HTML: sanitized, never trusted (REQ-48⑤).
+            # views/*.json content is model output reachable by prompt
+            # injection — raw passthrough here was stored XSS on the same
+            # origin as the destructive admin API.
+            body_parts.append(f'<div class="rv-section">{_sanitize_html(sec.get("content", ""))}</div>')
         else:
             body_parts.append(f'<div class="rv-section"><pre>{html_mod.escape(json.dumps(sec, indent=2))}</pre></div>')
 
@@ -912,6 +1263,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return hmac.compare_digest(provided.encode("utf-8", "replace"),
                                    ADMIN_TOKEN.encode("utf-8", "replace"))
 
+    # ── REQ-48 security trio (state-changing verbs) ──────────────────
+
+    def _check_host(self) -> bool:
+        """Host header must name localhost — blocks DNS-rebinding and any
+        request addressed to a non-loopback name."""
+        host = (self.headers.get("Host") or "").strip()
+        if host.startswith("["):  # [::1]:3456
+            hostname = host.split("]", 1)[0].lstrip("[")
+        else:
+            hostname = host.split(":", 1)[0]
+        return hostname.lower() in _ALLOWED_HOSTS
+
+    def _check_post_token(self) -> bool:
+        """X-Admin-Token header must match the .admin_token file (or the
+        configured admin.token). A custom header forces a CORS preflight,
+        so cross-origin pages cannot fire state-changing requests."""
+        import hmac
+        provided = self.headers.get("X-Admin-Token") or ""
+        if not provided:
+            return False
+        expected = _get_post_token()
+        if expected and hmac.compare_digest(
+                provided.encode("utf-8", "replace"),
+                expected.encode("utf-8", "replace")):
+            return True
+        if ADMIN_TOKEN and hmac.compare_digest(
+                provided.encode("utf-8", "replace"),
+                ADMIN_TOKEN.encode("utf-8", "replace")):
+            return True
+        return False
+
+    def _guard_mutation(self) -> bool:
+        """Run the security trio shared by POST and DELETE. Sends the error
+        response and returns False when the request must be rejected."""
+        if not self._check_host():
+            self._json({"error": "forbidden: Host must be localhost"}, status=403)
+            return False
+        if not self._check_post_token():
+            self._json({"error": "forbidden: missing or invalid X-Admin-Token"}, status=403)
+            return False
+        if not self._check_auth():
+            self._json({"error": "unauthorized"}, status=401)
+            return False
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -970,16 +1366,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/heartbeat/status":
             self._json(heartbeat_status())
         elif path == "/api/eigenflux/status":
-            self._json(eigenflux_status())
+            self._json(eigenflux_status_cached())
         elif path == "/api/eigenflux/settings":
             self._json(eigenflux_settings())
         elif path == "/api/views":
             self._json(list_views())
+        elif path == "/api/logs":
+            file_key = params.get("file", ["jarvis"])[0]
+            try:
+                lines = int(params.get("lines", ["200"])[0])
+            except ValueError:
+                self._json({"error": "lines must be an integer"}, status=400)
+                return
+            grep = params.get("grep", [""])[0]
+            result = tail_log(file_key, lines=lines, grep=grep)
+            self._json(result, status=200 if "error" not in result else 400)
+        elif path == "/api/sched_events":
+            task = params.get("task", [""])[0]
+            try:
+                limit = int(params.get("limit", ["500"])[0])
+            except ValueError:
+                self._json({"error": "limit must be an integer"}, status=400)
+                return
+            try:
+                self._json(sched_events_tail(task=task, limit=limit))
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+        elif path == "/api/queues":
+            try:
+                self._json(queues_overview())
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+        elif path == "/api/intents":
+            status_q = params.get("status", [""])[0]
+            try:
+                self._json(intents_overview(status=status_q))
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+        elif path.startswith("/api/"):
+            # Strict 404 for unknown API paths (REQ-48④) — serving the SPA
+            # here made every typo'd endpoint look like a 200.
+            self._json({"error": "not found"}, status=404)
         else:
+            # SPA shell. The POST token is injected into a <meta> tag so the
+            # frontend can send X-Admin-Token on every state-changing call.
+            html_out = HTML
+            token = _get_post_token()
+            if token:
+                html_out = html_out.replace("__ADMIN_TOKEN__", token)
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(HTML.encode())
+            self.wfile.write(html_out.encode())
 
     def _serve_health(self):
         """Health check endpoint for monitoring. No auth required."""
@@ -1045,22 +1483,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
 
-    def _read_json_body(self) -> dict | None:
-        """Read and parse JSON request body. Returns None on failure (sends 400)."""
+    def _drain_body(self) -> bytes:
+        """Read the request body exactly once (bounded) and cache it.
+
+        Responding while unread bytes sit on the socket resets the connection
+        before the client sees the status — so EVERY mutation handler drains
+        first, even paths that reject the request or take no body.
+        """
+        cached = getattr(self, "_body_cache", None)
+        if cached is not None:
+            return cached
         try:
             length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length)
-            return json.loads(raw) if raw else {}
+        except ValueError:
+            length = 0
+        length = max(0, min(length, 10 * 1024 * 1024))  # 10MB cap
+        try:
+            self._body_cache = self.rfile.read(length) if length else b""
+        except OSError:
+            self._body_cache = b""
+        return self._body_cache
+
+    def _read_json_body(self) -> dict | None:
+        """Parse the (already drained) JSON request body. Enforces
+        Content-Type: application/json (REQ-48 trio ③) and sends the error
+        response itself, returning None so the caller just bails."""
+        raw = self._drain_body()
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json({"error": "Content-Type must be application/json"}, status=415)
+            return None
+        try:
+            body = json.loads(raw) if raw else {}
+            if not isinstance(body, dict):
+                self._json({"error": "JSON body must be an object"}, status=400)
+                return None
+            return body
         except (json.JSONDecodeError, ValueError):
             self._json({"error": "invalid JSON body"}, status=400)
             return None
 
     def do_POST(self):
-        if not self._check_auth():
-            self.send_response(401)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"error":"unauthorized"}')
+        self._drain_body()
+        if not self._guard_mutation():
             return
 
         parsed = urlparse(self.path)
@@ -1096,19 +1561,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not name or not interval_str or not prompt:
                 self._json({"error": "name, interval_str, and prompt are required"}, status=400)
                 return
-            result = save_heartbeat_task(name, interval_str, pre, post, prompt)
-            self._json(result, status=200 if "ok" in result else 400)
+            result = save_heartbeat_task(name, interval_str, pre, post, prompt,
+                                         expected_mtime=body.get("mtime"))
+            if "ok" in result:
+                status = 200
+            elif result.get("conflict"):
+                status = 409
+            else:
+                status = 400
+            self._json(result, status=status)
 
         elif path.startswith("/api/heartbeat/force/"):
-            task_name = path.split("/api/heartbeat/force/", 1)[1]
+            from urllib.parse import unquote
+            task_name = unquote(path.split("/api/heartbeat/force/", 1)[1]).strip()
             if not task_name:
                 self._json({"error": "task name required"}, status=400)
                 return
-            # Write trigger file that bot.sh reads
-            trigger_path = Path("/tmp/jarvis-heartbeat-trigger")
+            # Validate against HEARTBEAT.md (REQ-47②): an unknown name would
+            # be written, consumed by heartbeat_loop, and silently no-op.
             try:
-                trigger_path.write_text(task_name, encoding="utf-8")
-                self._json({"ok": True, "task": task_name})
+                from core.heartbeat import parse_heartbeat
+                known = {t["name"] for t in parse_heartbeat(ROOT / "HEARTBEAT.md")}
+            except (OSError, FileNotFoundError):
+                known = set()
+            if task_name not in known:
+                self._json({"error": f"unknown task {task_name!r}",
+                            "known_tasks": sorted(known)}, status=404)
+                return
+            # Bare task name, no trailing newline — heartbeat_loop reads the
+            # CONTENT and scopes the forced cycle to run_cycle(only_task=).
+            try:
+                HEARTBEAT_TRIGGER_PATH.write_text(task_name, encoding="utf-8")
+                self._json({"ok": True, "task": task_name, "scope": "single-task"})
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
 
@@ -1116,44 +1600,135 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self._read_json_body()
             if body is None:
                 return
-            # Merge with existing settings so partial updates work
+            confirm_overwrite = bool(body.pop("confirm_overwrite", False))
             current = eigenflux_settings()
             if "error" in current:
                 current = {}
+            # REQ-47④: refuse to stomp a hand-tuned free-text preference with
+            # one of the fixed template values unless explicitly confirmed —
+            # this exact path silently destroyed the curated routing rules.
+            new_pref = body.get("feed_delivery_preference")
+            cur_pref = str(current.get("feed_delivery_preference", "") or "")
+            if (new_pref is not None and new_pref in EF_TEMPLATE_PREFS
+                    and cur_pref.strip() and new_pref != cur_pref
+                    and not confirm_overwrite):
+                self._json({
+                    "error": "refusing to replace a non-empty hand-tuned "
+                             "feed_delivery_preference with a template value "
+                             "— resend with confirm_overwrite: true to proceed",
+                    "needs_confirm": True,
+                    "current_preference": cur_pref,
+                }, status=409)
+                return
             current.update(body)
             result = save_eigenflux_settings(current)
             self._json(result, status=200 if "ok" in result else 500)
 
         elif path == "/api/bot/stop_task":
-            # Kill the running Claude process for the most active session
-            import glob as _glob
-            locks = _glob.glob(str(ROOT / ".session_lock_*"))
-            killed = 0
-            for lock in locks:
-                try:
-                    pid = int(Path(lock).read_text().strip())
-                    os.kill(pid, 9)
-                    killed += 1
-                except (ValueError, ProcessLookupError, OSError):
-                    pass
-                Path(lock).unlink(missing_ok=True)
-            self._json({"ok": True, "killed": killed})
+            self._json(self._stop_task())
 
         elif path == "/api/bot/restart":
-            # Write restart trigger file for bot.sh to pick up
+            # Write restart trigger; heartbeat_loop is the single consumer —
+            # it spawns restart.sh detached (REQ-42, ~15s round trip).
             trigger = ROOT / ".restart_trigger"
             trigger.write_text(str(int(time.time())))
-            self._json({"ok": True, "message": "Restart triggered"})
+            self._json({"ok": True, "message": "Restart triggered — heartbeat "
+                                               "loop hands off to restart.sh (~15s)"})
+
+        elif path == "/api/intents/cancel":
+            body = self._read_json_body()
+            if body is None:
+                return
+            intent_id = str(body.get("id", "")).strip()
+            if not intent_id:
+                self._json({"error": "id required"}, status=400)
+                return
+            try:
+                from core import intentions
+                ok = intentions.cancel_intent(intent_id, reason="cancelled via admin console")
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            if ok:
+                self._json({"ok": True, "id": intent_id})
+            else:
+                self._json({"error": "intent not found"}, status=404)
+
+        elif path == "/api/intents/rearm":
+            body = self._read_json_body()
+            if body is None:
+                return
+            intent_id = str(body.get("id", "")).strip()
+            if not intent_id:
+                self._json({"error": "id required"}, status=400)
+                return
+            try:
+                result = rearm_intent(intent_id)
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            self._json(result, status=200 if "ok" in result else 404)
 
         else:
             self._json({"error": "not found"}, status=404)
 
+    def _stop_task(self) -> dict:
+        """Kill running session handlers honestly (REQ-47①).
+
+        Lock format is '<pid-or-acquiring> <token>' (two fields — bot.sh).
+        The old code int()'d the whole line, ALWAYS raised, never killed
+        anything, then unconditionally deleted live locks — enabling
+        concurrent --resume transcript corruption while reporting ok:true.
+
+        Rules: take the FIRST whitespace field; skip 'acquiring' (holder is
+        mid-acquire, no pid yet); kill only numeric pids; unlink ONLY after
+        the holder is confirmed dead (kill -0 → ProcessLookupError).
+        """
+        import glob as _glob
+        killed = 0   # actually SIGKILLed and confirmed dead
+        cleaned = 0  # holder was already dead — stale lock removed
+        skipped = 0  # acquiring / malformed / could-not-confirm-dead
+        for lock in _glob.glob(str(ROOT / ".session_lock_*")):
+            lock_path = Path(lock)
+            try:
+                content = lock_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                skipped += 1
+                continue
+            first = content.split()[0] if content.split() else ""
+            if first == "acquiring" or not first.isdigit():
+                skipped += 1  # no pid to kill — and the lock is NOT ours to delete
+                continue
+            pid = int(first)
+            already_dead = False
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                already_dead = True
+            except OSError:
+                skipped += 1  # e.g. PermissionError — not our process, leave the lock
+                continue
+            if already_dead:
+                lock_path.unlink(missing_ok=True)
+                cleaned += 1
+                continue
+            # SIGKILL is async — confirm death before touching the lock.
+            dead = False
+            for _ in range(20):  # up to ~2s
+                if _pid_dead(pid):
+                    dead = True
+                    break
+                time.sleep(0.1)
+            if dead:
+                lock_path.unlink(missing_ok=True)
+                killed += 1
+            else:
+                skipped += 1  # holder still alive — lock stays
+        return {"ok": True, "killed": killed, "cleaned": cleaned, "skipped": skipped}
+
     def do_DELETE(self):
-        if not self._check_auth():
-            self.send_response(401)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"error":"unauthorized"}')
+        self._drain_body()
+        if not self._guard_mutation():
             return
 
         parsed = urlparse(self.path)
@@ -1182,7 +1757,11 @@ def main():
     print(auth_line)
     if HOST not in ("127.0.0.1", "localhost") and not ADMIN_TOKEN:
         print("  ⚠ WARNING: admin bound to non-localhost with no token — set admin.token in jarvis.yaml")
-    server = http.server.HTTPServer((HOST, PORT), Handler)
+    # Materialize the POST token at startup (creates .admin_token, 0600).
+    _get_post_token()
+    # Threading (REQ-48③): the single-threaded HTTPServer let one slow request
+    # (e.g. an eigenflux subprocess) freeze the console AND Lark /view/ links.
+    server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

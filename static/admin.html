@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="admin-token" content="__ADMIN_TOKEN__">
 <title>Jarvis Admin</title>
 <style>
 :root {
@@ -311,6 +312,10 @@ select.form-input { cursor: pointer; }
   <button class="nav-item" data-tab="memories">Memories</button>
   <button class="nav-item" data-tab="heartbeat">Heartbeat</button>
   <button class="nav-item" data-tab="eigenflux">EigenFlux</button>
+  <button class="nav-item" data-tab="logs">Logs</button>
+  <button class="nav-item" data-tab="events">Events</button>
+  <button class="nav-item" data-tab="queues">Queues</button>
+  <button class="nav-item" data-tab="intents">Intents</button>
   <button class="nav-item" data-tab="search">Search</button>
   <button class="nav-item" data-tab="sessions">Sessions</button>
   <button class="nav-item" data-tab="settings">Settings</button>
@@ -321,6 +326,10 @@ select.form-input { cursor: pointer; }
 <section id="memories"></section>
 <section id="heartbeat"></section>
 <section id="eigenflux"></section>
+<section id="logs"></section>
+<section id="events"></section>
+<section id="queues"></section>
+<section id="intents"></section>
 <section id="search"></section>
 <section id="sessions"></section>
 <section id="settings"></section>
@@ -329,6 +338,14 @@ select.form-input { cursor: pointer; }
 <div class="toast-container" id="toasts"></div>
 <script>
 // ── Helpers ──
+// POST CSRF token injected by the server into the meta tag at serve time.
+// Sent as X-Admin-Token on every state-changing request — the custom header
+// forces a CORS preflight, so cross-origin pages cannot fire these calls.
+const ADMIN_TOKEN=(document.querySelector('meta[name="admin-token"]')||{}).content||'';
+function apiFetch(url,opts){
+  opts=opts||{}; opts.headers=Object.assign({'X-Admin-Token':ADMIN_TOKEN},opts.headers||{});
+  return fetch(url,opts);
+}
 const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const bold = s => esc(s).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
 function hl(text,q) {
@@ -365,7 +382,22 @@ function fmtParagraphs(s) {
 }
 function roleTag(r) { return `<span class="sr-role ${r}">${r}</span>`; }
 function fmtBytes(n) { if(!n)return '-'; if(n<1024)return n+'B'; if(n<1048576)return (n/1024).toFixed(1)+'KB'; return (n/1048576).toFixed(2)+'MB'; }
-function fmtTs(ts) { return (ts||'').slice(0,16).replace('T',' ')||'-'; }
+function fmtTs(ts) {
+  // Local-time rendering (REQ-48②). Session-file timestamps are UTC ISO
+  // strings ("...Z") — slicing them raw displayed times 8h off. Anything
+  // carrying an explicit zone is converted to browser-local; zone-less
+  // strings are already local (core.timeutil writes local) and pass through.
+  if(ts==null||ts==='') return '-';
+  if(typeof ts==='number'){ const d=new Date(ts<1e12?ts*1000:ts); return isNaN(d)?String(ts):fmtDateLocal(d); }
+  if(/([zZ]|[+-]\d{2}:?\d{2})$/.test(ts) && /^\d{4}-\d{2}-\d{2}T/.test(ts)){
+    const d=new Date(ts); if(!isNaN(d)) return fmtDateLocal(d);
+  }
+  return ts.slice(0,16).replace('T',' ');
+}
+function fmtDateLocal(d){
+  const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function toast(msg) {
   const c=document.getElementById('toasts'), d=document.createElement('div');
   d.className='toast'; d.textContent=msg; c.appendChild(d);
@@ -393,6 +425,9 @@ document.querySelectorAll('.nav-item').forEach(t=>{
     document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
     document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
     t.classList.add('active'); document.getElementById(t.dataset.tab).classList.add('active');
+    // Ops tabs load on demand (fresh data each visit)
+    const loaders={logs:loadLogs,events:loadEvents,queues:loadQueues,intents:loadIntents};
+    if(loaders[t.dataset.tab]) loaders[t.dataset.tab]();
   });
 });
 
@@ -405,10 +440,39 @@ function fmtAgo(sec){
 }
 const stateLabels={working:'Working',idle:'Idle',dead:'Offline'};
 function botAction(action){
-  if(action==='restart'&&!confirm('Restart bot?')) return;
-  fetch('/api/bot/'+action,{method:'POST'}).then(r=>r.json()).then(d=>{
-    toast(d.message||action+' done'); loadBotStatus();
+  if(action==='restart'&&!confirm('Restart bot? 全栈重启，约 15 秒不可用。')) return;
+  if(action==='stop_task'&&!confirm('Stop task: SIGKILL 当前会话处理进程。\n只杀锁文件里确认存活的 PID，确认死亡后才清锁；acquiring 状态的锁会被跳过。继续？')) return;
+  apiFetch('/api/bot/'+action,{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(action==='restart'){ pollRestart(); return; }
+    if(action==='stop_task'){
+      toast(`Stop task: killed ${d.killed||0} · cleaned ${d.cleaned||0} stale · skipped ${d.skipped||0}`);
+    } else {
+      toast(d.message||d.error||action+' done');
+    }
+    loadBotStatus();
   }).catch(()=>toast('Failed'));
+}
+function pollRestart(){
+  // REQ-47③: poll /health every 2s — show 重启中… until the stack answers
+  // again. Require either an observed DOWN or 20s elapsed before declaring
+  // recovery (the old admin may answer for a few seconds before dying).
+  let banner=document.getElementById('restart-banner');
+  if(!banner){
+    banner=document.createElement('div'); banner.id='restart-banner'; banner.className='toast';
+    document.getElementById('toasts').appendChild(banner);
+  }
+  banner.textContent='重启中…';
+  const t0=Date.now(); let sawDown=false; let done=false;
+  const iv=setInterval(()=>{
+    if(Date.now()-t0>180000){ clearInterval(iv); banner.textContent='重启超时 — 检查 daemon/restart.sh 日志'; setTimeout(()=>banner.remove(),8000); return; }
+    fetch('/health',{cache:'no-store'}).then(r=>{
+      if(done) return;
+      if(sawDown||Date.now()-t0>20000){
+        done=true; clearInterval(iv); banner.textContent='已恢复';
+        setTimeout(()=>banner.remove(),5000); loadBotStatus();
+      }
+    }).catch(()=>{ sawDown=true; banner.textContent='重启中…（服务已下线，等待恢复）'; });
+  },2000);
 }
 function loadBotStatus(){
   fetch('/api/bot_status').then(r=>r.json()).then(s=>{
@@ -458,7 +522,7 @@ function loadLive(){
             return `<div class="live-msg tool_result">${esc(m.text)}</div>`;
           }
           return `<div class="live-msg ${m.role}">
-            <span class="live-ts">${esc(m.timestamp)}</span>${fmtParagraphs(m.text)}</div>`;
+            <span class="live-ts">${esc(fmtTs(m.timestamp))}</span>${fmtParagraphs(m.text)}</div>`;
         }).join('')}
       </div>`;
     loadBotStatus();
@@ -600,7 +664,7 @@ function saveMemory(){
   if(!payload.filename||!payload.name){toast('Filename and name are required');return;}
   if(!payload.filename.endsWith('.md')) payload.filename+='.md';
   btn.textContent='Saving...'; btn.disabled=true;
-  fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+  apiFetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
     .then(r=>r.json()).then(res=>{
       if(res.ok){toast('Memory saved'); _memEditing=null; loadMemories();}
       else{toast('Error: '+(res.error||'unknown')); btn.textContent='Save'; btn.disabled=false;}
@@ -608,7 +672,7 @@ function saveMemory(){
 }
 function deleteMemory(file){
   if(!confirm('Delete '+file+'?')) return;
-  fetch('/api/memory/'+encodeURIComponent(file),{method:'DELETE'})
+  apiFetch('/api/memory/'+encodeURIComponent(file),{method:'DELETE'})
     .then(r=>r.json()).then(res=>{
       if(res.ok){toast('Deleted '+file); loadMemories();}
       else toast('Error: '+(res.error||'unknown'));
@@ -617,13 +681,14 @@ function deleteMemory(file){
 loadMemories();
 
 // ── Heartbeat ──
-let _hbTasks=[];
+let _hbTasks=[], _hbMtime=null;
 function loadHeartbeat(){
   const el=document.getElementById('heartbeat');
   el.innerHTML='<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">Loading...</div>';
   fetch('/api/heartbeat/status').then(r=>r.json()).then(data=>{
     if(data.error){el.innerHTML=`<div class="section-header"><h2>Heartbeat</h2></div><div class="empty-state">${esc(data.error)}</div>`;return;}
     _hbTasks=data.tasks||[];
+    _hbMtime=data.mtime||null;  // concurrent-edit token: echoed back on save
     renderHeartbeat();
   });
 }
@@ -690,18 +755,23 @@ function saveHbTask(i){
     pre:document.getElementById('hb-pre-'+i).value,
     post:document.getElementById('hb-post-'+i).value,
     prompt:document.getElementById('hb-prompt-'+i).value,
+    mtime:_hbMtime,  // server 409s if HEARTBEAT.md changed since load
   };
-  fetch('/api/heartbeat/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-    .then(r=>r.json()).then(res=>{
+  apiFetch('/api/heartbeat/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(async r=>{
+      const res=await r.json();
       if(res.ok){toast('Task "'+t.name+'" saved');loadHeartbeat();}
+      else if(r.status===409){toast('HEARTBEAT.md 已被其他进程修改 — 已重新加载，请重试');loadHeartbeat();}
       else{toast('Error: '+(res.error||'unknown'));btn.textContent='Save';btn.disabled=false;}
     }).catch(()=>{toast('Network error');btn.textContent='Save';btn.disabled=false;});
 }
 function forceRun(name,btn){
   btn.disabled=true; btn.textContent='...';
-  fetch('/api/heartbeat/force/'+encodeURIComponent(name),{method:'POST'})
+  // Single-task force: the trigger file carries this task name and the
+  // heartbeat loop scopes the forced cycle to it (NOT the full roster).
+  apiFetch('/api/heartbeat/force/'+encodeURIComponent(name),{method:'POST'})
     .then(r=>r.json()).then(res=>{
-      if(res.ok){ btn.textContent='Triggered'; toast('Triggered: '+name); setTimeout(()=>{btn.textContent='Run Now';btn.disabled=false;},2000); }
+      if(res.ok){ btn.textContent='Triggered'; toast('Triggered (single task): '+name); setTimeout(()=>{btn.textContent='Run Now';btn.disabled=false;},2000); }
       else{ btn.textContent='Run Now'; btn.disabled=false; toast('Error: '+(res.error||'unknown')); }
     }).catch(()=>{btn.textContent='Run Now';btn.disabled=false;toast('Network error');});
 }
@@ -744,6 +814,11 @@ function renderHeartbeatTimeline(){
 }
 
 // ── EigenFlux ──
+// The live feed_delivery_preference is curated FREE TEXT — modeling it as
+// four radios silently destroyed the hand-tuned value on save (REQ-47④).
+// Now: textarea shows the real value; templates only FILL the textarea;
+// save submits dirty fields only; template-overwrites need confirmation.
+let _efOriginal={pref:'',cool:60};
 function loadEigenFlux(){
   const el=document.getElementById('eigenflux');
   el.innerHTML='<div class="section-header"><h2>EigenFlux</h2></div><div class="empty-state">Loading...</div>';
@@ -752,50 +827,241 @@ function loadEigenFlux(){
     fetch('/api/eigenflux/settings').then(r=>r.json())
   ]).then(([status,settings])=>{
     const authed=status.authed;
-    const profile=status.profile||{};
+    const profile=status.profile||status||{};
     const dotHtml=authed?'<span class="status-dot dot-green"></span>Connected':'<span class="status-dot dot-gray"></span>Not connected';
-    const prefs=['Push everything','Action-only','Digest','Silent'];
-    const curPref=settings.feed_delivery_preference||'Push everything';
-    const curCool=settings.publish_cooldown_minutes||60;
+    const templates=['Push everything','Action-only','Digest','Silent'];
+    const curPref=settings.feed_delivery_preference||'';
+    const curCool=settings.publish_cooldown_minutes!=null?settings.publish_cooldown_minutes:60;
+    _efOriginal={pref:curPref,cool:curCool};
     el.innerHTML=`
       <div class="section-header"><h2>EigenFlux</h2></div>
       <div class="ef-status-box">
         <div style="font-size:14px;font-weight:600;margin-bottom:10px">Connection Status</div>
         <div style="font-size:13px;color:var(--muted)">${dotHtml}</div>
         ${authed?`<div style="margin-top:8px;font-size:12px;color:var(--dim)">
-          Agent: <span style="color:var(--text)">${esc(profile.agent_name||profile.name||'-')}</span>
-          &middot; ID: <span style="color:var(--accent2);font-family:SF Mono,monospace">${esc(profile.agent_id||profile.id||'-')}</span>
-          ${profile.influence?` &middot; Influence items: ${profile.influence.total_items||0}`:''}
+          Agent: <span style="color:var(--text)">${esc(status.agent_name||profile.agent_name||'-')}</span>
+          &middot; ID: <span style="color:var(--accent2);font-family:SF Mono,monospace">${esc(status.agent_id||profile.agent_id||'-')}</span>
+          ${status.influence?` &middot; Influence items: ${status.influence.total_items||0}`:''}
         </div>`:`<div style="margin-top:8px;font-size:11px;color:var(--dim)">${esc(status.error||status.stderr||'')}</div>`}
       </div>
       <div class="ef-form">
         <div style="font-size:14px;font-weight:600;margin-bottom:14px">Settings</div>
-        <div class="form-group"><label>Feed delivery preference</label>
-          <div class="radio-group">
-            ${prefs.map(p=>`<label><input type="radio" name="ef-pref" value="${p}" ${p===curPref?'checked':''}> ${p}</label>`).join('')}
-          </div></div>
+        <div class="form-group"><label>Feed delivery preference (free text — this is the live routing rule)</label>
+          <textarea class="form-input" id="ef-pref" style="min-height:110px">${esc(curPref)}</textarea>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+            ${templates.map(p=>`<button class="fbtn" onclick="document.getElementById('ef-pref').value=${JSON.stringify(p)}">${p}</button>`).join('')}
+          </div>
+          <div style="font-size:10px;color:var(--dim);margin-top:4px">模板按钮只填充文本框，不会直接保存；覆盖手调文本需二次确认。</div>
+        </div>
         <div class="form-group"><label>Publish cooldown (minutes)</label>
           <input class="form-input" type="number" id="ef-cool" value="${curCool}" min="0" style="width:120px"></div>
-        <button class="btn btn-primary" id="ef-save" onclick="saveEFSettings()">Save</button>
+        <button class="btn btn-primary" id="ef-save" onclick="saveEFSettings(false)">Save</button>
       </div>`;
   });
 }
-function saveEFSettings(){
+function saveEFSettings(confirmOverwrite){
   const btn=document.getElementById('ef-save');
-  const pref=document.querySelector('input[name="ef-pref"]:checked');
-  const payload={
-    feed_delivery_preference: pref?pref.value:'Push everything',
-    publish_cooldown_minutes: parseInt(document.getElementById('ef-cool').value)||60
-  };
+  const pref=document.getElementById('ef-pref').value;
+  const cool=parseInt(document.getElementById('ef-cool').value);
+  const payload={};
+  if(pref!==_efOriginal.pref) payload.feed_delivery_preference=pref;
+  if(!isNaN(cool)&&cool!==_efOriginal.cool) payload.publish_cooldown_minutes=cool;
+  if(!Object.keys(payload).length){toast('No changes to save');return;}
+  if(confirmOverwrite) payload.confirm_overwrite=true;
   btn.textContent='Saving...'; btn.disabled=true;
-  fetch('/api/eigenflux/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
-    .then(r=>r.json()).then(res=>{
+  apiFetch('/api/eigenflux/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(async r=>{
+      const res=await r.json();
       btn.textContent='Save'; btn.disabled=false;
-      if(res.ok) toast('EigenFlux settings saved');
+      if(r.status===409&&res.needs_confirm){
+        if(confirm('当前偏好是手调的自由文本，用模板覆盖将丢失它：\n\n'+(res.current_preference||_efOriginal.pref)+'\n\n确定覆盖？')){
+          saveEFSettings(true);
+        }
+        return;
+      }
+      if(res.ok){toast('EigenFlux settings saved');loadEigenFlux();}
       else toast('Error: '+(res.error||'unknown'));
     }).catch(()=>{btn.textContent='Save';btn.disabled=false;toast('Network error');});
 }
 loadEigenFlux();
+
+// ── Logs ──
+function loadLogs(){
+  const el=document.getElementById('logs');
+  if(!document.getElementById('log-file')){
+    el.innerHTML=`
+      <div class="section-header"><h2>Logs</h2><span class="count" id="log-count"></span></div>
+      <div class="search-bar">
+        <select id="log-file"><option value="jarvis">jarvis.log</option><option value="daemon">daemon.log</option></select>
+        <input type="number" id="log-lines" value="200" min="10" max="2000" style="flex:0 0 90px" title="lines">
+        <input type="text" id="log-grep" placeholder="filter substring (server-side)...">
+        <button onclick="fetchLogs()">Refresh</button>
+      </div>
+      <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:10px">
+        <input type="checkbox" id="log-flagged" onchange="fetchLogs()"> 只看已标记失败行（info 级失败签名：timed out / JSON parse failed / exited with code 1 / stderr:）
+      </label>
+      <div id="log-out"></div>`;
+    document.getElementById('log-grep').addEventListener('keydown',e=>{if(e.key==='Enter')fetchLogs();});
+    document.getElementById('log-file').addEventListener('change',fetchLogs);
+  }
+  fetchLogs();
+}
+function fetchLogs(){
+  const f=document.getElementById('log-file').value;
+  const n=document.getElementById('log-lines').value||200;
+  const g=document.getElementById('log-grep').value;
+  document.getElementById('log-out').innerHTML='<div class="empty-state">Loading...</div>';
+  fetch(`/api/logs?file=${encodeURIComponent(f)}&lines=${encodeURIComponent(n)}&grep=${encodeURIComponent(g)}`)
+    .then(r=>r.json()).then(d=>{
+      if(d.error){document.getElementById('log-out').innerHTML=`<div class="empty-state">${esc(d.error)}</div>`;return;}
+      let rows=d.lines||[];
+      if(document.getElementById('log-flagged').checked) rows=rows.filter(l=>l.flagged);
+      document.getElementById('log-count').textContent=`${rows.length} lines · ${d.flagged_count||0} flagged`;
+      document.getElementById('log-out').innerHTML=rows.length
+        ?`<pre style="font-size:11px;line-height:1.55;max-height:calc(100vh - 250px);overflow:auto;white-space:pre-wrap;word-break:break-all">${
+            rows.map(l=>l.flagged?`<span style="color:var(--red)">⚑ ${esc(l.text)}</span>`:esc(l.text)).join('\n')}</pre>`
+        :'<div class="empty-state">No matching lines</div>';
+    }).catch(()=>toast('Failed to load logs'));
+}
+
+// ── Events (sched_events.jsonl) ──
+function loadEvents(){
+  const el=document.getElementById('events');
+  if(!document.getElementById('ev-task')){
+    el.innerHTML=`
+      <div class="section-header"><h2>Scheduler Events</h2><span class="count" id="ev-count"></span></div>
+      <div class="search-bar">
+        <input type="text" id="ev-task" placeholder="task name filter (exact, empty = all)..." style="flex:0 0 280px">
+        <input type="number" id="ev-limit" value="300" min="10" max="2000" style="flex:0 0 90px" title="limit">
+        <button onclick="fetchEvents()">Refresh</button>
+      </div>
+      <div id="ev-out"></div>`;
+    document.getElementById('ev-task').addEventListener('keydown',e=>{if(e.key==='Enter')fetchEvents();});
+  }
+  fetchEvents();
+}
+function fetchEvents(){
+  const task=document.getElementById('ev-task').value.trim();
+  const limit=document.getElementById('ev-limit').value||300;
+  document.getElementById('ev-out').innerHTML='<div class="empty-state">Loading...</div>';
+  fetch(`/api/sched_events?task=${encodeURIComponent(task)}&limit=${encodeURIComponent(limit)}`)
+    .then(r=>r.json()).then(d=>{
+      if(d.error){document.getElementById('ev-out').innerHTML=`<div class="empty-state">${esc(d.error)}</div>`;return;}
+      const evs=(d.events||[]).slice().reverse();  // newest first
+      document.getElementById('ev-count').textContent=`${evs.length} shown / ${d.total} total`;
+      const evColor=e=>e==='task_finish'?'var(--green)':(e==='task_skip'?'var(--yellow)':(e==='task_timeout'?'var(--red)':'var(--accent2)'));
+      document.getElementById('ev-out').innerHTML=evs.length?`
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+          <thead><tr style="color:var(--dim);text-align:left">
+            <th style="padding:6px 8px">ts</th><th style="padding:6px 8px">event</th>
+            <th style="padding:6px 8px">task</th><th style="padding:6px 8px">run</th><th style="padding:6px 8px">details</th></tr></thead>
+          <tbody>${evs.map(e=>{
+            const extras=Object.entries(e).filter(([k])=>!['ts','event','task','run_id'].includes(k))
+              .map(([k,v])=>`${k}=${typeof v==='object'?JSON.stringify(v):v}`).join(' ');
+            return `<tr style="border-top:1px solid var(--border)">
+              <td style="padding:5px 8px;font-family:monospace;color:var(--dim);white-space:nowrap">${esc(e.ts)}</td>
+              <td style="padding:5px 8px;color:${evColor(e.event)}">${esc(e.event)}</td>
+              <td style="padding:5px 8px">${esc(e.task||'-')}</td>
+              <td style="padding:5px 8px;font-family:monospace;color:var(--dim)">${esc(e.run_id||'')}</td>
+              <td style="padding:5px 8px;color:var(--muted);word-break:break-all">${esc(extras)}</td></tr>`;}).join('')}
+          </tbody></table>`:'<div class="empty-state">No events</div>';
+    }).catch(()=>toast('Failed to load events'));
+}
+
+// ── Queues ──
+function loadQueues(){
+  const el=document.getElementById('queues');
+  el.innerHTML='<div class="section-header"><h2>Queues</h2></div><div class="empty-state">Loading...</div>';
+  fetch('/api/queues').then(r=>r.json()).then(d=>{
+    if(d.error){el.innerHTML=`<div class="section-header"><h2>Queues</h2></div><div class="empty-state">${esc(d.error)}</div>`;return;}
+    const ageStr=m=>m==null?'?':(m<60?m+'m':(m<1440?Math.floor(m/60)+'h '+(m%60)+'m':Math.floor(m/1440)+'d'));
+    const block=(title,inner)=>`<div style="margin-bottom:26px"><div style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--accent)">${title}</div>${inner}</div>`;
+    const nq=(d.night_queue||[]);
+    const bq=(d.breach_queue||[]);
+    const running=(d.jobs&&d.jobs.running)||[];
+    const counts=(d.jobs&&d.jobs.counts)||{};
+    el.innerHTML=`<div class="section-header"><h2>Queues</h2>
+        <span style="display:flex;gap:8px;align-items:center"><span class="count">实时队列与任务状态</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadQueues()">Refresh</button></span></div>
+      ${block(`Night queue (${nq.length})`, nq.length?nq.map(e=>`<div class="card" style="padding:12px 16px">
+          <div style="font-size:11px;color:var(--dim);font-family:monospace">${esc(e.ts)} · ${ageStr(e.age_minutes)} ago</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;white-space:pre-wrap">${esc(e.text)}</div>
+        </div>`).join(''):'<div class="empty-state">empty</div>')}
+      ${block(`Intent breach queue (${bq.length})`, bq.length?bq.map(e=>`<div class="card" style="padding:12px 16px">
+          <div style="font-size:12px;color:var(--muted);font-family:monospace;white-space:pre-wrap">${esc(JSON.stringify(e,null,1))}</div>
+        </div>`).join(''):'<div class="empty-state">empty — 没有未告知的违约</div>')}
+      ${block(`Background jobs (running: ${running.length} · ${Object.entries(counts).map(([k,v])=>k+': '+v).join(' · ')||'registry empty'})`,
+        running.length?running.map(j=>`<div class="card" style="padding:12px 16px">
+          <div style="font-size:12px;font-weight:600">${esc(j.id)} <span style="color:var(--dim);font-weight:400">pid ${esc(String(j.pid||'?'))} · started ${esc(j.started_at)} (${ageStr(j.age_minutes)} ago)</span></div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px">${esc(j.description||'(no description)')}</div>
+        </div>`).join(''):'<div class="empty-state">no running jobs</div>')}
+      ${block('Delivery state', `<div class="card" style="padding:12px 16px"><div style="font-family:monospace;font-size:12px;color:var(--muted)">${esc(JSON.stringify(d.delivery_state||{}))}</div></div>`)}`;
+  }).catch(()=>toast('Failed to load queues'));
+}
+
+// ── Intents ──
+let _intStatus='';
+function loadIntents(){
+  const el=document.getElementById('intents');
+  if(!document.getElementById('int-out')){
+    el.innerHTML=`
+      <div class="section-header"><h2>Intents</h2><span class="count" id="int-count"></span></div>
+      <div class="filters" id="int-filters"></div>
+      <div id="int-stats" style="margin-bottom:14px"></div>
+      <div id="int-out"></div>`;
+  }
+  fetchIntents();
+}
+function fetchIntents(){
+  document.getElementById('int-out').innerHTML='<div class="empty-state">Loading...</div>';
+  fetch('/api/intents'+(_intStatus?'?status='+encodeURIComponent(_intStatus):''))
+    .then(r=>r.json()).then(d=>{
+      if(d.error){document.getElementById('int-out').innerHTML=`<div class="empty-state">${esc(d.error)}</div>`;return;}
+      const stats=d.stats||{};
+      const sts=['','pending','triggered','executed','expired','cancelled'];
+      document.getElementById('int-filters').innerHTML=sts.map(s=>
+        `<button class="fbtn${_intStatus===s?' active':''}" onclick="_intStatus='${s}';fetchIntents()">${s||'all'}${s&&stats[s]!=null?' ('+stats[s]+')':''}</button>`).join('');
+      document.getElementById('int-stats').innerHTML=
+        `<span style="font-size:12px;color:var(--dim)">lifecycle: ${Object.entries(stats).map(([k,v])=>`${k} <b style="color:var(--text)">${v}</b>`).join(' · ')}</span>`;
+      const rows=d.intents||[];
+      document.getElementById('int-count').textContent=rows.length+' intents';
+      const when=it=>{
+        try{const tc=JSON.parse(it.trigger_config||'{}');
+          if(it.trigger_type==='cron')return (tc.expression||'')+(it.next_fire_at?' → '+it.next_fire_at.slice(0,16).replace('T',' '):'');
+          return (tc.datetime||'').slice(0,16).replace('T',' ');}catch(e){return '';}
+      };
+      const stColor=s=>({pending:'var(--green)',triggered:'var(--yellow)',executed:'var(--accent2)',expired:'var(--red)',cancelled:'var(--dim)'})[s]||'var(--muted)';
+      document.getElementById('int-out').innerHTML=rows.length?`
+        <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+          <thead><tr style="color:var(--dim);text-align:left">
+            <th style="padding:6px 8px">id</th><th style="padding:6px 8px">status</th><th style="padding:6px 8px">name</th>
+            <th style="padding:6px 8px">trigger</th><th style="padding:6px 8px">cat</th><th style="padding:6px 8px">att</th><th style="padding:6px 8px"></th></tr></thead>
+          <tbody>${rows.map(it=>`<tr style="border-top:1px solid var(--border)">
+            <td style="padding:5px 8px;font-family:monospace;color:var(--accent2);white-space:nowrap">${esc(it.id)}</td>
+            <td style="padding:5px 8px;color:${stColor(it.status)}">${esc(it.status)}</td>
+            <td style="padding:5px 8px;max-width:340px">${esc(it.name)}</td>
+            <td style="padding:5px 8px;font-family:monospace;color:var(--dim);white-space:nowrap">${esc(it.trigger_type)} ${esc(when(it))}</td>
+            <td style="padding:5px 8px;color:var(--muted)">${esc(it.category||'')}</td>
+            <td style="padding:5px 8px;color:var(--muted)">${it.attempt||0}</td>
+            <td style="padding:5px 8px;white-space:nowrap">
+              ${['pending','triggered'].includes(it.status)?`<button class="btn btn-danger btn-sm" onclick="intentCancel('${esc(it.id)}')">Cancel</button>`:''}
+              ${['expired','cancelled','executed'].includes(it.status)?`<button class="btn btn-ghost btn-sm" onclick="intentRearm('${esc(it.id)}')">Re-arm</button>`:''}
+            </td></tr>`).join('')}
+          </tbody></table>`:'<div class="empty-state">No intents</div>';
+    }).catch(()=>toast('Failed to load intents'));
+}
+function intentCancel(id){
+  if(!confirm('Cancel intent '+id+'?')) return;
+  apiFetch('/api/intents/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})
+    .then(r=>r.json()).then(d=>{toast(d.ok?'Cancelled '+id:'Error: '+(d.error||'unknown'));fetchIntents();})
+    .catch(()=>toast('Network error'));
+}
+function intentRearm(id){
+  if(!confirm('Re-arm '+id+'? status→pending, attempt→0, 触发时间 = 10 分钟后')) return;
+  apiFetch('/api/intents/rearm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})
+    .then(r=>r.json()).then(d=>{toast(d.ok?'Re-armed '+id+' → '+(d.next_fire||''):'Error: '+(d.error||'unknown'));fetchIntents();})
+    .catch(()=>toast('Network error'));
+}
 
 // ── Search ──
 let allSessionsMeta=[];
@@ -825,7 +1091,7 @@ function initSearch(){
       results.innerHTML=data.map(r=>`<div class="sr">
           <div class="sr-header">
             <span class="sr-sid" onclick="openSession('${r.session_id}')">${esc(r.session_id.slice(0,8))}</span>
-            <span>${esc(r.timestamp)}</span>${roleTag(r.role)}
+            <span>${esc(fmtTs(r.timestamp))}</span>${roleTag(r.role)}
           </div><div class="sr-body">
             ${r.context_before.map(c=>`<div class="sr-ctx">${roleTag(c.role)} ${esc(c.text)}</div>`).join('')}
             <div class="sr-match-wrap"><div class="sr-match">${roleTag(r.role)} ${hl(r.text,q)}</div></div>
@@ -890,7 +1156,7 @@ function renderMessages(msgs,filter,tail){
     if(m.role==='tool'){
       return `<div class="sv-msg sv-tool"><div class="sv-msg-head">
         <span class="tool-name">${esc(m.tool_name||'tool')}</span>
-        <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
+        <span class="sv-msg-ts">${esc(fmtTs(m.timestamp))}</span></div>
         <div class="sv-msg-text">${fmtParagraphs(m.text)}</div></div>`;
     }
     if(m.role==='tool_result'){
@@ -898,7 +1164,7 @@ function renderMessages(msgs,filter,tail){
         <div class="sv-msg-text">${filter?hl(m.text,filter):esc(m.text)}</div></div>`;
     }
     return `<div class="sv-msg"><div class="sv-msg-head">${roleTag(m.role)}
-      <span class="sv-msg-ts">${esc(m.timestamp)}</span></div>
+      <span class="sv-msg-ts">${esc(fmtTs(m.timestamp))}</span></div>
       <div class="sv-msg-text">${filter?hl(m.text,filter):fmtParagraphs(m.text)}</div></div>`;
   }).join('');
 }
