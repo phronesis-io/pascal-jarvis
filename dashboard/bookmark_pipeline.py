@@ -17,7 +17,6 @@ from core.timeutil import now_local_str
 from .db import (
     bookmark_add, bookmark_list, bookmark_search, bookmark_update, get_db
 )
-from .event_bus import bus
 
 # Controlled vocabulary for auto-tags (prevents tag explosion)
 TAG_VOCABULARY = [
@@ -37,17 +36,21 @@ TAG_VOCABULARY = [
 def capture(title: str, url: str = "", source: str = "manual",
             content: str = "") -> int:
     """Capture a new bookmark into the inbox."""
-    bookmark_id = bookmark_add(
+    return bookmark_add(
         title=title, url=url, source=source, content=content
     )
-    bus.emit_sync("bookmark:captured", {"id": bookmark_id, "title": title})
-    return bookmark_id
 
 
 def get_resurface_candidates(count: int = 5) -> list[dict]:
-    """Select items to resurface in daily digest.
+    """Select items to resurface in daily digest. READ-ONLY (REQ-43).
 
     Mix: 2 new (inbox) + 2 spaced (old, due) + 1 random (serendipity)
+
+    Selection no longer mutates surfaced_count/last_surfaced_at: the
+    dashboard GET render calls this on every page view, so each refresh /
+    monitoring probe silently advanced the spaced-repetition state (tonight's
+    probes corrupted 6 bookmarks). Advancing the state is now an explicit
+    act — call mark_surfaced() when the items were actually shown to Pascal.
     """
     db = get_db()
     candidates = []
@@ -96,18 +99,28 @@ def get_resurface_candidates(count: int = 5) -> list[dict]:
         if item["id"] not in seen_ids:
             seen_ids.add(item["id"])
             result.append(item)
-    result = result[:count]
+    return result[:count]
 
-    # Mark as surfaced
+
+def mark_surfaced(bookmark_ids: list[int]) -> None:
+    """Advance the spaced-repetition state for items actually surfaced.
+
+    The explicit user action that used to be a GET side effect: call this
+    from a digest sender or a dashboard button — never from a render path.
+    """
+    db = get_db()
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
-    for item in result:
+    for bm_id in bookmark_ids:
+        row = db.execute(
+            "SELECT surfaced_count FROM bookmarks WHERE id = ?", (bm_id,)
+        ).fetchone()
+        if row is None:
+            continue
         bookmark_update(
-            item["id"],
-            surfaced_count=(item.get("surfaced_count") or 0) + 1,
+            bm_id,
+            surfaced_count=(row[0] or 0) + 1,
             last_surfaced_at=now,
         )
-
-    return result
 
 
 def get_context_matches(query: str, limit: int = 3) -> list[dict]:

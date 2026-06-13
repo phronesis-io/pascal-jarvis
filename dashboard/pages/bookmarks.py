@@ -1,7 +1,12 @@
 """Bookmarks page — manage saved content with AI-powered resurfacing.
 
-Organized by status lifecycle: inbox → triaged → reading → done → archived.
+Organized by status lifecycle: inbox → reading → done → archived.
 Search via FTS5. Daily digest preview.
+
+REQ-43: rendering is READ-ONLY — the old page advanced surfaced_count on
+every GET (each refresh/probe corrupted spaced-repetition state). The
+advance is now the explicit "✓ 已看" button, and every card carries
+lifecycle buttons (直连 dashboard.db, 不走 API).
 """
 
 import json
@@ -10,7 +15,16 @@ from pathlib import Path
 from nicegui import ui
 
 from ..db import bookmark_list, bookmark_update, bookmark_delete, bookmark_search
-from ..bookmark_pipeline import capture, get_resurface_candidates
+from ..bookmark_pipeline import capture, get_resurface_candidates, mark_surfaced
+
+# 生命周期流转: 当前状态 → 可去的状态 (按钮标签, 目标状态, 颜色)
+_LIFECYCLE_MOVES = {
+    "inbox":    [("▶ 开始读", "reading", "green"), ("归档", "archived", "grey")],
+    "triaged":  [("▶ 开始读", "reading", "green"), ("归档", "archived", "grey")],
+    "reading":  [("✓ 读完", "done", "blue"), ("归档", "archived", "grey")],
+    "done":     [("归档", "archived", "grey")],
+    "archived": [("↩ 回 inbox", "inbox", "blue")],
+}
 
 
 @ui.page("/bookmarks")
@@ -54,14 +68,15 @@ def bookmarks_page():
 
         search_input.on("keydown.enter", on_search)
 
-        # Daily Digest Preview
+        # Daily Digest Preview — 只读选择；只有点 ✓ 已看 才推进间隔重复状态
         ui.label("Today's Resurface").classes("text-lg font-semibold mt-4")
-        ui.label("Items selected for rediscovery").classes("text-xs text-gray-500")
+        ui.label("Items selected for rediscovery — 点 ✓ 已看 才算一次 surface").classes(
+            "text-xs text-gray-500")
 
         resurface = get_resurface_candidates(5)
         if resurface:
             for bm in resurface:
-                _render_bookmark(bm, compact=True)
+                _render_bookmark(bm, compact=True, surfaceable=True)
         else:
             ui.label("No items to resurface yet.").classes("text-gray-400 text-sm italic")
 
@@ -128,8 +143,8 @@ def bookmarks_page():
             ui.button("Save", on_click=add_bookmark).classes("mt-2")
 
 
-def _render_bookmark(bm: dict, compact: bool = False):
-    """Render a single bookmark card."""
+def _render_bookmark(bm: dict, compact: bool = False, surfaceable: bool = False):
+    """Render a single bookmark card. Pure render — never writes to the DB."""
     status = bm.get("status", "inbox")
     classes = f"bookmark-card status-{status} w-full"
 
@@ -158,6 +173,16 @@ def _render_bookmark(bm: dict, compact: bool = False):
                             for tag in tags[:5]:
                                 ui.badge(tag, color="gray").classes("text-xs")
 
+            # 显式推进间隔重复 (原 GET 副作用 → 用户动作)
+            if surfaceable:
+                async def surfaced_click(bm_id=bm["id"]):
+                    mark_surfaced([bm_id])
+                    ui.notify("已记一次 surface", type="positive")
+                    ui.navigate.reload()
+
+                ui.button("✓ 已看", on_click=surfaced_click).props(
+                    "flat dense size=xs color=pink")
+
             # Status + actions
             if not compact:
                 with ui.column().classes("gap-1 items-end"):
@@ -169,3 +194,14 @@ def _render_bookmark(bm: dict, compact: bool = False):
                     # Date
                     created = bm.get("created_at", "")[:10]
                     ui.label(created).classes("text-xs text-gray-400")
+
+                    # 生命周期流转按钮 (REQ-43: 27/27 书签卡死 inbox 的修复)
+                    with ui.row().classes("gap-1"):
+                        for label, target, color in _LIFECYCLE_MOVES.get(status, []):
+                            async def move_click(bm_id=bm["id"], to=target):
+                                bookmark_update(bm_id, status=to)
+                                ui.notify(f"→ {to}", type="positive")
+                                ui.navigate.reload()
+
+                            ui.button(label, on_click=move_click).props(
+                                f"flat dense size=xs color={color}")

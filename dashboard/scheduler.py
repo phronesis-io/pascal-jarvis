@@ -8,7 +8,6 @@ Trigger types:
   - cron: standard cron expression (minute hour dom month dow)
   - interval: every N seconds
   - date: one-shot at specific ISO datetime
-  - event: when a specific event fires on the bus
 
 Condition types:
   - time_window: only run between HH:MM and HH:MM
@@ -20,7 +19,6 @@ Action types:
   - prompt: run a Claude prompt via heartbeat
   - script: run a shell script
   - notify: send a message to Lark
-  - bus_event: emit an event on the bus
 """
 
 import json
@@ -32,7 +30,6 @@ from pathlib import Path
 from core.timeutil import now_local, now_local_str
 
 from .db import get_db, task_list, task_update
-from .event_bus import bus
 
 
 def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
@@ -216,7 +213,6 @@ def mark_executed(task_id: str, result: str = "") -> None:
     row = db.execute("SELECT run_count FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
     count = (row[0] or 0) + 1 if row else 1
     task_update(task_id, last_run_at=now, run_count=count, last_result=result)
-    bus.emit_sync("task:executed", {"task_id": task_id, "result": result})
 
 
 def register_alarm(name: str, dt: datetime, action_config: dict) -> str:
@@ -234,7 +230,6 @@ def register_alarm(name: str, dt: datetime, action_config: dict) -> str:
         category="user",
         priority=1,
     )
-    bus.emit_sync("task:registered", {"task_id": task_id, "name": name})
     return task_id
 
 
@@ -256,5 +251,4 @@ def register_recurring(name: str, cron_expr: str, action_type: str,
         category="user",
         priority=priority,
     )
-    bus.emit_sync("task:registered", {"task_id": task_id, "name": name})
     return task_id

@@ -12,6 +12,7 @@ import json
 import time
 from pathlib import Path
 
+from fastapi import Request
 from nicegui import app
 
 from core.timeutil import now_local_str
@@ -30,7 +31,7 @@ def register_api_routes():
     # ── Bookmarks ────────────────────────────────────────────────────
 
     @app.post("/api/bookmarks")
-    async def api_bookmark_add(request):
+    async def api_bookmark_add(request: Request):
         """Add a bookmark. Body: {title, url?, source?, summary?, tags?}"""
         data = await request.json()
         bm_id = bookmark_add(
@@ -55,7 +56,7 @@ def register_api_routes():
         return {"items": items}
 
     @app.patch("/api/bookmarks/{bookmark_id}")
-    async def api_bookmark_update(bookmark_id: int, request):
+    async def api_bookmark_update(bookmark_id: int, request: Request):
         """Update a bookmark. Body: {status?, summary?, tags?}"""
         data = await request.json()
         bookmark_update(bookmark_id, **data)
@@ -70,7 +71,7 @@ def register_api_routes():
     # ── Agent Log ────────────────────────────────────────────────────
 
     @app.post("/api/log")
-    async def api_log_event(request):
+    async def api_log_event(request: Request):
         """Log an agent event. Body: {source, message, level?, context?}"""
         data = await request.json()
         log_event(
@@ -96,7 +97,7 @@ def register_api_routes():
         return {"items": items}
 
     @app.post("/api/tasks")
-    async def api_task_register(request):
+    async def api_task_register(request: Request):
         """Register a new task. Body: {id, name, trigger_type, trigger_config, ...}"""
         data = await request.json()
         task_register(
@@ -113,7 +114,7 @@ def register_api_routes():
         return {"status": "ok", "id": data["id"]}
 
     @app.post("/api/tasks/{task_id}/execute")
-    async def api_task_mark_executed(task_id: str, request):
+    async def api_task_mark_executed(task_id: str, request: Request):
         """Mark a task as executed."""
         data = await request.json()
         mark_executed(task_id, result=data.get("result", ""))
@@ -134,7 +135,7 @@ def register_api_routes():
     # ── Convenience: alarms and recurring ────────────────────────────
 
     @app.post("/api/tasks/alarm")
-    async def api_alarm(request):
+    async def api_alarm(request: Request):
         """Create a one-shot alarm. Body: {name, datetime, message}"""
         from datetime import datetime as dt
         data = await request.json()
@@ -147,7 +148,7 @@ def register_api_routes():
         return {"status": "ok", "id": task_id}
 
     @app.post("/api/tasks/recurring")
-    async def api_recurring(request):
+    async def api_recurring(request: Request):
         """Create a recurring task. Body: {name, cron, action_type, action_config, conditions?}"""
         data = await request.json()
         task_id = register_recurring(
@@ -168,7 +169,7 @@ def register_api_routes():
         return {"key": key, "value": kv_get(key)}
 
     @app.post("/api/kv/{key}")
-    async def api_kv_set(key: str, request):
+    async def api_kv_set(key: str, request: Request):
         """Set a KV value. Body: {value}"""
         data = await request.json()
         kv_set(key, data["value"])
@@ -177,7 +178,7 @@ def register_api_routes():
     # ── Engagement ───────────────────────────────────────────────────
 
     @app.post("/api/engagement")
-    async def api_engagement_record(request):
+    async def api_engagement_record(request: Request):
         """Record engagement event. Body: {event_type, source?, engaged?, gap_seconds?, metadata?}"""
         data = await request.json()
         engagement_record(

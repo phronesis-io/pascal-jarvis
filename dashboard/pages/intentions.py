@@ -1,15 +1,22 @@
-"""Intentions page — visual timeline of agent's future actions.
+"""Intentions page — closure funnel + timeline of agent's future actions.
 
-Shows upcoming intents on a timeline, past executions, and lets the user
-create/cancel intents from the UI.
+REQ-45: the funnel header makes state-transition leaks visible (created→
+fired→executed→closed per 7d window, 静默丢弃 highlighted), the 过期尸检
+list gives every auto-expired commitment a one-click re-arm, and the create
+form captures category/closure_question so dashboard-created intents stop
+defaulting to closure-free 'none'.
 """
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.timeutil import now_local
+# _coerce aligns tz-awareness with now_local() — the live DB holds BOTH naive
+# ('2026-09-25T09:00:00') and aware ('2026-06-13T12:30:00+08:00') datetimes,
+# and naive-aware subtraction raises TypeError (the old 500 on every load).
+from core.intentions import _coerce, CLOSURE_POLICY
 
 from nicegui import ui
 
@@ -31,7 +38,7 @@ def _parse_trigger_when(intent: dict) -> str:
         dt_str = tc.get("datetime", "")
         if dt_str:
             try:
-                dt = datetime.fromisoformat(dt_str)
+                dt = _coerce(datetime.fromisoformat(dt_str))
                 now = now_local()
                 delta = dt - now
                 if delta.total_seconds() < 0:
@@ -42,7 +49,7 @@ def _parse_trigger_when(intent: dict) -> str:
                     return f"{int(delta.total_seconds() / 3600)}小时后"
                 else:
                     return dt.strftime("%m/%d %H:%M")
-            except ValueError:
+            except (ValueError, TypeError):
                 return dt_str
     elif tt == "cron":
         return f"cron: {tc.get('expression', '')}"
@@ -55,6 +62,115 @@ def _parse_trigger_when(intent: dict) -> str:
         else:
             return f"每 {secs // 3600}小时"
     return "?"
+
+
+# ---------------------------------------------------------------------------
+# 漏斗数据层 (REQ-45) — pure data functions, unit-tested directly
+# ---------------------------------------------------------------------------
+
+def compute_funnel(days: int = 7) -> dict:
+    """7d 窗口的状态转移计数 — created→fired→executed / expired / closed.
+
+    时间列 (created_at/triggered_at/executed_at/closed_at) 都是 create_intent
+    写入的本地 naive 字符串，零填充 ISO 格式 → 字符串比较即时间比较。
+    `leaked` = 静默丢弃：expired 且 last_error 是自动过期类
+    （'expired after N attempts…' / 'auto-expired…'）。
+    """
+    mod = _get_intentions_module()
+    mod._init()
+    db = mod._get_db()
+    cutoff = (now_local() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def _count(sql: str, params: tuple = ()) -> int:
+        return db.execute(sql, params).fetchone()[0]
+
+    return {
+        "created": _count(
+            "SELECT COUNT(*) FROM intentions WHERE created_at >= ?", (cutoff,)),
+        "fired": _count(
+            "SELECT COUNT(*) FROM intentions "
+            "WHERE triggered_at IS NOT NULL AND triggered_at >= ?", (cutoff,)),
+        "executed": _count(
+            "SELECT COUNT(*) FROM intentions "
+            "WHERE executed_at IS NOT NULL AND executed_at >= ?", (cutoff,)),
+        # expired 行没有专属时间戳 — 以最后已知活动时间锚定窗口
+        "expired": _count(
+            "SELECT COUNT(*) FROM intentions WHERE status = 'expired' "
+            "AND COALESCE(triggered_at, created_at) >= ?", (cutoff,)),
+        "closure_asked": _count(
+            "SELECT COUNT(*) FROM intentions WHERE closure_status != 'none' "
+            "AND created_at >= ?", (cutoff,)),
+        "closed": _count(
+            "SELECT COUNT(*) FROM intentions "
+            "WHERE closure_status IN ('done', 'recorded', 'na') "
+            "AND COALESCE(closed_at, created_at) >= ?", (cutoff,)),
+        "leaked": _count(
+            "SELECT COUNT(*) FROM intentions WHERE status = 'expired' "
+            "AND COALESCE(triggered_at, created_at) >= ? "
+            "AND (last_error LIKE '%expired after%attempts%' "
+            "     OR last_error LIKE 'auto-expired%')", (cutoff,)),
+    }
+
+
+def expired_autopsy(limit: int = 20) -> list[dict]:
+    """过期尸检 — expired rows with name / was-due time / last_error."""
+    mod = _get_intentions_module()
+    mod._init()
+    db = mod._get_db()
+    rows = db.execute(
+        "SELECT * FROM intentions WHERE status = 'expired' "
+        "ORDER BY COALESCE(triggered_at, created_at) DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        it = dict(r)
+        try:
+            cfg = json.loads(it["trigger_config"]) if isinstance(it["trigger_config"], str) else (it["trigger_config"] or {})
+        except (json.JSONDecodeError, TypeError):
+            cfg = {}
+        it["was_due"] = cfg.get("datetime") or cfg.get("expression") or "?"
+        out.append(it)
+    return out
+
+
+def rearm_intent(intent_id: str) -> bool:
+    """一键复活: status='pending'、attempt=0、10 分钟后触发 (REQ-45).
+
+    date intent 改写 trigger_config.datetime = now+10min；非 date（cron/
+    interval）只复位状态，不能动 trigger_config（会摧毁表达式）。
+    attempt 不在 update_intent 白名单内，直接 UPDATE 归零。
+    """
+    mod = _get_intentions_module()
+    mod._init()
+    it = mod.get_intent(intent_id)
+    if not it:
+        return False
+    updates: dict = {"status": "pending"}
+    if it.get("trigger_type") == "date":
+        new_dt = (now_local() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        updates["trigger_config"] = {"datetime": new_dt}
+    ok = mod.update_intent(intent_id, **updates)
+    db = mod._get_db()
+    db.execute(
+        "UPDATE intentions SET attempt = 0, last_error = ? WHERE id = ?",
+        ("re-armed from dashboard (+10min)", intent_id),
+    )
+    db.commit()
+    return ok
+
+
+def awaiting_age_days(intent: dict, now: datetime | None = None) -> float:
+    """Age in days of an awaiting closure, anchored like lifecycle_sweep."""
+    now = now or now_local()
+    anchor_raw = intent.get("executed_at") or intent.get("triggered_at") or intent.get("created_at")
+    try:
+        anchor = _coerce(datetime.fromisoformat(anchor_raw)) if anchor_raw else None
+    except (ValueError, TypeError):
+        anchor = None
+    if not anchor:
+        return 0.0
+    return max((now - anchor).total_seconds() / 86400, 0.0)
 
 
 def _status_badge(status: str):
@@ -71,7 +187,7 @@ def _status_badge(status: str):
 
 @ui.page("/intentions")
 def intentions_page():
-    """Intentions timeline page."""
+    """Intentions funnel + timeline page."""
     mod = _get_intentions_module()
 
     ui.add_head_html("""
@@ -88,6 +204,7 @@ def intentions_page():
         .dot-pending { background: #3b82f6; }
         .dot-executed { background: #22c55e; }
         .dot-cancelled { background: #ef4444; }
+        .funnel-card { background: #f9fafb; border-radius: 10px; padding: 0.6rem 0.9rem; }
     </style>
     """)
 
@@ -96,99 +213,155 @@ def intentions_page():
             ui.link("← Home", "/").classes("text-gray-500 text-sm")
             ui.label("🎯 Intentions").classes("text-2xl font-bold")
 
-        # Stats
-        stats = mod.intent_stats()
-        with ui.row().classes("gap-4"):
-            ui.label(f"Pending: {stats.get('pending', 0)}").classes("text-blue-600 font-medium")
-            ui.label(f"Executed: {stats.get('executed', 0)}").classes("text-green-600")
-            ui.label(f"Expired: {stats.get('expired', 0)}").classes("text-gray-400")
-            ui.label(f"Cancelled: {stats.get('cancelled', 0)}").classes("text-red-400")
+        @ui.refreshable
+        def content():
+            # ── 漏斗头 (REQ-45): 7d created→fired→executed→closed + 泄漏率 ──
+            funnel = compute_funnel(7)
+            ui.label("7 天漏斗").classes("text-lg font-semibold")
+            with ui.row().classes("w-full gap-3"):
+                for label, key, cls in (
+                    ("created", "created", "text-gray-700"),
+                    ("fired", "fired", "text-blue-600"),
+                    ("executed", "executed", "text-green-600"),
+                    ("expired", "expired", "text-gray-400"),
+                    ("closure-asked", "closure_asked", "text-amber-600"),
+                    ("closed", "closed", "text-purple-600"),
+                ):
+                    with ui.card().classes("funnel-card"):
+                        ui.label(str(funnel[key])).classes(f"text-xl font-bold {cls}")
+                        ui.label(label).classes("text-xs text-gray-500")
+            leak_cls = "text-red-600 font-medium" if funnel["leaked"] else "text-gray-400"
+            ui.label(
+                f"本周 fired {funnel['fired']}, executed {funnel['executed']}, "
+                f"静默丢弃 {funnel['leaked']}" + (" ⚠" if funnel["leaked"] else "")
+            ).classes(f"text-sm {leak_cls}")
 
-        # Active intents (pending)
-        ui.label("Upcoming").classes("text-lg font-semibold mt-4")
-        pending = mod.list_intents(status="pending", limit=50)
+            # Stats
+            stats = mod.intent_stats()
+            with ui.row().classes("gap-4"):
+                ui.label(f"Pending: {stats.get('pending', 0)}").classes("text-blue-600 font-medium")
+                ui.label(f"Executed: {stats.get('executed', 0)}").classes("text-green-600")
+                ui.label(f"Expired: {stats.get('expired', 0)}").classes("text-gray-400")
+                ui.label(f"Cancelled: {stats.get('cancelled', 0)}").classes("text-red-400")
 
-        if pending:
-            for intent in pending:
-                tags = json.loads(intent["tags"]) if isinstance(intent["tags"], str) else (intent["tags"] or [])
-                with ui.card().classes(f"intent-card intent-pending w-full"):
-                    with ui.row().classes("w-full items-start justify-between"):
-                        with ui.column().classes("gap-1 flex-1"):
-                            with ui.row().classes("items-center gap-2"):
-                                ui.html('<span class="timeline-dot dot-pending"></span>')
-                                ui.label(intent["name"]).classes("font-medium")
-                            ui.label(_parse_trigger_when(intent)).classes("text-xs text-blue-500")
-                            if intent.get("purpose"):
-                                ui.label(intent["purpose"]).classes("text-xs text-gray-500 italic")
-                            if intent.get("prompt"):
-                                prompt_preview = intent["prompt"][:120] + ("..." if len(intent["prompt"]) > 120 else "")
-                                ui.label(prompt_preview).classes("text-xs text-gray-400 mt-1")
-                            # ⚠无闭环 drift: a chasing-category row with no closure
-                            # question. healing/autonomous/context/none excluded —
-                            # the dashboard never flags health/learning as "missing".
-                            if (not (intent.get("closure_question") or "").strip()
-                                    and intent.get("category") in ("hard", "external")):
-                                ui.badge("⚠ 无闭环", color="orange").classes("text-xs mt-1")
-                            if tags:
-                                with ui.row().classes("gap-1 mt-1"):
-                                    for tag in tags[:3]:
-                                        ui.badge(tag, color="purple").props("outline").classes("text-xs")
-                        with ui.column().classes("items-end gap-1"):
-                            ui.label(f"src: {intent['source']}").classes("text-xs text-gray-400")
-                            ui.label(f"id: {intent['id'][:12]}").classes("text-xs text-gray-300")
+            # Active intents (pending)
+            ui.label("Upcoming").classes("text-lg font-semibold mt-4")
+            pending = mod.list_intents(status="pending", limit=50)
 
-                            async def cancel_click(iid=intent["id"]):
-                                mod.cancel_intent(iid, reason="cancelled from dashboard")
-                                ui.notify("Intent cancelled", type="warning")
-                                ui.navigate.reload()
+            if pending:
+                for intent in pending:
+                    tags = json.loads(intent["tags"]) if isinstance(intent["tags"], str) else (intent["tags"] or [])
+                    with ui.card().classes(f"intent-card intent-pending w-full"):
+                        with ui.row().classes("w-full items-start justify-between"):
+                            with ui.column().classes("gap-1 flex-1"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.html('<span class="timeline-dot dot-pending"></span>')
+                                    ui.label(intent["name"]).classes("font-medium")
+                                ui.label(_parse_trigger_when(intent)).classes("text-xs text-blue-500")
+                                if intent.get("purpose"):
+                                    ui.label(intent["purpose"]).classes("text-xs text-gray-500 italic")
+                                if intent.get("prompt"):
+                                    prompt_preview = intent["prompt"][:120] + ("..." if len(intent["prompt"]) > 120 else "")
+                                    ui.label(prompt_preview).classes("text-xs text-gray-400 mt-1")
+                                # ⚠无闭环 drift: a chasing-category row with no closure
+                                # question. healing/autonomous/context/none excluded —
+                                # the dashboard never flags health/learning as "missing".
+                                if (not (intent.get("closure_question") or "").strip()
+                                        and intent.get("category") in ("hard", "external")):
+                                    ui.badge("⚠ 无闭环", color="orange").classes("text-xs mt-1")
+                                if tags:
+                                    with ui.row().classes("gap-1 mt-1"):
+                                        for tag in tags[:3]:
+                                            ui.badge(tag, color="purple").props("outline").classes("text-xs")
+                            with ui.column().classes("items-end gap-1"):
+                                ui.label(f"src: {intent['source']}").classes("text-xs text-gray-400")
+                                ui.label(f"id: {intent['id'][:12]}").classes("text-xs text-gray-300")
 
-                            ui.button("Cancel", on_click=cancel_click).props("flat dense size=xs color=red")
-        else:
-            ui.label("No pending intents. The agent will create them from calendar events and conversations.").classes(
-                "text-gray-400 text-sm italic"
-            )
+                                async def cancel_click(iid=intent["id"]):
+                                    mod.cancel_intent(iid, reason="cancelled from dashboard")
+                                    ui.notify("Intent cancelled", type="warning")
+                                    content.refresh()
 
-        # 🔄 待闭环 — moments that fired and await a result. Exclude healing/
-        # autonomous: the dashboard never scores health/learning follow-through.
-        awaiting = mod.awaiting_closures()
-        ui.separator()
-        ui.label("🔄 待闭环 (awaiting result · 不催)").classes("text-lg font-semibold mt-2")
-        if awaiting:
-            for intent in awaiting:
-                with ui.card().classes("intent-card w-full").style("border-left:3px solid #f59e0b"):
-                    with ui.row().classes("w-full items-center justify-between"):
-                        with ui.column().classes("gap-0 flex-1"):
-                            ui.label(intent["name"]).classes("font-medium text-sm")
-                            ui.label(intent.get("closure_question") or intent.get("purpose", "")).classes(
-                                "text-xs text-amber-600")
-                        ui.badge(intent.get("category", "?"), color="amber").props("outline").classes("text-xs")
+                                ui.button("Cancel", on_click=cancel_click).props("flat dense size=xs color=red")
+            else:
+                ui.label("No pending intents. The agent will create them from calendar events and conversations.").classes(
+                    "text-gray-400 text-sm italic"
+                )
 
-                        async def close_click(iid=intent["id"]):
-                            mod.record_closure(iid, outcome="done", result="closed from dashboard")
-                            ui.notify("Closure recorded", type="positive")
-                            ui.navigate.reload()
-
-                        ui.button("✓ done", on_click=close_click).props("flat dense size=xs color=green")
-        else:
-            ui.label("No open loops awaiting a result.").classes("text-gray-400 text-sm italic")
-
-        # Recently executed
-        ui.separator()
-        ui.label("Recently Executed").classes("text-lg font-semibold mt-2")
-        executed = mod.list_intents(status="executed", limit=10)
-        if executed:
-            for intent in executed:
-                with ui.card().classes("intent-card intent-executed w-full"):
-                    with ui.row().classes("w-full items-center justify-between"):
-                        with ui.column().classes("gap-0"):
-                            with ui.row().classes("items-center gap-2"):
-                                ui.html('<span class="timeline-dot dot-executed"></span>')
+            # ── 过期尸检 (REQ-45): every dropped commitment, with re-arm ──
+            ui.separator()
+            ui.label("💀 过期尸检 (expired · 可复活)").classes("text-lg font-semibold mt-2")
+            autopsy = expired_autopsy(20)
+            if autopsy:
+                for intent in autopsy:
+                    with ui.card().classes("intent-card intent-expired w-full"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            with ui.column().classes("gap-0 flex-1"):
                                 ui.label(intent["name"]).classes("font-medium text-sm")
-                            if intent.get("executed_at"):
-                                ui.label(f"executed: {intent['executed_at'][:16]}").classes("text-xs text-gray-400")
-                        _status_badge("executed")
-        else:
-            ui.label("No executed intents yet.").classes("text-gray-400 text-sm italic")
+                                ui.label(f"原定: {intent['was_due']}").classes("text-xs text-gray-500")
+                                if intent.get("last_error"):
+                                    ui.label(intent["last_error"][:120]).classes("text-xs text-red-400")
+
+                            async def rearm_click(iid=intent["id"]):
+                                if rearm_intent(iid):
+                                    ui.notify("已复活：10 分钟后触发", type="positive")
+                                else:
+                                    ui.notify("复活失败", type="negative")
+                                content.refresh()
+
+                            ui.button("⟳ re-arm", on_click=rearm_click).props("flat dense size=xs color=purple")
+            else:
+                ui.label("无过期意图。").classes("text-gray-400 text-sm italic")
+
+            # 🔄 待闭环 — moments that fired and await a result. Exclude healing/
+            # autonomous: the dashboard never scores health/learning follow-through.
+            awaiting = mod.awaiting_closures()
+            ui.separator()
+            ui.label("🔄 待闭环 (awaiting result · 不催)").classes("text-lg font-semibold mt-2")
+            if awaiting:
+                for intent in awaiting:
+                    age_d = awaiting_age_days(intent)
+                    is_zombie = age_d > 3
+                    with ui.card().classes("intent-card w-full").style("border-left:3px solid #f59e0b"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            with ui.column().classes("gap-0 flex-1"):
+                                ui.label(intent["name"]).classes("font-medium text-sm")
+                                ui.label(intent.get("closure_question") or intent.get("purpose", "")).classes(
+                                    "text-xs text-amber-600")
+                                age_cls = "text-red-500" if is_zombie else "text-gray-400"
+                                ui.label(f"等了 {age_d:.1f} 天" + (" 🧟 zombie" if is_zombie else "")).classes(
+                                    f"text-xs {age_cls}")
+                            ui.badge(intent.get("category", "?"), color="amber").props("outline").classes("text-xs")
+
+                            async def close_click(iid=intent["id"]):
+                                mod.record_closure(iid, outcome="done", result="closed from dashboard")
+                                ui.notify("Closure recorded", type="positive")
+                                content.refresh()
+
+                            ui.button("✓ done", on_click=close_click).props("flat dense size=xs color=green")
+            else:
+                ui.label("No open loops awaiting a result.").classes("text-gray-400 text-sm italic")
+
+            # Recently executed
+            ui.separator()
+            ui.label("Recently Executed").classes("text-lg font-semibold mt-2")
+            executed = mod.list_intents(status="executed", limit=10)
+            if executed:
+                for intent in executed:
+                    with ui.card().classes("intent-card intent-executed w-full"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            with ui.column().classes("gap-0"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.html('<span class="timeline-dot dot-executed"></span>')
+                                    ui.label(intent["name"]).classes("font-medium text-sm")
+                                if intent.get("executed_at"):
+                                    ui.label(f"executed: {intent['executed_at'][:16]}").classes("text-xs text-gray-400")
+                            _status_badge("executed")
+            else:
+                ui.label("No executed intents yet.").classes("text-gray-400 text-sm italic")
+
+        content()
+        ui.timer(30, content.refresh)
 
         # Create new intent form
         ui.separator()
@@ -210,6 +383,16 @@ def intentions_page():
                 placeholder="Check in on Pascal about..."
             ).classes("w-full")
             purpose_input = ui.input("Purpose (why)", placeholder="Follow up on conversation").classes("w-full")
+            # 闭环字段 (REQ-45): 堵创建侧 'none' 漏洞 — dashboard 建的 intent
+            # 也要进闭环轴。category 直接取 CLOSURE_POLICY 的键。
+            with ui.row().classes("w-full gap-4"):
+                category_select = ui.select(
+                    list(CLOSURE_POLICY.keys()), value="none", label="Category"
+                )
+                closure_input = ui.input(
+                    "Closure question (做了吗？怎么样？)",
+                    placeholder="后来怎么样了？"
+                ).classes("flex-1")
             tags_input = ui.input("Tags (comma separated)", placeholder="health, follow-up").classes("w-full")
 
             async def create_intent_click():
@@ -227,21 +410,31 @@ def intentions_page():
                     tc = {"seconds": int(tv) if tv.isdigit() else 600}
                 tags = [t.strip() for t in tags_input.value.split(",") if t.strip()]
 
-                mod.create_intent(
-                    name=name,
-                    trigger_type=tt,
-                    trigger_config=tc,
-                    prompt=prompt_input.value.strip(),
-                    purpose=purpose_input.value.strip(),
-                    tags=tags,
-                    source="dashboard",
-                    action_type="notify",
-                )
+                try:
+                    # create_intent RAISES ValueError on empty/invalid datetime
+                    # or cron expression — surface it instead of 500ing.
+                    mod.create_intent(
+                        name=name,
+                        trigger_type=tt,
+                        trigger_config=tc,
+                        prompt=prompt_input.value.strip(),
+                        purpose=purpose_input.value.strip(),
+                        tags=tags,
+                        source="dashboard",
+                        action_type="notify",
+                        category=category_select.value or "none",
+                        closure_question=closure_input.value.strip(),
+                    )
+                except ValueError as e:
+                    ui.notify(f"创建失败: {e}", type="negative")
+                    return
                 ui.notify(f"Intent '{name}' created!", type="positive")
                 name_input.value = ""
                 trigger_value.value = ""
                 prompt_input.value = ""
                 purpose_input.value = ""
+                closure_input.value = ""
                 tags_input.value = ""
+                content.refresh()
 
             ui.button("Create Intent", on_click=create_intent_click).classes("mt-2")
