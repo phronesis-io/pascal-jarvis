@@ -112,3 +112,7 @@ eigenflux/pending_publish/
 data/.intention_inflight.json
 data/.intent_breach_queue.jsonl
 data/.intent_card_ledger.jsonl
+.repos_sync_product.txt
+.repos_sync_consumed
+eigenflux/.ef-cursor
+eigenflux/.ef-seen

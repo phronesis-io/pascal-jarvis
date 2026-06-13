@@ -160,8 +160,22 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user."""
 
 def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     jd = Path(jarvis_dir)
-    cursor_file = Path("/tmp/jarvis-ef-cursor")
-    seen_file = Path("/tmp/jarvis-ef-seen")
+    # Cursor/seen state lives in the repo's eigenflux/ dir, NOT /tmp (REQ-57):
+    # /tmp is wiped on reboot — the cursor was destroyed 3 times in 3 weeks,
+    # causing PM re-delivery or gaps. One-time migration picks up a surviving
+    # /tmp copy so an upgrade doesn't itself lose the position.
+    state_dir = jd / "eigenflux"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    cursor_file = state_dir / ".ef-cursor"
+    seen_file = state_dir / ".ef-seen"
+    for new, old in ((cursor_file, Path("/tmp/jarvis-ef-cursor")),
+                     (seen_file, Path("/tmp/jarvis-ef-seen"))):
+        if not new.exists() and old.exists():
+            try:
+                new.write_text(old.read_text())
+                log("ef-stream", f"migrated {old} → {new}")
+            except OSError:
+                pass
 
     # Check eigenflux CLI
     if not shutil.which("eigenflux"):

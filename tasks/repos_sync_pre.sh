@@ -1,75 +1,30 @@
 #!/usr/bin/env bash
-# Pre-hook: git pull all repos under ~/Desktop/jarvis/repos/
-# For repos that received updates, surface enough detail (commits, authors,
-# diff stat, new branches) that the Claude prompt can produce a substantive
-# analysis instead of "X repo had updates".
-REPOS_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}/repos"
+# Pre-hook for repos-sync — the FAST half (REQ-52).
+#
+# The old monolithic version pulled 12 repos with network fetches inline and
+# exceeded the heartbeat's 60s pre-script cap on 19/19 observed runs — the
+# channel was effectively dead for days. Now: the slow pulls live in
+# tasks/repos_sync_worker.sh (detached, single-flight); this pre just
+# (a) spawns the worker when the product is stale, and (b) emits the product
+# once when it has fresh, unconsumed content. Sub-second, never times out.
 
-echo "Repos sync:"
-for repo in "$REPOS_DIR"/*/; do
-  [ -d "$repo/.git" ] || continue
-  name=$(basename "$repo")
-  branch=$(git -C "$repo" branch --show-current 2>/dev/null || echo "?")
+JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+PRODUCT="$JARVIS_DIR/.repos_sync_product.txt"
+CONSUMED="$JARVIS_DIR/.repos_sync_consumed"
+WORKER="$JARVIS_DIR/tasks/repos_sync_worker.sh"
+MAX_PRODUCT_AGE_MIN=300  # respawn worker when product older than ~5h
 
-  # Snapshot HEAD before pull so we can show the actual incoming range.
-  pre_head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
-  # Snapshot remote branches before fetch to detect newly-pushed branches.
-  pre_branches=$(git -C "$repo" for-each-ref --format='%(refname:short)' refs/remotes/origin 2>/dev/null | sort)
+# Spawn the worker (detached) when the product is missing or stale. The
+# worker's own lock makes double-spawns harmless.
+if [ ! -f "$PRODUCT" ] || [ -n "$(find "$PRODUCT" -mmin +$MAX_PRODUCT_AGE_MIN 2>/dev/null)" ]; then
+  nohup bash "$WORKER" >/dev/null 2>&1 &
+fi
 
-  # Fetch all refs (so we see new branches, not just current branch fast-forward).
-  git -C "$repo" fetch --all --prune --quiet 2>/dev/null
-  result=$(git -C "$repo" pull --ff-only 2>&1 || echo "PULL_FAILED")
-  post_head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
-  post_branches=$(git -C "$repo" for-each-ref --format='%(refname:short)' refs/remotes/origin 2>/dev/null | sort)
-
-  # Detect new branches (post − pre).
-  new_branches=$(comm -13 <(echo "$pre_branches") <(echo "$post_branches") | grep -v '^origin/HEAD$' || true)
-
-  if echo "$result" | grep -q "PULL_FAILED"; then
-    echo "  $name ($branch): PULL FAILED — $result"
-    continue
-  fi
-
-  main_updated=false
-  [ -n "$pre_head" ] && [ -n "$post_head" ] && [ "$pre_head" != "$post_head" ] && main_updated=true
-
-  if [ "$main_updated" = false ] && [ -z "$new_branches" ]; then
-    echo "  $name ($branch): up to date"
-    continue
-  fi
-
-  echo ""
-  echo "  === $name ($branch) ==="
-
-  if [ "$main_updated" = true ]; then
-    # Range short hash + commit count + diff stat summary
-    range_count=$(git -C "$repo" rev-list --count "$pre_head..$post_head" 2>/dev/null || echo "?")
-    short_pre=$(git -C "$repo" rev-parse --short "$pre_head" 2>/dev/null)
-    short_post=$(git -C "$repo" rev-parse --short "$post_head" 2>/dev/null)
-    echo "  $branch: $short_pre → $short_post ($range_count commits)"
-    echo "  commits (newest first):"
-    git -C "$repo" log "$pre_head..$post_head" \
-      --pretty=format:'    %h %ad %an: %s' --date=format:'%m-%d %H:%M' 2>/dev/null
-    echo ""
-    # Diff stat summary — files changed, +/- lines.
-    diffstat=$(git -C "$repo" diff --shortstat "$pre_head..$post_head" 2>/dev/null)
-    echo "  diff: $diffstat"
-    # Top 5 most-changed files for context.
-    echo "  hot files:"
-    git -C "$repo" diff --stat "$pre_head..$post_head" 2>/dev/null \
-      | head -n -1 | sort -t'|' -k2 -nr | head -5 \
-      | sed 's/^/    /'
-  fi
-
-  if [ -n "$new_branches" ]; then
-    echo "  new branches (since last sync):"
-    while IFS= read -r b; do
-      [ -z "$b" ] && continue
-      tip=$(git -C "$repo" log "$b" --pretty=format:'%h %ad %an: %s' --date=format:'%m-%d %H:%M' -1 2>/dev/null)
-      # Commits not yet in main, capped at 5
-      ahead=$(git -C "$repo" log "origin/main..$b" --pretty=format:'      %h %an: %s' 2>/dev/null | head -5)
-      echo "    $b  ←  $tip"
-      [ -n "$ahead" ] && echo "$ahead"
-    done <<< "$new_branches"
-  fi
-done
+# Emit the product once per refresh: only when it is newer than the last
+# consumption stamp. Otherwise empty output → heartbeat skips the task.
+[ -f "$PRODUCT" ] || exit 0
+if [ -f "$CONSUMED" ] && [ ! "$PRODUCT" -nt "$CONSUMED" ]; then
+  exit 0
+fi
+cat "$PRODUCT"
+touch -r "$PRODUCT" "$CONSUMED"
