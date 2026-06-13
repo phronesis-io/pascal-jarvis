@@ -104,6 +104,22 @@ def main() -> int:
                 return P2CardActionTriggerResponse(
                     {"toast": {"type": "success",
                                "content": "已在收藏列表里" if dup else "已收藏，空闲时提醒你"}})
+            if action == "intent_close":
+                # One-tap closure (REQ-34): button value carries the PARENT
+                # intent id + outcome; record_closure cancels any pending
+                # follow-up itself (no double-ask). Deterministic, zero LLM.
+                args = ["python3", "-m", "core.intentions", "close",
+                        str(value.get("id", "")), str(value.get("outcome", "done"))]
+                result_text = str(value.get("result", "")).strip()
+                if result_text:
+                    args.append(result_text)
+                out = subprocess.run(args, timeout=5, capture_output=True,
+                                     text=True, cwd=str(JARVIS_DIR))
+                ok = out.returncode == 0
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "success" if ok else "info",
+                               "content": "闭环已记录 ✓" if ok
+                               else "已经闭环过了（或意图不存在）"}})
         except Exception as e:
             print(f"card handler error: {e}", file=sys.stderr)
         return P2CardActionTriggerResponse({})

@@ -130,8 +130,16 @@ class JobManager:
             pid = job.get("pid")
             if pid:
                 try:
-                    # Kill process group
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    # Kill the job's process group — but ONLY if it actually
+                    # has its own group (REQ-38). A job spawned without
+                    # setsid shares bot.sh's group: killpg there SIGTERMs the
+                    # ENTIRE bot (heartbeat, admin, handlers) — user-facing
+                    # 'cancel <job>' was restarting the whole product.
+                    target_pgid = os.getpgid(pid)
+                    if target_pgid != os.getpgid(0):
+                        os.killpg(target_pgid, signal.SIGTERM)
+                    else:
+                        os.kill(pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError, OSError):
                     try:
                         os.kill(pid, signal.SIGTERM)

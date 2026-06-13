@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # intentions_pre.sh — Check for due intents and format for Claude.
 #
-# Output: JSON with due intents, or empty if nothing due.
-# Called by heartbeat runner as the pre-script for intention-check task.
+# Output: JSON with due intents (+ any breach notifications owed), or empty
+# if nothing due. Called by heartbeat runner as the pre-script for the
+# intention-check task.
+#
+# v2 (REQ-30/31/32): after mark_triggered, the due ids are persisted to the
+# inflight manifest (data/.intention_inflight.json) so intentions_post.py can
+# deterministically reconcile what Claude's envelope did NOT cover — the
+# execution-ack no longer depends on a perfect LLM JSON round-trip. The
+# breach queue carries commitments that exhausted their retries; they ride
+# this cycle as an apology card so dropped reminders are never silent.
 
 set -euo pipefail
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -14,15 +22,16 @@ sys.path.insert(0, os.environ['JARVIS_DIR'])
 
 from core.intentions import (
     get_due_intents, mark_triggered, generate_calendar_intents,
-    reset_stale_triggered, snapshot_active_intents,
+    lifecycle_sweep, snapshot_active_intents, write_inflight, drain_breaches,
 )
 from pathlib import Path
 
-# 0. Recover any intents stuck in 'triggered' for >10 min (previous cycle crashed)
+# 0. Lifecycle sweep: retry stuck intents (bounded), expire exhausted ones
+#    with a breach notification, retire awaiting-closure zombies (TTL).
 try:
-    reset_stale_triggered(stale_minutes=10)
+    lifecycle_sweep(stale_minutes=10)
 except Exception as e:
-    print(f"[intentions] Stale-triggered reset error: {e}", file=sys.stderr)
+    print(f"[intentions] lifecycle sweep error: {e}", file=sys.stderr)
 
 # 1. Auto-generate calendar prep intents (idempotent — skips existing)
 cal_file = Path(os.environ['MEMORY_DIR']) / "hot" / "calendar_today.md"
@@ -40,14 +49,25 @@ try:
 except Exception as e:
     print(f"[intentions] Snapshot error: {e}", file=sys.stderr)
 
-# 2. Check for due intents
+# 2. Check for due intents + breach notifications owed
 due = get_due_intents()
-if not due:
+try:
+    breaches = drain_breaches()
+except Exception as e:
+    print(f"[intentions] breach drain error: {e}", file=sys.stderr)
+    breaches = []
+
+if not due and not breaches:
     sys.exit(0)  # Empty output → heartbeat skips
 
-# 3. Mark as triggered (prevents re-pickup next cycle)
+# 3. Mark as triggered (prevents re-pickup next cycle) and persist the
+#    inflight manifest — the deterministic execution-ack (REQ-30).
 for intent in due:
     mark_triggered(intent["id"])
+try:
+    write_inflight([i["id"] for i in due])
+except Exception as e:
+    print(f"[intentions] inflight manifest write error: {e}", file=sys.stderr)
 
 # 4. Format for Claude
 output = {
@@ -74,6 +94,19 @@ for intent in due:
         "closure_question": intent.get("closure_question", ""),
         "parent_intent_id": intent.get("parent_intent_id"),
     })
+
+# 5. Breach notifications: commitments whose reminders were dropped after
+#    retries. Claude must surface ONE apology card covering them — the
+#    original prompt rides along so the reminder's value isn't lost.
+if breaches:
+    output["breaches"] = [{
+        "id": b.get("id", ""),
+        "name": b.get("name", ""),
+        "original_prompt": b.get("prompt", ""),
+        "purpose": b.get("purpose", ""),
+        "was_due_at": b.get("trigger_time", ""),
+        "attempts": b.get("attempt", 0),
+    } for b in breaches]
 
 print(json.dumps(output, ensure_ascii=False))
 PYTHON

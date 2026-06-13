@@ -132,8 +132,12 @@ class HeartbeatRunner:
 
     # Tasks exempt from batch cap — they run on every cycle regardless.
     # These are infrastructure tasks that must stay fresh for others to work.
+    # intention-check (REQ-32): the only task whose pre-script makes stateful
+    # user-facing commitments; batch-cap starvation was losing whole cron
+    # occurrences (configured 60s, observed median gap 31min). Its pre is a
+    # sub-second sqlite pass (296/304 runs empty), so exemption costs nothing.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "eigenflux-messages"}
+                       "eigenflux-friends", "eigenflux-messages", "intention-check"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output
@@ -150,6 +154,14 @@ class HeartbeatRunner:
     # layer backstop in core/heartbeat_loop.py (SILENT_SOURCES). To silence
     # another task, add its name here — no logic changes needed.
     SILENT_TASKS = {"daily-plan", "self-diagnostic", "thinking-review"}
+
+    # Tasks whose PRE-script mutates state that the POST-script must always
+    # get a chance to reconcile (REQ-30). intention-check's pre marks intents
+    # 'triggered' and writes the inflight manifest; if the Claude call dies
+    # (HEARTBEAT_OK / empty / killed / unparseable envelope), the post is
+    # still invoked with stdin='__NO_ENVELOPE__' so the manifest resolves
+    # deterministically instead of stranding intents until they expire.
+    ACK_REQUIRED_TASKS = {"intention-check"}
 
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
@@ -198,6 +210,26 @@ class HeartbeatRunner:
         affect the scheduling path.
         """
         sched_emit(self.jarvis_dir, event, task=task, run_id=self._cid, **fields)
+
+    def _ack_failed_posts(self, runnable: list) -> None:
+        """Run ACK-required tasks' post-scripts with '__NO_ENVELOPE__' (REQ-30).
+
+        Called on every path where Claude's reply never reaches the normal
+        post routing (HEARTBEAT_OK early return, empty/failed call, killed,
+        envelope parse failure). For intention-check this resolves the
+        inflight manifest deterministically — retry or expire-with-breach —
+        instead of stranding intents in 'triggered' until they silently die.
+        Output is intentionally discarded (state reconciliation, not content).
+        """
+        for task in runnable:
+            if task["name"] in self.ACK_REQUIRED_TASKS and task.get("post"):
+                try:
+                    self.run_script(task["post"], stdin_data="__NO_ENVELOPE__")
+                    self._event("task_skip", task=task["name"],
+                                reason="no_envelope_acked")
+                except Exception as e:
+                    self._log(f"ACK post for {task['name']} failed: {e}",
+                              level="warn")
 
     def _collect_output(self, task_name: str, message: str,
                         user_messages: list, producing_tasks: list):
@@ -287,8 +319,13 @@ class HeartbeatRunner:
                 timeout=60,
                 cwd=str(self.jarvis_dir),
             )
-            if result.returncode != 0 and result.stderr.strip():
-                self._log(f"Script {script_path} stderr: {result.stderr.strip()[:200]}")
+            # stderr is logged regardless of exit code (REQ-35): post-scripts
+            # exit 0 by design while reporting failures on stderr — under the
+            # old returncode guard the exact failures killing half the fired
+            # intents produced zero log lines.
+            if result.stderr.strip():
+                self._log(f"Script {script_path} stderr: {result.stderr.strip()[:300]}",
+                          level="warn" if result.returncode != 0 else "info")
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
             self._log(f"Script {script_path} timed out (60s)")
@@ -622,9 +659,22 @@ You have access to the user's memory below. Use it to personalize your responses
 
         # Build combined prompt
         n = len(runnable)
+        ack_present = [t["name"] for t in runnable if t["name"] in self.ACK_REQUIRED_TASKS]
         parts = [f"[HEARTBEAT — {n} task{'s' if n > 1 else ''} due]"]
         parts.append("Process each task below. For each, return the requested format.")
-        parts.append("If NOTHING across ALL tasks needs user attention, reply with exactly: HEARTBEAT_OK")
+        if ack_present:
+            # Contract fix (REQ-30d): the old wording instructed exactly the
+            # reply that stranded intents. When an ACK task has data, a bare
+            # HEARTBEAT_OK is never legitimate — its envelope must cover every
+            # id, with action:"silent" for no-ops.
+            parts.append(
+                f"Task(s) {', '.join(ack_present)} REQUIRE their JSON envelope in your reply "
+                "covering EVERY listed id (use action \"silent\" for ids with nothing to say). "
+                "NEVER reply with a bare HEARTBEAT_OK when these tasks are present.")
+            parts.append("For the OTHER tasks only: if nothing needs user attention, "
+                         "their slices may be omitted.")
+        else:
+            parts.append("If NOTHING across ALL tasks needs user attention, reply with exactly: HEARTBEAT_OK")
         parts.append("")
 
         for task in runnable:
@@ -640,7 +690,8 @@ You have access to the user's memory below. Use it to personalize your responses
             parts.append('Return JSON: {"tasks":{"<task-name>": <per-task response>}, "user_message":"<combined markdown or empty>"}')
         else:
             parts.append("Return the task's requested format directly.")
-        parts.append("Or if nothing needs attention: HEARTBEAT_OK")
+        if not ack_present:
+            parts.append("Or if nothing needs attention: HEARTBEAT_OK")
 
         prompt = "\n".join(parts)
 
@@ -663,6 +714,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._event("task_finish", task=task["name"], status="killed",
                             duration_s=call_dur)
             self.save_state(state)
+            self._ack_failed_posts(runnable)
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → killed (no penalty)")
             return ""
 
@@ -686,6 +738,7 @@ You have access to the user's memory below. Use it to personalize your responses
                     self._event("task_finish", task=task["name"],
                                 status="failed", duration_s=call_dur)
             self.save_state(state)
+            self._ack_failed_posts(runnable)
             if tripped_names:
                 self._log(f"Circuit TRIPPED for: {tripped_names}")
                 return f"⚠️ 以下任务连续失败已自动暂停: {', '.join(tripped_names)}。系统会在冷却后自动恢复。"
@@ -704,12 +757,18 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._event("task_finish", task=task["name"], status="idle",
                             duration_s=call_dur)
             self.save_state(state)
+            # ACK-required tasks (intention-check) had pre-side state writes:
+            # a bare HEARTBEAT_OK must not strand them (REQ-30 — this exact
+            # reply, which the old prompt even INSTRUCTED, was the #1 silent
+            # intent killer).
+            self._ack_failed_posts(runnable)
             # Log status to stderr (goes to jarvis.log) — NOT returned to Lark
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → OK")
             return ""
 
         # Route responses through post-scripts
         # (user_messages and producing_tasks may already have Tier 0 results)
+        parse_failed = False
         if n == 1:
             task = runnable[0]
             if task["post"]:
@@ -738,6 +797,12 @@ You have access to the user's memory below. Use it to personalize your responses
                 for task in runnable:
                     resp = task_responses.get(task["name"])
                     if resp is None:
+                        # ACK-required tasks must reconcile even when their
+                        # slice is missing from the envelope (REQ-30).
+                        if task["name"] in self.ACK_REQUIRED_TASKS and task["post"]:
+                            self.run_script(task["post"], stdin_data="__NO_ENVELOPE__")
+                            self._event("task_skip", task=task["name"],
+                                        reason="missing_slice_acked")
                         continue
                     resp_str = json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp)
                     if task["post"]:
@@ -766,11 +831,36 @@ You have access to the user's memory below. Use it to personalize your responses
                 if top_msg and top_msg.strip() and not has_card and not any_silent:
                     user_messages.append(top_msg)
             except json.JSONDecodeError:
-                # NEVER dump raw JSON to user — log for debugging and skip
-                self._log(f"JSON parse failed for {n}-task response, skipping output")
+                # NEVER dump raw JSON to user — log and treat as a FAILURE.
+                parse_failed = True
+                self._log(f"JSON parse failed for {n}-task response — "
+                          "recording failure (will retry shortly)", level="warn")
                 self._log(f"Raw response (first 300 chars): {raw[:300]}")
+                self._ack_failed_posts(runnable)
 
-        # Update state (preserve circuit breaker data, record success)
+        # Update state. Parse failure used to fall through to the success
+        # loop — record_success for every task whose output was just thrown
+        # away, invisible to the circuit breaker, no retry until the next
+        # full interval (REQ-36: 7x in 2 days, 3 destroyed memory-hourly
+        # payloads). Now: record_failure + bounded fast retry (≤5 min),
+        # mirroring the empty-response path's breaker semantics.
+        if parse_failed:
+            for task in runnable:
+                ts = TaskState.from_dict(state.get(task["name"], {}))
+                retry_delay = min(300, task["interval"])
+                ts.last_run = now - task["interval"] + retry_delay
+                tripped = ts.circuit.record_failure()
+                if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
+                    ts.circuit.disabled_until = 0
+                state[task["name"]] = ts.to_dict()
+                self._event("task_finish", task=task["name"], status="parse_failed",
+                            duration_s=round(time.time() - call_t0, 2),
+                            retry_in_s=retry_delay)
+            self.save_state(state)
+            self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → parse failed")
+            return ""
+
+        # (preserve circuit breaker data, record success)
         for task in runnable:
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now

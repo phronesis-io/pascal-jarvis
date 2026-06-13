@@ -544,6 +544,38 @@ def _record_engagement(jarvis_dir: Path):
                     entry["message_ids"] = sent_ids
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    # Back-fill the intent card ledger (REQ-34B): intentions_post recorded
+    # which intent ids this cycle's card covers; now that the real Lark
+    # message_ids are known, stamp them in so a quote-reply to the card can
+    # be matched back to its intent deterministically.
+    if sent_ids and "intention-check" in sources:
+        try:
+            _ledger_backfill(jarvis_dir, sent_ids)
+        except Exception as e:
+            log("heartbeat", f"intent ledger backfill failed: {e}", level="warn")
+
+
+def _ledger_backfill(jarvis_dir: Path, message_ids: list):
+    """Stamp real message_ids onto the newest ledger row lacking them."""
+    ledger = jarvis_dir / "data" / ".intent_card_ledger.jsonl"
+    if not ledger.exists():
+        return
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            row = json.loads(lines[i])
+        except json.JSONDecodeError:
+            continue
+        if not row.get("message_ids"):
+            row["message_ids"] = list(message_ids)
+            lines[i] = json.dumps(row, ensure_ascii=False)
+            break
+    # Keep the ledger bounded — only recent cards matter for reply matching.
+    lines = lines[-200:]
+    tmp = ledger.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    os.replace(tmp, ledger)
+
 
 def _trim_file(path: Path, max_lines: int):
     """Trim a JSONL file to last N lines."""
@@ -603,20 +635,53 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     _LAST_SENT_IDS.clear()
             except Exception as e:
                 log("heartbeat", f"Job sweep error: {e}", level="warn")
-        # Check restart trigger
+        # Check restart trigger. Single consumer, fast path (REQ-42): spawn
+        # restart.sh detached and exit the loop NORMALLY — the old behavior
+        # (SIGTERM the whole process group, then wait for daemon.py to notice
+        # over 2x30s checks + 300s cooldown) gave 1-15 minutes of darkness,
+        # racing a second consumer in bot.sh that only ran when a Lark
+        # message happened to arrive. restart.sh handles the actual kill.
         restart_trigger = jd / ".restart_trigger"
         if restart_trigger.exists():
             restart_trigger.unlink(missing_ok=True)
-            log("heartbeat", "Restart trigger detected — exiting")
-            os.kill(0, signal.SIGTERM)
+            log("heartbeat", "Restart trigger detected — handing off to restart.sh")
+            try:
+                subprocess.Popen(["bash", str(jd / "restart.sh"), "--yes"],
+                                 start_new_session=True,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            except Exception as e:
+                log("heartbeat", f"restart.sh spawn failed: {e} — falling back "
+                    "to group SIGTERM", level="error")
+                os.kill(0, signal.SIGTERM)
             break
 
-        # Check force trigger
+        # Check force trigger. The file CONTENT names the task to force
+        # (REQ-37): admin's per-task Run Now and [ACTION:heartbeat] markers
+        # write a task name. A name scopes the cycle to run_cycle(only_task=);
+        # empty/'all' keeps the legacy full-roster force but behind a 10-min
+        # cooldown — 32 full-roster storms/day were re-running weekly tasks
+        # within hours and starving the batch queue.
         force = False
+        force_task = ""
         if heartbeat_trigger.exists():
+            try:
+                force_task = heartbeat_trigger.read_text().strip()[:64]
+            except OSError:
+                force_task = ""
             heartbeat_trigger.unlink(missing_ok=True)
-            force = True
-            log("heartbeat", "Force trigger detected")
+            if force_task and force_task != "all":
+                log("heartbeat", f"Force trigger detected (task={force_task})")
+            else:
+                force_task = ""
+                last_full = getattr(run_loop, "_last_full_force", 0.0)
+                if time.time() - last_full >= 600:
+                    run_loop._last_full_force = time.time()
+                    force = True
+                    log("heartbeat", "Force trigger detected (full roster)")
+                else:
+                    log("heartbeat", "Full-roster force suppressed "
+                        "(within 10min cooldown)", level="warn")
 
         # Emit "working" marker for daemon health check
         print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (working)",
@@ -624,7 +689,10 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
 
         # Run cycle
         try:
-            output = runner.run_cycle(force=force)
+            if force_task:
+                output = runner.run_cycle(force=True, only_task=force_task)
+            else:
+                output = runner.run_cycle(force=force)
         except Exception as e:
             log("heartbeat", f"Cycle exception: {e}", level="error")
             output = ""

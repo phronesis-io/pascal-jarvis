@@ -550,10 +550,17 @@ SILENT_TASKS, not this doc.
     Each response must be a real, full-sentence message the user can act on, or else
     action: silent. Do NOT emit one-word acknowledgements as notify cards.
 
-    Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain",
+    BREACHES (if a "breaches" array is present in DATA): these are commitments whose
+    reminders the system DROPPED after retries. Surface ONE combined apology card —
+    "我没能按时把「<name>」提醒出来，原本要说的是：<original_prompt 的要点>。还需要吗？"
+    Never hide a breach: silent violation of a commitment is the worst trust-killer.
+
+    Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain|failed",
       "closure": {"parent": "<parent_id>", "outcome": "done|recorded|na", "result": "<one line>"}}}}
     (omit "closure" unless you are recording a result.)
-    If no intents need attention, reply HEARTBEAT_OK.
+    The envelope MUST cover EVERY intent id listed in DATA — use action "silent" for ids
+    with nothing to say. NEVER reply HEARTBEAT_OK to this task: its pre-script only emits
+    when due intents exist, so an idle reply is never legitimate and strands them.
 
 ## System Maintenance
 

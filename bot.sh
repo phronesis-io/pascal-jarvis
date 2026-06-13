@@ -963,6 +963,11 @@ except Exception:
     print('')
 " 2>/dev/null || echo "")
 
+  # set -m: give the job its OWN process group (REQ-38). Without it the
+  # subshell shares bot.sh's group and cancel_job's killpg SIGTERMed the
+  # ENTIRE bot — user-facing "cancel <job>" restarted the whole product.
+  # With its own group, killpg cleanly reaps subshell + with_timeout + claude.
+  set -m
   if [ -n "$_main_sid" ] && [ -f "$CLAUDE_PROJECT_DIR/${_main_sid}.jsonl" ]; then
     log_info "[bg:$job_id] Forking from session $_main_sid"
     (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
@@ -978,6 +983,7 @@ except Exception:
       < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
   fi
   local _bg_pid=$!
+  set +m
 
   # Record PID in registry
   JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" set-pid "$job_id" "$_bg_pid" \
@@ -1260,27 +1266,11 @@ lark_subscribe_messages \
         continue
       fi
 
-      # Check for restart trigger (written by admin panel)
-      if [ -f "$JARVIS_DIR/.restart_trigger" ]; then
-        rm -f "$JARVIS_DIR/.restart_trigger"
-        log_info "Restart triggered from message loop — cleaning up and exec-ing self..."
-        # Save pending messages so they can be replayed after restart
-        _queue_file="$JARVIS_DIR/.message_queue"
-        rm -f "$_queue_file"
-        for _lock in "$JARVIS_DIR"/.session_lock_*; do
-          [ -f "$_lock" ] || continue
-          _lock_sid=$(basename "$_lock" | sed 's/^\.session_lock_//')
-          log_info "Queuing in-flight message for session $_lock_sid"
-          # We can't recover the content, but we can notify the user
-          echo "$_lock_sid" >> "$_queue_file"
-        done
-        # Delegate to restart.sh: it kills the whole bot tree (including this
-        # pipeline subshell) and starts a fresh instance. The old
-        # `kill 0; exec bot.sh` here TERM'd our own process group — the exec
-        # rarely survived and recovery silently depended on the daemon.
-        nohup "$JARVIS_DIR/restart.sh" --yes >/dev/null 2>&1 &
-        exit 0
-      fi
+      # Restart trigger consumption moved to heartbeat_loop (REQ-42): a
+      # single consumer that polls every ~10s and spawns restart.sh detached.
+      # The consumer that lived here only ran when a Lark event happened to
+      # arrive — admin-clicked restarts raced between the two consumers and
+      # the common winner gave 1-15 minutes of downtime.
 
       # Parse message fields from raw (non-compact) event format.
       # Raw format: .event.message.content is a JSON string like '{"text":"hello"}'

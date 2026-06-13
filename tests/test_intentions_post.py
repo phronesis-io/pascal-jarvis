@@ -59,7 +59,8 @@ def test_apply_action_records_closure_and_does_not_card(monkeypatch):
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     calls = []
     monkeypatch.setattr(ip, "record_closure",
-                        lambda parent, outcome="done", result="": calls.append((parent, outcome, result)))
+                        lambda parent, outcome="done", result="", via="cli":
+                        calls.append((parent, outcome, result)))
     msgs = []
     ip._apply_action("int_fu", response="约了周四下午", action="notify",
                      user_messages=msgs,
@@ -78,15 +79,81 @@ def test_apply_action_no_closure_still_cards(monkeypatch):
     assert msgs == ["你之前说今天约学妹，约上了吗？"]
 
 
+def _isolate_state(monkeypatch):
+    """main() touches the inflight manifest / breach queue — never the real
+    ones from a test."""
+    monkeypatch.setattr(ip, "read_inflight", lambda: [])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": []})
+    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+
+
 def test_malformed_intents_envelope_not_emitted(monkeypatch, capsys):
     """The 09:00 leak: {"intents": {"id": , ...}} is invalid JSON and must
     not be carded as raw text."""
+    _isolate_state(monkeypatch)
     monkeypatch.setattr("sys.stdin", _Stdin(
         '{"intents": {"int_c460a594e7": , "int_c83a783ac8": }}'))
     ip.main()
     out = capsys.readouterr().out
     assert '"intents"' not in out
     assert "int_c460a594e7" not in out
+
+
+def test_no_envelope_sentinel_reconciles_everything(monkeypatch, capsys):
+    """REQ-30: '__NO_ENVELOPE__' (runner saw HEARTBEAT_OK / empty / killed /
+    parse failure) reconciles the manifest with zero covered ids and emits
+    nothing user-facing."""
+    calls = []
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: (calls.append(covered),
+                                         {"retried": ["int_b"], "expired": []})[1])
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_b"])
+    monkeypatch.setattr("sys.stdin", _Stdin("__NO_ENVELOPE__"))
+    ip.main()
+    assert calls == [[]]                       # nothing covered
+    assert capsys.readouterr().out == ""       # nothing user-facing
+
+
+def test_envelope_reconciles_covered_ids(monkeypatch, capsys):
+    """A parsed envelope reconciles with exactly the covered ids, so the
+    uncovered remainder gets the retry policy."""
+    recon_calls = []
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_a", "int_b"])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: (recon_calls.append(sorted(covered)),
+                                         {"retried": [], "expired": []})[1])
+    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "get_intent", lambda iid: {"parent_intent_id": None})
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_a": {"response": "记得 14:00 开会", "action": "notify"}}}'))
+    ip.main()
+    assert recon_calls == [["int_a"]]
+
+
+def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
+    """REQ-34: a follow-up that is ASKING gets one-tap ✅/❌/🚫 buttons whose
+    value routes intent_close to the sidecar."""
+    import json
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_fu"])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": []})
+    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "get_intent",
+                        lambda iid: {"parent_intent_id": "int_parent", "name": "闭环: 约学妹"})
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_fu": {"response": "昨天的饭局，有值得跟进的吗？", "action": "notify"}}}'))
+    ip.main()
+    out = capsys.readouterr().out.strip()
+    card = json.loads(out)
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "intent_close" in blob
+    assert "int_parent" in blob
 
 
 class _Stdin:

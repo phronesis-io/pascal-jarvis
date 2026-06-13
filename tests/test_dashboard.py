@@ -142,14 +142,44 @@ class TestScheduler:
         teardown_test_db(self.db_path)
 
     def test_cron_matches(self):
+        """STANDARD cron dow semantics: 0/7=Sunday, 1=Monday ... 6=Saturday.
+
+        The old comparison used dt.weekday() (0=Monday) — every weekly
+        schedule fired one day late (live misfire: int_fb4fcab91d
+        '30 14 * * 2' executed on a Wednesday). This test pins the fix.
+        """
         from dashboard.scheduler import cron_matches
         from datetime import datetime
         # Monday 9:00
         dt = datetime(2026, 5, 25, 9, 0)  # Monday
         assert cron_matches("0 9 * * *", dt)
         assert not cron_matches("0 10 * * *", dt)
-        assert cron_matches("0 9 * * 0", dt)  # 0=Monday
-        assert not cron_matches("0 9 * * 1", dt)  # 1=Tuesday
+        assert cron_matches("0 9 * * 1", dt)       # 1=Monday (standard cron)
+        assert not cron_matches("0 9 * * 0", dt)   # 0=Sunday
+        assert not cron_matches("0 9 * * 2", dt)   # 2=Tuesday
+        # Tuesday 14:30 — the live misfire shape
+        tue = datetime(2026, 6, 9, 14, 30)  # a Tuesday
+        assert cron_matches("30 14 * * 2", tue)
+        wed = datetime(2026, 6, 10, 14, 30)  # a Wednesday
+        assert not cron_matches("30 14 * * 2", wed)
+        # Sunday tolerance: both 0 and 7 mean Sunday
+        sun = datetime(2026, 6, 14, 9, 0)  # a Sunday
+        assert cron_matches("0 9 * * 0", sun)
+        assert cron_matches("0 9 * * 7", sun)
+
+    def test_cron_next(self):
+        """REQ-32 catch-up primitive: next occurrence strictly after `after`."""
+        from dashboard.scheduler import cron_next
+        from datetime import datetime
+        after = datetime(2026, 6, 9, 20, 30)  # Tuesday evening
+        nxt = cron_next("0 21 * * *", after)
+        assert nxt == datetime(2026, 6, 9, 21, 0)
+        # Weekly: next Tuesday 14:30 after Tuesday 15:00 is +7 days
+        nxt = cron_next("30 14 * * 2", datetime(2026, 6, 9, 15, 0))
+        assert nxt == datetime(2026, 6, 16, 14, 30)
+        # Malformed expressions return None, never raise
+        assert cron_next("not a cron", after) is None
+        assert cron_next("0 21 * *", after) is None
 
     def test_cron_wildcards(self):
         from dashboard.scheduler import cron_matches

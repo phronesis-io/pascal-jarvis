@@ -4,13 +4,19 @@ An Intent is NOT a reminder. It's: "at time T, wake up with context C and
 execute action A." Each intent has its own prompt/context, so the agent
 at that moment knows exactly what to think about.
 
-Lifecycle: create → pending → triggered → executed | expired | cancelled
+Lifecycle (execution axis, REQ-30/31): create → pending → triggered(+attempt)
+  → executed | (retry → pending, ≤3 attempts within 2h grace) | expired(+breach
+  notification) | cancelled. Every transition is owned by deterministic code —
+  the LLM only authors content; absence of its envelope is itself a
+  deterministic signal via the inflight manifest (data/.intention_inflight.json).
 
 Architecture:
   - Stored in SQLite `intentions` table (via dashboard.db)
   - Checked every heartbeat cycle by intention-check task
   - Can be created by: agent (ACTION:intent_create), calendar bridge, seed script
-  - Supports: one-shot (date), recurring (cron), relative (interval), chains
+  - Supports: one-shot (date), recurring (cron with next_fire_at catch-up),
+    relative (interval), chains
+  - Every transition emits an intent_* event to sched_events.jsonl (REQ-35)
 """
 
 import json
@@ -24,6 +30,35 @@ from pathlib import Path
 from core.timeutil import now_local, now_local_str
 
 ROOT = Path(__file__).parent.parent
+
+# Sidecar state files (repo-root data/, all writers use atomic tmp+rename)
+INFLIGHT_FILE = ROOT / "data" / ".intention_inflight.json"
+BREACH_QUEUE = ROOT / "data" / ".intent_breach_queue.jsonl"
+
+# Bounded-retry policy for one-shot date intents stuck in 'triggered'
+# (REQ-31). One failed cycle no longer means permanent silent death: retry up
+# to MAX_ATTEMPTS within RETRY_GRACE of the trigger time, then expire WITH a
+# user-visible breach notification. Intents already ancient at first sweep
+# (> STORM_AGE past trigger — the 2026-06-08 resurrection-storm class) are
+# expired silently, exactly as before.
+MAX_ATTEMPTS = 3
+RETRY_GRACE = timedelta(hours=2)
+STORM_AGE = timedelta(hours=24)
+
+# Cron catch-up (REQ-32): a missed minute fires on the next check via
+# next_fire_at, but never more than CRON_STALENESS late — a laptop asleep all
+# evening must not fire 21:00 content at 03:00; the occurrence is skipped
+# (with an intent_occurrence_skipped event) and next_fire_at recomputed.
+CRON_STALENESS = timedelta(hours=6)
+
+
+def _emit_intent(event: str, intent_id: str, **fields) -> None:
+    """Emit an intent-lifecycle event to sched_events.jsonl. Never raises."""
+    try:
+        from core.sched_events import emit as sched_emit
+        sched_emit(ROOT, event, task=intent_id, **fields)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Closure model — Input/Decision/Output + a category-driven closure policy.
@@ -45,13 +80,17 @@ ROOT = Path(__file__).parent.parent
 #               False → asked at most once, never re-surfaced (healing safety).
 #   decay_budget: hard cap on proactive touches.
 # ---------------------------------------------------------------------------
+#   awaiting_ttl_days: how long an 'awaiting' closure may live with no live
+#               follow-up before the sweeper retires it to 'na' (REQ-33 —
+#               'awaiting' is now a guaranteed-terminating state; the
+#               int_7a545cc10d zombie class cannot recur).
 CLOSURE_POLICY = {
-    "hard":       {"followup": ("rel_hours", 2),   "may_notify": True,  "re_surface": True,  "decay_budget": 99},
-    "context":    {"followup": None,                "may_notify": False, "re_surface": False, "decay_budget": 0},
-    "healing":    {"followup": ("next_day_at", 11), "may_notify": False, "re_surface": False, "decay_budget": 1},
-    "external":   {"followup": ("next_day_at", 11), "may_notify": True,  "re_surface": True,  "decay_budget": 5},
-    "autonomous": {"followup": ("next_day_at", 11), "may_notify": False, "re_surface": False, "decay_budget": 1},
-    "none":       {"followup": None,                "may_notify": False, "re_surface": False, "decay_budget": 0},
+    "hard":       {"followup": ("rel_hours", 2),   "may_notify": True,  "re_surface": True,  "decay_budget": 99, "awaiting_ttl_days": 7},
+    "context":    {"followup": None,                "may_notify": False, "re_surface": False, "decay_budget": 0,  "awaiting_ttl_days": 3},
+    "healing":    {"followup": ("next_day_at", 11), "may_notify": False, "re_surface": False, "decay_budget": 1,  "awaiting_ttl_days": 3},
+    "external":   {"followup": ("next_day_at", 11), "may_notify": True,  "re_surface": True,  "decay_budget": 5,  "awaiting_ttl_days": 14},
+    "autonomous": {"followup": ("next_day_at", 11), "may_notify": False, "re_surface": False, "decay_budget": 1,  "awaiting_ttl_days": 3},
+    "none":       {"followup": None,                "may_notify": False, "re_surface": False, "decay_budget": 0,  "awaiting_ttl_days": 3},
 }
 
 _VALID_ACTION_TYPES = ("prompt", "notify", "lark_card", "script")
@@ -136,6 +175,10 @@ _NEW_COLS = [
     ("closure_touches",     "INTEGER NOT NULL DEFAULT 0"),
     ("closure_followup_id", "TEXT"),
     ("parent_intent_id",    "TEXT"),
+    # ── v2 execution-axis columns (REQ-30/31/32/33) ──
+    ("attempt",             "INTEGER NOT NULL DEFAULT 0"),  # execution attempts since last success
+    ("next_fire_at",        "TEXT"),                        # cron catch-up watermark
+    ("closed_at",           "TEXT"),                        # closure-axis terminal timestamp
 ]
 
 
@@ -154,6 +197,28 @@ def _migrate():
                 print(f"[intentions._migrate] skip {col}: {e}", file=sys.stderr)
     db.execute("CREATE INDEX IF NOT EXISTS idx_intentions_closure ON intentions(closure_status)")
     db.commit()
+    # Backfill next_fire_at for live cron rows that predate the column
+    # (REQ-32). One-time per row; safe to re-run (only touches NULLs).
+    try:
+        rows = db.execute(
+            "SELECT id, trigger_config FROM intentions "
+            "WHERE trigger_type = 'cron' AND status IN ('pending', 'triggered') "
+            "AND next_fire_at IS NULL"
+        ).fetchall()
+        if rows:
+            from dashboard.scheduler import cron_next
+            for iid, cfg_raw in rows:
+                try:
+                    expr = (json.loads(cfg_raw) or {}).get("expression", "")
+                    nxt = cron_next(expr) if expr else None
+                    if nxt:
+                        db.execute("UPDATE intentions SET next_fire_at = ? WHERE id = ?",
+                                   (nxt.isoformat(), iid))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            db.commit()
+    except Exception as e:  # backfill must never block table init
+        print(f"[intentions._migrate] next_fire_at backfill: {e}", file=sys.stderr)
 
 
 _table_ready = False
@@ -214,6 +279,30 @@ def create_intent(
         raise ValueError(f"invalid action_type: {action_type!r} (must be one of {_VALID_ACTION_TYPES})")
     if category not in CLOSURE_POLICY:
         raise ValueError(f"invalid category: {category!r} (must be one of {tuple(CLOSURE_POLICY)})")
+
+    # Reject unfireable rows at the boundary (REQ-53): a date intent with an
+    # empty/unparseable datetime would be created 'pending' but can never
+    # fire, never expire, and silently bloats the snapshot wall forever.
+    next_fire_at = None
+    if trigger_type == "date":
+        target = (trigger_config or {}).get("datetime", "")
+        try:
+            datetime.fromisoformat(str(target))
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"date intent needs a parseable trigger_config.datetime, got {target!r}")
+    elif trigger_type == "cron":
+        expr = (trigger_config or {}).get("expression", "")
+        try:
+            from dashboard.scheduler import cron_next
+            nxt = cron_next(expr) if expr else None
+        except Exception:
+            nxt = None
+        if nxt is None:
+            raise ValueError(
+                f"cron intent needs a valid 5-field expression, got {expr!r}")
+        next_fire_at = nxt.isoformat()
+
     db = _get_db()
     iid = intent_id or f"int_{uuid.uuid4().hex[:10]}"
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
@@ -224,9 +313,10 @@ def create_intent(
             prompt, context, action_type, action_config, conditions,
             priority, chain_next, purpose, tags, created_at, expires_at,
             category, input_ctx, decision, closure_question, closure_status,
-            closure_result, closure_touches, closure_followup_id, parent_intent_id)
+            closure_result, closure_touches, closure_followup_id, parent_intent_id,
+            attempt, next_fire_at)
            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
         (iid, name, source, trigger_type,
          json.dumps(trigger_config, ensure_ascii=False), prompt,
          json.dumps(context or {}, ensure_ascii=False), action_type,
@@ -235,7 +325,8 @@ def create_intent(
          priority, chain_next, purpose,
          json.dumps(tags or [], ensure_ascii=False), now, expires_at,
          category, input_ctx, decision, closure_question, closure_status,
-         closure_result, closure_touches, closure_followup_id, parent_intent_id),
+         closure_result, closure_touches, closure_followup_id, parent_intent_id,
+         next_fire_at),
     )
     db.commit()
     return iid
@@ -390,6 +481,26 @@ def _coerce(dt: datetime) -> datetime:
     return dt
 
 
+def _skip_stale_cron_occurrence(db, intent: dict, expr: str,
+                                missed_dt: datetime, now: datetime) -> None:
+    """Retire a cron occurrence that is too stale to fire (REQ-32 ceiling)."""
+    try:
+        from dashboard.scheduler import cron_next
+        nxt = cron_next(expr, after=now.replace(tzinfo=None)) if expr else None
+        db.execute(
+            "UPDATE intentions SET next_fire_at = ?, last_error = ? WHERE id = ?",
+            (nxt.isoformat() if nxt else None,
+             f"occurrence {missed_dt.isoformat()} skipped (>{CRON_STALENESS} stale)",
+             intent["id"]),
+        )
+        db.commit()
+        _emit_intent("intent_occurrence_skipped", intent["id"],
+                     missed=missed_dt.isoformat(), name=intent.get("name", ""))
+    except Exception as e:
+        print(f"[intentions] stale-occurrence skip failed for {intent.get('id')}: {e}",
+              file=sys.stderr)
+
+
 def get_due_intents() -> list[dict]:
     """Find all pending intents whose trigger condition is met NOW."""
     _init()
@@ -426,14 +537,33 @@ def get_due_intents() -> list[dict]:
                     pass  # Skip intents with malformed datetime
 
         elif trigger_type == "cron":
-            from dashboard.scheduler import cron_matches
+            # Catch-up semantics (REQ-32): fire when now >= next_fire_at, so a
+            # missed minute (batch-deferred check, busy runner, sleep) fires
+            # on the NEXT check instead of silently losing the occurrence.
             expr = trigger_config.get("expression", "")
-            triggered = cron_matches(expr, now)
-            # Prevent re-triggering within same minute
-            if triggered and intent.get("executed_at"):
-                last = _coerce(datetime.fromisoformat(intent["executed_at"]))
-                if (now - last).total_seconds() < 60:
-                    triggered = False
+            nfa = intent.get("next_fire_at")
+            if nfa:
+                try:
+                    nfa_dt = _coerce(datetime.fromisoformat(nfa))
+                except (ValueError, TypeError):
+                    nfa_dt = None
+                if nfa_dt and now >= nfa_dt:
+                    if now - nfa_dt > CRON_STALENESS:
+                        # Too late to be useful (e.g. host slept all evening):
+                        # skip the occurrence, recompute, never fire 21:00
+                        # content at 03:00.
+                        _skip_stale_cron_occurrence(db, intent, expr, nfa_dt, now)
+                    else:
+                        triggered = True
+            else:
+                # Legacy row without next_fire_at: exact-minute match once,
+                # then mark_executed/backfill stamps next_fire_at.
+                from dashboard.scheduler import cron_matches
+                triggered = cron_matches(expr, now)
+                if triggered and intent.get("executed_at"):
+                    last = _coerce(datetime.fromisoformat(intent["executed_at"]))
+                    if (now - last).total_seconds() < 60:
+                        triggered = False
 
         elif trigger_type == "interval":
             seconds = trigger_config.get("seconds", 600)
@@ -457,90 +587,187 @@ def get_due_intents() -> list[dict]:
 
 
 def mark_triggered(intent_id: str):
-    """Mark an intent as triggered (being processed)."""
+    """Mark an intent as triggered (being processed). Counts the attempt."""
     _init()
     db = _get_db()
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
     db.execute(
-        "UPDATE intentions SET status = 'triggered', triggered_at = ? WHERE id = ?",
+        "UPDATE intentions SET status = 'triggered', triggered_at = ?, "
+        "attempt = attempt + 1 WHERE id = ?",
         (now, intent_id),
     )
     db.commit()
+    row = db.execute("SELECT attempt, name FROM intentions WHERE id = ?",
+                     (intent_id,)).fetchone()
+    _emit_intent("intent_fired", intent_id,
+                 attempt=row["attempt"] if row else 1,
+                 name=row["name"] if row else "")
 
 
-def _is_overdue_oneshot(intent: dict, ref: datetime | None = None) -> bool:
-    """True if `intent` is a one-shot `date` intent whose trigger time is past.
-
-    Such an intent can never usefully fire again: get_due_intents marks any
-    past-dated `date` intent as due, so resetting it to 'pending' makes it
-    re-fire immediately. Used by reset_stale_triggered to break the resurrection
-    loop (see that function's docstring).
-    """
-    if intent.get("trigger_type") != "date":
-        return False
+def _trigger_dt(intent: dict) -> datetime | None:
+    """Parsed trigger datetime of a one-shot date intent, or None."""
     try:
         cfg = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
-    except (json.JSONDecodeError, TypeError):
-        return False
-    target = (cfg or {}).get("datetime", "")
-    if not target:
-        return False
+        return _coerce(datetime.fromisoformat((cfg or {}).get("datetime", "")))
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _queue_breach(intent: dict, now: datetime) -> None:
+    """Append a dropped-commitment notification to the breach queue (REQ-31).
+
+    intentions_pre.sh drains this queue into the next intention-check cycle so
+    Pascal hears '我没能按时把「X」提醒出来' instead of silence. The original
+    prompt rides along — the reminder's value isn't lost with its schedule.
+    Atomic-ish append (O_APPEND single line); never raises.
+    """
     try:
-        target_dt = _coerce(datetime.fromisoformat(target))
-    except (ValueError, TypeError):
-        return False
-    return target_dt < (ref or now_local())
+        BREACH_QUEUE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "id": intent["id"], "name": intent.get("name", ""),
+            "prompt": intent.get("prompt", ""), "purpose": intent.get("purpose", ""),
+            "trigger_time": _intent_when(intent),
+            "attempt": intent.get("attempt") or 0,
+            "ts": now.strftime("%Y-%m-%dT%H:%M:%S"), "notify_attempts": 0,
+        }
+        with open(BREACH_QUEUE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[intentions] breach queue append failed: {e}", file=sys.stderr)
 
 
-def reset_stale_triggered(stale_minutes: int = 10) -> int:
-    """Recover intents stuck in 'triggered' state.
+def lifecycle_sweep(stale_minutes: int = 10) -> int:
+    """Sweep stuck and zombie lifecycle states. Returns count reset to pending.
 
-    If a heartbeat cycle crashes between mark_triggered and mark_executed
-    (Claude timeout, JSON parse failure, post-script crash, etc.) the intent
-    stays 'triggered' forever and never re-fires. This bumps recoverable ones
-    back to 'pending' after `stale_minutes` so they get another chance.
+    Replaces reset_stale_triggered, whose anti-resurrection exception expired
+    EVERY stuck one-shot (a date intent is by definition past-due the moment
+    it fires) — one failed cycle meant permanent silent commitment-dropping,
+    the literal mechanism behind 创建后没有闭环 (18/19 expired rows in the
+    6/13 audit died this way). Graduated policy (REQ-31):
 
-    EXCEPTION — the resurrection loop: a one-shot `date` intent whose trigger
-    time is already in the past must NOT be reset to 'pending'. get_due_intents
-    treats any past-dated `date` intent as due, so it would re-fire instantly,
-    and if execution keeps failing it re-sticks in 'triggered' → it reappears
-    every single cycle forever. This is exactly the 2026-06-08 storm: junk
-    intents dated 2026-01-01 resurrected on every heartbeat. Those are marked
-    'expired' instead (with a last_error breadcrumb), terminating the loop.
+    Stuck 'triggered' rows (cycle crashed between mark_triggered and
+    mark_executed):
+      - cron/interval → back to pending; the occurrence SURVIVES because
+        next_fire_at is not advanced until a successful fire (REQ-32).
+      - one-shot date, ancient (> STORM_AGE past trigger) → expire silently —
+        the 2026-06-08 resurrection-storm class, unchanged behavior.
+      - one-shot date, attempt < MAX_ATTEMPTS and within RETRY_GRACE of the
+        trigger → back to pending for another try next cycle.
+      - retries exhausted → expire + user-visible breach notification via the
+        breach queue + still run the closure axis (REQ-33: the reminder
+        failed, but the real-world event happened — for hard/external the
+        next-day '后来怎么样' is MORE valuable, not less).
 
-    Returns the count of intents reset to 'pending' (expired ones are NOT
-    counted — they were retired, not recovered).
+    Awaiting-closure TTL (REQ-33): 'awaiting' rows with no live follow-up
+    past their category TTL → closure_status 'na' with closed_at stamped, so
+    'awaiting' is a guaranteed-terminating state (no more permanent zombies).
     """
     _init()
     db = _get_db()
-    cutoff = (now_local() - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+    now = now_local()
+    cutoff = (now - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
     stuck = db.execute(
         "SELECT * FROM intentions "
         "WHERE status = 'triggered' AND triggered_at IS NOT NULL AND triggered_at < ?",
         (cutoff,),
     ).fetchall()
 
-    now = now_local()
     reset = 0
+    terminal_moments: list[dict] = []
     for row in stuck:
         intent = dict(row)
-        if _is_overdue_oneshot(intent, now):
-            db.execute(
-                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
-                ("auto-expired: overdue one-shot stuck in triggered "
-                 "(would resurrection-loop if reset to pending)", intent["id"]),
-            )
-            # Retire any dangling closure loop so the nightly review stops chasing it.
-            if intent.get("closure_status") == "awaiting":
-                db.execute("UPDATE intentions SET closure_status = 'na' WHERE id = ?", (intent["id"],))
-        else:
+        if intent.get("trigger_type") != "date":
+            # Recurring: the occurrence survives (next_fire_at untouched).
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"auto-reset after {stale_minutes}m stuck in triggered", intent["id"]),
             )
+            _emit_intent("intent_retry", intent["id"],
+                         attempt=intent.get("attempt") or 0, kind=intent.get("trigger_type"))
             reset += 1
+            continue
+
+        target = _trigger_dt(intent)
+        age = (now - target) if target else (STORM_AGE + timedelta(seconds=1))
+        attempt = intent.get("attempt") or 0
+
+        if age > STORM_AGE:
+            # Ancient at sweep time — junk/storm class. Expire silently.
+            db.execute(
+                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                ("auto-expired: stuck in triggered, trigger >24h past (storm class)",
+                 intent["id"]),
+            )
+            if intent.get("closure_status") == "awaiting":
+                db.execute(
+                    "UPDATE intentions SET closure_status = 'na', closed_at = ? WHERE id = ?",
+                    (now.strftime("%Y-%m-%dT%H:%M:%S"), intent["id"]))
+            _emit_intent("intent_expired", intent["id"], attempt=attempt,
+                         notified=False, reason="storm_class")
+        elif attempt < MAX_ATTEMPTS and age < RETRY_GRACE:
+            db.execute(
+                "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
+                (f"retry {attempt}/{MAX_ATTEMPTS} after stuck in triggered", intent["id"]),
+            )
+            _emit_intent("intent_retry", intent["id"], attempt=attempt, kind="date")
+            reset += 1
+        else:
+            # Retries exhausted — expire LOUDLY: breach queue + closure axis.
+            db.execute(
+                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                (f"expired after {attempt} attempts — breach notification queued",
+                 intent["id"]),
+            )
+            _queue_breach(intent, now)
+            _emit_intent("intent_expired", intent["id"], attempt=attempt,
+                         notified=True, reason="retries_exhausted")
+            terminal_moments.append(dict(intent))
+    db.commit()
+
+    # Closure spawns AFTER the commit: _on_moment_terminal opens its own
+    # connection — running it inside the sweep's open transaction deadlocks
+    # ('database is locked').
+    for intent in terminal_moments:
+        try:
+            _on_moment_terminal(intent, how="expired")
+        except Exception as e:
+            print(f"[intentions] closure-on-expiry failed for {intent['id']}: {e}",
+                  file=sys.stderr)
+
+    # ── Awaiting-closure TTL pass (REQ-33) ──────────────────────────────
+    awaiting = db.execute(
+        "SELECT * FROM intentions WHERE closure_status = 'awaiting'"
+    ).fetchall()
+    for row in awaiting:
+        it = dict(row)
+        pol = CLOSURE_POLICY.get(it.get("category", "none"), CLOSURE_POLICY["none"])
+        ttl = timedelta(days=pol.get("awaiting_ttl_days", 3))
+        anchor_raw = it.get("executed_at") or it.get("triggered_at") or it.get("created_at")
+        try:
+            anchor = _coerce(datetime.fromisoformat(anchor_raw)) if anchor_raw else None
+        except (ValueError, TypeError):
+            anchor = None
+        if not anchor or (now - anchor) <= ttl:
+            continue
+        fu_id = it.get("closure_followup_id")
+        if fu_id:
+            fu = get_intent(fu_id)
+            if fu and fu.get("status") in ("pending", "triggered"):
+                continue  # follow-up still live — let it ask first
+        db.execute(
+            "UPDATE intentions SET closure_status = 'na', closed_at = ?, "
+            "closure_result = ? WHERE id = ?",
+            (now.strftime("%Y-%m-%dT%H:%M:%S"),
+             f"ttl: no signal within {pol.get('awaiting_ttl_days', 3)}d window",
+             it["id"]),
+        )
+        _emit_intent("intent_closure", it["id"], outcome="na", via="ttl")
     db.commit()
     return reset
+
+
+# Backward-compatible alias (older call sites and tests).
+reset_stale_triggered = lifecycle_sweep
 
 
 def mark_executed(intent_id: str, result: str = ""):
@@ -554,36 +781,39 @@ def mark_executed(intent_id: str, result: str = ""):
         return
 
     if intent["trigger_type"] == "cron":
-        # Recurring: reset to pending for next trigger
+        # Recurring: reset to pending for the next occurrence. attempt resets
+        # (it counts tries of ONE occurrence) and next_fire_at advances —
+        # only here, on success, so a failed cycle never loses the occurrence.
+        nxt = None
+        try:
+            from dashboard.scheduler import cron_next
+            cfg = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
+            expr = (cfg or {}).get("expression", "")
+            nxt = cron_next(expr) if expr else None
+        except Exception:
+            pass
         db.execute(
-            "UPDATE intentions SET status = 'pending', executed_at = ?, last_error = ? WHERE id = ?",
-            (now, result, intent_id),
+            "UPDATE intentions SET status = 'pending', executed_at = ?, last_error = ?, "
+            "attempt = 0, next_fire_at = ? WHERE id = ?",
+            (now, result, nxt.isoformat() if nxt else None, intent_id),
         )
     else:
-        # One-shot: mark executed
+        # One-shot: mark executed (attempt resets — execution succeeded)
         db.execute(
-            "UPDATE intentions SET status = 'executed', executed_at = ?, last_error = ? WHERE id = ?",
+            "UPDATE intentions SET status = 'executed', executed_at = ?, "
+            "last_error = ?, attempt = 0 WHERE id = ?",
             (now, result, intent_id),
         )
     db.commit()
+    _emit_intent("intent_executed", intent_id,
+                 kind=intent["trigger_type"], name=intent.get("name", ""))
 
-    # ── Closure follow-up spawn (ONE-SHOT date intents only) ──────────────
-    # CRITICAL: this lives in the one-shot path only. cron/interval MUST NOT
-    # spawn a follow-up per fire (that builds the "left-glute did-you-do-it"
-    # nag-mountain the healing frame forbids); recurring closure is handled by
-    # the moment prompt + the nightly review's get_closure_due, not per-fire.
-    # Guards: has a closure_question, not already awaiting/closed (防重派生),
-    # and is itself a MOMENT (not a follow-up). Wrapped so a spawn failure
-    # never crashes the post-script (the parent is already committed executed).
-    if (intent["trigger_type"] == "date"
-            and intent.get("closure_question")
-            and intent.get("closure_status", "none") == "none"
-            and not intent.get("parent_intent_id")):
-        try:
-            _spawn_closure_followup(intent)
-        except Exception as e:
-            print(f"[intentions] closure follow-up spawn failed for {intent_id}: {e}",
-                  file=sys.stderr)
+    # Closure axis: spawn the follow-up for a closure-bearing one-shot moment.
+    try:
+        _on_moment_terminal(intent, how="executed")
+    except Exception as e:
+        print(f"[intentions] closure follow-up spawn failed for {intent_id}: {e}",
+              file=sys.stderr)
 
     # Handle explicit chain (legacy mechanism, unchanged — 0 live rows use it)
     if intent.get("chain_next"):
@@ -594,6 +824,28 @@ def mark_executed(intent_id: str, result: str = ""):
             except Exception as e:
                 print(f"[intentions] chain_next spawn failed for {intent_id}: {e}",
                       file=sys.stderr)
+
+
+def _on_moment_terminal(intent: dict, how: str) -> None:
+    """Closure-axis transition when a MOMENT reaches a terminal state.
+
+    Extracted from mark_executed (REQ-33) so the spawn also runs when the
+    reminder FAILED but the underlying real-world event happened (a dinner, a
+    class): asking '后来怎么样' next day is more valuable then, not less.
+    Guards: one-shot date moments only (cron/interval per-fire spawn would
+    build the nag-mountain the healing frame forbids), closure_question set,
+    not already awaiting/closed, not itself a follow-up. On how='expired' the
+    spawn is further gated to hard/external — healing/autonomous keep their
+    never-nag guarantee even on failure.
+    """
+    if not (intent.get("trigger_type") == "date"
+            and intent.get("closure_question")
+            and intent.get("closure_status", "none") == "none"
+            and not intent.get("parent_intent_id")):
+        return
+    if how == "expired" and intent.get("category") not in ("hard", "external"):
+        return
+    _spawn_closure_followup(intent)
 
 
 def _spawn_closure_followup(parent: dict) -> str | None:
@@ -666,7 +918,8 @@ def _spawn_closure_followup(parent: dict) -> str | None:
     return fu_id
 
 
-def record_closure(parent_id: str, outcome: str = "done", result: str = "") -> bool:
+def record_closure(parent_id: str, outcome: str = "done", result: str = "",
+                   via: str = "cli") -> bool:
     """Record a closure OUTPUT on an awaiting parent. The single write path.
 
     Hardens its own boundary (does not trust callers): str().strip() the id,
@@ -674,6 +927,9 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "") -> b
     closure_status axis), idempotent no-op on unknown/already-terminal rows, and
     NULL-guards the follow-up before cancelling it (no double-ask). Returns
     False on no-op so callers can tell whether a write happened.
+
+    `via` is telemetry only (button|reply|followup|review|cli|ttl|dashboard) —
+    which path closed the loop, the learning signal REQ-34/35 feed on.
     """
     _init()
     parent_id = str(parent_id).strip()
@@ -684,8 +940,8 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "") -> b
     db = _get_db()
     db.execute(
         "UPDATE intentions SET closure_status = ?, closure_result = ?, "
-        "closure_touches = closure_touches + 1 WHERE id = ?",
-        (outcome, str(result), parent_id),
+        "closure_touches = closure_touches + 1, closed_at = ? WHERE id = ?",
+        (outcome, str(result), now_local_str("%Y-%m-%dT%H:%M:%S"), parent_id),
     )
     fu_id = p.get("closure_followup_id")
     if fu_id:
@@ -696,6 +952,7 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "") -> b
                 ("parent closure recorded (no double-ask)", fu_id),
             )
     db.commit()
+    _emit_intent("intent_closure", parent_id, outcome=outcome, via=via)
     return True
 
 
@@ -813,18 +1070,27 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
         if event_dt < now_local():
             continue
 
-        intent_tag = f"cal:{current_date}:{start_time}:{title[:20]}"
-        close_tag = f"cal-close:{current_date}:{start_time}:{title[:20]}"
+        # Dedup key is date+title WITHOUT start_time (REQ-53/leak-8): a
+        # rescheduled event must update the existing prep/closure in place,
+        # not spawn a duplicate pair (stale wrong-time prep + double
+        # closure-ask). Time changes are handled below via supersede.
+        intent_tag = f"cal:{current_date}:{title[:20]}"
+        close_tag = f"cal-close:{current_date}:{title[:20]}"
 
-        # All existing calendar-intent tags (dedup BOTH prep and close in one pass).
+        # All existing calendar-intent tags (dedup BOTH prep and close in one
+        # pass), plus tag→(id, trigger_config) for the supersede path.
         # JSON parse, not LIKE: json.dumps may store Chinese as \uXXXX.
         existing_tags = set()
+        tag_to_row: dict = {}
         for row in db.execute(
-            "SELECT tags FROM intentions WHERE source = 'calendar' "
+            "SELECT id, tags, trigger_config FROM intentions WHERE source = 'calendar' "
             "AND status IN ('pending', 'triggered')"
         ).fetchall():
             try:
-                existing_tags.update(json.loads(row[0]) if isinstance(row[0], str) else (row[0] or []))
+                row_tags = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or [])
+                existing_tags.update(row_tags)
+                for t in row_tags:
+                    tag_to_row[t] = (row[0], row[2])
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -839,23 +1105,43 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
             prep_dt = event_dt - timedelta(minutes=30)
             prep_prompt = f"{title} 在 {start_time} 开始（还有 30 分钟）。快速回顾：这个会/活动的目的是什么？有什么需要提前准备的？"
 
-        if prep_dt and prep_dt >= now_local() and intent_tag not in existing_tags:
-            iid = create_intent(
-                name=f"Prep: {title}",
-                trigger_type="date",
-                trigger_config={"datetime": prep_dt.isoformat()},
-                prompt=prep_prompt,
-                context={"event_title": title, "event_time": f"{start_time}-{end_time}",
-                          "event_date": current_date, "event_details": details},
-                action_type="notify",
-                action_config={"type": "prep_reminder"},
-                purpose=f"为 {title} 做心理和实际准备",
-                tags=[intent_tag, "calendar-prep"],
-                source="calendar",
-                category="context",
-                expires_at=event_dt.isoformat(),
-            )
-            created.append(iid)
+        if prep_dt and prep_dt >= now_local():
+            if intent_tag in existing_tags:
+                # Same event (date+title) already has a prep — if the event
+                # TIME changed, supersede in place instead of duplicating
+                # (REQ-53: reschedules became an update, not a wrong-time
+                # prep card plus a fresh duplicate).
+                row = tag_to_row.get(intent_tag)
+                if row:
+                    iid_existing, cfg_raw = row
+                    try:
+                        stored = (json.loads(cfg_raw) or {}).get("datetime", "")
+                    except (json.JSONDecodeError, TypeError):
+                        stored = ""
+                    if stored and stored != prep_dt.isoformat():
+                        update_intent(
+                            iid_existing,
+                            trigger_config={"datetime": prep_dt.isoformat()},
+                            prompt=prep_prompt,
+                            expires_at=event_dt.isoformat(),
+                        )
+            else:
+                iid = create_intent(
+                    name=f"Prep: {title}",
+                    trigger_type="date",
+                    trigger_config={"datetime": prep_dt.isoformat()},
+                    prompt=prep_prompt,
+                    context={"event_title": title, "event_time": f"{start_time}-{end_time}",
+                              "event_date": current_date, "event_details": details},
+                    action_type="notify",
+                    action_config={"type": "prep_reminder"},
+                    purpose=f"为 {title} 做心理和实际准备",
+                    tags=[intent_tag, "calendar-prep"],
+                    source="calendar",
+                    category="context",
+                    expires_at=event_dt.isoformat(),
+                )
+                created.append(iid)
 
         # ── Post-event closure for social / 外联 events (category='external') ──
         # Logistics-only events (康复课/workshop) stay prep-only. The closure asks,
@@ -881,6 +1167,9 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
                     purpose=f"{title} 的会后/饭后闭环",
                     tags=[close_tag, "calendar-close"],
                     source="calendar",
+                    # An unanswered closure ask must not go stale-pending
+                    # forever (REQ-53): cap at 36h past event end.
+                    expires_at=(event_end_dt + timedelta(hours=36)).isoformat(),
                 )
                 created.append(cid)
 
@@ -888,42 +1177,199 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Rendering for heartbeat
+# Envelope contract — SINGLE SOURCE for the shape Claude must return from the
+# intention-check task (REQ-53/leak-10). The same schema text is asserted to
+# appear verbatim in HEARTBEAT.md's intention-check block by a unit test, so
+# prompt and parser cannot drift apart silently (the drift class that shipped
+# 'reply HEARTBEAT_OK' instructions against a state machine requiring an
+# envelope). intentions_post.py imports validate_envelope for its manifest
+# reconciliation.
 # ---------------------------------------------------------------------------
 
-def format_due_intents_for_claude(intents: list[dict]) -> str:
-    """Format due intents as a prompt for Claude to process."""
-    if not intents:
-        return ""
+ENVELOPE_SCHEMA_DOC = (
+    '{"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain|failed", '
+    '"closure": {"parent": "<parent_id>", "outcome": "done|recorded|na", "result": "<one line>"}}}}'
+)
 
-    parts = ["[INTENTION EXECUTION]",
-             "The following intents are due. For each, execute the prompt with the given context.",
-             "INPUT = prep material to surface now. DECISION = the yes/no or A/B judgment to put to Pascal.",
-             "If a closure sub-object is present, this is a FOLLOW-UP capturing a result — follow its prompt's",
-             "rules (healing/autonomous: never proactively ask; only record if Pascal already volunteered).",
-             "Return JSON: {\"intents\": {\"<intent_id>\": {\"response\": \"<text>\", \"action\": \"notify|silent|chain\","
-             " \"closure\": {\"parent\": \"<parent_id>\", \"outcome\": \"done|recorded|na\", \"result\": \"<one line>\"}}}}",
-             "(omit \"closure\" unless you are recording a result.)",
-             ""]
 
-    for intent in intents:
-        ctx = json.loads(intent["context"]) if isinstance(intent["context"], str) else intent["context"]
-        parts.append(f"--- Intent: {intent['id']} ({intent['name']}) [category={intent.get('category', 'none')}] ---")
-        parts.append(f"Purpose: {intent['purpose']}")
-        parts.append(f"Prompt: {intent['prompt']}")
-        if intent.get("input_ctx"):
-            parts.append(f"INPUT: {intent['input_ctx']}")
-        if intent.get("decision"):
-            parts.append(f"DECISION: {intent['decision']}")
-        if intent.get("closure_question"):
-            parts.append(f"CLOSURE: {intent['closure_question']}")
-        if intent.get("parent_intent_id"):
-            parts.append(f"(follow-up of {intent['parent_intent_id']} — record via closure field)")
-        if ctx:
-            parts.append(f"Context: {json.dumps(ctx, ensure_ascii=False)}")
-        parts.append("")
+def validate_envelope(data, expected_ids: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Check a parsed envelope against the ids the manifest says are inflight.
 
-    return "\n".join(parts)
+    Returns (covered_ids, missing_ids, errors). An id is covered when it
+    appears in data['intents'] with a dict value. Never raises.
+    """
+    errors: list[str] = []
+    covered: list[str] = []
+    if not isinstance(data, dict):
+        return [], list(expected_ids), ["envelope is not a dict"]
+    intents = data.get("intents")
+    if not isinstance(intents, dict):
+        return [], list(expected_ids), ["envelope has no 'intents' dict"]
+    for iid, slot in intents.items():
+        if not isinstance(slot, dict):
+            errors.append(f"{iid}: slot is not a dict")
+            continue
+        covered.append(str(iid))
+    missing = [i for i in expected_ids if i not in covered]
+    return covered, missing, errors
+
+
+# ---------------------------------------------------------------------------
+# Inflight manifest — the deterministic execution-ack (REQ-30). Written by
+# intentions_pre.sh after mark_triggered; resolved by intentions_post.py on
+# EVERY outcome (envelope, garbage, or __NO_ENVELOPE__). The absence of a
+# Claude envelope is itself a deterministic signal: ids not covered get the
+# bounded-retry policy applied immediately instead of waiting to be swept.
+# ---------------------------------------------------------------------------
+
+def write_inflight(ids: list[str]) -> None:
+    """Persist the set of intent ids handed to the current Claude cycle."""
+    INFLIGHT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = INFLIGHT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(
+        {"ts": now_local_str("%Y-%m-%dT%H:%M:%S"), "ids": list(ids)},
+        ensure_ascii=False))
+    import os
+    os.replace(tmp, INFLIGHT_FILE)
+
+
+def read_inflight() -> list[str]:
+    try:
+        return list(json.loads(INFLIGHT_FILE.read_text()).get("ids", []))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+
+
+def clear_inflight() -> None:
+    try:
+        INFLIGHT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def reconcile_inflight(covered_ids: list[str]) -> dict:
+    """Resolve manifest ids the envelope did NOT cover (REQ-30c).
+
+    Applies the bounded-retry policy immediately — no 10-minute sweeper wait:
+    rows still 'triggered' that weren't covered go back to 'pending' while
+    they have retry budget, or expire loudly (breach queue + closure axis)
+    when exhausted. Covered ids are the caller's job (mark_executed et al).
+    Returns {"retried": [...], "expired": [...]} and clears the manifest.
+    """
+    _init()
+    inflight = read_inflight()
+    out = {"retried": [], "expired": []}
+    if not inflight:
+        return out
+    db = _get_db()
+    now = now_local()
+    covered = set(covered_ids)
+    terminal_moments: list[dict] = []
+    for iid in inflight:
+        if iid in covered:
+            continue
+        it = get_intent(iid)
+        if not it or it.get("status") != "triggered":
+            continue  # already resolved by someone else
+        attempt = it.get("attempt") or 0
+        if it.get("trigger_type") != "date":
+            db.execute(
+                "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
+                ("retry: envelope missing", iid))
+            _emit_intent("intent_retry", iid, attempt=attempt,
+                         kind=it.get("trigger_type"))
+            out["retried"].append(iid)
+            continue
+        target = _trigger_dt(it)
+        age = (now - target) if target else (STORM_AGE + timedelta(seconds=1))
+        if attempt < MAX_ATTEMPTS and age < RETRY_GRACE:
+            db.execute(
+                "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
+                (f"retry {attempt}/{MAX_ATTEMPTS}: envelope missing", iid))
+            _emit_intent("intent_retry", iid, attempt=attempt, kind="date")
+            out["retried"].append(iid)
+        else:
+            db.execute(
+                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                (f"expired after {attempt} attempts (envelope missing) — breach queued", iid))
+            _queue_breach(it, now)
+            _emit_intent("intent_expired", iid, attempt=attempt,
+                         notified=True, reason="retries_exhausted")
+            terminal_moments.append(it)
+            out["expired"].append(iid)
+    db.commit()
+    # Closure spawns after the commit — see lifecycle_sweep (lock contention).
+    for it in terminal_moments:
+        try:
+            _on_moment_terminal(it, how="expired")
+        except Exception as e:
+            print(f"[intentions] closure-on-expiry failed for {it['id']}: {e}",
+                  file=sys.stderr)
+    clear_inflight()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Breach queue — dropped commitments awaiting their apology card (REQ-31)
+# ---------------------------------------------------------------------------
+
+def drain_breaches(max_notify_attempts: int = 3) -> list[dict]:
+    """Return breach entries still owed a notification and bump their counter.
+
+    Each entry gets up to `max_notify_attempts` rides on an intention-check
+    cycle; a successfully parsed envelope clears the queue via clear_breaches
+    (the card was generated). Entries over budget are dropped — three failed
+    delivery attempts means the pipeline itself is broken and the watermark/
+    self-diagnostic layer is the right alarm, not an ever-growing queue.
+    """
+    if not BREACH_QUEUE.exists():
+        return []
+    entries, keep = [], []
+    try:
+        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(e.get("notify_attempts", 0)) < max_notify_attempts:
+                e["notify_attempts"] = int(e.get("notify_attempts", 0)) + 1
+                entries.append(e)
+                keep.append(e)
+        tmp = BREACH_QUEUE.with_suffix(".tmp")
+        tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in keep)
+                       + ("\n" if keep else ""), encoding="utf-8")
+        import os
+        os.replace(tmp, BREACH_QUEUE)
+    except OSError as e:
+        print(f"[intentions] breach drain failed: {e}", file=sys.stderr)
+        return []
+    return entries
+
+
+def clear_breaches(ids: list[str] | None = None) -> None:
+    """Remove breach entries (all, or by id) once their card went out."""
+    if not BREACH_QUEUE.exists():
+        return
+    try:
+        if ids is None:
+            BREACH_QUEUE.unlink(missing_ok=True)
+            return
+        drop = set(ids)
+        keep = []
+        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+            try:
+                if json.loads(line).get("id") not in drop:
+                    keep.append(line)
+            except json.JSONDecodeError:
+                continue
+        tmp = BREACH_QUEUE.with_suffix(".tmp")
+        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+        import os
+        os.replace(tmp, BREACH_QUEUE)
+    except OSError as e:
+        print(f"[intentions] breach clear failed: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1469,62 @@ def intent_stats() -> dict:
     return stats
 
 
+def closure_stats() -> dict:
+    """Per-category closure funnel — the learning record made usable (REQ-33).
+
+    Answers what the system previously could not: which categories actually
+    close? are reading-closure intents systematically dying (wrong TYPE, not
+    just broken pipeline)? Consumed by the nightly 每晚intent复盘 and the
+    dashboard funnel. Moments only (follow-up rows excluded).
+    """
+    _init()
+    db = _get_db()
+    out: dict = {}
+    rows = db.execute(
+        "SELECT category, status, closure_status, closure_question, "
+        "created_at, executed_at, closed_at FROM intentions "
+        "WHERE parent_intent_id IS NULL OR parent_intent_id = ''"
+    ).fetchall()
+    for r in rows:
+        it = dict(r)
+        cat = it.get("category") or "none"
+        c = out.setdefault(cat, {
+            "created": 0, "fired": 0, "executed": 0, "expired": 0,
+            "closure_bearing": 0, "closed_done": 0, "closed_recorded": 0,
+            "closed_na": 0, "awaiting": 0, "hours_to_close": [],
+        })
+        c["created"] += 1
+        if it.get("executed_at") or it.get("status") in ("executed", "expired"):
+            c["fired"] += 1
+        if it.get("status") == "executed":
+            c["executed"] += 1
+        if it.get("status") == "expired":
+            c["expired"] += 1
+        if (it.get("closure_question") or "").strip():
+            c["closure_bearing"] += 1
+        cs = it.get("closure_status") or "none"
+        if cs == "done":
+            c["closed_done"] += 1
+        elif cs == "recorded":
+            c["closed_recorded"] += 1
+        elif cs == "na":
+            c["closed_na"] += 1
+        elif cs == "awaiting":
+            c["awaiting"] += 1
+        if it.get("closed_at") and it.get("executed_at"):
+            try:
+                dt_open = datetime.fromisoformat(it["executed_at"])
+                dt_close = datetime.fromisoformat(it["closed_at"])
+                c["hours_to_close"].append(
+                    round((dt_close - dt_open).total_seconds() / 3600, 1))
+            except (ValueError, TypeError):
+                pass
+    for cat, c in out.items():
+        hrs = sorted(c.pop("hours_to_close"))
+        c["median_hours_to_close"] = hrs[len(hrs) // 2] if hrs else None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CLI — synchronous, verifiable intent ops for in-turn Bash tool calls.
 #
@@ -1115,13 +1617,17 @@ def _cli(argv: list[str]) -> int:
         return 0
 
     if cmd == "stats":
-        print(json.dumps(intent_stats(), ensure_ascii=False))
+        if rest and rest[0] == "--closure":
+            print(json.dumps(closure_stats(), ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(intent_stats(), ensure_ascii=False))
         return 0
 
     if cmd == "reset-stale":
         mins = int(rest[0]) if rest and rest[0].isdigit() else 10
-        n = reset_stale_triggered(stale_minutes=mins)
-        print(f"reset {n} stale intent(s) to pending (overdue one-shots expired)")
+        n = lifecycle_sweep(stale_minutes=mins)
+        print(f"swept: {n} intent(s) back to pending for retry "
+              "(exhausted ones expired with breach notification)")
         return 0
 
     if cmd == "purge":

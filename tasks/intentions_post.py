@@ -7,24 +7,36 @@ and emits a Lark card with the combined user-facing messages.
 Expected envelope from Claude (multi-intent — the standard shape):
   {"intents": {"<id>": {"response": "...", "action": "notify|silent|chain|failed"}}}
 
-Fallbacks:
-  - {"response": "...", "action": "..."} (single intent without envelope) —
-    we don't know the ID, so we resolve it from the most-recently triggered
-    intent in the DB. Without this, the intent would stay stuck in 'triggered'.
-  - Plain text — emit as-is, but log a warning since no intent is marked
-    executed (the stale-triggered sweeper in intentions_pre.sh will recover).
+v2 execution-ack (REQ-30): this script now runs on EVERY cycle outcome. The
+heartbeat runner invokes it with stdin='__NO_ENVELOPE__' when Claude's reply
+was HEARTBEAT_OK / empty / killed / unparseable, and the inflight manifest
+(data/.intention_inflight.json, written by intentions_pre.sh after
+mark_triggered) is reconciled deterministically: ids the envelope did not
+cover get the bounded-retry policy applied immediately — absence of an
+envelope is itself a deterministic signal, never silent intent death.
+
+Closure buttons (REQ-34): when a closure follow-up cards its question, the
+card carries ✅/❌/🚫 buttons whose value routes through the Lark event
+sidecar straight into record_closure — one tap closes the loop, zero LLM.
 """
 
+import json
 import re
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.intentions import mark_executed, mark_failed, list_intents, record_closure
+from core.intentions import (
+    mark_executed, mark_failed, get_intent, record_closure,
+    read_inflight, reconcile_inflight, clear_breaches, validate_envelope,
+)
 from core.card import build_card
 from core.safety import parse_json_response
+
+CARD_LEDGER = ROOT / "data" / ".intent_card_ledger.jsonl"
 
 
 # Bare status / ack tokens an internal "prompt"-type intent may report as its
@@ -52,20 +64,30 @@ def _is_contentless(response: str) -> bool:
     return s in _STATUS_TOKENS
 
 
-def _resolve_single_triggered_id() -> str:
-    """Find the only currently-triggered intent (single-intent fallback path).
+def _ledger_append(intent_ids: list[str]) -> None:
+    """Record that a card covering these intents went out (REQ-34B).
 
-    Returns "" if zero or more than one triggered intents exist — in those
-    cases we can't safely guess which one Claude is replying about.
+    heartbeat_loop back-fills the real Lark message_ids after the send, so a
+    quote-reply to the card can be matched back to its intent deterministically.
+    Never raises.
     """
-    triggered = list_intents(status="triggered", limit=10)
-    if len(triggered) == 1:
-        return triggered[0]["id"]
-    return ""
+    if not intent_ids:
+        return
+    try:
+        CARD_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with open(CARD_LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "intent_ids": intent_ids,
+                "message_ids": [],
+            }, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[intentions_post] ledger append failed: {e}", file=sys.stderr)
 
 
 def _apply_action(intent_id: str, response: str, action: str,
-                  user_messages: list, closure: dict | None = None) -> None:
+                  user_messages: list, closure: dict | None = None,
+                  button_specs: list | None = None) -> None:
     """Mark the intent and optionally surface a user message.
 
     If a `closure` sub-object is present, this row is a FOLLOW-UP recording a
@@ -73,7 +95,8 @@ def _apply_action(intent_id: str, response: str, action: str,
     cards (recording is internal; healing/autonomous follow-ups are silent by
     construction, and even an external follow-up that records must not also
     nag). A follow-up that is still *asking* (no answer yet) carries no closure
-    field, so its response cards normally.
+    field, so its response cards normally — and gets one-tap closure buttons
+    (REQ-34) targeting its parent.
     """
     if action == "failed":
         mark_failed(intent_id, error=response)
@@ -84,12 +107,41 @@ def _apply_action(intent_id: str, response: str, action: str,
         try:
             record_closure(str(closure["parent"]).strip(),
                            outcome=closure.get("outcome", "done"),
-                           result=closure.get("result", ""))
+                           result=closure.get("result", ""),
+                           via="followup")
         except Exception as e:
             print(f"[intentions_post] closure record failed: {e}", file=sys.stderr)
         return  # closure rows never card
     if action != "silent" and response and not _is_contentless(response):
         user_messages.append(response)
+        # One-tap closure buttons for a follow-up that is ASKING (REQ-34).
+        if button_specs is not None:
+            try:
+                row = get_intent(intent_id)
+                parent_id = (row or {}).get("parent_intent_id")
+                if parent_id:
+                    button_specs.append(
+                        {"parent": parent_id, "name": (row or {}).get("name", "")})
+            except Exception as e:
+                print(f"[intentions_post] button spec failed: {e}", file=sys.stderr)
+
+
+def _closure_buttons(button_specs: list) -> list[dict]:
+    """Build the ✅/❌/🚫 button row(s) for asking follow-ups."""
+    buttons = []
+    for spec in button_specs[:2]:  # at most 2 intents' rows — cards stay small
+        pid = spec["parent"]
+        prefix = "" if len(button_specs) == 1 else f"{spec['name'][:8]}·"
+        buttons += [
+            {"text": f"{prefix}✅ 做了",
+             "value": {"action": "intent_close", "id": pid, "outcome": "done"}},
+            {"text": f"{prefix}❌ 没做",
+             "value": {"action": "intent_close", "id": pid, "outcome": "recorded",
+                        "result": "没做（按钮记录）"}},
+            {"text": f"{prefix}🚫 不用追了",
+             "value": {"action": "intent_close", "id": pid, "outcome": "na"}},
+        ]
+    return buttons
 
 
 def main():
@@ -97,15 +149,28 @@ def main():
     if not raw:
         return
 
+    inflight = read_inflight()
+
+    if raw == "__NO_ENVELOPE__":
+        # Deterministic no-envelope path (REQ-30b): the runner saw
+        # HEARTBEAT_OK / empty / killed / parse-failure. Nothing was covered;
+        # apply the retry policy to everything inflight.
+        result = reconcile_inflight([])
+        if result["retried"] or result["expired"]:
+            print(f"[intentions_post] no-envelope reconcile: "
+                  f"retried={result['retried']} expired={result['expired']}",
+                  file=sys.stderr)
+        return
+
     data = parse_json_response(raw)
     if data is None:
-        # Plain text with no extractable JSON — emit only if it looks human-readable.
+        # Plain text with no extractable JSON. Reconcile the manifest first —
+        # deterministic recovery, not "hope the sweeper gets it".
+        result = reconcile_inflight([])
+        print(f"[intentions_post] Non-JSON response; reconciled manifest "
+              f"(retried={len(result['retried'])}, expired={len(result['expired'])}).",
+              file=sys.stderr)
         # Never emit raw JSON to the user.
-        print("[intentions_post] Non-JSON response. "
-              "Stuck intents will auto-reset.", file=sys.stderr)
-        # If it's a malformed intents envelope (e.g. {"intents": {"id": , ...}}),
-        # bail entirely — stripping braces would still leak fragments. The
-        # stale-triggered sweeper recovers the intents.
         if '"intents"' in raw or '"response"' in raw or raw.lstrip().startswith('{'):
             print("[intentions_post] Looks like malformed JSON envelope — "
                   "suppressing to avoid leaking raw JSON to the user.",
@@ -118,9 +183,14 @@ def main():
         return
 
     user_messages: list = []
+    button_specs: list = []
+    covered: list[str] = []
 
     intents_map = data.get("intents") if isinstance(data, dict) else None
     if isinstance(intents_map, dict) and intents_map:
+        covered, _missing, errors = validate_envelope(data, inflight)
+        for err in errors:
+            print(f"[intentions_post] envelope: {err}", file=sys.stderr)
         for intent_id, result in intents_map.items():
             if not isinstance(result, dict):
                 result = {"response": str(result), "action": "notify"}
@@ -131,15 +201,19 @@ def main():
                     action=result.get("action", "notify"),
                     user_messages=user_messages,
                     closure=result.get("closure"),
+                    button_specs=button_specs,
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing {intent_id}: {e}",
                       file=sys.stderr)
 
     elif isinstance(data, dict) and "response" in data:
-        # Single-intent shape (no envelope). Resolve which intent Claude meant.
-        intent_id = _resolve_single_triggered_id()
+        # Single-intent shape (no envelope). The manifest replaces the old
+        # guess-from-DB resolution: unambiguous only when exactly one id was
+        # handed to this cycle.
+        intent_id = inflight[0] if len(inflight) == 1 else ""
         if intent_id:
+            covered = [intent_id]
             try:
                 _apply_action(
                     intent_id,
@@ -147,23 +221,40 @@ def main():
                     action=data.get("action", "notify"),
                     user_messages=user_messages,
                     closure=data.get("closure"),
+                    button_specs=button_specs,
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing single intent: {e}",
                       file=sys.stderr)
         else:
-            # Ambiguous — surface message but leave intents to the sweeper.
             print("[intentions_post] Ambiguous single-intent response — "
-                  "cannot resolve target ID. Stale-triggered sweeper will recover.",
+                  "manifest reconcile will retry the uncovered ids.",
                   file=sys.stderr)
             resp = data.get("response", "")
             if resp and data.get("action") != "silent" and not _is_contentless(resp):
                 user_messages.append(resp)
 
+    # Deterministic reconcile: whatever the envelope did not cover gets the
+    # bounded-retry policy NOW (REQ-30c). Also clears the manifest.
+    result = reconcile_inflight(covered)
+    if result["retried"] or result["expired"]:
+        print(f"[intentions_post] reconcile: retried={result['retried']} "
+              f"expired={result['expired']}", file=sys.stderr)
+
+    # A parsed envelope means breach apologies (if any rode this cycle's pre
+    # output) were rendered by Claude — retire the queue.
+    try:
+        clear_breaches()
+    except Exception as e:
+        print(f"[intentions_post] breach clear failed: {e}", file=sys.stderr)
+
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())
         if combined:
-            print(build_card("🎯 Intent", combined, source="intentions"))
+            buttons = _closure_buttons(button_specs) if button_specs else None
+            _ledger_append(covered)
+            print(build_card("🎯 Intent", combined, source="intentions",
+                             buttons=buttons))
 
 
 if __name__ == "__main__":

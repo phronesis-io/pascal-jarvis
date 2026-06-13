@@ -55,7 +55,13 @@ def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
 
 
 def cron_matches(expression: str, dt: datetime | None = None) -> bool:
-    """Check if a cron expression matches the given datetime."""
+    """Check if a cron expression matches the given datetime.
+
+    dow uses STANDARD cron semantics: 0=Sunday…6=Saturday, 7 also Sunday.
+    (Previously compared against dt.weekday() where 0=Monday, shifting every
+    weekly schedule one day late — live misfire int_fb4fcab91d '30 14 * * 2'
+    executed on a Wednesday and self-diagnosed it in last_error.)
+    """
     if dt is None:
         dt = now_local()
     parts = expression.strip().split()
@@ -63,16 +69,45 @@ def cron_matches(expression: str, dt: datetime | None = None) -> bool:
         return False
     minute, hour, dom, month, dow = parts
     checks = [
-        (minute, dt.minute, 0, 59),
-        (hour, dt.hour, 0, 23),
-        (dom, dt.day, 1, 31),
-        (month, dt.month, 1, 12),
-        (dow, dt.weekday(), 0, 6),  # 0=Monday
+        (minute, dt.minute, 0, 59, False),
+        (hour, dt.hour, 0, 23, False),
+        (dom, dt.day, 1, 31, False),
+        (month, dt.month, 1, 12, False),
+        (dow, (dt.weekday() + 1) % 7, 0, 7, True),  # standard cron: 0/7=Sunday
     ]
-    for field_str, current, min_v, max_v in checks:
-        if current not in _parse_cron_field(field_str, min_v, max_v):
+    for field_str, current, min_v, max_v, is_dow in checks:
+        allowed = _parse_cron_field(field_str, min_v, max_v)
+        if is_dow and 7 in allowed:
+            allowed = allowed | {0}  # cron tolerance: 7 == Sunday == 0
+        if current not in allowed:
             return False
     return True
+
+
+def cron_next(expression: str, after: datetime | None = None,
+              horizon_days: int = 366) -> datetime | None:
+    """Next datetime strictly after `after` that matches the cron expression.
+
+    Minute-resolution forward scan. Cron has minute granularity and our live
+    expressions are sparse (daily/weekly), so the scan exits quickly; the
+    horizon bounds pathological expressions. Returns None on malformed input
+    or no match within the horizon.
+
+    This is the catch-up primitive (REQ-32): intent firing compares
+    now >= next_fire_at, so a missed minute fires on the NEXT check instead
+    of silently losing the whole occurrence.
+    """
+    if after is None:
+        after = now_local()
+    if len(expression.strip().split()) != 5:
+        return None
+    probe = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    end = after + timedelta(days=horizon_days)
+    while probe <= end:
+        if cron_matches(expression, probe):
+            return probe
+        probe += timedelta(minutes=1)
+    return None
 
 
 def check_conditions(conditions: list[dict], task: dict) -> bool:

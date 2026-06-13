@@ -321,3 +321,102 @@ def test_silent_task_full_output_archived(tmp_path, monkeypatch):
     rows = [json.loads(l) for l in archive.read_text().splitlines()]
     assert rows[-1]["task"] == "self-diagnostic"
     assert rows[-1]["text"] == long_report  # full text, not a prefix
+
+
+# ===========================================================================
+# v2: ACK-required tasks + envelope parse failure semantics (REQ-30/36)
+# ===========================================================================
+
+def _ack_runner(tmp_path):
+    """Runner with an ACK-required task whose post records its stdin."""
+    hb = """
+### intention-check
+- interval: 1m
+- pre: tasks/pre.sh
+- post: tasks/post.py
+- prompt: process intents
+
+### other-task
+- interval: 1h
+- prompt: other
+"""
+    runner = _make_runner(tmp_path, hb)
+    (runner.jarvis_dir / "tasks").mkdir(parents=True, exist_ok=True)
+    pre = runner.jarvis_dir / "tasks" / "pre.sh"
+    pre.write_text("#!/bin/bash\necho '{\"count\":1}'\n")
+    pre.chmod(0o755)
+    stdin_log = runner.jarvis_dir / "post_stdin.log"
+    post = runner.jarvis_dir / "tasks" / "post.py"
+    post.write_text(
+        "import sys, pathlib\n"
+        f"pathlib.Path({str(stdin_log)!r}).open('a').write(sys.stdin.read() + '\\n')\n"
+    )
+    return runner, stdin_log
+
+
+def test_heartbeat_ok_still_acks_intention_check(tmp_path, monkeypatch):
+    """REQ-30: a bare HEARTBEAT_OK reply must STILL invoke the ACK task's post
+    with __NO_ENVELOPE__ — this exact reply (which the old prompt instructed)
+    was the #1 silent intent killer (50% of fired one-shots died)."""
+    runner, stdin_log = _ack_runner(tmp_path)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+
+
+def test_empty_response_acks_intention_check(tmp_path, monkeypatch):
+    runner, stdin_log = _ack_runner(tmp_path)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "")
+    runner.run_cycle(force=True)
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+
+
+def test_killed_response_acks_intention_check(tmp_path, monkeypatch):
+    runner, stdin_log = _ack_runner(tmp_path)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "__KILLED__")
+    runner.run_cycle(force=True)
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+
+
+def test_parse_failure_acks_and_records_failure(tmp_path, monkeypatch):
+    """REQ-36: an unparseable multi-task envelope is a FAILURE — circuit
+    breaker sees it, last_run gets a short retry (≤5min), status
+    parse_failed — never record_success over destroyed output."""
+    runner, stdin_log = _ack_runner(tmp_path)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "{this is not json")
+    runner.run_cycle(force=True)
+    # ACK post still ran
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+    state = runner.load_state()
+    # Failure recorded for the batch (consecutive_failures bumped)
+    assert state["other-task"]["circuit"]["consecutive_failures"] == 1
+    # Fast retry: last_run rewound so the task re-fires within ~5 minutes
+    import time as _t
+    other_interval = 3600
+    eta = state["other-task"]["last_run"] + other_interval - int(_t.time())
+    assert eta <= 300
+
+
+def test_missing_slice_acks_intention_check(tmp_path, monkeypatch):
+    """REQ-30: envelope parses but omits the ACK task's slice → post still
+    invoked with __NO_ENVELOPE__ so the manifest reconciles."""
+    runner, stdin_log = _ack_runner(tmp_path)
+    envelope = json.dumps({"tasks": {"other-task": "all good"}, "user_message": ""})
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    runner.run_cycle(force=True)
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+
+
+def test_ack_task_prompt_forbids_bare_heartbeat_ok(tmp_path, monkeypatch):
+    """REQ-30d: when an ACK task is in the batch, the wrapper prompt must not
+    invite the bare-HEARTBEAT_OK reply that breaks the state machine."""
+    runner, _ = _ack_runner(tmp_path)
+    captured = {}
+    def _capture(p):
+        captured["prompt"] = p
+        return "HEARTBEAT_OK"
+    monkeypatch.setattr(runner, "claude_call", _capture)
+    runner.run_cycle(force=True)
+    p = captured["prompt"]
+    assert "NEVER reply with a bare HEARTBEAT_OK" in p
+    assert "reply with exactly: HEARTBEAT_OK" not in p

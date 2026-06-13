@@ -157,7 +157,17 @@ class ActionProcessor:
     # ── Heartbeat ──
 
     def _do_heartbeat(self, raw: str) -> str:
-        Path("/tmp/jarvis-heartbeat-trigger").touch()
+        # The trigger file CONTENT names the task to force (REQ-37). A bare
+        # [ACTION:heartbeat] used to force the ENTIRE 32-task roster — 32
+        # full-roster storms on 6/12 alone, weekly tasks re-running within
+        # hours, batch cap deferring 18-19 tasks per cycle. Default to
+        # intention-check (the only task a chat reply plausibly needs fresh);
+        # [ACTION:heartbeat|task=<name>] scopes explicitly; task=all keeps
+        # the legacy full-roster behavior (10-min cooldown enforced in the
+        # loop).
+        p = parse_params(raw)
+        task = p.get("task", "") or "intention-check"
+        Path("/tmp/jarvis-heartbeat-trigger").write_text(task)
         return ""
 
     # ── Calendar ──
