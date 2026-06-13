@@ -158,6 +158,7 @@ emit("DATA_DIR", c.data_dir)
 emit("WORK_DIR", c.work_dir)
 emit("MEMORY_DIR", c.memory_dir)
 emit("MAX_SESSION_SIZE", c.claude.get("max_session_size", 512000))
+emit("MAIN_MODEL", c.claude.get("main_model", "opus") or "opus")
 emit("HEARTBEAT_MODEL", c.claude.get("heartbeat_model", "opus"))
 emit("HEARTBEAT_TIMEOUT", c.claude.get("heartbeat_timeout", 600))
 emit("CHECK_INTERVAL", c.heartbeat.get("check_interval", 10))
@@ -169,13 +170,18 @@ PYEOF
 # shellcheck disable=SC1090
 eval "$CONFIG_VARS"
 
+# Never let the main conversation inherit the account's DEFAULT claude model:
+# that default can be a banned model (Fable). Pin to opus (= Opus 4.8) so an
+# empty/missing config or a changed account default can never break the bot.
+: "${MAIN_MODEL:=opus}"
+
 # Claude Code stores sessions in ~/.claude/projects/<slug>/, where <slug>
 # is the absolute cwd with every '/' replaced by '-' (leading dash kept).
 CLAUDE_PROJECT_DIR="$HOME/.claude/projects/$(echo "$WORK_DIR" | sed 's|/|-|g')"
 SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
-export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
 
@@ -610,6 +616,7 @@ except Exception:
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
       (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --resume "$session_id" \
+        --model "$MAIN_MODEL" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -618,6 +625,7 @@ except Exception:
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
       (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --session-id "$session_id" \
+        --model "$MAIN_MODEL" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -972,12 +980,14 @@ except Exception:
     log_info "[bg:$job_id] Forking from session $_main_sid"
     (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
       --resume "$_main_sid" --fork-session \
+      --model "$MAIN_MODEL" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
       < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
   else
     (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
       --session-id "$bg_session_id" \
+      --model "$MAIN_MODEL" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
       < /dev/null 2>>"$log_file_job" > "$output_file" || true) &

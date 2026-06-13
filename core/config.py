@@ -9,7 +9,11 @@ _DEFAULTS = {
     "work_dir": "",
     "lark": {"user_id": "", "app_id": ""},
     "claude": {
-        "main_model": "",
+        # Explicit "opus" (= Opus 4.8), NOT "" : an empty value made every
+        # main-conversation claude call inherit the account's DEFAULT model.
+        # When that default is a banned model (Fable), the whole bot would
+        # fail. Pinning opus here severs that dependency.
+        "main_model": "opus",
         "heartbeat_model": "opus",
         "max_session_size": 512000,
         # Max seconds a single heartbeat Claude call may run. Raised from the

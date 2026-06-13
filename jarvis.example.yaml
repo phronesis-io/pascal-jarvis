@@ -43,9 +43,11 @@ lark:
 # ── Claude model settings ──────────────────────────────────────────
 
 claude:
-  # Main conversation model. Empty = default (Opus, most capable).
-  # Override if you want a cheaper model for IM replies.
-  main_model: ""
+  # Main conversation model. Set an explicit model — do NOT leave empty.
+  # An empty value makes every reply inherit the account's DEFAULT model,
+  # which may be a model your account can't use (e.g. a banned/preview one),
+  # silently breaking the bot. "opus" = Opus 4.8 (most capable).
+  main_model: "opus"
   # Heartbeat background tasks use this. Default opus — max capability;
   # set a cheaper model here if you'd rather batch them down.
   heartbeat_model: "sonnet"   # cheaper default for new installs; "opus" = highest quality, noticeably higher cost
