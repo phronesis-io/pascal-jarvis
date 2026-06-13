@@ -45,12 +45,16 @@ from pathlib import Path
 from core.timeutil import now_local_str
 
 SCHED_EVENT_FILE = "sched_events.jsonl"
-MAX_BYTES = 10 * 1024 * 1024  # rotate to .1 past this size
+MAX_BYTES = 10 * 1024 * 1024  # rotate past this size
+GENERATIONS = 7  # .1 … .7 — the replay/audit window depends on history depth
+                 # (REQ-49: with one generation, a restart-heavy week left <3
+                 # days of trail and multi-day failure-rate audits were
+                 # impossible)
 TS_FMT = "%Y-%m-%d %H:%M:%S"  # second precision — replay needs ordering
 
 
 def _rotate_if_oversized(path: Path) -> None:
-    """Keep one `.1` generation once the live file exceeds MAX_BYTES.
+    """Keep GENERATIONS archive generations once the live file exceeds MAX_BYTES.
 
     Serialized via a sidecar flock: emit() has multi-process writers, and an
     unserialized double-rotation would clobber the freshly-rotated archive
@@ -70,6 +74,10 @@ def _rotate_if_oversized(path: Path) -> None:
             try:
                 # Re-check under the lock — the racing writer may have rotated.
                 if path.exists() and path.stat().st_size > MAX_BYTES:
+                    for gen in range(GENERATIONS - 1, 0, -1):
+                        older = path.with_name(f"{path.name}.{gen}")
+                        if older.exists():
+                            os.replace(older, path.with_name(f"{path.name}.{gen + 1}"))
                     os.replace(path, path.with_name(path.name + ".1"))
             finally:
                 fcntl.flock(lock_f, fcntl.LOCK_UN)

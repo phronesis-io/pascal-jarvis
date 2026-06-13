@@ -578,14 +578,86 @@ def _ledger_backfill(jarvis_dir: Path, message_ids: list):
 
 
 def _trim_file(path: Path, max_lines: int):
-    """Trim a JSONL file to last N lines."""
+    """Trim a JSONL file to its last N lines, append-safely (REQ-49).
+
+    The old read→tmp→os.replace silently destroyed lines appended between the
+    read and the replace — engagement_log has concurrent appenders (bot.sh jq
+    read-receipts), and lost rows corrupt the stats driving interval
+    auto-tuning. In-place truncate+rewrite under flock keeps the same inode
+    (O_APPEND writers never get diverted to a dead file) and shrinks the race
+    window from the whole trim to nothing for flock-takers and ~ms for the
+    unlocked jq appenders.
+    """
+    import fcntl
     if not path.exists():
         return
-    lines = path.read_text().splitlines()
-    if len(lines) > max_lines:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("\n".join(lines[-max_lines:]) + "\n")
-        os.replace(tmp, path)
+    try:
+        with open(path, "r+", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            lines = f.read().splitlines()
+            if len(lines) > max_lines:
+                f.seek(0)
+                f.truncate()
+                f.write("\n".join(lines[-max_lines:]) + "\n")
+            fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError as e:
+        log("heartbeat", f"trim failed for {path.name}: {e}", level="warn")
+
+
+def _hourly_housekeeping(jd: Path):
+    """Hourly GC pass (REQ-49) — runs on the loop's tick, never raises.
+
+    - re-trim outbox/engagement (startup-only trims let week-long uptimes
+      grow them unbounded)
+    - jobs GC: cleanup_old_jobs was dead code; 18 of 20 job dirs were empty
+      husks that every future audit re-investigated
+    - views GC: expired RichView JSONs previously lingered until someone
+      happened to GET them
+    - /tmp logs: launchd appends to jarvis-dashboard.log forever; restart.log
+      only rotated inside restart.sh
+    """
+    try:
+        _trim_file(jd / "heartbeat_outbox.jsonl", 20)
+        _trim_file(jd / "engagement_log.jsonl", 2000)
+    except Exception as e:
+        log("heartbeat", f"housekeeping trim error: {e}", level="warn")
+    try:
+        from core.jobs import JobManager
+        removed = JobManager(jd / "jobs").cleanup_old_jobs(max_age_days=7)
+        if removed:
+            log("heartbeat", f"jobs GC: removed {removed} finished job(s) >7d")
+    except Exception as e:
+        log("heartbeat", f"jobs GC error: {e}", level="warn")
+    try:
+        import time as _t
+        views = jd / "views"
+        if views.is_dir():
+            n = 0
+            for vf in views.glob("*.json"):
+                try:
+                    expires = json.loads(vf.read_text()).get("expires_at", 0)
+                    if expires and _t.time() > expires:
+                        vf.unlink(missing_ok=True)
+                        n += 1
+                except (json.JSONDecodeError, OSError):
+                    continue
+            if n:
+                log("heartbeat", f"views GC: removed {n} expired view(s)")
+    except Exception as e:
+        log("heartbeat", f"views GC error: {e}", level="warn")
+    for tmp_log in (Path("/tmp/jarvis-dashboard.log"),
+                    Path("/tmp/jarvis_restart.log")):
+        try:
+            if tmp_log.exists() and tmp_log.stat().st_size > 500_000:
+                lines = tmp_log.read_text(errors="replace").splitlines()
+                # copytruncate: launchd/daemon hold O_APPEND fds — a rename
+                # would divert their writes to a dead inode until restart.
+                with open(tmp_log, "r+") as f:
+                    f.seek(0)
+                    f.truncate()
+                    f.write("\n".join(lines[-500:]) + "\n")
+        except OSError:
+            pass
 
 
 def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
@@ -619,6 +691,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         # Background-job sweeper (REQ-16 MVP-3, ~every 60s): a job whose
         # handler died (crash/restart) would otherwise stay "running" forever
         # and the user waits on a result that will never come.
+        if ticks % max(1, 3600 // max(1, check_interval)) == 0:
+            _hourly_housekeeping(jd)
         if ticks % max(1, 60 // max(1, check_interval)) == 0:
             try:
                 from core.jobs import JobManager

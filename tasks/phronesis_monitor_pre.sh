@@ -2,10 +2,27 @@
 # Pre-hook: fetch recent messages from Phronesis group chat.
 # Only triggers during waking hours. Outputs recent messages for analysis.
 
-CHAT_ID="oc_REDACTEDREDACTEDREDACTEDREDACTE"
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 STATE_FILE="$JARVIS_DIR/.phronesis_last_ts"
-PASCAL_ID="ou_REDACTEDREDACTEDREDACTEDREDACTE"
+
+# Identity comes from jarvis.yaml (REQ-50): this is a PUBLIC repo — a real
+# Lark chat_id + the owner's open_id do not belong in source. Configure:
+#   phronesis:
+#     chat_id: oc_xxx
+#     user_open_id: ou_xxx
+CHAT_ID=$(python3 -c "
+import yaml, sys
+cfg = yaml.safe_load(open('$JARVIS_DIR/jarvis.yaml')) or {}
+print((cfg.get('phronesis') or {}).get('chat_id', ''))" 2>/dev/null)
+PASCAL_ID=$(python3 -c "
+import yaml, sys
+cfg = yaml.safe_load(open('$JARVIS_DIR/jarvis.yaml')) or {}
+p = (cfg.get('phronesis') or {}).get('user_open_id', '')
+print(p or (cfg.get('lark') or {}).get('user_id', ''))" 2>/dev/null)
+if [ -z "$CHAT_ID" ]; then
+  # Not configured → nothing to monitor (empty pre output = task skipped)
+  exit 0
+fi
 
 hour=$(date +%H)
 if [ "$hour" -lt 9 ] || [ "$hour" -ge 23 ]; then

@@ -106,3 +106,9 @@ plugins:
     enabled: false         # set true after running the email verification flow
     persist_feed: true     # keep a local copy of every fetched item (for search)
     feed_db: eigenflux/feed_store.jsonl
+
+# Optional: Phronesis group-chat monitor (tasks/phronesis_monitor_pre.sh).
+# Leave unset to disable the task entirely.
+phronesis:
+  chat_id: ""          # oc_xxx — the group chat to monitor
+  user_open_id: ""     # ou_xxx — whose mentions matter (defaults to lark.user_id)

@@ -18,11 +18,25 @@
 - Session backup script with read-only protection
 - Docs overhaul: architecture diagram, task development guide, example memory templates
 
-## P1 — Hardcoded paths
+## Done (2026-06-13 wave — see docs/prd_system_iteration_v2.md)
 
-- Several task scripts have hardcoded /Users/pascal paths (phronesis_monitor_pre.sh, self_diagnostic_pre.sh, repos_sync_pre.sh, backup_sessions.sh) — should use $JARVIS_DIR or config
-- phronesis_monitor_pre.sh has hardcoded chat_id and user open_id
+- Intent closure end-to-end: manifest ack, bounded retry + breach cards,
+  cron catch-up + dow fix, closure buttons, lifecycle telemetry (REQ-30~35)
+- Scheduler honesty: parse failure = failure, scoped force triggers,
+  cancel_job containment, single-consumer restart (REQ-36~38, 42)
+- Self-monitoring: components.yaml manifest, unmuted self-diagnostic alerts,
+  real backups (memory+DB), truth watermarks (REQ-39~41, 51)
+- Data hygiene: hourly GC (jobs/views/log trims), 7-generation sched_events,
+  dead-file cleanup (REQ-49); phronesis identity moved to jarvis.yaml (REQ-50)
+
+## P1 — Residual
+
 - content-recommend prompt has hardcoded taste profile — should read from memory
+- repos-sync pre-script still exceeds the 60s cap (REQ-52: move git pulls to a
+  background job; pre reads last job product)
+- Engagement page + Ops/log explorer on the dashboard (REQ-54/55)
+- Host sleep modeling (REQ-56) and atomic-write/fsync helper (REQ-57)
+- Two-channel alerting helper (REQ-58)
 
 ## P2 — Self-evolution
 

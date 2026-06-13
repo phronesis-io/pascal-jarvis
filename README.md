@@ -397,7 +397,7 @@ Chat with your agent from Lark/Feishu on any device. The plugin:
 - Supports quote replies — fetches the quoted message and passes it as context
 - Maps each conversation (`conv_key`) to a stable Claude Code session
 - Auto-rotates sessions when they cross `claude.max_session_size`
-- Auto-retries on empty Claude responses (2 attempts with 3s backoff)
+- Auto-retries on empty Claude responses (4 attempts, escalating backoff)
 - Shows transient `Thinking...` indicators during Claude calls
 - Saves in-flight messages on shutdown/restart, notifies user to resend on startup
 - Recognizes shortcut commands (`loop` / `heartbeat` to force-trigger a heartbeat cycle)
@@ -473,7 +473,7 @@ Utility scripts in `scripts/` for operations and debugging:
 
 `daemon.py` is a lightweight supervisor process that keeps the bot alive:
 
-- Monitors `bot.sh` health every 2 minutes — checks PID, heartbeat freshness, and session locks
+- Monitors `bot.sh` health every 30 seconds — checks PID, heartbeat freshness, and session locks (suspended during `restart.sh` deploy windows via the `.deploying` flag)
 - Kills stuck Claude processes by detecting stale session lock files
 - Auto-restarts `bot.sh` on crash (up to 3 attempts with 5-minute cooldown)
 - Logs to `daemon.log` with automatic log rotation
