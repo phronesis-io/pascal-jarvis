@@ -82,20 +82,63 @@ def log(level: str, msg: str):
 
 
 def notify_lark(msg: str):
-    """Send a notification to Pascal via Lark."""
+    """Send a notification to Pascal — Lark first, local banner fallback.
+
+    REQ-58: every alert path used to flow through the same lark-cli + app
+    credentials as the system being alerted about — a Lark/auth outage took
+    down both the system AND every alarm about it ('如果你看到这条说明链路已
+    部分恢复'). On Lark failure: macOS banner (Pascal is usually at this Mac)
+    + a dead-letter line flushed on the next successful send.
+    """
     if not USER_ID:
         log("WARN", "No USER_ID configured, cannot notify Lark")
         return
+    ok = False
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["lark-cli", "im", "+messages-send",
              "--user-id", USER_ID,
              "--markdown", f"🛡️ **Guardian Daemon**\n\n{msg}",
              "--as", "bot"],
             capture_output=True, text=True, timeout=15,
         )
+        ok = r.returncode == 0
     except Exception as e:
         log("ERROR", f"Lark notify failed: {e}")
+
+    dead_letter = JARVIS_DIR / "alerts_deadletter.jsonl"
+    if ok:
+        # Flush any dead letters from earlier outages (best effort, one shot)
+        if dead_letter.exists():
+            try:
+                lines = dead_letter.read_text().splitlines()[-10:]
+                pending = [json.loads(l).get("msg", "") for l in lines if l.strip()]
+                if pending:
+                    subprocess.run(
+                        ["lark-cli", "im", "+messages-send", "--user-id", USER_ID,
+                         "--markdown", "🛡️ **Guardian Daemon**（补发告警 — 当时 Lark 链路不通）\n\n"
+                         + "\n---\n".join(pending), "--as", "bot"],
+                        capture_output=True, text=True, timeout=15)
+                dead_letter.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return
+
+    # Lark failed → local banner + dead letter
+    try:
+        safe = msg.replace('"', "'")[:200]
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{safe}" with title "Jarvis Guardian (Lark链路不通)"'],
+            capture_output=True, timeout=5)
+    except Exception:
+        pass
+    try:
+        with open(dead_letter, "a") as f:
+            f.write(json.dumps({"ts": _daemon_now().strftime("%Y-%m-%d %H:%M:%S"),
+                                 "msg": msg}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _find_last_heartbeat() -> float | None:

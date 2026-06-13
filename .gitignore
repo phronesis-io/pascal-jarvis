@@ -116,3 +116,4 @@ data/.intent_card_ledger.jsonl
 .repos_sync_consumed
 eigenflux/.ef-cursor
 eigenflux/.ef-seen
+alerts_deadletter.jsonl
