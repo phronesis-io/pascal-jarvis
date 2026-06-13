@@ -4,6 +4,11 @@ WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/-Users-pascal-Desktop-jarvis/memory}"
 
+# REQ-39: leave a copy of this report for the deterministic alert post-script
+# (tasks/self_diagnostic_post.py scans it for ⚠️ lines — detection and
+# delivery are split so SILENT_TASKS can never mute a real alarm again).
+exec > >(tee "$JARVIS_DIR/.diag_last_pre.txt")
+
 echo "=== SYSTEM HEALTH CHECK ==="
 echo "Time: $(date '+%Y-%m-%d %H:%M %A')"
 echo ""
@@ -99,6 +104,26 @@ echo ""
 (cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" python3 -m core.watermarks 2>/dev/null) \
   || echo "--- Channel Watermarks ---
   ⚠️ watermark check itself failed to run"
+
+# 7b. Component manifest (REQ-40): the single source of truth for "what
+#     should be running". Failures print as ⚠️ lines → REQ-39 alert path.
+echo ""
+(cd "$JARVIS_DIR" && python3 -m core.components 2>/dev/null) \
+  || true  # non-zero exit = failing components; the ⚠️ lines carry the signal
+
+# 7c. Intent breach daily check (REQ-35): silently-expired commitments in the
+#     last 24h mean the retry+breach pipeline itself is broken — page loudly.
+echo ""
+echo "--- Intent Lifecycle ---"
+_dropped=$(sqlite3 "file:$JARVIS_DIR/data/jarvis.db?mode=ro" \
+  "SELECT COUNT(*) FROM intentions WHERE status='expired' \
+   AND (last_error LIKE 'auto-expired%' OR last_error LIKE '%expired after%attempts%') \
+   AND triggered_at >= datetime('now','-1 day')" 2>/dev/null || echo "?")
+if [ "$_dropped" != "?" ] && [ "${_dropped:-0}" -gt 0 ]; then
+  echo "⚠️ $_dropped intent(s) dropped in the last 24h (expired after retries/stuck) — check breach cards went out"
+else
+  echo "✓ No silently dropped intents in the last 24h"
+fi
 
 # 8. CLI versions
 echo ""

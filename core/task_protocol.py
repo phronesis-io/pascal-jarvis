@@ -118,11 +118,20 @@ class CircuitState:
 
 @dataclass
 class TaskState:
-    """Extended task state — replaces the simple {"last_run": int} dict."""
+    """Extended task state — replaces the simple {"last_run": int} dict.
+
+    last_run is a SCHEDULING watermark (rewritten on every skip/retry rewind);
+    last_success is the TRUTH watermark (REQ-51) — set only when the task
+    actually finished ok/idle. Starvation detection must read last_success:
+    repos-sync timed out 19/19 runs while its fresh last_run kept the
+    watermark report saying 'all channels within expected cadence'.
+    """
     last_run: int = 0
     circuit: CircuitState = field(default_factory=CircuitState)
     engagement_rate: float = -1.0   # -1 = not enough data
     effective_interval: int = 0     # 0 = use default from HEARTBEAT.md
+    last_success: int = 0           # epoch of last real ok/idle finish
+    last_status: str = ""           # ok|idle|failed|parse_failed|timeout|pre_timeout|pre_error|empty_pre|killed
 
     def to_dict(self) -> dict:
         d = {"last_run": self.last_run}
@@ -133,6 +142,10 @@ class TaskState:
             d["engagement_rate"] = self.engagement_rate
         if self.effective_interval > 0:
             d["effective_interval"] = self.effective_interval
+        if self.last_success > 0:
+            d["last_success"] = self.last_success
+        if self.last_status:
+            d["last_status"] = self.last_status
         return d
 
     @classmethod
@@ -143,6 +156,8 @@ class TaskState:
             ts.circuit = CircuitState.from_dict(d["circuit"])
         ts.engagement_rate = d.get("engagement_rate", -1.0)
         ts.effective_interval = d.get("effective_interval", 0)
+        ts.last_success = d.get("last_success", 0)
+        ts.last_status = d.get("last_status", "")
         return ts
 
 

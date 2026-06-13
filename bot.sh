@@ -1099,6 +1099,7 @@ trap cleanup EXIT INT TERM
 heartbeat_watchdog() {
   sleep 30  # initial grace period
   local _fails=0 _last_fail=0 _ticks=0
+  local _stream_fails=0 _stream_last_fail=0 _admin_fails=0 _admin_last_fail=0
   while true; do
     # Hourly housekeeping (120 ticks × 30s). Startup-only rotation isn't
     # enough: a bot that stays up for weeks grows jarvis.log and tmp/ without
@@ -1143,6 +1144,36 @@ heartbeat_watchdog() {
       python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
       HEARTBEAT_PID=$!
       log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
+    fi
+    # Supervision dead zones closed (REQ-40): ef_stream_loop and admin.py
+    # previously had NO watchdog — their death was invisible until the next
+    # full restart (EigenFlux PMs silently stopped; Lark RichView links 404'd).
+    # Same 4-crashes-in-10min breaker discipline, separate counters.
+    if [ -n "${STREAM_PID:-}" ] && ! kill -0 "$STREAM_PID" 2>/dev/null; then
+      _now=$(date +%s)
+      if [ $((_now - _stream_last_fail)) -gt 600 ]; then _stream_fails=0; fi
+      _stream_fails=$((_stream_fails + 1)); _stream_last_fail=$_now
+      if [ "$_stream_fails" -lt 4 ]; then
+        log_warn "[watchdog] EF stream PID $STREAM_PID died — restarting (fail #${_stream_fails})"
+        EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}" EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}"           LOG_FILE="$LOG_FILE" python3 -m core.ef_stream_loop 2>>"$LOG_FILE" &
+        STREAM_PID=$!
+        log_info "[watchdog] EF stream restarted (PID: $STREAM_PID)"
+      elif [ "$_stream_fails" -eq 4 ]; then
+        log_warn "[watchdog] EF stream crashed ${_stream_fails}x within 10min — giving up until next reset window"
+      fi
+    fi
+    if [ "$ADMIN_ENABLED" = "true" ] && [ -n "${ADMIN_PID:-}" ] && ! kill -0 "$ADMIN_PID" 2>/dev/null; then
+      _now=$(date +%s)
+      if [ $((_now - _admin_last_fail)) -gt 600 ]; then _admin_fails=0; fi
+      _admin_fails=$((_admin_fails + 1)); _admin_last_fail=$_now
+      if [ "$_admin_fails" -lt 4 ]; then
+        log_warn "[watchdog] Admin PID $ADMIN_PID died — restarting (fail #${_admin_fails})"
+        python3 "$JARVIS_DIR/admin.py" >>"$LOG_FILE" 2>&1 &
+        ADMIN_PID=$!
+        log_info "[watchdog] Admin restarted (PID: $ADMIN_PID)"
+      elif [ "$_admin_fails" -eq 4 ]; then
+        log_warn "[watchdog] Admin crashed ${_admin_fails}x within 10min — giving up until next reset window (likely port conflict)"
+      fi
     fi
     sleep 30
   done
@@ -1361,6 +1392,32 @@ except: pass
           content="[Replying to: ${_quoted_text}]
 ${content}"
           log_info "Quote reply: parent=$_parent_id (${#_quoted_text} chars)"
+        fi
+        # ── Reply-to-intent matching (REQ-34B): if the quoted message is an
+        # intention card, inject a structured hint so the main session closes
+        # the loop deterministically instead of relying on LLM goodwill.
+        _intent_hint=$(JV_PARENT="$_parent_id" JV_LEDGER="$JARVIS_DIR/data/.intent_card_ledger.jsonl" python3 -c "
+import json, os, sys
+ledger = os.environ.get('JV_LEDGER', '')
+parent = os.environ.get('JV_PARENT', '')
+try:
+    for line in reversed(open(ledger, encoding='utf-8').read().splitlines()):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if parent in (row.get('message_ids') or []):
+            ids = row.get('intent_ids') or []
+            if ids:
+                print(','.join(ids))
+            break
+except OSError:
+    pass
+" 2>/dev/null)
+        if [ -n "$_intent_hint" ]; then
+          content="[REPLY_TO_INTENT ids=${_intent_hint}] 这条回复是对意图卡片的回应。如果它回答了某个闭环问题，立即运行：python3 -m core.intentions close <对应id> done <他的一句话答复>（在 JARVIS_DIR 下），然后再正常回复。
+${content}"
+          log_info "Quote reply matched intent card: $_intent_hint"
         fi
       fi
 

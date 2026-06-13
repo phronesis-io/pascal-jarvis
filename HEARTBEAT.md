@@ -882,6 +882,7 @@ SILENT_TASKS, not this doc.
 ### self-diagnostic
 - interval: 4h
 - pre: tasks/self_diagnostic_pre.sh
+- post: tasks/self_diagnostic_post.py
 - prompt: |
     [SELF DIAGNOSTIC]
     Review the system health data below. Flag ONLY genuine issues that need attention:

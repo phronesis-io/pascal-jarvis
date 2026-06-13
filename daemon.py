@@ -170,6 +170,21 @@ def check_health() -> dict:
     """Run health checks. Returns {"healthy": bool, "issues": [str]}."""
     issues = []
 
+    # 0. Deploy guard (REQ-42): while restart.sh is mid-deploy the stack is
+    # legitimately half-down — a daemon "fix" here is friendly fire (6/12: the
+    # daemon killed a healthy bot twice during the 17:24-17:54 deploy window
+    # and latched 'manual intervention needed'). A .deploying flag younger
+    # than 30min means hands off; staler flags are leftovers and are ignored.
+    deploying = JARVIS_DIR / ".deploying"
+    if deploying.exists():
+        try:
+            if time.time() - deploying.stat().st_mtime < 1800:
+                return {"healthy": True, "issues": [],
+                        "note": "deploy window — checks suspended"}
+            deploying.unlink(missing_ok=True)  # stale leftover
+        except OSError:
+            pass
+
     # 1. Is bot.sh running? (PID file + pgrep)
     if not _is_bot_alive():
         issues.append("bot.sh is not running")
@@ -210,6 +225,35 @@ def check_health() -> dict:
     # Script-level errors are handled by circuit breaker, not daemon restarts.
 
     return {"healthy": len(issues) == 0, "issues": issues}
+
+
+# Components the daemon observes but does NOT own (REQ-40): :3456 admin and
+# :3457 dashboard belong to bot.sh's watchdog and launchd respectively. The
+# daemon's job here is ALERT-ONLY — it must never start new fights (the 6/12
+# restart spiral lesson). One Lark line per component per 4h.
+_probe_alert_stamps: dict = {}
+PROBE_ALERT_WINDOW = 4 * 3600
+
+
+def probe_observed_components():
+    """Alert (never restart) when :3456/:3457 are down — the dashboard died
+    for 23 days because nothing watched it. Errors here never raise."""
+    import urllib.request
+    for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),
+                      ("dashboard :3457", "http://127.0.0.1:3457/")):
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                if resp.status < 500:
+                    _probe_alert_stamps.pop(name, None)  # recovered
+                    continue
+        except Exception:
+            pass
+        last = _probe_alert_stamps.get(name, 0)
+        if time.time() - last >= PROBE_ALERT_WINDOW:
+            _probe_alert_stamps[name] = time.time()
+            log("WARN", f"Observed component DOWN: {name}")
+            notify_lark(f"⚠️ 组件失联：{name} 探测不通。"
+                        f"（守护进程只告警不代管；如未自愈请重启或查 launchd）")
 
 
 def diagnose_and_fix(issues: list[str]) -> str:
@@ -372,10 +416,29 @@ def main():
     log("INFO", f"  Check interval: {CHECK_INTERVAL}s")
 
     consecutive_failures = 0
+    # Stale-code hot reload (REQ-42): the long-lived daemon never noticed its
+    # on-disk code changed — on 6/12 a pre-deploy daemon killed a healthy bot
+    # twice by enforcing outdated rules. When disk is newer, exit 0 and let
+    # launchd KeepAlive respawn us on fresh code within seconds.
+    _code_mtime = os.path.getmtime(__file__)
+    probe_tick = 0
 
     try:
         while running:
             try:
+                try:
+                    if os.path.getmtime(__file__) > _code_mtime + 1:
+                        log("INFO", "daemon.py changed on disk — exiting for "
+                            "launchd respawn (hot reload)")
+                        break
+                except OSError:
+                    pass
+
+                # Observed-component probes (alert-only) every ~4th check
+                probe_tick += 1
+                if probe_tick % 4 == 0:
+                    probe_observed_components()
+
                 result = check_health()
 
                 if result["healthy"]:

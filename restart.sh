@@ -203,6 +203,15 @@ for _a in "$@"; do
 done
 set -- "${_args[@]:-}"
 
+# Deploy guard (REQ-42): while this script works, the daemon must not "fix"
+# the intentionally-half-down stack (6/12: daemon killed a healthy bot twice
+# mid-deploy). Restart paths touch the flag; status/help do not. The trap
+# clears it even when a kill/start step fails (set -e).
+_set_deploy_guard() {
+  touch "$JARVIS_DIR/.deploying"
+  trap 'rm -f "$JARVIS_DIR/.deploying"' EXIT
+}
+
 case "${1:-}" in
   --status|-s)
     status
@@ -210,6 +219,7 @@ case "${1:-}" in
   --full|-f)
     echo "=== Full Restart (daemon + bot) ==="
     echo ""
+    _set_deploy_guard
     kill_bot
     kill_daemon
     echo ""
@@ -229,6 +239,7 @@ case "${1:-}" in
   *)
     echo "=== Bot Restart ==="
     echo ""
+    _set_deploy_guard
     kill_bot
     echo ""
     start_bot

@@ -1,0 +1,79 @@
+# components.yaml — single source of truth for "what should be running" (REQ-40).
+#
+# The dashboard died for 23 days because four supervision surfaces (daemon,
+# doctor.sh, restart.sh --status, self-diagnostic) each kept their own
+# hardcoded component list and none included :3457. This manifest is consumed
+# by ALL of them via core/components.py — a component not listed here does
+# not exist; a component listed here cannot die silently.
+#
+# check types:
+#   pid       — pidfile alive (first whitespace field, kill -0)
+#   pgrep     — process matching `pattern` exists
+#   http      — GET `url` answers < 5s with status < 500
+#   file_age  — `path` mtime younger than `max_age_hours`
+#   launchctl — `label` loaded in the gui domain
+#
+# critical: true → daemon.py checks it every 30s (alert-only for components
+# it does not own; daemon only ever restarts bot.sh). Everything is checked
+# by self-diagnostic every 4h, doctor.sh at install, restart.sh --status on
+# demand.
+
+components:
+  - name: daemon
+    check: pid
+    path: .daemon.pid
+    critical: false          # daemon can't check itself; launchd owns it
+    note: launchd KeepAlive com.pascal.jarvis.daemon
+
+  - name: bot
+    check: pid
+    path: .bot.pid
+    critical: true
+    note: main Lark loop; daemon restarts it
+
+  - name: heartbeat-loop
+    check: pgrep
+    pattern: "core.heartbeat_loop"
+    critical: true
+    note: resident scheduler inside bot.sh; bot watchdog restarts it
+
+  - name: ef-stream
+    check: pgrep
+    pattern: "core.ef_stream_loop"
+    critical: true
+    note: EigenFlux PM/friend stream; bot watchdog restarts it (REQ-40)
+
+  - name: lark-sidecar
+    check: pgrep
+    pattern: "lark_event_sidecar"
+    critical: true
+    note: card callbacks + read receipts die silently without it
+
+  - name: admin
+    check: http
+    url: "http://127.0.0.1:3456/health"
+    critical: true
+    note: ops console + Lark RichView links; bot watchdog restarts it
+
+  - name: dashboard
+    check: http
+    url: "http://127.0.0.1:3457/"
+    critical: true
+    note: launchd KeepAlive com.pascal.jarvis.dashboard; the 23-day corpse
+
+  - name: dashboard-launchd
+    check: launchctl
+    label: com.pascal.jarvis.dashboard
+    critical: false
+
+  - name: daemon-launchd
+    check: launchctl
+    label: com.pascal.jarvis.daemon
+    critical: false
+
+  - name: session-backup
+    check: file_age
+    path: .last_backup_ok
+    max_age_hours: 48
+    critical: false
+    note: backup silently failed for 27 days before this check existed (REQ-41)

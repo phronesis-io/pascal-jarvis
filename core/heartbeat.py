@@ -304,7 +304,9 @@ class HeartbeatRunner:
     def run_script(self, script_path: str, stdin_data: str = "") -> str:
         """Run a pre/post script, return stdout."""
         full_path = self.jarvis_dir / script_path
+        self._last_script_outcome = "ok"
         if not full_path.exists():
+            self._last_script_outcome = "missing"
             return ""
         try:
             # Use python3 for .py files that aren't executable
@@ -326,12 +328,20 @@ class HeartbeatRunner:
             if result.stderr.strip():
                 self._log(f"Script {script_path} stderr: {result.stderr.strip()[:300]}",
                           level="warn" if result.returncode != 0 else "info")
+            if result.returncode != 0:
+                self._last_script_outcome = "nonzero"
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
-            self._log(f"Script {script_path} timed out (60s)")
+            # Distinguishable from "legitimately nothing to do" (REQ-51): the
+            # caller feeds pre_timeout/pre_error into the circuit breaker and
+            # the truth watermark, so a chronically failing pre-script can
+            # never look like a healthy quiet channel again.
+            self._last_script_outcome = "timeout"
+            self._log(f"Script {script_path} timed out (60s)", level="warn")
             return ""
         except Exception as e:
-            self._log(f"Script {script_path} error: {e}")
+            self._last_script_outcome = "error"
+            self._log(f"Script {script_path} error: {e}", level="warn")
             return ""
 
     def claude_call(self, prompt: str) -> str:
@@ -589,13 +599,26 @@ You have access to the user's memory below. Use it to personalize your responses
             if task["pre"]:
                 data = self.run_script(task["pre"])
                 if not data:
+                    outcome = getattr(self, "_last_script_outcome", "ok")
                     retry_delay = self.EMPTY_RETRY_DELAYS.get(task["name"], task["interval"])
                     ts = TaskState.from_dict(state.get(task["name"], {}))
                     ts.last_run = now - task["interval"] + retry_delay
+                    if outcome in ("timeout", "error", "nonzero"):
+                        # Pre failure is a FAILURE (REQ-51), not "nothing to
+                        # do": the breaker sees it and last_status records it
+                        # so watermarks can flag a dead data-gathering step.
+                        ts.last_status = f"pre_{outcome}"
+                        tripped = ts.circuit.record_failure()
+                        if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
+                            ts.circuit.disabled_until = 0
+                        reason = f"pre_{outcome}"
+                    else:
+                        ts.last_status = "empty_pre"
+                        reason = "empty_pre"
                     state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
                     self._event("task_skip", task=task["name"],
-                                reason="empty_pre", retry_in_s=retry_delay)
+                                reason=reason, retry_in_s=retry_delay)
                     continue
                 task_data[task["name"]] = data
             else:
@@ -631,6 +654,8 @@ You have access to the user's memory below. Use it to personalize your responses
             # Update state — task ran successfully
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
+            ts.last_success = now
+            ts.last_status = "ok"
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()
             self._event("task_finish", task=task["name"], status="ok",
@@ -710,6 +735,7 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
+                ts.last_status = "killed"
                 state[task["name"]] = ts.to_dict()
                 self._event("task_finish", task=task["name"], status="killed",
                             duration_s=call_dur)
@@ -724,6 +750,7 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
+                ts.last_status = "timeout" if self._call_timed_out else "failed"
                 tripped = ts.circuit.record_failure()
                 # PRIORITY_TASKS: reset circuit immediately — they must never be disabled
                 if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
@@ -752,6 +779,8 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
+                ts.last_success = now
+                ts.last_status = "idle"
                 ts.circuit.record_success()
                 state[task["name"]] = ts.to_dict()
                 self._event("task_finish", task=task["name"], status="idle",
@@ -849,6 +878,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 retry_delay = min(300, task["interval"])
                 ts.last_run = now - task["interval"] + retry_delay
+                ts.last_status = "parse_failed"
                 tripped = ts.circuit.record_failure()
                 if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
                     ts.circuit.disabled_until = 0
@@ -864,6 +894,8 @@ You have access to the user's memory below. Use it to personalize your responses
         for task in runnable:
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
+            ts.last_success = now
+            ts.last_status = "ok"
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()
             # duration covers claude_call + this task's post-script routing

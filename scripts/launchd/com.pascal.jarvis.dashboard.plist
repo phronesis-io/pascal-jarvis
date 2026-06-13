@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.jarvis.dashboard</string>
+    <string>com.pascal.jarvis.dashboard</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/python3</string>
         <string>-m</string>
         <string>dashboard.main</string>
     </array>
@@ -33,10 +33,10 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis/dashboard.log</string>
+    <string>/tmp/jarvis-dashboard.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis/dashboard.log</string>
+    <string>/tmp/jarvis-dashboard.log</string>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>

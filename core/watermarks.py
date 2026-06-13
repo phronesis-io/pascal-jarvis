@@ -101,17 +101,29 @@ def channel_watermark_report(jarvis_dir: str | Path,
                     or ts.get("effective_interval", 0)
                     or task["interval"])
         last_run = ts.get("last_run", 0)
+        # TRUTH watermark (REQ-51): last_run is a scheduling watermark that
+        # gets rewritten on every empty_pre/pre-failure skip, so chronically
+        # failing channels looked perpetually fresh (repos-sync: 19/19 pre
+        # timeouts, report said 'all channels within expected cadence').
+        # last_success is set only on a real ok/idle finish. Fall back to
+        # last_run for state predating the field.
+        last_success = ts.get("last_success", 0) or last_run
+        last_status = ts.get("last_status", "")
         disabled_until = ts.get("circuit", {}).get("disabled_until", 0)
 
         if disabled_until > now:
             circuits.append(
                 f"  ⚠️ {name}: circuit OPEN, re-enables in {_fmt_age(disabled_until - now)}")
             continue
-        if last_run == 0:
-            starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
-        elif now - last_run > STARVATION_FACTOR * interval:
+        if last_status.startswith("pre_") and                 ts.get("circuit", {}).get("consecutive_failures", 0) >= 3:
             starved.append(
-                f"  ⚠️ {name}: last ran {_fmt_age(now - last_run)} ago "
+                f"  ⚠️ {name}: pre-script failing ({last_status} ×"
+                f"{ts['circuit']['consecutive_failures']}) — channel data-gathering DEAD")
+        if last_success == 0:
+            starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
+        elif now - last_success > STARVATION_FACTOR * interval:
+            starved.append(
+                f"  ⚠️ {name}: last real success {_fmt_age(now - last_success)} ago "
                 f"(expected every {_fmt_age(interval)}) — STARVED")
 
     delivery = _load(jd / ".delivery_state.json")
