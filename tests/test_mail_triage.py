@@ -1,0 +1,205 @@
+"""Tests for the mail-triage task (RSS-for-email)."""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tasks"))
+
+import mail_triage_lib as m  # noqa: E402
+
+POST = ROOT / "tasks" / "mail_triage_post.py"
+
+SAMPLE_BUFFER = """\
+### WmgyOE== | lark_mail | Gmail 小组 <forwarding-noreply@google.com> | 2026-06-12T16:57:00+0800 | private | buffer
+📧 (Gmail) 转发确认
+From: Gmail 小组 <forwarding-noreply@google.com>
+Mailbox: me [INBOX]
+Date: 2026-06-12 16:57
+Subject: (Gmail) 转发确认
+(正文未注入——需要时: lark-cli mail +message --mailbox 'me' --message-id 'WmgyOE==')
+
+### imap:user_1998@163.com:1:1377189256 | mail_163 | alice <alice@example.org> | 2026-06-11T08:04:38+0800 | private | buffer
+📧 Re: your llama + minimax trajectory
+From: alice <alice@example.org>
+Mailbox: user_1998@163.com [INBOX] UID 1377189256
+Date: 2026-06-11T08:04:38+0800
+Subject: Re: your llama + minimax trajectory
+(正文未注入——163 邮件用 IMAP 按需拉取该 UID)
+"""
+
+
+# --- parsing -----------------------------------------------------------------
+def test_parse_buffer_extracts_fields():
+    entries = m.parse_buffer(SAMPLE_BUFFER)
+    assert len(entries) == 2
+    lark, imap = entries
+    assert lark["event_id"] == "WmgyOE=="
+    assert lark["source_id"] == "lark_mail"
+    assert lark["subject"] == "(Gmail) 转发确认"
+    assert imap["source_id"] == "mail_163"
+    assert imap["sender"].startswith("alice")
+    assert imap["subject"] == "Re: your llama + minimax trajectory"
+
+
+def test_imap_coords_extracts_label_and_uid():
+    e = {"event_id": "imap:user_1998@163.com:1:1377189256"}
+    label, uid = m._imap_coords(e)
+    assert label == "user_1998@163.com"
+    assert uid == 1377189256
+
+
+def test_imap_coords_none_for_lark():
+    assert m._imap_coords({"event_id": "WmgyOE=="}) is None
+
+
+def test_lark_mailbox_parsing():
+    assert m._lark_mailbox({"mailbox_raw": "me [INBOX]"}) == "me"
+    assert m._lark_mailbox(
+        {"mailbox_raw": "contact@eigenflux.one [INBOX]"}) == "contact@eigenflux.one"
+    assert m._lark_mailbox({"mailbox_raw": ""}) == "me"
+
+
+def test_html_to_text_strips_tags():
+    out = m._html_to_text("<p>Hello</p><br/><b>world</b> &amp; more")
+    assert "Hello" in out and "world" in out and "&" in out
+    assert "<" not in out
+
+
+# --- collect_new dedup + body attach -----------------------------------------
+def _setup_dirs(tmp_path, monkeypatch, buffer_text, triaged=None):
+    mem = tmp_path / "memory"
+    (mem / "system").mkdir(parents=True)
+    (mem / "system" / "inbox_private_mail.md").write_text(buffer_text)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMORY_DIR", str(mem))
+    if triaged:
+        md = tmp_path / "mail"
+        md.mkdir(parents=True, exist_ok=True)
+        (md / "triaged.jsonl").write_text(
+            "\n".join(json.dumps(t) for t in triaged) + "\n")
+
+
+def test_collect_new_skips_triaged_and_attaches_body(tmp_path, monkeypatch):
+    _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
+                triaged=[{"event_id": "WmgyOE=="}])
+    monkeypatch.setattr(m, "fetch_imap_bodies",
+                        lambda uids, folder="INBOX": {1377189256: "Hi Yongyi, lets chat"})
+    monkeypatch.setattr(m, "fetch_lark_body", lambda mb, mid: "should not be called")
+
+    recs = m.collect_new()
+    # Lark one already triaged → only the imap one remains.
+    assert len(recs) == 1
+    assert recs[0]["event_id"].endswith("1377189256")
+    assert recs[0]["body"] == "Hi Yongyi, lets chat"
+
+
+def test_main_writes_pending_and_prints(tmp_path, monkeypatch, capsys):
+    _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
+                triaged=[{"event_id": "WmgyOE=="}])
+    monkeypatch.setattr(m, "fetch_imap_bodies",
+                        lambda uids, folder="INBOX": {1377189256: "Hi Yongyi"})
+    rc = m.main()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "EVENT_ID: imap:user_1998@163.com:1:1377189256" in out
+    assert "Hi Yongyi" in out
+    pend = json.loads(m.pending_path().read_text())
+    assert [p["event_id"] for p in pend] == ["imap:user_1998@163.com:1:1377189256"]
+
+
+def test_collect_new_empty_when_all_triaged(tmp_path, monkeypatch):
+    _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
+                triaged=[{"event_id": "WmgyOE=="},
+                         {"event_id": "imap:user_1998@163.com:1:1377189256"}])
+    monkeypatch.setattr(m, "fetch_imap_bodies", lambda *a, **k: {})
+    assert m.collect_new() == []
+
+
+def test_collect_new_body_fetch_failure_degrades(tmp_path, monkeypatch):
+    _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER)
+    monkeypatch.setattr(m, "fetch_imap_bodies", lambda *a, **k: {})  # fetch fails
+    monkeypatch.setattr(m, "fetch_lark_body", lambda mb, mid: "")
+    recs = m.collect_new()
+    assert len(recs) == 2
+    for r in recs:
+        assert "拉取失败" in r["body"]
+
+
+# --- post.py: dedup recording + quiet-hours hold -----------------------------
+def _run_post(reply: str, tmp_path, quiet="awake", pending=None) -> str:
+    md = tmp_path / "mail"
+    md.mkdir(parents=True, exist_ok=True)
+    if pending is not None:
+        (md / ".pending_batch.json").write_text(json.dumps(pending))
+    env = {"JARVIS_DIR": str(tmp_path), "PATH": "/usr/bin:/bin",
+           "MEMORY_DIR": str(tmp_path / "memory"),
+           "JARVIS_EF_QUIET_OVERRIDE": quiet}
+    r = subprocess.run([sys.executable, str(POST)], input=reply,
+                       capture_output=True, text=True, env=env)
+    return r.stdout
+
+
+PENDING = [
+    {"event_id": "a1", "sender": "x", "subject": "s1"},
+    {"event_id": "b2", "sender": "y", "subject": "s2"},
+]
+
+
+def test_post_emits_card_and_records_all_triaged(tmp_path):
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"},
+                   {"event_id": "b2", "decision": "silent"}],
+        "user_message": "📬 来自 X 的邮件", "urgent": False})
+    out = _run_post(reply, tmp_path, pending=PENDING)
+    assert "📬" in out and "来自 X" in out
+    rows = [json.loads(x) for x in
+            (tmp_path / "mail" / "triaged.jsonl").read_text().splitlines() if x]
+    assert {r["event_id"] for r in rows} == {"a1", "b2"}
+    # pending consumed
+    assert not (tmp_path / "mail" / ".pending_batch.json").exists()
+
+
+def test_post_silent_when_no_message(tmp_path):
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "silent"},
+                   {"event_id": "b2", "decision": "silent"}],
+        "user_message": "", "urgent": False})
+    out = _run_post(reply, tmp_path, pending=PENDING)
+    assert out.strip() == ""
+    rows = [json.loads(x) for x in
+            (tmp_path / "mail" / "triaged.jsonl").read_text().splitlines() if x]
+    assert {r["event_id"] for r in rows} == {"a1", "b2"}
+
+
+def test_post_quiet_hours_holds_message_but_records_triaged(tmp_path):
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"}],
+        "user_message": "📬 夜间来信", "urgent": False})
+    out = _run_post(reply, tmp_path, quiet="quiet",
+                    pending=[{"event_id": "a1", "subject": "s"}])
+    assert out.strip() == ""  # held, not sent
+    # still recorded as triaged (won't be re-read)
+    rows = (tmp_path / "mail" / "triaged.jsonl").read_text()
+    assert "a1" in rows
+    # message parked in backlog
+    backlog = (tmp_path / "mail" / "mail_backlog.jsonl").read_text()
+    assert "夜间来信" in backlog
+
+
+def test_post_urgent_breaks_through_quiet_hours(tmp_path):
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"}],
+        "user_message": "📬 紧急", "urgent": True})
+    out = _run_post(reply, tmp_path, quiet="quiet",
+                    pending=[{"event_id": "a1", "subject": "s"}])
+    assert "紧急" in out
+
+
+def test_post_parse_failure_does_not_record(tmp_path):
+    out = _run_post("not json at all", tmp_path, pending=PENDING)
+    assert out.strip() == ""
+    # pending preserved (retry next cycle), nothing triaged
+    assert (tmp_path / "mail" / ".pending_batch.json").exists()
+    assert not (tmp_path / "mail" / "triaged.jsonl").exists()

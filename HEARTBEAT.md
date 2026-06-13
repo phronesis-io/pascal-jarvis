@@ -19,6 +19,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Intentions | intention-check | yes (when intent fires) |
 | Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
+| Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
 | Analytics | engagement-analyze, cross-session-sync | silent |
@@ -257,6 +258,49 @@ SILENT_TASKS, not this doc.
     }
 
     If no pending requests: HEARTBEAT_OK
+
+### mail-triage
+- interval: 15m
+- pre: tasks/mail_triage_pre.sh
+- post: tasks/mail_triage_post.py
+- prompt: |
+    [MAIL TRIAGE — 邮件 RSS]
+    The DATA below is a batch of NEW emails (Feishu mailbox + 163), each shown
+    with its FULL body between "--- EMAIL ---" markers. Pascal wants every email
+    READ like an RSS item: read each body, think about it, surface only what
+    matters. Reading is for YOU; surfacing must stay rare.
+
+    For EACH email, decide one of:
+    - "push": worth Pascal's attention NOW. A real person reaching out (recruiting,
+      collaboration, a friend/colleague, an intro), something needing his action or
+      a reply, a deadline, an account/security/billing anomaly, anything tied to his
+      projects (EigenFlux, white paper), holdings, health appointments, or people in
+      his memory (team, contacts).
+    - "silent": read and filed, not surfaced. Routine bank statements/credit notices,
+      LinkedIn/job-board spam, marketing, newsletters/digests (Substack, AINews, TED,
+      Berkeley RDI…), CI failure notices, GitHub PR notification noise, automated
+      receipts. Default to silent when in doubt — better to under-surface than nag.
+
+    Use Pascal's memory files (profile, team, contacts, projects, health) to judge
+    who matters. Recognize names like alice/Luma, MiniMax/LLaMA-era contacts,
+    EigenFlux teammates, Polytechnique/校友.
+
+    Compose user_message ONLY from the "push" emails. For each: who it's from in
+    plain words (and why they matter if non-obvious) + the one thing it's asking or
+    offering + what Pascal might do. One tight line each, phone-scannable. If a
+    newsletter genuinely contains something high-value for his work, you may lift the
+    single relevant nugget into one line — but the email itself stays silent unless
+    it needs action. If nothing is push-worthy, return user_message "".
+
+    HARD LENGTH CAP: user_message ≤ 700 characters. Lead with the most important.
+
+    URGENCY (night gate): emails are HELD at night (22:00–09:00) and batched into a
+    morning card. Set "urgent": true ONLY for the rare email Pascal would regret not
+    seeing within hours (time-critical reply, security/billing emergency). Default false.
+
+    Return JSON: {"triage":[{"event_id":"<id>","decision":"push|silent","reason":"<brief>"}],"user_message":"<markdown or empty>","urgent":false}
+    Include EVERY email's event_id in "triage" (even silent ones) so they're not re-read.
+    If DATA is empty: HEARTBEAT_OK
 
 ## Check-in & Wellbeing
 
