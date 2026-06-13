@@ -102,3 +102,13 @@ session_compacts/
 dashboard/__pycache__/
 eigenflux/pending_publish/
 *.json.lock
+
+# v2 runtime sidecars (REQ-30/31/34/39/41/42)
+.last_backup_ok
+.diag_last_pre.txt
+.diag_last_alert.json
+.deploying
+.admin_token
+data/.intention_inflight.json
+data/.intent_breach_queue.jsonl
+data/.intent_card_ledger.jsonl
