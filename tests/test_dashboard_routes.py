@@ -34,6 +34,11 @@ import dashboard.telemetry as telemetry
 from core.timeutil import now_local
 
 # ── NiceGUI app, prepared for TestClient (no server, no ui.run) ──────────
+# Skip this whole module where nicegui isn't installed (e.g. CI, which only
+# installs pyyaml+pytest) instead of erroring out and aborting collection for
+# the entire suite. Runs in full wherever the dashboard deps exist (local).
+pytest.importorskip("nicegui", exc_type=ImportError)
+
 from nicegui import app as nicegui_app
 from dashboard.app import create_app
 
