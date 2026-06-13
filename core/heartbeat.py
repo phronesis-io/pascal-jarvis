@@ -613,7 +613,15 @@ You have access to the user's memory below. Use it to personalize your responses
                             ts.circuit.disabled_until = 0
                         reason = f"pre_{outcome}"
                     else:
+                        # Clean empty pre (exit 0, nothing to do) is a HEALTHY
+                        # cycle — advance last_success too (red-team fix): for
+                        # empty-pre-dominant tasks (intention-check 296/304
+                        # empty, memory-hourly) last_success would otherwise lag
+                        # forever and watermarks falsely flagged them STARVED.
+                        # Only pre_timeout/pre_error/nonzero (above) leave
+                        # last_success stale — the real channel-dead signal.
                         ts.last_status = "empty_pre"
+                        ts.last_success = now
                         reason = "empty_pre"
                     state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
@@ -825,13 +833,22 @@ You have access to the user's memory below. Use it to personalize your responses
                 task_responses = envelope.get("tasks", {})
                 for task in runnable:
                     resp = task_responses.get(task["name"])
-                    if resp is None:
-                        # ACK-required tasks must reconcile even when their
-                        # slice is missing from the envelope (REQ-30).
-                        if task["name"] in self.ACK_REQUIRED_TASKS and task["post"]:
+                    # A present-but-degenerate slice (empty string, whitespace,
+                    # null, or non-dict) is treated as MISSING for ACK-required
+                    # tasks (red-team fix): otherwise the row fell through to
+                    # the str()-coerce branch below, the manifest was never
+                    # reconciled via __NO_ENVELOPE__, AND a later catch-all
+                    # could double-run the post. One deterministic path only.
+                    _degenerate = (resp is None
+                                   or (isinstance(resp, str) and not resp.strip()))
+                    if task["name"] in self.ACK_REQUIRED_TASKS and (
+                            _degenerate or not isinstance(resp, (dict, str))):
+                        if task["post"]:
                             self.run_script(task["post"], stdin_data="__NO_ENVELOPE__")
                             self._event("task_skip", task=task["name"],
                                         reason="missing_slice_acked")
+                        continue
+                    if resp is None:
                         continue
                     resp_str = json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp)
                     if task["post"]:

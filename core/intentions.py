@@ -784,12 +784,28 @@ def mark_executed(intent_id: str, result: str = ""):
         # Recurring: reset to pending for the next occurrence. attempt resets
         # (it counts tries of ONE occurrence) and next_fire_at advances —
         # only here, on success, so a failed cycle never loses the occurrence.
+        # Anchor the recompute to the FIRED occurrence (the row's current
+        # next_fire_at), NOT wall-clock now (red-team fix 2026-06-13): a slow
+        # or retried cycle finishes minutes-to-hours after the occurrence;
+        # cron_next(after=now) would jump past every occurrence between the
+        # fired one and now, silently skipping beats (hourly intent loses the
+        # 14:00 beat if post runs at 14:03). Anchoring at the fired occurrence
+        # means a late-but-within-staleness fire is caught up next cycle, as
+        # REQ-32 promises; the >6h-stale case is still retired by
+        # _skip_stale_cron_occurrence in get_due_intents.
         nxt = None
         try:
             from dashboard.scheduler import cron_next
             cfg = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
             expr = (cfg or {}).get("expression", "")
-            nxt = cron_next(expr) if expr else None
+            anchor = None
+            nfa = intent.get("next_fire_at")
+            if nfa:
+                try:
+                    anchor = datetime.fromisoformat(nfa).replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    anchor = None
+            nxt = cron_next(expr, after=anchor) if expr else None
         except Exception:
             pass
         db.execute(
@@ -1222,12 +1238,16 @@ def validate_envelope(data, expected_ids: list[str]) -> tuple[list[str], list[st
 # bounded-retry policy applied immediately instead of waiting to be swept.
 # ---------------------------------------------------------------------------
 
-def write_inflight(ids: list[str]) -> None:
-    """Persist the set of intent ids handed to the current Claude cycle."""
+def write_inflight(ids: list[str], breach_ids: list[str] | None = None) -> None:
+    """Persist the intent ids handed to the current Claude cycle, plus the
+    breach ids that rode this cycle's PRE apology prompt (so post marks
+    exactly those shown — not a blanket wipe that would eat reconcile's
+    freshly-queued breaches)."""
     INFLIGHT_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = INFLIGHT_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(
-        {"ts": now_local_str("%Y-%m-%dT%H:%M:%S"), "ids": list(ids)},
+        {"ts": now_local_str("%Y-%m-%dT%H:%M:%S"), "ids": list(ids),
+         "breach_ids": list(breach_ids or [])},
         ensure_ascii=False))
     import os
     os.replace(tmp, INFLIGHT_FILE)
@@ -1236,6 +1256,13 @@ def write_inflight(ids: list[str]) -> None:
 def read_inflight() -> list[str]:
     try:
         return list(json.loads(INFLIGHT_FILE.read_text()).get("ids", []))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+
+
+def read_inflight_breaches() -> list[str]:
+    try:
+        return list(json.loads(INFLIGHT_FILE.read_text()).get("breach_ids", []))
     except (OSError, json.JSONDecodeError, AttributeError):
         return []
 
@@ -1258,7 +1285,10 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
     """
     _init()
     inflight = read_inflight()
-    out = {"retried": [], "expired": []}
+    # "breached" = ids this call newly appended to the breach queue. The caller
+    # must NOT mark these shown this cycle — they were queued AFTER the pre's
+    # apology-card prompt, so they haven't ridden a card yet (red-team fix).
+    out = {"retried": [], "expired": [], "breached": []}
     if not inflight:
         return out
     db = _get_db()
@@ -1297,6 +1327,7 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
                          notified=True, reason="retries_exhausted")
             terminal_moments.append(it)
             out["expired"].append(iid)
+            out["breached"].append(iid)
     db.commit()
     # Closure spawns after the commit — see lifecycle_sweep (lock contention).
     for it in terminal_moments:
@@ -1313,18 +1344,20 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
 # Breach queue — dropped commitments awaiting their apology card (REQ-31)
 # ---------------------------------------------------------------------------
 
-def drain_breaches(max_notify_attempts: int = 3) -> list[dict]:
-    """Return breach entries still owed a notification and bump their counter.
+def peek_breaches(max_notify_attempts: int = 3) -> list[dict]:
+    """Return breach entries still owed a notification — WITHOUT mutating.
 
-    Each entry gets up to `max_notify_attempts` rides on an intention-check
-    cycle; a successfully parsed envelope clears the queue via clear_breaches
-    (the card was generated). Entries over budget are dropped — three failed
-    delivery attempts means the pipeline itself is broken and the watermark/
-    self-diagnostic layer is the right alarm, not an ever-growing queue.
+    Red-team fix (2026-06-13): the old drain_breaches bumped notify_attempts
+    on every PRE invocation, but breaches were only cleared on a PARSED
+    envelope. A no-envelope / parse-fail cycle (Claude produced nothing) thus
+    burned a delivery attempt without ever rendering the apology card — three
+    such cycles silently dropped the breach. The counter must count CARDS
+    RENDERED, not pre-script runs. So peek is read-only; mark_breaches_shown
+    is the only writer, called only when a card actually went out.
     """
     if not BREACH_QUEUE.exists():
         return []
-    entries, keep = [], []
+    entries = []
     try:
         for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -1334,28 +1367,60 @@ def drain_breaches(max_notify_attempts: int = 3) -> list[dict]:
             except json.JSONDecodeError:
                 continue
             if int(e.get("notify_attempts", 0)) < max_notify_attempts:
-                e["notify_attempts"] = int(e.get("notify_attempts", 0)) + 1
                 entries.append(e)
-                keep.append(e)
+    except OSError as e:
+        print(f"[intentions] breach peek failed: {e}", file=sys.stderr)
+        return []
+    return entries
+
+
+def mark_breaches_shown(ids: list[str], max_notify_attempts: int = 3) -> None:
+    """Bump notify_attempts for the breach ids that just rode a RENDERED card.
+
+    Entries reaching max_notify_attempts are dropped (shown enough). Only the
+    ids passed in are touched — a breach freshly queued by reconcile_inflight
+    in the same post-cycle is NOT in this set, so the old blanket
+    clear_breaches() wipe (which deleted reconcile's just-queued breach) is
+    gone. Atomic tmp+rename. Never raises.
+    """
+    if not BREACH_QUEUE.exists() or not ids:
+        return
+    shown = set(ids)
+    keep = []
+    try:
+        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("id") in shown:
+                e["notify_attempts"] = int(e.get("notify_attempts", 0)) + 1
+                if e["notify_attempts"] >= max_notify_attempts:
+                    continue  # shown enough — retire
+            keep.append(e)
         tmp = BREACH_QUEUE.with_suffix(".tmp")
         tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in keep)
                        + ("\n" if keep else ""), encoding="utf-8")
         import os
         os.replace(tmp, BREACH_QUEUE)
     except OSError as e:
-        print(f"[intentions] breach drain failed: {e}", file=sys.stderr)
-        return []
-    return entries
+        print(f"[intentions] breach mark-shown failed: {e}", file=sys.stderr)
+
+
+# Back-compat alias: drain_breaches now means "peek" (non-mutating). Callers
+# that relied on the bump must migrate to mark_breaches_shown.
+drain_breaches = peek_breaches
 
 
 def clear_breaches(ids: list[str] | None = None) -> None:
-    """Remove breach entries (all, or by id) once their card went out."""
-    if not BREACH_QUEUE.exists():
+    """Remove breach entries by id once their card went out. ids=None is a
+    no-op now (the old blanket wipe deleted reconcile's freshly-queued
+    breaches — use mark_breaches_shown with explicit ids instead)."""
+    if not BREACH_QUEUE.exists() or not ids:
         return
     try:
-        if ids is None:
-            BREACH_QUEUE.unlink(missing_ok=True)
-            return
         drop = set(ids)
         keep = []
         for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():

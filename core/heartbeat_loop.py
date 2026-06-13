@@ -556,24 +556,40 @@ def _record_engagement(jarvis_dir: Path):
 
 
 def _ledger_backfill(jarvis_dir: Path, message_ids: list):
-    """Stamp real message_ids onto the newest ledger row lacking them."""
+    """Stamp real message_ids onto the newest ledger row lacking them.
+
+    Red-team fix: an UNSTAMPED row older than the newest means a prior card's
+    backfill was missed (two cards sent before this runs) — its message_ids
+    are unrecoverable, so it can never match a reply. Leaving it unstamped
+    strands it forever AND lets the file fill with dead rows. So: stamp the
+    newest unstamped row with THIS cycle's ids, and DROP any older unstamped
+    rows (they're useless for reply matching) — the ledger only ever holds
+    rows that are either stamped or the single most-recent pending one.
+    """
     ledger = jarvis_dir / "data" / ".intent_card_ledger.jsonl"
     if not ledger.exists():
         return
-    lines = ledger.read_text(encoding="utf-8").splitlines()
-    for i in range(len(lines) - 1, -1, -1):
+    parsed = []
+    for line in ledger.read_text(encoding="utf-8").splitlines():
         try:
-            row = json.loads(lines[i])
+            parsed.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        if not row.get("message_ids"):
+    stamped_newest = False
+    kept = []
+    for row in reversed(parsed):  # newest first
+        if row.get("message_ids"):
+            kept.append(row)
+        elif not stamped_newest:
             row["message_ids"] = list(message_ids)
-            lines[i] = json.dumps(row, ensure_ascii=False)
-            break
-    # Keep the ledger bounded — only recent cards matter for reply matching.
-    lines = lines[-200:]
+            kept.append(row)
+            stamped_newest = True
+        # else: an older unstamped row — drop it (unrecoverable, would strand)
+    kept.reverse()
+    kept = kept[-200:]  # bounded — only recent cards matter for reply matching
     tmp = ledger.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in kept)
+                   + ("\n" if kept else ""), encoding="utf-8")
     os.replace(tmp, ledger)
 
 
@@ -730,43 +746,57 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 os.kill(0, signal.SIGTERM)
             break
 
-        # Check force trigger. The file CONTENT names the task to force
-        # (REQ-37): admin's per-task Run Now and [ACTION:heartbeat] markers
-        # write a task name. A name scopes the cycle to run_cycle(only_task=);
-        # empty/'all' keeps the legacy full-roster force but behind a 10-min
-        # cooldown — 32 full-roster storms/day were re-running weekly tasks
-        # within hours and starving the batch queue.
-        force = False
-        force_task = ""
+        # Check force trigger. The file is an APPEND log (red-team fix): each
+        # force is one line (admin 'Run Now', chat [ACTION:heartbeat]); we
+        # drain EVERY line so two near-simultaneous forces are never dropped
+        # last-writer-wins, and an O_APPEND line is never read torn. A bare
+        # task name scopes a cycle to run_cycle(only_task=); empty/'all' is a
+        # full-roster force behind a 10-min cooldown (32 storms/day were
+        # re-running weekly tasks within hours and starving the batch queue).
+        force_tasks: list[str] = []   # distinct named tasks to force
+        want_full = False
         if heartbeat_trigger.exists():
             try:
-                force_task = heartbeat_trigger.read_text().strip()[:64]
+                _lines = heartbeat_trigger.read_text().splitlines()
             except OSError:
-                force_task = ""
+                _lines = []
             heartbeat_trigger.unlink(missing_ok=True)
-            if force_task and force_task != "all":
-                log("heartbeat", f"Force trigger detected (task={force_task})")
-            else:
-                force_task = ""
-                last_full = getattr(run_loop, "_last_full_force", 0.0)
-                if time.time() - last_full >= 600:
-                    run_loop._last_full_force = time.time()
-                    force = True
-                    log("heartbeat", "Force trigger detected (full roster)")
-                else:
-                    log("heartbeat", "Full-roster force suppressed "
-                        "(within 10min cooldown)", level="warn")
+            for _ln in _lines:
+                t = _ln.strip()[:64]
+                if not t or t == "all":
+                    want_full = True
+                elif t not in force_tasks:
+                    force_tasks.append(t)
+            if force_tasks:
+                log("heartbeat", f"Force trigger(s): {force_tasks}")
 
         # Emit "working" marker for daemon health check
         print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (working)",
               file=sys.stderr)
 
-        # Run cycle
+        # Run cycle(s). Forced runs REPLACE the normal cadence cycle this tick
+        # (matches prior semantics); when nothing is forced, the normal
+        # due-check runs.
         try:
-            if force_task:
-                output = runner.run_cycle(force=True, only_task=force_task)
+            if force_tasks or want_full:
+                _outputs = []
+                for _t in force_tasks:
+                    o = runner.run_cycle(force=True, only_task=_t)
+                    if o:
+                        _outputs.append(o)
+                if want_full:
+                    last_full = getattr(run_loop, "_last_full_force", 0.0)
+                    if time.time() - last_full >= 600:
+                        run_loop._last_full_force = time.time()
+                        o = runner.run_cycle(force=True)
+                        if o:
+                            _outputs.append(o)
+                    else:
+                        log("heartbeat", "Full-roster force suppressed "
+                            "(within 10min cooldown)", level="warn")
+                output = "\n\n---\n\n".join(_outputs)
             else:
-                output = runner.run_cycle(force=force)
+                output = runner.run_cycle(force=False)
         except Exception as e:
             log("heartbeat", f"Cycle exception: {e}", level="error")
             output = ""
@@ -824,6 +854,26 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
 if __name__ == "__main__":
     jarvis_dir = os.environ.get("JARVIS_DIR", ".")
     sys.path.insert(0, jarvis_dir)
+
+    # Process-level singleton (red-team fix): the REQ-42 restart hand-off can
+    # briefly leave two heartbeat_loops alive (the bot.sh watchdog relaunches
+    # one while restart.sh tears the tree down). A duplicate that grabbed the
+    # cycle lock and ran intention-check would corrupt the inflight manifest /
+    # double-process intents. An exclusive flock held for process lifetime
+    # makes the second instance exit immediately — harmless no matter who
+    # spawned it. The fd is intentionally leaked (kept open until exit).
+    import fcntl as _fcntl
+    _lock_path = os.path.join(jarvis_dir, "data", ".heartbeat_loop.lock")
+    try:
+        os.makedirs(os.path.dirname(_lock_path), exist_ok=True)
+        _lock_fd = open(_lock_path, "w")
+        _fcntl.flock(_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+    except OSError:
+        log("heartbeat", "another heartbeat_loop holds the singleton lock — exiting",
+            level="warn")
+        sys.exit(0)
 
     run_loop(
         jarvis_dir=jarvis_dir,

@@ -31,7 +31,8 @@ sys.path.insert(0, str(ROOT))
 
 from core.intentions import (
     mark_executed, mark_failed, get_intent, record_closure,
-    read_inflight, reconcile_inflight, clear_breaches, validate_envelope,
+    read_inflight, read_inflight_breaches, reconcile_inflight,
+    mark_breaches_shown, validate_envelope,
 )
 from core.card import build_card
 from core.safety import parse_json_response
@@ -146,15 +147,17 @@ def _closure_buttons(button_specs: list) -> list[dict]:
 
 def main():
     raw = sys.stdin.read().strip()
-    if not raw:
-        return
-
     inflight = read_inflight()
+    if not raw and not inflight:
+        return  # nothing to do and no manifest to reconcile
 
-    if raw == "__NO_ENVELOPE__":
+    if not raw or raw == "__NO_ENVELOPE__":
         # Deterministic no-envelope path (REQ-30b): the runner saw
-        # HEARTBEAT_OK / empty / killed / parse-failure. Nothing was covered;
-        # apply the retry policy to everything inflight.
+        # HEARTBEAT_OK / empty / killed / parse-failure (or empty stdin —
+        # red-team fix: empty stdin must reconcile, never strand the
+        # manifest). Nothing was covered; apply the retry policy to
+        # everything inflight. Breaches that rode this cycle are NOT marked
+        # shown — no card rendered, so their notify budget is untouched.
         result = reconcile_inflight([])
         if result["retried"] or result["expired"]:
             print(f"[intentions_post] no-envelope reconcile: "
@@ -234,19 +237,16 @@ def main():
             if resp and data.get("action") != "silent" and not _is_contentless(resp):
                 user_messages.append(resp)
 
+    # Capture which breaches rode THIS cycle's PRE prompt BEFORE reconcile (it
+    # may queue fresh breaches we must NOT mark shown — they never rode a card).
+    rode_breach_ids = read_inflight_breaches()
+
     # Deterministic reconcile: whatever the envelope did not cover gets the
     # bounded-retry policy NOW (REQ-30c). Also clears the manifest.
     result = reconcile_inflight(covered)
     if result["retried"] or result["expired"]:
         print(f"[intentions_post] reconcile: retried={result['retried']} "
               f"expired={result['expired']}", file=sys.stderr)
-
-    # A parsed envelope means breach apologies (if any rode this cycle's pre
-    # output) were rendered by Claude — retire the queue.
-    try:
-        clear_breaches()
-    except Exception as e:
-        print(f"[intentions_post] breach clear failed: {e}", file=sys.stderr)
 
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())
@@ -255,6 +255,18 @@ def main():
             _ledger_append(covered)
             print(build_card("🎯 Intent", combined, source="intentions",
                              buttons=buttons))
+            # A card actually rendered → the apology (if any breach rode this
+            # cycle's prompt) was delivered. Bump notify_attempts for exactly
+            # those breach ids — NOT reconcile's freshly-queued ones (red-team
+            # fix: the old blanket clear_breaches() wiped the new breach too).
+            fresh = set(result.get("breached", []))
+            to_mark = [b for b in rode_breach_ids if b not in fresh]
+            if to_mark:
+                try:
+                    mark_breaches_shown(to_mark)
+                except Exception as e:
+                    print(f"[intentions_post] mark_breaches_shown failed: {e}",
+                          file=sys.stderr)
 
 
 if __name__ == "__main__":

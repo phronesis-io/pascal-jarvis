@@ -22,7 +22,7 @@ sys.path.insert(0, os.environ['JARVIS_DIR'])
 
 from core.intentions import (
     get_due_intents, mark_triggered, generate_calendar_intents,
-    lifecycle_sweep, snapshot_active_intents, write_inflight, drain_breaches,
+    lifecycle_sweep, snapshot_active_intents, write_inflight, peek_breaches,
 )
 from pathlib import Path
 
@@ -49,23 +49,27 @@ try:
 except Exception as e:
     print(f"[intentions] Snapshot error: {e}", file=sys.stderr)
 
-# 2. Check for due intents + breach notifications owed
+# 2. Check for due intents + breach notifications owed. peek_breaches is
+#    NON-mutating (red-team fix): the notify_attempts counter is bumped by
+#    intentions_post ONLY when a card actually renders, never per pre-run.
 due = get_due_intents()
 try:
-    breaches = drain_breaches()
+    breaches = peek_breaches()
 except Exception as e:
-    print(f"[intentions] breach drain error: {e}", file=sys.stderr)
+    print(f"[intentions] breach peek error: {e}", file=sys.stderr)
     breaches = []
 
 if not due and not breaches:
     sys.exit(0)  # Empty output → heartbeat skips
 
 # 3. Mark as triggered (prevents re-pickup next cycle) and persist the
-#    inflight manifest — the deterministic execution-ack (REQ-30).
+#    inflight manifest — the deterministic execution-ack (REQ-30). The breach
+#    ids riding THIS cycle's prompt are recorded so post marks exactly those
+#    shown (not a blanket wipe that would eat reconcile's fresh breaches).
 for intent in due:
     mark_triggered(intent["id"])
 try:
-    write_inflight([i["id"] for i in due])
+    write_inflight([i["id"] for i in due], breach_ids=[b.get("id", "") for b in breaches])
 except Exception as e:
     print(f"[intentions] inflight manifest write error: {e}", file=sys.stderr)
 

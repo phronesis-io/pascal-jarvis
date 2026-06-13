@@ -167,7 +167,13 @@ class ActionProcessor:
         # loop).
         p = parse_params(raw)
         task = p.get("task", "") or "intention-check"
-        Path("/tmp/jarvis-heartbeat-trigger").write_text(task)
+        # APPEND one line per force (red-team fix): the old write_text both
+        # (a) truncated-then-wrote → torn reads ('' → full-roster storm), and
+        # (b) last-writer-wins → a concurrent admin 'Run Now' or chat trigger
+        # was silently dropped. An O_APPEND single small write is atomic and
+        # loss-free; heartbeat_loop drains every line per tick.
+        with open("/tmp/jarvis-heartbeat-trigger", "a") as f:
+            f.write(task + "\n")
         return ""
 
     # ── Calendar ──

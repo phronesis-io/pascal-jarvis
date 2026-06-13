@@ -1132,6 +1132,16 @@ heartbeat_watchdog() {
       fi
       find "$JARVIS_DIR/tmp" -type f -mtime +7 -delete 2>/dev/null || true
     fi
+    # Deploy guard (red-team fix): during a restart.sh window the stack is
+    # being torn down on purpose. If the watchdog relaunches heartbeat/stream/
+    # admin here, restart.sh's kill_bot races it and can ORPHAN the relaunched
+    # child (it's no longer in the pidfile the parent's cleanup trap knows).
+    # Skip ALL relaunches while .deploying is fresh. (The heartbeat_loop
+    # singleton flock is the second line of defense.)
+    if [ -f "$JARVIS_DIR/.deploying" ]; then
+      sleep 30
+      continue
+    fi
     if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
       local _now
       _now=$(date +%s)
@@ -1163,27 +1173,33 @@ heartbeat_watchdog() {
       _now=$(date +%s)
       if [ $((_now - _stream_last_fail)) -gt 600 ]; then _stream_fails=0; fi
       _stream_fails=$((_stream_fails + 1)); _stream_last_fail=$_now
-      if [ "$_stream_fails" -lt 4 ]; then
-        log_warn "[watchdog] EF stream PID $STREAM_PID died — restarting (fail #${_stream_fails})"
-        EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}" EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}"           LOG_FILE="$LOG_FILE" python3 -m core.ef_stream_loop 2>>"$LOG_FILE" &
-        STREAM_PID=$!
-        log_info "[watchdog] EF stream restarted (PID: $STREAM_PID)"
-      elif [ "$_stream_fails" -eq 4 ]; then
-        log_warn "[watchdog] EF stream crashed ${_stream_fails}x within 10min — giving up until next reset window"
+      # Mirror the heartbeat branch (red-team fix): restart UNCONDITIONALLY,
+      # only the backoff sleep is gated on the breaker. The old `elif -eq 4`
+      # give-up never recovered — fails kept climbing past 4 (matching no
+      # branch) because the process was never restarted, so the >600s reset
+      # was unreachable and EF PMs stayed dead forever.
+      if [ "$_stream_fails" -ge 4 ]; then
+        log_warn "[watchdog] EF stream crashed ${_stream_fails}x within 10min — backing off 300s before retry"
+        sleep 300
       fi
+      log_warn "[watchdog] EF stream PID $STREAM_PID died — restarting (fail #${_stream_fails})"
+      EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}" EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}" \
+        LOG_FILE="$LOG_FILE" python3 -m core.ef_stream_loop 2>>"$LOG_FILE" &
+      STREAM_PID=$!
+      log_info "[watchdog] EF stream restarted (PID: $STREAM_PID)"
     fi
     if [ "$ADMIN_ENABLED" = "true" ] && [ -n "${ADMIN_PID:-}" ] && ! kill -0 "$ADMIN_PID" 2>/dev/null; then
       _now=$(date +%s)
       if [ $((_now - _admin_last_fail)) -gt 600 ]; then _admin_fails=0; fi
       _admin_fails=$((_admin_fails + 1)); _admin_last_fail=$_now
-      if [ "$_admin_fails" -lt 4 ]; then
-        log_warn "[watchdog] Admin PID $ADMIN_PID died — restarting (fail #${_admin_fails})"
-        python3 "$JARVIS_DIR/admin.py" >>"$LOG_FILE" 2>&1 &
-        ADMIN_PID=$!
-        log_info "[watchdog] Admin restarted (PID: $ADMIN_PID)"
-      elif [ "$_admin_fails" -eq 4 ]; then
-        log_warn "[watchdog] Admin crashed ${_admin_fails}x within 10min — giving up until next reset window (likely port conflict)"
+      if [ "$_admin_fails" -ge 4 ]; then
+        log_warn "[watchdog] Admin crashed ${_admin_fails}x within 10min — backing off 300s before retry (likely port conflict)"
+        sleep 300
       fi
+      log_warn "[watchdog] Admin PID $ADMIN_PID died — restarting (fail #${_admin_fails})"
+      python3 "$JARVIS_DIR/admin.py" >>"$LOG_FILE" 2>&1 &
+      ADMIN_PID=$!
+      log_info "[watchdog] Admin restarted (PID: $ADMIN_PID)"
     fi
     sleep 30
   done

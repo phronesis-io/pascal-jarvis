@@ -572,7 +572,10 @@ def test_inflight_manifest_reconcile(intent_db, tmp_path, monkeypatch):
     assert mod.read_inflight() == []                 # manifest cleared
 
 
-def test_breach_queue_drain_and_clear(intent_db, tmp_path, monkeypatch):
+def test_breach_queue_peek_and_mark_shown(intent_db, tmp_path, monkeypatch):
+    """Red-team fix: peek is NON-mutating (counter only advances on a rendered
+    card via mark_breaches_shown), so a no-envelope cycle can't silently burn
+    the notify budget."""
     import core.intentions as mod
     from core.timeutil import now_local
 
@@ -582,12 +585,57 @@ def test_breach_queue_drain_and_clear(intent_db, tmp_path, monkeypatch):
               "trigger_config": '{"datetime": "2026-06-12T18:00:00"}'}
     mod._queue_breach(intent, now_local())
 
-    drained = mod.drain_breaches()
-    assert len(drained) == 1 and drained[0]["id"] == "int_x"
-    assert drained[0]["notify_attempts"] == 1
+    # peek does NOT bump — repeatable, budget untouched on no-render cycles
+    assert [b["id"] for b in mod.peek_breaches()] == ["int_x"]
+    assert mod.peek_breaches()[0].get("notify_attempts", 0) == 0
+    assert mod.peek_breaches()[0].get("notify_attempts", 0) == 0  # still 0
 
-    mod.clear_breaches()
-    assert mod.drain_breaches() == []
+    # a rendered card marks it shown (bump); after 3 it retires
+    mod.mark_breaches_shown(["int_x"])
+    assert mod.peek_breaches()[0]["notify_attempts"] == 1
+    mod.mark_breaches_shown(["int_x"])
+    mod.mark_breaches_shown(["int_x"])               # 3rd → dropped
+    assert mod.peek_breaches() == []
+
+    # back-compat alias drain_breaches == peek_breaches (non-mutating)
+    assert mod.drain_breaches is mod.peek_breaches
+
+
+def test_reconcile_breach_survives_post_clear(intent_db, tmp_path, monkeypatch):
+    """Red-team fix: a breach freshly queued by reconcile_inflight must NOT be
+    wiped by the same post-cycle's mark-shown (it never rode a card)."""
+    import core.intentions as mod
+    from datetime import timedelta
+    from core.timeutil import now_local
+
+    monkeypatch.setattr(mod, "BREACH_QUEUE", tmp_path / "breach.jsonl")
+    monkeypatch.setattr(mod, "INFLIGHT_FILE", tmp_path / "inflight.json")
+
+    # An old breach already in the queue rode this cycle's PRE prompt (id A);
+    # reconcile then exhausts B and queues it fresh.
+    old = (now_local() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    a = mod.create_intent(name="a", trigger_type="date", trigger_config={"datetime": old})
+    b = mod.create_intent(name="b", trigger_type="date", trigger_config={"datetime": old})
+    mod._queue_breach({"id": a, "name": "a", "prompt": "pa", "attempt": 3,
+                       "trigger_type": "date", "trigger_config": '{"datetime": "%s"}' % old},
+                      now_local())
+    mod.mark_triggered(b)
+    # exhaust b's attempts so reconcile expires + breaches it
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET attempt = ? WHERE id = ?", (mod.MAX_ATTEMPTS, b))
+    conn.commit(); conn.close()
+    mod.write_inflight([b], breach_ids=[a])
+
+    result = mod.reconcile_inflight([])            # b uncovered → expired + breached
+    assert b in result["breached"]
+    # mark only the breach that rode the card (a), NOT reconcile's fresh b
+    fresh = set(result["breached"])
+    mod.mark_breaches_shown([x for x in [a] if x not in fresh])
+    entries = {x["id"]: x for x in mod.peek_breaches()}
+    assert b in entries                            # reconcile's fresh breach survived
+    assert entries[b]["notify_attempts"] == 0      # b never rode a card → budget intact
+    assert a in entries                            # a shown once (1 < 3) → still queued
+    assert entries[a]["notify_attempts"] == 1
 
 
 def test_closure_stats_funnel(intent_db):
@@ -655,3 +703,29 @@ def test_cancel_awaiting_parent_sets_na_and_cancels_followup(intent_db):
     cancel_intent(pid, "no longer relevant")
     assert get_intent(pid)["closure_status"] == "na"
     assert get_intent(fu_id)["status"] == "cancelled"
+
+
+def test_cron_next_fire_anchors_to_fired_occurrence(intent_db, monkeypatch):
+    """Red-team fix: a slow/late mark_executed must advance next_fire_at from
+    the FIRED occurrence, not wall-clock now — else a late post skips every
+    intervening occurrence (hourly intent loses the 14:00 beat if post runs
+    at 14:03)."""
+    import core.intentions as mod
+    from datetime import datetime, timedelta
+    from core.timeutil import now_local
+
+    pid = mod.create_intent(name="hourly", trigger_type="cron",
+                            trigger_config={"expression": "0 * * * *"})
+    # Simulate: occurrence was 13:00, but we're marking executed late.
+    fired = now_local().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET next_fire_at = ? WHERE id = ?",
+                 (fired.replace(tzinfo=None).isoformat(), pid))
+    conn.commit(); conn.close()
+
+    mod.mark_executed(pid)
+    row = mod.get_intent(pid)
+    nxt = datetime.fromisoformat(row["next_fire_at"]).replace(tzinfo=None)
+    # Next fire must be the occurrence right AFTER the fired one (fired+1h),
+    # not jumped to now+1h — catch-up preserved.
+    assert nxt == fired.replace(tzinfo=None) + timedelta(hours=1)

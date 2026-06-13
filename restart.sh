@@ -106,6 +106,14 @@ kill_bot() {
   # Kill all bot.sh and lark-cli event processes
   pkill -f "bash.*$JARVIS_DIR/bot\\.sh" 2>/dev/null || true
   pkill -f "lark-cli event|lark_event_sidecar" 2>/dev/null || true
+  # Reap orphaned python children (red-team fix): the REQ-42 restart hand-off
+  # could leave a watchdog-relaunched heartbeat_loop / ef_stream_loop / admin
+  # the parent's cleanup trap no longer knows about. The heartbeat_loop
+  # singleton flock makes a duplicate exit anyway; reaping here guarantees no
+  # stale loop survives a restart.
+  pkill -f "core\\.heartbeat_loop" 2>/dev/null || true
+  pkill -f "core\\.ef_stream_loop" 2>/dev/null || true
+  pkill -f "$JARVIS_DIR/admin\\.py" 2>/dev/null || true
 
   # Kill stuck claude sessions (lock format: "<pid> <token>")
   for lock in "$JARVIS_DIR"/.session_lock_*; do

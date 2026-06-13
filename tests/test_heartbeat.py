@@ -420,3 +420,17 @@ def test_ack_task_prompt_forbids_bare_heartbeat_ok(tmp_path, monkeypatch):
     p = captured["prompt"]
     assert "NEVER reply with a bare HEARTBEAT_OK" in p
     assert "reply with exactly: HEARTBEAT_OK" not in p
+
+
+def test_degenerate_ack_slice_routes_to_no_envelope(tmp_path, monkeypatch):
+    """Red-team fix: an envelope present but with a degenerate intention-check
+    slice (empty string) must route to the ACK __NO_ENVELOPE__ reconcile path,
+    not fall through and double-process."""
+    runner, stdin_log = _ack_runner(tmp_path)
+    envelope = json.dumps({"tasks": {"intention-check": "  ", "other-task": "ok"},
+                           "user_message": ""})
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+    runner.run_cycle(force=True)
+    contents = stdin_log.read_text()
+    # ACK post invoked exactly once with the no-envelope sentinel
+    assert contents.count("__NO_ENVELOPE__") == 1

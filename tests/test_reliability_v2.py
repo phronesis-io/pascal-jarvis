@@ -271,3 +271,50 @@ def test_daemon_deploy_guard(tmp_path, monkeypatch):
     result = daemon_mod.check_health()
     assert result["healthy"] is False
     assert not (tmp_path / ".deploying").exists()
+
+
+def test_empty_pre_advances_last_success(tmp_path, monkeypatch):
+    """Red-team fix: a clean empty pre (exit 0, nothing to do) is a HEALTHY
+    cycle and must advance last_success — else empty-pre-dominant tasks
+    (intention-check, memory-hourly) are falsely flagged STARVED."""
+    from core.heartbeat import HeartbeatRunner
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("### t\n- interval: 1h\n- pre: tasks/pre.sh\n- prompt: x\n")
+    jarvis_dir = tmp_path / "jarvis"
+    (jarvis_dir / "tasks").mkdir(parents=True)
+    memory_dir = tmp_path / "memory"; memory_dir.mkdir()
+    runner = HeartbeatRunner(jarvis_dir=jarvis_dir, heartbeat_file=hb,
+                             state_file=tmp_path / "state.json",
+                             memory_dir=memory_dir, idle_judge=False)
+    def fake_run_script(path, stdin_data=""):
+        runner._last_script_outcome = "ok"   # clean exit, just empty output
+        return ""
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert state["t"]["last_status"] == "empty_pre"
+    assert state["t"]["last_success"] > 0       # healthy empty advances truth watermark
+
+
+def test_pre_timeout_does_not_advance_last_success(tmp_path, monkeypatch):
+    """Contrast: a pre TIMEOUT leaves last_success stale (the real channel-dead
+    signal watermarks must catch)."""
+    from core.heartbeat import HeartbeatRunner
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("### t\n- interval: 1h\n- pre: tasks/pre.sh\n- prompt: x\n")
+    jarvis_dir = tmp_path / "jarvis"
+    (jarvis_dir / "tasks").mkdir(parents=True)
+    memory_dir = tmp_path / "memory"; memory_dir.mkdir()
+    runner = HeartbeatRunner(jarvis_dir=jarvis_dir, heartbeat_file=hb,
+                             state_file=tmp_path / "state.json",
+                             memory_dir=memory_dir, idle_judge=False)
+    def fake_run_script(path, stdin_data=""):
+        runner._last_script_outcome = "timeout"
+        return ""
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert state["t"]["last_status"] == "pre_timeout"
+    assert state["t"].get("last_success", 0) == 0   # stays stale → STARVED-detectable

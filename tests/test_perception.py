@@ -207,14 +207,26 @@ def _mail_msgs(*rows):
             for d, f, s, m in rows]
 
 
+# The first-run lookback cursor (lark_mail.FIRST_RUN_LOOKBACK_H=24) is relative
+# to wall-clock NOW, so a hardcoded recent date eventually falls behind the
+# window and the tests flake the moment real time crosses that date + 24h
+# (observed 2026-06-13). Use a timestamp a few hours ago so "recent" is ALWAYS
+# inside the 24h window regardless of when the suite runs.
+def _recent_mail_date(hours_ago: float = 2.0) -> str:
+    import time as _t
+    return _t.strftime("%Y-%m-%d %H:%M", _t.localtime(_t.time() - hours_ago * 3600))
+
+
 def test_lark_mail_collects_and_advances_cursor(monkeypatch):
     from sources import lark_mail
     calls = []
 
+    recent = _recent_mail_date()
+
     def fake_triage(mailbox, folder):
         calls.append(mailbox)
         return _mail_msgs(
-            ("2026-06-12 12:00", "alice@x.com", "Hello", "MID1"),
+            (recent, "alice@x.com", "Hello", "MID1"),
             ("2020-01-01 00:00", "old@x.com", "Ancient", "MID0"),
         )
 
@@ -227,7 +239,7 @@ def test_lark_mail_collects_and_advances_cursor(monkeypatch):
     assert "alice@x.com" in signals[0]["summary"]
     # body is metadata-only: never ingests mail content
     assert "MID1" in signals[0]["body"] and "Hello" in signals[0]["body"]
-    assert state["cursors"]["me"] == "2026-06-12 12:00"
+    assert state["cursors"]["me"] == recent
     assert state["error_type"] is None
 
     # second run with same payload: cursor admits the boundary message
@@ -238,13 +250,14 @@ def test_lark_mail_collects_and_advances_cursor(monkeypatch):
 
 def test_lark_mail_exclude_from_filters_but_advances_cursor(monkeypatch):
     from sources import lark_mail
+    recent = _recent_mail_date()
     monkeypatch.setattr(lark_mail, "_triage", lambda mb, f: _mail_msgs(
-        ("2026-06-12 12:00", "noreply-dmarc-support@google.com", "Report", "MIDD"),
+        (recent, "noreply-dmarc-support@google.com", "Report", "MIDD"),
     ))
     signals, state = lark_mail.collect(
         {"mailboxes": ["me"], "exclude_from": ["dmarc"]}, {})
     assert signals == []
-    assert state["cursors"]["me"] == "2026-06-12 12:00"
+    assert state["cursors"]["me"] == recent
 
 
 def test_lark_mail_error_isolated_per_mailbox(monkeypatch):
@@ -253,7 +266,7 @@ def test_lark_mail_error_isolated_per_mailbox(monkeypatch):
     def fake_triage(mailbox, folder):
         if mailbox == "broken@x.com":
             raise RuntimeError("network")
-        return _mail_msgs(("2026-06-12 12:00", "a@x.com", "Hi", "MID9"))
+        return _mail_msgs((_recent_mail_date(), "a@x.com", "Hi", "MID9"))
 
     monkeypatch.setattr(lark_mail, "_triage", fake_triage)
     signals, state = lark_mail.collect(

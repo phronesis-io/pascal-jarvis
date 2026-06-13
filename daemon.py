@@ -108,20 +108,40 @@ def notify_lark(msg: str):
 
     dead_letter = JARVIS_DIR / "alerts_deadletter.jsonl"
     if ok:
-        # Flush any dead letters from earlier outages (best effort, one shot)
+        # Flush ALL dead letters from earlier outages, and only delete the
+        # file if the re-send actually succeeded (red-team fix: the old code
+        # took only the last 10 — silently dropping older alerts — and
+        # unlinked unconditionally, losing everything if the flush itself
+        # failed).
         if dead_letter.exists():
             try:
-                lines = dead_letter.read_text().splitlines()[-10:]
-                pending = [json.loads(l).get("msg", "") for l in lines if l.strip()]
+                lines = [l for l in dead_letter.read_text().splitlines() if l.strip()]
+                pending = []
+                for l in lines:
+                    try:
+                        pending.append(json.loads(l).get("msg", ""))
+                    except (json.JSONDecodeError, ValueError):
+                        continue
                 if pending:
-                    subprocess.run(
-                        ["lark-cli", "im", "+messages-send", "--user-id", USER_ID,
-                         "--markdown", "🛡️ **Guardian Daemon**（补发告警 — 当时 Lark 链路不通）\n\n"
-                         + "\n---\n".join(pending), "--as", "bot"],
-                        capture_output=True, text=True, timeout=15)
-                dead_letter.unlink(missing_ok=True)
+                    # Chunk so a huge backlog can't exceed message limits;
+                    # only unlink if every chunk sent.
+                    all_sent = True
+                    for i in range(0, len(pending), 10):
+                        chunk = pending[i:i + 10]
+                        r2 = subprocess.run(
+                            ["lark-cli", "im", "+messages-send", "--user-id", USER_ID,
+                             "--markdown", "🛡️ **Guardian Daemon**（补发告警 — 当时 Lark 链路不通）\n\n"
+                             + "\n---\n".join(chunk), "--as", "bot"],
+                            capture_output=True, text=True, timeout=15)
+                        if r2.returncode != 0:
+                            all_sent = False
+                            break
+                    if all_sent:
+                        dead_letter.unlink(missing_ok=True)
+                else:
+                    dead_letter.unlink(missing_ok=True)  # only unparseable junk
             except Exception:
-                pass
+                pass  # leave the file for the next successful notify
         return
 
     # Lark failed → local banner + dead letter
@@ -278,9 +298,25 @@ _probe_alert_stamps: dict = {}
 PROBE_ALERT_WINDOW = 4 * 3600
 
 
+def _in_deploy_window() -> bool:
+    """True while a restart.sh deploy is in progress (.deploying < 30min old).
+    Shared by check_health and probe_observed_components so the deploy guard
+    can't drift between them (red-team fix)."""
+    deploying = JARVIS_DIR / ".deploying"
+    try:
+        return deploying.exists() and time.time() - deploying.stat().st_mtime < 1800
+    except OSError:
+        return False
+
+
 def probe_observed_components():
     """Alert (never restart) when :3456/:3457 are down — the dashboard died
     for 23 days because nothing watched it. Errors here never raise."""
+    # During a restart window the stack is legitimately down — probing here
+    # would fire false 'component DOWN' alerts (red-team fix: the probe ran
+    # OUTSIDE check_health's deploy guard).
+    if _in_deploy_window():
+        return
     import urllib.request
     for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),
                       ("dashboard :3457", "http://127.0.0.1:3457/")):

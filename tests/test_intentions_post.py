@@ -84,8 +84,9 @@ def _isolate_state(monkeypatch):
     ones from a test."""
     monkeypatch.setattr(ip, "read_inflight", lambda: [])
     monkeypatch.setattr(ip, "reconcile_inflight",
-                        lambda covered: {"retried": [], "expired": []})
-    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
     monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
 
 
@@ -108,7 +109,7 @@ def test_no_envelope_sentinel_reconciles_everything(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(ip, "reconcile_inflight",
                         lambda covered: (calls.append(covered),
-                                         {"retried": ["int_b"], "expired": []})[1])
+                                         {"retried": ["int_b"], "expired": [], "breached": []})[1])
     monkeypatch.setattr(ip, "read_inflight", lambda: ["int_b"])
     monkeypatch.setattr("sys.stdin", _Stdin("__NO_ENVELOPE__"))
     ip.main()
@@ -123,8 +124,9 @@ def test_envelope_reconciles_covered_ids(monkeypatch, capsys):
     monkeypatch.setattr(ip, "read_inflight", lambda: ["int_a", "int_b"])
     monkeypatch.setattr(ip, "reconcile_inflight",
                         lambda covered: (recon_calls.append(sorted(covered)),
-                                         {"retried": [], "expired": []})[1])
-    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+                                         {"retried": [], "expired": [], "breached": []})[1])
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
     monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent", lambda iid: {"parent_intent_id": None})
@@ -140,8 +142,9 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
     import json
     monkeypatch.setattr(ip, "read_inflight", lambda: ["int_fu"])
     monkeypatch.setattr(ip, "reconcile_inflight",
-                        lambda covered: {"retried": [], "expired": []})
-    monkeypatch.setattr(ip, "clear_breaches", lambda ids=None: None)
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
     monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent",
