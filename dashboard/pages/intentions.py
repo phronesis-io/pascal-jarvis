@@ -134,30 +134,80 @@ def expired_autopsy(limit: int = 20) -> list[dict]:
     return out
 
 
-def rearm_intent(intent_id: str) -> bool:
-    """一键复活: status='pending'、attempt=0、10 分钟后触发 (REQ-45).
+def rearm_intent(intent_id: str) -> bool | str:
+    """一键复活: status='pending'、attempt=0、清 expires_at、重锚调度 (REQ-45).
 
-    date intent 改写 trigger_config.datetime = now+10min；非 date（cron/
-    interval）只复位状态，不能动 trigger_config（会摧毁表达式）。
-    attempt 不在 update_intent 白名单内，直接 UPDATE 归零。
+    Returns False if the intent is missing, else a short human description of
+    when it will next fire (truthy) so the toast can be honest per trigger type.
+
+    expires_at MUST be cleared: many expired date rows carry a PAST expires_at,
+    and get_due_intents() runs cleanup_expired() first — which flips a re-armed
+    'pending' row straight back to 'expired' (WHERE expires_at < now) before it
+    can ever fire (silent re-expiry, success toast lying).
+
+    Per trigger type:
+    - date: rewrite trigger_config.datetime = now+10min.
+    - cron: trigger_config (the expression) is untouched — overwriting it with a
+      datetime would destroy the schedule. Instead recompute next_fire_at via
+      cron_next() so a stale-past watermark doesn't fire instantly, nor a future
+      one get skipped as >CRON_STALENESS late.
+    - interval: re-anchor the schedule by resetting created_at=now (the interval
+      due-check anchors on created_at), so it fires within one interval rather
+      than instantly off a stale anchor.
+    All status/expires_at/attempt/anchor writes land so the row is never left
+    half-updated. next_fire_at/created_at/attempt are not in update_intent's
+    allowed set — written via a direct UPDATE on the same connection.
     """
     mod = _get_intentions_module()
     mod._init()
     it = mod.get_intent(intent_id)
     if not it:
         return False
-    updates: dict = {"status": "pending"}
-    if it.get("trigger_type") == "date":
-        new_dt = (now_local() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
-        updates["trigger_config"] = {"datetime": new_dt}
-    ok = mod.update_intent(intent_id, **updates)
+
+    tt = it.get("trigger_type")
     db = mod._get_db()
+
+    if tt == "date":
+        new_dt = (now_local() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        # trigger_config + status + expires_at via update_intent (all allowed);
+        # attempt/last_error via a direct UPDATE (not in the allowed set).
+        mod.update_intent(intent_id, status="pending",
+                          trigger_config={"datetime": new_dt}, expires_at=None)
+        db.execute(
+            "UPDATE intentions SET attempt = 0, last_error = ? WHERE id = ?",
+            ("re-armed from dashboard (+10min)", intent_id),
+        )
+        db.commit()
+        return "10分钟后触发"
+
+    if tt == "cron":
+        try:
+            tc = json.loads(it["trigger_config"]) if isinstance(it["trigger_config"], str) else (it["trigger_config"] or {})
+        except (json.JSONDecodeError, TypeError):
+            tc = {}
+        expr = tc.get("expression", "")
+        from dashboard.scheduler import cron_next
+        nxt = cron_next(expr, after=now_local())
+        nxt_iso = nxt.isoformat() if nxt else None
+        mod.update_intent(intent_id, status="pending", expires_at=None)
+        db.execute(
+            "UPDATE intentions SET attempt = 0, last_error = ?, next_fire_at = ? WHERE id = ?",
+            ("re-armed from dashboard (cron re-anchored)", nxt_iso, intent_id),
+        )
+        db.commit()
+        if nxt:
+            return f"下次触发: {nxt.strftime('%m/%d %H:%M')}"
+        return "已复活 (cron 表达式无效，无法计算下次触发)"
+
+    # interval (and any other non-date/non-cron): re-anchor on created_at=now.
+    new_anchor = now_local().strftime("%Y-%m-%dT%H:%M:%S")
+    mod.update_intent(intent_id, status="pending", expires_at=None)
     db.execute(
-        "UPDATE intentions SET attempt = 0, last_error = ? WHERE id = ?",
-        ("re-armed from dashboard (+10min)", intent_id),
+        "UPDATE intentions SET attempt = 0, last_error = ?, created_at = ? WHERE id = ?",
+        ("re-armed from dashboard (interval re-anchored)", new_anchor, intent_id),
     )
     db.commit()
-    return ok
+    return "一个周期内触发"
 
 
 def awaiting_age_days(intent: dict, now: datetime | None = None) -> float:
@@ -303,8 +353,9 @@ def intentions_page():
                                     ui.label(intent["last_error"][:120]).classes("text-xs text-red-400")
 
                             async def rearm_click(iid=intent["id"]):
-                                if rearm_intent(iid):
-                                    ui.notify("已复活：10 分钟后触发", type="positive")
+                                result = rearm_intent(iid)
+                                if result:
+                                    ui.notify(f"已复活：{result}", type="positive")
                                 else:
                                     ui.notify("复活失败", type="negative")
                                 content.refresh()

@@ -91,12 +91,22 @@ def _get_post_token() -> str:
     token = ""
     try:
         if path.exists():
+            # Defensive self-heal: a previously-leaked file (created 0644 before
+            # an earlier chmod, or chmod failed) tightens itself on next read.
+            if path.stat().st_mode & 0o077:
+                os.chmod(path, 0o600)
             token = path.read_text(encoding="utf-8").strip()
         if not token:
             import secrets
             token = secrets.token_hex(16)
-            path.write_text(token + "\n", encoding="utf-8")
-            os.chmod(path, 0o600)
+            # Create atomically at 0600 — write_text()+chmod left a window at
+            # 0644 (umask default), and if chmod ever failed the 0644 file
+            # persisted (later reads skip the chmod). O_CREAT honours the mode.
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (token + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
     except OSError as e:
         print(f"[admin] cannot read/create .admin_token: {e}", file=sys.stderr)
         token = ""
@@ -947,21 +957,31 @@ def rearm_intent(intent_id: str) -> dict:
         return {"error": "intent not found"}
     target = (now_local().replace(tzinfo=None) + timedelta(minutes=10)) \
         .strftime("%Y-%m-%dT%H:%M:%S")
-    if intent.get("trigger_type") == "cron":
-        intentions.update_intent(intent_id, status="pending", expires_at=None)
-        db = intentions._get_db()
-        db.execute("UPDATE intentions SET attempt = 0, next_fire_at = ?, "
-                   "last_error = NULL WHERE id = ?", (target, intent_id))
+    db = intentions._get_db()
+    tt = intent.get("trigger_type")
+    # ONE statement + ONE commit per branch (red-team fix): the cron path used
+    # to update_intent() [commit] then a second UPDATE [commit], leaving a
+    # cross-process window where a heartbeat could read pending + stale-past
+    # next_fire_at and fire/skip the occurrence unintentionally. Folding every
+    # column (status, expires_at=NULL, attempt=0, the schedule anchor,
+    # last_error=NULL) into a single atomic UPDATE closes that window.
+    # expires_at=NULL is mandatory: a past expires_at lets cleanup_expired()
+    # re-kill the row before it can fire.
+    if tt == "cron":
+        db.execute(
+            "UPDATE intentions SET status = 'pending', expires_at = NULL, "
+            "attempt = 0, next_fire_at = ?, last_error = NULL WHERE id = ?",
+            (target, intent_id))
         db.commit()
     else:
-        intentions.update_intent(intent_id, status="pending",
-                                 trigger_config={"datetime": target},
-                                 expires_at=None)
-        # attempt is deliberately NOT in update_intent's allowed set —
-        # reset it directly (spec: rearm restarts the retry budget).
-        db = intentions._get_db()
-        db.execute("UPDATE intentions SET attempt = 0, last_error = NULL "
-                   "WHERE id = ?", (intent_id,))
+        # date/interval/event: rewrite the trigger_config datetime in the same
+        # statement (json-encoded inline). Overwriting a cron's config with a
+        # datetime would destroy the schedule — hence the separate branch.
+        tc = json.dumps({"datetime": target}, ensure_ascii=False)
+        db.execute(
+            "UPDATE intentions SET status = 'pending', expires_at = NULL, "
+            "attempt = 0, trigger_config = ?, last_error = NULL WHERE id = ?",
+            (tc, intent_id))
         db.commit()
     return {"ok": True, "id": intent_id, "next_fire": target}
 
@@ -1672,6 +1692,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, status=404)
 
+    @staticmethod
+    def _pid_is_claude(pid: int) -> bool:
+        """True only when `pid`'s command line names a claude/handler process.
+
+        Guards stop_task's SIGKILL against a recycled pid: a stale lock can hold
+        a number the OS has since handed to an unrelated process, and killing
+        that would be a murder we never want. `ps -o command= -p <pid>` prints
+        the full command of a live pid (empty/non-zero for a gone pid); we
+        require 'claude' in it (the handler spawns `claude -p --resume/...`).
+        Any failure (ps error/timeout/no output) → not ours → False.
+        """
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=3)
+        except Exception:
+            return False
+        if out.returncode != 0:
+            return False
+        return "claude" in out.stdout
+
     def _stop_task(self) -> dict:
         """Kill running session handlers honestly (REQ-47①).
 
@@ -1683,10 +1723,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         Rules: take the FIRST whitespace field; skip 'acquiring' (holder is
         mid-acquire, no pid yet); kill only numeric pids; unlink ONLY after
         the holder is confirmed dead (kill -0 → ProcessLookupError).
+
+        Identity check (red-team fix): a numeric pid is no proof the lock is
+        still ours. If the lock is stale and the OS recycled the pid, blindly
+        SIGKILLing it murders an innocent process — strictly worse than the
+        pre-change behaviour (which never killed). Before kill, verify the
+        process command line contains 'claude' (the handler runs
+        `claude -p --resume/--session-id`). If it does NOT match, the lock is
+        stale: do NOT kill — just unlink it and count it as `cleaned`.
         """
         import glob as _glob
         killed = 0   # actually SIGKILLed and confirmed dead
-        cleaned = 0  # holder was already dead — stale lock removed
+        cleaned = 0  # holder dead OR pid recycled to a non-claude process — stale lock removed
         skipped = 0  # acquiring / malformed / could-not-confirm-dead
         for lock in _glob.glob(str(ROOT / ".session_lock_*")):
             lock_path = Path(lock)
@@ -1700,6 +1748,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 skipped += 1  # no pid to kill — and the lock is NOT ours to delete
                 continue
             pid = int(first)
+            # Identity check: only a live claude/handler process is ours to kill.
+            # A recycled pid running something else means the lock is stale —
+            # treat it as a cleanup, never a kill.
+            if not self._pid_is_claude(pid):
+                lock_path.unlink(missing_ok=True)
+                cleaned += 1
+                continue
             already_dead = False
             try:
                 os.kill(pid, 9)

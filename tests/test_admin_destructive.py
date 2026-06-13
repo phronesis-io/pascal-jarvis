@@ -97,12 +97,17 @@ def _post(url, data=None, token=TEST_TOKEN, ctype="application/json"):
 
 # ── REQ-47① stop_task ────────────────────────────────────────────────
 
-def test_stop_task_kills_two_field_lock_holder_and_unlinks(server):
+def test_stop_task_kills_two_field_lock_holder_and_unlinks(server, monkeypatch):
     """The real lock format is '<pid> <token>' — the old int() parse ALWAYS
-    raised and never killed anything. A live dummy holder must actually die,
-    and its lock must be removed only after death is confirmed."""
+    raised and never killed anything. A live dummy holder (verified as ours by
+    the identity check) must actually die, and its lock must be removed only
+    after death is confirmed."""
     base, ctx = server
     root = ctx["root"]
+    # The dummy holder is `sleep`, not a real `claude` process — pin the
+    # identity check True so the actual SIGKILL path is exercised.
+    monkeypatch.setattr(admin_mod.Handler, "_pid_is_claude",
+                        staticmethod(lambda pid: True))
     child = subprocess.Popen(["sleep", "300"])
     lock = root / ".session_lock_sess-a"
     lock.write_text(f"{child.pid} {os.getpid()}.1765593600.12345")
@@ -119,6 +124,28 @@ def test_stop_task_kills_two_field_lock_holder_and_unlinks(server):
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def test_stop_task_does_not_kill_recycled_non_claude_pid(server):
+    """Identity check (red-team fix): a stale lock can name a pid the OS has
+    recycled to an UNRELATED process. stop_task must NOT SIGKILL it — the
+    holder is a live `sleep`, whose `ps` command lacks 'claude'. The innocent
+    process survives; the stale lock is cleaned (not killed)."""
+    base, ctx = server
+    root = ctx["root"]
+    child = subprocess.Popen(["sleep", "300"])  # live, but NOT a claude handler
+    lock = root / ".session_lock_recycled"
+    lock.write_text(f"{child.pid} sometoken.123")
+    try:
+        status, body = _post(f"{base}/api/bot/stop_task")
+        assert status == 200
+        assert body["killed"] == 0            # the innocent pid was NOT killed
+        assert body["cleaned"] == 1           # stale lock removed instead
+        assert child.poll() is None           # still alive
+        assert not lock.exists()
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_stop_task_skips_acquiring_lock(server):
@@ -138,11 +165,15 @@ def test_stop_task_skips_acquiring_lock(server):
     assert lock.read_text().startswith("acquiring")
 
 
-def test_stop_task_does_not_unlink_while_holder_alive(server):
-    """A holder we cannot kill (pid 1, root-owned → PermissionError) stays
-    alive — its lock must survive. The old code deleted it anyway."""
+def test_stop_task_does_not_unlink_while_holder_alive(server, monkeypatch):
+    """A live claude holder we cannot SIGKILL (pid 1, root-owned →
+    PermissionError) stays alive — its lock must survive. The old code deleted
+    it anyway. Identity check pinned True so this exercises the can't-kill path
+    (the recycled-pid path is covered separately)."""
     base, ctx = server
     root = ctx["root"]
+    monkeypatch.setattr(admin_mod.Handler, "_pid_is_claude",
+                        staticmethod(lambda pid: True))
     lock = root / ".session_lock_sess-c"
     lock.write_text("1 sometoken.123")        # pid 1: alive, not ours to kill
 

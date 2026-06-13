@@ -480,7 +480,10 @@ def test_intents_rearm(server, intent_db):
                         trigger_config={"datetime": "2026-01-01T09:00:00"})
     update_intent(iid, status="expired")
     db = intentions_mod._get_db()
-    db.execute("UPDATE intentions SET attempt = 3 WHERE id = ?", (iid,))
+    # Stamp a PAST expires_at — without clearing it, cleanup_expired() re-kills
+    # the re-armed row (FIX 1/5 shared root, admin side).
+    db.execute("UPDATE intentions SET attempt = 3, "
+               "expires_at = '2026-01-01T00:00:00' WHERE id = ?", (iid,))
     db.commit()
 
     body = _post_ok(f"{base}/api/intents/rearm", {"id": iid})
@@ -488,6 +491,7 @@ def test_intents_rearm(server, intent_db):
     row = get_intent(iid)
     assert row["status"] == "pending"
     assert row["attempt"] == 0
+    assert row["expires_at"] is None  # cleared so cleanup_expired won't re-kill
     target = json.loads(row["trigger_config"])["datetime"]
     assert body["next_fire"] == target
     # fires ~10 minutes out, not in the past
@@ -499,6 +503,36 @@ def test_intents_rearm(server, intent_db):
 
     status, body = _post(f"{base}/api/intents/rearm", {"id": "int_nope"})
     assert status == 404
+
+
+def test_intents_rearm_cron_single_update_sets_next_fire(server, intent_db):
+    """FIX 5: the cron rearm path must be ONE atomic statement+commit — no
+    intermediate pending + stale-past next_fire_at visible to a concurrent
+    heartbeat. Verify status/attempt/expires_at/next_fire_at all land and the
+    cron expression is preserved (never overwritten with a datetime)."""
+    from core.intentions import create_intent, get_intent, update_intent
+    import core.intentions as intentions_mod
+    base, ctx = server
+    iid = create_intent(name="dead cron", trigger_type="cron",
+                        trigger_config={"expression": "0 9 * * *"})
+    update_intent(iid, status="expired")
+    db = intentions_mod._get_db()
+    db.execute("UPDATE intentions SET attempt = 3, next_fire_at = "
+               "'2026-01-01T09:00:00', expires_at = '2026-01-01T00:00:00' "
+               "WHERE id = ?", (iid,))
+    db.commit()
+
+    body = _post_ok(f"{base}/api/intents/rearm", {"id": iid})
+    assert body["ok"] is True
+    row = get_intent(iid)
+    assert row["status"] == "pending"
+    assert row["attempt"] == 0
+    assert row["expires_at"] is None
+    # expression preserved; trigger_config NOT replaced by a datetime
+    cfg = json.loads(row["trigger_config"])
+    assert cfg.get("expression") == "0 9 * * *"
+    assert "datetime" not in cfg
+    assert row["next_fire_at"] == body["next_fire"]
 
 
 # ── EigenFlux status cache (REQ-48③) ──
@@ -585,3 +619,36 @@ def test_richview_route_serves_sanitized(server, monkeypatch, tmp_path):
     assert "<script>alert" not in html
     assert "javascript:" not in html
     assert "<b>bold stays</b>" in html
+
+
+# ── .admin_token permissions (FIX 4) ──────────────────────────────────
+
+def test_admin_token_created_0600(tmp_path, monkeypatch):
+    """FIX 4: .admin_token must be created atomically at 0600. write_text()+
+    chmod left a window at 0644, and a failed chmod left the leak permanent.
+    os.open(O_CREAT, 0o600) closes the window."""
+    import os
+    monkeypatch.setattr(admin_mod, "ROOT", tmp_path)
+    admin_mod._post_token_cache.update(path=None, token="")
+    token = admin_mod._get_post_token()
+    assert token  # a real token was generated
+    tok_path = tmp_path / ".admin_token"
+    assert tok_path.exists()
+    mode = tok_path.stat().st_mode & 0o777
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    # no group/other bits leaked
+    assert tok_path.stat().st_mode & 0o077 == 0
+
+
+def test_admin_token_self_heals_leaked_0644(tmp_path, monkeypatch):
+    """FIX 4: a previously-leaked 0644 token file tightens itself to 0600 on
+    the next read (the defensive re-chmod in the read-existing branch)."""
+    import os
+    monkeypatch.setattr(admin_mod, "ROOT", tmp_path)
+    admin_mod._post_token_cache.update(path=None, token="")
+    tok_path = tmp_path / ".admin_token"
+    tok_path.write_text("preexisting-token\n", encoding="utf-8")
+    os.chmod(tok_path, 0o644)  # simulate the historical leak
+    token = admin_mod._get_post_token()
+    assert token == "preexisting-token"
+    assert tok_path.stat().st_mode & 0o077 == 0  # group/other bits stripped

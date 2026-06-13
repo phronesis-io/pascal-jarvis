@@ -174,6 +174,32 @@ class TestTelemetryTail:
         events = telemetry.read_jsonl_tail(p)
         assert [e["n"] for e in events] == [99]
 
+    def test_rotation_by_rename_rereads_on_inode_change(self, tmp_path):
+        """FIX 6: sched_events rotates by RENAME — the live file is replaced by
+        a FRESH inode that may be LARGER than the cached offset. A size-only
+        reset (size < offset) would keep reading from the stale offset into the
+        new file and miss/garble a generation. A changed inode forces a full
+        re-read."""
+        import os
+        telemetry.reset_cache()
+        p = tmp_path / "ev.jsonl"
+        # gen 1: small file, fully consumed (cache offset advances).
+        _write_jsonl(p, [{"n": 1}, {"n": 2}])
+        assert [e["n"] for e in telemetry.read_jsonl_tail(p)] == [1, 2]
+        ino_before = telemetry._tail_cache[str(p)]["ino"]
+
+        # Rotate by RENAME: replace the live path with a brand-new, LARGER file
+        # whose inode differs (the size grew, so a size-only check would NOT
+        # trigger a reset and would mis-read).
+        os.replace(p, tmp_path / "ev.jsonl.1")
+        _write_jsonl(p, [{"n": 10}, {"n": 11}, {"n": 12}, {"n": 13}])
+        assert p.stat().st_ino != ino_before          # genuinely a new inode
+        assert p.stat().st_size > 0
+
+        events = telemetry.read_jsonl_tail(p)
+        assert [e["n"] for e in events] == [10, 11, 12, 13]
+        assert telemetry._tail_cache[str(p)]["ino"] == p.stat().st_ino
+
     def test_missing_file_and_bad_lines(self, tmp_path):
         telemetry.reset_cache()
         assert telemetry.read_jsonl_tail(tmp_path / "nope.jsonl") == []
@@ -305,6 +331,75 @@ class TestIntentFunnel:
     def test_rearm_unknown_id_is_safe(self, test_db):
         from dashboard.pages.intentions import rearm_intent
         assert rearm_intent("int_nonexistent") is False
+
+    def test_rearm_clears_past_expires_at_survives_cleanup(self, test_db):
+        """FIX 1: a re-armed expired DATE intent must NOT silently re-expire.
+        rearm clears expires_at; get_due_intents() runs cleanup_expired() first
+        (WHERE expires_at < now), so a leftover PAST expires_at would flip the
+        row straight back to 'expired' before it could ever fire."""
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+        ids = self._seed()
+        # Stamp a PAST expires_at on the expired row (the live-DB shape).
+        past = (now_local() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        db = intents._get_db()
+        db.execute("UPDATE intentions SET expires_at=? WHERE id=?",
+                   (past, ids["leak1"]))
+        db.commit()
+        assert rearm_intent(ids["leak1"])
+        assert intents.get_intent(ids["leak1"])["expires_at"] is None
+        # cleanup_expired() must leave the re-armed row pending, not re-kill it.
+        intents.cleanup_expired()
+        assert intents.get_intent(ids["leak1"])["status"] == "pending"
+
+    def test_rearm_cron_recomputes_future_next_fire_at(self, test_db):
+        """FIX 2: a re-armed CRON intent re-anchors next_fire_at to the next
+        match (future), so a stale-past watermark neither fires instantly nor
+        gets skipped as >CRON_STALENESS late. The expression is preserved."""
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+        iid = intents.create_intent(
+            name="daily cron", trigger_type="cron",
+            trigger_config={"expression": "0 9 * * *"}, source="test")
+        db = intents._get_db()
+        # Make it look dead: expired + stale-past next_fire_at + spent retries.
+        stale = (now_local() - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+        db.execute("UPDATE intentions SET status='expired', attempt=3, "
+                   "next_fire_at=?, expires_at=? WHERE id=?",
+                   (stale, stale, iid))
+        db.commit()
+        result = rearm_intent(iid)
+        assert result  # honest, non-date toast string
+        row = intents.get_intent(iid)
+        assert row["status"] == "pending"
+        assert row["attempt"] == 0
+        assert row["expires_at"] is None
+        # expression untouched; next_fire_at now strictly in the future.
+        assert json.loads(row["trigger_config"])["expression"] == "0 9 * * *"
+        nfa = datetime.fromisoformat(row["next_fire_at"])
+        assert nfa.replace(tzinfo=None) > now_local().replace(tzinfo=None)
+
+    def test_rearm_interval_reanchors_created_at(self, test_db):
+        """FIX 2: a re-armed INTERVAL intent re-anchors created_at=now (the
+        interval due-check anchors on created_at), so it fires within one
+        interval instead of instantly off a stale anchor."""
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+        iid = intents.create_intent(
+            name="every hour", trigger_type="interval",
+            trigger_config={"seconds": 3600}, source="test")
+        db = intents._get_db()
+        old = (now_local() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%S")
+        db.execute("UPDATE intentions SET status='expired', created_at=? WHERE id=?",
+                   (old, iid))
+        db.commit()
+        assert rearm_intent(iid)
+        row = intents.get_intent(iid)
+        assert row["status"] == "pending"
+        anchor = datetime.fromisoformat(row["created_at"])
+        # re-anchored to ~now (within a couple minutes), not 5 days ago.
+        delta = abs((now_local().replace(tzinfo=None) - anchor).total_seconds())
+        assert delta < 120
 
     def test_awaiting_age_zombie_flag(self, test_db):
         from dashboard.pages.intentions import awaiting_age_days

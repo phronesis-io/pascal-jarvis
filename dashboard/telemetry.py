@@ -51,14 +51,20 @@ def read_jsonl_tail(path: str | Path) -> list[dict]:
     p = Path(path)
     key = str(p)
     try:
-        size = p.stat().st_size
+        st = p.stat()
+        size = st.st_size
     except OSError:
         _tail_cache.pop(key, None)
         return []
 
     entry = _tail_cache.get(key)
-    if entry is None or size < entry["offset"]:
-        entry = {"offset": 0, "events": []}  # fresh / rotated → full re-read
+    # Rotation by RENAME (live file replaced by a fresh one — possibly LARGER
+    # than the cached offset) changes the inode without shrinking, so a
+    # size-only check would keep reading from a stale offset into the new file
+    # and miss/garble a whole generation. A changed inode is treated exactly
+    # like a shrink: re-read from byte 0.
+    if entry is None or size < entry["offset"] or entry.get("ino") != st.st_ino:
+        entry = {"offset": 0, "events": [], "ino": st.st_ino}  # fresh / rotated → full re-read
         _tail_cache[key] = entry
 
     if size > entry["offset"]:
