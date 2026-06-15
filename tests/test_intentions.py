@@ -590,12 +590,11 @@ def test_breach_queue_peek_and_mark_shown(intent_db, tmp_path, monkeypatch):
     assert mod.peek_breaches()[0].get("notify_attempts", 0) == 0
     assert mod.peek_breaches()[0].get("notify_attempts", 0) == 0  # still 0
 
-    # a rendered card marks it shown (bump); after 3 it retires
+    # a rendered card marks it shown ONCE → retired (BREACH_MAX_SHOWS=1, the
+    # 2026-06-15 anti-nag fix: the dinner-closure apology was shown 3x).
+    assert mod.BREACH_MAX_SHOWS == 1
     mod.mark_breaches_shown(["int_x"])
-    assert mod.peek_breaches()[0]["notify_attempts"] == 1
-    mod.mark_breaches_shown(["int_x"])
-    mod.mark_breaches_shown(["int_x"])               # 3rd → dropped
-    assert mod.peek_breaches() == []
+    assert mod.peek_breaches() == []                 # shown once → gone, no nag
 
     # back-compat alias drain_breaches == peek_breaches (non-mutating)
     assert mod.drain_breaches is mod.peek_breaches
@@ -634,8 +633,7 @@ def test_reconcile_breach_survives_post_clear(intent_db, tmp_path, monkeypatch):
     entries = {x["id"]: x for x in mod.peek_breaches()}
     assert b in entries                            # reconcile's fresh breach survived
     assert entries[b]["notify_attempts"] == 0      # b never rode a card → budget intact
-    assert a in entries                            # a shown once (1 < 3) → still queued
-    assert entries[a]["notify_attempts"] == 1
+    assert a not in entries                        # a shown once → retired (max=1, no nag)
 
 
 def test_closure_stats_funnel(intent_db):

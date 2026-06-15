@@ -16,6 +16,15 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export JARVIS_DIR
 
+# Ensure the native-installer `claude` (~/.local/bin/claude → versions/<x>) is on
+# PATH for EVERY child — most importantly the heartbeat loop, which shells out to
+# `claude` each cycle. launchd starts the daemon with a minimal PATH that omits
+# ~/.local/bin, so this MUST be exported before any child is spawned. Previously
+# this lived further down (after the heartbeat launch), so on a launchd cold-start
+# the heartbeat inherited the minimal PATH and every claude_call died with
+# "Claude CLI not found", tripping non-priority circuits until the next restart.
+export PATH="$HOME/.local/bin:$PATH"
+
 # Anchor CWD to JARVIS_DIR. The bg helpers run as `python3 -m core.X`, which
 # resolves `core/` from the CWD — if bot.sh is launched (or self-exec'd) from
 # any other directory (e.g. a restart kicked off from WORK_DIR), every helper
@@ -317,7 +326,8 @@ HEARTBEAT_PID=$!
 # ── EigenFlux Real-Time Stream (background, Python) ─────────────────
 # The stream loop is now in Python (core/ef_stream_loop.py) where it
 # can be tested. Handles reconnect, backoff, message delivery, analysis.
-export PATH="$HOME/.local/bin:$PATH"
+# PATH (incl. ~/.local/bin) is exported at the top so every child — heartbeat,
+# this stream, admin — can find the native-installer `claude`.
 # Identify jarvis to EigenFlux server telemetry (same contract as client.sh).
 # The `eigenflux stream` child inherits these via the Python process env.
 EIGENFLUX_HOST="${EIGENFLUX_HOST:-jarvis}" EIGENFLUX_CHANNEL="${EIGENFLUX_CHANNEL:-lark}" \
@@ -649,18 +659,24 @@ except: pass
 print(n)
 " 2>/dev/null || echo 0)
      _elapsed=0
+     # Responsiveness policy is single-sourced + tested in core/responsiveness
+     # (REQ-59). Pull the tuned constants here; fall back to literals if the
+     # module call ever fails so the loop never breaks.
+     eval "$(python3 -m core.responsiveness env 2>/dev/null)"
+     : "${JV_POLL_FIRST:=6}" "${JV_POLL_STEADY:=20}"
+     : "${JV_THINKING_ACK:=💭 收到了，正在想……（稍等）}"
      # First poll fast (~6s) so the user sees a sign of life quickly, then
      # settle to 20s to avoid spam. The instant "Typing" reaction already
      # fired at dispatch; this loop adds the FIRST textual feedback within
      # ~6s — either a tool narration (🔧) or, when opus is just thinking with
      # no tool calls, a one-time "received, thinking" note so the long
      # generation (median ~100s on opus) isn't dead silence.
-     _poll=6
+     _poll="$JV_POLL_FIRST"
      _thinking_sent=0
      while [ "$_elapsed" -lt 6000 ]; do
        sleep "$_poll"
        _elapsed=$((_elapsed + _poll))
-       _poll=20
+       _poll="$JV_POLL_STEADY"
        if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
        # Extract tool call descriptions, compare with last snapshot
        _new_tools=$(python3 -c "
@@ -730,7 +746,7 @@ $_formatted" \
          # silent gap). Fast replies (<6s) never reach here: the kill -0
          # check above broke the loop. Fires at most once per turn.
          _thinking_sent=1
-         lark_reply_text "$message_id" "💭 收到了，正在想这个问题……（想得稍微深一点，请稍等）" >/dev/null 2>&1 || true
+         lark_reply_text "$message_id" "$JV_THINKING_ACK" >/dev/null 2>&1 || true
        fi
        # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
        # background job. Release the conversation instead of blocking it —

@@ -968,6 +968,14 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "",
                 ("parent closure recorded (no double-ask)", fu_id),
             )
     db.commit()
+    # Closing the loop (e.g. via a ✅/❌/🚫 button tap) also retires any pending
+    # breach apology for this intent — otherwise the breach card could re-fire
+    # after the user already answered (2026-06-15: the dinner-closure breach
+    # nagged even though buttons were present to close it).
+    try:
+        clear_breaches([parent_id])
+    except Exception as e:
+        print(f"[intentions] clear_breaches on closure failed: {e}", file=sys.stderr)
     _emit_intent("intent_closure", parent_id, outcome=outcome, via=via)
     return True
 
@@ -1344,7 +1352,16 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
 # Breach queue — dropped commitments awaiting their apology card (REQ-31)
 # ---------------------------------------------------------------------------
 
-def peek_breaches(max_notify_attempts: int = 3) -> list[dict]:
+# A breach apology is shown ONCE, not retried (2026-06-15 fix). The old
+# default of 3 meant the same "我没能按时提醒" card fired on 3 separate cycles
+# — Pascal received the identical 「和小明哥哥吃饭」饭后闭环 apology 3 times
+# across two days. A rendered card IS delivered (genuine send failures are the
+# REQ-11 delivery-ACK layer's job, not this counter), and breach cards carry
+# ✅/❌/🚫 buttons, so one apology is enough; re-showing is pure nagging.
+BREACH_MAX_SHOWS = 1
+
+
+def peek_breaches(max_notify_attempts: int = BREACH_MAX_SHOWS) -> list[dict]:
     """Return breach entries still owed a notification — WITHOUT mutating.
 
     Red-team fix (2026-06-13): the old drain_breaches bumped notify_attempts
@@ -1353,7 +1370,8 @@ def peek_breaches(max_notify_attempts: int = 3) -> list[dict]:
     burned a delivery attempt without ever rendering the apology card — three
     such cycles silently dropped the breach. The counter must count CARDS
     RENDERED, not pre-script runs. So peek is read-only; mark_breaches_shown
-    is the only writer, called only when a card actually went out.
+    is the only writer, called only when a card actually went out. Shown at
+    most BREACH_MAX_SHOWS times (1) — a breach apology must never nag.
     """
     if not BREACH_QUEUE.exists():
         return []
@@ -1374,7 +1392,7 @@ def peek_breaches(max_notify_attempts: int = 3) -> list[dict]:
     return entries
 
 
-def mark_breaches_shown(ids: list[str], max_notify_attempts: int = 3) -> None:
+def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SHOWS) -> None:
     """Bump notify_attempts for the breach ids that just rode a RENDERED card.
 
     Entries reaching max_notify_attempts are dropped (shown enough). Only the
