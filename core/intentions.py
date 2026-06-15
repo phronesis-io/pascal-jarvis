@@ -109,8 +109,13 @@ _SOCIAL_RE = re.compile(r"饭|聚|咖啡|午餐|晚餐|见面|面试|lunch|dinne
 # must fire in the MORNING before Pascal leaves home, not at the event's own
 # prep time — the 6/13 root cause: 复动肌骨 12:30 康复课的伞被锚到午饭点，
 # 他早上 9 点出门时根本没收到。匹配事件标题/详情里暗示需要随身携带的线索。
-_CARRY_RE = re.compile(r"伞|球拍|拍子|带[上好]?|要还|还的|归还|护照|证件|材料|文件|"
-                       r"复动肌骨|康复|羽毛球|网球|游泳|装备|umbrella|racket|return|bring|gear")
+# Red-team fix: the bare 带 alternative over-matched 纽带/一带一路/带宽/带娃/携带
+# etc. Require 带 to be followed by a concrete carry object, and drop standalone
+# 康复 (logistics-only, prep covers it) — keep 复动肌骨伞 via the 伞 cue.
+_CARRY_RE = re.compile(
+    r"伞|球拍|拍子|带(上|好)?(伞|球拍|拍子|电脑|本|书|材料|文件|证件|护照|钥匙|卡|药|水|包|礼物|东西)|"
+    r"要带|要还|要还的|归还|护照|证件|材料|文件|羽毛球|网球|游泳|装备|"
+    r"umbrella|racket|return|bring|gear")
 
 # REQ-70 first-leave anchor. A carry checklist fires this many minutes before
 # the day's earliest out-of-home event, but never earlier than the morning
@@ -1381,9 +1386,26 @@ def _generate_carry_intents(by_date: dict, now: datetime,
         elif anchor > ceiling:
             # Event is much later in the day → still fire by the morning ceiling.
             anchor = ceiling
-        # Never schedule into the past (e.g. this morning already gone).
+        # Red-team fix: the clamp must NEVER push the reminder to/after the
+        # event (an early ≤07:00 departure clamped UP to the 07:00 floor would
+        # fire after leaving — and the 护照/airport carry is exactly that case).
+        # Cap the anchor at lead-before-event so it always precedes departure.
+        latest = first["event_dt"] - CARRY_LEAD
+        if anchor > latest:
+            anchor = latest
+        # If the ideal morning anchor is already past (late same-day sync / event
+        # added after the ceiling) but the event is still comfortably ahead,
+        # fire SOON rather than dropping it (silence is the worst outcome — the
+        # 12:30 伞 added at 10:00 must still get a reminder).
         if anchor < now:
-            continue
+            soon = now + timedelta(minutes=2)
+            if soon < latest:
+                anchor = soon
+            else:
+                continue  # event too imminent for a useful carry reminder
+        # expires_at must be AFTER the fire time (red-team fix: an early event
+        # gave expires_at < trigger → cleanup_expired killed it before it fired).
+        carry_expires = max(first["event_dt"], anchor + timedelta(hours=2))
 
         items_desc = "、".join(
             f"{e['title']}（{e['start_time']}）" for e in carry_items)
@@ -1410,7 +1432,7 @@ def _generate_carry_intents(by_date: dict, now: datetime,
                         iid_existing,
                         trigger_config={"datetime": anchor.isoformat()},
                         prompt=carry_prompt,
-                        expires_at=first["event_dt"].isoformat(),
+                        expires_at=carry_expires.isoformat(),
                     )
                     tag_to_row[carry_tag] = (iid_existing, json.dumps(
                         {"datetime": anchor.isoformat()}, ensure_ascii=False))
@@ -1432,7 +1454,7 @@ def _generate_carry_intents(by_date: dict, now: datetime,
             category="context",
             # Travel-pause hygiene: a dated carry reminder expires at first
             # leave — it must never linger past the day it was for.
-            expires_at=first["event_dt"].isoformat(),
+            expires_at=carry_expires.isoformat(),
         )
         out.append(cid)
         existing_tags.add(carry_tag)

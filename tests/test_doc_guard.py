@@ -74,3 +74,16 @@ def test_behavioral_rules_carry_the_new_discipline():
     assert "截断" in text and "甩" in text       # REQ-69 no false-truncation blame
     assert "裸 URL" in text or "[文字](链接)" in text  # REQ-69 link lint rule
     assert "表忠心" in text or "证据行" in text   # REQ-74 evidence not narrative
+
+
+def test_diff_counts_duplicate_row_deletions_with_multiplicity():
+    """Red-team P1: a set-based diff collapsed N identical rows to one, so
+    wiping 30 table rows read as deleting 1 (ratio 0.024) and passed as safe."""
+    before = "\n".join(["intro"] + [f"| row | data{i} |" for i in range(5)]
+                        + ["| --- | --- |"] * 30)   # 30 identical separator rows
+    after = "intro\n| header |"
+    d = dg.diff_blocks(before, after)
+    assert d["deleted"] >= 30                       # counted with multiplicity
+    assert d["deletion_ratio"] > 0.30
+    v = dg.verify_write(before, after)
+    assert v["ok"] is False and "destructive" in v["reason"]

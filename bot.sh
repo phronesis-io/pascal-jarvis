@@ -1497,18 +1497,25 @@ except OSError:
     pass
 if not (roots or all_ids):
     sys.exit(0)
-# Deterministic closure for closure-ask roots
+# Deterministic closure — ONLY when the card carried exactly ONE closure-ask
+# root (red-team fix: a multi-root card + one ambiguous reply would close BOTH
+# loops with the same outcome — e.g. '约了' closing both dinner AND gym). With
+# >1 root we can't tell which the reply answers → defer to the LLM hint.
 from core.reply_closure import classify_reply, short_result
 outcome = classify_reply(reply)
 closed = []
-if outcome and roots:
-    from core.intentions import record_closure
-    for r in roots:
-        try:
-            if record_closure(r, outcome=outcome, result=short_result(reply), via='reply'):
-                closed.append(r)
-        except Exception:
-            pass
+if outcome and len(roots) == 1:
+    from core.intentions import record_closure, get_intent
+    try:
+        # Only close a root that is actually AWAITING (red-team fix: a stale
+        # ledger could name a 'none' root, and record_closure would fabricate
+        # a closure on an intent that was never asking for one).
+        row = get_intent(roots[0])
+        if row and row.get('closure_status') == 'awaiting':
+            if record_closure(roots[0], outcome=outcome, result=short_result(reply), via='reply'):
+                closed.append(roots[0])
+    except Exception:
+        pass
 # Output: 'CLOSED <ids>' if we closed deterministically, else 'HINT <ids>'
 if closed:
     print('CLOSED ' + ','.join(closed))

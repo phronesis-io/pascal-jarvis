@@ -139,18 +139,29 @@ def _read_jsonl(path: Path, max_bytes: int | None = None) -> list[dict]:
     return out
 
 
-def _read_sched_events(jarvis_dir: Path) -> list[dict]:
-    """sched_events.jsonl + its rotated `.1` generation, oldest first.
+# Bound the per-refresh parse (red-team fix): the dashboard panel calls
+# compute_selfmon every 10s and sched_events grows to a 10MB rotation cap, so an
+# unbounded full re-parse (twice per call) blocked the asyncio loop ~75ms→~1s.
+# selfmon metrics are 24h-windowed; a 2MB tail covers far more than 24h of
+# events. Memoize on (size, mtime) so the two callers in one compute_selfmon
+# parse at most once, and a 10s refresh on an unchanged file is free.
+SCHED_TAIL_BYTES = 2 * 1024 * 1024
+_sched_cache: dict = {"key": None, "events": []}
 
-    Read directly (not via dashboard.telemetry) so this module stays importable
-    in a standalone CLI / daemon context with no nicegui dependency.
-    """
+
+def _read_sched_events(jarvis_dir: Path) -> list[dict]:
+    """sched_events.jsonl tail (bounded), oldest first. Cached on (size, mtime)."""
     base = jarvis_dir / "sched_events.jsonl"
-    events: list[dict] = []
-    rotated = base.with_name(base.name + ".1")
-    if rotated.exists():
-        events.extend(_read_jsonl(rotated))
-    events.extend(_read_jsonl(base))
+    try:
+        st = base.stat()
+        key = (str(base), st.st_size, st.st_mtime)
+    except OSError:
+        key = (str(base), 0, 0)
+    if _sched_cache["key"] == key:
+        return _sched_cache["events"]
+    events = _read_jsonl(base, max_bytes=SCHED_TAIL_BYTES)
+    _sched_cache["key"] = key
+    _sched_cache["events"] = events
     return events
 
 
@@ -526,13 +537,16 @@ def selfmon_liveness_ok(jarvis_dir) -> tuple[bool, str]:
     # No recent events — is the system otherwise alive?
     alive_evidence = []
 
+    # active_sessions.json is a DURABLE conv→session map that is never pruned
+    # (red-team fix): once Pascal has ever messaged the bot it is permanently
+    # non-empty, so "non-empty" is NOT a liveness signal — it false-fired
+    # 'self-monitoring dead' on an idle/closed laptop. Require RECENCY: the
+    # file (or heartbeat_state) must have been touched within the window.
     sessions = jd / "active_sessions.json"
     try:
-        if sessions.exists() and sessions.stat().st_size > 2:
-            data = json.loads(sessions.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data:
-                alive_evidence.append("active session transcripts exist")
-    except (OSError, json.JSONDecodeError, ValueError):
+        if sessions.exists() and sessions.stat().st_mtime >= cutoff:
+            alive_evidence.append("active_sessions updated in 24h")
+    except OSError:
         pass
 
     try:

@@ -63,21 +63,28 @@ def readback_count(live_text: str, pattern: str, *, regex: bool = False) -> int:
 
 
 def diff_blocks(before: str, after: str) -> dict:
-    """Block-level before/after diff. Returns counts + the deletion ratio."""
-    b = _blocks(before)
-    a = set(_blocks(after))
-    before_set = set(b)
-    deleted = [x for x in before_set if x not in a]
-    added = [x for x in set(_blocks(after)) if x not in before_set]
-    n_before = len(before_set)
-    ratio = (len(deleted) / n_before) if n_before else 0.0
+    """Block-level before/after diff. Returns counts + the deletion ratio.
+
+    Counts blocks WITH MULTIPLICITY (red-team fix): a set-based diff collapsed
+    N identical lines to one, so wiping 30 identical table rows (parking
+    points / drive-time rows in Pascal's handbook) counted as deleting ONE
+    block — deletion_ratio 0.024, sailed through as "safe", re-opening the
+    exact destructive-overwrite this module exists to catch."""
+    from collections import Counter
+    bc = Counter(_blocks(before))
+    ac = Counter(_blocks(after))
+    removed = bc - ac           # multiplicity-aware: 30 rows gone counts as 30
+    added_c = ac - bc
+    deleted = sum(removed.values())
+    n_before = sum(bc.values())
+    ratio = (deleted / n_before) if n_before else 0.0
     return {
         "blocks_before": n_before,
-        "blocks_after": len(a),
-        "deleted": len(deleted),
-        "added": len(added),
+        "blocks_after": sum(ac.values()),
+        "deleted": deleted,
+        "added": sum(added_c.values()),
         "deletion_ratio": round(ratio, 3),
-        "deleted_samples": deleted[:5],
+        "deleted_samples": list(removed.keys())[:5],
     }
 
 
@@ -106,7 +113,9 @@ def verify_write(before: str, after: str, *,
             f"destructive: this write deletes {d['deleted']}/{d['blocks_before']} "
             f"blocks ({int(d['deletion_ratio']*100)}% > "
             f"{int(MAX_BLOCK_DELETION_RATIO*100)}%) — likely a full overwrite "
-            f"that would wipe hand-entered content; sample lost: {d['deleted_samples']}")
+            f"that would wipe hand-entered content; sample lost: {d['deleted_samples']}. "
+            f"If this large removal is intentional and confirmed, re-run with "
+            f"allow_overwrite=True (--allow-overwrite).")
 
     if claim_feature:
         readback = readback_count(after, claim_feature, regex=regex)

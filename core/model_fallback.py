@@ -23,19 +23,22 @@ DEGRADE_CHAIN = ["opus", "sonnet", "haiku"]
 
 # stderr signatures that mean "this model can't serve the request right now"
 # (as opposed to a transient network blip, which the normal retry handles).
+# Tightened (red-team fix): drop over-broad 'does not support' / 'insufficient' /
+# bare 'quota' that could match unrelated error text and falsely degrade.
 _MODEL_ERROR = re.compile(
     r"issue with the selected model"
-    r"|selected model"
+    r"|the selected model"
     r"|model is (currently )?unavailable"
     r"|invalid model"
     r"|model not found"
-    r"|does not support"
-    r"|banned|disabled model"
+    r"|model .* (is )?(banned|disabled|deprecated)"
     r"|claude-fable",
     re.IGNORECASE,
 )
 _SPEND_ERROR = re.compile(
-    r"monthly spend limit|spend limit|usage limit|quota|insufficient", re.IGNORECASE)
+    r"monthly spend limit|spend limit|usage limit (reached|exceeded)"
+    r"|credit balance is too low|insufficient credits",
+    re.IGNORECASE)
 
 
 def is_model_error(stderr: str) -> bool:

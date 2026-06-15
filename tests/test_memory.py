@@ -213,9 +213,13 @@ def test_tier_budgets_sum_to_max(tmp_path):
 
 
 def test_digest_prioritized_within_timeline(tmp_path):
-    """When timeline is over its budget, the longterm_digest survives over the
-    bulkier hourly log."""
+    """When the GLOBAL payload exceeds MAX (so tier budgeting kicks in), the
+    longterm_digest survives over the bulkier hourly log within the timeline
+    reserve. Tier truncation only fires when global > MAX (red-team fix:
+    headroom is borrowed, never thrown away)."""
     _make_full_tree(tmp_path)
+    # Push the GLOBAL payload over MAX so per-tier budgeting engages.
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS))
     (tmp_path / "timeline" / "longterm_digest.md").write_text(
         "DIGEST_KEEP " + ("d" * 2000)
     )
@@ -223,8 +227,26 @@ def test_digest_prioritized_within_timeline(tmp_path):
         "HOURLY_BULK " + ("h" * (TIMELINE_BUDGET * 2))
     )
     output = load_tiered_memory(tmp_path)
-    assert "DIGEST_KEEP" in output
-    assert "[timeline memory truncated" in output
+    assert "DIGEST_KEEP" in output                 # priority 0 survives
+    assert "[timeline memory truncated" in output  # tier budget engaged
+
+
+def test_under_budget_loads_everything_no_truncation(tmp_path):
+    """Red-team fix: with global headroom, NO tier is truncated — load-bearing
+    system files (open_threads/todos) must not be dropped just because a tier
+    is over its reserve while the total fits under MAX."""
+    _make_full_tree(tmp_path)
+    sysd = tmp_path / "system"
+    sysd.mkdir(exist_ok=True)
+    # A bulky inbox over SYSTEM_BUDGET, plus small load-bearing files.
+    (sysd / "inbox_ops.md").write_text("OPS " + ("o" * 50000))
+    (sysd / "open_threads.md").write_text("OPEN_THREADS_KEEP active follow-up")
+    (sysd / "todos.md").write_text("TODOS_KEEP - [ ] do the thing")
+    output = load_tiered_memory(tmp_path)
+    # Total is well under MAX (200k), so nothing is dropped.
+    assert "OPEN_THREADS_KEEP" in output
+    assert "TODOS_KEEP" in output
+    assert "[system memory truncated" not in output
 
 
 # ── REQ-73: stale warm demotion ──────────────────────────────────────────
@@ -344,3 +366,24 @@ def test_structured_facts_injected_first_in_hot(tmp_path):
 def test_all_facts_empty_when_missing(tmp_path):
     assert all_facts(tmp_path) == {}
     assert get_fact(tmp_path, "anything") is None
+
+
+def test_set_fact_rejects_newline_injection(tmp_path):
+    """Red-team P2: a newline in value injected a phantom fact."""
+    from core.memory import set_fact, all_facts
+    (tmp_path / "hot").mkdir()
+    set_fact(tmp_path, "note", "line1\nfake_key: injected")
+    facts = all_facts(tmp_path)
+    assert "fake_key" not in facts
+    assert facts["note"] == "line1 fake_key: injected"  # newline collapsed, single fact
+
+
+def test_set_fact_atomic_and_dedups(tmp_path):
+    from core.memory import set_fact, get_fact
+    (tmp_path / "hot").mkdir()
+    set_fact(tmp_path, "k", "A")
+    set_fact(tmp_path, "k", "B")
+    assert get_fact(tmp_path, "k") == "B"
+    # only one line for k
+    text = (tmp_path / "hot" / "structured_facts.md").read_text()
+    assert text.count("k: ") == 1

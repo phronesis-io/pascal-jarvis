@@ -22,42 +22,59 @@ from __future__ import annotations
 
 import re
 
-# Order matters: na (explicit stop) is checked before recorded/done so "不用追了"
-# isn't misread as a negation→recorded. Each entry is (outcome, regex).
-_RULES = [
-    ("na", re.compile(r"不用追|别追|不用了|不用提醒|算了|取消(这个|吧|了)|别管|无所谓|不重要|删(了|掉)|关掉")),
-    ("done", re.compile(r"做了|做完|搞定|约了|约上了|去了|去过|聊了|完成|搞定了|已经(做|约|去|聊)|弄好|处理好|解决了|✅|👍|搞掂")),
-    ("recorded", re.compile(r"没做|没去|没约|没聊|还没|没有做|改天|下次|以后再|过几天|暂时不|先不|没时间|忘了|忘记|抽不出|没空")),
-]
+# na = explicit "stop chasing".
+_NA = re.compile(r"不用追|别追|不用了|不用提醒|算了|取消(这个|吧|了)?|别管|无所谓|不重要|删(了|掉)|关掉")
+# A negation token NEAR a completion verb means "did NOT do it" (recorded), even
+# though a done substring (做/约/去…) is present — red-team fix: "没做完",
+# "做了一半还没弄完", "没搞定" were misread as done by a bare substring match.
+_NEGATION = re.compile(r"没|还没|没有|未|尚未|没能|不曾|一半|没完|没弄完|没做完")
+_DONE_VERB = re.compile(r"做|做完|搞定|约|去|聊|弄|完成|处理|解决|搞掂|读|写")
+# Positive completion (no negation context).
+_DONE = re.compile(r"做了|做完了?|搞定了?|约了|约上了|去了|去过|聊了|完成了?|弄好|处理好|解决了|✅|👍|搞掂|读完|写完")
+# Explicit "did not do, but noted".
+_RECORDED = re.compile(r"没做|没去|没约|没聊|没有做|改天|下次|以后再|过几天|暂时不|先不|没时间|忘了|忘记|抽不出|没空|还没")
 
-# A bare affirmation/negation when we KNOW it's a reply to a yes/no closure ask.
-_BARE_YES = re.compile(r"^(是|对|嗯+|yes|y|好的?|👍|✅|做了|约了)[\s。.!！]*$", re.IGNORECASE)
-_BARE_NO = re.compile(r"^(没|没有|不|no|n|还没|没做)[\s。.!！]*$", re.IGNORECASE)
+# Bare affirmation/negation as a reply to a yes/no closure ask.
+_BARE_YES = re.compile(r"^(是|对|yes|y|✅|做了|约了|去了)[\s。.!！]*$", re.IGNORECASE)
+_BARE_NO = re.compile(r"^(没|没有|不|no|n|还没|没做|改天)[\s。.!！]*$", re.IGNORECASE)
 
 
 def classify_reply(text: str) -> str | None:
     """Classify a closure reply → 'done'|'recorded'|'na'|None (ambiguous).
 
-    Conservative: returns None unless a clear signal is present, so an
-    ambiguous reply falls through to the LLM path rather than being
-    mis-closed. Never raises.
+    Conservative + negation-aware: a negation near a completion verb is
+    'recorded' (did NOT do it), never 'done'. Returns None unless a clear,
+    unambiguous signal is present, so a borderline reply falls through to the
+    LLM path rather than being mis-closed (closing is semi-destructive). Never
+    raises.
     """
     if not text:
         return None
-    t = text.strip()
-    # Strip a leading quote-reply marker if present
-    t = re.sub(r"^\[Replying to:.*?\]\s*", "", t, flags=re.DOTALL).strip()
+    t = re.sub(r"^\[Replying to:.*?\]\s*", "", text.strip(), flags=re.DOTALL).strip()
     if not t:
         return None
     low = t[:200]
-    # Bare yes/no (only meaningful as a reply to a yes/no ask)
-    if _BARE_YES.match(low):
-        return "done"
+    if _NA.search(low):
+        return "na"
+    # Bare ack/deny (only one token) — unambiguous
     if _BARE_NO.match(low):
         return "recorded"
-    for outcome, rx in _RULES:
-        if rx.search(low):
-            return outcome
+    if _BARE_YES.match(low):
+        return "done"
+    has_neg = bool(_NEGATION.search(low))
+    has_done = bool(_DONE.search(low))
+    has_done_verb = bool(_DONE_VERB.search(low))
+    has_recorded = bool(_RECORDED.search(low))
+    # Negation near a completion verb → did NOT do it (recorded), even if a
+    # done substring is present ("做了一半还没弄完", "没做完", "没搞定").
+    if has_neg and has_done_verb:
+        return "recorded"
+    if has_recorded and not has_done:
+        return "recorded"
+    if has_done and not has_neg:
+        return "done"
+    # done token AND negation both present but no completion-verb adjacency →
+    # genuinely ambiguous: defer to the LLM rather than guess.
     return None
 
 

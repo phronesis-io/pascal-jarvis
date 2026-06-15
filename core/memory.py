@@ -99,34 +99,47 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound") -> str:
     if not memory_dir.is_dir():
         return ""
 
-    # Build each tier's sections independently, then truncate within budget.
+    # Build each tier's sections independently (priority-ordered within tier).
     hot_parts = _collect_hot(memory_dir)
     warm_parts = _collect_warm(memory_dir)
     system_parts = _collect_system(memory_dir, purpose)
     timeline_parts = _collect_timeline(memory_dir)
 
-    # Truncate within each tier to its reserved budget (most recent / highest
-    # priority kept — see per-collector ordering). Hot is never truncated.
+    sep = "\n\n"
+    full = {
+        "hot": sep.join(hot_parts),
+        "warm": sep.join(warm_parts),
+        "system": sep.join(system_parts),
+        "timeline": sep.join(timeline_parts),
+    }
+    total = sum(len(v) for v in full.values()) + sep.count("") * 3
+
+    # COMMON CASE — everything fits under the global cap → load it ALL, no
+    # truncation (red-team fix: per-tier budgets were dropping load-bearing
+    # system files — open_threads/todos/pending_updates — even though the
+    # total was UNDER MAX_MEMORY_CHARS, with 15KB of headroom unused. Per-tier
+    # reserves are FLOORS for the over-budget case, never caps that throw away
+    # headroom).
+    if total <= MAX_MEMORY_CHARS:
+        blocks = [full[t] for t in ("hot", "warm", "system", "timeline") if full[t]]
+        return sep.join(blocks)
+
+    # OVER BUDGET — apply per-tier reserves. hot + system + timeline get their
+    # reserves (load-bearing); warm absorbs the squeeze with the remainder. If
+    # a reserved tier is under its reserve, the slack flows to warm.
     hot_text = _join_within_budget(hot_parts, HOT_BUDGET, "hot")
-    warm_text = _join_within_budget(warm_parts, WARM_BUDGET, "warm")
     system_text = _join_within_budget(system_parts, SYSTEM_BUDGET, "system")
     timeline_text = _join_within_budget(timeline_parts, TIMELINE_BUDGET, "timeline")
+    used = len(hot_text) + len(system_text) + len(timeline_text)
+    warm_room = max(0, MAX_MEMORY_CHARS - used - 3 * len(sep))
+    warm_text = _join_within_budget(warm_parts, warm_room, "warm")
 
     blocks = [b for b in (hot_text, warm_text, system_text, timeline_text) if b]
-    result = "\n\n".join(blocks)
+    result = sep.join(blocks)
 
-    # Final safety net: should never trigger now that tiers are budgeted, but
-    # keep a hard cap so a pathological hot tier can't blow the context. If it
-    # fires, warn loudly — the per-tier budgets failed.
+    # Final hard safety net (should never fire now).
     if len(result) > MAX_MEMORY_CHARS:
-        dropped = len(result) - MAX_MEMORY_CHARS
-        print(
-            f"[memory] WARNING: total payload over MAX_MEMORY_CHARS even after "
-            f"per-tier budgeting — hard-truncating {dropped} chars from the tail",
-            file=sys.stderr,
-        )
         result = result[:MAX_MEMORY_CHARS] + "\n\n[memory truncated — over budget]"
-
     return result
 
 
@@ -175,7 +188,15 @@ def _collect_warm(memory_dir: Path) -> list[str]:
     # Only top-level *.md — archive/ subdir is deliberately skipped.
     files = [f for f in warm_dir.glob("*.md") if f.is_file()]
     # Newest mtime first → stale docs are the ones dropped when over budget.
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    # Guard stat() (red-team fix): a file vanishing between glob and sort
+    # (demote_stale_warm rename / external move) raised FileNotFoundError out
+    # of load_tiered_memory, aborting the whole prompt build.
+    def _mtime(f):
+        try:
+            return f.stat().st_mtime
+        except OSError:
+            return 0.0
+    files.sort(key=_mtime, reverse=True)
     for f in files:
         _append_file(parts, f, f"Knowledge: {f.stem}")
     return parts
@@ -183,12 +204,29 @@ def _collect_warm(memory_dir: Path) -> list[str]:
 
 def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
     """System tier: todos, open_threads, digest, insights, perception buffers.
-    Honors the outbound sensitivity gate."""
+    Honors the outbound sensitivity gate.
+
+    Priority-ordered (red-team fix): the load-bearing operational files
+    (open_threads — drives heartbeat proactive follow-up per CLAUDE.md, todos,
+    pending_updates, the digest) come FIRST so that if the tier is ever
+    truncated the casualties are the bulky perception buffers (inbox_ops /
+    inbox_private_mail), never Pascal's todos/threads. Previously plain
+    alphabetical, so inbox_ops (21KB) ate the budget and dropped open_threads."""
     parts: list[str] = []
     sys_dir = memory_dir / "system"
     if not sys_dir.is_dir():
         return parts
-    for f in sorted(sys_dir.glob("*.md")):
+    priority = {
+        "open_threads.md": 0,
+        "todos.md": 1,
+        "pending_updates.md": 2,
+        "cross_session_digest.md": 3,
+        "engagement_insights.md": 4,
+        "engineering_roadmap.md": 5,
+    }
+    files = [f for f in sys_dir.glob("*.md") if f.is_file()]
+    files.sort(key=lambda f: (priority.get(f.name, 50), f.name))
+    for f in files:
         if purpose == "outbound" and (f.name.startswith("inbox_private")
                                       or f.name.startswith("inbox_secret")):
             continue
@@ -216,9 +254,14 @@ def _collect_timeline(memory_dir: Path) -> list[str]:
         "daily_log.md": 2,
         "hourly_log.md": 3,
     }
+    def _nonempty(f):
+        try:
+            return f.stat().st_size > 0
+        except OSError:
+            return False
     files = [
         f for f in tl_dir.glob("*.md")
-        if f.name not in _TIMELINE_SKIP and f.is_file() and f.stat().st_size > 0
+        if f.name not in _TIMELINE_SKIP and f.is_file() and _nonempty(f)
     ]
     files.sort(key=lambda f: (priority.get(f.name, 99), f.name))
     for f in files:
@@ -415,27 +458,44 @@ def set_fact(memory_dir: str | Path, key: str, value: str) -> None:
     Preserves existing comments/headings; updates the matching key in place or
     appends a new `key: value` line. Deterministic round-trip with get_fact.
     """
+    # Sanitize (red-team fix): a newline/colon in value would inject a phantom
+    # fact line that all_facts parses and that re-setting the key can't remove.
+    key = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(key)).strip("_") or "key"
+    value = re.sub(r"\s+", " ", str(value)).strip()
+
     path = _facts_path(memory_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not path.exists():
-        path.write_text(_STRUCTURED_FACTS_TEMPLATE, encoding="utf-8")
-
-    lines = path.read_text(encoding="utf-8").splitlines()
-    new_line = f"{key}: {value}"
-    found = False
-    for i, raw in enumerate(lines):
-        stripped = raw.strip()
-        if stripped.startswith("#"):
-            continue
-        m = _FACT_LINE.match(stripped)
-        if m and m.group(1) == key:
-            lines[i] = new_line
-            found = True
-            break
-    if not found:
-        if lines and lines[-1].strip() != "":
-            lines.append("")
-        lines.append(new_line)
-
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Atomic, locked read-modify-write (red-team fix): the bot is multi-process
+    # (heartbeat + handle_message + tasks share memory_dir); an unlocked
+    # truncate-then-write could lose a concurrent set or be read half-written.
+    import fcntl, os as _os
+    lock_path = path.with_suffix(".lock")
+    with open(lock_path, "w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        if not path.exists():
+            path.write_text(_STRUCTURED_FACTS_TEMPLATE, encoding="utf-8")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        new_line = f"{key}: {value}"
+        found = False
+        kept = []
+        for raw in lines:
+            stripped = raw.strip()
+            m = _FACT_LINE.match(stripped) if not stripped.startswith("#") else None
+            if m and m.group(1) == key:
+                if not found:
+                    kept.append(new_line)   # replace first occurrence
+                    found = True
+                # drop any further duplicate lines for this key (consistency)
+                continue
+            kept.append(raw)
+        if not found:
+            if kept and kept[-1].strip() != "":
+                kept.append("")
+            kept.append(new_line)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        _os.replace(tmp, path)
