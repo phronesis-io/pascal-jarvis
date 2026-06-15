@@ -788,3 +788,206 @@ def test_cron_success_clears_last_error(intent_db):
     row = mod.get_intent(pid)
     assert row["status"] == "pending"          # cron resets
     assert not row["last_error"]               # narration NOT stored as error
+
+
+# ===========================================================================
+# REQ-68 — calendar→intent idempotent upsert (kill prep/closure churn)
+# REQ-70 — carry/prep reminders anchored to first-leave-time
+# ===========================================================================
+
+def _cal_md(date_str: str, lines: list[str], label: str = "Day 1") -> str:
+    """Build calendar markdown for one date. `lines` are ('HH:MM-HH:MM', title)
+    tuples or raw event strings."""
+    body = [f"{label} ({date_str} 周一)"]
+    for ln in lines:
+        if isinstance(ln, tuple):
+            span, title = ln
+            body.append(f"  {span}  {title}")
+        else:
+            body.append(f"  {ln}")
+    return "\n".join(body)
+
+
+def _tags_of(intent: dict) -> set:
+    return set(json.loads(intent.get("tags", "[]") or "[]"))
+
+
+def _cal_rows():
+    """All calendar-source intents in the test DB (any status)."""
+    from core.intentions import list_intents
+    return [i for i in list_intents(limit=1000) if i.get("source") == "calendar"]
+
+
+def test_calendar_upsert_idempotent_no_duplicates(intent_db):
+    """REQ-68: calling generate_calendar_intents TWICE on the same markdown
+    creates NO duplicate prep/closure rows — the 小明 11-row churn (two preps
+    at the same 17:00:16) cannot recur. At most one row per (date,title,role)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    # Event tomorrow afternoon → a social dinner gets prep + closure.
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("18:30-20:30", "和小明哥哥吃饭")])
+
+    first = mod.generate_calendar_intents(md)
+    second = mod.generate_calendar_intents(md)
+
+    assert second == []                       # second sync creates nothing new
+    rows = _cal_rows()
+    # Exactly one prep + one closure for this single event.
+    prep = [r for r in rows if f"cal:{day}:" in str(_tags_of(r))]
+    close = [r for r in rows if f"cal-close:{day}:" in str(_tags_of(r))]
+    assert len(prep) == 1, f"expected 1 prep, got {len(prep)}"
+    assert len(close) == 1, f"expected 1 closure, got {len(close)}"
+    assert len(first) == 2                     # first sync made exactly the pair
+
+
+def test_calendar_upsert_supersedes_on_reschedule(intent_db):
+    """REQ-68: a rescheduled event UPDATEs the existing prep/closure trigger in
+    place — never a stale wrong-time row PLUS a fresh duplicate."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    mod.generate_calendar_intents(_cal_md(day, [("18:30-20:30", "和小明吃饭")]))
+    # Event moved later; same date+title → supersede, not duplicate.
+    mod.generate_calendar_intents(_cal_md(day, [("19:30-21:30", "和小明吃饭")]))
+
+    rows = _cal_rows()
+    prep = [r for r in rows if f"cal:{day}:" in str(_tags_of(r))]
+    close = [r for r in rows if f"cal-close:{day}:" in str(_tags_of(r))]
+    assert len(prep) == 1                       # still one prep
+    assert len(close) == 1                      # still one closure
+    # Prep trigger moved with the event (new start 19:30 → prep 19:00).
+    cfg = json.loads(prep[0]["trigger_config"])
+    assert cfg["datetime"][11:16] == "19:00"
+
+
+def test_calendar_no_dup_after_prep_fired(intent_db):
+    """REQ-68 core idempotency: once a prep has FIRED (left 'pending'), a
+    re-sync must NOT create a second one. The old dedup only looked at
+    pending/triggered, so a fired prep was invisible and got re-INSERTed —
+    a direct source of the duplicate-prep churn."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("18:30-20:30", "晚餐 X")])
+    created = mod.generate_calendar_intents(md)
+    prep_id = [i for i in created
+               if "calendar-prep" in _tags_of(mod.get_intent(i))][0]
+    # Simulate the prep firing.
+    mod.mark_triggered(prep_id); mod.mark_executed(prep_id)
+    assert mod.get_intent(prep_id)["status"] == "executed"
+
+    # Re-sync the SAME event → no second prep.
+    mod.generate_calendar_intents(md)
+    prep = [r for r in _cal_rows() if "calendar-prep" in _tags_of(r)]
+    assert len(prep) == 1
+
+
+def test_calendar_prep_after_event_start_skipped(intent_db, monkeypatch):
+    """REQ-68.2: a prep whose computed fire time would be AT/AFTER the event
+    start is skipped (the 18:00 prep that fired AFTER the 17:30 dinner). With a
+    pathological lead the prep lands after start → must be dropped, not fired
+    late."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    # Event ~3h out, but a 5h prep lead would put prep AFTER the event start.
+    monkeypatch.setattr(mod, "PREP_LEAD", timedelta(hours=5))
+    start = (now_local() + timedelta(hours=3)).replace(second=0, microsecond=0)
+    day = start.strftime("%Y-%m-%d")
+    span = f"{start.strftime('%H:%M')}-{(start + timedelta(hours=1)).strftime('%H:%M')}"
+    md = _cal_md(day, [(span, "复动肌骨 康复课")])
+
+    created = mod.generate_calendar_intents(md)
+    prep = [i for i in created
+            if "calendar-prep" in _tags_of(mod.get_intent(i))]
+    assert prep == []                           # prep dropped (would fire late)
+
+
+def test_calendar_carry_reminder_fires_in_morning_not_at_event(intent_db):
+    """REQ-70: a morning carry reminder for an AFTERNOON event fires in the
+    morning, not at the event's own prep time. The 复动肌骨 12:30 康复课 伞 must
+    be anchored to a sane morning hour, not lunchtime."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    # Tomorrow so the morning anchor is safely in the future regardless of
+    # the current wall-clock hour.
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("12:30-13:30", "复动肌骨 康复课 记得带伞")])
+
+    created = mod.generate_calendar_intents(md)
+    carry = [mod.get_intent(i) for i in created
+             if "calendar-carry" in _tags_of(mod.get_intent(i))]
+    assert len(carry) == 1, "expected one morning carry checklist"
+    cfg = json.loads(carry[0]["trigger_config"])
+    fire_hour = int(cfg["datetime"][11:13])
+    # Anchored to the morning ceiling (event is much later), NOT 12:30/11:30.
+    assert fire_hour <= mod.CARRY_MORNING_CEILING
+    assert fire_hour < 12, f"carry fired at {fire_hour}:xx — should be morning"
+    # expires at first-leave (travel-pause hygiene): never lingers past the day.
+    assert carry[0]["expires_at"].startswith(day)
+
+
+def test_calendar_carry_anchors_to_first_leave(intent_db):
+    """REQ-70: with multiple events, the carry checklist anchors to the FIRST
+    out-of-home event (~CARRY_LEAD before), and MERGES all carry items into ONE
+    intent (one card, not N)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [
+        ("10:00-11:00", "羽毛球 带球拍"),       # first leave + carry
+        ("15:00-16:00", "要还的书 拿给图书馆"),   # later carry (要还 cue)
+    ])
+    created = mod.generate_calendar_intents(md)
+    carry = [mod.get_intent(i) for i in created
+             if "calendar-carry" in _tags_of(mod.get_intent(i))]
+    assert len(carry) == 1                       # merged into ONE checklist
+    cfg = json.loads(carry[0]["trigger_config"])
+    fire_h, fire_m = int(cfg["datetime"][11:13]), int(cfg["datetime"][14:16])
+    # 10:00 first leave, CARRY_LEAD=75min → ~08:45 (>= floor 07:00).
+    assert (fire_h, fire_m) == (8, 45), f"expected 08:45, got {fire_h:02d}:{fire_m:02d}"
+    # Both carry items merged into the one prompt.
+    assert "羽毛球" in carry[0]["prompt"]
+    assert "要还的书" in carry[0]["prompt"]
+
+
+def test_calendar_carry_idempotent(intent_db):
+    """REQ-68+70: re-syncing does not duplicate the carry checklist."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("10:00-11:00", "羽毛球 带球拍")])
+    mod.generate_calendar_intents(md)
+    second = mod.generate_calendar_intents(md)
+    assert second == []
+    carry = [r for r in _cal_rows() if "calendar-carry" in _tags_of(r)]
+    assert len(carry) == 1
+
+
+def test_calendar_no_carry_when_nothing_to_bring(intent_db):
+    """A plain meeting with no carry cue gets NO carry checklist (no noise)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("15:00-16:00", "线上同步会")])
+    created = mod.generate_calendar_intents(md)
+    carry = [r for r in _cal_rows() if "calendar-carry" in _tags_of(r)]
+    assert carry == []
+    # but a regular prep is still created
+    assert any("calendar-prep" in _tags_of(mod.get_intent(i)) for i in created)

@@ -16,9 +16,16 @@ STATE_FILE = JARVIS_DIR / ".free_time_nudge_state"
 
 
 def update_nudge_count():
-    """Increment today's nudge counter after a successful send."""
+    """Increment today's nudge counter after a successful send.
+
+    State file is up to 3 lines: date / count / block_id. Line 3 (the per-block
+    fire stamp written by free_time_nudge_pre.sh for REQ-75 double-fire dedup)
+    must be PRESERVED here — otherwise this rewrite would drop it and a second
+    fire in the same block would slip through.
+    """
     today = now_local_str("%Y-%m-%d")
     count = 0
+    block_id = ""
     if STATE_FILE.exists():
         lines = STATE_FILE.read_text().strip().split("\n")
         if lines and lines[0] == today:
@@ -26,7 +33,8 @@ def update_nudge_count():
                 count = int(lines[1]) if len(lines) > 1 else 0
             except ValueError:
                 count = 0
-    STATE_FILE.write_text(f"{today}\n{count + 1}\n")
+            block_id = lines[2] if len(lines) > 2 else ""
+    STATE_FILE.write_text(f"{today}\n{count + 1}\n{block_id}\n")
 
 
 def main():

@@ -20,6 +20,31 @@ from ..telemetry import read_jsonl_tail, read_sched_events, read_json
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
+
+def _selfmon_headline(jarvis_dir: Path) -> dict:
+    """Headline self-monitoring numbers from core.selfmon (REQ-67).
+
+    Logic lives in core.selfmon (computed from LIVE sources, not the dead
+    tables). This is a thin, defensive adapter: any read/import failure → an
+    'n/a' shape so the panel always renders.
+    """
+    try:
+        from core.selfmon import compute_selfmon
+        m = compute_selfmon(jarvis_dir, window_hours=24)
+        overdue = m["closure_overdue"]
+        return {
+            "noise_cards": m["noise_card_count"]["total_sent"],
+            "low_engagement": len(m["noise_card_count"]["low_engagement_sources"]),
+            "refires": m["same_intent_refires"]["offender_count"],
+            "closure_overdue": (overdue["overdue_count"]
+                                if overdue.get("db_available") else "n/a"),
+            "crashes": m["model_crash_or_skip"]["total"],
+            "silent": m["silent_failures"]["total"],
+            "ok": True,
+        }
+    except Exception:  # noqa: BLE001 — panel must never break the home page
+        return {"ok": False}
+
 # feed 只收用户可理解的事件；task_spawn/batch_flush 是机器节拍，太吵
 _FEED_EVENTS = ("task_finish", "task_skip", "task_timeout")
 
@@ -164,6 +189,28 @@ def home_page():
                 with ui.card().classes("stat-card flex-1"):
                     ui.label(str(active_tasks)).classes("text-2xl font-bold")
                     ui.label("active tasks").classes("text-xs text-gray-500")
+
+            # 🩺 Self-monitoring (24h) — headline numbers from core.selfmon,
+            # computed from LIVE sources (REQ-67). Defensive: any failure → n/a.
+            sm = _selfmon_headline(JARVIS_DIR)
+            with ui.card().classes("stat-card w-full mt-2"):
+                ui.label("🩺 Self-monitoring (24h)").classes("text-sm font-semibold")
+                if not sm.get("ok"):
+                    ui.label("n/a").classes("text-xs text-gray-400 italic")
+                else:
+                    def _metric(label: str, value, alert: bool = False):
+                        with ui.column().classes("items-center gap-0"):
+                            cls = "text-xl font-bold" + (
+                                " text-red-600" if alert and value not in (0, "n/a") else "")
+                            ui.label(str(value)).classes(cls)
+                            ui.label(label).classes("text-xs text-gray-500")
+
+                    with ui.row().classes("w-full gap-6 justify-around"):
+                        _metric("noise cards", sm["noise_cards"])
+                        _metric("re-fires", sm["refires"], alert=True)
+                        _metric("closure overdue", sm["closure_overdue"], alert=True)
+                        _metric("crashes/skips", sm["crashes"], alert=True)
+                        _metric("silent fails", sm["silent"], alert=True)
 
             # Activity timeline — 活数据: sched_events + 真实送达
             ui.label("Recent Activity").classes("text-lg font-semibold mt-4")

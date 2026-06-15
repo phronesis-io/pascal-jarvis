@@ -5,6 +5,17 @@
 # return titles + URLs for Claude to curate. This is NOT a subscription
 # model — it's discovery-based, bypassing platform recommendation algorithms.
 #
+# REQ-75 (event-gate low-value proactive sources): as a STANDALONE proactive
+# card this source earned 0% engagement (0/7 — pure unanswered push). Per
+# Pascal's principle, every proactive message must earn its interruption, so
+# the standalone push is gated OFF by default: this pre-script exits silently
+# (empty output → heartbeat skips the task) unless explicitly opted in.
+#
+# TARGET (follow-up, not this change): batch these discoveries into the daily
+# plan / daily digest instead of an immediate per-item card. The discovery
+# machinery below is intentionally preserved so the digest can invoke it.
+# To run it (digest pipeline or manual/testing), set CONTENT_RECOMMEND_PUSH=1.
+#
 # Requires: yt-dlp (brew install yt-dlp)
 
 set -euo pipefail
@@ -13,6 +24,13 @@ JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 YT_DLP="${YT_DLP:-$(command -v yt-dlp 2>/dev/null || echo /opt/homebrew/bin/yt-dlp)}"
 LOG_FILE="$MEMORY_DIR/system/content_recommend_log.jsonl"
+
+# ── REQ-75 event gate: defer the standalone push unless explicitly enabled ──
+# Default behavior is now "OK unless noteworthy": stay silent so the heartbeat
+# skips this task. Discovery is meant to be batched into the daily digest.
+if [ "${CONTENT_RECOMMEND_PUSH:-0}" != "1" ]; then
+  exit 0
+fi
 
 # Only during waking hours
 hour=$(date +%H)

@@ -1,8 +1,21 @@
 """Tests for core.memory — flat loading (1M context era)."""
 
+import time
 from pathlib import Path
 
-from core.memory import load_tiered_memory
+from core.memory import (
+    HOT_BUDGET,
+    MAX_MEMORY_CHARS,
+    SYSTEM_BUDGET,
+    TIMELINE_BUDGET,
+    WARM_BUDGET,
+    WARM_STALE_DAYS,
+    all_facts,
+    demote_stale_warm,
+    get_fact,
+    load_tiered_memory,
+    set_fact,
+)
 
 
 def test_empty_dir(tmp_path):
@@ -121,10 +134,213 @@ def test_jsonl_system_files_not_loaded(tmp_path):
 
 
 def test_truncation(tmp_path):
+    # A single hot file far exceeding the hot tier budget is truncated WITHIN
+    # the hot tier (REQ-73) and the overall payload stays under MAX.
     hot = tmp_path / "hot"
     hot.mkdir()
-    # Write a file exceeding the 200K budget
     (hot / "big.md").write_text("x" * 250000)
     output = load_tiered_memory(tmp_path)
-    assert "[memory truncated" in output
+    assert "[hot memory truncated" in output
     assert len(output) < 250000
+    assert len(output) <= MAX_MEMORY_CHARS
+
+
+# ── REQ-73: per-tier budgets ─────────────────────────────────────────────
+
+
+def _make_full_tree(tmp_path):
+    for sub in ("hot", "warm", "system", "timeline"):
+        (tmp_path / sub).mkdir()
+
+
+def test_huge_warm_does_not_starve_timeline(tmp_path):
+    """The core REQ-73 fix: an over-budget warm tier must NOT cause timeline
+    content (freshest cross-day continuity) to be truncated away."""
+    _make_full_tree(tmp_path)
+    # warm far larger than the entire budget — would, under the old end-of-load
+    # truncation, eat everything and drop timeline entirely.
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    (tmp_path / "timeline" / "longterm_digest.md").write_text(
+        "DIGEST_CONTINUITY_MARKER cross-day digest text"
+    )
+    (tmp_path / "timeline" / "hourly_log.md").write_text("HOURLY_MARKER")
+
+    output = load_tiered_memory(tmp_path)
+
+    # Timeline survived despite warm being massively over budget.
+    assert "DIGEST_CONTINUITY_MARKER" in output
+    assert "HOURLY_MARKER" in output
+    # warm was truncated within its tier.
+    assert "[warm memory truncated" in output
+    # total respects the global cap.
+    assert len(output) <= MAX_MEMORY_CHARS
+
+
+def test_huge_warm_does_not_starve_structured_facts(tmp_path):
+    """Hot reserve (incl. structured facts) is never dropped by a huge warm."""
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    set_fact(tmp_path, "pascal_departure", "2026-06-24")
+    output = load_tiered_memory(tmp_path)
+    assert "pascal_departure: 2026-06-24" in output
+    assert "Structured Facts" in output
+
+
+def test_truncation_emits_warning(tmp_path, capsys):
+    """Truncation must be observable: a stderr warning naming the tier and
+    chars dropped (REQ-73 #2)."""
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    load_tiered_memory(tmp_path)
+    err = capsys.readouterr().err
+    assert "warm tier truncated" in err
+    assert "dropped" in err
+
+
+def test_no_warning_when_within_budget(tmp_path, capsys):
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "small.md").write_text("small warm")
+    (tmp_path / "timeline" / "hourly_log.md").write_text("small timeline")
+    load_tiered_memory(tmp_path)
+    err = capsys.readouterr().err
+    assert "truncated" not in err
+
+
+def test_tier_budgets_sum_to_max(tmp_path):
+    # Sanity: reserves + warm remainder == MAX (warm absorbs the remainder).
+    assert HOT_BUDGET + TIMELINE_BUDGET + SYSTEM_BUDGET + WARM_BUDGET == MAX_MEMORY_CHARS
+    assert WARM_BUDGET > 0
+
+
+def test_digest_prioritized_within_timeline(tmp_path):
+    """When timeline is over its budget, the longterm_digest survives over the
+    bulkier hourly log."""
+    _make_full_tree(tmp_path)
+    (tmp_path / "timeline" / "longterm_digest.md").write_text(
+        "DIGEST_KEEP " + ("d" * 2000)
+    )
+    (tmp_path / "timeline" / "hourly_log.md").write_text(
+        "HOURLY_BULK " + ("h" * (TIMELINE_BUDGET * 2))
+    )
+    output = load_tiered_memory(tmp_path)
+    assert "DIGEST_KEEP" in output
+    assert "[timeline memory truncated" in output
+
+
+# ── REQ-73: stale warm demotion ──────────────────────────────────────────
+
+
+def test_demote_stale_warm_moves_to_archive_and_loader_skips(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    stale = warm / "tianmushan_prep.md"
+    fresh = warm / "health.md"
+    stale.write_text("STALE_PREP_DOC for a past trip")
+    fresh.write_text("FRESH_HEALTH_DATA")
+    # Backdate the stale file well beyond the threshold.
+    old = time.time() - (WARM_STALE_DAYS + 5) * 86400
+    import os
+    os.utime(stale, (old, old))
+
+    demoted = demote_stale_warm(tmp_path)
+    assert "tianmushan_prep.md" in demoted
+    # File was MOVED, not deleted.
+    assert not stale.exists()
+    archived = warm / "archive" / "tianmushan_prep.md"
+    assert archived.exists()
+    assert "STALE_PREP_DOC" in archived.read_text()
+    # Fresh file untouched.
+    assert fresh.exists()
+
+    # Loader skips warm/archive/ but still loads the fresh file.
+    output = load_tiered_memory(tmp_path)
+    assert "FRESH_HEALTH_DATA" in output
+    assert "STALE_PREP_DOC" not in output
+
+
+def test_demote_skips_fresh_and_index(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "_index.md").write_text("index")
+    (warm / "recent.md").write_text("recent")
+    # Backdate even the index past the threshold — it must still be protected.
+    old = time.time() - (WARM_STALE_DAYS + 5) * 86400
+    import os
+    os.utime(warm / "_index.md", (old, old))
+    demoted = demote_stale_warm(tmp_path)
+    assert demoted == []
+    assert (warm / "_index.md").exists()
+    assert (warm / "recent.md").exists()
+
+
+def test_demote_never_touches_other_tiers(tmp_path):
+    """Demotion is warm-only; hot/system/timeline are never moved."""
+    _make_full_tree(tmp_path)
+    old = time.time() - (WARM_STALE_DAYS + 30) * 86400
+    import os
+    for sub, name in (("hot", "user_profile.md"),
+                      ("system", "todos.md"),
+                      ("timeline", "hourly_log.md")):
+        p = tmp_path / sub / name
+        p.write_text("content")
+        os.utime(p, (old, old))
+    demote_stale_warm(tmp_path)
+    for sub, name in (("hot", "user_profile.md"),
+                      ("system", "todos.md"),
+                      ("timeline", "hourly_log.md")):
+        assert (tmp_path / sub / name).exists()
+    assert not (tmp_path / "hot" / "archive").exists()
+
+
+# ── REQ-71: structured dated facts ───────────────────────────────────────
+
+
+def test_set_get_fact_roundtrip(tmp_path):
+    (tmp_path / "hot").mkdir()
+    set_fact(tmp_path, "pascal_departure", "2026-06-24")
+    set_fact(tmp_path, "partner_departure", "2026-06-14")
+    assert get_fact(tmp_path, "pascal_departure") == "2026-06-24"
+    assert get_fact(tmp_path, "partner_departure") == "2026-06-14"
+    assert get_fact(tmp_path, "missing", "fallback") == "fallback"
+    facts = all_facts(tmp_path)
+    assert facts["pascal_departure"] == "2026-06-24"
+    assert facts["partner_departure"] == "2026-06-14"
+
+
+def test_set_fact_updates_in_place(tmp_path):
+    (tmp_path / "hot").mkdir()
+    set_fact(tmp_path, "pascal_departure", "2026-06-24")
+    set_fact(tmp_path, "pascal_departure", "2026-06-25")  # correction
+    assert get_fact(tmp_path, "pascal_departure") == "2026-06-25"
+    # No duplicate DATA lines (commented example lines don't count).
+    text = (tmp_path / "hot" / "structured_facts.md").read_text()
+    data_lines = [
+        ln for ln in text.splitlines()
+        if ln.strip().startswith("pascal_departure:") and not ln.strip().startswith("#")
+    ]
+    assert len(data_lines) == 1
+
+
+def test_set_fact_creates_file_with_template(tmp_path):
+    # hot/ doesn't even exist yet — set_fact creates it.
+    set_fact(tmp_path, "deadline", "2026-07-01")
+    facts_file = tmp_path / "hot" / "structured_facts.md"
+    assert facts_file.exists()
+    assert get_fact(tmp_path, "deadline") == "2026-07-01"
+
+
+def test_structured_facts_injected_first_in_hot(tmp_path):
+    hot = tmp_path / "hot"
+    hot.mkdir()
+    (hot / "behavioral_rules.md").write_text("RULES_MARKER")
+    (hot / "user_profile.md").write_text("PROFILE_MARKER")
+    set_fact(tmp_path, "pascal_departure", "2026-06-24")
+    output = load_tiered_memory(tmp_path)
+    # Structured facts come before rules and profile.
+    assert output.index("Structured Facts") < output.index("RULES_MARKER")
+    assert output.index("pascal_departure: 2026-06-24") < output.index("PROFILE_MARKER")
+
+
+def test_all_facts_empty_when_missing(tmp_path):
+    assert all_facts(tmp_path) == {}
+    assert get_fact(tmp_path, "anything") is None

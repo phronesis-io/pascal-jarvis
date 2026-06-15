@@ -105,6 +105,27 @@ _CLOSURE_TERMINAL = ("done", "recorded", "na")
 # others are prep-only). Deliberately narrow — bare 约/见 over-match logistics.
 _SOCIAL_RE = re.compile(r"饭|聚|咖啡|午餐|晚餐|见面|面试|lunch|dinner|coffee|meet")
 
+# REQ-70 carry/bring detection. A "要带的东西" reminder (伞/球拍/要还的东西…)
+# must fire in the MORNING before Pascal leaves home, not at the event's own
+# prep time — the 6/13 root cause: 复动肌骨 12:30 康复课的伞被锚到午饭点，
+# 他早上 9 点出门时根本没收到。匹配事件标题/详情里暗示需要随身携带的线索。
+_CARRY_RE = re.compile(r"伞|球拍|拍子|带[上好]?|要还|还的|归还|护照|证件|材料|文件|"
+                       r"复动肌骨|康复|羽毛球|网球|游泳|装备|umbrella|racket|return|bring|gear")
+
+# REQ-70 first-leave anchor. A carry checklist fires this many minutes before
+# the day's earliest out-of-home event, but never earlier than the morning
+# floor nor later than the morning ceiling — so it lands while Pascal is still
+# home getting ready, regardless of whether the first event is at 09:00 or
+# 14:30.
+CARRY_LEAD = timedelta(minutes=75)        # ~60-90min before first leave
+CARRY_MORNING_FLOOR = 7                    # never card before 07:00
+CARRY_MORNING_CEILING = 9                  # afternoon-only days still fire by 09:00
+
+# REQ-68 per-event prep lead. The context-recall prep fires this long before a
+# ≤48h event. A module constant (not a literal) so the after-event guard is
+# unit-testable (a pathological lead must drop the prep, never fire it late).
+PREP_LEAD = timedelta(minutes=30)
+
 
 def snap_to_golden(dt: datetime) -> datetime:
     """Clamp a may_notify follow-up time into the 11:00-18:00 golden window.
@@ -1087,13 +1108,52 @@ def mark_failed(intent_id: str, error: str):
 # Calendar bridge — auto-generate prep intents from calendar events
 # ---------------------------------------------------------------------------
 
-def generate_calendar_intents(calendar_md: str) -> list[str]:
-    """Parse calendar markdown and create prep intents for upcoming events.
+def _load_cal_index(db) -> tuple[set, dict]:
+    """Snapshot every calendar intent's tags → (existing_tags, tag→(id,cfg)).
 
-    Creates intents like:
-    - 30min before meeting: "prepare context for meeting X"
-    - Morning of event day: "today you have X, remember to bring Y"
-    - 2 days before activity: "prepare for activity X"
+    REQ-68 idempotency: the dedup must look at ALL statuses, not just
+    pending/triggered. The 小明-饭 churn (one dinner → 11 rows, two preps at
+    the exact same 17:00:16) came partly from re-syncing after a prep had
+    already fired: once it left 'pending', the old query no longer saw it, so
+    the very next sync INSERTed a fresh duplicate. Including executed/expired/
+    cancelled in the dedup snapshot makes 'never a second prep/closure for the
+    same (date,title,role)' an invariant the INSERT path cannot violate.
+    JSON parse, not LIKE: json.dumps may store Chinese as \\uXXXX.
+    """
+    existing_tags: set = set()
+    tag_to_row: dict = {}
+    for row in db.execute(
+        "SELECT id, tags, trigger_config FROM intentions WHERE source = 'calendar'"
+    ).fetchall():
+        try:
+            row_tags = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or [])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        existing_tags.update(row_tags)
+        for t in row_tags:
+            tag_to_row[t] = (row[0], row[2])
+    return existing_tags, tag_to_row
+
+
+def generate_calendar_intents(calendar_md: str) -> list[str]:
+    """Parse calendar markdown and create prep / closure / carry intents.
+
+    Three intent ROLES, each keyed on (event-date, title, role) so a re-sync
+    upserts in place rather than churning duplicates (REQ-68):
+    - prep (role='prep', category='context'): context recall ~30min before, or
+      next-day 09:00 for events >48h out. Skipped if its fire time would land
+      AT/AFTER the event start — a prep that fires after the event is useless.
+    - closure (role='close', category='external'): post-event 后闭环 for social
+      events only. Asks, never nags.
+    - carry (role='carry', category='context'): ONE morning checklist per day,
+      merging every "要带的东西" (伞/球拍/要还的) across that day's events,
+      anchored to the FIRST out-of-home event so it fires while Pascal is still
+      home (REQ-70 — the 复动肌骨 伞 was anchored to lunchtime and missed the
+      morning he actually left).
+
+    Idempotency invariants (REQ-68): for each (date,title,role) there is at most
+    ONE row, EVER; a reschedule UPDATEs the existing row's trigger time in place
+    (supersede); no path can INSERT a second row for the same key.
 
     Returns list of created intent IDs.
     """
@@ -1101,144 +1161,284 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
     _init()
     db = _get_db()
     created = []
+    now = now_local()
 
-    # Parse events from calendar markdown
+    # ── Pass 1: parse events, grouped by date (carry needs the whole day) ──
     # Format: "  HH:MM-HH:MM  Title  (optional details)"
     lines = calendar_md.strip().splitlines()
     current_date = None
-    date_label = ""
+    by_date: dict[str, list[dict]] = {}
 
     for line in lines:
-        # Detect date headers
         date_match = re.match(r'^(Today|Tomorrow|Day \d+)\s+\((\d{4}-\d{2}-\d{2})', line)
         if date_match:
-            date_label = date_match.group(1)
             current_date = date_match.group(2)
             continue
-
         if not current_date:
             continue
-
-        # Parse event lines
         event_match = re.match(r'^\s+(\d{2}:\d{2})-(\d{2}:\d{2})\s+(.+?)(?:\s+\((.+)\))?\s*$', line)
         if not event_match:
             continue
-
-        start_time = event_match.group(1)
-        end_time = event_match.group(2)
+        start_time, end_time = event_match.group(1), event_match.group(2)
         title = event_match.group(3).strip()
         details = event_match.group(4) or ""
-
-        event_dt = _coerce(datetime.fromisoformat(f"{current_date}T{start_time}:00"))
-
-        # Skip past events
-        if event_dt < now_local():
+        try:
+            event_dt = _coerce(datetime.fromisoformat(f"{current_date}T{start_time}:00"))
+        except (ValueError, TypeError):
             continue
+        by_date.setdefault(current_date, []).append({
+            "start_time": start_time, "end_time": end_time, "title": title,
+            "details": details, "event_dt": event_dt,
+        })
 
-        # Dedup key is date+title WITHOUT start_time (REQ-53/leak-8): a
-        # rescheduled event must update the existing prep/closure in place,
-        # not spawn a duplicate pair (stale wrong-time prep + double
-        # closure-ask). Time changes are handled below via supersede.
-        intent_tag = f"cal:{current_date}:{title[:20]}"
-        close_tag = f"cal-close:{current_date}:{title[:20]}"
+    # Dedup snapshot across ALL statuses (see _load_cal_index). Refreshed lazily
+    # below as we INSERT, so two identical event lines in ONE markdown can't
+    # both slip through before the DB sees the first.
+    existing_tags, tag_to_row = _load_cal_index(db)
 
-        # All existing calendar-intent tags (dedup BOTH prep and close in one
-        # pass), plus tag→(id, trigger_config) for the supersede path.
-        # JSON parse, not LIKE: json.dumps may store Chinese as \uXXXX.
-        existing_tags = set()
-        tag_to_row: dict = {}
-        for row in db.execute(
-            "SELECT id, tags, trigger_config FROM intentions WHERE source = 'calendar' "
-            "AND status IN ('pending', 'triggered')"
-        ).fetchall():
-            try:
-                row_tags = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or [])
-                existing_tags.update(row_tags)
-                for t in row_tags:
-                    tag_to_row[t] = (row[0], row[2])
-            except (json.JSONDecodeError, TypeError):
-                pass
+    # ── Pass 2: per-event prep + closure ──
+    for current_date in sorted(by_date):
+        for ev in by_date[current_date]:
+            start_time, end_time = ev["start_time"], ev["end_time"]
+            title, details, event_dt = ev["title"], ev["details"], ev["event_dt"]
 
-        # ── Prep intent (category='context' — legitimately closure-free; a prep
-        #    correctly classified is NOT a 美化版日历提醒) ──
-        hours_until = (event_dt - now_local()).total_seconds() / 3600
-        prep_dt, prep_prompt = None, ""
-        if hours_until > 48:
-            prep_dt = (event_dt - timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-            prep_prompt = f"明天 {start_time} 有 {title}。帮 Pascal 做准备：回忆相关上下文、准备需要带的东西、确认地点和时间。"
-        elif hours_until > 2:
-            prep_dt = event_dt - timedelta(minutes=30)
-            prep_prompt = f"{title} 在 {start_time} 开始（还有 30 分钟）。快速回顾：这个会/活动的目的是什么？有什么需要提前准备的？"
+            # Skip past events
+            if event_dt < now:
+                continue
 
-        if prep_dt and prep_dt >= now_local():
-            if intent_tag in existing_tags:
-                # Same event (date+title) already has a prep — if the event
-                # TIME changed, supersede in place instead of duplicating
-                # (REQ-53: reschedules became an update, not a wrong-time
-                # prep card plus a fresh duplicate).
-                row = tag_to_row.get(intent_tag)
-                if row:
-                    iid_existing, cfg_raw = row
-                    try:
-                        stored = (json.loads(cfg_raw) or {}).get("datetime", "")
-                    except (json.JSONDecodeError, TypeError):
-                        stored = ""
-                    if stored and stored != prep_dt.isoformat():
-                        update_intent(
-                            iid_existing,
-                            trigger_config={"datetime": prep_dt.isoformat()},
-                            prompt=prep_prompt,
-                            expires_at=event_dt.isoformat(),
-                        )
-            else:
-                iid = create_intent(
-                    name=f"Prep: {title}",
-                    trigger_type="date",
-                    trigger_config={"datetime": prep_dt.isoformat()},
-                    prompt=prep_prompt,
-                    context={"event_title": title, "event_time": f"{start_time}-{end_time}",
-                              "event_date": current_date, "event_details": details},
-                    action_type="notify",
-                    action_config={"type": "prep_reminder"},
-                    purpose=f"为 {title} 做心理和实际准备",
-                    tags=[intent_tag, "calendar-prep"],
-                    source="calendar",
-                    category="context",
-                    expires_at=event_dt.isoformat(),
-                )
-                created.append(iid)
+            # Dedup key is date+title WITHOUT start_time (REQ-53/leak-8): a
+            # rescheduled event must update the existing prep/closure in place,
+            # not spawn a duplicate pair. Role is encoded in the tag prefix.
+            intent_tag = f"cal:{current_date}:{title[:20]}"
+            close_tag = f"cal-close:{current_date}:{title[:20]}"
 
-        # ── Post-event closure for social / 外联 events (category='external') ──
-        # Logistics-only events (康复课/workshop) stay prep-only. The closure asks,
-        # AFTER the event, whether there is anything to follow up — only cards on
-        # a real lead (external policy), never nags.
-        if _SOCIAL_RE.search(title) and close_tag not in existing_tags:
-            try:
-                event_end_dt = _coerce(datetime.fromisoformat(f"{current_date}T{end_time}:00"))
-            except (ValueError, TypeError):
-                event_end_dt = event_dt
-            close_dt = snap_to_golden(event_end_dt + timedelta(minutes=90))
-            if close_dt >= now_local():
-                cid = create_intent(
-                    name=f"{title} 后闭环",
-                    trigger_type="date",
-                    trigger_config={"datetime": close_dt.isoformat()},
-                    prompt=(f"{title} 应该结束了。若 Pascal 提到，记录：聊了/做了什么值得跟进的？"
-                            f"有具体线索才发卡问，没有就静默。"),
-                    context={"event_title": title, "event_date": current_date},
-                    action_type="notify",
-                    category="external",
-                    closure_question=f"{title} 之后——有什么值得跟进的吗？",
-                    purpose=f"{title} 的会后/饭后闭环",
-                    tags=[close_tag, "calendar-close"],
-                    source="calendar",
-                    # An unanswered closure ask must not go stale-pending
-                    # forever (REQ-53): cap at 36h past event end.
-                    expires_at=(event_end_dt + timedelta(hours=36)).isoformat(),
-                )
-                created.append(cid)
+            # ── Prep intent (category='context' — legitimately closure-free; a
+            #    prep correctly classified is NOT a 美化版日历提醒) ──
+            hours_until = (event_dt - now).total_seconds() / 3600
+            prep_dt, prep_prompt = None, ""
+            if hours_until > 48:
+                prep_dt = (event_dt - timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+                prep_prompt = f"明天 {start_time} 有 {title}。帮 Pascal 做准备：回忆相关上下文、准备需要带的东西、确认地点和时间。"
+            elif hours_until > 2:
+                prep_dt = event_dt - PREP_LEAD
+                prep_prompt = f"{title} 在 {start_time} 开始（还有 30 分钟）。快速回顾：这个会/活动的目的是什么？有什么需要提前准备的？"
+
+            # REQ-68.2: a prep whose computed fire time is AT/AFTER the event
+            # start is useless (the 18:00 prep that fired AFTER the 17:30 dinner
+            # start). Never create or supersede it; log and drop.
+            if prep_dt is not None and prep_dt >= event_dt:
+                print(f"[calendar-intents] skip prep for {title!r} @ {current_date}: "
+                      f"prep_dt {prep_dt.isoformat()} >= event {event_dt.isoformat()}",
+                      file=sys.stderr)
+                prep_dt = None
+
+            if prep_dt and prep_dt >= now:
+                if intent_tag in existing_tags:
+                    # Same event (date+title) already has a prep — if the event
+                    # TIME changed, supersede in place instead of duplicating
+                    # (REQ-68: reschedules update, never a wrong-time prep card
+                    # plus a fresh duplicate). Only revive a still-live row.
+                    row = tag_to_row.get(intent_tag)
+                    if row:
+                        iid_existing, cfg_raw = row
+                        try:
+                            stored = (json.loads(cfg_raw) or {}).get("datetime", "")
+                        except (json.JSONDecodeError, TypeError):
+                            stored = ""
+                        cur = get_intent(iid_existing)
+                        if (stored and stored != prep_dt.isoformat()
+                                and cur and cur.get("status") in ("pending", "triggered")):
+                            update_intent(
+                                iid_existing,
+                                trigger_config={"datetime": prep_dt.isoformat()},
+                                prompt=prep_prompt,
+                                expires_at=event_dt.isoformat(),
+                            )
+                            tag_to_row[intent_tag] = (iid_existing, json.dumps(
+                                {"datetime": prep_dt.isoformat()}, ensure_ascii=False))
+                else:
+                    iid = create_intent(
+                        name=f"Prep: {title}",
+                        trigger_type="date",
+                        trigger_config={"datetime": prep_dt.isoformat()},
+                        prompt=prep_prompt,
+                        context={"event_title": title, "event_time": f"{start_time}-{end_time}",
+                                  "event_date": current_date, "event_details": details},
+                        action_type="notify",
+                        action_config={"type": "prep_reminder"},
+                        purpose=f"为 {title} 做心理和实际准备",
+                        tags=[intent_tag, "calendar-prep"],
+                        source="calendar",
+                        category="context",
+                        expires_at=event_dt.isoformat(),
+                    )
+                    created.append(iid)
+                    existing_tags.add(intent_tag)
+                    tag_to_row[intent_tag] = (iid, json.dumps(
+                        {"datetime": prep_dt.isoformat()}, ensure_ascii=False))
+
+            # ── Post-event closure for social / 外联 events (category='external') ──
+            # Logistics-only events (康复课/workshop) stay prep-only. The closure
+            # asks, AFTER the event, whether there is anything to follow up —
+            # only cards on a real lead (external policy), never nags.
+            if _SOCIAL_RE.search(title):
+                try:
+                    event_end_dt = _coerce(datetime.fromisoformat(f"{current_date}T{end_time}:00"))
+                except (ValueError, TypeError):
+                    event_end_dt = event_dt
+                close_dt = snap_to_golden(event_end_dt + timedelta(minutes=90))
+                if close_tag in existing_tags:
+                    # REQ-68.1: extend the supersede path to the closure role —
+                    # a rescheduled social event updates its 后闭环 in place
+                    # instead of leaving a stale one + INSERTing a duplicate.
+                    row = tag_to_row.get(close_tag)
+                    if row:
+                        iid_existing, cfg_raw = row
+                        try:
+                            stored = (json.loads(cfg_raw) or {}).get("datetime", "")
+                        except (json.JSONDecodeError, TypeError):
+                            stored = ""
+                        cur = get_intent(iid_existing)
+                        if (stored and stored != close_dt.isoformat()
+                                and cur and cur.get("status") in ("pending", "triggered")):
+                            update_intent(
+                                iid_existing,
+                                trigger_config={"datetime": close_dt.isoformat()},
+                                expires_at=(event_end_dt + timedelta(hours=36)).isoformat(),
+                            )
+                            tag_to_row[close_tag] = (iid_existing, json.dumps(
+                                {"datetime": close_dt.isoformat()}, ensure_ascii=False))
+                elif close_dt >= now:
+                    cid = create_intent(
+                        name=f"{title} 后闭环",
+                        trigger_type="date",
+                        trigger_config={"datetime": close_dt.isoformat()},
+                        prompt=(f"{title} 应该结束了。若 Pascal 提到，记录：聊了/做了什么值得跟进的？"
+                                f"有具体线索才发卡问，没有就静默。"),
+                        context={"event_title": title, "event_date": current_date},
+                        action_type="notify",
+                        category="external",
+                        closure_question=f"{title} 之后——有什么值得跟进的吗？",
+                        purpose=f"{title} 的会后/饭后闭环",
+                        tags=[close_tag, "calendar-close"],
+                        source="calendar",
+                        # An unanswered closure ask must not go stale-pending
+                        # forever (REQ-53): cap at 36h past event end.
+                        expires_at=(event_end_dt + timedelta(hours=36)).isoformat(),
+                    )
+                    created.append(cid)
+                    existing_tags.add(close_tag)
+                    tag_to_row[close_tag] = (cid, json.dumps(
+                        {"datetime": close_dt.isoformat()}, ensure_ascii=False))
+
+    # ── Pass 3: ONE morning carry checklist per day (REQ-70) ──
+    created += _generate_carry_intents(by_date, now, existing_tags, tag_to_row)
 
     return created
+
+
+def _generate_carry_intents(by_date: dict, now: datetime,
+                            existing_tags: set, tag_to_row: dict) -> list[str]:
+    """Emit one morning "要带的东西" checklist per day, anchored to first leave.
+
+    REQ-70: a carry/bring reminder must fire in the MORNING before Pascal
+    leaves home, not at the event's own prep time. For each day we:
+      1. collect every event whose title/details suggest something to bring;
+      2. anchor the fire time to CARRY_LEAD before the day's FIRST out-of-home
+         event, clamped into [CARRY_MORNING_FLOOR, CARRY_MORNING_CEILING] —
+         so an afternoon-only event still gets a 09:00-by reminder, not a
+         13:30 one (the exact 复动肌骨 12:30 失败);
+      3. merge all carry items for the day into ONE intent (one card, not N).
+    Upsert-keyed on (date, role='carry') so a re-sync never duplicates.
+    Carry intents carry expires_at = first-event start (travel-pause hygiene:
+    a dated calendar reminder never lingers past the day it was for — the
+    no-expires_at 接狗 cron class needs structured trip dates, REQ-71/agent).
+    """
+    out: list[str] = []
+    for current_date in sorted(by_date):
+        events = sorted(by_date[current_date], key=lambda e: e["event_dt"])
+        # First event still in the future = the day's first leave-home moment.
+        future = [e for e in events if e["event_dt"] >= now]
+        if not future:
+            continue
+        first = future[0]
+        carry_items = [e for e in events
+                       if e["event_dt"] >= now
+                       and _CARRY_RE.search(f"{e['title']} {e['details']}")]
+        if not carry_items:
+            continue
+
+        carry_tag = f"cal-carry:{current_date}"
+
+        # Anchor: CARRY_LEAD before first leave, clamped to a sane morning hour.
+        anchor = first["event_dt"] - CARRY_LEAD
+        floor = first["event_dt"].replace(hour=CARRY_MORNING_FLOOR, minute=0,
+                                          second=0, microsecond=0)
+        ceiling = first["event_dt"].replace(hour=CARRY_MORNING_CEILING, minute=0,
+                                            second=0, microsecond=0)
+        if anchor < floor:
+            anchor = floor
+        elif anchor > ceiling:
+            # Event is much later in the day → still fire by the morning ceiling.
+            anchor = ceiling
+        # Never schedule into the past (e.g. this morning already gone).
+        if anchor < now:
+            continue
+
+        items_desc = "、".join(
+            f"{e['title']}（{e['start_time']}）" for e in carry_items)
+        carry_prompt = (
+            f"早上出门前提醒 Pascal 今天要带的东西。今天最早 {first['start_time']} 出门，"
+            f"涉及携带：{items_desc}。一句话清单提醒他别忘带（伞/球拍/要还的东西等），"
+            f"出门前一次性说清，别等到事件本身的准备时间。"
+        )
+
+        if carry_tag in existing_tags:
+            # Upsert: re-sync updates the morning anchor in place (first-leave
+            # time may have shifted) instead of duplicating the checklist.
+            row = tag_to_row.get(carry_tag)
+            if row:
+                iid_existing, cfg_raw = row
+                try:
+                    stored = (json.loads(cfg_raw) or {}).get("datetime", "")
+                except (json.JSONDecodeError, TypeError):
+                    stored = ""
+                cur = get_intent(iid_existing)
+                if (stored and stored != anchor.isoformat()
+                        and cur and cur.get("status") in ("pending", "triggered")):
+                    update_intent(
+                        iid_existing,
+                        trigger_config={"datetime": anchor.isoformat()},
+                        prompt=carry_prompt,
+                        expires_at=first["event_dt"].isoformat(),
+                    )
+                    tag_to_row[carry_tag] = (iid_existing, json.dumps(
+                        {"datetime": anchor.isoformat()}, ensure_ascii=False))
+            continue
+
+        cid = create_intent(
+            name=f"出门带东西清单 {current_date}",
+            trigger_type="date",
+            trigger_config={"datetime": anchor.isoformat()},
+            prompt=carry_prompt,
+            context={"event_date": current_date,
+                      "first_leave": first["start_time"],
+                      "carry_items": [e["title"] for e in carry_items]},
+            action_type="notify",
+            action_config={"type": "carry_reminder"},
+            purpose=f"{current_date} 出门前一次性提醒要带的东西",
+            tags=[carry_tag, "calendar-carry"],
+            source="calendar",
+            category="context",
+            # Travel-pause hygiene: a dated carry reminder expires at first
+            # leave — it must never linger past the day it was for.
+            expires_at=first["event_dt"].isoformat(),
+        )
+        out.append(cid)
+        existing_tags.add(carry_tag)
+        tag_to_row[carry_tag] = (cid, json.dumps(
+            {"datetime": anchor.isoformat()}, ensure_ascii=False))
+    return out
 
 
 # ---------------------------------------------------------------------------
