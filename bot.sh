@@ -649,9 +649,18 @@ except: pass
 print(n)
 " 2>/dev/null || echo 0)
      _elapsed=0
+     # First poll fast (~6s) so the user sees a sign of life quickly, then
+     # settle to 20s to avoid spam. The instant "Typing" reaction already
+     # fired at dispatch; this loop adds the FIRST textual feedback within
+     # ~6s — either a tool narration (🔧) or, when opus is just thinking with
+     # no tool calls, a one-time "received, thinking" note so the long
+     # generation (median ~100s on opus) isn't dead silence.
+     _poll=6
+     _thinking_sent=0
      while [ "$_elapsed" -lt 6000 ]; do
-       sleep 20
-       _elapsed=$((_elapsed + 20))
+       sleep "$_poll"
+       _elapsed=$((_elapsed + _poll))
+       _poll=20
        if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
        # Extract tool call descriptions, compare with last snapshot
        _new_tools=$(python3 -c "
@@ -685,6 +694,7 @@ for d in descs[offset:]:
        _new_count=$(echo "$_new_tools" | head -1)
        _new_descs=$(echo "$_new_tools" | tail -n +2)
        if [ -n "$_new_descs" ] && [ "$_new_count" -gt "$_last_tool_count" ] 2>/dev/null; then
+         _thinking_sent=1   # tool narration IS the sign of life — suppress the thinking note
          _formatted=$(echo "$_new_descs" | while IFS= read -r _d; do
            [ -n "$_d" ] && echo "• $_d"
          done)
@@ -714,6 +724,13 @@ $_formatted" \
            fi
          fi
          _last_tool_count="$_new_count"
+       elif [ "$_thinking_sent" -eq 0 ]; then
+         # No tool calls yet and the reply isn't back — opus is "just
+         # thinking". Send ONE textual ack (the reaction alone left a long
+         # silent gap). Fast replies (<6s) never reach here: the kill -0
+         # check above broke the loop. Fires at most once per turn.
+         _thinking_sent=1
+         lark_reply_text "$message_id" "💭 收到了，正在想这个问题……（想得稍微深一点，请稍等）" >/dev/null 2>&1 || true
        fi
        # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
        # background job. Release the conversation instead of blocking it —
