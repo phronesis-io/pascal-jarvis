@@ -117,3 +117,4 @@ data/.intent_card_ledger.jsonl
 eigenflux/.ef-cursor
 eigenflux/.ef-seen
 alerts_deadletter.jsonl
+.daemon_brain_state.json

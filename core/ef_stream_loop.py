@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from core.card import linkify_bare_urls
+from core.claude_bin import resolve_claude_bin
 from core.ef_stream import (
     extract_detail,
     extract_item_ids,
@@ -136,7 +137,7 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user."""
 
     try:
         p = subprocess.Popen(
-            ["claude", "--model", "opus", "--dangerously-skip-permissions",
+            [resolve_claude_bin(), "--model", "opus", "--dangerously-skip-permissions",
              "--no-session-persistence", "--disable-slash-commands", "-p", prompt],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             stdin=subprocess.DEVNULL,

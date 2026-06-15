@@ -297,6 +297,11 @@ def check_health() -> dict:
 _probe_alert_stamps: dict = {}
 PROBE_ALERT_WINDOW = 4 * 3600
 
+# Persisted across daemon hot-reloads: per-priority-task failure-window samples
+# (so a brain-death verdict survives the REQ-42 respawn churn) + the last
+# brain-death alert time (4h dedup). See _check_brain_health / core.brain_health.
+BRAIN_STATE_FILE = JARVIS_DIR / ".daemon_brain_state.json"
+
 
 def _in_deploy_window() -> bool:
     """True while a restart.sh deploy is in progress (.deploying < 30min old).
@@ -333,6 +338,69 @@ def probe_observed_components():
             log("WARN", f"Observed component DOWN: {name}")
             notify_lark(f"⚠️ 组件失联：{name} 探测不通。"
                         f"（守护进程只告警不代管；如未自愈请重启或查 launchd）")
+
+
+def _check_brain_health():
+    """Alert (never restart) when the heartbeat loop is ALIVE BUT BRAIN-DEAD —
+    ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
+    was missing from the launchd PATH for ~1h and EVERY liveness signal stayed
+    fresh (beat-marker, /health heartbeat_age, per-task circuit), so nothing
+    caught it. The daemon is Claude-independent and can: it reads
+    heartbeat_state.json directly and applies the 'ran-but-failing' detectors in
+    core/brain_health.py. Alert-only, 4h dedup, deploy-guarded. Never raises."""
+    if _in_deploy_window():
+        return
+    try:
+        # A legitimately stopped loop is the bot-alive check's job, not ours —
+        # only judge brain-death while the loop is actually ticking.
+        beat_age = _find_last_heartbeat()
+        if beat_age is None or beat_age > HEARTBEAT_STALE_THRESHOLD:
+            return
+
+        from core import brain_health
+        from core.heartbeat import HeartbeatRunner, parse_heartbeat
+        from core.task_protocol import CircuitState
+
+        try:
+            state = json.loads((JARVIS_DIR / "heartbeat_state.json").read_text())
+        except (OSError, ValueError):
+            return
+        try:
+            overrides = json.loads(
+                (JARVIS_DIR / "interval_overrides.json").read_text())
+        except (OSError, ValueError):
+            overrides = {}
+        tasks = parse_heartbeat(JARVIS_DIR / "HEARTBEAT.md")
+
+        try:
+            prev = json.loads(BRAIN_STATE_FILE.read_text())
+        except (OSError, ValueError):
+            prev = {}
+        prev_samples = prev.get("samples", {}) or {}
+        last_alert = prev.get("last_alert", 0) or 0
+
+        result = brain_health.assess(
+            state=state, tasks=tasks, overrides=overrides,
+            priority_tasks=HeartbeatRunner.PRIORITY_TASKS,
+            prev_samples=prev_samples, now=time.time(),
+            failure_threshold=CircuitState.FAILURE_THRESHOLD,
+        )
+
+        now = time.time()
+        new_last_alert = last_alert
+        if result["brain_dead"] and now - last_alert >= PROBE_ALERT_WINDOW:
+            new_last_alert = now
+            log("WARN", "BRAIN-DEAD heartbeat: " + "; ".join(result["alerts"]))
+            notify_lark(result["summary"])
+
+        # Atomic persist: samples carry the per-priority failure windows across
+        # hot-reloads; last_alert enforces the 4h dedup.
+        new_state = {"samples": result["samples"], "last_alert": new_last_alert}
+        tmp = BRAIN_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new_state))
+        os.replace(tmp, BRAIN_STATE_FILE)
+    except Exception as e:
+        log("ERROR", f"brain-health check failed: {e}")
 
 
 def diagnose_and_fix(issues: list[str]) -> str:
@@ -517,6 +585,11 @@ def main():
                 probe_tick += 1
                 if probe_tick % 4 == 0:
                     probe_observed_components()
+                # Brain-death detection (alert-only) every ~8th check (~4min).
+                # Cheaper than a restart-spiral; runs in the daemon because it
+                # must survive a dead claude binary that the heartbeat can't.
+                if probe_tick % 8 == 0:
+                    _check_brain_health()
 
                 result = check_health()
 

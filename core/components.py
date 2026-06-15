@@ -53,11 +53,26 @@ def _check_pid(comp: dict, root: Path) -> tuple[bool, str]:
 
 
 def _check_pgrep(comp: dict, root: Path) -> tuple[bool, str]:
+    pattern = comp.get("pattern", "")
     try:
-        r = subprocess.run(["pgrep", "-f", comp.get("pattern", "")],
+        r = subprocess.run(["pgrep", "-f", pattern],
                            capture_output=True, text=True, timeout=5)
-        ok = r.returncode == 0 and r.stdout.strip()
-        return (True, f"pids {r.stdout.split()}") if ok else (False, "no process")
+        if r.returncode == 0 and r.stdout.strip():
+            return True, f"pids {r.stdout.split()}"
+        # macOS pgrep -f only inspects a truncated cmdline (~first 100 chars),
+        # so a long interpreter path prefix can hide patterns like
+        # "-m core.heartbeat_loop". Fall back to a full-cmdline ps scan.
+        ps = subprocess.run(["ps", "ax", "-o", "pid=,command="],
+                            capture_output=True, text=True, timeout=5)
+        pids = []
+        for line in ps.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            pid, _, cmd = line.partition(" ")
+            if pattern and pattern in cmd and "pgrep" not in cmd:
+                pids.append(pid)
+        return (True, f"pids {pids}") if pids else (False, "no process")
     except Exception as e:
         return False, f"pgrep error: {e}"
 

@@ -13,6 +13,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from core.claude_bin import resolve_claude_bin
 from core.textutil import extract_text
 
 NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
@@ -112,7 +113,7 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
     # Call Claude via CLI (opus — Pascal 2026-06-07: 全部用最好的模型，不计 token)
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "opus",
+            [resolve_claude_bin(), "-p", "--model", "opus",
              "--dangerously-skip-permissions"],
             input=prompt,
             capture_output=True,
