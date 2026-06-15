@@ -727,3 +727,64 @@ def test_cron_next_fire_anchors_to_fired_occurrence(intent_db, monkeypatch):
     # Next fire must be the occurrence right AFTER the fired one (fired+1h),
     # not jumped to now+1h — catch-up preserved.
     assert nxt == fired.replace(tzinfo=None) + timedelta(hours=1)
+
+
+# ── REQ-60: closure-of-closure guard + stale closure expiry ──────────────
+
+def test_closure_followup_does_not_spawn_second_level(intent_db):
+    """A followup row (source='closure') reaching terminal must NOT breed a
+    second-level __fu (the 小明 triple-nag root cause)."""
+    import core.intentions as mod
+    # Simulate a closure followup row
+    fu = mod.create_intent(name="闭环: 饭后", trigger_type="date",
+                           trigger_config={"datetime": "2026-06-14T11:00:00"},
+                           source="closure", category="external",
+                           closure_question="有什么跟进的吗？")
+    row = mod.get_intent(fu)
+    # _on_moment_terminal must early-return (source='closure')
+    mod._on_moment_terminal(dict(row), how="executed")
+    assert mod.get_intent(f"{fu}__fu") is None  # no second-level followup
+
+
+def test_stale_closure_followup_expires_not_fires(intent_db, monkeypatch):
+    """REQ-60: a closure follow-up overdue by > CLOSURE_STALE_DAYS is expired,
+    not surfaced — the dinner ask must not nag 2 days late."""
+    import core.intentions as mod
+    from datetime import timedelta
+    from core.timeutil import now_local
+    stale = (now_local() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+    fu = mod.create_intent(name="闭环: 小明饭", trigger_type="date",
+                           trigger_config={"datetime": stale},
+                           source="closure", category="external",
+                           closure_question="有什么跟进的吗？")
+    due_ids = {d["id"] for d in mod.get_due_intents()}
+    assert fu not in due_ids                       # NOT surfaced
+    assert mod.get_intent(fu)["status"] == "expired"
+    assert "stale" in (mod.get_intent(fu)["last_error"] or "")
+
+
+def test_fresh_closure_followup_still_fires(intent_db):
+    """A closure follow-up within the staleness window fires normally."""
+    import core.intentions as mod
+    from datetime import timedelta
+    from core.timeutil import now_local
+    recent = (now_local() - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S")
+    fu = mod.create_intent(name="闭环: 今天的饭", trigger_type="date",
+                           trigger_config={"datetime": recent},
+                           source="closure", category="external",
+                           closure_question="有什么跟进的吗？")
+    due_ids = {d["id"] for d in mod.get_due_intents()}
+    assert fu in due_ids
+
+
+# ── REQ-61: cron success clears last_error (not a status field) ───────────
+
+def test_cron_success_clears_last_error(intent_db):
+    import core.intentions as mod
+    pid = mod.create_intent(name="小时报", trigger_type="cron",
+                            trigger_config={"expression": "0 9-23 * * *"})
+    mod.mark_triggered(pid)
+    mod.mark_executed(pid, result="11:30-12:21：Pascal 在深度投入，无需打扰")
+    row = mod.get_intent(pid)
+    assert row["status"] == "pending"          # cron resets
+    assert not row["last_error"]               # narration NOT stored as error

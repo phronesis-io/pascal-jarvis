@@ -95,3 +95,18 @@ def test_route_output_mixed():
         mock_card.assert_called_once()
         mock_text.assert_called_once()
         assert "plain text" in mock_text.call_args[0][0]
+
+
+def test_record_engagement_skips_silent_sources(tmp_path):
+    """REQ-61: a SILENT source (daily-plan) riding a mixed cycle must NOT get a
+    'sent' engagement row — its content was dropped at the delivery gate, so
+    logging it makes it a fake guaranteed-0% source skewing keep/cut."""
+    import json
+    from core import heartbeat_loop as hl
+    (tmp_path / ".heartbeat_last_source").write_text("daily-plan,checkin")
+    hl._LAST_SENT_IDS.clear()
+    hl._record_engagement(tmp_path)
+    rows = [json.loads(l) for l in (tmp_path / "engagement_log.jsonl").read_text().splitlines() if l.strip()]
+    sources = {r["source"] for r in rows if r["type"] == "sent"}
+    assert "checkin" in sources            # non-silent logged
+    assert "daily-plan" not in sources     # silent skipped (REQ-61)

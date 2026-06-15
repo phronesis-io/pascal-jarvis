@@ -434,3 +434,20 @@ def test_degenerate_ack_slice_routes_to_no_envelope(tmp_path, monkeypatch):
     contents = stdin_log.read_text()
     # ACK post invoked exactly once with the no-envelope sentinel
     assert contents.count("__NO_ENVELOPE__") == 1
+
+
+def test_circuit_trip_does_not_message_user(tmp_path, monkeypatch):
+    """REQ-62: a tripped circuit is an OPS event (log + sched_event), never a
+    chat message. Pascal got raw '连续失败已自动暂停…冷却后自动恢复' verbatim."""
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: x\n")
+    # Force the task's circuit to be one failure from tripping, then fail.
+    from core.task_protocol import TaskState
+    st = runner.load_state()
+    ts = TaskState()
+    ts.circuit.consecutive_failures = ts.circuit.FAILURE_THRESHOLD - 1
+    st["t"] = ts.to_dict()
+    runner.save_state(st)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "")   # empty → failure
+    out = runner.run_cycle(force=True)
+    assert "连续失败" not in out and "自动暂停" not in out
+    assert out == ""                                            # nothing to chat

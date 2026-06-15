@@ -15,6 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .claude_bin import resolve_claude_bin
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
@@ -177,7 +178,8 @@ class HeartbeatRunner:
                  state_file: str | Path, memory_dir: str | Path,
                  model: str = "opus", persona: str = "Jarvis",
                  work_dir: str | Path | None = None,
-                 idle_judge: bool = True, claude_timeout: int = 300):
+                 idle_judge: bool = True, claude_timeout: int = 300,
+                 claude_bin: str = ""):
         self.jarvis_dir = Path(jarvis_dir)
         self.heartbeat_file = Path(heartbeat_file)
         self.state_file = Path(state_file)
@@ -191,6 +193,10 @@ class HeartbeatRunner:
         # Cheap-model idle-noise second net. On in prod; tests pass False to
         # avoid real network calls. See _judge_is_idle_noise.
         self.idle_judge = idle_judge
+        # Resolve the `claude` binary ONCE here, not at every call. Bare "claude"
+        # on PATH is fragile under launchd (minimal PATH omits ~/.local/bin) —
+        # the 2026-06-15 brain-death incident. See core/claude_bin.py.
+        self._claude_bin = resolve_claude_bin(claude_bin)
         self._cid = ""  # cycle_id, set per run_cycle invocation
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
@@ -364,7 +370,7 @@ You have access to the user's memory below. Use it to personalize your responses
 {memory}"""
 
         cmd = [
-            "claude",
+            self._claude_bin,
             "--dangerously-skip-permissions",
             "--no-session-persistence",
             "--system-prompt", system_prompt,
@@ -430,7 +436,7 @@ You have access to the user's memory below. Use it to personalize your responses
             "--- TEXT ---\n" + message
         )
         cmd = [
-            "claude",
+            self._claude_bin,
             "--dangerously-skip-permissions",
             "--no-session-persistence",
             "--disable-slash-commands",
@@ -775,8 +781,17 @@ You have access to the user's memory below. Use it to personalize your responses
             self.save_state(state)
             self._ack_failed_posts(runnable)
             if tripped_names:
-                self._log(f"Circuit TRIPPED for: {tripped_names}")
-                return f"⚠️ 以下任务连续失败已自动暂停: {', '.join(tripped_names)}。系统会在冷却后自动恢复。"
+                # Ops event — NOT a chat message (REQ-62). Pascal got raw
+                # "⚠️ 以下任务连续失败已自动暂停…冷却后自动恢复" verbatim, which
+                # is internal health jargon he can't act on and makes the
+                # assistant look sick. Log + sched_event only; genuine
+                # user-impacting outages still reach him via the self-
+                # diagnostic deterministic alert (REQ-39, 4h-deduped, in
+                # plain language). Return "" so nothing surfaces.
+                self._log(f"Circuit TRIPPED for: {tripped_names}", level="warn")
+                for _t in tripped_names:
+                    self._event("circuit_tripped", task=_t)
+                return ""
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
             return ""
 

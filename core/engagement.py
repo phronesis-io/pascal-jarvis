@@ -27,18 +27,28 @@ def record_response(log_path: str | Path, content_head: str = "") -> bool:
     if not log_path.exists():
         return False
 
-    # Find last 'sent' entry
+    # Find the last 'sent' entry AND whether a 'response' was already recorded
+    # AFTER it (REQ-63). The old code credited EVERY reply within 60min to the
+    # last sent source with no cap — so a multi-message conversation after one
+    # proactive card billed every message to that source (calendar-sync showed
+    # 27 sent / 29 responses = 107%, with '凯瑞老师'/背痛 misattributed). Now:
+    # only the FIRST reply credits the source; later messages are 'conversation'.
     last_sent = None
+    responded_already = False
     for line in log_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             entry = json.loads(line)
-            if entry.get("type") == "sent":
-                last_sent = entry
         except (json.JSONDecodeError, TypeError):
             continue
+        t = entry.get("type")
+        if t == "sent":
+            last_sent = entry
+            responded_already = False  # a new send resets the "first reply" gate
+        elif t == "response" and last_sent is not None:
+            responded_already = True
 
     if not last_sent:
         return False
@@ -51,7 +61,7 @@ def record_response(log_path: str | Path, content_head: str = "") -> bool:
     if gap_seconds > 3600:
         return False
 
-    # Classify
+    # Classify timing
     if gap_seconds <= 600:
         reaction = "engaged"
     elif gap_seconds <= 1800:
@@ -59,9 +69,20 @@ def record_response(log_path: str | Path, content_head: str = "") -> bool:
     else:
         reaction = "ignored"
 
+    is_quote_reply = content_head.strip().startswith("[Replying to:")
+    if responded_already and not is_quote_reply:
+        # The proactive card was already answered; this is a follow-on
+        # conversation message. Log it for volume but DON'T re-credit the
+        # source (that's the 107% bug). A quote-reply is exempt — it's an
+        # explicit, attributable reply to a specific card.
+        source = "conversation"
+        reaction = "conversation"
+    else:
+        source = last_sent.get("source", "unknown")
+
     entry = {
         "ts": time.strftime("%Y-%m-%d %H:%M"),
-        "source": last_sent.get("source", "unknown"),
+        "source": source,
         "type": "response",
         "reaction": reaction,
         "gap_seconds": gap_seconds,

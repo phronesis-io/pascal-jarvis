@@ -51,6 +51,11 @@ STORM_AGE = timedelta(hours=24)
 # (with an intent_occurrence_skipped event) and next_fire_at recomputed.
 CRON_STALENESS = timedelta(hours=6)
 
+# Closure follow-up staleness (REQ-60): a "后来怎么样" ask more than this past
+# its target is no longer worth surfacing — Pascal got the 小明 dinner
+# closure 2 days late. Expire instead of nag.
+CLOSURE_STALE_DAYS = timedelta(days=2)
+
 
 def _emit_intent(event: str, intent_id: str, **fields) -> None:
     """Emit an intent-lifecycle event to sched_events.jsonl. Never raises."""
@@ -534,7 +539,25 @@ def get_due_intents() -> list[dict]:
                     target_dt = _coerce(datetime.fromisoformat(target))
                     triggered = now >= target_dt
                 except (ValueError, TypeError):
+                    target_dt = None
                     pass  # Skip intents with malformed datetime
+                # Stale closure expiry (REQ-60): a closure follow-up
+                # (source='closure') that is overdue by more than
+                # CLOSURE_STALE_DAYS is no longer worth surfacing — the dinner
+                # was days ago. Asking "后来怎么样" 2+ days late is the nag
+                # Pascal got (int_023339f780__fu fired 6/15 for a 6/13 meal).
+                # Expire it instead of firing.
+                if (triggered and target_dt
+                        and intent.get("source") == "closure"
+                        and (now - target_dt) > CLOSURE_STALE_DAYS):
+                    db.execute(
+                        "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                        (f"closure follow-up stale (>{CLOSURE_STALE_DAYS.days}d past) — not surfaced",
+                         intent["id"]))
+                    db.commit()
+                    _emit_intent("intent_expired", intent["id"],
+                                 reason="closure_stale", name=intent.get("name", ""))
+                    triggered = False
 
         elif trigger_type == "cron":
             # Catch-up semantics (REQ-32): fire when now >= next_fire_at, so a
@@ -808,10 +831,14 @@ def mark_executed(intent_id: str, result: str = ""):
             nxt = cron_next(expr, after=anchor) if expr else None
         except Exception:
             pass
+        # last_error is for ERRORS, not status (REQ-61): cron success used to
+        # store the run narration here ('小时报 11:30-12:21：Pascal 在深度
+        # 投入…'), polluting every error scan and the funnel. Clear it on
+        # success so a non-NULL last_error always means a real failure.
         db.execute(
-            "UPDATE intentions SET status = 'pending', executed_at = ?, last_error = ?, "
+            "UPDATE intentions SET status = 'pending', executed_at = ?, last_error = NULL, "
             "attempt = 0, next_fire_at = ? WHERE id = ?",
-            (now, result, nxt.isoformat() if nxt else None, intent_id),
+            (now, nxt.isoformat() if nxt else None, intent_id),
         )
     else:
         # One-shot: mark executed (attempt resets — execution succeeded)
@@ -857,7 +884,12 @@ def _on_moment_terminal(intent: dict, how: str) -> None:
     if not (intent.get("trigger_type") == "date"
             and intent.get("closure_question")
             and intent.get("closure_status", "none") == "none"
-            and not intent.get("parent_intent_id")):
+            and not intent.get("parent_intent_id")
+            # Never spawn a closure-of-a-closure (REQ-60): a follow-up row
+            # (source='closure') reaching a terminal state must not breed a
+            # second-level __fu. parent_intent_id already catches this, but
+            # source is the clearer invariant.
+            and intent.get("source") != "closure"):
         return
     if how == "expired" and intent.get("category") not in ("hard", "external"):
         return

@@ -65,6 +65,51 @@ def _is_contentless(response: str) -> bool:
     return s in _STATUS_TOKENS
 
 
+def _root_id(iid: str) -> str:
+    """The ROOT intent of a card row: a followup '<X>__fu' belongs to root X.
+    Used for semantic dedup — three reworded cards for the same dinner all
+    share root int_023339f780 even though their text differs (REQ-59)."""
+    return (iid or "").split("__fu")[0]
+
+
+# How long the same root intent's card is suppressed after one goes out.
+CARD_DEDUP_MINUTES = 30
+
+
+def _recent_card_roots(within_min: int = CARD_DEDUP_MINUTES) -> set[str]:
+    """Root intent ids whose card was sent within the window (from the ledger).
+
+    The triple-nag fix's REAL path (REQ-59): byte-level dedup fails because the
+    LLM rewords each apology, but they all carry the same root intent. Keying
+    on root + a time window kills the 3-cards-in-4-minutes class regardless of
+    wording. Never raises.
+    """
+    if not CARD_LEDGER.exists():
+        return set()
+    import datetime as _dt
+    cutoff = _dt.datetime.now() - _dt.timedelta(minutes=within_min)
+    roots: set[str] = set()
+    try:
+        for line in CARD_LEDGER.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = row.get("ts", "")
+            try:
+                when = _dt.datetime.fromisoformat(ts)
+            except (ValueError, TypeError):
+                continue
+            if when >= cutoff:
+                for iid in (row.get("intent_ids") or []):
+                    roots.add(_root_id(iid))
+    except OSError:
+        return set()
+    return roots
+
+
 def _ledger_append(intent_ids: list[str]) -> None:
     """Record that a card covering these intents went out (REQ-34B).
 
@@ -251,22 +296,36 @@ def main():
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())
         if combined:
-            buttons = _closure_buttons(button_specs) if button_specs else None
-            _ledger_append(covered)
-            print(build_card("🎯 Intent", combined, source="intentions",
-                             buttons=buttons))
-            # A card actually rendered → the apology (if any breach rode this
-            # cycle's prompt) was delivered. Bump notify_attempts for exactly
-            # those breach ids — NOT reconcile's freshly-queued ones (red-team
-            # fix: the old blanket clear_breaches() wiped the new breach too).
-            fresh = set(result.get("breached", []))
-            to_mark = [b for b in rode_breach_ids if b not in fresh]
-            if to_mark:
-                try:
-                    mark_breaches_shown(to_mark)
-                except Exception as e:
-                    print(f"[intentions_post] mark_breaches_shown failed: {e}",
-                          file=sys.stderr)
+            # Outbox-layer semantic dedup (REQ-59): if a card for the SAME root
+            # intent already went out within the window, suppress this one. The
+            # 6/15 triple-nag (3 reworded dinner-closure cards in 4 min) all
+            # shared root int_023339f780 — byte dedup missed them, root dedup
+            # catches them. Roots = covered ids + the parents the buttons target.
+            roots_now = {_root_id(c) for c in covered}
+            roots_now |= {_root_id(s.get("parent", "")) for s in button_specs}
+            roots_now.discard("")
+            recent = _recent_card_roots()
+            if roots_now and roots_now <= recent:
+                print(f"[intentions_post] suppressed duplicate card for root(s) "
+                      f"{sorted(roots_now)} — already sent within "
+                      f"{CARD_DEDUP_MINUTES}min (REQ-59)", file=sys.stderr)
+            else:
+                buttons = _closure_buttons(button_specs) if button_specs else None
+                _ledger_append(covered)
+                print(build_card("🎯 Intent", combined, source="intentions",
+                                 buttons=buttons))
+                # A card actually rendered → the apology (if any breach rode
+                # this cycle's prompt) was delivered. Bump notify_attempts for
+                # exactly those breach ids — NOT reconcile's freshly-queued
+                # ones. (Only when a card truly went out, i.e. not suppressed.)
+                fresh = set(result.get("breached", []))
+                to_mark = [b for b in rode_breach_ids if b not in fresh]
+                if to_mark:
+                    try:
+                        mark_breaches_shown(to_mark)
+                    except Exception as e:
+                        print(f"[intentions_post] mark_breaches_shown failed: {e}",
+                              file=sys.stderr)
 
 
 if __name__ == "__main__":

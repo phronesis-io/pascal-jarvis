@@ -165,3 +165,49 @@ class _Stdin:
 
     def read(self):
         return self._text
+
+
+# ── REQ-59: outbox semantic dedup by root intent ─────────────────────────
+
+def test_root_id_strips_followup_suffix():
+    assert ip._root_id("int_023339f780__fu") == "int_023339f780"
+    assert ip._root_id("int_abc") == "int_abc"
+    assert ip._root_id("") == ""
+
+
+def test_recent_card_roots_reads_ledger(tmp_path, monkeypatch):
+    import json, datetime
+    ledger = tmp_path / ".intent_card_ledger.jsonl"
+    now = datetime.datetime.now()
+    fresh = now.strftime("%Y-%m-%dT%H:%M:%S")
+    old = (now - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    ledger.write_text(
+        json.dumps({"ts": fresh, "intent_ids": ["int_aaa__fu"], "message_ids": []}) + "\n" +
+        json.dumps({"ts": old, "intent_ids": ["int_bbb"], "message_ids": []}) + "\n")
+    monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
+    roots = ip._recent_card_roots(within_min=30)
+    assert "int_aaa" in roots          # fresh, suffix stripped → root
+    assert "int_bbb" not in roots      # 2h old → outside window
+
+
+def test_duplicate_card_for_same_root_suppressed(tmp_path, monkeypatch, capsys):
+    """The triple-nag fix: a second card whose only root was already carded
+    within the window is suppressed (REQ-59)."""
+    import json, datetime
+    ledger = tmp_path / ".intent_card_ledger.jsonl"
+    fresh = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    ledger.write_text(json.dumps(
+        {"ts": fresh, "intent_ids": ["int_023339f780__fu"], "message_ids": []}) + "\n")
+    monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_023339f780__fu"])
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "get_intent",
+                        lambda iid: {"parent_intent_id": "int_023339f780", "name": "闭环"})
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_023339f780__fu": {"response": "饭后有什么跟进的吗？", "action": "notify"}}}'))
+    ip.main()
+    out = capsys.readouterr().out
+    assert out.strip() == ""           # card suppressed (same root within window)

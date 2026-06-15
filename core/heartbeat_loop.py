@@ -537,7 +537,12 @@ def _record_engagement(jarvis_dir: Path):
     with open(elog, "a") as f:
         for src in sources.split(","):
             src = src.strip()
-            if src:
+            # Never log a "sent" for a SILENT source (REQ-61): in a MIXED cycle
+            # (a silent task riding with a non-silent one) the silent task's
+            # content is dropped at the delivery gate, yet it still got a
+            # "sent" row here — making daily-plan/self-diagnostic show up as
+            # guaranteed-0% sources that skew every keep/cut decision.
+            if src and src not in SILENT_SOURCES:
                 entry = {"ts": ts, "source": src, "type": "sent", "epoch": epoch}
                 if sent_ids:
                     # join key for read-receipt events (REQ-15)
@@ -697,6 +702,9 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         model=model,
         work_dir=work_dir or jarvis_dir,
         claude_timeout=claude_timeout,
+        # Optional explicit override; empty ⇒ resolve_claude_bin uses
+        # which + ~/.local/bin fallback (severs the launchd-PATH dependency).
+        claude_bin=os.environ.get("CLAUDE_BIN", ""),
     )
 
     log("heartbeat", f"Starting ({check_interval}s cycle)")
