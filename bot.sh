@@ -606,6 +606,10 @@ except Exception:
   local answer=""
   local _attempt
   local _watchdog_killed=0  # set to 1 only when the 6000s watchdog did the kill
+  # REQ-77: the model to use this attempt. Degrades (opus→sonnet→haiku) if a
+  # spawn fails with a model-unavailable / spend-limit stderr, instead of
+  # looping to empty death ("Continue / No response requested").
+  local _cur_model="$MAIN_MODEL"
 
   for _attempt in 1 2 3 4; do
     if [ "$_attempt" -gt 1 ]; then
@@ -626,7 +630,7 @@ except Exception:
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
       (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --resume "$session_id" \
-        --model "$MAIN_MODEL" \
+        --model "$_cur_model" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -635,7 +639,7 @@ except Exception:
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
       (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
         --session-id "$session_id" \
-        --model "$MAIN_MODEL" \
+        --model "$_cur_model" \
         --append-system-prompt "$sys_prompt" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -842,6 +846,14 @@ except Exception:
       # branches on whether the watchdog marker is present.
       if [ "${_exit_code:-0}" -eq 143 ]; then
         break
+      fi
+      # REQ-77: if the empty answer was a MODEL error (unavailable / banned /
+      # spend limit) rather than a transient blip, degrade the model for the
+      # next attempt instead of retrying the same broken model to death.
+      _fallback=$(printf '%s' "$_stderr_content" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
+      if [ -n "$_fallback" ]; then
+        log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
+        _cur_model="$_fallback"
       fi
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -1455,10 +1467,22 @@ ${content}"
         # ── Reply-to-intent matching (REQ-34B): if the quoted message is an
         # intention card, inject a structured hint so the main session closes
         # the loop deterministically instead of relying on LLM goodwill.
-        _intent_hint=$(JV_PARENT="$_parent_id" JV_LEDGER="$JARVIS_DIR/data/.intent_card_ledger.jsonl" python3 -c "
+        # REQ-64: reply-based closure. The ledger maps the quoted card's
+        # message_id → the closure root intents it carried (card_roots). If
+        # this reply quotes such a card, try a DETERMINISTIC classify of the
+        # reply (做了/没做/不用追) and close the loop directly via
+        # record_closure(via=reply) — no dependence on the Feishu button
+        # backend (0 closures ever happened via button/reply before this).
+        # Only when the classifier is ambiguous do we fall back to the LLM hint.
+        _intent_match=$(JV_PARENT="$_parent_id" JV_REPLY="$content" \
+          JV_LEDGER="$JARVIS_DIR/data/.intent_card_ledger.jsonl" \
+          JARVIS_DIR="$JARVIS_DIR" python3 -c "
 import json, os, sys
+sys.path.insert(0, os.environ['JARVIS_DIR'])
 ledger = os.environ.get('JV_LEDGER', '')
 parent = os.environ.get('JV_PARENT', '')
+reply = os.environ.get('JV_REPLY', '')
+roots, all_ids = [], []
 try:
     for line in reversed(open(ledger, encoding='utf-8').read().splitlines()):
         try:
@@ -1466,17 +1490,40 @@ try:
         except json.JSONDecodeError:
             continue
         if parent in (row.get('message_ids') or []):
-            ids = row.get('intent_ids') or []
-            if ids:
-                print(','.join(ids))
+            roots = row.get('card_roots') or []
+            all_ids = row.get('intent_ids') or []
             break
 except OSError:
     pass
-" 2>/dev/null)
-        if [ -n "$_intent_hint" ]; then
-          content="[REPLY_TO_INTENT ids=${_intent_hint}] 这条回复是对意图卡片的回应。如果它回答了某个闭环问题，立即运行：python3 -m core.intentions close <对应id> done <他的一句话答复>（在 JARVIS_DIR 下），然后再正常回复。
+if not (roots or all_ids):
+    sys.exit(0)
+# Deterministic closure for closure-ask roots
+from core.reply_closure import classify_reply, short_result
+outcome = classify_reply(reply)
+closed = []
+if outcome and roots:
+    from core.intentions import record_closure
+    for r in roots:
+        try:
+            if record_closure(r, outcome=outcome, result=short_result(reply), via='reply'):
+                closed.append(r)
+        except Exception:
+            pass
+# Output: 'CLOSED <ids>' if we closed deterministically, else 'HINT <ids>'
+if closed:
+    print('CLOSED ' + ','.join(closed))
+elif all_ids:
+    print('HINT ' + ','.join(all_ids))
+" 2>>"$LOG_FILE")
+        if [ "${_intent_match#CLOSED }" != "$_intent_match" ]; then
+          _closed_ids="${_intent_match#CLOSED }"
+          content="[闭环已自动记录:对意图 ${_closed_ids} 的回复已判定并 close,无需再调 intent_close] ${content}"
+          log_info "Reply-based closure recorded (REQ-64): $_closed_ids"
+        elif [ "${_intent_match#HINT }" != "$_intent_match" ]; then
+          _hint_ids="${_intent_match#HINT }"
+          content="[REPLY_TO_INTENT ids=${_hint_ids}] 这条回复是对意图卡片的回应。如果它回答了某个闭环问题，运行：python3 -m core.intentions close <对应id> done <他的一句话答复>（在 JARVIS_DIR 下），然后再正常回复。
 ${content}"
-          log_info "Quote reply matched intent card: $_intent_hint"
+          log_info "Quote reply matched intent card (ambiguous→LLM hint): $_hint_ids"
         fi
       fi
 
