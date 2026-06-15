@@ -1,5 +1,29 @@
 # Jarvis Roadmap
 
+> **Current release: v1.0.0 (2026-06-15)** — first formal tag. REQ-01~77 all
+> shipped & tested (779 passing). See `CHANGELOG.md` for the release summary and
+> `docs/prd_interaction_v3.md` for the latest wave.
+
+## Done (2026-06-15 wave — REQ-59~77, v1.0.0 — see docs/prd_interaction_v3.md)
+
+- No-nag intents: outbox dedup keyed on closure-ask root, closure-of-closure
+  guard, stale external-closure expiry, breach-shown-once (REQ-59/60)
+- Clean funnel: hourly-cron self-reports excluded, silent sources don't log
+  "sent", last_error stops masquerading as state; ops/self-mon alerts off chat;
+  engagement attribution via quote-reply join not 60-min proximity (REQ-61~63)
+- Reply-based closure classifier, negation-aware, via='reply' (REQ-64)
+- Protected-doc write guard: read-back counts + multiplicity block-diff,
+  destructive-overwrite reject (REQ-65)
+- Self-monitoring from live JSONL/state/DB + liveness assertion (REQ-67)
+- Calendar→intent idempotent upsert + prep-after-event drop (REQ-68);
+  carry/bring reminders anchored to morning-before-leave (REQ-70)
+- Structured dated facts in hot memory (REQ-71); per-tier memory sub-budgets
+  with borrow-headroom + truncation alarm (REQ-73)
+- Behavioral rules: no false truncation/blame, link self-check, continuation
+  discipline, evidence-over-narrative (REQ-69/72/74)
+- Event-gated free-time-nudge / content-recommend (REQ-75)
+- Graceful model fallback opus→sonnet→haiku on model/spend error (REQ-77)
+
 ## Done (recent)
 
 - Background jobs — long tasks run in independent Claude sessions with start/finish cards (`jobs` / `job output <id>` / `cancel <id>`)
@@ -35,8 +59,7 @@
 - repos-sync pre-script still exceeds the 60s cap (REQ-52: move git pulls to a
   background job; pre reads last job product)
 - Engagement page + Ops/log explorer on the dashboard (REQ-54/55)
-- Host sleep modeling (REQ-56) and atomic-write/fsync helper (REQ-57)
-- Two-channel alerting helper (REQ-58)
+- Host sleep modeling (REQ-56)
 
 ## P2 — Self-evolution
 

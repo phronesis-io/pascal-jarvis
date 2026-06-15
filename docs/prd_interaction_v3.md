@@ -3,7 +3,8 @@
 - 版本：v3.0（2026-06-15）
 - 作者：Claude（基于 Pascal↔Jarvis 真实交互记录的 6-agent 审计）
 - 编号：延续 v1（REQ-01~29）、v2（REQ-30~58），本期 **REQ-59 起**
-- 状态：见各 REQ 标注（本期实现 / 路线图）
+- 状态：**REQ-59~77 全部上线 ✅**（v1.0.0，2026-06-15；首个正式发版，详见 CHANGELOG.md）
+- 实现期编号说明：路线图初稿（REQ-64~76）在落地时按工程优先级重排，**代码内的 REQ 号为准**（写入守卫=REQ-65、回复闭环=REQ-64、自监控=REQ-67、模型回退=REQ-77）。下文第 3 节已对齐到上线后的真实编号。
 
 ---
 
@@ -76,28 +77,29 @@ v1（6/11）解决"交互质量与可靠性"，v2（6/13）做"系统迭代"。�
 
 ---
 
-## 3. 路线图（REQ-64~76，本期记录、需 Pascal 决策或更大改动）
+## 3. 本期补充实现（REQ-64~77，全部上线 ✅）
 
-### 信任 / 正确性（P0-P1）
-- **REQ-64 受保护文档写入守卫**【P0/M】：受保护 doc 默认 append/block-patch;整体覆写若删除 >N% 原区块则拒绝;完成断言的 N 必须来自对线上文档的独立读回 grep,不用生成侧计数;写前快照 revision、写后 diff,不符 → 标 FAILED + "我没改成,请确认"卡。堵幻觉成功 + 破坏性覆写(最高信任风险)。
-- **REQ-65 回复式闭环路径**【P0/M】：Pascal 引用回复(或紧随)闭环问题卡时,跑廉价 done/not-done/na 分类 → record_closure(via='reply')。不依赖飞书按钮后端。按钮后端验证可用前,停渲染会静默失败的闭环按钮。
-- **REQ-66 自监控表接活数据**【P1/M】：engagement_events/agent_log 冻在 5/21;把发送/工具错误/道歉/重发/幻觉成功等路径实时写入;启动断言:24h 内有会话但 agent_log 零行 → "自监控已死"。
+> 路线图初稿（REQ-64~76）在落地时按工程优先级重排并扩出 REQ-77。下文为**上线后的真实编号**（与代码/测试/CHANGELOG 一致）。每条均测试先行、红队复查、restart 上线、组件验证。
 
-### 提醒 / 意图(P1)
-- **REQ-67 calendar→intent 幂等 upsert**(按 event+role,改期更新不新建,prep 晚于事件则自动跳过)。
-- **REQ-68 carry/prep 提醒锚到当天首次出门时间**;旅行期间暂停地点型例行(接狗 cron 无 expires_at,Pascal 出国还在 6/14 19:00 触发)。
-- **REQ-69 载重日期事实进结构化记忆**(pascal_departure/partner_departure 等显式字段);修 auto→heartbeat 同步缺口(trip 文件在 auto 目录但 heartbeat warm/ 没有,运行中的 bot 看不到);open_threads.md 双向漂移加哈希自检。
+### 信任 / 正确性
+- **REQ-64 回复式闭环路径** ✅（`core/reply_closure.py` + bot.sh）：Pascal 引用回复闭环问题卡时,跑否定感知的 done/recorded/na 分类 → `record_closure(via='reply')`。不依赖飞书按钮后端;歧义回复交回 LLM;仅单根、awaiting 的意图自动闭合。
+- **REQ-65 受保护文档写入守卫** ✅（`core/doc_guard.py`）：完成断言只能来自对线上文档的独立读回计数,绝不用生成侧数字;按多重性的区块 diff,删除 >30% 原区块即判破坏性覆写并拒绝;不符 → FAILED + "我没改成"。堵幻觉成功 + 破坏性覆写(最高信任风险)。
+- **REQ-67 自监控接活数据** ✅（`core/selfmon.py`）：噪声卡数/同意图重触发/闭环逾期/崩溃/静默失败 + liveness 断言,全部从线上 JSONL/state/DB 实时计算(有界读 + 缓存);dashboard 面板。
 
-### 诊断 / 行为(P1-P2)
-- **REQ-70 禁止假"截断/外部"甩锅 + 链接失败诊断排序**:声称缺输入前先搜会话/后台记录;链接打不开第 0 步先自检"我上条是不是用了飞书不渲染的 Markdown 链接语法";出站消息 lint 禁裸 Markdown 链接。
-- **REQ-71 自述"我真回读了"样板话削减**,换成卡片上的机器可核验证据行(读回计数+关键区块存在清单+diff)。
-- **REQ-72 续作探测器**:同一 doc token 短时内的连续追问视为一个延续意图,工作态按 doc token 存 scratchpad 下轮先读,不每轮重抓重判;工作笔记不漏进交付物。
+### 提醒 / 意图
+- **REQ-68 calendar→intent 幂等 upsert** ✅：(date,title,role) 跨全状态至多一行;prep 晚于事件则自动跳过(不再 11 行饭局 churn)。
+- **REQ-70 carry/prep 提醒锚到当天首次出门前** ✅：带物提醒在出门前的早晨触发(钳制、绝不晚于事件、触发后过期);修复"中午门诊的伞"漏报。
 
-### 记忆 / 噪声 / 时序(P1-P2)
-- **REQ-73 记忆分层子预算**:给 timeline 留预算(或先加载),别每轮把最新连续性层截掉;truncation 触发即告警;warm/ 超 N 天未动自动降级 archive/。
-- **REQ-74 event-gate free-time-nudge / content-recommend**(无可提供内容就 OK,不发裸"你有空";content-recommend 并入日报),套用 phronesis 的"无事即静默"模式。
-- **REQ-75 意图卡每轮至多一张**(多条 due 合并成列表卡);取消固定 08:15(08:00 是死区 5%);可 surface 的发送 gate 到 Pascal 已证明的活跃窗(10-12/14/18/20-21),由 engagement-analyze 用小时分布填充。
-- **REQ-76 模型崩溃/限额优雅恢复**:bg-job 模型预检不可用即回退授权模型;近限额降级 haiku 而非杀链;"Continue/No response" 死循环时检测上轮未竟承诺并续上,轮转前写一行 in-flight 面包屑。
+### 记忆
+- **REQ-71 载重日期事实进结构化记忆** ✅（`hot/structured_facts.md` + get/set_fact）：sanitized + atomic,top-priority 注入,出发日期等不再跨会话丢失。
+- **REQ-73 记忆分层子预算** ✅：各层有保留下限;总量低于全局上限时整体加载(不浪费余量);truncation 可观测;warm/ 超期降级 archive/。
+
+### 诊断 / 行为（behavioral_rules 第 9 节）
+- **REQ-69 / REQ-72 / REQ-74 行为规则** ✅：禁假"截断/外部"甩锅;出站链接自检(禁飞书不渲染的裸 Markdown 链接);续作纪律(不每轮重抓重判同一产物);证据优于叙述的完成报告。
+
+### 噪声 / 可靠性
+- **REQ-75 event-gate free-time-nudge / content-recommend** ✅：无可提供内容即静默,不发裸"你有空";content-recommend 独立推送 gate 关闭。
+- **REQ-77 模型崩溃/限额优雅恢复** ✅（`core/model_fallback.py` + bot.sh）：opus→sonnet→haiku 降级链;限额直跳 haiku 不再烧额度;模型不可用一步降级,取代空死循环(Fable 永不在链中)。
 
 ---
 
@@ -110,9 +112,9 @@ v1（6/11）解决"交互质量与可靠性"，v2（6/13）做"系统迭代"。�
 | 漏斗指标受 cron 小时报污染 | 65% fired 是小时报 | 0（排除后，REQ-61） |
 | 裸运维告警入聊天/周 | ≥2 | 0（REQ-62） |
 | engagement 归因可信度 | calendar-sync 107%(不可能) | 每源 ≤100% 且引用回复精确归因（REQ-63） |
-| 闭环经按钮/回复闭合占比 | 0% | >0（REQ-65，路线图） |
-| 幻觉成功捕获 | 0(靠 Pascal 抓) | 写入守卫拦截（REQ-64，路线图） |
+| 闭环经回复闭合占比 | 0% | >0（REQ-64 已上线，回复式分类器） |
+| 幻觉成功捕获 | 0(靠 Pascal 抓) | 写入守卫拦截（REQ-65 已上线，读回 diff） |
 
 ## 5. 实现顺序
 
-本期(REQ-59~63):意图卡去重 → 闭环的闭环守卫 → 漏斗/静音源/last_error 清理 → 运维告警改道 → engagement 归因修复。每条测试先行/同行,全绿后红队复查 → restart 上线 → 组件验证。路线图 REQ-64~76 下一期按 Pascal 优先级推进(REQ-64 写入守卫和 REQ-65 回复闭环是下期 P0 头两条)。
+第一批(REQ-59~63):意图卡去重 → 闭环的闭环守卫 → 漏斗/静音源/last_error 清理 → 运维告警改道 → engagement 归因修复。第二批(REQ-64~77,本节):回复闭环 → 写入守卫 → 自监控 → 日历幂等/carry → 结构化事实/记忆预算 → 行为规则 → event-gate → 模型回退。每条测试先行/同行,全绿后红队复查 → restart 上线 → 组件验证。**全部 77 条已上线,封装为 v1.0.0 首个正式发版(2026-06-15)。** 测试 779 通过。
