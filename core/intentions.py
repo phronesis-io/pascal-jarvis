@@ -550,13 +550,22 @@ def get_due_intents() -> list[dict]:
                 if (triggered and target_dt
                         and intent.get("source") == "closure"
                         and (now - target_dt) > CLOSURE_STALE_DAYS):
-                    db.execute(
-                        "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
-                        (f"closure follow-up stale (>{CLOSURE_STALE_DAYS.days}d past) — not surfaced",
-                         intent["id"]))
-                    db.commit()
-                    _emit_intent("intent_expired", intent["id"],
-                                 reason="closure_stale", name=intent.get("name", ""))
+                    # Guarded like _skip_stale_cron_occurrence (red-team fix):
+                    # a DB-lock OperationalError here must NOT crash the whole
+                    # due-check — that would strand the cycle (no reminders, no
+                    # breach cards). On write failure, leave it pending and try
+                    # again next cycle; just don't surface it now.
+                    try:
+                        db.execute(
+                            "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                            (f"closure follow-up stale (>{CLOSURE_STALE_DAYS.days}d past) — not surfaced",
+                             intent["id"]))
+                        db.commit()
+                        _emit_intent("intent_expired", intent["id"],
+                                     reason="closure_stale", name=intent.get("name", ""))
+                    except Exception as e:
+                        print(f"[intentions] stale-closure expire failed for "
+                              f"{intent['id']}: {e}", file=sys.stderr)
                     triggered = False
 
         elif trigger_type == "cron":

@@ -45,6 +45,12 @@ with open(log_path, encoding='utf-8') as f:
 # Separate sent and response entries
 sent_entries = [e for e in entries if e.get('type') == 'sent']
 response_entries = [e for e in entries if e.get('type') == 'response']
+# Rate-eligible responses exclude 'conversation' rows (REQ-63): follow-on chat
+# after a card is logged as type=response/reaction=conversation for volume, but
+# it can NEVER be 'engaged', so counting it in a rate DENOMINATOR only deflates
+# the rate and can flip the 7-day trend to a false ▼ that nudges auto-tuning to
+# slow a healthy task. Time-of-day and trend use this filtered list.
+rated_responses = [e for e in response_entries if e.get('reaction') != 'conversation']
 
 # === Per-source engagement rate ===
 source_sent = defaultdict(int)
@@ -119,7 +125,7 @@ print('=== TIME-OF-DAY ENGAGEMENT ===')
 hour_engaged = defaultdict(int)
 hour_total = defaultdict(int)
 
-for e in response_entries:
+for e in rated_responses:
     ts = e.get('ts', '')
     try:
         hour = int(ts.split(' ')[1].split(':')[0])
@@ -141,7 +147,7 @@ print('=== 7-DAY TREND ===')
 now = datetime.now()
 for days_ago in range(6, -1, -1):
     day = (now - timedelta(days=days_ago)).strftime('%Y-%m-%d')
-    day_responses = [e for e in response_entries if e.get('ts', '').startswith(day)]
+    day_responses = [e for e in rated_responses if e.get('ts', '').startswith(day)]
     day_engaged = sum(1 for e in day_responses if e.get('reaction') == 'engaged')
     day_total = len(day_responses)
     rate = (day_engaged / day_total * 100) if day_total > 0 else 0

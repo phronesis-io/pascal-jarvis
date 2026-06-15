@@ -77,12 +77,15 @@ CARD_DEDUP_MINUTES = 30
 
 
 def _recent_card_roots(within_min: int = CARD_DEDUP_MINUTES) -> set[str]:
-    """Root intent ids whose card was sent within the window (from the ledger).
+    """NAG-class root intents whose card went out within the window (REQ-59).
 
-    The triple-nag fix's REAL path (REQ-59): byte-level dedup fails because the
-    LLM rewords each apology, but they all carry the same root intent. Keying
-    on root + a time window kills the 3-cards-in-4-minutes class regardless of
-    wording. Never raises.
+    Reads the ledger's `card_roots` field — the closure-ask roots a card
+    actually surfaced — NOT `intent_ids` (which also lists silent/prompt
+    slots and reply-matching ids). Red-team fix: keying dedup on all covered
+    ids made a silent slot (or a sub-30-min recurring occurrence) look
+    'carded', then suppressed that root's NEXT genuine notify. Dedup must see
+    only the reworded-nag class (closure asks), keyed on root + time window.
+    Never raises.
     """
     if not CARD_LEDGER.exists():
         return set()
@@ -103,19 +106,21 @@ def _recent_card_roots(within_min: int = CARD_DEDUP_MINUTES) -> set[str]:
             except (ValueError, TypeError):
                 continue
             if when >= cutoff:
-                for iid in (row.get("intent_ids") or []):
-                    roots.add(_root_id(iid))
+                for r in (row.get("card_roots") or []):
+                    if r:
+                        roots.add(r)
     except OSError:
         return set()
     return roots
 
 
-def _ledger_append(intent_ids: list[str]) -> None:
-    """Record that a card covering these intents went out (REQ-34B).
+def _ledger_append(intent_ids: list[str], card_roots: list[str] | None = None) -> None:
+    """Record that a card covering these intents went out.
 
-    heartbeat_loop back-fills the real Lark message_ids after the send, so a
-    quote-reply to the card can be matched back to its intent deterministically.
-    Never raises.
+    intent_ids = all ids the card covers (REQ-34B reply matching — heartbeat_loop
+    back-fills message_ids so a quote-reply maps back to its intent).
+    card_roots = the NAG-class roots this card actually surfaced (closure asks),
+    the ONLY thing REQ-59 dedup keys on. Never raises.
     """
     if not intent_ids:
         return
@@ -125,6 +130,7 @@ def _ledger_append(intent_ids: list[str]) -> None:
             f.write(json.dumps({
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "intent_ids": intent_ids,
+                "card_roots": list(card_roots or []),
                 "message_ids": [],
             }, ensure_ascii=False) + "\n")
     except Exception as e:
@@ -296,22 +302,25 @@ def main():
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())
         if combined:
-            # Outbox-layer semantic dedup (REQ-59): if a card for the SAME root
-            # intent already went out within the window, suppress this one. The
-            # 6/15 triple-nag (3 reworded dinner-closure cards in 4 min) all
-            # shared root int_023339f780 — byte dedup missed them, root dedup
-            # catches them. Roots = covered ids + the parents the buttons target.
-            roots_now = {_root_id(c) for c in covered}
-            roots_now |= {_root_id(s.get("parent", "")) for s in button_specs}
-            roots_now.discard("")
+            # Outbox-layer semantic dedup (REQ-59), scoped to the NAG class:
+            # closure-ASK cards (those with ✅/❌/🚫 buttons targeting a parent).
+            # The 6/15 triple-nag (3 reworded dinner-closure cards in 4 min) all
+            # targeted root int_023339f780 — byte dedup missed them, root dedup
+            # catches them. Red-team fix: key ONLY on button (closure-ask) roots,
+            # NOT all `covered` — else a silent slot or a sub-30-min recurring
+            # occurrence riding the cycle would falsely suppress its own next
+            # genuine notify. Plain notify / recurring intents (no buttons) are
+            # never deduped here; they keep their own cadence.
+            nag_roots = {_root_id(s.get("parent", "")) for s in button_specs}
+            nag_roots.discard("")
             recent = _recent_card_roots()
-            if roots_now and roots_now <= recent:
-                print(f"[intentions_post] suppressed duplicate card for root(s) "
-                      f"{sorted(roots_now)} — already sent within "
+            if nag_roots and nag_roots <= recent:
+                print(f"[intentions_post] suppressed duplicate closure card for "
+                      f"root(s) {sorted(nag_roots)} — already sent within "
                       f"{CARD_DEDUP_MINUTES}min (REQ-59)", file=sys.stderr)
             else:
                 buttons = _closure_buttons(button_specs) if button_specs else None
-                _ledger_append(covered)
+                _ledger_append(covered, card_roots=sorted(nag_roots))
                 print(build_card("🎯 Intent", combined, source="intentions",
                                  buttons=buttons))
                 # A card actually rendered → the apology (if any breach rode

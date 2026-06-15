@@ -10,6 +10,7 @@ Used by bot.sh message listener to record engagement per source.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -22,11 +23,28 @@ def record_response(log_path: str | Path, content_head: str = "") -> bool:
 
     Reads the last 'sent' entry, computes gap, classifies reaction, appends.
     Returns True if a response was recorded, False if skipped.
+
+    The whole read-scan-append runs under an exclusive flock (red-team fix):
+    bot.sh spawns this backgrounded once per inbound message with no `wait`,
+    so two rapid replies used to race — both read responded_already=False
+    before either appended and BOTH credited the source (the 107% over-count
+    this very function exists to kill). The lock also serializes against
+    _trim_file's in-place truncate on the same file.
     """
     log_path = Path(log_path)
     if not log_path.exists():
         return False
 
+    lock_fh = open(log_path, "a")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        return _record_response_locked(log_path, content_head)
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+def _record_response_locked(log_path: Path, content_head: str) -> bool:
     # Find the last 'sent' entry AND whether a 'response' was already recorded
     # AFTER it (REQ-63). The old code credited EVERY reply within 60min to the
     # last sent source with no cap — so a multi-message conversation after one

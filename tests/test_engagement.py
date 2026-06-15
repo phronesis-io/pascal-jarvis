@@ -95,3 +95,24 @@ def test_quote_reply_always_attributes_to_card(tmp_path):
     rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     intent_responses = [r for r in rows if r.get("type") == "response" and r["source"] == "intention-check"]
     assert len(intent_responses) == 2  # the free-form first + the quote-reply both count for the card
+
+
+def test_record_response_is_flock_serialized(tmp_path):
+    """Red-team P1-B: the read-scan-append must hold an exclusive flock so two
+    concurrent recorders can't both read responded_already=False and
+    double-credit. We can't easily force a true race in a unit test, but we
+    pin that the lock path exists and the serial cap still holds."""
+    import json, time, inspect
+    from core import engagement
+    # The source must acquire an exclusive flock around the critical section.
+    src = inspect.getsource(engagement.record_response)
+    assert "LOCK_EX" in src and "flock" in src
+    # And the cap still holds when called serially under the lock.
+    log = tmp_path / "engagement_log.jsonl"
+    now = int(time.time())
+    log.write_text(json.dumps({"type": "sent", "source": "checkin", "epoch": now}) + "\n")
+    engagement.record_response(log, "回了")
+    engagement.record_response(log, "又说一句")
+    rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    credited = [r for r in rows if r.get("type") == "response" and r["source"] == "checkin"]
+    assert len(credited) == 1

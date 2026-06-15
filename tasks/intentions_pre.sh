@@ -52,7 +52,14 @@ except Exception as e:
 # 2. Check for due intents + breach notifications owed. peek_breaches is
 #    NON-mutating (red-team fix): the notify_attempts counter is bumped by
 #    intentions_post ONLY when a card actually renders, never per pre-run.
-due = get_due_intents()
+try:
+    due = get_due_intents()
+except Exception as e:
+    # A DB-lock / transient error in the due-check (incl. cleanup_expired and
+    # the REQ-60 stale-closure write) must not strand the cycle — degrade to
+    # no-due this tick rather than crash the pre-script (red-team fix).
+    print(f"[intentions] get_due_intents error: {e}", file=sys.stderr)
+    due = []
 try:
     breaches = peek_breaches()
 except Exception as e:

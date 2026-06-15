@@ -87,7 +87,7 @@ def _isolate_state(monkeypatch):
                         lambda covered: {"retried": [], "expired": [], "breached": []})
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
     monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
-    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
 
 
 def test_malformed_intents_envelope_not_emitted(monkeypatch, capsys):
@@ -127,7 +127,7 @@ def test_envelope_reconciles_covered_ids(monkeypatch, capsys):
                                          {"retried": [], "expired": [], "breached": []})[1])
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
     monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
-    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent", lambda iid: {"parent_intent_id": None})
     monkeypatch.setattr("sys.stdin", _Stdin(
@@ -145,7 +145,7 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
                         lambda covered: {"retried": [], "expired": [], "breached": []})
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
     monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
-    monkeypatch.setattr(ip, "_ledger_append", lambda ids: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent",
                         lambda iid: {"parent_intent_id": "int_parent", "name": "闭环: 约学妹"})
@@ -182,11 +182,11 @@ def test_recent_card_roots_reads_ledger(tmp_path, monkeypatch):
     fresh = now.strftime("%Y-%m-%dT%H:%M:%S")
     old = (now - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
     ledger.write_text(
-        json.dumps({"ts": fresh, "intent_ids": ["int_aaa__fu"], "message_ids": []}) + "\n" +
-        json.dumps({"ts": old, "intent_ids": ["int_bbb"], "message_ids": []}) + "\n")
+        json.dumps({"ts": fresh, "intent_ids": ["int_aaa__fu"], "card_roots": ["int_aaa"], "message_ids": []}) + "\n" +
+        json.dumps({"ts": old, "intent_ids": ["int_bbb"], "card_roots": ["int_bbb"], "message_ids": []}) + "\n")
     monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
     roots = ip._recent_card_roots(within_min=30)
-    assert "int_aaa" in roots          # fresh, suffix stripped → root
+    assert "int_aaa" in roots          # fresh card_root → in window
     assert "int_bbb" not in roots      # 2h old → outside window
 
 
@@ -197,7 +197,7 @@ def test_duplicate_card_for_same_root_suppressed(tmp_path, monkeypatch, capsys):
     ledger = tmp_path / ".intent_card_ledger.jsonl"
     fresh = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     ledger.write_text(json.dumps(
-        {"ts": fresh, "intent_ids": ["int_023339f780__fu"], "message_ids": []}) + "\n")
+        {"ts": fresh, "intent_ids": ["int_023339f780__fu"], "card_roots": ["int_023339f780"], "message_ids": []}) + "\n")
     monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
     monkeypatch.setattr(ip, "read_inflight", lambda: ["int_023339f780__fu"])
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
@@ -211,3 +211,28 @@ def test_duplicate_card_for_same_root_suppressed(tmp_path, monkeypatch, capsys):
     ip.main()
     out = capsys.readouterr().out
     assert out.strip() == ""           # card suppressed (same root within window)
+
+
+def test_dedup_only_keys_on_button_roots_not_silent_slots(tmp_path, monkeypatch, capsys):
+    """Red-team P1-A: a card that covered an intent only as a silent/no-button
+    slot must NOT register that root in the dedup ledger — otherwise that
+    intent's own later genuine notify gets suppressed. Only closure-ask
+    (button) roots enter card_roots."""
+    import json, datetime
+    ledger = tmp_path / ".intent_card_ledger.jsonl"
+    monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_B"])
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    # int_B is a plain notify (no parent_intent_id → no buttons)
+    monkeypatch.setattr(ip, "get_intent", lambda iid: {"parent_intent_id": None})
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_B": {"response": "你的快递到了", "action": "notify"}}}'))
+    ip.main()
+    out = capsys.readouterr().out
+    assert "快递" in out                       # the genuine notify went out
+    # ledger row for this card must carry EMPTY card_roots (no button/closure)
+    row = json.loads(ledger.read_text().splitlines()[-1])
+    assert row["card_roots"] == []            # int_B not registered as a nag root
