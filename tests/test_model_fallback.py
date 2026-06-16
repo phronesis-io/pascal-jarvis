@@ -73,6 +73,15 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "前一条还在处理" in bot
 
 
+def test_bot_progress_narration_never_sends_claude_error_text():
+    from pathlib import Path
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+    leak = 'lark_reply_text "$message_id" "🔧 $_n"'
+    idx = bot.index(leak)
+    guard_window = bot[max(0, idx - 220):idx]
+    assert '! looks_like_error "$_n"' in guard_window
+
+
 def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(tmp_path, monkeypatch):
     from subprocess import CompletedProcess
     from core.heartbeat import HeartbeatRunner

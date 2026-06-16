@@ -792,7 +792,7 @@ for d in descs[offset:]:
 $_formatted" \
                  --model haiku --no-session-persistence --disable-slash-commands \
                  --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
-               if [ -n "$_n" ] && [ "${#_n}" -lt 200 ]; then
+               if [ -n "$_n" ] && [ "${#_n}" -lt 200 ] && ! looks_like_error "$_n"; then
                  lark_reply_text "$message_id" "🔧 $_n" >/dev/null 2>&1
                else
                  lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1
