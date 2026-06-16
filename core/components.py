@@ -105,7 +105,13 @@ def _check_pgrep(comp: dict, root: Path) -> tuple[bool, str]:
                 continue
             if not pattern or pattern not in cmd:
                 continue
-            if "core.components" in cmd or "rg " in cmd:
+            if (
+                "core.components" in cmd
+                or "rg " in cmd
+                or " --system-prompt " in cmd
+                or "/claude" in cmd
+                or cmd.startswith("claude ")
+            ):
                 continue
             if owner and not _has_ancestor(pid_i, owner, procs):
                 continue

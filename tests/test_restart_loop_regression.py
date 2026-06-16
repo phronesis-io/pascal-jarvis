@@ -79,5 +79,12 @@ def test_lark_listener_reconnects_without_exiting_bot():
         BOT_SH.index("run_lark_listener_once()")
 
 
+def test_sigterm_cleanup_exits_bot():
+    """SIGTERM must not merely run cleanup and continue the reconnect loop."""
+    assert "trap cleanup EXIT" in BOT_SH
+    assert "trap 'cleanup; exit 0' INT TERM" in BOT_SH
+    assert "_CLEANED_UP" in BOT_SH
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

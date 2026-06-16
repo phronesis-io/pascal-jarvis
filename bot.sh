@@ -1238,7 +1238,10 @@ print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
 }
 
 # Cleanup on exit
+_CLEANED_UP=0
 cleanup() {
+  [ "$_CLEANED_UP" -eq 1 ] && return
+  _CLEANED_UP=1
   log_info "Shutting down..."
   # Save in-flight message sessions so next startup can notify user
   _queue_file="$JARVIS_DIR/.message_queue"
@@ -1262,7 +1265,8 @@ cleanup() {
   [ -n "$ADMIN_PID" ] && wait "$ADMIN_PID" 2>/dev/null || true
   log_info "Stopped."
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM
 
 # ── Heartbeat Watchdog (background) ──────────────────────────────────
 # Separate loop that checks heartbeat PID every 30s and restarts if dead.

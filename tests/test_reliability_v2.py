@@ -91,11 +91,13 @@ components:
         if cmd[3] == "pid=,command=":
             return Result(
                 "200 python3 /repo/scripts/lark_event_sidecar.py\n"
+                "225 /Users/pascal/.local/bin/claude --system-prompt lark_event_sidecar.py\n"
                 "300 python3 /repo/scripts/lark_event_sidecar.py\n"
             )
         return Result(
             "100 1 bash /repo/bot.sh\n"
             "200 1 python3 /repo/scripts/lark_event_sidecar.py\n"
+            "225 100 /Users/pascal/.local/bin/claude --system-prompt lark_event_sidecar.py\n"
             "250 100 bash pipeline subshell\n"
             "300 250 python3 /repo/scripts/lark_event_sidecar.py\n"
         )
@@ -105,6 +107,7 @@ components:
     assert result["ok"] is True
     assert "300" in result["detail"]
     assert "200" not in result["detail"]
+    assert "225" not in result["detail"]
 
 
 def test_components_report_emits_warning_lines(tmp_path):
