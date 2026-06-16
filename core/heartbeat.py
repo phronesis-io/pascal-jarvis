@@ -351,6 +351,47 @@ class HeartbeatRunner:
             self._log(f"Script {script_path} error: {e}", level="warn")
             return ""
 
+    def _openai_fallback_call(self, system_prompt: str, prompt: str) -> str:
+        """Last-resort heartbeat responder when Claude-compatible routes are quota-blocked."""
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if os.environ.get("OPENAI_FALLBACK_ENABLED", "true") != "true" or not api_key:
+            return ""
+        try:
+            from core.openai_fallback import call_openai, extract_text
+
+            model = (
+                os.environ.get("OPENAI_FALLBACK_MODEL")
+                or os.environ.get("OPENAI_MODEL")
+                or "gpt-5.2"
+            )
+            base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            timeout = int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))
+            max_output_tokens = int(os.environ.get("OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", "4096"))
+            user_agent = os.environ.get("OPENAI_USER_AGENT", "")
+            instructions = (
+                "You are Jarvis running a heartbeat cycle through an OpenAI-compatible "
+                "fallback because every Claude-compatible provider hit an account/model "
+                "limit. You cannot use local tools here. Use only the task prompt and "
+                "DATA already included by pre-scripts. Return the exact requested "
+                "heartbeat format, JSON envelope, or HEARTBEAT_OK."
+            )
+            if system_prompt.strip():
+                instructions = f"{instructions}\n\nPrimary heartbeat system prompt:\n{system_prompt}"
+            payload = {
+                "model": model,
+                "instructions": instructions,
+                "input": prompt,
+                "max_output_tokens": max_output_tokens,
+            }
+            self._log(f"Calling OpenAI heartbeat fallback model={model}")
+            text = extract_text(call_openai(payload, api_key, base_url, timeout, user_agent))
+            if text:
+                self._log(f"OpenAI heartbeat fallback succeeded ({len(text)} chars)")
+            return text.strip()
+        except Exception as e:
+            self._log(f"OpenAI heartbeat fallback failed: {e}", level="warn")
+            return ""
+
     def claude_call(self, prompt: str) -> str:
         """Call Claude with memory injection, no session persistence."""
         memory = load_tiered_memory(self.memory_dir)
@@ -444,6 +485,10 @@ You have access to the user's memory below. Use it to personalize your responses
                     model = self.model
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
+                if model_problem:
+                    fallback = self._openai_fallback_call(system_prompt, prompt)
+                    if fallback:
+                        return fallback
                 # Nonzero Claude output is an error surface, not user content.
                 return ""
         except subprocess.TimeoutExpired:

@@ -180,3 +180,52 @@ def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert any(env.get("ANTHROPIC_BASE_URL") == "https://backup.example"
                for _, env in calls)
+
+
+def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core.heartbeat import HeartbeatRunner
+    from core import openai_fallback
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("### t\n- interval: 1h\n- prompt: hi\n")
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path,
+        heartbeat_file=heartbeat_file,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        model="opus",
+        idle_judge=False,
+    )
+    runner._claude_bin = "claude"
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_FALLBACK_MODEL", "gpt-test")
+
+    claude_calls = []
+
+    def fake_run(cmd, **kwargs):
+        claude_calls.append(cmd)
+        return CompletedProcess(
+            cmd, 1,
+            stdout="You've hit your monthly spend limit",
+            stderr="",
+        )
+
+    openai_calls = []
+
+    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
+        openai_calls.append((payload, api_key, base_url, timeout, user_agent))
+        return {"output_text": "HEARTBEAT_OK"}
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus", "haiku"]
+    assert openai_calls
+    assert openai_calls[0][0]["model"] == "gpt-test"
