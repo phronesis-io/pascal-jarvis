@@ -627,6 +627,8 @@ except Exception:
   local _use_claude_backup=0
   local _claude_backup_tried=0
   local _openai_tried=0
+  local _answer_provider=""
+  local _answer_model=""
   # REQ-77: the model to use this attempt. Degrades (opus→sonnet→haiku) if a
   # spawn fails with a model-unavailable / spend-limit stderr, instead of
   # looping to empty death ("Continue / No response requested").
@@ -926,6 +928,8 @@ except Exception:
           2>"${ANSWER_FILE}.openai.stderr")
         _openai_exit=$?
         if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
+          _answer_provider="GPT fallback"
+          _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.2}"
           log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
           break
         fi
@@ -935,6 +939,12 @@ except Exception:
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
     else
+      if [ "$_use_claude_backup" -eq 1 ]; then
+        _answer_provider="Claude backup"
+      else
+        _answer_provider="Claude primary"
+      fi
+      _answer_model="$_cur_model"
       break
     fi
   done
@@ -1015,6 +1025,11 @@ except Exception:
     return
   fi
 
+  local _model_footer=""
+  if [ -n "$_answer_provider" ] && [ -n "$_answer_model" ]; then
+    _model_footer="Model: ${_answer_provider} ${_answer_model}"
+  fi
+
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
   reply=$(process_actions "$reply" "$conv_key" "$message_id")
 
@@ -1035,6 +1050,12 @@ for title, url in matches:
     done <<< "$_sl_extracted"
     # Strip markers from reply
     reply=$(echo "$reply" | sed 's/\[SAVE_LATER:[^]]*\]//g' | sed '/^[[:space:]]*$/d')
+  fi
+
+  if [ -n "$_model_footer" ]; then
+    reply="${reply}
+
+${_model_footer}"
   fi
 
   log_info "[$session_id] Replied (${#reply} chars)"
