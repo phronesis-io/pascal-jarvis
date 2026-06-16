@@ -37,11 +37,12 @@ def test_bot_anchors_cwd_to_jarvis_dir():
 
 def test_restart_sh_cds_before_launching_bot():
     """RC defense-in-depth: restart.sh must cd to JARVIS_DIR before launching bot.sh."""
-    launch = 'nohup bash "$JARVIS_DIR/bot.sh"'
+    launch = '["bash", f"{jarvis_dir}/bot.sh"]'
     assert launch in RESTART_SH
     prefix = RESTART_SH[: RESTART_SH.index(launch)]
     # The cd must be in start_bot(), i.e. the closest cd before the launch line.
     assert 'cd "$JARVIS_DIR"' in prefix, "restart.sh must cd to JARVIS_DIR before launching bot.sh"
+    assert "start_new_session=True" in RESTART_SH
 
 
 def test_restart_sh_settles_before_clearing_deploy_guard():

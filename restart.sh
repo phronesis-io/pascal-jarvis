@@ -204,7 +204,21 @@ start_bot() {
   # brings the bot up broken and triggers a restart loop. (bot.sh now also
   # anchors its own CWD, but keep this as defense in depth.)
   cd "$JARVIS_DIR" || { red "  FATAL: cannot cd to JARVIS_DIR"; return 1; }
-  nohup bash "$JARVIS_DIR/bot.sh" >> "$LOG" 2>&1 &
+  python3 - "$JARVIS_DIR" "$LOG" <<'PY'
+import subprocess
+import sys
+
+jarvis_dir, log_path = sys.argv[1], sys.argv[2]
+log_fd = open(log_path, "a")
+subprocess.Popen(
+    ["bash", f"{jarvis_dir}/bot.sh"],
+    stdout=log_fd,
+    stderr=subprocess.STDOUT,
+    cwd=jarvis_dir,
+    start_new_session=True,
+)
+log_fd.close()
+PY
   sleep 3
 
   if pgrep -f "bash.*$JARVIS_DIR/bot\\.sh" >/dev/null 2>&1; then
