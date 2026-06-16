@@ -184,6 +184,39 @@ def test_multi_task_envelope_parsing(tmp_path, monkeypatch):
     assert "response for b" in result
 
 
+def test_multi_task_envelope_ignores_braced_trailer(tmp_path, monkeypatch):
+    """A valid envelope followed by model notes must not poison the batch."""
+    hb = """
+### task-a
+- interval: 1h
+- prompt: a
+
+### task-b
+- interval: 1h
+- prompt: b
+"""
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {
+            "task-a": "response for a",
+            "task-b": "response for b",
+        },
+        "user_message": "",
+    })
+    monkeypatch.setattr(
+        runner,
+        "claude_call",
+        lambda p: f"{envelope}\n\nNote: {{\"debug\": \"not part of payload\"}}",
+    )
+
+    result = runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert "response for a" in result
+    assert "response for b" in result
+    assert state["task-a"]["last_status"] == "ok"
+    assert state["task-b"]["last_status"] == "ok"
+
+
 def test_idle_sentinel_detection():
     """Standalone HEARTBEAT_OK line = idle; prose mention = not idle."""
     from core.heartbeat import _has_idle_sentinel

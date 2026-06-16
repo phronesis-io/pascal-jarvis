@@ -98,6 +98,13 @@ def test_extract_json_trailing_text():
     assert data["user_message"] == "test"
 
 
+def test_extract_json_trailing_text_with_braces():
+    raw = '{"key": "value"}\n\nNote: use {"example": "not part of payload"}'
+    result = extract_json(raw)
+    import json
+    assert json.loads(result) == {"key": "value"}
+
+
 def test_extract_json_no_fence():
     raw = '{"plain": "json"}'
     assert extract_json(raw) == '{"plain": "json"}'
@@ -175,6 +182,11 @@ def test_parse_json_response_code_fence_and_trailing():
 
 def test_parse_json_response_preamble():
     assert parse_json_response('Sure!\n{"a": 1}\nDone.') == {"a": 1}
+
+
+def test_parse_json_response_ignores_braced_trailer():
+    raw = '```json\n{"tasks": {"a": "ok"}, "user_message": ""}\n```\nNote: {"debug": true}'
+    assert parse_json_response(raw) == {"tasks": {"a": "ok"}, "user_message": ""}
 
 
 def test_parse_json_response_empty_is_none():

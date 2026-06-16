@@ -99,6 +99,7 @@ def extract_json(raw: str) -> str:
 
     Returns the cleaned JSON string, or the original if no JSON found.
     """
+    import json
     import re
     # Strip code fence markers
     cleaned = re.sub(r'^```json?\s*', '', raw.strip())
@@ -111,6 +112,17 @@ def extract_json(raw: str) -> str:
     json_start = cleaned.find('{')
     json_end = cleaned.rfind('}')
     if json_start >= 0 and json_end > json_start:
+        # Prefer the first complete JSON object. A model may append commentary
+        # containing braces after the envelope; first-to-last slicing makes that
+        # valid envelope unparseable. Do not scan forward to nested braces on a
+        # failed decode: callers rely on malformed top-level JSON staying
+        # malformed so system fields do not leak via partial objects.
+        decoder = json.JSONDecoder()
+        try:
+            _, end = decoder.raw_decode(cleaned[json_start:])
+            return cleaned[json_start:json_start + end]
+        except json.JSONDecodeError:
+            pass
         return cleaned[json_start:json_end + 1]
     return cleaned
 

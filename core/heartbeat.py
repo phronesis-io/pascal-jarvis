@@ -19,6 +19,7 @@ from .claude_bin import resolve_claude_bin
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
+from .safety import parse_json_response
 from .sched_events import emit as sched_emit
 from .task_protocol import TaskState
 from .timeutil import now_local_str
@@ -882,16 +883,11 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._collect_output(task["name"], raw,
                                      user_messages, producing_tasks)
         else:
-            # Multi-task: Claude returns JSON envelope. Extract robustly.
-            cleaned = re.sub(r'^```json?\s*', '', raw.strip())
-            cleaned = re.sub(r'```\s*$', '', cleaned.strip())
-            # Try to find JSON object if there's preamble text
-            json_start = cleaned.find('{')
-            json_end = cleaned.rfind('}')
-            if json_start >= 0 and json_end > json_start:
-                cleaned = cleaned[json_start:json_end + 1]
-            try:
-                envelope = json.loads(cleaned)
+            # Multi-task: Claude returns JSON envelope. Extract robustly via
+            # the shared safety boundary so wrappers/trailers do not destroy a
+            # valid first JSON object.
+            envelope = parse_json_response(raw)
+            if envelope is not None:
                 task_responses = envelope.get("tasks", {})
                 for task in runnable:
                     resp = task_responses.get(task["name"])
@@ -938,7 +934,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 any_silent = any(t["name"] in self.SILENT_TASKS for t in runnable)
                 if top_msg and top_msg.strip() and not has_card and not any_silent:
                     user_messages.append(top_msg)
-            except json.JSONDecodeError:
+            else:
                 # NEVER dump raw JSON to user — log and treat as a FAILURE.
                 parse_failed = True
                 self._log(f"JSON parse failed for {n}-task response — "
