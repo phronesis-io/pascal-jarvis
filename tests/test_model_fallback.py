@@ -67,6 +67,8 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert '"Claude primary"' in bot
     assert '"Claude backup"' in bot
     assert '"GPT fallback"' in bot
+    assert "_answer_is_error" in bot        # non-empty provider errors still fallback
+    assert "_model_error_text" in bot       # stdout errors feed model fallback
 
 
 def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(tmp_path, monkeypatch):

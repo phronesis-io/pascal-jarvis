@@ -884,9 +884,21 @@ except Exception:
 " 2>/dev/null)
     local _stderr_content
     _stderr_content=$(head -5 "${ANSWER_FILE}.stderr" 2>/dev/null | tr '\n' ' ')
+    local _answer_is_error=0
+    if [ -n "$answer" ] && looks_like_error "$answer"; then
+      _answer_is_error=1
+    fi
+    local _model_error_text="${_stderr_content:-}"
+    if [ "$_answer_is_error" -eq 1 ]; then
+      _model_error_text="${_model_error_text} ${answer}"
+    fi
 
-    if [ -z "$answer" ]; then
-      log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
+    if [ -z "$answer" ] || [ "$_answer_is_error" -eq 1 ]; then
+      if [ "$_answer_is_error" -eq 1 ]; then
+        log_warn "[$session_id] Error-looking answer from Claude (attempt $_attempt, exit=$_exit_code, content=${answer:0:180})"
+      else
+        log_warn "[$session_id] Empty answer from Claude (attempt $_attempt, exit=$_exit_code, stderr=${_stderr_content:-none})"
+      fi
       # Promoted to background: never retry — the conversation has moved on
       # (rotated session), so a silent re-run would race the new session's
       # traffic and double-bill a task the user already saw go background.
@@ -903,7 +915,7 @@ except Exception:
       # REQ-77: if the empty answer was a MODEL error (unavailable / banned /
       # spend limit) rather than a transient blip, degrade the model for the
       # next attempt instead of retrying the same broken model to death.
-      _fallback=$(printf '%s' "$_stderr_content" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
+      _fallback=$(printf '%s' "$_model_error_text" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
       if [ -n "$_fallback" ]; then
         log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
         _cur_model="$_fallback"
@@ -912,7 +924,7 @@ except Exception:
         && [ "$_claude_backup_tried" -eq 0 ] \
         && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
         && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ] \
-        && printf '%s' "$_stderr_content" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
         _claude_backup_tried=1
         _use_claude_backup=1
         _cur_model="$MAIN_MODEL"
@@ -920,7 +932,7 @@ except Exception:
       elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
         && [ -n "${OPENAI_API_KEY:-}" ] \
         && [ "$_openai_tried" -eq 0 ] \
-        && printf '%s' "$_stderr_content" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
         _openai_tried=1
         log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.2})"
         answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
