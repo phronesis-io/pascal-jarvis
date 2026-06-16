@@ -61,7 +61,40 @@ status() {
   fi
 
   # Lark listener
-  lark_pid=$(pgrep -f "lark-cli event|lark_event_sidecar" 2>/dev/null | head -1 || true)
+  # Anchor to the current bot PID. Broad pgrep patterns can match diagnostics
+  # or orphaned sidecars, which made status report green while bot/admin were
+  # actually gone.
+  lark_pid=""
+  if [ -n "${bot_pid:-}" ] && kill -0 "$bot_pid" 2>/dev/null; then
+    lark_pid=$(python3 - "$bot_pid" <<'PY' 2>/dev/null || true
+import subprocess, sys
+bot = int(sys.argv[1])
+r = subprocess.run(["ps", "ax", "-o", "pid=,ppid=,command="],
+                   capture_output=True, text=True, timeout=5)
+procs = {}
+for line in r.stdout.splitlines():
+    parts = line.strip().split(None, 2)
+    if len(parts) < 3:
+        continue
+    try:
+        procs[int(parts[0])] = (int(parts[1]), parts[2])
+    except ValueError:
+        pass
+def owned(pid):
+    seen = set()
+    while pid and pid not in seen:
+        if pid == bot:
+            return True
+        seen.add(pid)
+        pid = procs.get(pid, (0, ""))[0]
+    return False
+for pid, (_, cmd) in procs.items():
+    if ("lark_event_sidecar.py" in cmd or "lark-cli event" in cmd) and owned(pid):
+        print(pid)
+        break
+PY
+)
+  fi
   if [ -n "$lark_pid" ]; then
     green "  lark-cli:  running (PID $lark_pid)"
   else

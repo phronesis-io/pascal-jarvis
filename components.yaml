@@ -34,18 +34,21 @@ components:
   - name: heartbeat-loop
     check: pgrep
     pattern: "core.heartbeat_loop"
+    owned_by_pidfile: .bot.pid
     critical: true
     note: resident scheduler inside bot.sh; bot watchdog restarts it
 
   - name: ef-stream
     check: pgrep
     pattern: "core.ef_stream_loop"
+    owned_by_pidfile: .bot.pid
     critical: true
     note: EigenFlux PM/friend stream; bot watchdog restarts it (REQ-40)
 
   - name: lark-sidecar
     check: pgrep
-    pattern: "lark_event_sidecar"
+    pattern: "lark_event_sidecar.py"
+    owned_by_pidfile: .bot.pid
     critical: true
     note: card callbacks + read receipts die silently without it
 

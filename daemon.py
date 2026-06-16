@@ -209,12 +209,17 @@ def _find_last_heartbeat() -> float | None:
 
 def _is_bot_alive() -> bool:
     """Check if bot.sh is alive via PID file (primary) or pgrep (fallback)."""
+    return _bot_pid() is not None
+
+
+def _bot_pid() -> int | None:
+    """Return the live bot.sh PID for this repo, or None."""
     # Primary: check PID file (format: "PID" or "PID BOOT_TS")
     if BOT_PID_FILE.exists():
         try:
             pid = int(BOT_PID_FILE.read_text().strip().split()[0])
             os.kill(pid, 0)  # Check if process exists
-            return True
+            return pid
         except (ValueError, ProcessLookupError, PermissionError, IndexError):
             pass
 
@@ -224,9 +229,64 @@ def _is_bot_alive() -> bool:
     try:
         r = subprocess.run(["pgrep", "-f", f"bash.*{_re.escape(str(JARVIS_DIR))}/bot\\.sh"],
                            capture_output=True, text=True, timeout=5)
-        return bool(r.stdout.strip())
+        for line in r.stdout.splitlines():
+            try:
+                return int(line.strip())
+            except ValueError:
+                continue
     except Exception:
+        pass
+    return None
+
+
+def _ps_processes() -> dict[int, tuple[int, str]]:
+    """Return {pid: (ppid, command)} from ps; never raises."""
+    try:
+        r = subprocess.run(["ps", "ax", "-o", "pid=,ppid=,command="],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return {}
+    procs: dict[int, tuple[int, str]] = {}
+    for line in r.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        procs[pid] = (ppid, parts[2])
+    return procs
+
+
+def _has_ancestor(pid: int, ancestor: int, procs: dict[int, tuple[int, str]]) -> bool:
+    """True if pid is a descendant of ancestor according to the ps snapshot."""
+    seen = set()
+    cur = pid
+    while cur and cur not in seen:
+        if cur == ancestor:
+            return True
+        seen.add(cur)
+        cur = procs.get(cur, (0, ""))[0]
+    return False
+
+
+def _is_lark_listener_alive(bot_pid: int | None = None) -> bool:
+    """Check for a Lark listener owned by the current bot process.
+
+    A stale/orphaned sidecar is worse than no sidecar: it can make the daemon
+    think the bot is healthy while admin/heartbeat are gone. Anchor listener
+    health to the live bot PID instead of a broad pgrep.
+    """
+    bot_pid = bot_pid or _bot_pid()
+    if not bot_pid:
         return False
+    procs = _ps_processes()
+    for pid, (_, cmd) in procs.items():
+        if ("lark_event_sidecar.py" in cmd or "lark-cli event" in cmd) \
+                and _has_ancestor(pid, bot_pid, procs):
+            return True
+    return False
 
 
 def check_health() -> dict:
@@ -249,19 +309,13 @@ def check_health() -> dict:
             pass
 
     # 1. Is bot.sh running? (PID file + pgrep)
-    if not _is_bot_alive():
+    bot_pid = _bot_pid()
+    if not bot_pid:
         issues.append("bot.sh is not running")
 
     # 2. Is Lark listener connected?
-    try:
-        # Either event backend counts as the listener (lark-cli or the
-        # single-connection python sidecar)
-        r = subprocess.run(["pgrep", "-f", "lark-cli event|lark_event_sidecar"],
-                           capture_output=True, text=True, timeout=5)
-        if not r.stdout.strip():
-            issues.append("Lark event listener is not running")
-    except Exception as e:
-        issues.append(f"Cannot check Lark listener: {e}")
+    if bot_pid and not _is_lark_listener_alive(bot_pid):
+        issues.append("Lark event listener is not running")
 
     # 3. Is heartbeat alive? (check BOTH log files for recent beat)
     beat_age = _find_last_heartbeat()

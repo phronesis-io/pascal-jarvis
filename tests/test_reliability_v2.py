@@ -67,6 +67,46 @@ components:
     assert results["fresh-file"]["ok"] is False
 
 
+def test_components_pgrep_filters_to_owner_pidfile(tmp_path, monkeypatch):
+    from core.components import check_components
+
+    (tmp_path / ".bot.pid").write_text("100 123")
+    manifest = tmp_path / "components.yaml"
+    manifest.write_text("""
+components:
+  - name: sidecar
+    check: pgrep
+    pattern: lark_event_sidecar.py
+    owned_by_pidfile: .bot.pid
+    critical: true
+""")
+
+    class Result:
+        def __init__(self, stdout="", returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:3] == ["ps", "ax", "-o"]
+        if cmd[3] == "pid=,command=":
+            return Result(
+                "200 python3 /repo/scripts/lark_event_sidecar.py\n"
+                "300 python3 /repo/scripts/lark_event_sidecar.py\n"
+            )
+        return Result(
+            "100 1 bash /repo/bot.sh\n"
+            "200 1 python3 /repo/scripts/lark_event_sidecar.py\n"
+            "250 100 bash pipeline subshell\n"
+            "300 250 python3 /repo/scripts/lark_event_sidecar.py\n"
+        )
+
+    monkeypatch.setattr("core.components.subprocess.run", fake_run)
+    result = check_components(manifest_path=manifest, root=tmp_path)[0]
+    assert result["ok"] is True
+    assert "300" in result["detail"]
+    assert "200" not in result["detail"]
+
+
 def test_components_report_emits_warning_lines(tmp_path):
     from core.components import check_components, format_report
     manifest = tmp_path / "components.yaml"

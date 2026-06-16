@@ -52,27 +52,72 @@ def _check_pid(comp: dict, root: Path) -> tuple[bool, str]:
         return False, f"pid {pid} dead"
 
 
+def _read_pidfile(root: Path, path: str) -> int | None:
+    try:
+        return int((root / path).read_text().strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _has_ancestor(pid: int, ancestor: int, procs: dict[int, tuple[int, str]]) -> bool:
+    seen = set()
+    cur = pid
+    while cur and cur not in seen:
+        if cur == ancestor:
+            return True
+        seen.add(cur)
+        cur = procs.get(cur, (0, ""))[0]
+    return False
+
+
 def _check_pgrep(comp: dict, root: Path) -> tuple[bool, str]:
     pattern = comp.get("pattern", "")
+    owner = _read_pidfile(root, comp.get("owned_by_pidfile", "")) \
+        if comp.get("owned_by_pidfile") else None
     try:
-        r = subprocess.run(["pgrep", "-f", pattern],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            return True, f"pids {r.stdout.split()}"
         # macOS pgrep -f only inspects a truncated cmdline (~first 100 chars),
         # so a long interpreter path prefix can hide patterns like
-        # "-m core.heartbeat_loop". Fall back to a full-cmdline ps scan.
+        # "-m core.heartbeat_loop". Use a full-cmdline ps scan as the source
+        # of truth; it also lets us filter out this diagnostic command and
+        # orphaned processes not owned by bot.sh.
         ps = subprocess.run(["ps", "ax", "-o", "pid=,command="],
                             capture_output=True, text=True, timeout=5)
+        ps_tree = subprocess.run(["ps", "ax", "-o", "pid=,ppid=,command="],
+                                 capture_output=True, text=True, timeout=5)
+        procs: dict[int, tuple[int, str]] = {}
+        for line in ps_tree.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                procs[int(parts[0])] = (int(parts[1]), parts[2])
+            except ValueError:
+                continue
         pids = []
         for line in ps.stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
             pid, _, cmd = line.partition(" ")
-            if pattern and pattern in cmd and "pgrep" not in cmd:
-                pids.append(pid)
-        return (True, f"pids {pids}") if pids else (False, "no process")
+            try:
+                pid_i = int(pid)
+            except ValueError:
+                continue
+            if not pattern or pattern not in cmd:
+                continue
+            if "core.components" in cmd or "rg " in cmd:
+                continue
+            if owner and not _has_ancestor(pid_i, owner, procs):
+                continue
+            pids.append(str(pid_i))
+        if pids:
+            detail = f"pids {pids}"
+            if owner:
+                detail += f" owned by {owner}"
+            return True, detail
+        if owner:
+            return False, f"no process owned by pid {owner}"
+        return False, "no process"
     except Exception as e:
         return False, f"pgrep error: {e}"
 

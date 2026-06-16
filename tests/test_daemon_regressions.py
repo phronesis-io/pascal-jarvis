@@ -83,3 +83,27 @@ def test_restart_wait_is_at_least_60s():
     # Check for the sleep loop with range(90) — 90 seconds
     assert "range(90)" in source, \
         "diagnose_and_fix must wait ~90s after restart before health check"
+
+
+def test_lark_listener_must_be_owned_by_bot(monkeypatch):
+    """An orphan sidecar must not satisfy daemon health.
+
+    Regression: broad pgrep saw a reparented lark_event_sidecar and marked the
+    listener healthy while bot.sh/admin were dead.
+    """
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        200: (1, "python3 /repo/scripts/lark_event_sidecar.py"),
+    })
+    assert daemon_mod._is_lark_listener_alive() is False
+
+
+def test_lark_listener_owned_by_bot_is_healthy(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        150: (100, "bash pipeline subshell"),
+        200: (150, "python3 /repo/scripts/lark_event_sidecar.py"),
+    })
+    assert daemon_mod._is_lark_listener_alive() is True
