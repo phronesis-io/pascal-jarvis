@@ -276,10 +276,17 @@ SILENT_TASKS, not this doc.
       a reply, a deadline, an account/security/billing anomaly, anything tied to his
       projects (EigenFlux, white paper), holdings, health appointments, or people in
       his memory (team, contacts).
-    - "silent": read and filed, not surfaced. Routine bank statements/credit notices,
-      LinkedIn/job-board spam, marketing, newsletters/digests (Substack, AINews, TED,
-      Berkeley RDI…), CI failure notices, GitHub PR notification noise, automated
-      receipts. Default to silent when in doubt — better to under-surface than nag.
+      ALSO push (calibrated on Pascal's real 163 inbox, 2026-06-15):
+        • SECURITY alerts — 新设备登录提醒 / 异地登录 / 密码或账户变更 / abnormal-login.
+          These are the "security anomaly" above; do NOT bury them as 163 routine noise.
+        • A REAL bill with money/deadline — monthly e-statement (招行信用卡电子账单),
+          payment due, 还款提醒, 临时额度调整. Push the statement itself (once) — missing
+          a payment is costly. (But the daily "每日信用管家" marketing stays silent, below.)
+    - "silent": read and filed, not surfaced. LinkedIn/job-board spam, marketing,
+      promos, newsletters/digests (Substack, AINews, TED, Berkeley RDI…), 每日信用管家
+      and other daily credit-marketing pushes, bank service-rating/致电评价 requests,
+      social 加好友请求, CI failure notices, GitHub PR/comment notification noise,
+      automated receipts. Default to silent when in doubt — better to under-surface than nag.
 
     Use Pascal's memory files (profile, team, contacts, projects, health) to judge
     who matters. Recognize names like alice/Luma, MiniMax/LLaMA-era contacts,

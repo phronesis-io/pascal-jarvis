@@ -17,6 +17,10 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "API Error",
     "Traceback",
     "usage limit",
+    "You've hit your monthly spend limit",
+    "You have hit your monthly spend limit",
+    "monthly spend limit",
+    "spend limit",
     "credit balance",
     "Connection error",
     "Failed to authenticate",
@@ -45,6 +49,10 @@ PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "API Error: 500",
     "API Error: 529",
     "Request not allowed",
+    "You've hit your monthly spend limit",
+    "You have hit your monthly spend limit",
+    "monthly spend limit",
+    "raise it at claude.ai/settings/usage",
 )
 
 

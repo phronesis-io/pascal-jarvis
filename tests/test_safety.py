@@ -73,6 +73,11 @@ def test_json_error_type_caught():
     assert looks_like_error(err) is True
 
 
+def test_claude_spend_limit_caught_even_under_card_header():
+    text = "**🏛️ Phronesis**\n\nYou've hit your monthly spend limit · raise it at claude.ai/settings/usage"
+    assert looks_like_error(text, proactive=True) is True
+
+
 def test_substring_patterns_in_json():
     for p in ERROR_SUBSTRINGS:
         text = f'some prefix {p} and more text' + "x" * 50
