@@ -2016,8 +2016,8 @@ ${content}"
 }
 
 while true; do
-  run_lark_listener_once
-  _listener_rc=$?
+  _listener_rc=0
+  run_lark_listener_once || _listener_rc=$?
   log_warn "Lark listener exited (rc=$_listener_rc) — reconnecting in 5s"
   sleep 5
 done

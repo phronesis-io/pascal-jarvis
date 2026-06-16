@@ -44,6 +44,16 @@ def test_restart_sh_cds_before_launching_bot():
     assert 'cd "$JARVIS_DIR"' in prefix, "restart.sh must cd to JARVIS_DIR before launching bot.sh"
 
 
+def test_restart_sh_settles_before_clearing_deploy_guard():
+    """restart.sh must own the post-start verdict instead of racing daemon checks."""
+    assert "settle_bot()" in RESTART_SH
+    assert "python3 -m core.components --critical" in RESTART_SH
+    assert "Settling bot for ${seconds}s" in RESTART_SH
+    full = RESTART_SH[RESTART_SH.index("--full|-f)"):]
+    assert full.index("_set_deploy_guard") < full.index("kill_bot")
+    assert full.index("start_bot") < full.index("settle_bot")
+
+
 def test_chinese_stop_words_recognized():
     """User-facing: Chinese「结束/停/停止/取消」must hit the stop/cancel bypass."""
     for word in ("结束", "停", "停止", "取消"):
@@ -75,8 +85,15 @@ def test_lark_listener_reconnects_without_exiting_bot():
     assert "run_lark_listener_once()" in BOT_SH
     assert "Lark listener exited" in BOT_SH
     assert "reconnecting in 5s" in BOT_SH
-    assert BOT_SH.index("while true; do\n  run_lark_listener_once") > \
+    assert BOT_SH.index("while true; do\n  _listener_rc=0") > \
         BOT_SH.index("run_lark_listener_once()")
+
+
+def test_lark_listener_reconnect_captures_nonzero_exit():
+    """A listener failure must be logged/reconnected, not fall through ambiguously."""
+    assert "run_lark_listener_once || _listener_rc=$?" in BOT_SH
+    bad = "while true; do\n  run_lark_listener_once\n  _listener_rc=$?"
+    assert bad not in BOT_SH
 
 
 def test_sigterm_cleanup_exits_bot():

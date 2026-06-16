@@ -215,6 +215,22 @@ start_bot() {
   fi
 }
 
+settle_bot() {
+  local seconds="${1:-75}"
+  local report="/tmp/jarvis_restart_components.$$"
+  echo "Settling bot for ${seconds}s..."
+  sleep "$seconds"
+  if python3 -m core.components --critical > "$report" 2>&1; then
+    green "  Bot settled; critical components healthy."
+    rm -f "$report"
+  else
+    red "  Bot failed post-start settle check:"
+    cat "$report"
+    rm -f "$report"
+    return 1
+  fi
+}
+
 start_daemon() {
   echo "Starting daemon.py..."
   cd "$JARVIS_DIR"
@@ -266,6 +282,7 @@ case "${1:-}" in
     echo ""
     start_daemon
     start_bot
+    settle_bot
     echo ""
     status
     ;;
@@ -284,6 +301,7 @@ case "${1:-}" in
     kill_bot
     echo ""
     start_bot
+    settle_bot
     echo ""
     status
     ;;
