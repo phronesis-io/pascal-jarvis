@@ -567,6 +567,7 @@ $(load_memory)"
   local _lock_token
   _lock_token="$$.$(date +%s).$RANDOM"
   local waited=0
+  local _busy_notice_sent=0
   while :; do
     # Acquire atomically (noclobber) BEFORE spawning Claude. Stale-lock
     # policy: a NUMERIC dead pid → reclaim immediately; an alive holder is
@@ -593,6 +594,10 @@ $(load_memory)"
       fi
       if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
         log_info "[$session_id] Session busy, waiting... (${waited}s)"
+        if [ "$_busy_notice_sent" -eq 0 ]; then
+          _busy_notice_sent=1
+          lark_reply_text "$message_id" "前一条还在处理，我已把这条排队；轮到它时会继续，不需要重发。" >/dev/null 2>&1 || true
+        fi
       fi
       sleep 5
       waited=$((waited + 5))
