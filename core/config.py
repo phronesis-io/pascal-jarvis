@@ -16,11 +16,29 @@ _DEFAULTS = {
         "main_model": "opus",
         "heartbeat_model": "opus",
         "max_session_size": 512000,
+        # Optional Claude Code-compatible backup provider. When configured,
+        # main chat can retry `claude -p` with ANTHROPIC_* env pointed at this
+        # endpoint before falling back to text-only OpenAI.
+        "backup_enabled": True,
+        "backup_auth_token": "",
+        "backup_base_url": "",
         # Max seconds a single heartbeat Claude call may run. Raised from the
         # old hard-coded 300s so heartbeat tasks have room to fan out subagents
         # (Task/Agent) and wait for them. Bumping this lengthens the worst-case
         # time one cycle blocks other due tasks — keep it bounded.
         "heartbeat_timeout": 600,
+    },
+    "openai": {
+        # Last-resort main-chat fallback when Claude Code fails with a
+        # model/account limit. It is deliberately off unless an API key exists
+        # and bot.sh sees a Claude model error.
+        "fallback_enabled": True,
+        "fallback_model": "gpt-5.2",
+        "api_key": "",
+        "base_url": "https://api.openai.com/v1",
+        "user_agent": "",
+        "timeout": 120,
+        "max_output_tokens": 4096,
     },
     "memory": {
         "dir": "memory",
@@ -101,6 +119,10 @@ class Config:
     @property
     def claude(self) -> dict:
         return self._raw.get("claude", {})
+
+    @property
+    def openai(self) -> dict:
+        return self._raw.get("openai", {})
 
     @property
     def memory(self) -> dict:

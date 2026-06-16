@@ -369,35 +369,82 @@ You have access to the user's memory below. Use it to personalize your responses
 
 {memory}"""
 
-        cmd = [
-            self._claude_bin,
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--system-prompt", system_prompt,
-            "--disable-slash-commands",
-            "-p", prompt,
-        ]
-        if self.model:
-            cmd.extend(["--model", self.model])
-
         self._call_timed_out = False
+        attempted: set[str] = set()
+        model = self.model
+        use_backup = False
+        backup_tried = False
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=self.claude_timeout, stdin=subprocess.DEVNULL,
-                cwd=str(self.work_dir),
-                start_new_session=True,  # isolate from parent process group signals
-            )
-            if result.returncode != 0:
+            while True:
+                cmd = [
+                    self._claude_bin,
+                    "--dangerously-skip-permissions",
+                    "--no-session-persistence",
+                    "--system-prompt", system_prompt,
+                    "--disable-slash-commands",
+                    "-p", prompt,
+                ]
+                if model:
+                    cmd.extend(["--model", model])
+                provider = "backup" if use_backup else "primary"
+                attempted.add(f"{provider}:{model or ''}")
+                env = None
+                if use_backup:
+                    env = os.environ.copy()
+                    env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
+                        "CLAUDE_BACKUP_AUTH_TOKEN", "")
+                    env["ANTHROPIC_BASE_URL"] = os.environ.get(
+                        "CLAUDE_BACKUP_BASE_URL", "")
+                self._log(
+                    f"Calling Claude heartbeat provider={provider} model={model or '(default)'}"
+                )
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=self.claude_timeout, stdin=subprocess.DEVNULL,
+                    cwd=str(self.work_dir),
+                    env=env,
+                    start_new_session=True,  # isolate from parent process group signals
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+
                 self._log(f"Claude exited with code {result.returncode}")
-                if result.stderr.strip():
-                    self._log(f"Claude stderr: {result.stderr.strip()[:300]}")
+                err_text = "\n".join(
+                    s for s in (result.stderr.strip(), result.stdout.strip()) if s
+                )
+                if err_text:
+                    self._log(f"Claude error output: {err_text[:300]}")
                 # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
                 # event (restart/shutdown), not a task failure. Return a sentinel
                 # so run_cycle doesn't punish tasks via circuit breaker.
                 if result.returncode in (137, 143):  # SIGKILL=137, SIGTERM=143
                     return "__KILLED__"
-            return result.stdout.strip()
+
+                try:
+                    from core.model_fallback import (fallback_for_stderr,
+                                                     is_model_error)
+                    nxt = fallback_for_stderr(model or "", err_text)
+                    model_problem = is_model_error(err_text)
+                except Exception:
+                    nxt = None
+                    model_problem = False
+                if nxt and f"{provider}:{nxt}" not in attempted:
+                    self._log(
+                        f"Retrying Claude heartbeat with {provider} fallback model: {nxt}")
+                    model = nxt
+                    continue
+                if (not use_backup and not backup_tried
+                        and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                        and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
+                        and os.environ.get("CLAUDE_BACKUP_BASE_URL")
+                        and model_problem):
+                    backup_tried = True
+                    use_backup = True
+                    model = self.model
+                    self._log("Retrying Claude heartbeat with backup provider")
+                    continue
+                # Nonzero Claude output is an error surface, not user content.
+                return ""
         except subprocess.TimeoutExpired:
             self._call_timed_out = True
             self._log(f"Claude call timed out ({self.claude_timeout}s)")

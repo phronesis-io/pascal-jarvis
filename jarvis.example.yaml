@@ -60,6 +60,30 @@ claude:
   # blocks other due tasks for longer. (Conversation replies use a separate
   # 6000s watchdog in bot.sh.)
   heartbeat_timeout: 600
+  # Optional Claude Code-compatible backup provider. When primary Claude hits
+  # a model/account/rate limit, main chat retries `claude -p` with these
+  # ANTHROPIC_* values before using the text-only OpenAI fallback.
+  backup_enabled: true
+  backup_auth_token: ""
+  backup_base_url: ""
+
+
+# ── OpenAI fallback settings ───────────────────────────────────────
+# Used only when the main Claude Code conversation path fails with a model /
+# account limit and the Claude opus→sonnet→haiku chain is exhausted.
+# Requires OPENAI_API_KEY in the bot environment. This fallback is text-only:
+# it cannot use Claude Code tools, shell commands, or local file editing.
+
+openai:
+  fallback_enabled: true
+  fallback_model: "gpt-5.2"
+  # Prefer env var OPENAI_API_KEY for normal installs. This field exists for
+  # private, gitignored deployments that keep provider keys in jarvis.yaml.
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  user_agent: ""
+  timeout: 120
+  max_output_tokens: 4096
 
 
 # ── Memory System ──────────────────────────────────────────────────

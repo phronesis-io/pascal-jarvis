@@ -170,6 +170,16 @@ emit("MAX_SESSION_SIZE", c.claude.get("max_session_size", 512000))
 emit("MAIN_MODEL", c.claude.get("main_model", "opus") or "opus")
 emit("HEARTBEAT_MODEL", c.claude.get("heartbeat_model", "opus"))
 emit("HEARTBEAT_TIMEOUT", c.claude.get("heartbeat_timeout", 600))
+emit("CLAUDE_BACKUP_ENABLED", str(bool(c.claude.get("backup_enabled", True))).lower())
+emit("CLAUDE_BACKUP_AUTH_TOKEN", c.claude.get("backup_auth_token", ""))
+emit("CLAUDE_BACKUP_BASE_URL", c.claude.get("backup_base_url", ""))
+emit("OPENAI_FALLBACK_ENABLED", str(bool(c.openai.get("fallback_enabled", True))).lower())
+emit("OPENAI_FALLBACK_MODEL", c.openai.get("fallback_model", "gpt-5.2"))
+emit("OPENAI_API_KEY_CONFIG", c.openai.get("api_key", ""))
+emit("OPENAI_BASE_URL", c.openai.get("base_url", "https://api.openai.com/v1"))
+emit("OPENAI_USER_AGENT", c.openai.get("user_agent", ""))
+emit("OPENAI_FALLBACK_TIMEOUT", c.openai.get("timeout", 120))
+emit("OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", c.openai.get("max_output_tokens", 4096))
 emit("CHECK_INTERVAL", c.heartbeat.get("check_interval", 10))
 emit("ADMIN_ENABLED", str(bool(c.admin.get("enabled", False))).lower())
 emit("ADMIN_HOST", c.admin.get("host", "127.0.0.1"))
@@ -191,6 +201,12 @@ SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
 export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL
+export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
+if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
+  export OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
+fi
+unset OPENAI_API_KEY_CONFIG
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
 
@@ -539,6 +555,8 @@ $(load_memory)"
   local LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
   local ANSWER_FILE
   ANSWER_FILE=$(mktemp /tmp/jarvis-answer-XXXXXX)
+  local SYS_PROMPT_FILE="${ANSWER_FILE}.system_prompt"
+  printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
   # Lock ownership token: every write to the lock file carries it, and every
   # destructive operation (overwrite at spawn, cleanup rm) first verifies the
   # token is still ours. Without ownership checks, a waiter that legitimately
@@ -606,6 +624,9 @@ except Exception:
   local answer=""
   local _attempt
   local _watchdog_killed=0  # set to 1 only when the 6000s watchdog did the kill
+  local _use_claude_backup=0
+  local _claude_backup_tried=0
+  local _openai_tried=0
   # REQ-77: the model to use this attempt. Degrades (opus→sonnet→haiku) if a
   # spawn fails with a model-unavailable / spend-limit stderr, instead of
   # looping to empty death ("Continue / No response requested").
@@ -628,22 +649,52 @@ except Exception:
 
     if [ -f "$session_file" ]; then
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
-      (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
-        --resume "$session_id" \
-        --model "$_cur_model" \
-        --append-system-prompt "$sys_prompt" \
-        --dangerously-skip-permissions \
-        --output-format json \
-        2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      if [ "$_use_claude_backup" -eq 1 ]; then
+        log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
+        (cd "$WORK_DIR" && printf '%s' "$content" | env \
+          ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" \
+          ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL" \
+          claude -p \
+          --resume "$session_id" \
+          --model "$_cur_model" \
+          --append-system-prompt "$sys_prompt" \
+          --dangerously-skip-permissions \
+          --output-format json \
+          2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      else
+        log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
+        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+          --resume "$session_id" \
+          --model "$_cur_model" \
+          --append-system-prompt "$sys_prompt" \
+          --dangerously-skip-permissions \
+          --output-format json \
+          2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      fi
     else
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
-      (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
-        --session-id "$session_id" \
-        --model "$_cur_model" \
-        --append-system-prompt "$sys_prompt" \
-        --dangerously-skip-permissions \
-        --output-format json \
-        2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      if [ "$_use_claude_backup" -eq 1 ]; then
+        log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
+        (cd "$WORK_DIR" && printf '%s' "$content" | env \
+          ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" \
+          ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL" \
+          claude -p \
+          --session-id "$session_id" \
+          --model "$_cur_model" \
+          --append-system-prompt "$sys_prompt" \
+          --dangerously-skip-permissions \
+          --output-format json \
+          2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      else
+        log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
+        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+          --session-id "$session_id" \
+          --model "$_cur_model" \
+          --append-system-prompt "$sys_prompt" \
+          --dangerously-skip-permissions \
+          --output-format json \
+          2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+      fi
     fi
     _claude_pid=$!
     printf '%s %s' "$_claude_pid" "$_lock_token" > "$LOCK_FILE"
@@ -854,6 +905,32 @@ except Exception:
       if [ -n "$_fallback" ]; then
         log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
         _cur_model="$_fallback"
+      elif [ "$_use_claude_backup" -eq 0 ] \
+        && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+        && [ "$_claude_backup_tried" -eq 0 ] \
+        && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
+        && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ] \
+        && printf '%s' "$_stderr_content" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        _claude_backup_tried=1
+        _use_claude_backup=1
+        _cur_model="$MAIN_MODEL"
+        log_warn "[$session_id] Primary Claude exhausted on $_cur_model → trying Claude Code backup provider"
+      elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
+        && [ -n "${OPENAI_API_KEY:-}" ] \
+        && [ "$_openai_tried" -eq 0 ] \
+        && printf '%s' "$_stderr_content" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        _openai_tried=1
+        log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.2})"
+        answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
+          python3 -m core.openai_fallback \
+          2>"${ANSWER_FILE}.openai.stderr")
+        _openai_exit=$?
+        if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
+          log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
+          break
+        fi
+        _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
+        log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
       fi
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -864,7 +941,8 @@ except Exception:
 
   local _promoted_job=""
   [ -f "${ANSWER_FILE}.promoted" ] && _promoted_job=$(cat "${ANSWER_FILE}.promoted" 2>/dev/null)
-  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" "${ANSWER_FILE}.promoted"
+  rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
+    "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.openai.stderr" "$SYS_PROMPT_FILE"
   # Remove the lock ONLY if we still own it: after promotion released it (or
   # a staleness reclaim), it may belong to another live handler — an
   # unconditional rm here silently unlocked their in-flight session.

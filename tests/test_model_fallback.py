@@ -5,6 +5,8 @@ from core import model_fallback as mf
 def test_model_error_detection():
     assert mf.is_model_error("There's an issue with the selected model (claude-fable-5)")
     assert mf.is_model_error("You've hit your monthly spend limit")
+    assert mf.is_model_error("Rate limit exceeded")
+    assert mf.is_model_error("too many requests")
     assert mf.is_model_error("invalid model")
     assert not mf.is_model_error("connection reset by peer")
     assert not mf.is_model_error("")
@@ -20,6 +22,7 @@ def test_fallback_chain():
 def test_spend_limit_jumps_to_cheapest():
     assert mf.fallback_for_stderr("opus", "monthly spend limit") == "haiku"
     assert mf.fallback_for_stderr("sonnet", "spend limit") == "haiku"
+    assert mf.fallback_for_stderr("opus", "rate limit exceeded") == "haiku"
     assert mf.fallback_for_stderr("haiku", "spend limit") is None  # already cheapest
 
 
@@ -39,9 +42,133 @@ def test_cli(tmp_path):
     assert r.stdout.strip() == "sonnet"
 
 
+def test_cli_is_model_error_predicate():
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-m", "core.model_fallback", "--is-model-error"],
+                       input="You've hit your monthly spend limit",
+                       capture_output=True, text=True)
+    assert r.returncode == 0
+    r = subprocess.run([sys.executable, "-m", "core.model_fallback", "--is-model-error"],
+                       input="connection reset by peer",
+                       capture_output=True, text=True)
+    assert r.returncode == 1
+
+
 def test_bot_sh_wires_reply_closure_and_model_fallback():
     from pathlib import Path
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
     assert "core.reply_closure" in bot         # REQ-64 wired
     assert "core.model_fallback" in bot        # REQ-77 wired
     assert '"$_cur_model"' in bot              # main path uses degradable model
+    assert "core.openai_fallback" in bot       # Claude-limit escape hatch
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
+    assert "ANTHROPIC_BASE_URL" in bot
+
+
+def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core.heartbeat import HeartbeatRunner
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("### t\n- interval: 1h\n- prompt: hi\n")
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path,
+        heartbeat_file=heartbeat_file,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        model="opus",
+        idle_judge=False,
+    )
+    runner._claude_bin = "claude"
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        model = cmd[cmd.index("--model") + 1]
+        if model == "opus":
+            return CompletedProcess(
+                cmd, 1,
+                stdout="You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+                stderr="",
+            )
+        return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert calls[0][calls[0].index("--model") + 1] == "opus"
+    assert calls[1][calls[1].index("--model") + 1] == "haiku"
+
+
+def test_heartbeat_claude_call_suppresses_nonfallback_error_stdout(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core.heartbeat import HeartbeatRunner
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("### t\n- interval: 1h\n- prompt: hi\n")
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path,
+        heartbeat_file=heartbeat_file,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        model="haiku",
+        idle_judge=False,
+    )
+    runner._claude_bin = "claude"
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kwargs: CompletedProcess(
+            cmd, 1,
+            stdout="You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+            stderr="",
+        ),
+    )
+
+    assert runner.claude_call("prompt") == ""
+
+
+def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core.heartbeat import HeartbeatRunner
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("### t\n- interval: 1h\n- prompt: hi\n")
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path,
+        heartbeat_file=heartbeat_file,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        model="opus",
+        idle_judge=False,
+    )
+    runner._claude_bin = "claude"
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        env = kwargs.get("env") or {}
+        calls.append((cmd, env))
+        if env.get("ANTHROPIC_AUTH_TOKEN") == "backup-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        return CompletedProcess(
+            cmd, 1,
+            stdout="You've hit your monthly spend limit",
+            stderr="",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert any(env.get("ANTHROPIC_BASE_URL") == "https://backup.example"
+               for _, env in calls)

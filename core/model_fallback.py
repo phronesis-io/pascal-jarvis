@@ -37,6 +37,7 @@ _MODEL_ERROR = re.compile(
 )
 _SPEND_ERROR = re.compile(
     r"monthly spend limit|spend limit|usage limit (reached|exceeded)"
+    r"|rate limit (reached|exceeded)|rate_limit|too many requests"
     r"|credit balance is too low|insufficient credits",
     re.IGNORECASE)
 
@@ -92,6 +93,8 @@ def fallback_for_stderr(current: str, stderr: str) -> str | None:
 
 if __name__ == "__main__":
     # CLI for bot.sh: args = <current_model> ; stderr text on stdin.
+    if len(sys.argv) > 1 and sys.argv[1] == "--is-model-error":
+        sys.exit(0 if is_model_error(sys.stdin.read()) else 1)
     cur = sys.argv[1] if len(sys.argv) > 1 else "opus"
     err = sys.stdin.read()
     nxt = fallback_for_stderr(cur, err)
