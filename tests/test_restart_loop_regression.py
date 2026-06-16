@@ -66,5 +66,18 @@ def test_143_message_gated_on_watchdog_marker():
     assert "_watchdog_killed" in window, "the 「继续」 nag must be gated on _watchdog_killed"
 
 
+def test_lark_listener_reconnects_without_exiting_bot():
+    """The Lark long-connection is allowed to drop or be replaced.
+
+    bot.sh must restart the listener instead of letting the foreground pipe end,
+    because an EXIT cleanup kills admin.py and takes :3456 down.
+    """
+    assert "run_lark_listener_once()" in BOT_SH
+    assert "Lark listener exited" in BOT_SH
+    assert "reconnecting in 5s" in BOT_SH
+    assert BOT_SH.index("while true; do\n  run_lark_listener_once") > \
+        BOT_SH.index("run_lark_listener_once()")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -1376,8 +1376,9 @@ if [ -z "$USER_ID" ]; then
   exit 0
 fi
 
-lark_subscribe_messages \
-  | while IFS= read -r line; do
+run_lark_listener_once() {
+  lark_subscribe_messages \
+    | while IFS= read -r line; do
       # Skip SDK error lines (they shouldn't appear on stdout but just in case)
       case "$line" in "[SDK Error]"*) continue ;; esac
 
@@ -2007,4 +2008,12 @@ ${content}"
       # Dispatch to background — main loop continues immediately
       handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" &
       log_info "[$session_id] Dispatched to background handler (PID $!)"
-    done
+      done
+}
+
+while true; do
+  run_lark_listener_once
+  _listener_rc=$?
+  log_warn "Lark listener exited (rc=$_listener_rc) — reconnecting in 5s"
+  sleep 5
+done
