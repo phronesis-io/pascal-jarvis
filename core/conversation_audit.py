@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 from core.search import load_chat_messages
+from core.timeutil import now_local
 
 
 LOG_RE = re.compile(r"^\[(?P<ts>[^]]+)\] \[(?P<level>[^]]+)\] (?P<msg>.*)$")
@@ -134,7 +135,20 @@ def connect(path: Path) -> sqlite3.Connection:
 
 def _parse_ts(raw: str) -> datetime | None:
     try:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    local_tz = now_local().tzinfo
+    if local_tz is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.replace(tzinfo=local_tz).astimezone(timezone.utc)
+
+
+def _parse_message_ts(raw: str) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -188,12 +202,10 @@ def ingest_logs(conn: sqlite3.Connection, run_id: int, paths: Iterable[Path],
         for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
             m = LOG_RE.match(line)
             if not m:
-                if "syntax error near unexpected token" in line or "unbound variable" in line:
-                    ts = ""
-                    level = "ERROR"
-                    message = line
-                else:
-                    continue
+                # Windowed audits need timestamped evidence. Long-lived logs can
+                # retain old unstructured shell stderr forever while their mtime
+                # stays fresh because new structured lines are appended.
+                continue
             else:
                 ts = m.group("ts")
                 parsed = _parse_ts(ts)
@@ -252,6 +264,9 @@ def ingest_sessions(conn: sqlite3.Connection, run_id: int, session_dirs: Iterabl
             if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < since:
                 continue
             for msg in load_chat_messages(path):
+                msg_ts = _parse_message_ts(msg.get("timestamp", ""))
+                if msg_ts and msg_ts < since:
+                    continue
                 conn.execute(
                     """
                     INSERT INTO session_messages (run_id, session_id, ts, role, text)
