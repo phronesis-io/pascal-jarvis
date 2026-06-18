@@ -246,6 +246,7 @@ def home_page():
         with ui.row().classes("gap-4"):
             ui.link("Tasks", "/tasks").classes("text-blue-600")
             ui.link("Task Health", "/agent-calendar").classes("text-green-600")
+            ui.link("Engagement", "/engagement").classes("text-green-600")
             ui.link("Thinking", "/thinking").classes("text-purple-600")
             ui.link("Intentions", "/intentions").classes("text-purple-600")
             ui.link("Bookmarks", "/bookmarks").classes("text-blue-600")

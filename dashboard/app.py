@@ -27,6 +27,7 @@ def create_app():
     # production while the home page linked to them (REQ-43).
     from .pages import (  # noqa: F401
         home, tasks, bookmarks, settings, intentions, thinking, agent_calendar,
+        engagement,
     )
 
     # Register REST API for bot.sh integration

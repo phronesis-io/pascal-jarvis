@@ -56,7 +56,7 @@ if not nicegui_app.config.has_run_config:
 from fastapi.testclient import TestClient  # noqa: E402
 
 PAGES = ["/", "/tasks", "/bookmarks", "/settings", "/intentions",
-         "/thinking", "/agent-calendar"]
+         "/thinking", "/agent-calendar", "/engagement"]
 
 
 @pytest.fixture
@@ -78,8 +78,8 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import home, tasks, settings, agent_calendar
-    for mod in (home, tasks, settings, agent_calendar):
+    from dashboard.pages import home, tasks, settings, agent_calendar, engagement
+    for mod in (home, tasks, settings, agent_calendar, engagement):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -548,7 +548,65 @@ class TestTaskHealth:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# Route smoke tests — all 7 pages 200 + write APIs accept JSON bodies
+# (5b) engagement board — source-level ROI from engagement_log.jsonl
+# ═════════════════════════════════════════════════════════════════════════
+
+class TestEngagementBoard:
+    def test_source_engagement_report_counts_sent_read_replied_and_ignored(self, tmp_path):
+        from dashboard.pages.engagement import source_engagement_report
+
+        now = int(time.time())
+        _write_jsonl(tmp_path / "engagement_log.jsonl", [
+            {"ts": "2026-06-18 10:00", "source": "checkin", "type": "sent",
+             "epoch": now - 600, "message_ids": ["m1"]},
+            {"ts": "2026-06-18 10:01", "source": "checkin", "type": "sent",
+             "epoch": now - 500, "message_ids": ["m2"]},
+            {"ts": "2026-06-18 10:02", "type": "read", "epoch": now - 490,
+             "message_ids": ["m1", "m2"]},
+            {"ts": "2026-06-18 10:03", "source": "checkin", "type": "response",
+             "reaction": "engaged", "epoch": now - 480, "gap_seconds": 120},
+            {"ts": "2026-06-18 10:04", "source": "checkin", "type": "response",
+             "reaction": "ignored", "epoch": now - 470, "gap_seconds": 1900},
+            {"ts": "2026-06-18 10:05", "source": "feed", "type": "sent",
+             "epoch": now - 460, "message_ids": ["m3"]},
+            {"ts": "2026-06-18 10:06", "source": "feed", "type": "response",
+             "reaction": "late_reply", "epoch": now - 450, "gap_seconds": 1200},
+            {"ts": "2026-06-18 10:07", "source": "conversation", "type": "response",
+             "reaction": "conversation", "epoch": now - 440},
+        ])
+
+        report = source_engagement_report(tmp_path, days=7)
+        by_source = {r["source"]: r for r in report["sources"]}
+
+        assert report["totals"]["sent"] == 3
+        assert report["totals"]["read"] == 2
+        assert report["totals"]["replied"] == 2
+        assert report["totals"]["ignored"] == 1
+        assert by_source["checkin"]["sent"] == 2
+        assert by_source["checkin"]["read"] == 2
+        assert by_source["checkin"]["replied"] == 1
+        assert by_source["checkin"]["ignored"] == 1
+        assert by_source["checkin"]["reply_rate"] == 50.0
+        assert by_source["checkin"]["read_rate"] == 100.0
+        assert by_source["checkin"]["median_gap_s"] == 120
+        assert by_source["feed"]["late_reply"] == 1
+        assert "conversation" not in by_source
+
+    def test_source_engagement_report_filters_old_rows(self, tmp_path):
+        from dashboard.pages.engagement import source_engagement_report
+
+        now = int(time.time())
+        _write_jsonl(tmp_path / "engagement_log.jsonl", [
+            {"source": "old", "type": "sent", "epoch": now - 20 * 86400},
+            {"source": "fresh", "type": "sent", "epoch": now - 60},
+        ])
+
+        report = source_engagement_report(tmp_path, days=7)
+        assert [r["source"] for r in report["sources"]] == ["fresh"]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Route smoke tests — all pages 200 + write APIs accept JSON bodies
 # ═════════════════════════════════════════════════════════════════════════
 
 class TestRoutes:
