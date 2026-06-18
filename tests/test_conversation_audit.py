@@ -97,6 +97,37 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     assert "Issues derived: 2" in report
 
 
+def test_audit_flags_recent_interaction_self_evolution_signals(tmp_path):
+    log = tmp_path / "jarvis.log"
+    base = now_local() - timedelta(minutes=10)
+    ts = [(base + timedelta(seconds=i)).strftime("%Y-%m-%d %H:%M:%S") for i in range(5)]
+    log.write_text(
+        "\n".join([
+            f"[{ts[0]}] [INFO] Event: msg_type=text content_len=10 mid=om_model chat_type=p2p content_head=我想知道你现在到底是什么模型",
+            f"[{ts[1]}] [INFO] Event: msg_type=text content_len=10 mid=om_done chat_type=p2p content_head=codex 干完了吗，这个啥情况",
+            f"[{ts[2]}] [INFO] Event: msg_type=text content_len=10 mid=om_copy chat_type=p2p content_head=用人话简洁明了地说，这个文案不是中文",
+            f"[{ts[3]}] [INFO] Event: msg_type=text content_len=10 mid=om_pgc chat_type=p2p content_head=我们在说PGC信源问题，为什么让他这么晚收到，时效性差",
+            f"[{ts[4]}] [INFO] Event: msg_type=text content_len=10 mid=om_research chat_type=p2p content_head=查呀，全查了，把所有东西都查明白",
+        ]),
+        encoding="utf-8",
+    )
+    paths = audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=[log],
+        session_dirs=[],
+        db_path=tmp_path / "audit.db",
+    )
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "model_transparency_requested" in report
+    assert "status_uncertainty" in report
+    assert "awkward_progress_copy" in report
+    assert "pgc_latency_quality" in report
+    assert "needs_deeper_research" in report
+
+
 def test_audit_ingests_daemon_instability(tmp_path):
     daemon = tmp_path / "daemon.log"
     daemon.write_text(

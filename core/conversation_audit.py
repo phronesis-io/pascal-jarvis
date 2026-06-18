@@ -30,9 +30,48 @@ EVENT_RE = re.compile(
 )
 
 COMPLAINT_PATTERNS = {
-    "missed_signal": ("没有收到", "为什么没有推送", "也没有收到", "太差"),
-    "hallucination_or_confusion": ("乱说", "不知道你在说什么", "傻逼玩意"),
-    "needs_deeper_research": ("全面调研", "所有东西都查明白", "多查查"),
+    "missed_signal": {
+        "severity": "P1",
+        "title": "User complained that important signals were not surfaced",
+        "patterns": ("没有收到", "为什么没有推送", "也没有收到", "太差"),
+        "recommendation": "Route this to the PGC/source-health audit: compare feed ingestion, ranking, and delivery gates for the cited item.",
+    },
+    "hallucination_or_confusion": {
+        "severity": "P1",
+        "title": "User challenged an answer as confusing or fabricated",
+        "patterns": ("乱说", "不知道你在说什么", "傻逼玩意"),
+        "recommendation": "When challenged, prefer evidence-first correction and cite the exact source/session artifact used.",
+    },
+    "needs_deeper_research": {
+        "severity": "P2",
+        "title": "User asked for a deeper, broader investigation pass",
+        "patterns": ("全面调研", "所有东西都查明白", "多查查", "全查了", "查呀"),
+        "recommendation": "Auto-promote broad research requests earlier and send progress checkpoints with sources inspected.",
+    },
+    "model_transparency_requested": {
+        "severity": "P1",
+        "title": "User explicitly asked which model/provider is answering",
+        "patterns": ("什么模型", "哪个模型", "what model", "model am i using", "which model"),
+        "recommendation": "Keep provider/model footer telemetry on every successful Lark reply and include fallback/provider switches in audit reports.",
+    },
+    "status_uncertainty": {
+        "severity": "P1",
+        "title": "User repeatedly asked whether work is done or what is happening",
+        "patterns": ("all done", "done?", "done？", "干完了吗", "咋样了", "这个啥情况", "what's next step", "next steps", "how about now", "what now"),
+        "recommendation": "For long-running work, send compact status checkpoints with current phase, last verified evidence, and next irreversible step.",
+    },
+    "awkward_progress_copy": {
+        "severity": "P2",
+        "title": "User criticized progress/acknowledgement copy as unnatural or noisy",
+        "patterns": ("不是中文", "很蠢", "you should not show me this", "用人话", "简洁明了"),
+        "recommendation": "Keep acknowledgement copy short and natural; suppress low-value heartbeat/status narration unless it changes user action.",
+    },
+    "pgc_latency_quality": {
+        "severity": "P1",
+        "title": "User reported PGC source latency or recommendation-chain quality problems",
+        "patterns": ("时效性差", "推荐系统有问题", "让他这么晚收到", "PGC信源", "信源过时"),
+        "recommendation": "Open a PGC production audit: trace source coverage, index latency, ranking gates, and delivery delay for the referenced event.",
+    },
 }
 
 PROVIDER_ERROR_NEEDLES = (
@@ -420,12 +459,12 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     provider_issue_type = (
         "progress_provider_error_leak"
         if any(row["text"].lstrip().startswith(("🔧", "🛠", "⚙")) for row in direct_provider_rows)
-        else "provider_error_as_answer"
+        else "provider_error_in_assistant_transcript"
     )
     _add_user_visible_provider_issue(
         conn, run_id, direct_provider_rows, provider_issue_type,
-        "Provider/account-limit text was visible in assistant conversation",
-        "Never narrate raw provider/account failures. Classify them as provider failures, advance the fallback chain, and expose only provider/model status when the response is successful.",
+        "Provider/account-limit text was recorded in assistant transcript",
+        "Treat transcript-level provider errors as failed attempts, not answers: keep advancing fallback, and only expose provider/model status after a successful reply.",
     )
     _add_user_visible_provider_issue(
         conn, run_id, direct_empty_rows, "empty_reply_user_visible",
@@ -513,22 +552,15 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     ).fetchall()
     for row in incoming:
         text = row["content"]
-        for issue_type, patterns in COMPLAINT_PATTERNS.items():
-            if any(p in text for p in patterns):
-                severity = "P1" if issue_type != "needs_deeper_research" else "P2"
+        lowered = text.lower()
+        for issue_type, cfg in COMPLAINT_PATTERNS.items():
+            patterns = cfg["patterns"]
+            if any(p.lower() in lowered for p in patterns):
                 _add_issue(
-                    conn, run_id, severity, issue_type,
-                    {
-                        "missed_signal": "User complained that important signals were not surfaced",
-                        "hallucination_or_confusion": "User challenged an answer as confusing or fabricated",
-                        "needs_deeper_research": "User asked for a deeper, broader investigation pass",
-                    }[issue_type],
+                    conn, run_id, cfg["severity"], issue_type,
+                    cfg["title"],
                     f"{row['ts']} message_id={row['message_id']} content={text}",
-                    {
-                        "missed_signal": "Route this to the PGC/source-health audit: compare feed ingestion, ranking, and delivery gates for the cited item.",
-                        "hallucination_or_confusion": "When challenged, prefer evidence-first correction and cite the exact source/session artifact used.",
-                        "needs_deeper_research": "Auto-promote broad research requests earlier and send progress checkpoints with sources inspected.",
-                    }[issue_type],
+                    cfg["recommendation"],
                 )
 
     after_count = conn.execute(
@@ -602,6 +634,7 @@ def render_report(db_path: Path, run_id: int) -> str:
         "- Provider/account-limit text must trigger fallback before any safety-filter user message.",
         "- Lark replies must show the actual provider/model used.",
         "- Same-session follow-ups waiting longer than 30s must receive one queue acknowledgement.",
+        "- Repeated status/model-transparency questions must appear as structured audit issues, not only as anecdotal feedback.",
         "- Each audit run must be reproducible from `data/conversation_audit.db`.",
     ])
     conn.close()
