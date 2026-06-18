@@ -243,6 +243,7 @@ LAST_MSG_MARKER = "/tmp/jarvis-last-msg"  # touched by bot.sh on every inbound m
 NIGHT_QUEUE_FILE = "night_queue.jsonl"
 NIGHT_QUEUE_MAX = 20
 BATCH_FLUSH_STAMP = ".batch_last_flush"
+PROMPT_VARIANTS_FILE = ".heartbeat_prompt_variants"
 
 
 def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
@@ -262,6 +263,11 @@ def _peek_source(jarvis_dir: Path) -> str:
         return (jarvis_dir / ".heartbeat_last_source").read_text().strip()
     except OSError:
         return ""
+
+
+def _clear_delivery_sidecars(jarvis_dir: Path) -> None:
+    (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
+    (jarvis_dir / PROMPT_VARIANTS_FILE).unlink(missing_ok=True)
 
 
 def _is_urgent(source_str: str) -> bool:
@@ -367,6 +373,7 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
     readable = _truncate_entry(readable, NIGHT_DIGEST_MAX_CHARS)
     source = _peek_source(jarvis_dir)
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
+    prompt_variants = _consume_prompt_variants(jarvis_dir)
     sources = _sources_of(source)
     if sources and sources <= SILENT_SOURCES:
         # Pure silent-task output: never queue, never deliver — log only.
@@ -375,6 +382,8 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
         return
     entry = {"ts": now_local_str("%Y-%m-%d %H:%M"),
              "text": readable, "source": source or "heartbeat"}
+    if prompt_variants:
+        entry["prompt_variants"] = prompt_variants
     with open(jarvis_dir / NIGHT_QUEUE_FILE, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     quiet = _in_quiet_hours()
@@ -453,6 +462,11 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> bool:
             for source in sorted({e.get("source", "heartbeat") for e in entries}):
                 row = {"ts": ts, "source": source, "type": "sent",
                        "via": "night-digest", "epoch": epoch}
+                for e in entries:
+                    if e.get("source", "heartbeat") != source:
+                        continue
+                    _merge_prompt_variant(row, e.get("prompt_variants", {}).get(source))
+                    break
                 if digest_ids:
                     row["message_ids"] = digest_ids
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -529,6 +543,7 @@ def _record_engagement(jarvis_dir: Path):
         source_file.unlink(missing_ok=True)
     else:
         sources = "heartbeat"
+    prompt_variants = _consume_prompt_variants(jarvis_dir)
 
     sent_ids = list(_LAST_SENT_IDS)
     _LAST_SENT_IDS.clear()
@@ -544,6 +559,7 @@ def _record_engagement(jarvis_dir: Path):
             # guaranteed-0% sources that skew every keep/cut decision.
             if src and src not in SILENT_SOURCES:
                 entry = {"ts": ts, "source": src, "type": "sent", "epoch": epoch}
+                _merge_prompt_variant(entry, prompt_variants.get(src))
                 if sent_ids:
                     # join key for read-receipt events (REQ-15)
                     entry["message_ids"] = sent_ids
@@ -558,6 +574,29 @@ def _record_engagement(jarvis_dir: Path):
             _ledger_backfill(jarvis_dir, sent_ids)
         except Exception as e:
             log("heartbeat", f"intent ledger backfill failed: {e}", level="warn")
+
+
+def _consume_prompt_variants(jarvis_dir: Path) -> dict:
+    path = jarvis_dir / PROMPT_VARIANTS_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        data = {}
+    path.unlink(missing_ok=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_prompt_variant(row: dict, variant: dict | None) -> None:
+    if not isinstance(variant, dict):
+        return
+    exp = variant.get("prompt_experiment")
+    vid = variant.get("prompt_variant")
+    if exp:
+        row["prompt_experiment"] = str(exp)[:80]
+    if vid:
+        row["prompt_variant"] = str(vid)[:80]
 
 
 def _ledger_backfill(jarvis_dir: Path, message_ids: list):
@@ -836,14 +875,14 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     f"({','.join(sorted(cycle_sources))}) — log-only, never delivered")
                 sched_emit(jd, "task_skip", task=",".join(sorted(cycle_sources)),
                            reason="silent_output")
-                (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+                _clear_delivery_sidecars(jd)
             elif _is_duplicate_send(output, jd):
                 log("heartbeat", "Suppressed duplicate send (identical message "
                     f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
                 sched_emit(jd, "task_skip",
                            task=",".join(sorted(cycle_sources)) or "heartbeat",
                            reason="duplicate_send")
-                (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+                _clear_delivery_sidecars(jd)
             elif _should_queue(jd):
                 _queue_for_morning(output, jd)
             else:
@@ -859,13 +898,13 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     # entry would make the dedup window suppress the retry
                     # (REQ-04 cancelling REQ-11), and a "sent" record would
                     # poison engagement stats with messages never delivered.
-                    (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+                    _clear_delivery_sidecars(jd)
                     _LAST_SENT_IDS.clear()  # drop ids from partial successes
                     log("heartbeat", "Delivery failed — output not recorded as sent",
                         level="warn")
         elif output:
             log("heartbeat", "Suppressed error-like output", level="warn")
-            (jd / ".heartbeat_last_source").unlink(missing_ok=True)
+            _clear_delivery_sidecars(jd)
         else:
             print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (idle)",
                   file=sys.stderr)

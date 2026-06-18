@@ -26,6 +26,7 @@
 
 ## Done (recent)
 
+- Prompt A/B framework — memory-backed prompt experiments inject approved variants into heartbeat task prompts, record exposure metadata in engagement logs, and surface variant performance in engagement-analyze
 - Engagement self-evolution content mix — engagement-analyze now writes advisory `engagement_content_mix.md`; checkin pre-hook consumes it as steering context alongside guarded interval tuning
 - Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files
 - Host sleep modeling REQ-56 — heartbeat emits `sleep_gap` events after long host pauses; daemon grants a short wake grace before treating heartbeat age as stale
@@ -64,7 +65,6 @@
 
 ## P2 — Self-evolution
 
-- Prompt A/B testing framework (propose → approve → measure)
 - Implementation intentions auto-generation for calendar events
 - Mental contrasting integration in daily plan
 

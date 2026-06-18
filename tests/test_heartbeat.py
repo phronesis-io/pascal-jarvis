@@ -91,6 +91,56 @@ def test_only_task_filter(tmp_path, monkeypatch):
     assert "task-b" not in called_with[0]
 
 
+def test_prompt_experiment_variant_is_injected_and_sidecar_written(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### checkin\n- interval: 1h\n- prompt: base prompt\n")
+    exp_dir = runner.memory_dir / "system"
+    exp_dir.mkdir(parents=True)
+    (exp_dir / "prompt_experiments.json").write_text(json.dumps({
+        "experiments": [{
+            "id": "checkin-choice-v1",
+            "task": "checkin",
+            "enabled": True,
+            "variants": [{
+                "id": "choice_first",
+                "weight": 1,
+                "instruction": "Offer two concrete response options first.",
+            }],
+        }],
+    }))
+    captured = {}
+
+    def _fake_call(prompt):
+        captured["prompt"] = prompt
+        return "实验输出"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    assert runner.run_cycle(force=True) == "实验输出"
+
+    assert "Experiment: checkin-choice-v1" in captured["prompt"]
+    assert "Variant: choice_first" in captured["prompt"]
+    assert "Offer two concrete response options first." in captured["prompt"]
+    sidecar = json.loads((runner.jarvis_dir / ".heartbeat_prompt_variants").read_text())
+    assert sidecar == {
+        "checkin": {
+            "prompt_experiment": "checkin-choice-v1",
+            "prompt_variant": "choice_first",
+        }
+    }
+
+
+def test_prompt_experiment_missing_config_is_noop(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### checkin\n- interval: 1h\n- prompt: base prompt\n")
+    captured = {}
+
+    def _fake_call(prompt):
+        captured["prompt"] = prompt
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True)
+    assert "[Prompt experiment]" not in captured["prompt"]
+
+
 def test_pipeline_protection_one_memory_task_per_cycle(tmp_path, monkeypatch):
     """Only one of the PIPELINE_TASKS may run per cycle to prevent races.
     memory-hourly is a PRIORITY_TASK (Tier 0) so it bypasses Claude.

@@ -78,6 +78,45 @@ for src in sorted(all_sources):
     rate = (engaged / total_responses * 100) if total_responses > 0 else 0
     print(f'{src}: sent={sent}, engaged={engaged}, ignored={ignored}, rate={rate:.0f}%')
 
+# === Prompt experiment variants ===
+experiment_sent = defaultdict(int)
+experiment_engaged = defaultdict(int)
+experiment_replied = defaultdict(int)
+experiment_ignored = defaultdict(int)
+
+for e in sent_entries:
+    exp = e.get('prompt_experiment')
+    var = e.get('prompt_variant')
+    if exp and var:
+        experiment_sent[(exp, var, e.get('source', 'unknown'))] += 1
+
+for e in response_entries:
+    exp = e.get('prompt_experiment')
+    var = e.get('prompt_variant')
+    if not exp or not var:
+        continue
+    key = (exp, var, e.get('source', 'unknown'))
+    reaction = e.get('reaction')
+    if reaction in ('engaged', 'late_reply'):
+        experiment_replied[key] += 1
+        if reaction == 'engaged':
+            experiment_engaged[key] += 1
+    elif reaction == 'ignored':
+        experiment_ignored[key] += 1
+
+if experiment_sent:
+    print()
+    print('=== PROMPT EXPERIMENT BREAKDOWN ===')
+    for key in sorted(experiment_sent):
+        exp, var, src = key
+        sent = experiment_sent[key]
+        replied = min(experiment_replied.get(key, 0), sent) if sent else experiment_replied.get(key, 0)
+        engaged = experiment_engaged.get(key, 0)
+        ignored = experiment_ignored.get(key, 0)
+        reply_rate = (replied / sent * 100) if sent else 0
+        engaged_rate = (engaged / sent * 100) if sent else 0
+        print(f'{exp}/{var}/{src}: sent={sent}, replied={replied}, engaged={engaged}, ignored={ignored}, reply_rate={reply_rate:.0f}%, engaged_rate={engaged_rate:.0f}%')
+
 # === Delivery-ack attribution (REQ-15: read receipts) ===
 # Honest semantics: im.message.message_read_v1 arrives as BULK catch-up acks
 # (opening the chat acks everything unread at once — real events carry 10+

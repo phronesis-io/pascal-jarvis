@@ -106,6 +106,11 @@ def _record_response_locked(log_path: Path, content_head: str) -> bool:
         "gap_seconds": gap_seconds,
         "content_head": content_head[:80] if content_head else "",
     }
+    if source != "conversation":
+        if last_sent.get("prompt_experiment"):
+            entry["prompt_experiment"] = str(last_sent["prompt_experiment"])[:80]
+        if last_sent.get("prompt_variant"):
+            entry["prompt_variant"] = str(last_sent["prompt_variant"])[:80]
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True

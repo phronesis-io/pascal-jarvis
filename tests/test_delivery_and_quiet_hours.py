@@ -162,6 +162,45 @@ def test_flush_dedups_and_records_engagement(tmp_path, monkeypatch):
                and e.get("via") == "night-digest" for e in entries)
 
 
+def test_record_engagement_includes_prompt_variant_sidecar(tmp_path):
+    (tmp_path / ".heartbeat_last_source").write_text("checkin")
+    (tmp_path / hbl.PROMPT_VARIANTS_FILE).write_text(json.dumps({
+        "checkin": {
+            "prompt_experiment": "checkin-choice-v1",
+            "prompt_variant": "choice_first",
+        }
+    }))
+
+    hbl._record_engagement(tmp_path)
+
+    row = json.loads((tmp_path / "engagement_log.jsonl").read_text().splitlines()[0])
+    assert row["source"] == "checkin"
+    assert row["prompt_experiment"] == "checkin-choice-v1"
+    assert row["prompt_variant"] == "choice_first"
+    assert not (tmp_path / hbl.PROMPT_VARIANTS_FILE).exists()
+
+
+def test_night_digest_preserves_prompt_variant_metadata(tmp_path, monkeypatch):
+    (tmp_path / ".heartbeat_last_source").write_text("content-recommend")
+    (tmp_path / hbl.PROMPT_VARIANTS_FILE).write_text(json.dumps({
+        "content-recommend": {
+            "prompt_experiment": "recommend-tone-v1",
+            "prompt_variant": "compact",
+        }
+    }))
+    _queue_for_morning("推荐内容", tmp_path)
+
+    sent = []
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    assert _flush_night_queue(tmp_path, "ou_test")
+
+    row = json.loads((tmp_path / "engagement_log.jsonl").read_text().splitlines()[0])
+    assert row["source"] == "content-recommend"
+    assert row["via"] == "night-digest"
+    assert row["prompt_experiment"] == "recommend-tone-v1"
+    assert row["prompt_variant"] == "compact"
+
+
 # ── Daytime batching + breakpoint release (R3 research round) ────────
 
 

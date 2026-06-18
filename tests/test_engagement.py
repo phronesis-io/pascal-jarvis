@@ -1,6 +1,8 @@
 """Tests for core.engagement — heartbeat response tracking."""
 
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -32,6 +34,26 @@ def test_record_response_late_reply(tmp_path):
     record_response(log, "finally watched it")
     entries = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert entries[1]["reaction"] == "late_reply"
+
+
+def test_response_inherits_prompt_experiment_metadata(tmp_path):
+    log = tmp_path / "engagement.jsonl"
+    sent = {
+        "ts": "2026-01-01 12:00",
+        "source": "checkin",
+        "type": "sent",
+        "epoch": int(time.time()) - 60,
+        "prompt_experiment": "checkin-choice-v1",
+        "prompt_variant": "choice_first",
+    }
+    log.write_text(json.dumps(sent) + "\n")
+
+    record_response(log, "好的")
+
+    response = [json.loads(l) for l in log.read_text().splitlines()][1]
+    assert response["source"] == "checkin"
+    assert response["prompt_experiment"] == "checkin-choice-v1"
+    assert response["prompt_variant"] == "choice_first"
 
 
 def test_record_response_skips_old_sent(tmp_path):
@@ -116,3 +138,38 @@ def test_record_response_is_flock_serialized(tmp_path):
     rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     credited = [r for r in rows if r.get("type") == "response" and r["source"] == "checkin"]
     assert len(credited) == 1
+
+
+def test_engagement_analyze_pre_reports_prompt_experiment_breakdown(tmp_path):
+    script = Path(__file__).resolve().parent.parent / "tasks" / "engagement_analyze_pre.sh"
+    log = tmp_path / "engagement_log.jsonl"
+    now = int(time.time())
+    rows = []
+    for i in range(10):
+        variant = "choice_first" if i < 5 else "plain"
+        rows.append({
+            "ts": "2026-06-18 12:00",
+            "source": "checkin",
+            "type": "sent",
+            "epoch": now - 600 + i,
+            "prompt_experiment": "checkin-choice-v1",
+            "prompt_variant": variant,
+        })
+        rows.append({
+            "ts": "2026-06-18 12:01",
+            "source": "checkin",
+            "type": "response",
+            "reaction": "engaged" if i < 7 else "ignored",
+            "gap_seconds": 60,
+            "prompt_experiment": "checkin-choice-v1",
+            "prompt_variant": variant,
+        })
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    env = {**os.environ, "JARVIS_DIR": str(tmp_path), "ENGAGEMENT_LOG": str(log)}
+    result = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "=== PROMPT EXPERIMENT BREAKDOWN ===" in result.stdout
+    assert "checkin-choice-v1/choice_first/checkin" in result.stdout
+    assert "checkin-choice-v1/plain/checkin" in result.stdout

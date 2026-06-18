@@ -19,6 +19,7 @@ from .claude_bin import resolve_claude_bin
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
+from .prompt_experiments import choose_variant, inject_variant
 from .safety import parse_json_response
 from .sched_events import emit as sched_emit
 from .task_protocol import TaskState
@@ -201,6 +202,7 @@ class HeartbeatRunner:
         self._cid = ""  # cycle_id, set per run_cycle invocation
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
+        self._cycle_prompt_variants: dict[str, dict[str, str]] = {}
         # True iff the LAST claude_call ended in TimeoutExpired — lets the
         # cycle distinguish task_timeout from a generic failed call when
         # writing the scheduler event log (both return "" from claude_call).
@@ -621,6 +623,7 @@ You have access to the user's memory below. Use it to personalize your responses
     def _run_cycle_locked(self, force: bool = False, only_task: str = ""):
         cycle_id = uuid.uuid4().hex[:8]
         self._cid = cycle_id  # used by _log
+        self._cycle_prompt_variants = {}
 
         tasks = self._load_tasks()
         state = self.load_state()
@@ -782,6 +785,7 @@ You have access to the user's memory below. Use it to personalize your responses
                     try:
                         source_file = self.jarvis_dir / ".heartbeat_last_source"
                         source_file.write_text(",".join(producing_tasks))
+                        (self.jarvis_dir / ".heartbeat_prompt_variants").unlink(missing_ok=True)
                     except Exception:
                         pass
                 self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (tier0 only)")
@@ -792,6 +796,7 @@ You have access to the user's memory below. Use it to personalize your responses
         # Build combined prompt
         n = len(runnable)
         ack_present = [t["name"] for t in runnable if t["name"] in self.ACK_REQUIRED_TASKS]
+        variants = {}
         parts = [f"[HEARTBEAT — {n} task{'s' if n > 1 else ''} due]"]
         parts.append("Process each task below. For each, return the requested format.")
         if ack_present:
@@ -810,12 +815,18 @@ You have access to the user's memory below. Use it to personalize your responses
         parts.append("")
 
         for task in runnable:
+            variant = choose_variant(self.memory_dir, task["name"], now=now)
+            if variant:
+                variants[task["name"]] = variant
             parts.append(f"=== TASK: {task['name']} ===")
-            parts.append(task["prompt"].strip())
+            parts.append(inject_variant(task["prompt"].strip(), variant))
             data = task_data.get(task["name"], "")
             if data:
                 parts.append(f"\nDATA:\n{data}")
             parts.append("")
+        self._cycle_prompt_variants = {
+            name: variant.to_log() for name, variant in variants.items()
+        }
 
         parts.append("=== END TASKS ===")
         if n > 1:
@@ -1092,6 +1103,16 @@ You have access to the user's memory below. Use it to personalize your responses
                 try:
                     source_file = self.jarvis_dir / ".heartbeat_last_source"
                     source_file.write_text(",".join(producing_tasks))
+                    variant_rows = {
+                        name: self._cycle_prompt_variants[name]
+                        for name in producing_tasks
+                        if name in self._cycle_prompt_variants
+                    }
+                    variant_file = self.jarvis_dir / ".heartbeat_prompt_variants"
+                    if variant_rows:
+                        variant_file.write_text(json.dumps(variant_rows, ensure_ascii=False))
+                    else:
+                        variant_file.unlink(missing_ok=True)
                 except Exception:
                     pass
             self._log(f"{beat} → delivered")

@@ -692,6 +692,9 @@ SILENT_TASKS, not this doc.
        - If wellbeing checkins are ignored >70% of the time, suggest reducing frequency
        - If content-recommend engagement is high at certain times, note optimal windows
        - If a particular topic area gets more engagement, suggest weighting it higher
+       - If PROMPT EXPERIMENT BREAKDOWN is present, compare variants by
+         replied/engaged rates and mention whether to keep, pause, or iterate
+         a variant; do not modify experiment config directly.
     Return JSON: {"insights": "<markdown summary>",
                   "adaptations": [{"target": "<task>",
                                    "direction": "reduce|increase|keep",
