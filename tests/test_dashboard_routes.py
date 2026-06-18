@@ -56,7 +56,7 @@ if not nicegui_app.config.has_run_config:
 from fastapi.testclient import TestClient  # noqa: E402
 
 PAGES = ["/", "/tasks", "/bookmarks", "/settings", "/intentions",
-         "/thinking", "/agent-calendar", "/engagement"]
+         "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
 @pytest.fixture
@@ -78,8 +78,8 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import home, tasks, settings, agent_calendar, engagement
-    for mod in (home, tasks, settings, agent_calendar, engagement):
+    from dashboard.pages import home, tasks, settings, agent_calendar, engagement, ops
+    for mod in (home, tasks, settings, agent_calendar, engagement, ops):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -622,6 +622,82 @@ class TestEngagementBoard:
         assert row["replied"] == 1
         assert row["reply_rate"] == 100.0
         assert report["totals"]["reply_rate"] == 100.0
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# (5c) ops board — logs/events/queues from live files
+# ═════════════════════════════════════════════════════════════════════════
+
+class TestOpsBoard:
+    def test_tail_log_flags_failure_signatures(self, tmp_path):
+        from dashboard.pages.ops import tail_log
+
+        log = tmp_path / "jarvis.log"
+        log.write_text(
+            "[ts] normal\n"
+            "[ts] Script tasks/repos_sync_pre.sh timed out (60s)\n"
+            "[ts] multi-task JSON parse failed\n"
+            "[ts] Claude CLI not found\n",
+            encoding="utf-8",
+        )
+
+        result = tail_log(log, lines=20)
+        assert result["flagged_count"] == 3
+        flagged = [row["text"] for row in result["lines"] if row["flagged"]]
+        assert any("timed out" in row for row in flagged)
+        assert any("Claude CLI not found" in row for row in flagged)
+
+    def test_queue_overview_reads_night_breach_jobs_and_delivery(self, tmp_path):
+        from dashboard.pages.ops import queue_overview
+
+        (tmp_path / "night_queue.jsonl").write_text(
+            json.dumps({"ts": "2026-06-18 10:00", "source": "feed", "text": "x" * 300})
+            + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / ".intent_breach_queue.jsonl").write_text(
+            json.dumps({"id": "int_abc", "name": "missed"}) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "jobs").mkdir()
+        (tmp_path / "jobs" / "registry.json").write_text(json.dumps({
+            "j1": {"status": "running", "description": "research", "pid": 123,
+                   "started_at": "2026-06-18 10:00"},
+            "j2": {"status": "completed", "description": "done"},
+        }), encoding="utf-8")
+        (tmp_path / ".delivery_state.json").write_text(
+            json.dumps({"consec_fails": 2}), encoding="utf-8")
+
+        result = queue_overview(tmp_path)
+
+        assert len(result["night_queue"]) == 1
+        assert len(result["night_queue"][0]["text"]) == 180
+        assert result["breach_queue"][0]["id"] == "int_abc"
+        assert result["jobs"]["counts"] == {"running": 1, "completed": 1}
+        assert result["jobs"]["running"][0]["id"] == "j1"
+        assert result["delivery_state"]["consec_fails"] == 2
+
+    def test_ops_snapshot_summarizes_failures(self, tmp_path):
+        from dashboard.pages.ops import ops_snapshot
+
+        (tmp_path / "jarvis.log").write_text(
+            "[ts] stderr: something bad\n", encoding="utf-8")
+        (tmp_path / "daemon.log").write_text("[ts] ok\n", encoding="utf-8")
+        _write_jsonl(tmp_path / "sched_events.jsonl", [
+            {"ts": "2026-06-18 10:00:00", "event": "task_finish",
+             "task": "alpha", "status": "ok"},
+            {"ts": "2026-06-18 10:01:00", "event": "task_finish",
+             "task": "beta", "status": "failed"},
+            {"ts": "2026-06-18 10:02:00", "event": "task_timeout",
+             "task": "gamma"},
+        ])
+
+        snap = ops_snapshot(tmp_path)
+
+        assert snap["flagged_count"] == 1
+        assert len(snap["events"]) == 3
+        assert [e["task"] for e in snap["failed_events"]] == ["beta", "gamma"]
 
 
 # ═════════════════════════════════════════════════════════════════════════
