@@ -134,11 +134,15 @@ def ops_snapshot(jarvis_dir: Path | None = None, event_limit: int = 80) -> dict:
     jarvis_log = tail_log(jd / "jarvis.log", lines=160)
     daemon_log = tail_log(jd / "daemon.log", lines=80)
     events = read_sched_events(jd)[-event_limit:]
-    failed_events = [
-        e for e in events
-        if e.get("event") in ("task_timeout", "task_skip")
-        or (e.get("event") == "task_finish" and e.get("status") not in ("", "ok", None))
-    ]
+    failed_events = []
+    for e in events:
+        event = e.get("event")
+        if event == "task_timeout":
+            failed_events.append(e)
+        elif event == "task_finish" and e.get("status") not in ("", "ok", None):
+            failed_events.append(e)
+        elif event == "task_skip" and e.get("reason") != "empty_pre":
+            failed_events.append(e)
     queues = queue_overview(jd)
     return {
         "logs": {"jarvis": jarvis_log, "daemon": daemon_log},

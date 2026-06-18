@@ -691,13 +691,17 @@ class TestOpsBoard:
              "task": "beta", "status": "failed"},
             {"ts": "2026-06-18 10:02:00", "event": "task_timeout",
              "task": "gamma"},
+            {"ts": "2026-06-18 10:03:00", "event": "task_skip",
+             "task": "delta", "reason": "empty_pre"},
+            {"ts": "2026-06-18 10:04:00", "event": "task_skip",
+             "task": "epsilon", "reason": "pre_timeout"},
         ])
 
         snap = ops_snapshot(tmp_path)
 
         assert snap["flagged_count"] == 1
-        assert len(snap["events"]) == 3
-        assert [e["task"] for e in snap["failed_events"]] == ["beta", "gamma"]
+        assert len(snap["events"]) == 5
+        assert [e["task"] for e in snap["failed_events"]] == ["beta", "gamma", "epsilon"]
 
 
 # ═════════════════════════════════════════════════════════════════════════
