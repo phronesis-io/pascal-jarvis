@@ -26,6 +26,8 @@
 
 ## Done (recent)
 
+- Repos-sync REQ-52 — slow git fetch/pull work moved to detached single-flight worker; pre-hook now only spawns worker and emits fresh worker product once, with contract tests
+- Content-recommend curation reads safe taste/profile context from memory instead of relying on a stale hardcoded taste block
 - Background jobs — long tasks run in independent Claude sessions with start/finish cards (`jobs` / `job output <id>` / `cancel <id>`)
 - NiceGUI dashboard (port 3457) — home, tasks, bookmarks, intentions, thinking stream, agent calendar, settings; SQLite-backed
 - 30-day calendar window (7d detailed + 8-30d compact, NBA schedule API)
@@ -55,9 +57,6 @@
 
 ## P1 — Residual
 
-- content-recommend prompt has hardcoded taste profile — should read from memory
-- repos-sync pre-script still exceeds the 60s cap (REQ-52: move git pulls to a
-  background job; pre reads last job product)
 - Engagement page + Ops/log explorer on the dashboard (REQ-54/55)
 - Host sleep modeling (REQ-56)
 
