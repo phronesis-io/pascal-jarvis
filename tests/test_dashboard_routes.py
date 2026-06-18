@@ -604,6 +604,25 @@ class TestEngagementBoard:
         report = source_engagement_report(tmp_path, days=7)
         assert [r["source"] for r in report["sources"]] == ["fresh"]
 
+    def test_source_engagement_report_caps_historical_duplicate_reply_rate(self, tmp_path):
+        from dashboard.pages.engagement import source_engagement_report
+
+        now = int(time.time())
+        _write_jsonl(tmp_path / "engagement_log.jsonl", [
+            {"source": "heartbeat", "type": "sent", "epoch": now - 600},
+            {"source": "heartbeat", "type": "response", "reaction": "engaged",
+             "epoch": now - 590, "gap_seconds": 10},
+            {"source": "heartbeat", "type": "response", "reaction": "late_reply",
+             "epoch": now - 580, "gap_seconds": 600},
+        ])
+
+        report = source_engagement_report(tmp_path, days=7)
+        row = report["sources"][0]
+        assert row["sent"] == 1
+        assert row["replied"] == 1
+        assert row["reply_rate"] == 100.0
+        assert report["totals"]["reply_rate"] == 100.0
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Route smoke tests — all pages 200 + write APIs accept JSON bodies

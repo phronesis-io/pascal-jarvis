@@ -121,10 +121,14 @@ def source_engagement_report(jarvis_dir: Path | None = None, days: int = 7) -> d
         if sent == 0 and bucket["replied"] == 0 and bucket["ignored"] == 0:
             continue
         read = bucket["read"]
-        replied = bucket["replied"]
+        replied_raw = bucket["replied"]
+        # Historical logs may contain duplicate credited replies for one sent
+        # card (the old proximity attribution bug). Do not render impossible
+        # reply rates above 100%; the raw log remains untouched.
+        replied = min(replied_raw, sent) if sent else replied_raw
         ignored = bucket["ignored"]
         for key in totals:
-            totals[key] += bucket[key]
+            totals[key] += replied if key == "replied" else bucket[key]
         gaps = bucket["_gaps"]
         sources.append({
             "source": src,
