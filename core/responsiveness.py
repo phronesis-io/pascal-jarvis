@@ -40,9 +40,10 @@ POLL_FIRST_S = 6      # first poll: fast, so feedback lands within ~6s
 POLL_STEADY_S = 20    # subsequent polls: settle to avoid message spam
 PROMOTE_AFTER_S = 120  # a call past this becomes a background job
 
-# The one-time textual ack when opus is generating with no tool calls. The
-# instant Typing reaction alone left a long silent gap on median-100s replies.
-THINKING_ACK = "💭 收到了，正在想这个问题……（想得稍微深一点，请稍等）"
+# The one-time textual ack when opus is generating with no tool calls. Keep it
+# short and natural: recent interaction audits showed extra parenthetical
+# explanation made the bot feel noisy instead of reassuring.
+THINKING_ACK = "💭 收到了，正在想。"
 
 
 def poll_interval(poll_index: int) -> int:

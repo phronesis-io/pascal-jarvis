@@ -125,6 +125,7 @@ def test_audit_flags_recent_interaction_self_evolution_signals(tmp_path):
     assert "status_uncertainty" in report
     assert "awkward_progress_copy" in report
     assert "pgc_latency_quality" in report
+    assert "external PGC handoff signal" in report
     assert "needs_deeper_research" in report
 
 

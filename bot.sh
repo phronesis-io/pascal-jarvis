@@ -726,7 +726,7 @@ print(n)
      # module call ever fails so the loop never breaks.
      eval "$(python3 -m core.responsiveness env 2>/dev/null)"
      : "${JV_POLL_FIRST:=6}" "${JV_POLL_STEADY:=20}"
-     : "${JV_THINKING_ACK:=💭 收到了，正在想……（稍等）}"
+     : "${JV_THINKING_ACK:=💭 收到了，正在想。}"
      # First poll fast (~6s) so the user sees a sign of life quickly, then
      # settle to 20s to avoid spam. The instant "Typing" reaction already
      # fired at dispatch; this loop adds the FIRST textual feedback within

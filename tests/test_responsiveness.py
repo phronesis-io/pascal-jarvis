@@ -31,6 +31,9 @@ def test_ack_text_is_nonempty_and_calm():
     t = r.ack_text()
     assert t and t == r.THINKING_ACK
     assert "💭" in t  # the thinking glyph the user recognizes
+    assert t == "💭 收到了，正在想。"
+    assert "稍等" not in t
+    assert "想得稍微深一点" not in t
 
 
 def test_cli_env_is_shell_evalable():

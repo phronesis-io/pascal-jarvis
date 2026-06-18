@@ -70,7 +70,7 @@ COMPLAINT_PATTERNS = {
         "severity": "P1",
         "title": "User reported PGC source latency or recommendation-chain quality problems",
         "patterns": ("时效性差", "推荐系统有问题", "让他这么晚收到", "PGC信源", "信源过时"),
-        "recommendation": "Open a PGC production audit: trace source coverage, index latency, ranking gates, and delivery delay for the referenced event.",
+        "recommendation": "Record this as an external PGC handoff signal with enough context for the owning workflow; do not silently fold it into Jarvis-only self-evolution work.",
     },
 }
 
