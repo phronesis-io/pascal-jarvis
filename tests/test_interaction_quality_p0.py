@@ -8,7 +8,9 @@ Covers docs/prd_interaction_quality.md REQ-02/03/04/05:
 """
 
 import fcntl
+import io
 import json
+import sys
 import time
 
 from core.heartbeat import HeartbeatRunner
@@ -233,3 +235,52 @@ def test_apply_adaptations_structured_direction(tmp_path, monkeypatch):
     ])
     overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
     assert overrides == {"a": 7200}
+
+
+def test_engagement_content_mix_written_to_memory(tmp_path, monkeypatch):
+    from tasks import engagement_analyze_post as post
+    monkeypatch.setattr(post, "MEMORY_DIR", tmp_path / "memory")
+    monkeypatch.setattr(
+        post, "CONTENT_MIX_FILE",
+        tmp_path / "memory" / "system" / "engagement_content_mix.md",
+    )
+
+    post._write_content_mix([
+        {"target": "checkin", "mode": "wellbeing", "weight": "decrease",
+         "rationale": "ignored 80% in odd-hour wellbeing prompts"},
+        {"target": "content-recommend", "mode": "philosophy longform",
+         "weight": "increase", "rationale": "late replies clustered here"},
+        {"target": "", "mode": "bad", "weight": "increase"},
+    ])
+
+    out = tmp_path / "memory" / "system" / "engagement_content_mix.md"
+    text = out.read_text(encoding="utf-8")
+    assert "# Engagement Content Mix" in text
+    assert "**checkin / wellbeing**: decrease" in text
+    assert "ignored 80%" in text
+    assert "**content-recommend / philosophy longform**: increase" in text
+    assert "bad" not in text
+
+
+def test_engagement_post_accepts_content_mix_without_insights(tmp_path, monkeypatch):
+    from tasks import engagement_analyze_post as post
+    monkeypatch.setattr(post, "MEMORY_DIR", tmp_path / "memory")
+    monkeypatch.setattr(
+        post, "CONTENT_MIX_FILE",
+        tmp_path / "memory" / "system" / "engagement_content_mix.md",
+    )
+    monkeypatch.setattr(
+        sys, "stdin",
+        io.StringIO(json.dumps({
+            "content_mix": [
+                {"target": "checkin", "mode": "connection", "weight": "increase",
+                 "rationale": "connection prompts got replies"}
+            ]
+        })),
+    )
+
+    assert post.main() == 0
+    text = (tmp_path / "memory" / "system" / "engagement_content_mix.md").read_text(
+        encoding="utf-8"
+    )
+    assert "**checkin / connection**: increase" in text

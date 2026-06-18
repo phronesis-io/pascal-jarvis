@@ -8,6 +8,14 @@ import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "checkin_post.py"
+PRE_SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "checkin_pre.sh"
+
+
+def test_checkin_pre_syntax():
+    result = subprocess.run(
+        ["bash", "-n", str(PRE_SCRIPT)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _run(stdin: str, memory_dir: Path) -> subprocess.CompletedProcess:

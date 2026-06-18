@@ -193,6 +193,15 @@ if [ -f "$interests_file" ]; then
   interests=$(cat "$interests_file" 2>/dev/null)
 fi
 
+# Engagement-driven content-mix steering (advisory, not a hard rule). Written
+# by engagement-analyze post-hook; keeps checkins evolving from measured
+# response patterns without letting the analyzer mutate prompts directly.
+content_mix_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/engagement_content_mix.md"
+content_mix=""
+if [ -f "$content_mix_file" ]; then
+  content_mix=$(head -80 "$content_mix_file" 2>/dev/null || true)
+fi
+
 cat <<EOF
 Current time: $now_ts ($day, $date_ymd) — $phase
 Suggested mode this round: $mode
@@ -203,6 +212,9 @@ $transition_context
 
 User interests (for relevant knowledge nuggets):
 $interests
+
+Engagement-derived content mix steering (advisory; do not force it if context disagrees):
+$content_mix
 
 Past check-ins (MUST avoid repeating topics, openers, or structure):
 $recent_checkins

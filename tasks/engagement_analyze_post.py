@@ -16,6 +16,7 @@ from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 INSIGHTS_FILE = MEMORY_DIR / "system" / "engagement_insights.md"
+CONTENT_MIX_FILE = MEMORY_DIR / "system" / "engagement_content_mix.md"
 
 
 def main() -> int:
@@ -34,45 +35,96 @@ def main() -> int:
 
     insights = data.get("insights", "")
     adaptations = data.get("adaptations", [])
+    content_mix = data.get("content_mix", [])
 
-    if not insights:
+    if not insights and not content_mix:
         return 0
 
     # Build the insights markdown file
-    lines = [
-        f"# Engagement Insights",
-        f"",
-        f"_Last updated: {now_local_str('%Y-%m-%d %H:%M')}_",
-        f"",
-        insights,
-    ]
+    if insights:
+        lines = [
+            f"# Engagement Insights",
+            f"",
+            f"_Last updated: {now_local_str('%Y-%m-%d %H:%M')}_",
+            f"",
+            insights,
+        ]
 
-    if adaptations:
-        lines.append("")
-        lines.append("## Suggested Adaptations")
-        lines.append("")
-        for a in adaptations:
-            target = a.get("target", "unknown")
-            suggestion = a.get("suggestion", "")
-            lines.append(f"- **{target}**: {suggestion}")
+        if adaptations:
+            lines.append("")
+            lines.append("## Suggested Adaptations")
+            lines.append("")
+            for a in adaptations:
+                target = a.get("target", "unknown")
+                suggestion = a.get("suggestion", "")
+                lines.append(f"- **{target}**: {suggestion}")
 
-    content = "\n".join(lines) + "\n"
+        content = "\n".join(lines) + "\n"
 
-    # Write atomically
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
-    tmp = INSIGHTS_FILE.with_suffix(".md.tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, INSIGHTS_FILE)
+        # Write atomically
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
+        tmp = INSIGHTS_FILE.with_suffix(".md.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, INSIGHTS_FILE)
 
-    print(f"[engagement-analyze] wrote insights ({len(content)} chars)", file=sys.stderr)
+        print(f"[engagement-analyze] wrote insights ({len(content)} chars)", file=sys.stderr)
 
     # Apply adaptations to heartbeat_state.json effective_interval
     if adaptations:
         _apply_adaptations(adaptations)
+    if content_mix:
+        _write_content_mix(content_mix)
 
     # No user-facing output — this is a silent background task
     return 0
+
+
+def _write_content_mix(content_mix: list[dict]) -> None:
+    """Persist content-mix guidance for pre-hooks to consume.
+
+    This is deliberately advisory: it does not change scheduling. The next
+    checkin/content prompts can read this as steering context while frequency
+    changes stay in interval_overrides.json with guardrails.
+    """
+    rows = []
+    for item in content_mix:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "").strip()[:80]
+        mode = str(item.get("mode") or item.get("topic") or "").strip()[:120]
+        weight = str(item.get("weight") or item.get("direction") or "").strip()[:40]
+        rationale = str(item.get("rationale") or item.get("reason") or "").strip()[:240]
+        if not target or not mode:
+            continue
+        rows.append({
+            "target": target,
+            "mode": mode,
+            "weight": weight or "observe",
+            "rationale": rationale,
+        })
+    if not rows:
+        return
+
+    lines = [
+        "# Engagement Content Mix",
+        "",
+        f"_Last updated: {now_local_str('%Y-%m-%d %H:%M')}_",
+        "",
+        "Advisory steering from engagement-analyze. Frequency changes still live in interval_overrides.json.",
+        "",
+    ]
+    for row in rows[:12]:
+        lines.append(
+            f"- **{row['target']} / {row['mode']}**: {row['weight']} — {row['rationale']}"
+        )
+    content = "\n".join(lines).rstrip() + "\n"
+
+    (MEMORY_DIR / "system").mkdir(parents=True, exist_ok=True)
+    tmp = CONTENT_MIX_FILE.with_suffix(".md.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, CONTENT_MIX_FILE)
+    print(f"[engagement-analyze] wrote content mix ({len(rows)} item(s))", file=sys.stderr)
 
 
 # ── Frequency interval mapping ──

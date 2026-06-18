@@ -26,6 +26,7 @@
 
 ## Done (recent)
 
+- Engagement self-evolution content mix — engagement-analyze now writes advisory `engagement_content_mix.md`; checkin pre-hook consumes it as steering context alongside guarded interval tuning
 - Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files
 - Host sleep modeling REQ-56 — heartbeat emits `sleep_gap` events after long host pauses; daemon grants a short wake grace before treating heartbeat age as stale
 - Repos-sync REQ-52 — slow git fetch/pull work moved to detached single-flight worker; pre-hook now only spawns worker and emits fresh worker product once, with contract tests
@@ -63,7 +64,6 @@
 
 ## P2 — Self-evolution
 
-- Engagement tracking → auto-adjust checkin frequency and content mix
 - Prompt A/B testing framework (propose → approve → measure)
 - Implementation intentions auto-generation for calendar events
 - Mental contrasting integration in daily plan

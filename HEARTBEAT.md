@@ -695,10 +695,16 @@ SILENT_TASKS, not this doc.
     Return JSON: {"insights": "<markdown summary>",
                   "adaptations": [{"target": "<task>",
                                    "direction": "reduce|increase|keep",
-                                   "suggestion": "<what to change and why>"}]}
+                                   "suggestion": "<what to change and why>"}],
+                  "content_mix": [{"target": "checkin|content-recommend",
+                                   "mode": "<topic/mode/window to weight>",
+                                   "weight": "increase|decrease|observe",
+                                   "rationale": "<evidence from data>"}]}
     "direction" is the machine-applied field (frequency only); "suggestion"
     is the human-readable rationale. Infrastructure tasks (calendar-sync,
     memory-*) are exempt from frequency changes — don't propose them.
+    "content_mix" is advisory only: it is written to memory for future prompts,
+    not applied as a scheduling override.
     If not enough data yet (<10 data points), reply HEARTBEAT_OK.
 
 ## Daily Rhythm
