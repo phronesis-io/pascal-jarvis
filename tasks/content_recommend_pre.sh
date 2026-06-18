@@ -32,8 +32,9 @@ if [ "${CONTENT_RECOMMEND_PUSH:-0}" != "1" ]; then
   exit 0
 fi
 
-# Only during waking hours
-hour=$(date +%H)
+# Only during waking hours. CONTENT_RECOMMEND_TEST_HOUR keeps tests
+# deterministic without changing production behavior.
+hour="${CONTENT_RECOMMEND_TEST_HOUR:-$(date +%H)}"
 if [ "$hour" -lt 9 ] || [ "$hour" -ge 23 ]; then
   exit 0
 fi
@@ -191,18 +192,84 @@ if [ -z "$candidates" ]; then
   exit 0
 fi
 
-# ── Load interests for context ──
-interests_file="$MEMORY_DIR/warm/interests.md"
-interests=""
-if [ -f "$interests_file" ]; then
-  interests=$(cat "$interests_file" 2>/dev/null | head -30)
-fi
+# ── Load taste context from memory ───────────────────────────────────────
+# This keeps curation calibrated to Pascal's current memory instead of a stale
+# hardcoded taste list in HEARTBEAT.md. Only safe, user-profile style files are
+# considered; private/secret/inbox buffers are deliberately skipped because this
+# task can produce outbound-facing recommendation copy.
+taste_context=$(MEMORY_DIR="$MEMORY_DIR" python3 - <<'PY' 2>/dev/null || true
+import os
+from pathlib import Path
+
+memory = Path(os.environ.get("MEMORY_DIR", "")).expanduser()
+if not memory.exists():
+    raise SystemExit
+
+allowed_exact = {
+    "interests.md",
+    "user_profile.md",
+    "health_fitness.md",
+    "feedback_idle_suggestions.md",
+    "feedback_canon_plus_search_lens.md",
+    "feedback_philosophy_depth.md",
+}
+allowed_prefixes = (
+    "feedback_content",
+    "feedback_watch",
+    "feedback_recommend",
+    "taste",
+    "interests",
+    "preference",
+)
+blocked_name_parts = ("secret", "private", "inbox", "credential", "token")
+
+def allowed(path: Path) -> bool:
+    name = path.name.lower()
+    if any(part in name for part in blocked_name_parts):
+        return False
+    if name in allowed_exact:
+        return True
+    return any(name.startswith(prefix) for prefix in allowed_prefixes)
+
+files = []
+for tier in ("hot", "warm"):
+    root = memory / tier
+    if not root.is_dir():
+        continue
+    for path in sorted(root.glob("*.md")):
+        if allowed(path):
+            files.append(path)
+
+chars = 0
+out = []
+for path in files[:8]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        continue
+    if not text:
+        continue
+    text = "\n".join(text.splitlines()[:40]).strip()
+    if not text:
+        continue
+    block = f"## {path.relative_to(memory)}\n{text}"
+    remaining = 5000 - chars
+    if remaining <= 0:
+        break
+    if len(block) > remaining:
+        block = block[:remaining].rstrip() + "\n[truncated]"
+    out.append(block)
+    chars += len(block)
+
+print("\n\n".join(out))
+PY
+)
 
 cat <<EOF
 Current time: $(date '+%H:%M %A %Y-%m-%d')
 
-User interests:
-$interests
+Memory-derived taste context:
+${taste_context:-"(none found; use the fallback curation criteria in the task prompt)"}
 
 Past recommendations (DO NOT repeat these):
 $past_titles

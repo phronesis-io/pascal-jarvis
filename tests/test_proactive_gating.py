@@ -131,6 +131,41 @@ def _run_content(tmp_path: Path, push: str | None = None) -> subprocess.Complete
     )
 
 
+def _fake_yt_dlp(tmp_path: Path) -> Path:
+    fake = tmp_path / "yt-dlp"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == ytsearch8:* ]]; then\n"
+        "  echo 'Deep Philosophy Lecture ||| https://example.com/video ||| 50000 ||| 42:00'\n"
+        "else\n"
+        "  echo '{\"title\":\"Bili Deep Talk\",\"webpage_url\":\"https://www.bilibili.com/video/BV1\"}'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def _run_content_enabled(tmp_path: Path) -> subprocess.CompletedProcess:
+    jarvis = tmp_path / "jarvis"
+    mem = tmp_path / "mem"
+    jarvis.mkdir(parents=True, exist_ok=True)
+    mem.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "JARVIS_DIR": str(jarvis),
+        "MEMORY_DIR": str(mem),
+        "CONTENT_RECOMMEND_PUSH": "1",
+        "CONTENT_RECOMMEND_TEST_HOUR": "15",
+        "YT_DLP": str(_fake_yt_dlp(tmp_path)),
+    }
+    return subprocess.run(
+        ["bash", str(CONTENT_PRE)],
+        capture_output=True, text=True, env=env,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # free-time-nudge: event gate (empty unless genuine content)
 # ──────────────────────────────────────────────────────────────────────────
@@ -288,6 +323,45 @@ def test_content_recommend_pre_syntax():
         ["bash", "-n", str(CONTENT_PRE)], capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_content_recommend_enabled_reads_safe_taste_memory(tmp_path):
+    """When explicitly enabled, curation context comes from safe memory files,
+    while private/secret buffers are excluded from the outbound prompt."""
+    warm = tmp_path / "mem" / "warm"
+    warm.mkdir(parents=True, exist_ok=True)
+    (warm / "interests.md").write_text(
+        "喜欢严肃哲学和技术深潜\n偏好长讲座，不要浅层鸡汤\n",
+        encoding="utf-8",
+    )
+    (warm / "secret_taste.md").write_text("SHOULD_NOT_LEAK\n", encoding="utf-8")
+    (warm / "inbox_content_feedback.md").write_text(
+        "ALSO_SHOULD_NOT_LEAK\n", encoding="utf-8"
+    )
+
+    result = _run_content_enabled(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Memory-derived taste context:" in result.stdout
+    assert "喜欢严肃哲学和技术深潜" in result.stdout
+    assert "偏好长讲座" in result.stdout
+    assert "SHOULD_NOT_LEAK" not in result.stdout
+    assert "ALSO_SHOULD_NOT_LEAK" not in result.stdout
+    assert "Candidate videos:" in result.stdout
+    assert (
+        "Deep Philosophy Lecture" in result.stdout
+        or "Bili Deep Talk" in result.stdout
+    )
+
+
+def test_content_recommend_enabled_uses_fallback_without_taste_memory(tmp_path):
+    """No profile memory should still produce candidates with an explicit
+    fallback cue for the curator."""
+    result = _run_content_enabled(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "(none found; use the fallback curation criteria in the task prompt)" in result.stdout
+    assert "Candidate videos:" in result.stdout
 
 
 def test_free_time_pre_syntax():
