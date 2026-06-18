@@ -681,6 +681,20 @@ def _hourly_housekeeping(jd: Path):
             pass
 
 
+SLEEP_GAP_THRESHOLD_S = 120
+
+
+def _sleep_gap_seconds(slept_for_s: float, expected_s: float,
+                       threshold_s: float = SLEEP_GAP_THRESHOLD_S) -> float:
+    """Return host sleep/pause gap beyond the expected sleep interval.
+
+    This is measured only around the loop's own short sleep, not around Claude
+    calls, so long model runs are not mislabeled as host sleep.
+    """
+    gap = slept_for_s - expected_s
+    return gap if gap >= threshold_s else 0.0
+
+
 def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
              work_dir: str = "", check_interval: int = 10, user_id: str = "",
              claude_timeout: int = 600):
@@ -856,7 +870,13 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (idle)",
                   file=sys.stderr)
 
+        sleep_started = time.time()
         time.sleep(check_interval)
+        gap = _sleep_gap_seconds(time.time() - sleep_started, check_interval)
+        if gap:
+            sched_emit(jd, "sleep_gap", duration_s=round(gap, 1),
+                       slept_for_s=round(gap + check_interval, 1),
+                       expected_s=check_interval)
 
 
 if __name__ == "__main__":

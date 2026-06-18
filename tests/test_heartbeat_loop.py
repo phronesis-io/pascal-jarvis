@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from core.heartbeat_loop import (
     _route_output, _write_outbox, _record_engagement, _trim_file,
+    _sleep_gap_seconds,
 )
 
 
@@ -26,6 +27,14 @@ def test_trim_file_no_op(tmp_path):
 
 def test_trim_file_missing(tmp_path):
     _trim_file(tmp_path / "missing.jsonl", 10)  # should not crash
+
+
+def test_sleep_gap_seconds_ignores_normal_loop_sleep():
+    assert _sleep_gap_seconds(slept_for_s=10.5, expected_s=10, threshold_s=120) == 0
+
+
+def test_sleep_gap_seconds_detects_host_sleep_pause():
+    assert _sleep_gap_seconds(slept_for_s=400, expected_s=10, threshold_s=120) == 390
 
 
 def test_write_outbox(tmp_path):

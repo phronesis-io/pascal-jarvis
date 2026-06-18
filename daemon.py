@@ -39,6 +39,8 @@ def _daemon_now() -> datetime:
 JARVIS_DIR = Path(__file__).parent
 CHECK_INTERVAL = 30           # seconds between health checks
 HEARTBEAT_STALE_THRESHOLD = 1800  # 30 min without heartbeat = stale (Claude calls take 30-90s, cycles ~20min apart)
+WAKE_GRACE_SECONDS = 180      # after host sleep/wake, suppress stale-heartbeat restarts briefly
+SLEEP_GAP_THRESHOLD = 120     # daemon loop slept > expected by this much ⇒ host sleep/pause
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"
@@ -65,6 +67,7 @@ except Exception:
 last_restart_time = 0
 restart_count = 0
 running = True
+last_wake_time = 0.0
 
 
 def log(level: str, msg: str):
@@ -207,6 +210,27 @@ def _find_last_heartbeat() -> float | None:
     return None
 
 
+def _record_wake_gap(slept_for_s: float, expected_s: float = CHECK_INTERVAL) -> float:
+    """Record a recent host wake when the daemon's own sleep overshot.
+
+    The daemon loop sleeps in 1s chunks; after laptop sleep those chunks resume
+    much later. Marking this locally avoids a race where daemon checks health
+    before heartbeat_loop has had a chance to write its sleep_gap event.
+    """
+    global last_wake_time
+    gap = slept_for_s - expected_s
+    if gap >= SLEEP_GAP_THRESHOLD:
+        last_wake_time = time.time()
+        log("INFO", f"Host sleep/wake gap detected ({int(gap)}s beyond expected)")
+        return gap
+    return 0.0
+
+
+def _in_wake_grace(now: float | None = None) -> bool:
+    now = now if now is not None else time.time()
+    return bool(last_wake_time and 0 <= now - last_wake_time < WAKE_GRACE_SECONDS)
+
+
 def _is_bot_alive() -> bool:
     """Check if bot.sh is alive via PID file (primary) or pgrep (fallback)."""
     return _bot_pid() is not None
@@ -330,6 +354,9 @@ def check_health() -> dict:
         if active_locks:
             log("INFO", f"Heartbeat stale ({int(beat_age)}s) but {len(active_locks)} "
                 f"session(s) active — NOT restarting (would kill user's response)")
+        elif _in_wake_grace():
+            log("INFO", f"Heartbeat stale ({int(beat_age)}s) but host just woke — "
+                f"grace {WAKE_GRACE_SECONDS}s, NOT restarting")
         else:
             issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
 
@@ -665,11 +692,17 @@ def main():
             except Exception as e:
                 log("ERROR", f"Health check exception: {e}")
 
-            # Sleep in small increments so we can respond to signals
+            # Sleep in small increments so we can respond to signals. If the
+            # machine slept, the loop resumes much later; record a wake grace
+            # before the next health check so stale heartbeat age does not
+            # trigger a false restart while the stack catches up.
+            sleep_started = time.time()
             for _ in range(CHECK_INTERVAL):
                 if not running:
                     break
                 time.sleep(1)
+            if running:
+                _record_wake_gap(time.time() - sleep_started, CHECK_INTERVAL)
     finally:
         release_singleton()
         log("INFO", "Guardian daemon stopped")

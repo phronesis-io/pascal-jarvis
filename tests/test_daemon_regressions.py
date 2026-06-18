@@ -59,6 +59,47 @@ def test_stale_threshold_is_1200():
     assert daemon_mod.HEARTBEAT_STALE_THRESHOLD == 1800
 
 
+def test_daemon_records_wake_gap(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "last_wake_time", 0)
+    monkeypatch.setattr(daemon_mod.time, "time", lambda: 12345.0)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    assert daemon_mod._record_wake_gap(
+        slept_for_s=daemon_mod.CHECK_INTERVAL + daemon_mod.SLEEP_GAP_THRESHOLD + 1,
+        expected_s=daemon_mod.CHECK_INTERVAL,
+    ) == daemon_mod.SLEEP_GAP_THRESHOLD + 1
+    assert daemon_mod.last_wake_time == 12345.0
+    assert daemon_mod._in_wake_grace(now=12345.0 + daemon_mod.WAKE_GRACE_SECONDS - 1)
+    assert not daemon_mod._in_wake_grace(now=12345.0 + daemon_mod.WAKE_GRACE_SECONDS + 1)
+
+
+def test_daemon_wake_grace_suppresses_stale_heartbeat_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: True)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result["issues"] == []
+
+
+def test_daemon_stale_heartbeat_still_fails_outside_wake_grace(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is False
+    assert any("Heartbeat stale" in issue for issue in result["issues"])
+
+
 def test_kill_patterns_include_eigenflux():
     """diagnose_and_fix must kill eigenflux stream processes during restart.
 

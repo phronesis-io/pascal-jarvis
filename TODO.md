@@ -26,6 +26,8 @@
 
 ## Done (recent)
 
+- Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files
+- Host sleep modeling REQ-56 — heartbeat emits `sleep_gap` events after long host pauses; daemon grants a short wake grace before treating heartbeat age as stale
 - Repos-sync REQ-52 — slow git fetch/pull work moved to detached single-flight worker; pre-hook now only spawns worker and emits fresh worker product once, with contract tests
 - Content-recommend curation reads safe taste/profile context from memory instead of relying on a stale hardcoded taste block
 - Background jobs — long tasks run in independent Claude sessions with start/finish cards (`jobs` / `job output <id>` / `cancel <id>`)
@@ -57,8 +59,7 @@
 
 ## P1 — Residual
 
-- Engagement page + Ops/log explorer on the dashboard (REQ-54/55)
-- Host sleep modeling (REQ-56)
+- None currently tracked from the 2026-06-13 P1 list; next work should come from P2/self-evolution or a fresh audit finding.
 
 ## P2 — Self-evolution
 
