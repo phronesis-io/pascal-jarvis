@@ -34,6 +34,14 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
     '"type":"error"',
 )
 
+# Short no-op outputs that Claude/Claude Code can emit after a failed resume.
+# These are not useful answers and previously showed up in conversation audit
+# as user-visible empty turns. Keep this separate from ERROR_PATTERNS so normal
+# longer debugging prose can still discuss the phrase.
+NOOP_REPLY_NEEDLES: tuple[str, ...] = (
+    "no response requested",
+)
+
 # Checked ONLY for proactive (heartbeat) messages, where these phrases in the
 # first 300 chars are effectively always an error surface.
 # 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours as
@@ -70,6 +78,8 @@ def looks_like_error(text: str, proactive: bool = False) -> bool:
     """
     if not text or not text.strip():
         return True
+    if _looks_like_noop_reply(text):
+        return True
     head = text[:300]
     # Check line-start patterns
     for line in head.splitlines():
@@ -82,6 +92,20 @@ def looks_like_error(text: str, proactive: bool = False) -> bool:
     if proactive and any(p in head for p in PROACTIVE_ERROR_SUBSTRINGS):
         return True
     return False
+
+
+def _looks_like_noop_reply(text: str) -> bool:
+    compact = " ".join(text.strip().split())
+    if not compact or len(compact) > 200:
+        return False
+    lowered = compact.lower()
+    stripped = lowered.strip(" .。!！?？")
+    if stripped in NOOP_REPLY_NEEDLES:
+        return True
+    return (
+        stripped.startswith("continue from where you left off")
+        and any(needle in stripped for needle in NOOP_REPLY_NEEDLES)
+    )
 
 
 def sanitize_for_user(text: str, fallback: str = "") -> str:

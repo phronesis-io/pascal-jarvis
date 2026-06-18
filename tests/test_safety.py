@@ -30,6 +30,19 @@ def test_short_replies_are_safe():
     assert looks_like_error("记住了。") is False
 
 
+def test_no_response_requested_is_noop_error():
+    assert looks_like_error("No response requested.") is True
+    assert looks_like_error("Continue from where you left off. No response requested.") is True
+
+
+def test_long_debugging_text_can_discuss_noop_phrase():
+    text = (
+        "日志里的 No response requested 是 Claude Code 在失败 resume 后产生的空转文本；"
+        "修复方式是把它识别为 no-op provider output，而不是把这句话发给用户。"
+    )
+    assert looks_like_error(text) is False
+
+
 def test_normal_text_is_safe():
     assert looks_like_error("Here's what I found in your portfolio today...") is False
 
