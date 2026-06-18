@@ -34,6 +34,21 @@ COMPLAINT_PATTERNS = {
     "needs_deeper_research": ("全面调研", "所有东西都查明白", "多查查"),
 }
 
+PROVIDER_ERROR_NEEDLES = (
+    "monthly spend limit",
+    "raise it at claude.ai/settings/usage",
+    "usage limit",
+    "rate limit",
+    "api error",
+    "failed to authenticate",
+    "not logged in",
+)
+
+EMPTY_REPLY_NEEDLES = (
+    "no response requested",
+    "final empty/error answer",
+)
+
 
 @dataclass
 class AuditPaths:
@@ -47,9 +62,14 @@ def default_paths(jarvis_dir: Path | None = None) -> AuditPaths:
     root = jarvis_dir or Path.cwd()
     return AuditPaths(
         jarvis_dir=root,
-        log_paths=[root / "jarvis.log", Path("/tmp/jarvis_restart.log")],
+        log_paths=[
+            root / "jarvis.log",
+            root / "daemon.log",
+            Path("/tmp/jarvis_restart.log"),
+        ],
         session_dirs=[
             Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis",
+            Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos",
             Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis",
         ],
         db_path=root / "data/conversation_audit.db",
@@ -137,12 +157,22 @@ def _event_type(message: str) -> tuple[str, str, dict]:
         return "reply_sent", message, meta
     if "Suppressed content:" in message:
         return "suppressed_content", message.split("Suppressed content:", 1)[1].strip(), meta
+    if "Error-looking answer from" in message:
+        return "provider_error_detected", message, meta
     if "Final empty/error answer" in message:
         return "empty_or_error_answer", message, meta
     if "Session busy, waiting" in message:
         return "session_busy_wait", message, meta
     if "Promoted to background job" in message:
         return "background_promoted", message, meta
+    if "Observed component DOWN:" in message:
+        return "component_down", message, meta
+    if "Health check failed" in message:
+        return "daemon_health_failed", message, meta
+    if "Auto-restart successful" in message:
+        return "daemon_auto_restart", message, meta
+    if "BRAIN-DEAD heartbeat:" in message:
+        return "brain_dead_heartbeat", message, meta
     if "syntax error near unexpected token" in message or "unbound variable" in message:
         return "runtime_shell_error", message, meta
     return "log", message, meta
@@ -248,6 +278,71 @@ def _add_issue(conn: sqlite3.Connection, run_id: int, severity: str,
     )
 
 
+def _has_any(text: str, needles: Iterable[str]) -> bool:
+    lowered = text.lower()
+    return any(needle in lowered for needle in needles)
+
+
+def _excerpt(text: str, limit: int = 220) -> str:
+    single_line = " ".join(text.split())
+    if len(single_line) <= limit:
+        return single_line
+    return single_line[:limit - 1] + "…"
+
+
+def _is_direct_provider_surface(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or not _has_any(stripped, PROVIDER_ERROR_NEEDLES):
+        return False
+    first_line = stripped.splitlines()[0].lstrip()
+    if len(stripped) <= 220:
+        return True
+    return first_line.startswith((
+        "🔧",
+        "🛠",
+        "⚙",
+        "you've hit your monthly spend limit",
+        "you have hit your monthly spend limit",
+        "api error",
+        "failed to authenticate",
+    ))
+
+
+def _is_direct_empty_surface(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and len(stripped) <= 120 and _has_any(stripped, EMPTY_REPLY_NEEDLES)
+
+
+def _provider_status_for_log(content: str) -> str:
+    """Return issue status for provider errors seen in internal logs.
+
+    A suppressed-content line means the error hit the safety boundary, not
+    necessarily the user. Provider-error-detected means the newer fallback path
+    recognized the failure before answering, so it is treated as fixed evidence.
+    """
+    if "error-looking answer from" in content.lower():
+        return "fixed"
+    return "open"
+
+
+def _add_user_visible_provider_issue(
+    conn: sqlite3.Connection,
+    run_id: int,
+    rows: list[sqlite3.Row],
+    issue_type: str,
+    title: str,
+    recommendation: str,
+) -> None:
+    if not rows:
+        return
+    examples = "\n".join(
+        f"{row['ts']} session={row['session_id']} text={_excerpt(row['text'])}"
+        for row in rows[:5]
+    )
+    evidence = f"count={len(rows)}\n{examples}"
+    _add_issue(conn, run_id, "P0", issue_type, title, evidence, recommendation)
+
+
 def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     start_count = conn.execute(
         "SELECT COUNT(*) FROM audit_issues WHERE run_id=?", (run_id,)
@@ -262,14 +357,66 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
         (run_id,),
     ).fetchall()
     for row in suppressed:
-        status = "fixed" if "monthly spend limit" in row["content"] else "open"
         _add_issue(
             conn, run_id, "P0", "provider_error_as_answer",
             "Provider/account-limit text reached the reply safety boundary",
             f"{row['ts']} session={row['session_id']} content={row['content']}",
             "Treat error-looking stdout as a provider failure and continue the fallback chain before user-facing safety copy.",
-            status=status,
+            status=_provider_status_for_log(row["content"]),
         )
+
+    provider_errors = conn.execute(
+        """
+        SELECT ts, session_id, content FROM conversation_events
+        WHERE run_id=? AND event_type='provider_error_detected'
+        ORDER BY ts DESC LIMIT 200
+        """,
+        (run_id,),
+    ).fetchall()
+    if provider_errors:
+        examples = "\n".join(
+            f"{row['ts']} session={row['session_id']} content={_excerpt(row['content'])}"
+            for row in provider_errors[:5]
+        )
+        _add_issue(
+            conn, run_id, "P1", "provider_fallback_exercised",
+            "Provider/account-limit failure was detected before fallback",
+            f"count={len(provider_errors)}\n{examples}",
+            "Keep this as regression evidence: any future user-visible provider-error text should fail the conversation audit.",
+            status="fixed",
+        )
+
+    visible_provider_errors = conn.execute(
+        """
+        SELECT ts, session_id, role, text FROM session_messages
+        WHERE run_id=? AND role='assistant'
+        ORDER BY ts DESC LIMIT 200
+        """,
+        (run_id,),
+    ).fetchall()
+    direct_provider_rows = [
+        row for row in visible_provider_errors
+        if _is_direct_provider_surface(row["text"])
+    ]
+    direct_empty_rows = [
+        row for row in visible_provider_errors
+        if _is_direct_empty_surface(row["text"])
+    ]
+    provider_issue_type = (
+        "progress_provider_error_leak"
+        if any(row["text"].lstrip().startswith(("🔧", "🛠", "⚙")) for row in direct_provider_rows)
+        else "provider_error_as_answer"
+    )
+    _add_user_visible_provider_issue(
+        conn, run_id, direct_provider_rows, provider_issue_type,
+        "Provider/account-limit text was visible in assistant conversation",
+        "Never narrate raw provider/account failures. Classify them as provider failures, advance the fallback chain, and expose only provider/model status when the response is successful.",
+    )
+    _add_user_visible_provider_issue(
+        conn, run_id, direct_empty_rows, "empty_reply_user_visible",
+        "Assistant surfaced an empty/no-op response to the user",
+        "Treat empty/no-op provider output as a failed turn: retry/fallback internally, then send either a real answer or one concise recovery notice.",
+    )
 
     shell_errors = conn.execute(
         """
@@ -287,6 +434,40 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
             evidence,
             "Keep bash -n in pre-commit/deploy checks and prefer detached restart verification after every bot.sh change.",
             status="fixed",
+        )
+
+    daemon_instability = conn.execute(
+        """
+        SELECT ts, event_type, content FROM conversation_events
+        WHERE run_id=?
+          AND event_type IN (
+            'component_down',
+            'daemon_health_failed',
+            'brain_dead_heartbeat',
+            'daemon_auto_restart'
+          )
+        ORDER BY ts
+        """,
+        (run_id,),
+    ).fetchall()
+    failures = [
+        row for row in daemon_instability
+        if row["event_type"] in {"component_down", "daemon_health_failed", "brain_dead_heartbeat"}
+    ]
+    if failures:
+        restarts = [row for row in daemon_instability if row["event_type"] == "daemon_auto_restart"]
+        last_failure_ts = max((row["ts"] or "") for row in failures)
+        last_restart_ts = max((row["ts"] or "") for row in restarts) if restarts else ""
+        status = "fixed" if last_restart_ts and last_restart_ts >= last_failure_ts else "open"
+        evidence = "\n".join(
+            f"{r['ts']} {r['event_type']}: {r['content']}" for r in failures[-5:]
+        )
+        _add_issue(
+            conn, run_id, "P1", "guardian_runtime_instability",
+            "Guardian observed Jarvis runtime instability during the audit window",
+            evidence,
+            "Make daemon health failures first-class audit inputs and require post-deploy checks for admin :3456, bot.sh, listener, and heartbeat task success.",
+            status=status,
         )
 
     busy = conn.execute(

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from core import conversation_audit as audit
@@ -52,3 +53,66 @@ def test_report_can_be_written_from_cli(tmp_path, monkeypatch):
     assert audit.main(["--hours", "48", "--report", str(report)]) == 0
     assert report.exists()
     assert "Conversation Audit PRD" in report.read_text(encoding="utf-8")
+
+
+def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    session = session_dir / "turn.jsonl"
+    rows = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": "🔧 You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+            },
+            "timestamp": "2026-06-18T10:00:00.000Z",
+        },
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "No response requested."},
+            "timestamp": "2026-06-18T10:01:00.000Z",
+        },
+    ]
+    session.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+        encoding="utf-8",
+    )
+    paths = audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=[],
+        session_dirs=[session_dir],
+        db_path=tmp_path / "audit.db",
+    )
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "progress_provider_error_leak" in report
+    assert "empty_reply_user_visible" in report
+    assert "Issues derived: 2" in report
+
+
+def test_audit_ingests_daemon_instability(tmp_path):
+    daemon = tmp_path / "daemon.log"
+    daemon.write_text(
+        "\n".join([
+            "[2026-06-18 11:00:00] [WARN] Observed component DOWN: admin :3456",
+            "[2026-06-18 11:01:00] [WARN] Health check failed (2x): ['bot.sh is not running']",
+            "[2026-06-18 11:02:00] [WARN] BRAIN-DEAD heartbeat: cross-session-sync last_success stale",
+        ]),
+        encoding="utf-8",
+    )
+    paths = audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=[daemon],
+        session_dirs=[],
+        db_path=tmp_path / "audit.db",
+    )
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "guardian_runtime_instability" in report
+    assert "admin :3456" in report
+    assert "Status: `open`" in report
