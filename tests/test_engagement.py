@@ -122,18 +122,45 @@ def test_quote_reply_always_attributes_to_card(tmp_path):
 def test_record_response_is_flock_serialized(tmp_path):
     """Red-team P1-B: the read-scan-append must hold an exclusive flock so two
     concurrent recorders can't both read responded_already=False and
-    double-credit. We can't easily force a true race in a unit test, but we
-    pin that the lock path exists and the serial cap still holds."""
-    import json, time, inspect
+    double-credit. Verify by holding an exclusive lock and confirming that
+    record_response blocks (returns only after the lock is released)."""
+    import json, time, fcntl, threading
     from core import engagement
-    # The source must acquire an exclusive flock around the critical section.
-    src = inspect.getsource(engagement.record_response)
-    assert "LOCK_EX" in src and "flock" in src
-    # And the cap still holds when called serially under the lock.
     log = tmp_path / "engagement_log.jsonl"
     now = int(time.time())
     log.write_text(json.dumps({"type": "sent", "source": "checkin", "epoch": now}) + "\n")
-    engagement.record_response(log, "回了")
+
+    lock_acquired_by_thread = threading.Event()
+    lock_released = threading.Event()
+
+    def hold_lock():
+        fh = open(log, "a")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        lock_acquired_by_thread.set()
+        lock_released.wait(timeout=5)
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+    t = threading.Thread(target=hold_lock)
+    t.start()
+    lock_acquired_by_thread.wait(timeout=5)
+
+    result_box = [None]
+
+    def try_record():
+        result_box[0] = engagement.record_response(log, "回了")
+
+    recorder = threading.Thread(target=try_record)
+    recorder.start()
+    recorder.join(timeout=0.5)
+    assert recorder.is_alive(), "record_response should block while another lock is held"
+
+    lock_released.set()
+    recorder.join(timeout=5)
+    t.join(timeout=5)
+    assert result_box[0] is True
+
+    # Serial cap still holds
     engagement.record_response(log, "又说一句")
     rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     credited = [r for r in rows if r.get("type") == "response" and r["source"] == "checkin"]

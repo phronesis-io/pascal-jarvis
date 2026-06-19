@@ -157,9 +157,14 @@ def snap_to_golden(dt: datetime) -> datetime:
 # DB helpers — thin wrappers over dashboard.db
 # ---------------------------------------------------------------------------
 
+_sys_path_added = False
+
 def _get_db():
-    import sys
-    sys.path.insert(0, str(ROOT))
+    global _sys_path_added
+    if not _sys_path_added:
+        import sys
+        sys.path.insert(0, str(ROOT))
+        _sys_path_added = True
     from dashboard.db import get_db
     return get_db()
 
@@ -302,6 +307,7 @@ def create_intent(
     closure_touches: int = 0,
     closure_followup_id: str | None = None,
     parent_intent_id: str | None = None,
+    _db=None,
 ) -> str:
     """Create a new intent. Returns intent ID.
 
@@ -340,7 +346,7 @@ def create_intent(
                 f"cron intent needs a valid 5-field expression, got {expr!r}")
         next_fire_at = nxt.isoformat()
 
-    db = _get_db()
+    db = _db or _get_db()
     iid = intent_id or f"int_{uuid.uuid4().hex[:10]}"
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
 
@@ -365,7 +371,8 @@ def create_intent(
          closure_result, closure_touches, closure_followup_id, parent_intent_id,
          next_fire_at),
     )
-    db.commit()
+    if _db is None:
+        db.commit()
     return iid
 
 
@@ -984,6 +991,7 @@ def _spawn_closure_followup(parent: dict) -> str | None:
             f"并 action: silent。否则 action: silent（不产出任何用户可见内容）。"
         )
 
+    db = _get_db()
     fu_id = create_intent(
         name=f"闭环: {parent['name']}",
         trigger_type="date",
@@ -997,8 +1005,8 @@ def _spawn_closure_followup(parent: dict) -> str | None:
         parent_intent_id=pid,            # marks this as a follow-up → never re-spawns
         intent_id=f"{pid}__fu",          # deterministic → re-spawn overwrites
         tags=["closure-followup"],
+        _db=db,
     )
-    db = _get_db()
     db.execute(
         "UPDATE intentions SET closure_status = 'awaiting', closure_followup_id = ? WHERE id = ?",
         (fu_id, pid),

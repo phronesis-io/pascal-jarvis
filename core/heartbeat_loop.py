@@ -913,7 +913,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         time.sleep(check_interval)
         gap = _sleep_gap_seconds(time.time() - sleep_started, check_interval)
         if gap:
-            sched_emit(jd, "sleep_gap", duration_s=round(gap, 1),
+            sched_emit(jd, "sleep_gap", source="heartbeat_loop",
+                       duration_s=round(gap, 1),
                        slept_for_s=round(gap + check_interval, 1),
                        expected_s=check_interval)
 

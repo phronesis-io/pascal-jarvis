@@ -1071,3 +1071,91 @@ def test_calendar_no_carry_when_nothing_to_bring(intent_db):
     assert carry == []
     # but a regular prep is still created
     assert any("calendar-prep" in _tags_of(mod.get_intent(i)) for i in created)
+
+
+# ---------------------------------------------------------------------------
+# update_intent — field whitelist, JSON serialization, edge cases
+# ---------------------------------------------------------------------------
+
+def test_update_intent_basic_field(intent_db):
+    """A simple scalar field update should persist and be readable back."""
+    from core.intentions import create_intent, get_intent, update_intent
+
+    iid = create_intent(
+        name="original name",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-01-01T09:00:00"},
+        prompt="test",
+    )
+    result = update_intent(iid, name="updated name")
+    assert result is True
+    assert get_intent(iid)["name"] == "updated name"
+
+
+def test_update_intent_json_field_serialization(intent_db):
+    """JSON-typed fields (tags, trigger_config, etc.) passed as native Python
+    objects must be serialized to JSON strings for storage and readable back."""
+    from core.intentions import create_intent, get_intent, update_intent
+
+    iid = create_intent(
+        name="json test",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-01-01T09:00:00"},
+        prompt="test",
+    )
+    new_tags = ["urgent", "closure-followup"]
+    new_trigger = {"datetime": "2099-06-15T12:00:00"}
+    new_context = {"key": "value", "nested": {"a": 1}}
+    update_intent(iid, tags=new_tags, trigger_config=new_trigger, context=new_context)
+
+    intent = get_intent(iid)
+    assert json.loads(intent["tags"]) == new_tags
+    assert json.loads(intent["trigger_config"]) == new_trigger
+    assert json.loads(intent["context"]) == new_context
+
+
+def test_update_intent_disallowed_fields_rejected(intent_db):
+    """Passing only disallowed field names should return False (no-op)."""
+    from core.intentions import create_intent, get_intent, update_intent
+
+    iid = create_intent(
+        name="guard test",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-01-01T09:00:00"},
+        prompt="test",
+    )
+    result = update_intent(iid, id="hacked", nonexistent_field="nope")
+    assert result is False
+    assert get_intent(iid)["name"] == "guard test"
+
+
+def test_update_intent_mixed_allowed_and_disallowed(intent_db):
+    """When both allowed and disallowed fields are passed, only allowed ones
+    should be applied; the call should return True."""
+    from core.intentions import create_intent, get_intent, update_intent
+
+    iid = create_intent(
+        name="mixed test",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-01-01T09:00:00"},
+        prompt="original prompt",
+        priority=5,
+    )
+    result = update_intent(iid, prompt="new prompt", id="hacked", bogus="x")
+    assert result is True
+    intent = get_intent(iid)
+    assert intent["prompt"] == "new prompt"
+    assert intent["id"] == iid  # unchanged
+
+
+def test_update_intent_empty_kwargs(intent_db):
+    """Calling with no kwargs should return False."""
+    from core.intentions import create_intent, update_intent
+
+    iid = create_intent(
+        name="empty test",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-01-01T09:00:00"},
+        prompt="test",
+    )
+    assert update_intent(iid) is False

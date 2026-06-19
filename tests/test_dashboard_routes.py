@@ -604,6 +604,20 @@ class TestEngagementBoard:
         report = source_engagement_report(tmp_path, days=7)
         assert [r["source"] for r in report["sources"]] == ["fresh"]
 
+    def test_source_engagement_report_empty_log(self, tmp_path):
+        from dashboard.pages.engagement import source_engagement_report
+
+        report = source_engagement_report(tmp_path, days=7)
+        assert report["sources"] == []
+        assert report["totals"]["sent"] == 0
+
+    def test_source_engagement_report_empty_jsonl(self, tmp_path):
+        from dashboard.pages.engagement import source_engagement_report
+
+        (tmp_path / "engagement_log.jsonl").write_text("", encoding="utf-8")
+        report = source_engagement_report(tmp_path, days=7)
+        assert report["sources"] == []
+
     def test_source_engagement_report_caps_historical_duplicate_reply_rate(self, tmp_path):
         from dashboard.pages.engagement import source_engagement_report
 
@@ -646,6 +660,47 @@ class TestOpsBoard:
         flagged = [row["text"] for row in result["lines"] if row["flagged"]]
         assert any("timed out" in row for row in flagged)
         assert any("Claude CLI not found" in row for row in flagged)
+
+    def test_tail_log_missing_file(self, tmp_path):
+        from dashboard.pages.ops import tail_log
+
+        result = tail_log(tmp_path / "nope.log")
+        assert result["missing"] is True
+        assert result["lines"] == []
+
+    def test_tail_log_small_file_returns_all(self, tmp_path):
+        from dashboard.pages.ops import tail_log
+
+        log = tmp_path / "small.log"
+        log.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        result = tail_log(log, lines=100)
+        assert len(result["lines"]) == 3
+        assert result["lines"][0]["text"] == "line1"
+        assert result["missing"] is False
+
+    def test_tail_log_grep_filter(self, tmp_path):
+        from dashboard.pages.ops import tail_log
+
+        log = tmp_path / "filtered.log"
+        log.write_text("alpha\nbeta\nalpha again\ngamma\n", encoding="utf-8")
+        result = tail_log(log, lines=100, grep="alpha")
+        assert len(result["lines"]) == 2
+        assert all("alpha" in r["text"] for r in result["lines"])
+
+    def test_age_minutes_all_formats(self):
+        from dashboard.pages.ops import _age_minutes
+        from datetime import datetime
+
+        now = datetime(2026, 6, 19, 12, 0, 0)
+        assert _age_minutes("2026-06-19 11:30:00", now=now) == 30
+        assert _age_minutes("2026-06-19 11:30", now=now) == 30
+        assert _age_minutes("2026-06-19T11:30:00", now=now) == 30
+
+    def test_age_minutes_malformed(self):
+        from dashboard.pages.ops import _age_minutes
+
+        assert _age_minutes("not-a-date") is None
+        assert _age_minutes("") is None
 
     def test_queue_overview_reads_night_breach_jobs_and_delivery(self, tmp_path):
         from dashboard.pages.ops import queue_overview

@@ -168,14 +168,20 @@ def _apply_adaptations(adaptations: list[dict]):
 
     # Load task intervals from HEARTBEAT.md for reference
     sys.path.insert(0, str(jarvis_dir))
-    from core.heartbeat import HeartbeatRunner, parse_heartbeat
+    from core.heartbeat import parse_heartbeat
     tasks_def = {t["name"]: t["interval"] for t in parse_heartbeat(jarvis_dir / "HEARTBEAT.md")}
     # Infrastructure tasks are exempt from engagement tuning: they are silent
     # by design, so 0% engagement is their NORMAL state, not a signal to slow
     # them. 2026-06-11 the analyzer slowed Tier-0 calendar-sync to 2h within
     # hours of the apply path going live — stale-calendar complaints (5/25)
     # would have recurred with nothing reporting why.
-    protected = HeartbeatRunner.PRIORITY_TASKS | HeartbeatRunner.TIER0_TASKS
+    # Mirrored from HeartbeatRunner.PRIORITY_TASKS | .TIER0_TASKS — avoids
+    # importing the full HeartbeatRunner class and its dependency tree in this
+    # subprocess post-hook.
+    _PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
+                       "eigenflux-friends", "eigenflux-messages", "intention-check"}
+    _TIER0_TASKS = {"calendar-sync"}
+    protected = _PRIORITY_TASKS | _TIER0_TASKS
 
     changed = []
     for a in adaptations:

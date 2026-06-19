@@ -201,14 +201,15 @@ def ops_page():
                     {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
                 ]
                 rows = []
-                for e in event_rows:
+                for i, e in enumerate(event_rows):
                     rows.append({
+                        "_id": f"{e.get('ts', '')}-{i}",
                         "ts": e.get("ts", ""),
                         "event": e.get("event", ""),
                         "task": e.get("task", ""),
                         "detail": e.get("status") or e.get("reason") or e.get("count") or "",
                     })
-                ui.table(columns=columns, rows=rows, row_key="ts").classes("w-full")
+                ui.table(columns=columns, rows=rows, row_key="_id").classes("w-full")
             else:
                 ui.label("No sched_events yet.").classes("text-gray-400 text-sm italic")
 

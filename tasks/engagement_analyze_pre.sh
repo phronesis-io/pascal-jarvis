@@ -4,6 +4,7 @@
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 LOG_FILE="$JARVIS_DIR/engagement_log.jsonl"
+export LOG_FILE
 
 if [ ! -f "$LOG_FILE" ]; then
   exit 0
@@ -24,12 +25,12 @@ if [ "$total" -lt 10 ]; then
   exit 0
 fi
 
-python3 -c "
+python3 - <<'PYEOF'
 import json, sys, os
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-log_path = os.environ.get('ENGAGEMENT_LOG', '$LOG_FILE')
+log_path = os.environ.get('ENGAGEMENT_LOG', os.environ.get('LOG_FILE', ''))
 
 entries = []
 with open(log_path, encoding='utf-8') as f:
@@ -120,12 +121,9 @@ if experiment_sent:
 # === Delivery-ack attribution (REQ-15: read receipts) ===
 # Honest semantics: im.message.message_read_v1 arrives as BULK catch-up acks
 # (opening the chat acks everything unread at once — real events carry 10+
-# message_ids), so 'acked' means 'the chat was opened after this send', a
-# DELIVERY/ATTENTION watermark — NOT 'this content was seen and considered'.
-# NO DOUBLE QUOTES in comments here: this python code lives inside a bash
-# double-quoted string — an unescaped quote truncates the program silently
-# (it happened: everything below this section vanished from the output).
-# Also: sends batched in one heartbeat cycle share the same message_ids
+# message_ids), so "acked" means "the chat was opened after this send", a
+# DELIVERY/ATTENTION watermark — NOT "this content was seen and considered".
+# Sends batched in one heartbeat cycle share the same message_ids
 # (the cycle's send list), so per-source rows are cycle-granular.
 #   never_acked high => the chat isn't being opened — delivery/timing problem;
 #                       do NOT read it as content disinterest when tuning.
@@ -228,7 +226,7 @@ print()
 print('=== RECENT RAW ENTRIES (last 20) ===')
 for e in entries[-20:]:
     print(json.dumps(e, ensure_ascii=False))
-"
+PYEOF
 # (stderr intentionally NOT silenced: a python traceback here must surface
 #  in the heartbeat log, not vanish — a silent truncation hid the entire
 #  DELIVERY-ACK section once already)

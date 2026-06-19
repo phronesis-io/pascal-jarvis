@@ -231,6 +231,24 @@ def _event_type(message: str) -> tuple[str, str, dict]:
     return "log", message, meta
 
 
+_MAX_LOG_BYTES = 5 * 1024 * 1024  # 5 MB cap per log file
+
+
+def _tail_read(path: Path, max_bytes: int = _MAX_LOG_BYTES) -> str:
+    """Read up to the last *max_bytes* of a text file, dropping any partial first line."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size <= max_bytes:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    with open(path, "rb") as f:
+        f.seek(size - max_bytes)
+        raw = f.read().decode("utf-8", errors="ignore")
+    first_nl = raw.find("\n")
+    return raw[first_nl + 1:] if first_nl >= 0 else raw
+
+
 def ingest_logs(conn: sqlite3.Connection, run_id: int, paths: Iterable[Path],
                 since: datetime) -> int:
     count = 0
@@ -238,7 +256,7 @@ def ingest_logs(conn: sqlite3.Connection, run_id: int, paths: Iterable[Path],
     for path in paths:
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for line in _tail_read(path).splitlines():
             m = LOG_RE.match(line)
             if not m:
                 # Windowed audits need timestamped evidence. Long-lived logs can
@@ -440,20 +458,37 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
             status="fixed",
         )
 
-    visible_provider_errors = conn.execute(
-        """
+    _provider_sql_filter = " OR ".join(
+        f"LOWER(text) LIKE '%{needle}%'" for needle in PROVIDER_ERROR_NEEDLES
+    )
+    candidate_provider = conn.execute(
+        f"""
         SELECT ts, session_id, role, text FROM session_messages
-        WHERE run_id=? AND role='assistant'
-        ORDER BY ts DESC LIMIT 200
+        WHERE run_id=? AND role='assistant' AND ({_provider_sql_filter})
+        ORDER BY ts DESC
         """,
         (run_id,),
     ).fetchall()
     direct_provider_rows = [
-        row for row in visible_provider_errors
+        row for row in candidate_provider
         if _is_direct_provider_surface(row["text"])
     ]
+
+    _empty_sql_filter = " OR ".join(
+        f"LOWER(text) LIKE '%{needle}%'" for needle in EMPTY_REPLY_NEEDLES
+    )
+    candidate_empty = conn.execute(
+        f"""
+        SELECT ts, session_id, role, text FROM session_messages
+        WHERE run_id=? AND role='assistant'
+          AND LENGTH(text) <= 120
+          AND ({_empty_sql_filter})
+        ORDER BY ts DESC
+        """,
+        (run_id,),
+    ).fetchall()
     direct_empty_rows = [
-        row for row in visible_provider_errors
+        row for row in candidate_empty
         if _is_direct_empty_surface(row["text"])
     ]
     provider_issue_type = (

@@ -33,8 +33,17 @@ def _epoch(row: dict) -> float:
     return 0
 
 
+_read_cache: dict = {"mtime": 0.0, "size": 0, "rows": []}
+
+
 def _read_rows(jarvis_dir: Path) -> list[dict]:
     path = jarvis_dir / "engagement_log.jsonl"
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    if st.st_mtime == _read_cache["mtime"] and st.st_size == _read_cache["size"]:
+        return _read_cache["rows"]
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -47,6 +56,7 @@ def _read_rows(jarvis_dir: Path) -> list[dict]:
             continue
         if isinstance(row, dict):
             rows.append(row)
+    _read_cache.update(mtime=st.st_mtime, size=st.st_size, rows=rows)
     return rows
 
 

@@ -237,6 +237,61 @@ def test_apply_adaptations_structured_direction(tmp_path, monkeypatch):
     assert overrides == {"a": 7200}
 
 
+def test_apply_adaptations_increase_direction(tmp_path, monkeypatch):
+    """The 'increase' direction halves the interval (more frequent).
+    Also verifies Chinese synonyms (加频/提高/增加) and the 0.25x floor."""
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "### checkin\n- interval: 2h\n- prompt: p\n\n"
+        "### content-recommend\n- interval: 4h\n- prompt: q\n\n"
+        "### slow-task\n- interval: 30m\n- prompt: r\n")
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    from tasks.engagement_analyze_post import _apply_adaptations
+
+    _apply_adaptations([
+        {"target": "checkin", "direction": "increase", "suggestion": "用户互动频繁"},
+        {"target": "content-recommend", "direction": "加频", "suggestion": "回复率上升"},
+    ])
+
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides["checkin"] == 3600         # 2h * 0.5 = 1h
+    assert overrides["content-recommend"] == 7200  # 4h * 0.5 = 2h
+
+    # Compound after cooldown: 1h * 0.5 = 30min, still above 0.25x base (2h/4=30min)
+    meta_file = tmp_path / "interval_overrides_meta.json"
+    meta = json.loads(meta_file.read_text())
+    for k in meta:
+        meta[k] = 0
+    meta_file.write_text(json.dumps(meta))
+
+    _apply_adaptations([
+        {"target": "checkin", "direction": "increase", "suggestion": ""},
+    ])
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides["checkin"] == 1800  # 1h * 0.5 = 30min = 2h/4 (at floor)
+
+    # Floor: a further increase cannot go below 0.25x base
+    meta = json.loads(meta_file.read_text())
+    for k in meta:
+        meta[k] = 0
+    meta_file.write_text(json.dumps(meta))
+    _apply_adaptations([
+        {"target": "checkin", "direction": "increase", "suggestion": ""},
+    ])
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides["checkin"] == 1800  # clamped at 0.25x base (2h/4=1800s)
+
+    # Keyword fallback for "increase" (no structured direction)
+    meta = json.loads(meta_file.read_text())
+    for k in meta:
+        meta[k] = 0
+    meta_file.write_text(json.dumps(meta))
+    _apply_adaptations([
+        {"target": "slow-task", "suggestion": "increase frequency, more relevant"},
+    ])
+    overrides = json.loads((tmp_path / "interval_overrides.json").read_text())
+    assert overrides["slow-task"] == 900  # 30m * 0.5 = 15m
+
+
 def test_engagement_content_mix_written_to_memory(tmp_path, monkeypatch):
     from tasks import engagement_analyze_post as post
     monkeypatch.setattr(post, "MEMORY_DIR", tmp_path / "memory")

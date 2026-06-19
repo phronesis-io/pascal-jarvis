@@ -4,6 +4,7 @@ Tests the guardian daemon's health-check and restart logic.
 """
 
 import os
+import subprocess
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -100,30 +101,67 @@ def test_daemon_stale_heartbeat_still_fails_outside_wake_grace(tmp_path, monkeyp
     assert any("Heartbeat stale" in issue for issue in result["issues"])
 
 
-def test_kill_patterns_include_eigenflux():
+def test_kill_patterns_include_eigenflux(tmp_path, monkeypatch):
     """diagnose_and_fix must kill eigenflux stream processes during restart.
 
     Bug: old kill list didn't include eigenflux → orphan streams survived restart
     → 'Connection replaced by another session' infinite loop.
     """
-    import inspect
-    source = inspect.getsource(daemon_mod.diagnose_and_fix)
-    assert "eigenflux stream" in source, \
-        "diagnose_and_fix must include 'eigenflux stream' in its kill patterns"
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
+    monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
+    monkeypatch.setattr(daemon_mod, "restart_count", 0)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "check_health", lambda: {"healthy": True, "issues": []})
+
+    killed_patterns = []
+    original_run = subprocess.run
+
+    def capture_pkill(args, **kwargs):
+        if args and args[0] == "pkill":
+            killed_patterns.append(args[-1])
+        return original_run(["true"], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_pkill)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod.time, "sleep", lambda _: None)
+
+    daemon_mod.diagnose_and_fix(["test issue"])
+
+    assert any("eigenflux stream" in p for p in killed_patterns), \
+        f"diagnose_and_fix must pkill 'eigenflux stream'; patterns used: {killed_patterns}"
 
 
-def test_restart_wait_is_at_least_60s():
+def test_restart_wait_is_at_least_60s(tmp_path, monkeypatch):
     """After restarting bot.sh, daemon must wait long enough for the first
     heartbeat cycle to complete (Claude call can take 60-120s).
 
     Bug: old code waited only 10s → immediately judged as 'still unhealthy'
     → triggered another restart → restart spiral.
     """
-    import inspect
-    source = inspect.getsource(daemon_mod.diagnose_and_fix)
-    # Check for the sleep loop with range(90) — 90 seconds
-    assert "range(90)" in source, \
-        "diagnose_and_fix must wait ~90s after restart before health check"
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
+    monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
+    monkeypatch.setattr(daemon_mod, "restart_count", 0)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "check_health", lambda: {"healthy": True, "issues": []})
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
+
+    sleep_total = 0.0
+
+    def track_sleep(secs):
+        nonlocal sleep_total
+        sleep_total += secs
+
+    monkeypatch.setattr(daemon_mod.time, "sleep", track_sleep)
+
+    daemon_mod.diagnose_and_fix(["test issue"])
+
+    assert sleep_total >= 60, \
+        f"diagnose_and_fix must sleep ≥60s after restart; only slept {sleep_total}s"
 
 
 def test_lark_listener_must_be_owned_by_bot(monkeypatch):
