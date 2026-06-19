@@ -88,6 +88,7 @@ def _isolate_state(monkeypatch):
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
     monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
     monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
+    monkeypatch.setattr(ip, "note_closure_touch", lambda *a, **k: None)
 
 
 def test_malformed_intents_envelope_not_emitted(monkeypatch, capsys):
@@ -146,6 +147,7 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
     monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
     monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
     monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
+    monkeypatch.setattr(ip, "note_closure_touch", lambda *a, **k: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent",
                         lambda iid: {"parent_intent_id": "int_parent", "name": "闭环: 约学妹"})
@@ -157,6 +159,52 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
     blob = json.dumps(card, ensure_ascii=False)
     assert "intent_close" in blob
     assert "int_parent" in blob
+
+
+def test_rendered_closure_card_records_touch(monkeypatch, capsys):
+    """A closure ask consumes touch budget only once the card is rendered."""
+    calls = []
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_fu"])
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "mark_breaches_shown", lambda ids: None)
+    monkeypatch.setattr(ip, "_ledger_append", lambda ids, card_roots=None: None)
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "get_intent",
+                        lambda iid: {"parent_intent_id": "int_parent", "name": "闭环再问"})
+    monkeypatch.setattr(ip, "note_closure_touch",
+                        lambda parent, via="card": calls.append((parent, via)))
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_fu": {"response": "现在真的跑起来了吗？", "action": "notify"}}}'))
+    ip.main()
+    assert "现在真的跑起来了吗" in capsys.readouterr().out
+    assert calls == [("int_parent", "card")]
+
+
+def test_duplicate_closure_card_does_not_record_touch(tmp_path, monkeypatch, capsys):
+    """Duplicate-suppressed closure cards do not burn proactive touch budget."""
+    import json, datetime
+    calls = []
+    ledger = tmp_path / ".intent_card_ledger.jsonl"
+    fresh = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    ledger.write_text(json.dumps(
+        {"ts": fresh, "intent_ids": ["int_parent__fu"], "card_roots": ["int_parent"], "message_ids": []}) + "\n")
+    monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_parent__reask1"])
+    monkeypatch.setattr(ip, "read_inflight_breaches", lambda: [])
+    monkeypatch.setattr(ip, "reconcile_inflight",
+                        lambda covered: {"retried": [], "expired": [], "breached": []})
+    monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
+    monkeypatch.setattr(ip, "get_intent",
+                        lambda iid: {"parent_intent_id": "int_parent", "name": "闭环再问"})
+    monkeypatch.setattr(ip, "note_closure_touch",
+                        lambda parent, via="card": calls.append((parent, via)))
+    monkeypatch.setattr("sys.stdin", _Stdin(
+        '{"intents": {"int_parent__reask1": {"response": "现在真的跑起来了吗？", "action": "notify"}}}'))
+    ip.main()
+    assert capsys.readouterr().out.strip() == ""
+    assert calls == []
 
 
 class _Stdin:

@@ -672,6 +672,86 @@ def test_get_closure_due_excludes_healing_includes_external(intent_db):
     assert heal not in due_ids                      # healing structurally excluded
 
 
+def test_generate_closure_reask_intents_after_followup_drained(intent_db):
+    """A hard/external closure whose first follow-up asked and got no result
+    becomes a bounded re-ask intent instead of sinking forever."""
+    import core.intentions as mod
+
+    ext = mod.create_intent(name="上线 Jarvis 修复", trigger_type="date",
+                            trigger_config={"datetime": "2026-06-11T10:00:00"},
+                            category="external", closure_question="现在真的跑起来了吗？")
+    _fire(ext)
+    fu = mod.get_intent(ext)["closure_followup_id"]
+    mod.mark_triggered(fu)
+    mod.mark_executed(fu, result="asked, no answer")
+
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET executed_at = datetime('now', '-25 hours') WHERE id = ?", (fu,))
+    conn.commit(); conn.close()
+
+    created = mod.generate_closure_reask_intents()
+    assert len(created) == 1
+    reask = mod.get_intent(created[0])
+    assert reask["parent_intent_id"] == ext
+    assert reask["source"] == "closure"
+    assert reask["action_type"] == "notify"
+    assert "闭环再问" in reask["prompt"]
+    assert mod.get_intent(ext)["closure_followup_id"] == created[0]
+    assert mod.generate_closure_reask_intents() == []  # pending reask blocks dupes
+
+
+def test_generate_closure_reask_respects_gap_and_healing(intent_db):
+    """Re-asks are daily-throttled and healing closures remain never-card."""
+    import core.intentions as mod
+
+    ext = mod.create_intent(name="ext", trigger_type="date",
+                            trigger_config={"datetime": "2026-06-11T10:00:00"},
+                            category="external", closure_question="?")
+    heal = mod.create_intent(name="heal", trigger_type="date",
+                             trigger_config={"datetime": "2026-06-11T10:00:00"},
+                             category="healing", closure_question="?")
+    _fire(ext); _fire(heal)
+    ext_fu = mod.get_intent(ext)["closure_followup_id"]
+    heal_fu = mod.get_intent(heal)["closure_followup_id"]
+    for fu in (ext_fu, heal_fu):
+        mod.mark_triggered(fu)
+        mod.mark_executed(fu, result="asked")
+
+    # The external follow-up was just executed, so the 24h re-ask gap blocks it.
+    created = mod.generate_closure_reask_intents()
+    assert created == []
+
+    # Even after the gap, healing is structurally excluded.
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET executed_at = datetime('now', '-25 hours') WHERE id IN (?, ?)",
+                 (ext_fu, heal_fu))
+    conn.commit(); conn.close()
+    created = mod.generate_closure_reask_intents()
+    assert len(created) == 1
+    assert mod.get_intent(created[0])["parent_intent_id"] == ext
+
+
+def test_note_closure_touch_counts_rendered_card_budget(intent_db):
+    """Only rendered closure cards should consume proactive touch budget."""
+    import core.intentions as mod
+
+    ext = mod.create_intent(name="ext", trigger_type="date",
+                            trigger_config={"datetime": "2026-06-11T10:00:00"},
+                            category="external", closure_question="?")
+    _fire(ext)
+    assert mod.note_closure_touch(ext, via="card") is True
+    assert mod.note_closure_touch(ext, via="card") is True
+    assert mod.get_intent(ext)["closure_touches"] == 2
+
+    conn = mod._get_db()
+    conn.execute("UPDATE intentions SET closure_touches = ? WHERE id = ?",
+                 (mod.CLOSURE_POLICY["external"]["decay_budget"], ext))
+    conn.execute("UPDATE intentions SET status = 'executed' WHERE id = ?",
+                 (mod.get_intent(ext)["closure_followup_id"],))
+    conn.commit(); conn.close()
+    assert mod.get_closure_due() == []
+
+
 def test_snapshot_awaiting_excludes_healing(intent_db, tmp_path):
     """The 待闭环 wall shows external; healing/autonomous never appear (no visible
     'you didn't do it' ledger). Old '不追做没做' wording is gone."""

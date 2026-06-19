@@ -23,6 +23,7 @@ sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.intentions import (
     get_due_intents, mark_triggered, generate_calendar_intents,
     lifecycle_sweep, snapshot_active_intents, write_inflight, peek_breaches,
+    generate_closure_reask_intents,
 )
 from pathlib import Path
 
@@ -48,6 +49,16 @@ try:
     snapshot_active_intents(os.environ['MEMORY_DIR'])
 except Exception as e:
     print(f"[intentions] Snapshot error: {e}", file=sys.stderr)
+
+# 1c. Re-surface drained hard/external closures as normal bounded intents.
+#     This consumes get_closure_due() in the heartbeat path: a follow-up that
+#     asked once and got no answer must not silently sink forever.
+try:
+    reasks = generate_closure_reask_intents(limit=3)
+    if reasks:
+        print(f"[intentions] closure reasks generated: {len(reasks)}", file=sys.stderr)
+except Exception as e:
+    print(f"[intentions] closure reask error: {e}", file=sys.stderr)
 
 # 2. Check for due intents + breach notifications owed. peek_breaches is
 #    NON-mutating (red-team fix): the notify_attempts counter is bumped by

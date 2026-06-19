@@ -26,6 +26,8 @@
 
 ## Done (recent)
 
+- Intent closure acceleration — drained hard/external closures now generate
+  bounded re-ask intents, and only rendered closure cards consume touch budget
 - Prompt A/B framework — memory-backed prompt experiments inject approved variants into heartbeat task prompts, record exposure metadata in engagement logs, and surface variant performance in engagement-analyze
 - Engagement self-evolution content mix — engagement-analyze now writes advisory `engagement_content_mix.md`; checkin pre-hook consumes it as steering context alongside guarded interval tuning
 - Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files

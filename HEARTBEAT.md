@@ -598,6 +598,11 @@ SILENT_TASKS, not this doc.
       volunteered the result, record it with closure + action "silent". Otherwise action "silent"
       with no content. 闭环≠催促 — capture quietly, never nag.
 
+    CLOSURE RE-ASKS (a row whose prompt says "闭环再问"):
+    - Treat it as a bounded second touch for an unresolved external/hard commitment.
+    - Ask exactly the closure question, short and direct, without apology or pressure.
+    - If the answer is already known from context/memory, record closure silently instead of asking.
+
     Each response must be a real, full-sentence message the user can act on, or else
     action: silent. Do NOT emit one-word acknowledgements as notify cards.
 

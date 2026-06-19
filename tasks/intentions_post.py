@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 from core.intentions import (
     mark_executed, mark_failed, get_intent, record_closure,
     read_inflight, read_inflight_breaches, reconcile_inflight,
-    mark_breaches_shown, validate_envelope,
+    mark_breaches_shown, validate_envelope, note_closure_touch,
 )
 from core.card import build_card
 from core.safety import parse_json_response
@@ -323,6 +323,14 @@ def main():
                 _ledger_append(covered, card_roots=sorted(nag_roots))
                 print(build_card("🎯 Intent", combined, source="intentions",
                                  buttons=buttons))
+                # Proactive closure budget counts Pascal-visible asks, not row
+                # creation. Duplicate-suppressed cards do not call this path.
+                for spec in button_specs:
+                    try:
+                        note_closure_touch(spec.get("parent", ""), via="card")
+                    except Exception as e:
+                        print(f"[intentions_post] note_closure_touch failed: {e}",
+                              file=sys.stderr)
                 # A card actually rendered → the apology (if any breach rode
                 # this cycle's prompt) was delivered. Bump notify_attempts for
                 # exactly those breach ids — NOT reconcile's freshly-queued

@@ -56,6 +56,12 @@ CRON_STALENESS = timedelta(hours=6)
 # closure 2 days late. Expire instead of nag.
 CLOSURE_STALE_DAYS = timedelta(days=2)
 
+# Closure re-ask throttle. Once a hard/external closure follow-up has fired and
+# still produced no result, re-surface it as a normal closure intent at most once
+# per day. This keeps "close the loop" aggressive enough to matter without
+# creating an every-minute card loop.
+CLOSURE_REASK_MIN_GAP = timedelta(hours=24)
+
 
 def _emit_intent(event: str, intent_id: str, **fields) -> None:
     """Emit an intent-lifecycle event to sched_events.jsonl. Never raises."""
@@ -1047,6 +1053,60 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "",
     return True
 
 
+def _closure_child_anchor(child: dict) -> datetime | None:
+    """Latest useful timestamp on a closure child row."""
+    for key in ("executed_at", "triggered_at", "created_at"):
+        raw = child.get(key)
+        if not raw:
+            continue
+        try:
+            return _coerce(datetime.fromisoformat(raw))
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _latest_closure_child_at(parent_id: str) -> datetime | None:
+    """Latest time any closure child for a parent was created/asked/executed."""
+    _init()
+    db = _get_db()
+    rows = db.execute(
+        "SELECT * FROM intentions WHERE parent_intent_id = ? AND source = 'closure'",
+        (parent_id,),
+    ).fetchall()
+    anchors = [_closure_child_anchor(dict(r)) for r in rows]
+    anchors = [a for a in anchors if a is not None]
+    return max(anchors) if anchors else None
+
+
+def _closure_reask_id(parent_id: str, touch_index: int) -> str:
+    return f"{parent_id}__reask{touch_index}"
+
+
+def note_closure_touch(parent_id: str, via: str = "card") -> bool:
+    """Count a proactive closure touch only after a card actually rendered.
+
+    Creation of a re-ask intent is not a touch; a duplicate-suppressed outbox is
+    not a touch. The budget is about Pascal-visible asks, so post-script calls
+    this after the card print path succeeds.
+    """
+    _init()
+    parent_id = str(parent_id).strip()
+    p = get_intent(parent_id)
+    if not p or p.get("closure_status") in _CLOSURE_TERMINAL:
+        return False
+    if p.get("closure_status") != "awaiting":
+        return False
+    db = _get_db()
+    db.execute(
+        "UPDATE intentions SET closure_touches = closure_touches + 1 WHERE id = ?",
+        (parent_id,),
+    )
+    db.commit()
+    _emit_intent("intent_closure_touch", parent_id, via=via)
+    return True
+
+
 def get_closure_due() -> list[dict]:
     """Awaiting parents the NIGHTLY review may re-ask. Healing-safe by design.
 
@@ -1078,6 +1138,68 @@ def get_closure_due() -> list[dict]:
                 continue  # follow-up still active — let it ask first, don't pile on
         due.append(it)
     return due
+
+
+def generate_closure_reask_intents(now: datetime | None = None,
+                                   limit: int = 3) -> list[str]:
+    """Create bounded re-ask intents for drained hard/external closures.
+
+    The old contract had `get_closure_due()`, but the heartbeat path never
+    consumed it. This turns due closure parents back into normal `source=closure`
+    notify intents so they inherit the same manifest, retry, dedup, and button
+    behavior as first follow-ups.
+    """
+    _init()
+    now = now or now_local()
+    created: list[str] = []
+    for parent in get_closure_due():
+        if limit and len(created) >= limit:
+            break
+        pid = parent["id"]
+        pol = CLOSURE_POLICY.get(parent.get("category", "none"), CLOSURE_POLICY["none"])
+        touches = int(parent.get("closure_touches") or 0)
+        if touches >= int(pol.get("decay_budget", 0) or 0):
+            continue
+        last = _latest_closure_child_at(pid)
+        if last and (now - last) < CLOSURE_REASK_MIN_GAP:
+            continue
+
+        touch_index = touches + 1
+        reask_id = _closure_reask_id(pid, touch_index)
+        if get_intent(reask_id):
+            continue
+
+        fire_at = snap_to_golden(now) if pol.get("may_notify") else now
+        cq = parent.get("closure_question", "")
+        prompt = (
+            f"闭环再问（第 {touch_index} 次，有界）：{parent['name']}。直接问 Pascal：{cq}\n"
+            f"如果他已经回答，就在信封里带 closure 字段记录："
+            f'{{"closure":{{"parent":"{pid}","outcome":"done","result":"<他的一句话答复>"}}}}。'
+            f"如果还没答，就发这一条 notify 卡片；保持短，带按钮，不道歉、不施压。"
+        )
+        iid = create_intent(
+            name=f"闭环再问: {parent['name']}",
+            trigger_type="date",
+            trigger_config={"datetime": fire_at.isoformat()},
+            prompt=prompt,
+            action_type="notify",
+            priority=int(parent.get("priority", 5) or 5),
+            source="closure",
+            category=parent.get("category", "external"),
+            closure_question=cq,
+            parent_intent_id=pid,
+            intent_id=reask_id,
+            tags=["closure-reask"],
+        )
+        db = _get_db()
+        db.execute(
+            "UPDATE intentions SET closure_followup_id = ? WHERE id = ?",
+            (iid, pid),
+        )
+        db.commit()
+        _emit_intent("intent_closure_reask", pid, child=iid, touch_index=touch_index)
+        created.append(iid)
+    return created
 
 
 def awaiting_closures(categories: tuple = ("hard", "external")) -> list[dict]:
