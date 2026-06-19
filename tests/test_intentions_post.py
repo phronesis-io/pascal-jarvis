@@ -284,3 +284,140 @@ def test_dedup_only_keys_on_button_roots_not_silent_slots(tmp_path, monkeypatch,
     # ledger row for this card must carry EMPTY card_roots (no button/closure)
     row = json.loads(ledger.read_text().splitlines()[-1])
     assert row["card_roots"] == []            # int_B not registered as a nag root
+
+
+# ── E2E: main() → reconcile_inflight through a real DB ────────────────────
+
+def test_main_reconcile_inflight_e2e(tmp_path, monkeypatch, capsys):
+    """End-to-end: envelope covers one intent, leaves another uncovered.
+
+    Exercises the REAL reconcile_inflight + mark_executed through an actual
+    SQLite DB — no mocking of the core.intentions data path.
+    """
+    import json
+    import sqlite3
+    import core.intentions as mod
+
+    # ── Wire a real tmp SQLite ──
+    db_path = tmp_path / "data" / "jarvis.db"
+    db_path.parent.mkdir(parents=True)
+
+    def _test_get_db():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    monkeypatch.setattr(mod, "_get_db", _test_get_db)
+    monkeypatch.setattr(mod, "_table_ready", False)
+    mod._init()
+
+    # ── Wire inflight / breach / sched files to tmp ──
+    inflight = tmp_path / "data" / ".intention_inflight.json"
+    breach_q = tmp_path / "data" / ".intent_breach_queue.jsonl"
+    ledger = tmp_path / "data" / ".intent_card_ledger.jsonl"
+    monkeypatch.setattr(mod, "INFLIGHT_FILE", inflight)
+    monkeypatch.setattr(mod, "BREACH_QUEUE", breach_q)
+    monkeypatch.setattr(ip, "CARD_LEDGER", ledger)
+    # Silence sched_events (no real sched_events.jsonl needed)
+    monkeypatch.setattr(mod, "_emit_intent", lambda *a, **k: None)
+
+    # ── Create two intents, mark both triggered ──
+    from core.intentions import create_intent, mark_triggered, get_intent
+
+    id_a = create_intent(
+        name="covered intent",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-06-19T09:00:00"},
+        prompt="remind me to drink water",
+        intent_id="int_e2e_a",
+    )
+    id_b = create_intent(
+        name="uncovered intent",
+        trigger_type="cron",
+        trigger_config={"expression": "0 * * * *"},
+        prompt="hourly check",
+        intent_id="int_e2e_b",
+    )
+    mark_triggered(id_a)
+    mark_triggered(id_b)
+
+    # Sanity: both should be 'triggered'
+    assert get_intent(id_a)["status"] == "triggered"
+    assert get_intent(id_b)["status"] == "triggered"
+
+    # Write the inflight manifest (normally done by intentions_pre.sh)
+    mod.write_inflight([id_a, id_b])
+
+    # ── Feed envelope covering ONLY int_a ──
+    envelope = json.dumps({
+        "intents": {
+            id_a: {"response": "记得喝水", "action": "notify"},
+        }
+    })
+    monkeypatch.setattr("sys.stdin", _Stdin(envelope))
+    ip.main()
+
+    # ── Verify via real DB ──
+    a = get_intent(id_a)
+    b = get_intent(id_b)
+
+    # Covered intent → executed
+    assert a["status"] == "executed"
+
+    # Uncovered cron intent → retried back to pending (cron always retries)
+    assert b["status"] == "pending"
+    assert "retry" in (b.get("last_error") or "").lower()
+
+    # Inflight manifest cleared
+    assert not inflight.exists()
+
+    # Card was emitted for the covered intent
+    out = capsys.readouterr().out
+    assert "喝水" in out
+
+
+def test_main_no_envelope_reconcile_e2e(tmp_path, monkeypatch, capsys):
+    """E2E no-envelope path: all inflight intents get the retry policy."""
+    import json
+    import sqlite3
+    import core.intentions as mod
+
+    db_path = tmp_path / "data" / "jarvis.db"
+    db_path.parent.mkdir(parents=True)
+
+    def _test_get_db():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    monkeypatch.setattr(mod, "_get_db", _test_get_db)
+    monkeypatch.setattr(mod, "_table_ready", False)
+    mod._init()
+
+    inflight = tmp_path / "data" / ".intention_inflight.json"
+    monkeypatch.setattr(mod, "INFLIGHT_FILE", inflight)
+    monkeypatch.setattr(mod, "BREACH_QUEUE", tmp_path / "data" / ".breach.jsonl")
+    monkeypatch.setattr(mod, "_emit_intent", lambda *a, **k: None)
+
+    from core.intentions import create_intent, mark_triggered, get_intent
+
+    iid = create_intent(
+        name="lost intent",
+        trigger_type="cron",
+        trigger_config={"expression": "0 9 * * *"},
+        prompt="morning check",
+        intent_id="int_e2e_lost",
+    )
+    mark_triggered(iid)
+    mod.write_inflight([iid])
+
+    monkeypatch.setattr("sys.stdin", _Stdin("__NO_ENVELOPE__"))
+    ip.main()
+
+    it = get_intent(iid)
+    assert it["status"] == "pending"
+    assert "envelope missing" in (it.get("last_error") or "")
+    assert not inflight.exists()
+    assert capsys.readouterr().out == ""

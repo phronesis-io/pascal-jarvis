@@ -1159,3 +1159,140 @@ def test_update_intent_empty_kwargs(intent_db):
         prompt="test",
     )
     assert update_intent(iid) is False
+
+
+# ── CLI integration tests ──────────────────────────────────────────────
+
+
+def _run_cli(intent_db, argv):
+    """Run _cli with patched DB, capturing stdout/stderr."""
+    import io
+    import contextlib
+    from core.intentions import _cli
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = _cli(argv)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _seed_intent(name="test task", dt="2099-12-31T09:00:00", prompt="remind me"):
+    from core.intentions import create_intent
+    return create_intent(
+        name=name,
+        trigger_type="date",
+        trigger_config={"datetime": dt},
+        prompt=prompt,
+    )
+
+
+def test_cli_list_default(intent_db):
+    iid = _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["list"])
+    assert rc == 0
+    assert "1 intent(s)" in out
+    assert iid in out
+
+
+def test_cli_list_by_status(intent_db):
+    _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["list", "pending"])
+    assert rc == 0
+    assert "1 intent(s) status=pending" in out
+
+    rc2, out2, _ = _run_cli(intent_db, ["list", "executed"])
+    assert rc2 == 0
+    assert "0 intent(s)" in out2
+
+
+def test_cli_get(intent_db):
+    iid = _seed_intent(name="get-me")
+    rc, out, _ = _run_cli(intent_db, ["get", iid])
+    assert rc == 0
+    parsed = json.loads(out)
+    assert parsed["name"] == "get-me"
+    assert parsed["id"] == iid
+
+
+def test_cli_get_missing(intent_db):
+    rc, out, _ = _run_cli(intent_db, ["get", "nonexistent"])
+    assert rc == 1
+    assert "not found" in out
+
+
+def test_cli_due(intent_db):
+    rc, out, _ = _run_cli(intent_db, ["due"])
+    assert rc == 0
+    assert "0 due now" in out
+
+
+def test_cli_cancel(intent_db):
+    iid = _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["cancel", iid, "no longer needed"])
+    assert rc == 0
+    assert f"cancelled {iid}" in out
+    from core.intentions import get_intent
+    assert get_intent(iid)["status"] == "cancelled"
+
+
+def test_cli_cancel_missing(intent_db):
+    rc, out, _ = _run_cli(intent_db, ["cancel", "ghost"])
+    assert rc == 1
+    assert "not found" in out
+
+
+def test_cli_delete(intent_db):
+    iid = _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["delete", iid])
+    assert rc == 0
+    assert "gone=True" in out
+    from core.intentions import get_intent
+    assert get_intent(iid) is None
+
+
+def test_cli_stats(intent_db):
+    _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["stats"])
+    assert rc == 0
+    parsed = json.loads(out)
+    assert parsed.get("pending", 0) >= 1
+
+
+def test_cli_stats_closure(intent_db):
+    _seed_intent()
+    rc, out, _ = _run_cli(intent_db, ["stats", "--closure"])
+    assert rc == 0
+    parsed = json.loads(out)
+    assert "total" in parsed or "by_status" in parsed or isinstance(parsed, dict)
+
+
+def test_cli_purge_terminal(intent_db):
+    from core.intentions import create_intent, update_intent
+    iid = create_intent(
+        name="done task",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-01-01T09:00:00"},
+        prompt="x",
+    )
+    update_intent(iid, status="executed")
+    rc, out, _ = _run_cli(intent_db, ["purge", "executed"])
+    assert rc == 0
+    assert "purged 1" in out
+
+
+def test_cli_purge_refuses_pending(intent_db):
+    _seed_intent()
+    rc, _, err = _run_cli(intent_db, ["purge", "pending"])
+    assert rc == 2
+    assert "refuses" in err
+
+
+def test_cli_unknown_command(intent_db):
+    rc, _, err = _run_cli(intent_db, ["bogus"])
+    assert rc == 2
+    assert "unknown command" in err
+
+
+def test_cli_awaiting(intent_db):
+    rc, out, _ = _run_cli(intent_db, ["awaiting"])
+    assert rc == 0
+    assert "0 awaiting closure" in out
