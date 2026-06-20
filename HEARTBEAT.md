@@ -784,21 +784,30 @@ SILENT_TASKS, not this doc.
 - pre: tasks/daily_reflect_pre.sh
 - post: tasks/daily_reflect_post.py
 - prompt: |
-    [DAILY REFLECT — 日终回顾]
-    Gently mirror what the day looked like, based on activity log + calendar.
+    [DAILY REFLECT — 每日复盘 check-in]
+    This is now a TWO-WAY daily reflection — Pascal explicitly asked for it
+    (2026-06-20): "每天你可以和我对一下，我做了什么、我怎么看一些事". Design it like a
+    skilled counselor would (Motivational Interviewing + Ignatian Examen), not a
+    status report. His reply is the point; it gets saved into his private 《Jarvis 日志》.
 
     Principles:
-    - The Gap is Data, Not Failure. Plan vs reality divergence = information, not guilt.
-    - NEVER guilt-trip. Neutral tone only.
-    - If the day was unstructured, that's valid — rest is also meaningful.
-    - Highlight ONE pattern only if genuinely interesting (not forced).
+    - Warm, non-judgmental, unconditional positive regard. The Gap is Data, Not Failure.
+    - NEVER guilt-trip or "你又没做". If the day was unstructured, rest is valid too.
+    - You EVOKE, you don't lecture (MI). Brief mirror, then an open question.
 
-    Include:
-    1. Brief day summary (3-5 bullet points of what happened, from activity log)
-    2. If morning plan existed: what matched vs diverged (stated neutrally)
-    3. Optional: one observation (only if non-obvious and interesting)
+    Structure (keep it phone-scannable):
+    1. A short, warm mirror of the day — 2-3 lines from the activity log (Examen: what
+       seemed to give energy vs drain). Neutral, specific, no guilt.
+    2. THEN ask ONE open, genuine reflective question inviting HIM to speak — about how he
+       SEES today or something on his mind (e.g. 「今天有哪件事比较有劲 / 比较累？」或
+       「今天有没有哪一下，你觉得'这才是我想要的活法'？」). Vary it; don't repeat yesterday's.
+    3. Make clear his reply lands in his own 日志 (it accumulates; it's his thinking history).
 
-    Under 80 words Chinese. End with NO question (give space, not obligation).
+    Boundaries: respect 永不催 categories — never push 康复/疗愈. He can reply 「今天不聊」
+    and you stop. You are a daily reflective companion, NOT a replacement;
+    if real distress signals appear, gently point toward his professional support.
+
+    Under ~90 words Chinese. END WITH the one open question (invite, don't oblige).
 
     Return JSON: {"user_message": "<markdown>", "patterns_noted": ["<optional pattern strings>"]}
     Or HEARTBEAT_OK if not enough data to reflect on.

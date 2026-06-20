@@ -1552,6 +1552,12 @@ except:
 
       # ── Quote reply: fetch the quoted message and prepend as context ──
       if [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; then
+        # Journal capture (PRD P1, 每日复盘 check-in): if this reply quotes the
+        # daily-reflect card, save Pascal's OWN words ("我怎么看一些事") into his
+        # private 《Jarvis 日志》. Backgrounded so it never delays the reply; the
+        # capture script is fully guarded and only writes for daily-reflect cards.
+        ( JV_PARENT="$_parent_id" JV_REPLY="$content" JARVIS_DIR="$JARVIS_DIR" \
+          python3 "$JARVIS_DIR/tasks/journal_capture.py" >>"$LOG_FILE" 2>&1 & )
         _quoted_raw=$(lark-cli im +messages-mget --message-ids "$_parent_id" --as bot 2>>"$LOG_FILE")
         _quoted_text=$(echo "$_quoted_raw" | python3 -c "
 import json, sys

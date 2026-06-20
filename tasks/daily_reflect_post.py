@@ -10,6 +10,7 @@ from core.card import build_card, build_rich_card
 from core.safety import looks_like_error, parse_json_response, summarize
 from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
+from core.journal import append_entry
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 PATTERNS_FILE = MEMORY_DIR / "system" / "patterns.jsonl"
@@ -47,6 +48,15 @@ def main():
         # Keep last N entries
         existing = existing[-MAX_PATTERNS:]
         write_jsonl(PATTERNS_FILE, existing)
+
+    # Persist the reflection into the longitudinal 《Jarvis 日志》 (append-only,
+    # fully guarded). Only journal a cleanly-PARSED reflection — never a raw/
+    # error blob from a parse-fallback, which would pollute the journal.
+    if data is not None:
+        try:
+            append_entry(message)
+        except Exception:
+            pass
 
     # Output as Lark card with richview for full reflection
     date_str = now_local_str("%Y-%m-%d")
