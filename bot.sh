@@ -726,15 +726,14 @@ print(n)
      # module call ever fails so the loop never breaks.
      eval "$(python3 -m core.responsiveness env 2>/dev/null)"
      : "${JV_POLL_FIRST:=6}" "${JV_POLL_STEADY:=20}"
-     : "${JV_THINKING_ACK:=💭 收到了，正在想。}"
      # First poll fast (~6s) so the user sees a sign of life quickly, then
      # settle to 20s to avoid spam. The instant "Typing" reaction already
      # fired at dispatch; this loop adds the FIRST textual feedback within
-     # ~6s — either a tool narration (🔧) or, when opus is just thinking with
-     # no tool calls, a one-time "received, thinking" note so the long
-     # generation (median ~100s on opus) isn't dead silence.
+     # ~6s — a tool narration (🔧) when opus is actually running tools. When
+     # opus is just thinking, the instant "Typing" reaction is the ONLY sign of
+     # life: no textual thinking-ack is sent. (Pascal 2026-06-20: that ack was
+     # redundant with the typing indicator and felt annoying — removed.)
      _poll="$JV_POLL_FIRST"
-     _thinking_sent=0
      while [ "$_elapsed" -lt 6000 ]; do
        sleep "$_poll"
        _elapsed=$((_elapsed + _poll))
@@ -772,7 +771,6 @@ for d in descs[offset:]:
        _new_count=$(echo "$_new_tools" | head -1)
        _new_descs=$(echo "$_new_tools" | tail -n +2)
        if [ -n "$_new_descs" ] && [ "$_new_count" -gt "$_last_tool_count" ] 2>/dev/null; then
-         _thinking_sent=1   # tool narration IS the sign of life — suppress the thinking note
          _formatted=$(echo "$_new_descs" | while IFS= read -r _d; do
            [ -n "$_d" ] && echo "• $_d"
          done)
@@ -802,13 +800,6 @@ $_formatted" \
            fi
          fi
          _last_tool_count="$_new_count"
-       elif [ "$_thinking_sent" -eq 0 ]; then
-         # No tool calls yet and the reply isn't back — opus is "just
-         # thinking". Send ONE textual ack (the reaction alone left a long
-         # silent gap). Fast replies (<6s) never reach here: the kill -0
-         # check above broke the loop. Fires at most once per turn.
-         _thinking_sent=1
-         lark_reply_text "$message_id" "$JV_THINKING_ACK" >/dev/null 2>&1 || true
        fi
        # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
        # background job. Release the conversation instead of blocking it —
