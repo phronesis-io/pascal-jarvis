@@ -848,6 +848,42 @@ SILENT_TASKS, not this doc.
     - If there IS something: brief summary in Chinese, under 80 words
     - NEVER include the raw messages — only your analysis
 
+## PGC
+
+### pgc-improvement
+- interval: 24h
+- pre: tasks/pgc_improvement_pre.sh
+- prompt: |
+    [PGC DAILY PULSE]
+    Pascal explicitly asked for a DAILY pulse on PGC (his low-latency first-source
+    signal network). The pre-script read today's server-side improvement-loop
+    products. Turn the data block into a SHORT daily digest, in Chinese, for Pascal.
+
+    This is an opt-in daily pulse — SEND every day (do NOT reply HEARTBEAT_OK),
+    EXCEPT: if the block says PGC_UNREACHABLE, reply HEARTBEAT_OK (don't send a
+    broken message).
+
+    Lead with the headline + trend:
+    - win_rate_winnable + its Δ vs prev day. If Δ is None / few days tracked, say
+      "趋势建立中 (N天)" — don't fake a trend.
+    - one line on the realtime scoreboard (wins vs late_slower, last 2d).
+
+    Then, only if non-trivial:
+    - REGRESSION: if broken_first_party_sources > 0, flag it FIRST (a first-party
+      feed is down = forfeited wins) — that's the day's priority.
+    - ON-CHAIN: if on-chain items (24h) > 0, mention the notable one (the new moat).
+    - ONE recommended action for a session today. Be HONEST about the capture-gap
+      samples: many no_first_party events are media-native (crime/accident/opinion)
+      with no first-party origin — NOT capturable. Only recommend a gap that has a
+      real official/data origin to add. If today's gaps are all media-native, say so
+      and point to the live levers instead (on-chain, or a speed-swap where a faster
+      channel genuinely exists). If nothing is cleanly actionable, say "今天无干净
+      可补项，系统自走" — that's a valid honest daily pulse.
+
+    End with a one-liner: "👉 想让我做哪条就说一声" (Pascal triggers a build session).
+    Keep the whole thing tight — no filler, no restating the raw block. Target
+    under ~120 words.
+
 ## Thinking Review
 
 ### thinking-review
