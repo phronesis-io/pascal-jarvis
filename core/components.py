@@ -132,10 +132,18 @@ def _check_http(comp: dict, root: Path) -> tuple[bool, str]:
     url = comp.get("url", "")
     try:
         import urllib.request
+        import urllib.error
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             ok = resp.status < 500
             return ok, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        # The server responded — it's reachable, not down. A 5xx (e.g. /health
+        # returning 503 "degraded" because a circuit is open) is a soft failure;
+        # do NOT report it as "unreachable", which falsely reads as a dead process.
+        if e.code >= 500:
+            return False, f"degraded (HTTP {e.code})"
+        return True, f"HTTP {e.code}"
     except Exception as e:
         return False, f"unreachable ({type(e).__name__})"
 

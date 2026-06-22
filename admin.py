@@ -1476,7 +1476,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             health["status"] = "error"
             health["error"] = str(e)
         body = json.dumps(health, ensure_ascii=False).encode()
-        status = 200 if health["status"] == "ok" else 503
+        # "degraded" (an open circuit on some heartbeat task) means the admin
+        # process is alive and serving — it is NOT a web-server outage. Return
+        # 200 so liveness probes pass; reserve 5xx for genuine endpoint errors.
+        # Body still carries circuits_open for body-aware consumers.
+        status = 503 if health["status"] == "error" else 200
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

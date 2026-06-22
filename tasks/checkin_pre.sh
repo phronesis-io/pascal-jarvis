@@ -12,7 +12,7 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true
 
-hour=$(date +%H)
+hour=$((10#$(date +%H)))  # 10# forces base-10 so "08"/"09" aren't parsed as invalid octal in (( ))
 if [ "$hour" -lt "${WORK_START:-9}" ] || [ "$hour" -ge "${WORK_END:-22}" ]; then
   exit 0
 fi

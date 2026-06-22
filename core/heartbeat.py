@@ -1005,18 +1005,37 @@ You have access to the user's memory below. Use it to personalize your responses
         # payloads). Now: record_failure + bounded fast retry (≤5 min),
         # mirroring the empty-response path's breaker semantics.
         if parse_failed:
+            # parse_failed is only ever set in the n > 1 branch above (a single
+            # task's reply is never an envelope), so this is ALWAYS the batch
+            # case: Claude mis-formatted the COMBINED multi-task JSON. That is a
+            # SHARED/infrastructure failure, not any one task's fault. The old
+            # code charged record_failure() to EVERY batched task, so a single
+            # bad envelope tripped innocent tasks' circuits — the bug that
+            # pinned eigenflux-publish / perception-collect into multi-hour
+            # cooldowns (they were usually batched behind intention-check's
+            # strict envelope). We still fast-retry so no payload is lost and
+            # still mark parse_failed, but we do NOT poison per-task circuits;
+            # a shared envelope counter absorbs the failure instead.
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 retry_delay = min(300, task["interval"])
                 ts.last_run = now - task["interval"] + retry_delay
                 ts.last_status = "parse_failed"
-                tripped = ts.circuit.record_failure()
-                if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
-                    ts.circuit.disabled_until = 0
                 state[task["name"]] = ts.to_dict()
                 self._event("task_finish", task=task["name"], status="parse_failed",
                             duration_s=round(time.time() - call_t0, 2),
                             retry_in_s=retry_delay)
+            env = state.get("__envelope_parse__", {})
+            env_fails = int(env.get("consecutive_failures", 0)) + 1
+            state["__envelope_parse__"] = {"consecutive_failures": env_fails,
+                                           "last_failure": now}
+            # Persistent envelope breakage is a real signal (prompt too long /
+            # model degraded) — surface it loudly rather than silently
+            # poisoning task circuits.
+            if env_fails >= 5:
+                self._log(f"Envelope parse failed {env_fails}x consecutively "
+                          f"({n}-task batch) — combined JSON keeps mis-forming "
+                          "(NOT tripping per-task circuits)", level="warn")
             self.save_state(state)
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → parse failed")
             return ""
@@ -1032,6 +1051,7 @@ You have access to the user's memory below. Use it to personalize your responses
             # duration covers claude_call + this task's post-script routing
             self._event("task_finish", task=task["name"], status="ok",
                         duration_s=round(time.time() - call_t0, 2))
+        state.pop("__envelope_parse__", None)  # a clean parse clears the shared streak
         self.save_state(state)
 
         # Also check dynamic tasks from SQLite scheduler

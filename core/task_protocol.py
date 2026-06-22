@@ -51,15 +51,30 @@ class CircuitState:
     disabled_until: float = 0
     total_failures: int = 0
     total_runs: int = 0
+    # RECENT trip count, used to escalate the disable duration. Unlike
+    # total_failures (a monotonic lifetime counter that brain_health.py reads
+    # for its drift detection — must NOT change semantics), this DECAYS: it
+    # drops one level per clean run. So a long-healthy task that trips once
+    # backs off for the 1h baseline, not the 16h cap — escalation tracks
+    # CURRENT flakiness, not a lifetime grudge. (Before this, the duration used
+    # total_failures // THRESHOLD, so a task with a long failure history jumped
+    # straight to multi-hour cooldowns on its next trip even after weeks clean
+    # — the over-punishment that pinned eigenflux-publish/perception-collect.)
+    escalation_level: int = 0
 
     # Thresholds
     FAILURE_THRESHOLD: int = 5          # disable after 5 consecutive failures
     DISABLE_DURATION: float = 3600      # disable for 1 hour
     ESCALATION_FACTOR: float = 2.0      # double disable time on repeated trips
+    MAX_ESCALATION: int = 5             # cap: 3600 * 2^4 = 16h
 
     def record_success(self):
         self.consecutive_failures = 0
         self.total_runs += 1
+        # Recover toward baseline: each clean run sheds one escalation level,
+        # so a task that trips and then runs cleanly returns to the 1h baseline.
+        if self.escalation_level > 0:
+            self.escalation_level -= 1
 
     def record_failure(self) -> bool:
         """Record a failure. Returns True if circuit just tripped (newly disabled)."""
@@ -69,9 +84,9 @@ class CircuitState:
         self.last_failure_time = time.time()
 
         if self.consecutive_failures >= self.FAILURE_THRESHOLD:
-            # Escalate: each trip doubles the disable duration
-            trips = self.total_failures // self.FAILURE_THRESHOLD
-            duration = self.DISABLE_DURATION * (self.ESCALATION_FACTOR ** min(trips - 1, 4))
+            # Escalate on RECENT trips, not lifetime failures.
+            self.escalation_level = min(self.escalation_level + 1, self.MAX_ESCALATION)
+            duration = self.DISABLE_DURATION * (self.ESCALATION_FACTOR ** (self.escalation_level - 1))
             self.disabled_until = time.time() + duration
             self.consecutive_failures = 0  # reset for next cycle
             return True
@@ -95,13 +110,16 @@ class CircuitState:
         return max(0, int(self.disabled_until - time.time()))
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "consecutive_failures": self.consecutive_failures,
             "last_failure_time": self.last_failure_time,
             "disabled_until": self.disabled_until,
             "total_failures": self.total_failures,
             "total_runs": self.total_runs,
         }
+        if self.escalation_level > 0:
+            d["escalation_level"] = self.escalation_level
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> CircuitState:
@@ -111,6 +129,7 @@ class CircuitState:
         cs.disabled_until = d.get("disabled_until", 0)
         cs.total_failures = d.get("total_failures", 0)
         cs.total_runs = d.get("total_runs", 0)
+        cs.escalation_level = d.get("escalation_level", 0)
         return cs
 
 

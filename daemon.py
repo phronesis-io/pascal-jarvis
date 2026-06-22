@@ -404,6 +404,7 @@ def probe_observed_components():
     if _in_deploy_window():
         return
     import urllib.request
+    import urllib.error
     for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),
                       ("dashboard :3457", "http://127.0.0.1:3457/")):
         try:
@@ -411,6 +412,12 @@ def probe_observed_components():
                 if resp.status < 500:
                     _probe_alert_stamps.pop(name, None)  # recovered
                     continue
+        except urllib.error.HTTPError:
+            # The server RESPONDED (e.g. /health 503 "degraded" because a
+            # circuit is open). It is alive, not 失联 — never page "探测不通"
+            # for this. Connection-level failures fall through to the alert.
+            _probe_alert_stamps.pop(name, None)
+            continue
         except Exception:
             pass
         last = _probe_alert_stamps.get(name, 0)

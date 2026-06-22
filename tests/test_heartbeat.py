@@ -461,23 +461,49 @@ def test_killed_response_acks_intention_check(tmp_path, monkeypatch):
     assert "__NO_ENVELOPE__" in stdin_log.read_text()
 
 
-def test_parse_failure_acks_and_records_failure(tmp_path, monkeypatch):
-    """REQ-36: an unparseable multi-task envelope is a FAILURE — circuit
-    breaker sees it, last_run gets a short retry (≤5min), status
-    parse_failed — never record_success over destroyed output."""
+def test_parse_failure_acks_and_does_not_trip_batched_circuits(tmp_path, monkeypatch):
+    """REQ-36 + collateral-trip fix: an unparseable MULTI-task envelope is a
+    SHARED failure (Claude mis-formatted the combined JSON), not any one task's
+    fault. We still ack, still fast-retry (≤5min), still mark parse_failed and
+    never record_success over destroyed output — but we must NOT trip the
+    per-task circuits of the innocent batched tasks (the bug that pinned
+    eigenflux-publish / perception-collect into multi-hour cooldowns). Instead
+    a shared envelope counter is bumped."""
     runner, stdin_log = _ack_runner(tmp_path)
     monkeypatch.setattr(runner, "claude_call", lambda p: "{this is not json")
     runner.run_cycle(force=True)
     # ACK post still ran
     assert "__NO_ENVELOPE__" in stdin_log.read_text()
     state = runner.load_state()
-    # Failure recorded for the batch (consecutive_failures bumped)
-    assert state["other-task"]["circuit"]["consecutive_failures"] == 1
+    # Innocent batched task's circuit is UNTOUCHED — no collateral trip.
+    assert state["other-task"].get("circuit", {}).get("consecutive_failures", 0) == 0
+    assert state["other-task"]["last_status"] == "parse_failed"
+    # The shared envelope-parse counter absorbs the failure instead.
+    assert state["__envelope_parse__"]["consecutive_failures"] == 1
     # Fast retry: last_run rewound so the task re-fires within ~5 minutes
     import time as _t
     other_interval = 3600
     eta = state["other-task"]["last_run"] + other_interval - int(_t.time())
     assert eta <= 300
+
+
+def test_single_task_reply_is_not_envelope_parsed(tmp_path, monkeypatch):
+    """The flip side: a single-task call does NOT parse a JSON envelope at all —
+    the raw reply is delivered as the task's output. So there is no envelope
+    parse failure (and thus no circuit trip) for n == 1; the shared counter is
+    only touched for genuine multi-task envelope breakage."""
+    hb = """
+### solo-task
+- interval: 1h
+- prompt: do the thing
+"""
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "{this is not json")
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    # Single task ran to completion (delivered), not parse_failed.
+    assert state["solo-task"]["last_status"] != "parse_failed"
+    assert "__envelope_parse__" not in state
 
 
 def test_missing_slice_acks_intention_check(tmp_path, monkeypatch):
