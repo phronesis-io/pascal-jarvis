@@ -56,6 +56,7 @@ rated_responses = [e for e in response_entries if e.get('reaction') != 'conversa
 # === Per-source engagement rate ===
 source_sent = defaultdict(int)
 source_engaged = defaultdict(int)
+source_late = defaultdict(int)
 source_ignored = defaultdict(int)
 
 for e in sent_entries:
@@ -66,18 +67,27 @@ for e in response_entries:
     reaction = e.get('reaction', '')
     if reaction == 'engaged':
         source_engaged[src] += 1
+    elif reaction == 'late_reply':
+        source_late[src] += 1
     elif reaction == 'ignored':
         source_ignored[src] += 1
 
 print('=== PER-SOURCE ENGAGEMENT ===')
-all_sources = set(list(source_sent.keys()) + list(source_engaged.keys()) + list(source_ignored.keys()))
+all_sources = set(
+    list(source_sent.keys())
+    + list(source_engaged.keys())
+    + list(source_late.keys())
+    + list(source_ignored.keys())
+)
 for src in sorted(all_sources):
     sent = source_sent.get(src, 0)
     engaged = source_engaged.get(src, 0)
+    late = source_late.get(src, 0)
     ignored = source_ignored.get(src, 0)
-    total_responses = engaged + ignored
-    rate = (engaged / total_responses * 100) if total_responses > 0 else 0
-    print(f'{src}: sent={sent}, engaged={engaged}, ignored={ignored}, rate={rate:.0f}%')
+    total_responses = engaged + late + ignored
+    weighted_engaged = engaged + 0.5 * late
+    rate = (weighted_engaged / total_responses * 100) if total_responses > 0 else 0
+    print(f'{src}: sent={sent}, engaged={engaged}, late_reply={late}, ignored={ignored}, weighted_rate={rate:.0f}%')
 
 # === Prompt experiment variants ===
 experiment_sent = defaultdict(int)

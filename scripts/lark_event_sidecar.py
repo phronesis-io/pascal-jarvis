@@ -61,6 +61,58 @@ def _record_feedback(value: dict):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _closure_confirmation_card(ok: bool, outcome: str = "done",
+                               result_text: str = "") -> dict:
+    """Persistent card body shown after a one-tap intent closure.
+
+    Toasts disappear too quickly on mobile; returning a raw replacement card
+    gives Pascal visible proof that the loop is closed.
+    """
+    title = "闭环已记录" if ok else "闭环无需重复记录"
+    if ok:
+        status = {
+            "done": "已做了",
+            "recorded": "已记录为没做/改天",
+            "na": "已停止追踪",
+        }.get(outcome, "已记录")
+        body = f"✓ {status}"
+        if result_text:
+            body += f"\n\n{result_text}"
+    else:
+        body = "这条已经闭环过了，或者原始意图不存在。"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"content": title, "tag": "plain_text"}},
+        "elements": [
+            {"tag": "div", "text": {"content": body, "tag": "lark_md"}},
+        ],
+    }
+
+
+def _intent_close_payload(value: dict) -> dict:
+    """Close an intent from a card button and return a callback response dict."""
+    intent_id = str(value.get("id", "")).strip()
+    outcome = str(value.get("outcome", "done")).strip() or "done"
+    result_text = str(value.get("result", "")).strip()
+    try:
+        from core.intentions import record_closure
+        ok = record_closure(intent_id, outcome=outcome,
+                            result=result_text, via="button")
+    except Exception as e:
+        print(f"intent_close failed: {e}", file=sys.stderr)
+        ok = False
+    return {
+        "toast": {
+            "type": "success" if ok else "info",
+            "content": "闭环已记录 ✓" if ok else "已经闭环过了（或意图不存在）",
+        },
+        "card": {
+            "type": "raw",
+            "data": _closure_confirmation_card(ok, outcome, result_text),
+        },
+    }
+
+
 def main() -> int:
     try:
         import lark_oapi as lark
@@ -105,21 +157,7 @@ def main() -> int:
                     {"toast": {"type": "success",
                                "content": "已在收藏列表里" if dup else "已收藏，空闲时提醒你"}})
             if action == "intent_close":
-                # One-tap closure (REQ-34): button value carries the PARENT
-                # intent id + outcome; record_closure cancels any pending
-                # follow-up itself (no double-ask). Deterministic, zero LLM.
-                args = ["python3", "-m", "core.intentions", "close",
-                        str(value.get("id", "")), str(value.get("outcome", "done"))]
-                result_text = str(value.get("result", "")).strip()
-                if result_text:
-                    args.append(result_text)
-                out = subprocess.run(args, timeout=5, capture_output=True,
-                                     text=True, cwd=str(JARVIS_DIR))
-                ok = out.returncode == 0
-                return P2CardActionTriggerResponse(
-                    {"toast": {"type": "success" if ok else "info",
-                               "content": "闭环已记录 ✓" if ok
-                               else "已经闭环过了（或意图不存在）"}})
+                return P2CardActionTriggerResponse(_intent_close_payload(value))
         except Exception as e:
             print(f"card handler error: {e}", file=sys.stderr)
         return P2CardActionTriggerResponse({})

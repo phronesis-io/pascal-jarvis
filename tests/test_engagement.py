@@ -200,3 +200,33 @@ def test_engagement_analyze_pre_reports_prompt_experiment_breakdown(tmp_path):
     assert "=== PROMPT EXPERIMENT BREAKDOWN ===" in result.stdout
     assert "checkin-choice-v1/choice_first/checkin" in result.stdout
     assert "checkin-choice-v1/plain/checkin" in result.stdout
+
+
+def test_engagement_analyze_pre_counts_late_reply_in_source_rate(tmp_path):
+    script = Path(__file__).resolve().parent.parent / "tasks" / "engagement_analyze_pre.sh"
+    log = tmp_path / "engagement_log.jsonl"
+    now = int(time.time())
+    rows = []
+    reactions = ["engaged", "late_reply", "ignored"] * 4
+    for i, reaction in enumerate(reactions):
+        rows.append({
+            "ts": "2026-06-18 12:00",
+            "source": "checkin",
+            "type": "sent",
+            "epoch": now - 1200 + i,
+        })
+        rows.append({
+            "ts": "2026-06-18 12:10",
+            "source": "checkin",
+            "type": "response",
+            "reaction": reaction,
+            "gap_seconds": 1200 if reaction == "late_reply" else 60,
+        })
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    env = {**os.environ, "JARVIS_DIR": str(tmp_path), "ENGAGEMENT_LOG": str(log)}
+    result = subprocess.run([str(script)], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkin: sent=12, engaged=4, late_reply=4, ignored=4" in result.stdout
+    assert "weighted_rate=50%" in result.stdout

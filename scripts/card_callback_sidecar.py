@@ -37,6 +37,8 @@ import sys
 import time
 from pathlib import Path
 
+from lark_event_sidecar import _intent_close_payload
+
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
                                  Path(__file__).resolve().parent.parent))
 
@@ -96,6 +98,8 @@ def main() -> int:
                     timeout=5, capture_output=True)
                 return P2CardActionTriggerResponse(
                     {"toast": {"type": "success", "content": "已收藏，空闲时提醒你"}})
+            if action == "intent_close":
+                return P2CardActionTriggerResponse(_intent_close_payload(value))
         except Exception as e:  # never let a handler error break the ws loop
             print(f"card action handler error: {e}", file=sys.stderr)
         return P2CardActionTriggerResponse({})
