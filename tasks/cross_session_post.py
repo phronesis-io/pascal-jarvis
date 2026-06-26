@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.anchor_guard import unverified_anchors
 from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 
@@ -94,9 +95,21 @@ def main() -> int:
         if not raw:
             return 0
 
-    # If there's a user-facing message, print to stdout (sent to Lark)
+    # If there's a user-facing message, print to stdout (sent to Lark) — but only
+    # if every concrete clock time in it is grounded in the real logs. A narration
+    # line that names a specific HH:MM for a past event that no log supports is a
+    # fabricated specific (see core/anchor_guard); suppress the ping rather than
+    # surface it. The digest below is still written for continuity.
     if user_message:
-        print(f"📡 跨 Session 动态：{user_message}")
+        bad = unverified_anchors(user_message)
+        if bad:
+            print(
+                "[cross-session] suppressing user_message — unverifiable time "
+                f"anchor(s) {[a.raw for a in bad]}: {user_message!r}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"📡 跨 Session 动态：{user_message}")
 
     # Skip consecutive "No new data" entries — they waste index space
     is_no_data = "no new data" in raw.lower() or "no significant" in raw.lower()

@@ -63,6 +63,7 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     session = session_dir / "turn.jsonl"
+    now = datetime.now(timezone.utc)
     rows = [
         {
             "type": "assistant",
@@ -70,12 +71,12 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
                 "role": "assistant",
                 "content": "🔧 You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
             },
-            "timestamp": "2026-06-18T10:00:00.000Z",
+            "timestamp": (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         },
         {
             "type": "assistant",
             "message": {"role": "assistant", "content": "No response requested."},
-            "timestamp": "2026-06-18T10:01:00.000Z",
+            "timestamp": (now - timedelta(minutes=9)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         },
     ]
     session.write_text(
@@ -131,11 +132,13 @@ def test_audit_flags_recent_interaction_self_evolution_signals(tmp_path):
 
 def test_audit_ingests_daemon_instability(tmp_path):
     daemon = tmp_path / "daemon.log"
+    base = now_local() - timedelta(minutes=10)
+    ts = [(base + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S") for i in range(3)]
     daemon.write_text(
         "\n".join([
-            "[2026-06-18 11:00:00] [WARN] Observed component DOWN: admin :3456",
-            "[2026-06-18 11:01:00] [WARN] Health check failed (2x): ['bot.sh is not running']",
-            "[2026-06-18 11:02:00] [WARN] BRAIN-DEAD heartbeat: cross-session-sync last_success stale",
+            f"[{ts[0]}] [WARN] Observed component DOWN: admin :3456",
+            f"[{ts[1]}] [WARN] Health check failed (2x): ['bot.sh is not running']",
+            f"[{ts[2]}] [WARN] BRAIN-DEAD heartbeat: cross-session-sync last_success stale",
         ]),
         encoding="utf-8",
     )

@@ -87,7 +87,8 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
                     del current["_in_prompt"]
                 tasks.append(current)
             current = {"name": line[4:].strip(), "interval": 600,
-                        "pre": "", "post": "", "prompt": ""}
+                        "pre": "", "post": "", "prompt": "",
+                        "heavy": False, "timeout": None}
         elif current:
             if line.startswith("- interval:"):
                 current["interval"] = parse_interval(line.split(":", 1)[1])
@@ -95,6 +96,13 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
                 current["pre"] = line.split(":", 1)[1].strip()
             elif line.startswith("- post:"):
                 current["post"] = line.split(":", 1)[1].strip()
+            elif line.startswith("- heavy:"):
+                current["heavy"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
+            elif line.startswith("- timeout:"):
+                try:
+                    current["timeout"] = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    current["timeout"] = None
             elif line.startswith("- prompt:"):
                 rest = line.split(":", 1)[1].strip()
                 if rest == "|":
@@ -176,6 +184,19 @@ class HeartbeatRunner:
     # Prevents rapid Lark session rotations from hammering memory-hourly.
     FORCE_COOLDOWN_SECONDS = 60
 
+    # Heavy tasks (deep research, multi-repo audit, night deep work) run SOLO —
+    # their own Claude call with an extended timeout — instead of being crammed
+    # into the shared multi-task JSON envelope. DeerFlow-style fan-out isolation
+    # applied to the heartbeat: (1) a slow/failed heavy task can't poison the
+    # lightweight batch's combined envelope, and (2) the batch's 300s budget
+    # can't starve a task that needs to spawn subagents and wait. Opt in per
+    # task with `- heavy: true` in HEARTBEAT.md; tune the budget with
+    # `- timeout: <seconds>`. At most HEAVY_MAX_PER_CYCLE run per cycle (stalest
+    # first) so a long heavy call never starves the resident loop — unrun heavy
+    # tasks keep their state untouched and are picked up next cycle.
+    HEAVY_DEFAULT_TIMEOUT = 900
+    HEAVY_MAX_PER_CYCLE = 1
+
     def __init__(self, jarvis_dir: str | Path, heartbeat_file: str | Path,
                  state_file: str | Path, memory_dir: str | Path,
                  model: str = "opus", persona: str = "Jarvis",
@@ -239,6 +260,93 @@ class HeartbeatRunner:
                 except Exception as e:
                     self._log(f"ACK post for {task['name']} failed: {e}",
                               level="warn")
+
+    def _run_solo_task(self, task: dict, task_data: dict, state: dict, now: float,
+                       user_messages: list, producing_tasks: list) -> None:
+        """Run one heavy task in its own isolated Claude call (DeerFlow fan-out).
+
+        Mirrors the single-task path (direct response → post, no JSON envelope)
+        but with the task's own extended timeout, so deep-research / multi-repo
+        audit / night-deep-work tasks can spawn subagents and wait without
+        sharing the batch's budget or its combined-envelope failure mode. Owns
+        this task's full state transition (ok/idle/failed/timeout/killed) so the
+        downstream batch path never sees it.
+        """
+        name = task["name"]
+        timeout = task.get("timeout") or self.HEAVY_DEFAULT_TIMEOUT
+        variant = choose_variant(self.memory_dir, name, now=now)
+        parts = [f"[HEARTBEAT — heavy task: {name}]"]
+        parts.append(inject_variant(task["prompt"].strip(), variant))
+        data = task_data.get(name, "")
+        if data:
+            parts.append(f"\nDATA:\n{data}")
+        parts.append("\nReturn the task's requested format directly. "
+                     "If nothing needs attention, reply with exactly: HEARTBEAT_OK")
+        prompt = "\n".join(parts)
+
+        self._log(f"Calling Claude SOLO for heavy task {name} (timeout {timeout}s)...")
+        self._event("task_spawn", task=name, heavy=True)
+        t0 = time.time()
+        raw = self.claude_call(prompt, timeout=timeout)
+        dur = round(time.time() - t0, 2)
+
+        ts = TaskState.from_dict(state.get(name, {}))
+        ts.last_run = now
+
+        if raw == "__KILLED__":
+            # Restart/shutdown — not a task failure, no circuit penalty.
+            ts.last_status = "killed"
+            state[name] = ts.to_dict()
+            self._event("task_finish", task=name, status="killed",
+                        duration_s=dur, heavy=True)
+            self._ack_failed_posts([task])
+            return
+
+        if not raw:
+            # Timeout / network / nonzero — record failure with breaker.
+            ts.last_status = "timeout" if self._call_timed_out else "failed"
+            tripped = ts.circuit.record_failure()
+            if name in self.PRIORITY_TASKS and ts.circuit.is_open:
+                ts.circuit.disabled_until = 0
+                tripped = False
+            state[name] = ts.to_dict()
+            if self._call_timed_out:
+                self._event("task_timeout", task=name, duration_s=dur,
+                            timeout_s=timeout, heavy=True)
+            else:
+                self._event("task_finish", task=name, status="failed",
+                            duration_s=dur, heavy=True)
+            self._ack_failed_posts([task])
+            if tripped:
+                self._log(f"Circuit TRIPPED for heavy task: {name}", level="warn")
+                self._event("circuit_tripped", task=name)
+            return
+
+        if raw.strip() == "HEARTBEAT_OK":
+            ts.last_success = now
+            ts.last_status = "idle"
+            ts.circuit.record_success()
+            state[name] = ts.to_dict()
+            self._event("task_finish", task=name, status="idle",
+                        duration_s=dur, heavy=True)
+            self._ack_failed_posts([task])
+            return
+
+        # Success — route through post-script exactly like the n==1 path.
+        if task["post"]:
+            post_output = self.run_script(task["post"], stdin_data=raw)
+            if post_output:
+                self._collect_output(name, post_output, user_messages, producing_tasks)
+        elif _has_idle_sentinel(raw):
+            self._log(f"Heavy task idle (HEARTBEAT_OK in body): {name}")
+        else:
+            self._collect_output(name, raw, user_messages, producing_tasks)
+
+        ts.last_success = now
+        ts.last_status = "ok"
+        ts.circuit.record_success()
+        state[name] = ts.to_dict()
+        self._event("task_finish", task=name, status="ok", duration_s=dur, heavy=True)
 
     def _collect_output(self, task_name: str, message: str,
                         user_messages: list, producing_tasks: list):
@@ -394,8 +502,13 @@ class HeartbeatRunner:
             self._log(f"OpenAI heartbeat fallback failed: {e}", level="warn")
             return ""
 
-    def claude_call(self, prompt: str) -> str:
-        """Call Claude with memory injection, no session persistence."""
+    def claude_call(self, prompt: str, timeout: int | None = None) -> str:
+        """Call Claude with memory injection, no session persistence.
+
+        timeout: override the per-call subprocess budget (seconds). Heavy tasks
+        that fan out subagents pass a longer budget; None uses self.claude_timeout.
+        """
+        call_timeout = timeout or self.claude_timeout
         memory = load_tiered_memory(self.memory_dir)
         now_ts = now_local_str("%Y-%m-%d %H:%M %A")
         system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
@@ -444,7 +557,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 )
                 result = subprocess.run(
                     cmd, capture_output=True, text=True,
-                    timeout=self.claude_timeout, stdin=subprocess.DEVNULL,
+                    timeout=call_timeout, stdin=subprocess.DEVNULL,
                     cwd=str(self.work_dir),
                     env=env,
                     start_new_session=True,  # isolate from parent process group signals
@@ -495,7 +608,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 return ""
         except subprocess.TimeoutExpired:
             self._call_timed_out = True
-            self._log(f"Claude call timed out ({self.claude_timeout}s)")
+            self._log(f"Claude call timed out ({call_timeout}s)")
             return ""
         except FileNotFoundError:
             self._log("Claude CLI not found — is it installed?")
@@ -774,10 +887,28 @@ You have access to the user's memory below. Use it to personalize your responses
         if tier0:
             self._log(f"Tier 0 direct: {[t['name'] for t in tier0]}")
 
+        # ── Heavy tasks run SOLO (DeerFlow fan-out isolation) ──────────
+        # Peel heavy tasks out of the batch: each gets its own Claude call with
+        # an extended timeout so it can fan out subagents and wait, and a
+        # slow/failed heavy task never poisons the lightweight batch envelope.
+        # Cap at HEAVY_MAX_PER_CYCLE (stalest first); unrun heavy tasks keep
+        # their state untouched and are picked up next cycle. Runs after Tier 0
+        # but before the batch so the (fast) batch isn't delayed behind it only
+        # when no heavy task is due — when one is, it's the intended trade-off.
+        heavy_due = [t for t in tier2 if t.get("heavy")]
+        if heavy_due:
+            heavy_due.sort(key=lambda t: state.get(t["name"], {}).get("last_run", 0))
+            for task in heavy_due[:self.HEAVY_MAX_PER_CYCLE]:
+                self._run_solo_task(task, task_data, state, now,
+                                    user_messages, producing_tasks)
+            self._log(f"Heavy solo: {[t['name'] for t in heavy_due[:self.HEAVY_MAX_PER_CYCLE]]}")
+
         # ── Tier 2: regular tasks go through Claude ────────────────────
-        runnable = tier2
+        runnable = [t for t in tier2 if not t.get("heavy")]
         if not runnable:
-            # Only Tier 0 tasks ran — save state and return any output
+            # No batch tasks — only Tier 0 and/or heavy-solo tasks ran this
+            # cycle. Their state was already updated above; persist and return
+            # whatever output they staged.
             self.save_state(state)
             combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
             if combined.strip():
@@ -788,9 +919,9 @@ You have access to the user's memory below. Use it to personalize your responses
                         (self.jarvis_dir / ".heartbeat_prompt_variants").unlink(missing_ok=True)
                     except Exception:
                         pass
-                self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (tier0 only)")
+                self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (no batch)")
                 return combined
-            self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → OK (tier0 only)")
+            self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → OK (no batch)")
             return ""
 
         # Build combined prompt

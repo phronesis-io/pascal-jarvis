@@ -456,6 +456,8 @@ SILENT_TASKS, not this doc.
 - interval: 24h
 - pre: tasks/memory_consolidate_pre.sh
 - post: tasks/memory_consolidate_post.py
+- heavy: true
+- timeout: 900
 - prompt: |
     [DAILY MEMORY CONSOLIDATION]
     Review the memory files and today's context below. All memory is loaded unconditionally:
@@ -640,6 +642,8 @@ SILENT_TASKS, not this doc.
 - interval: 24h
 - pre: tasks/harness_evolve_pre.sh
 - post: tasks/harness_evolve_post.py
+- heavy: true
+- timeout: 900
 - prompt: |
     [HARNESS SELF-EVOLUTION]
     每日自进化任务。基于输入里的「增量」（新反馈/行为信号/提交）+ system prompt
@@ -853,6 +857,8 @@ SILENT_TASKS, not this doc.
 ### pgc-improvement
 - interval: 24h
 - pre: tasks/pgc_improvement_pre.sh
+- heavy: true
+- timeout: 900
 - prompt: |
     [PGC DAILY PULSE]
     Pascal explicitly asked for a DAILY pulse on PGC (his low-latency first-source

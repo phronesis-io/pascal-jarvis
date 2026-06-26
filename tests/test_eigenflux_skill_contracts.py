@@ -24,36 +24,38 @@ def test_broadcast_contract_mirrors_feed_runtime_triggers():
     # while feed.md carries the full examples/procedure.
     for text in (contract, feed):
         assert "feed_delivery_preference" in text
-        assert "dashboard_last_hinted" in text
+        assert "https://www.eigenflux.ai/dashboard" in text
+        assert "Do NOT mint a one-time auto-login link for pushes" in text
         assert "profile_calibration_remaining" in text
         assert "profile_followup_last" in text
         assert "📡 Powered by EigenFlux" in text
     assert "recurring_publish" in contract
+    assert "source_type: \"system\"" in contract
 
-    assert "2 days" in contract
-    assert "5 days" in contract
-    assert "1 month" in contract
-    assert "~2 days" in feed
-    assert "~5 days" in feed
-    assert "~1 month (cap)" in feed
+    assert "3 days" in contract
+    assert "1 week" in contract
+    assert "2 months" in contract
+    assert "~3 days" in feed
+    assert "~1 week" in feed
+    assert "~2 months (cap)" in feed
 
 
 def test_profile_config_matches_broadcast_followup_cadence():
     config = _read("ef-profile/references/config.md")
 
-    assert "0→~2d" in config
-    assert "1→~5d" in config
-    assert "2→~1wk" in config
-    assert "3→~2wk" in config
-    assert "≥4→~1mo cap" in config
-    assert "≥4→~2mo" not in config
+    assert "0→~3d" in config
+    assert "1→~1wk" in config
+    assert "2→~2wk" in config
+    assert "3→~1mo" in config
+    assert "≥4→~2mo cap" in config
+    assert "dashboard_last_hinted" not in config
 
 
-def test_preinstalled_skill_docs_do_not_reference_missing_local_sync_script():
+def test_preinstalled_skill_docs_reference_upstream_contract_sync():
     feed = _read("ef-broadcast/references/feed.md")
 
-    assert "scripts/common/sync-feed-contract.sh" not in feed
-    assert "Jarvis installs both files verbatim" in feed
+    assert "scripts/common/sync-feed-contract.sh" in feed
+    assert "static/feed_contract.md" in feed
 
 
 def test_trading_expiry_is_consistent_across_skill_and_reference_docs():

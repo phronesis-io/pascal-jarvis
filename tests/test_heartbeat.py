@@ -42,6 +42,39 @@ def test_parse_heartbeat_basic(tmp_path):
     assert tasks[1]["interval"] == 3600
     assert "Multiline prompt" in tasks[1]["prompt"]
     assert "with two lines." in tasks[1]["prompt"]
+    # Default heavy fields when unspecified.
+    assert tasks[0]["heavy"] is False
+    assert tasks[0]["timeout"] is None
+
+
+def test_parse_heartbeat_heavy_fields(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("""
+### deep-research
+- interval: 30m
+- heavy: true
+- timeout: 1200
+- prompt: research stuff
+
+### light-one
+- interval: 10m
+- heavy: false
+- prompt: light stuff
+
+### bad-timeout
+- interval: 10m
+- heavy: yes
+- timeout: notanumber
+- prompt: x
+""")
+    tasks = parse_heartbeat(hb)
+    by_name = {t["name"]: t for t in tasks}
+    assert by_name["deep-research"]["heavy"] is True
+    assert by_name["deep-research"]["timeout"] == 1200
+    assert by_name["light-one"]["heavy"] is False
+    # "yes" is truthy; an unparseable timeout degrades to None, not a crash.
+    assert by_name["bad-timeout"]["heavy"] is True
+    assert by_name["bad-timeout"]["timeout"] is None
 
 
 def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
@@ -193,6 +226,79 @@ def test_heartbeat_ok_updates_state(tmp_path, monkeypatch):
     state = runner.load_state()
     assert "t" in state
     assert state["t"]["last_run"] > 0
+
+
+_HEAVY_HB = (
+    "### deep-research\n- interval: 1h\n- heavy: true\n- timeout: 1200\n- prompt: research\n\n"
+    "### checkin\n- interval: 1h\n- prompt: light\n"
+)
+
+
+def test_heavy_task_runs_solo_not_batched(tmp_path, monkeypatch):
+    """A heavy task gets its OWN Claude call; it never joins the batch envelope."""
+    runner = _make_runner(tmp_path, _HEAVY_HB)
+    calls = []
+
+    def fake_call(prompt, timeout=None):
+        calls.append({"prompt": prompt, "timeout": timeout})
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", fake_call)
+    runner.run_cycle(force=True)
+
+    # Two separate calls: one solo heavy, one batch (here a single light task).
+    assert len(calls) == 2
+    heavy = [c for c in calls if "heavy task: deep-research" in c["prompt"]]
+    batch = [c for c in calls if "heavy task:" not in c["prompt"]]
+    assert len(heavy) == 1 and len(batch) == 1
+    # Isolation: heavy prompt has no light task, batch prompt has no heavy task.
+    assert "checkin" not in heavy[0]["prompt"]
+    assert "deep-research" not in batch[0]["prompt"]
+    assert "checkin" in batch[0]["prompt"]
+
+
+def test_heavy_task_uses_extended_timeout(tmp_path, monkeypatch):
+    """The solo heavy call gets the task's configured timeout; the batch gets none."""
+    runner = _make_runner(tmp_path, _HEAVY_HB)
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda prompt, timeout=None: calls.append((prompt, timeout)) or "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+
+    heavy_timeout = next(t for p, t in calls if "heavy task: deep-research" in p)
+    batch_timeout = next(t for p, t in calls if "heavy task:" not in p)
+    assert heavy_timeout == 1200
+    assert batch_timeout is None  # batch path uses the default budget
+
+
+def test_heavy_default_timeout_when_unset(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### deep-research\n- interval: 1h\n- heavy: true\n- prompt: r\n")
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda prompt, timeout=None: calls.append(timeout) or "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+    assert calls == [HeartbeatRunner.HEAVY_DEFAULT_TIMEOUT]
+
+
+def test_heavy_task_failure_does_not_starve_batch(tmp_path, monkeypatch):
+    """A heavy task that fails (timeout/empty) must not block the light batch."""
+    runner = _make_runner(tmp_path, _HEAVY_HB)
+
+    def fake_call(prompt, timeout=None):
+        if "heavy task: deep-research" in prompt:
+            return ""  # heavy call failed
+        return "今天的会改到三点了"  # light task has real, deliverable content
+
+    monkeypatch.setattr(runner, "claude_call", fake_call)
+    result = runner.run_cycle(force=True)
+
+    # Light content still delivered despite the heavy failure.
+    assert "今天的会改到三点了" in result
+    state = runner.load_state()
+    assert state["deep-research"]["last_status"] in ("failed", "timeout")
+    assert state["checkin"]["last_status"] == "ok"
 
 
 def test_work_dir_defaults_to_jarvis_dir(tmp_path):
