@@ -687,6 +687,7 @@ SILENT_TASKS, not this doc.
 - interval: 24h
 - pre: tasks/engagement_analyze_pre.sh
 - post: tasks/engagement_analyze_post.py
+- heavy: true
 - prompt: |
     [ENGAGEMENT ANALYSIS]
     Review the engagement data below. Your job:
@@ -967,6 +968,7 @@ SILENT_TASKS, not this doc.
 ### eigenflux-preinstall
 - interval: 24h
 - pre: tasks/eigenflux_preinstall_pre.sh
+- heavy: true
 - prompt: |
     [EIGENFLUX PARITY]
     The pre-script keeps jarvis's pre-installed EigenFlux capabilities current with

@@ -304,6 +304,14 @@ class HeartbeatRunner:
 
         if not raw:
             # Timeout / network / nonzero — record failure with breaker.
+            # Fast-retry like the batch path (REQ: heavy tasks were pushing
+            # last_run to now on every failure, so a single transient network
+            # blip on a 24h-interval task like pgc-improvement meant a full
+            # day's silence instead of a few minutes — see 2026-07-02 incident,
+            # ConnectionRefused/401 during a flaky-network window stalled
+            # pgc-improvement/engagement-analyze/eigenflux-preinstall for days).
+            retry_delay = min(300, task["interval"])
+            ts.last_run = now - task["interval"] + retry_delay
             ts.last_status = "timeout" if self._call_timed_out else "failed"
             tripped = ts.circuit.record_failure()
             if name in self.PRIORITY_TASKS and ts.circuit.is_open:

@@ -301,6 +301,28 @@ def test_heavy_task_failure_does_not_starve_batch(tmp_path, monkeypatch):
     assert state["checkin"]["last_status"] == "ok"
 
 
+def test_heavy_task_failure_fast_retries_instead_of_full_interval(tmp_path, monkeypatch):
+    """A failed heavy task must become due again soon, not after a full interval.
+
+    Regression for the 2026-07-02 incident: a transient network blip made
+    pgc-improvement's solo call fail, but last_run was stamped to `now` just
+    like a success — so on a 24h-interval task, one bad network moment meant
+    a full day of silence (and it kept compounding on every subsequent blip).
+    """
+    runner = _make_runner(tmp_path, _HEAVY_HB)
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda prompt, timeout=None: "")  # every call fails
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()
+    ts = state["deep-research"]
+    assert ts["last_status"] in ("failed", "timeout")
+    # interval is 1h (3600s); the task must become "due" again within the
+    # ~300s fast-retry window, not after the full interval elapses.
+    due_at = ts["last_run"] + 3600
+    assert due_at - time.time() < 350
+
+
 def test_work_dir_defaults_to_jarvis_dir(tmp_path):
     runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
     assert runner.work_dir == runner.jarvis_dir
