@@ -36,6 +36,22 @@ else
   echo "⚠️ No calendar_today.md found"
 fi
 
+# 2b. Calendar user-token probe (REQ-83): calendar-sync fetches --as user;
+#     when the user token lapses (6/29-30: ×7) the sync degrades to a stale
+#     snapshot. Probe a 1h agenda window with the same identity so token
+#     death pages HERE, deterministically — doctor.sh only probes the bot
+#     identity. (_GATE_TRIGGERS in the post redacts auth failure details.)
+if command -v lark-cli >/dev/null 2>&1; then
+  _probe_start=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  _probe_end=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  if lark-cli calendar +agenda --as user --format json \
+       --start "$_probe_start" --end "$_probe_end" >/dev/null 2>&1; then
+    echo "User-token probe: ✓"
+  else
+    echo "⚠️ 日历 user token 探针失败 — calendar-sync 只能用旧快照兜底，需要跑 lark-cli auth login 重新授权"
+  fi
+fi
+
 # 3. Repos — last pull times
 echo ""
 echo "--- Repos ---"
