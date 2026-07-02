@@ -1277,6 +1277,130 @@ def test_calendar_event_map_garbage_falls_back_per_day(intent_db):
     assert len(preps) == 1
 
 
+# ===========================================================================
+# REQ-85(c) — expires_at lapse leaves a trace; REQ-90 — closure edge cases
+# ===========================================================================
+
+def test_cleanup_expired_emits_trace_event(intent_db, monkeypatch):
+    """REQ-85(c): a date prep dying via expires_at must leave a visible trace
+    (intent_expired reason=expires_at_lapsed) — the lone expired 'Prep: 发散'
+    was undiagnosable under the old bare UPDATE. Idempotent: a second sweep
+    emits nothing new."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    events = []
+    monkeypatch.setattr(mod, "_emit_intent",
+                        lambda ev, iid, **f: events.append((ev, iid, f)))
+    past = (now_local() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    expired_at = (now_local() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    iid = mod.create_intent(name="Prep: 发散", trigger_type="date",
+                            trigger_config={"datetime": past},
+                            expires_at=expired_at)
+    mod.cleanup_expired()
+    assert mod.get_intent(iid)["status"] == "expired"
+    traces = [(ev, i, f) for ev, i, f in events if ev == "intent_expired"]
+    assert traces == [("intent_expired", iid,
+                       {"reason": "expires_at_lapsed", "name": "Prep: 发散"})]
+    events.clear()
+    mod.cleanup_expired()                       # already expired → no re-emit
+    assert events == []
+
+
+def test_context_moment_closes_na_on_execute(intent_db):
+    """REQ-90①: a context moment (followup=None policy) reaching terminal must
+    CLOSE its closure axis (na + closed_at), not fall through writing nothing —
+    the int_879cb1472b black-hole class. No follow-up row is spawned."""
+    from core.intentions import create_intent, get_intent
+
+    pid = create_intent(name="Prep: 某会", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-30T10:00:00"},
+                        category="context", closure_question="有要跟进的吗？")
+    _fire(pid)
+    row = get_intent(pid)
+    assert row["closure_status"] == "na"
+    assert row["closed_at"]
+    assert "no-followup policy" in row["closure_result"]
+    assert get_intent(f"{pid}__fu") is None      # nothing spawned
+    _fire(pid)                                    # re-execute → guard: no change
+    assert get_intent(pid)["closure_status"] == "na"
+
+
+def test_cron_intent_coerces_closure_question(intent_db):
+    """REQ-90②: cron intents never spawn follow-ups, so closure_question is a
+    dead field on them — coerced to empty at create, never raised."""
+    from core.intentions import create_intent, get_intent
+
+    pid = create_intent(name="每日跟进", trigger_type="cron",
+                        trigger_config={"expression": "0 9 * * *"},
+                        category="external", closure_question="进展如何？")
+    assert get_intent(pid)["closure_question"] == ""
+
+
+def test_record_closure_done_empty_result_coerced_to_na(intent_db):
+    """REQ-90③: done with an empty result is a claim without a record —
+    coerced to na (never raise: a raise would fail the closure write itself
+    and mint a new zombie class)."""
+    from core.intentions import create_intent, get_intent, record_closure
+
+    pid = create_intent(name="p", trigger_type="date",
+                        trigger_config={"datetime": "2999-01-01T09:00:00"})
+    assert record_closure(pid, outcome="done", result="   ") is True
+    row = get_intent(pid)
+    assert row["closure_status"] == "na"
+    assert row["closed_at"]
+
+
+def test_closure_done_button_carries_result(intent_db):
+    """Companion to REQ-90③: the ✅ button must send a non-empty result, or
+    every tap would be silently downgraded to na by the coerce."""
+    from tasks.intentions_post import _closure_buttons
+
+    buttons = _closure_buttons([{"parent": "int_x", "name": "饭局"}])
+    done = [b for b in buttons if b["value"].get("outcome") == "done"]
+    assert done and str(done[0]["value"].get("result", "")).strip()
+
+
+def test_backfill_req90_script_dry_run_and_apply(intent_db, tmp_path):
+    """The backfill script identifies the black-hole rows in dry-run mode and
+    closes exactly them (and only non-terminal ones) with --apply."""
+    import sqlite3 as sq
+    from datetime import datetime
+    from scripts.backfill_req90_context_closures import main as backfill_main
+
+    db_path = tmp_path / "jarvis_copy.db"
+    conn = sq.connect(str(db_path))
+    conn.execute("""CREATE TABLE intentions (
+        id TEXT PRIMARY KEY, name TEXT, status TEXT, category TEXT,
+        closure_status TEXT DEFAULT 'none', closure_result TEXT DEFAULT '',
+        closed_at TEXT)""")
+    conn.executemany(
+        "INSERT INTO intentions (id, name, status, category, closure_status) "
+        "VALUES (?, ?, 'executed', 'context', ?)",
+        [("int_879cb1472b", "blackhole-1", "none"),
+         ("int_d9aa5c5668", "blackhole-2", "none")])
+    conn.commit(); conn.close()
+
+    # Dry run: identifies both, writes nothing.
+    assert backfill_main(["--db", str(db_path)]) == 0
+    conn = sq.connect(str(db_path))
+    assert conn.execute("SELECT COUNT(*) FROM intentions "
+                        "WHERE closure_status = 'none'").fetchone()[0] == 2
+    conn.close()
+
+    # Apply: both closed na with closed_at; second apply is a no-op.
+    assert backfill_main(["--db", str(db_path), "--apply"]) == 0
+    conn = sq.connect(str(db_path))
+    rows = conn.execute("SELECT closure_status, closed_at, closure_result "
+                        "FROM intentions").fetchall()
+    conn.close()
+    for status, closed_at, result in rows:
+        assert status == "na" and closed_at
+        assert "backfill REQ-90" in result
+    assert backfill_main(["--db", str(db_path), "--apply"]) == 0
+
+
 # ---------------------------------------------------------------------------
 # update_intent — field whitelist, JSON serialization, edge cases
 # ---------------------------------------------------------------------------

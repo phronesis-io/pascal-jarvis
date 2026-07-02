@@ -353,6 +353,15 @@ def create_intent(
             raise ValueError(
                 f"cron intent needs a valid 5-field expression, got {expr!r}")
         next_fire_at = nxt.isoformat()
+        # REQ-90②: recurring moments never spawn follow-ups (see the one-shot
+        # guard in _on_moment_terminal), so a closure_question on a cron row
+        # is a dead field that reads like a promise to chase. Coerce to empty
+        # — never raise, live heartbeat paths create intents through here.
+        if closure_question:
+            print(f"[intentions] cron intent {name!r}: closure_question "
+                  f"dropped (recurring rows never spawn follow-ups)",
+                  file=sys.stderr)
+            closure_question = ""
 
     db = _db or _get_db()
     iid = intent_id or f"int_{uuid.uuid4().hex[:10]}"
@@ -498,15 +507,37 @@ def delete_intent(intent_id: str) -> bool:
 
 
 def cleanup_expired():
-    """Mark expired intents."""
+    """Mark expired intents — with a per-row trace event (REQ-85c).
+
+    The old bare UPDATE retired rows invisibly: the lone expired "Prep: 发散"
+    was undiagnosable because nothing recorded the lapse. SELECT-then-UPDATE
+    so every lapse emits intent_expired reason=expires_at_lapsed (summary-only
+    for the skip digest — never re-fired, unlike retries_exhausted). Wrapped
+    like the stale-closure expiry above: a DB-lock here must not crash the
+    whole due-check.
+    """
     _init()
     db = _get_db()
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
-    db.execute(
-        "UPDATE intentions SET status = 'expired' WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
-        (now,),
-    )
-    db.commit()
+    try:
+        rows = db.execute(
+            "SELECT id, name FROM intentions WHERE status = 'pending' "
+            "AND expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        ).fetchall()
+        if not rows:
+            return
+        db.execute(
+            "UPDATE intentions SET status = 'expired' WHERE status = 'pending' "
+            "AND expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        db.commit()
+        for r in rows:
+            _emit_intent("intent_expired", r["id"],
+                         reason="expires_at_lapsed", name=r["name"])
+    except Exception as e:
+        print(f"[intentions] cleanup_expired failed: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +980,25 @@ def _on_moment_terminal(intent: dict, how: str) -> None:
         return
     if how == "expired" and intent.get("category") not in ("hard", "external"):
         return
+    # REQ-90①: a no-followup category (context/none) used to fall through
+    # _spawn_closure_followup's `return None` with NOTHING written —
+    # closure_status stayed 'none' forever (the int_879cb1472b /
+    # int_d9aa5c5668 black-hole pair), violating the "CAPTURE is ALWAYS
+    # maintained" contract above. Close the axis explicitly: na + closed_at.
+    # The closure_status='none' WHERE clause mirrors the guard → idempotent.
+    cat = intent.get("category", "none")
+    pol = CLOSURE_POLICY.get(cat, CLOSURE_POLICY["none"])
+    if pol["followup"] is None:
+        db = _get_db()
+        db.execute(
+            "UPDATE intentions SET closure_status = 'na', closed_at = ?, "
+            "closure_result = ? WHERE id = ? AND closure_status = 'none'",
+            (now_local_str("%Y-%m-%dT%H:%M:%S"),
+             f"no-followup policy (category={cat})", intent["id"]),
+        )
+        db.commit()
+        _emit_intent("intent_closure", intent["id"], outcome="na", via="policy")
+        return
     _spawn_closure_followup(intent)
 
 
@@ -1042,6 +1092,13 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "",
     p = get_intent(parent_id)
     if not p or p.get("closure_status") in _CLOSURE_TERMINAL:
         return False
+    # REQ-90③: 'done' with an empty result is a claim without a record —
+    # store 'na' instead. Coerce, never raise: raising here would fail the
+    # closure write itself and mint a new zombie class (评审红线).
+    if outcome == "done" and not str(result).strip():
+        print(f"[intentions] record_closure {parent_id}: done with empty "
+              f"result coerced to na", file=sys.stderr)
+        outcome = "na"
     db = _get_db()
     db.execute(
         "UPDATE intentions SET closure_status = ?, closure_result = ?, "
