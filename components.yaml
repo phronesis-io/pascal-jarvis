@@ -80,3 +80,10 @@ components:
     max_age_hours: 48
     critical: false
     note: backup silently failed for 27 days before this check existed (REQ-41)
+
+  - name: conversation-audit
+    check: file_age
+    path: data/conversation_audit.db
+    max_age_hours: 48
+    critical: false
+    note: audit had no scheduler mount and sat idle 13 days (REQ-82); launchd com.jarvis.conversation-audit 04:20 daily

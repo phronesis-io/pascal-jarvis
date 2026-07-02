@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvis.conversation-audit</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>-c</string>
+        <string>import subprocess, sys; sys.exit(subprocess.call(['/bin/bash', '/Users/pascal/Desktop/jarvis/repos/pascal-jarvis/scripts/run_conversation_audit.sh']))</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/jarvis-conversation-audit.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/jarvis-conversation-audit.log</string>
+</dict>
+</plist>
