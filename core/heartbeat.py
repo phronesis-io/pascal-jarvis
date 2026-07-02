@@ -207,6 +207,25 @@ class HeartbeatRunner:
     # NOTE: PRIORITY_TASKS bypass this cap entirely.
     MAX_BATCH_SIZE = 4
 
+    # REQ-79.1: a failed SHARED Claude call (the whole batch died on timeout /
+    # network / nonzero exit before producing a byte) is infrastructure
+    # trouble, not any one task's fault — charging it to per-task circuit
+    # breakers tripped innocent tasks (7/1: batch=6 all failed at 21:37→23:57,
+    # 3 circuits tripped the same second; 7/2: a DNS outage put checkin into
+    # circuit_open). Instead a shared streak lives in
+    # state["__shared_call__"] = {consecutive_failures, last_failure,
+    # backoff_until} and, at SHARED_FAIL_THRESHOLD consecutive failed calls,
+    # the whole non-Tier0 roster backs off (doubling 5min → 60min cap) rather
+    # than re-dialing a dead API every cycle. DELIBERATELY a separate key from
+    # __envelope_parse__: envelope breakage will drive batch-clamping
+    # (REQ-79.2) while call failure drives backoff — sharing one counter would
+    # let an API outage falsely trigger the clamp. The 3600s cap sits far
+    # below the 6h cron-staleness window, so backoff can never rot an
+    # occurrence into a stale-skip.
+    SHARED_FAIL_THRESHOLD = 3   # consecutive failed shared calls before backoff
+    SHARED_BACKOFF_BASE = 300   # first backoff: 5 min
+    SHARED_BACKOFF_MAX = 3600   # cap: 60 min (<< 6h CRON_STALENESS)
+
     # Minimum interval between force-triggered runs of the same task, in seconds.
     # Prevents rapid Lark session rotations from hammering memory-hourly.
     FORCE_COOLDOWN_SECONDS = 60
@@ -834,6 +853,36 @@ You have access to the user's memory below. Use it to personalize your responses
         if not due_tasks:
             return ""
 
+        # ── Shared-call backoff gate (REQ-79.1) ────────────────────────
+        # While the shared Claude call is backing off, only TIER0_TASKS may
+        # proceed (calendar-sync is a pre→post direct pipe that never touches
+        # Claude, and it is REQ-83's upstream). Everything else — PRIORITY,
+        # heavy-solo, force-triggered alike — is held: exempting PRIORITY
+        # would mean re-dialing a dead API every cycle, which is exactly what
+        # the backoff exists to stop. Placed BEFORE pre-scripts on purpose:
+        # intention-check's pre has stateful side effects (mark_triggered +
+        # inflight manifest), so gating here leaves no reconciliation debt.
+        # last_run is untouched — when the backoff lapses the held tasks are
+        # naturally due again and MAX_BATCH_SIZE shaves the peak.
+        _shared = state.get("__shared_call__", {})
+        _backoff_until = float(_shared.get("backoff_until", 0) or 0)
+        if _backoff_until > now:
+            gated = [t["name"] for t in due_tasks
+                     if t["name"] not in self.TIER0_TASKS]
+            due_tasks = [t for t in due_tasks if t["name"] in self.TIER0_TASKS]
+            if gated:
+                retry_in = int(_backoff_until - now)
+                self._log(f"Shared-call backoff active ({retry_in}s left) — "
+                          f"holding {gated}", level="warn")
+                # One aggregate event per cycle (task="*"), not one per task —
+                # an open backoff is re-checked every tick and per-task rows
+                # would flood the replay log.
+                self._event("task_skip", task="*",
+                            reason="shared_call_backoff",
+                            retry_in_s=retry_in, skipped=gated)
+            if not due_tasks:
+                return ""
+
         # Separate priority tasks (exempt from batch cap) from regular tasks
         priority = [t for t in due_tasks if t["name"] in self.PRIORITY_TASKS]
         regular = [t for t in due_tasks if t["name"] not in self.PRIORITY_TASKS]
@@ -1040,24 +1089,23 @@ You have access to the user's memory below. Use it to personalize your responses
             return ""
 
         if not raw:
-            # Claude call failed (timeout, network, etc.) — record failure
-            #
-            # NOTE for the REQ-79 (batch 3) rewrite of this branch: keep the
-            # error=_error_excerpt(self._last_call_error) field on the
-            # task_finish emit below (REQ-80). Whatever shape the shared-
-            # failure accounting takes, failed events must stay diagnosable —
-            # 866 error-less failed events was the original sin here.
-            tripped_names = []
+            # The SHARED Claude call died (timeout / network / nonzero exit)
+            # before producing a byte — infrastructure trouble, not any one
+            # task's fault (REQ-79.1). The old code charged record_failure()
+            # to EVERY batched task, so one dead network window tripped
+            # innocent circuits (7/1: batch=6 all failed → 3 circuit_tripped
+            # the same second; 7/2: checkin circuit_open during a DNS outage).
+            # Mirror the parse_failed branch below: fast-retry each task,
+            # keep the diagnosable emit (error= per REQ-80 — 866 error-less
+            # failed events was the original sin), and let the shared counter
+            # absorb the failure; at SHARED_FAIL_THRESHOLD consecutive failed
+            # calls the backoff gate above holds the whole non-Tier0 roster
+            # instead of re-dialing a dead API every cycle.
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
-                ts.last_run = now
+                retry_delay = min(300, task["interval"])
+                ts.last_run = now - task["interval"] + retry_delay
                 ts.last_status = "timeout" if self._call_timed_out else "failed"
-                tripped = ts.circuit.record_failure()
-                # PRIORITY_TASKS: reset circuit immediately — they must never be disabled
-                if task["name"] in self.PRIORITY_TASKS and ts.circuit.is_open:
-                    ts.circuit.disabled_until = 0
-                elif tripped:
-                    tripped_names.append(task["name"])
                 state[task["name"]] = ts.to_dict()
                 if self._call_timed_out:
                     self._event("task_timeout", task=task["name"],
@@ -1066,22 +1114,36 @@ You have access to the user's memory below. Use it to personalize your responses
                     self._event("task_finish", task=task["name"],
                                 status="failed", duration_s=call_dur,
                                 error=_error_excerpt(self._last_call_error))
+            # One shared streak +1 per failed CYCLE, not per task — six tasks
+            # in one dead call are one failure, not six.
+            shared = state.get("__shared_call__", {})
+            fails = int(shared.get("consecutive_failures", 0)) + 1
+            shared = {"consecutive_failures": fails, "last_failure": now}
+            if fails >= self.SHARED_FAIL_THRESHOLD:
+                backoff = min(self.SHARED_BACKOFF_MAX,
+                              self.SHARED_BACKOFF_BASE
+                              * (2 ** (fails - self.SHARED_FAIL_THRESHOLD)))
+                shared["backoff_until"] = now + backoff
+                # Ops event — NOT a chat message (REQ-62): genuine user-
+                # impacting outages still reach Pascal via the self-diagnostic
+                # deterministic alert (REQ-39), in plain language.
+                self._log(f"Shared Claude call failed {fails}x consecutively "
+                          f"— backing off {backoff}s (Tier0 keeps running)",
+                          level="warn")
+                self._event("shared_call_backoff", task="*",
+                            consecutive_failures=fails, backoff_s=backoff,
+                            error=_error_excerpt(self._last_call_error))
+            state["__shared_call__"] = shared
             self.save_state(state)
             self._ack_failed_posts(runnable)
-            if tripped_names:
-                # Ops event — NOT a chat message (REQ-62). Pascal got raw
-                # "⚠️ 以下任务连续失败已自动暂停…冷却后自动恢复" verbatim, which
-                # is internal health jargon he can't act on and makes the
-                # assistant look sick. Log + sched_event only; genuine
-                # user-impacting outages still reach him via the self-
-                # diagnostic deterministic alert (REQ-39, 4h-deduped, in
-                # plain language). Return "" so nothing surfaces.
-                self._log(f"Circuit TRIPPED for: {tripped_names}", level="warn")
-                for _t in tripped_names:
-                    self._event("circuit_tripped", task=_t)
-                return ""
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
             return ""
+
+        # Any non-empty reply proves the shared call PATH is alive — clear the
+        # streak even if the envelope below fails to parse (parse breakage is
+        # a different fault tracked by __envelope_parse__, never conflated).
+        # Every branch past this point ends in save_state, so the pop lands.
+        state.pop("__shared_call__", None)
 
         if raw.strip() == "HEARTBEAT_OK":
             # Only treat as idle if the ENTIRE response is exactly HEARTBEAT_OK.

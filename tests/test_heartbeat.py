@@ -788,3 +788,256 @@ def test_killed_event_has_no_error_field(tmp_path, monkeypatch):
               if e["event"] == "task_finish" and e.get("status") == "killed"]
     assert killed, "killed task_finish event missing"
     assert "error" not in killed[0]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# REQ-79.1 — a failed SHARED Claude call (whole batch dead on timeout /
+# network / nonzero) is infrastructure trouble: no per-task record_failure,
+# no collateral circuit trips; a shared streak (state["__shared_call__"])
+# absorbs it and at 3 consecutive failures the non-Tier0 roster backs off
+# (5min doubling to a 60min cap) instead of re-dialing a dead API every
+# cycle. Regression for 7/1 21:37 (batch=6 all failed → 3 circuit_tripped
+# the same second) and 7/2 13:25-20:55 (DNS outage → ConnectionRefused,
+# checkin circuit_open at 16:59).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _failing_call(runner, error="API Error: Unable to connect to API (ConnectionRefused)"):
+    """A claude_call stub that mimics a dead shared call (empty reply)."""
+    def _call(prompt, timeout=None):
+        runner._call_timed_out = False
+        runner._last_call_error = error
+        return ""
+    return _call
+
+
+def test_shared_call_failure_no_per_task_penalty(tmp_path, monkeypatch):
+    """One dead shared call: every batched task fast-retries with its circuit
+    UNTOUCHED, the shared streak counts the CYCLE (+1, not +1 per task), and
+    the failed events stay diagnosable (error= per REQ-80)."""
+    hb = ("### task-a\n- interval: 1h\n- prompt: a\n\n"
+          "### task-b\n- interval: 1h\n- prompt: b\n")
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()
+    for name in ("task-a", "task-b"):
+        assert state[name]["last_status"] == "failed"
+        assert state[name].get("circuit", {}).get("consecutive_failures", 0) == 0
+        # last_run rewound → due again within the ~300s fast-retry window,
+        # not after the full 1h interval.
+        eta = state[name]["last_run"] + 3600 - int(time.time())
+        assert eta <= 300
+    # 2 tasks, ONE failed cycle → streak 1; below threshold → no backoff yet.
+    assert state["__shared_call__"]["consecutive_failures"] == 1
+    assert "backoff_until" not in state["__shared_call__"]
+    events = _sched_events(runner)
+    assert not [e for e in events if e["event"] == "circuit_tripped"]
+    fails = [e for e in events
+             if e["event"] == "task_finish" and e.get("status") == "failed"]
+    assert len(fails) == 2
+    assert all("ConnectionRefused" in e["error"] for e in fails)
+
+
+def test_shared_call_backoff_after_three_failures_gates_all_but_tier0(
+        tmp_path, monkeypatch):
+    """3 consecutive dead calls → backoff lands in state; the next cycle holds
+    every non-Tier0 task (ONE aggregate skip event, last_run untouched) while
+    calendar-sync keeps running."""
+    hb = ("### calendar-sync\n- interval: 1h\n- prompt: cal\n\n"
+          "### task-a\n- interval: 1h\n- prompt: a\n")
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    for _ in range(3):
+        runner.run_cycle(force=True)
+
+    state = runner.load_state()
+    shared = state["__shared_call__"]
+    assert shared["consecutive_failures"] == 3
+    assert shared["backoff_until"] > time.time()
+    # First backoff at threshold = base (5 min).
+    assert shared["backoff_until"] - shared["last_failure"] == \
+        HeartbeatRunner.SHARED_BACKOFF_BASE
+    backoffs = [e for e in _sched_events(runner)
+                if e["event"] == "shared_call_backoff"]
+    assert len(backoffs) == 1
+    assert backoffs[0]["backoff_s"] == HeartbeatRunner.SHARED_BACKOFF_BASE
+    assert backoffs[0]["consecutive_failures"] == 3
+
+    # Backoff cycle: Claude must not be dialed at all.
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda p, timeout=None: calls.append(p) or "should never run")
+    # calendar-sync just ran (last_run=now) — rewind it past the force
+    # cooldown so this cycle can prove Tier0 is exempt from the gate.
+    st = runner.load_state()
+    st["calendar-sync"]["last_run"] = 0
+    runner.save_state(st)
+    held_last_run = st["task-a"]["last_run"]
+    runner.run_cycle(force=True)
+
+    assert calls == []
+    state = runner.load_state()
+    assert state["calendar-sync"]["last_status"] == "ok"   # Tier0 kept running
+    assert state["task-a"]["last_run"] == held_last_run    # last_run untouched
+    skips = [e for e in _sched_events(runner)
+             if e["event"] == "task_skip"
+             and e.get("reason") == "shared_call_backoff"]
+    assert len(skips) == 1                                 # aggregate, not per-task
+    assert skips[0]["task"] == "*"
+    assert skips[0]["skipped"] == ["task-a"]
+
+
+def test_shared_backoff_doubles_and_caps_at_max(tmp_path, monkeypatch):
+    """Backoff curve: 3→5min, 4→10min, …, ≥7→60min cap (<< 6h cron staleness)."""
+    hb = "### task-a\n- interval: 1h\n- prompt: a\n"
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    now = int(time.time())
+    runner.save_state({"__shared_call__": {"consecutive_failures": 3,
+                                           "last_failure": now - 400,
+                                           "backoff_until": now - 100}})  # lapsed
+    runner.run_cycle(force=True)
+    shared = runner.load_state()["__shared_call__"]
+    assert shared["consecutive_failures"] == 4
+    assert shared["backoff_until"] - shared["last_failure"] == 600  # doubled
+
+    runner.save_state({"__shared_call__": {"consecutive_failures": 9,
+                                           "last_failure": now - 4000,
+                                           "backoff_until": now - 100}})
+    runner.run_cycle(force=True)
+    shared = runner.load_state()["__shared_call__"]
+    assert shared["consecutive_failures"] == 10
+    assert shared["backoff_until"] - shared["last_failure"] == \
+        HeartbeatRunner.SHARED_BACKOFF_MAX
+
+
+def test_backoff_gate_holds_heavy_and_priority_alike(tmp_path, monkeypatch):
+    """The gate exempts ONLY Tier0: PRIORITY tasks (exempting them = keep
+    dialing the dead API every cycle) and heavy-solo tasks are held too, and
+    held BEFORE pre-scripts so no stateful pre runs for a call never made."""
+    hb = ("### calendar-sync\n- interval: 1h\n- prompt: cal\n\n"
+          "### intention-check\n- interval: 1m\n- prompt: intents\n\n"
+          "### deep-research\n- interval: 1h\n- heavy: true\n- prompt: r\n")
+    runner = _make_runner(tmp_path, hb)
+    now = int(time.time())
+    runner.save_state({"__shared_call__": {"consecutive_failures": 3,
+                                           "last_failure": now,
+                                           "backoff_until": now + 300}})
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda p, timeout=None: calls.append(p) or "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+
+    assert calls == []  # neither the heavy solo call nor the batch fired
+    state = runner.load_state()
+    assert state["calendar-sync"]["last_status"] == "ok"
+    assert "intention-check" not in state   # PRIORITY held, state untouched
+    assert "deep-research" not in state     # heavy solo held, state untouched
+    skips = [e for e in _sched_events(runner)
+             if e.get("reason") == "shared_call_backoff"]
+    assert len(skips) == 1
+    assert set(skips[0]["skipped"]) == {"intention-check", "deep-research"}
+
+
+def test_shared_call_streak_clears_on_any_reply(tmp_path, monkeypatch):
+    """Any non-empty reply proves the call path is alive → key removed."""
+    hb = "### task-a\n- interval: 1h\n- prompt: a\n"
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+    runner.run_cycle(force=True)
+    assert runner.load_state()["__shared_call__"]["consecutive_failures"] == 2
+
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p, timeout=None: "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+    assert "__shared_call__" not in runner.load_state()
+
+
+def test_first_success_after_backoff_clears_key(tmp_path, monkeypatch):
+    """Once the backoff lapses, the first successful call removes the whole
+    __shared_call__ record — no residue to bias the next incident."""
+    hb = "### task-a\n- interval: 1h\n- prompt: a\n"
+    runner = _make_runner(tmp_path, hb)
+    now = int(time.time())
+    runner.save_state({"__shared_call__": {"consecutive_failures": 4,
+                                           "last_failure": now - 700,
+                                           "backoff_until": now - 100}})  # lapsed
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p, timeout=None: "明天的会改到三点了")
+    out = runner.run_cycle(force=True)
+    assert "明天的会改到三点了" in out
+    assert "__shared_call__" not in runner.load_state()
+
+
+def test_heavy_solo_failure_does_not_feed_shared_counter(tmp_path, monkeypatch):
+    """A heavy task's solo-call failure is a TASK-level signal (900s budget,
+    its own breaker) — it must not count toward the shared streak."""
+    runner = _make_runner(
+        tmp_path, "### deep-research\n- interval: 1h\n- heavy: true\n- prompt: r\n")
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()
+    assert "__shared_call__" not in state
+    # per-task breaker accounting is retained for heavy solo failures
+    assert state["deep-research"]["circuit"]["consecutive_failures"] == 1
+    assert state["deep-research"]["last_status"] == "failed"
+
+
+def test_replay_2026_07_02_outage_zero_circuit_trips(tmp_path, monkeypatch):
+    """Replay of run 45b4c417 (2026-07-02 16:13, real sched_events data): the
+    DNS outage made the whole batch fail with ConnectionRefused and tripped
+    checkin's circuit (skipped circuit_open at 16:59). Same shape re-run
+    under REQ-79.1: zero trips, zero circuit_open, shared streak absorbs it."""
+    names = ["intention-check", "cross-session-sync", "personal-site",
+             "memory-tidy", "checkin", "daily-plan"]
+    hb = "\n\n".join(f"### {n}\n- interval: 1h\n- prompt: {n}" for n in names)
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()
+    for n in names:
+        assert state[n]["last_status"] == "failed"
+        assert state[n].get("circuit", {}).get("consecutive_failures", 0) == 0
+        assert state[n].get("circuit", {}).get("disabled_until", 0) == 0
+    assert state["__shared_call__"]["consecutive_failures"] == 1
+    events = _sched_events(runner)
+    assert not [e for e in events if e["event"] == "circuit_tripped"]
+    assert not [e for e in events if e.get("reason") == "circuit_open"]
+
+
+def test_shared_call_and_envelope_parse_counters_are_independent(
+        tmp_path, monkeypatch):
+    """The two dunder streaks must never cross-contaminate: a dead call bumps
+    ONLY __shared_call__ (→ backoff), a garbled envelope bumps ONLY
+    __envelope_parse__ (→ future REQ-79.2 clamp) — and a garbled envelope
+    still PROVES the call path is alive, so it clears the shared streak."""
+    hb = ("### task-a\n- interval: 1h\n- prompt: a\n\n"
+          "### task-b\n- interval: 1h\n- prompt: b\n")
+    runner = _make_runner(tmp_path, hb)
+
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert state["__shared_call__"]["consecutive_failures"] == 2
+    assert "__envelope_parse__" not in state
+
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p, timeout=None: "{this is not json")
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert "__shared_call__" not in state          # call path alive → cleared
+    assert state["__envelope_parse__"]["consecutive_failures"] == 1
+
+    monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
+    runner.run_cycle(force=True)
+    state = runner.load_state()
+    assert state["__shared_call__"]["consecutive_failures"] == 1   # restarts
+    assert state["__envelope_parse__"]["consecutive_failures"] == 1  # untouched
