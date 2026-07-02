@@ -111,6 +111,14 @@ _CLOSURE_TERMINAL = ("done", "recorded", "na")
 # others are prep-only). Deliberately narrow — bare 约/见 over-match logistics.
 _SOCIAL_RE = re.compile(r"饭|聚|咖啡|午餐|晚餐|见面|面试|lunch|dinner|coffee|meet")
 
+# REQ-85(a) all-day status blocks. A 请假/婚假/OOO block is calendar STATE, not
+# an event — it must never produce a prep/closure/carry. Lark renders a true
+# all-day event as 00:00-00:00 (the start.get('date') fallback in
+# calendar_sync_pre.sh), so the filter is DOUBLE-conditioned: all-day time AND
+# a status keyword. A 00:00-08:00 红眼航班 (no keyword) and a 14:00-15:00
+# 请假面谈 (not all-day) both stay real events.
+_STATUS_BLOCK_RE = re.compile(r"请假|婚假|年假|休假|调休|leave|OOO|status", re.IGNORECASE)
+
 # REQ-70 carry/bring detection. A "要带的东西" reminder (伞/球拍/要还的东西…)
 # must fire in the MORNING before Pascal leaves home, not at the event's own
 # prep time — the 6/13 root cause: 复动肌骨 12:30 康复课的伞被锚到午饭点，
@@ -1270,7 +1278,99 @@ def _load_cal_index(db) -> tuple[set, dict]:
     return existing_tags, tag_to_row
 
 
-def generate_calendar_intents(calendar_md: str) -> list[str]:
+# REQ-85(b): sidecar mapping written by tasks/calendar_sync_pre.sh — the only
+# survivor of an event's TRUE start_iso/end_iso once the 30-day markdown has
+# sliced a multi-day event into one line per day (each day a fresh date → a
+# fresh cal: key → the 15-row Prep:请假 create/cancel churn).
+EVENT_MAP_FILE = ROOT / "calendar_event_mapping.json"
+
+
+def _load_event_map() -> list:
+    """Read calendar_event_mapping.json. Fail-open: a missing/corrupt file
+    returns [] and generate_calendar_intents behaves exactly as before
+    REQ-85(b) (per-day handling) — the calendar bridge must never crash on it.
+    """
+    try:
+        data = json.loads(EVENT_MAP_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _event_map_index(event_map: list) -> dict:
+    """(date, 'HH:MM-HH:MM') → [entries]. A list, because two events may share
+    a slot; _map_entry disambiguates by title prefix."""
+    idx: dict = {}
+    for entry in event_map or []:
+        if not isinstance(entry, dict):
+            continue
+        idx.setdefault((entry.get("date", ""), entry.get("time", "")),
+                       []).append(entry)
+    return idx
+
+
+def _map_entry(idx: dict, date: str, time_str: str, title: str) -> dict | None:
+    """Match a markdown event line back to its mapping entry. The markdown
+    title may carry an '@ 地点' suffix, so match title.startswith(summary);
+    no prefix match → None (fail-open to per-day handling)."""
+    for entry in idx.get((date, time_str), []):
+        summary = str(entry.get("summary", ""))
+        if summary and title.startswith(summary):
+            return entry
+    return None
+
+
+def _true_span(entry: dict) -> tuple[str, str, datetime]:
+    """(true_start_date, true_end_date, end_dt) of a mapping entry, local time.
+
+    start_iso/end_iso come from Lark with a Z suffix — fromisoformat chokes on
+    it (pre-3.11 semantics), hence the replace. Aware datetimes are converted
+    to local time; a bare all-day date stays naive (its date IS the local
+    date). Raises on garbage — the Pass-1 caller falls back to per-day
+    handling (fail-open).
+    """
+    tz = now_local().tzinfo
+
+    def to_local(raw):
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is not None and tz is not None:
+            dt = dt.astimezone(tz)
+        return dt
+
+    s, e = to_local(entry["start_iso"]), to_local(entry["end_iso"])
+    return s.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d"), _coerce(e)
+
+
+def _legacy_span_dup(ev: dict, current_date: str, title: str,
+                     existing_tags: set) -> bool:
+    """REQ-85(b) resurrection guard (zero-migration dedup). Under the old
+    per-day keying a multi-day event left rows keyed on EVERY covered day
+    (cal:2026-06-24:请假 … cal:2026-07-08:请假, all cancelled by hand). Before
+    minting the start-day key, scan day 2..N of the true span for any legacy
+    key — read old keys, write only the start-day one — so rows Pascal already
+    cancelled can never be recreated (_load_cal_index snapshots ALL statuses,
+    cancelled included). Day 1 is the caller's normal existing_tags check;
+    the scan is capped at 30 days (the rolling window never wrote beyond it).
+    """
+    end = ev.get("true_end_date")
+    if not end:
+        return False
+    try:
+        d0 = datetime.fromisoformat(current_date)
+        span_days = (datetime.fromisoformat(end) - d0).days
+    except (ValueError, TypeError):
+        return False
+    for k in range(1, min(span_days, 30) + 1):
+        tag = f"cal:{(d0 + timedelta(days=k)).strftime('%Y-%m-%d')}:{title[:20]}"
+        if tag in existing_tags:
+            print(f"[calendar-intents] skip prep for {title!r} @ {current_date}: "
+                  f"legacy per-day key {tag} already exists", file=sys.stderr)
+            return True
+    return False
+
+
+def generate_calendar_intents(calendar_md: str,
+                              event_map: list | None = None) -> list[str]:
     """Parse calendar markdown and create prep / closure / carry intents.
 
     Three intent ROLES, each keyed on (event-date, title, role) so a re-sync
@@ -1290,6 +1390,16 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
     ONE row, EVER; a reschedule UPDATEs the existing row's trigger time in place
     (supersede); no path can INSERT a second row for the same key.
 
+    REQ-85(b): `date` in the key is the event's TRUE start day. The 30-day
+    markdown renders a multi-day event as one line per day; `event_map`
+    (default: the sidecar mapping calendar_sync_pre.sh writes) recovers
+    start_iso/end_iso, so continuation-day lines are dropped in Pass 1 and the
+    key format never changes (cal:{start-day}:{title[:20]} — byte-identical to
+    the old key for single-day events, zero migration). Once the event has
+    started, the past-event skip below takes over → no re-generation ever.
+    Every event_map failure mode (missing file, no match, garbage ISO) falls
+    back to per-day handling — the bridge must never crash on the sidecar.
+
     Returns list of created intent IDs.
     """
     import re
@@ -1297,6 +1407,9 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
     db = _get_db()
     created = []
     now = now_local()
+    if event_map is None:
+        event_map = _load_event_map()
+    map_idx = _event_map_index(event_map)
 
     # ── Pass 1: parse events, grouped by date (carry needs the whole day) ──
     # Format: "  HH:MM-HH:MM  Title  (optional details)"
@@ -1317,14 +1430,47 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
         start_time, end_time = event_match.group(1), event_match.group(2)
         title = event_match.group(3).strip()
         details = event_match.group(4) or ""
+
+        # REQ-85(a): drop all-day status blocks HERE (Pass 1, not Pass 2) so
+        # they never enter by_date — a status block in by_date would also
+        # pollute the carry first-leave anchor (Pass 3 takes the day's
+        # earliest future event). A status block must produce nothing at all.
+        if (start_time == "00:00" and end_time == "00:00"
+                and _STATUS_BLOCK_RE.search(f"{title} {details}")):
+            print(f"[calendar-intents] skip all-day status block {title!r} "
+                  f"@ {current_date}", file=sys.stderr)
+            continue
+
         try:
             event_dt = _coerce(datetime.fromisoformat(f"{current_date}T{start_time}:00"))
         except (ValueError, TypeError):
             continue
-        by_date.setdefault(current_date, []).append({
+
+        ev = {
             "start_time": start_time, "end_time": end_time, "title": title,
             "details": details, "event_dt": event_dt,
-        })
+        }
+
+        # REQ-85(b): recover the event's TRUE span from the sidecar mapping.
+        # A continuation-day line of a multi-day event is dropped (only the
+        # start day keys/generates anything); a start-day line of a multi-day
+        # event carries its real end into Pass 2 (closure timing + expiry).
+        # Any lookup/parse failure → per-day handling, exactly as before.
+        entry = _map_entry(map_idx, current_date, f"{start_time}-{end_time}", title)
+        if entry:
+            try:
+                true_start, true_end, true_end_dt = _true_span(entry)
+            except Exception:
+                true_start = None  # garbage start/end_iso → per-day fallback
+            if true_start and current_date > true_start:
+                print(f"[calendar-intents] skip continuation day {current_date} "
+                      f"of {title!r} (true start {true_start})", file=sys.stderr)
+                continue
+            if true_start == current_date and true_end > true_start:
+                ev["true_end_date"] = true_end
+                ev["true_end_dt"] = true_end_dt
+
+        by_date.setdefault(current_date, []).append(ev)
 
     # Dedup snapshot across ALL statuses (see _load_cal_index). Refreshed lazily
     # below as we INSERT, so two identical event lines in ONE markdown can't
@@ -1391,7 +1537,7 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
                             )
                             tag_to_row[intent_tag] = (iid_existing, json.dumps(
                                 {"datetime": prep_dt.isoformat()}, ensure_ascii=False))
-                else:
+                elif not _legacy_span_dup(ev, current_date, title, existing_tags):
                     iid = create_intent(
                         name=f"Prep: {title}",
                         trigger_type="date",
@@ -1417,10 +1563,15 @@ def generate_calendar_intents(calendar_md: str) -> list[str]:
             # asks, AFTER the event, whether there is anything to follow up —
             # only cards on a real lead (external policy), never nags.
             if _SOCIAL_RE.search(title):
-                try:
-                    event_end_dt = _coerce(datetime.fromisoformat(f"{current_date}T{end_time}:00"))
-                except (ValueError, TypeError):
-                    event_end_dt = event_dt
+                # REQ-85(b): a multi-day event's line shows the DAY's rendered
+                # end — the real end (end_iso) is days later. The closure must
+                # fire (and expire) after the event ACTUALLY ends.
+                event_end_dt = ev.get("true_end_dt")
+                if event_end_dt is None:
+                    try:
+                        event_end_dt = _coerce(datetime.fromisoformat(f"{current_date}T{end_time}:00"))
+                    except (ValueError, TypeError):
+                        event_end_dt = event_dt
                 close_dt = snap_to_golden(event_end_dt + timedelta(minutes=90))
                 if close_tag in existing_tags:
                     # REQ-68.1: extend the supersede path to the closure role —
