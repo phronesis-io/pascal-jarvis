@@ -1084,6 +1084,14 @@ ${_model_footer}"
   [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
   if ! lark_reply "$message_id" "$reply"; then
     log_err "[$session_id] Failed to send reply to Lark"
+  else
+    # Write-claim audit (REQ-88, SHADOW): if the reply claims "已记录/已写入",
+    # reconcile against actual write-surface mtimes and append the verdict to
+    # data/write_claim_audit.jsonl. Strictly log-only — never messages, never
+    # writes on Jarvis's behalf. Backgrounded + fully guarded, so it can never
+    # delay the reply path (same pattern as the journal_capture hook).
+    ( JV_REPLY="$reply" JARVIS_DIR="$JARVIS_DIR" MEMORY_DIR="$MEMORY_DIR" \
+      python3 "$JARVIS_DIR/tasks/write_claim_audit.py" >>"$LOG_FILE" 2>&1 & )
   fi
 }
 
