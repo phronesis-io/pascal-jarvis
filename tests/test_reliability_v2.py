@@ -22,11 +22,20 @@ def test_components_manifest_loads_and_covers_critical_set():
     # The audit's dead zones must all be present — a component not listed
     # here can die silently again.
     for required in ("dashboard", "admin", "ef-stream", "lark-sidecar",
-                     "bot", "heartbeat-loop", "session-backup"):
+                     "bot", "heartbeat-loop", "session-backup",
+                     "conversation-audit"):
         assert required in names, f"components.yaml missing {required}"
     # The 23-day corpse and the silent stream must be critical (daemon probes)
     crit = {c["name"] for c in comps if c.get("critical")}
     assert "dashboard" in crit and "ef-stream" in crit
+    # REQ-82: the audit had no scheduler mount and sat idle for 13 days —
+    # freshness must be watched via the db mtime (48h = one missed daily run
+    # tolerated, two pages) and stay non-critical (observation layer).
+    ca = next(c for c in comps if c["name"] == "conversation-audit")
+    assert ca["check"] == "file_age"
+    assert ca["path"] == "data/conversation_audit.db"
+    assert ca["max_age_hours"] == 48
+    assert not ca.get("critical", False)
 
 
 def test_components_check_types(tmp_path):

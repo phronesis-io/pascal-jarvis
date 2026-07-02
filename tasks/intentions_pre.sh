@@ -60,6 +60,16 @@ try:
 except Exception as e:
     print(f"[intentions] closure reask error: {e}", file=sys.stderr)
 
+# 1d. Skip digest (REQ-78 batch 1): fold occurrences silently skipped during
+#     a stall into ONE breach-queue entry so they ride the apology card below.
+#     Internally gated to one scan per 10min; fail-open — a digest failure
+#     must never block the due-intent path.
+try:
+    from core.skip_digest import queue_digest
+    queue_digest()
+except Exception as e:
+    print(f"[intentions] skip digest error: {e}", file=sys.stderr)
+
 # 2. Check for due intents + breach notifications owed. peek_breaches is
 #    NON-mutating (red-team fix): the notify_attempts counter is bumped by
 #    intentions_post ONLY when a card actually renders, never per pre-run.

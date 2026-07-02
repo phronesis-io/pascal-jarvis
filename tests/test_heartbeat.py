@@ -688,3 +688,103 @@ def test_circuit_trip_does_not_message_user(tmp_path, monkeypatch):
     out = runner.run_cycle(force=True)
     assert "连续失败" not in out and "自动暂停" not in out
     assert out == ""                                            # nothing to chat
+
+
+def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
+    """Roster-drift guard (REQ-81.1). Every hard-coded task-name collection in
+    HeartbeatRunner must only reference tasks that exist in the REAL
+    HEARTBEAT.md — 2026-07-02 the zombie sweep found eigenflux-messages still
+    in PRIORITY_TASKS and memory-monthly in PIPELINE/EMPTY_RETRY while their
+    task blocks were being deleted. A stale name is not harmless: it silently
+    grants ghost tasks scheduling privileges (priority, retry pacing, silence)
+    and hides the fact that the list and the doc have diverged."""
+    hb = Path(__file__).resolve().parent.parent / "HEARTBEAT.md"
+    real_names = {t["name"] for t in parse_heartbeat(hb)}
+    for set_name in ("PRIORITY_TASKS", "PIPELINE_TASKS", "EMPTY_RETRY_DELAYS",
+                     "SILENT_TASKS", "TIER0_TASKS"):
+        members = set(getattr(HeartbeatRunner, set_name))
+        stale = members - real_names
+        assert not stale, (
+            f"HeartbeatRunner.{set_name} references tasks absent from "
+            f"HEARTBEAT.md: {sorted(stale)} — remove them or restore the task block"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# REQ-80 — failed/parse_failed task_finish events carry an error excerpt
+# (866 failed events with zero error info made 6/19's ~247-failure night
+# undiagnosable). killed events stay error-free by contract.
+# ──────────────────────────────────────────────────────────────────────────
+
+from core.heartbeat import _error_excerpt  # noqa: E402
+
+
+def _sched_events(runner):
+    f = runner.jarvis_dir / "sched_events.jsonl"
+    if not f.exists():
+        return []
+    return [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+
+
+def test_error_excerpt_first_line_truncate_redact():
+    # first non-empty line wins
+    assert _error_excerpt("\n\n  boom: connection refused  \nsecond line") == \
+        "boom: connection refused"
+    # truncation at limit
+    assert _error_excerpt("x" * 900) == "x" * 500
+    assert len(_error_excerpt("y" * 900, limit=100)) == 100
+    # secrets never reach the persistent event log
+    red = _error_excerpt("401 unauthorized sk-abcDEF1234567890 for key")
+    assert "sk-abc" not in red and "[redacted]" in red
+    red = _error_excerpt("Authorization: Bearer eyJhbGciOi.payload.sig failed")
+    assert "eyJhbGciOi" not in red and "[redacted]" in red
+    red = _error_excerpt("bad config api_key=supersecret123 rejected")
+    assert "supersecret123" not in red and "[redacted]" in red
+    # degenerate inputs fail open to ""
+    assert _error_excerpt("") == ""
+    assert _error_excerpt(None) == ""
+
+
+def test_batch_failure_emits_error_excerpt_without_secrets(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: x\n")
+
+    def failing_call(prompt, timeout=None):
+        runner._call_timed_out = False
+        runner._last_call_error = "API error 401\nBearer sk-verysecrettoken12345\nmore"
+        return ""
+
+    monkeypatch.setattr(runner, "claude_call", failing_call)
+    runner.run_cycle(force=True)
+
+    fails = [e for e in _sched_events(runner)
+             if e["event"] == "task_finish" and e.get("status") == "failed"]
+    assert fails, "failed task_finish event missing"
+    assert fails[0]["error"] == "API error 401"
+    assert "sk-verysecret" not in json.dumps(fails)
+
+
+def test_parse_failed_event_carries_envelope_head(tmp_path, monkeypatch):
+    hb = ("### task-a\n- interval: 1h\n- prompt: a\n\n"
+          "### task-b\n- interval: 1h\n- prompt: b\n")
+    runner = _make_runner(tmp_path, hb)
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p, timeout=None: "utterly not json {{{")
+    runner.run_cycle(force=True)
+
+    pf = [e for e in _sched_events(runner)
+          if e["event"] == "task_finish" and e.get("status") == "parse_failed"]
+    assert pf, "parse_failed task_finish event missing"
+    for e in pf:
+        assert e["error"].startswith("envelope unparseable; head: ")
+        assert "utterly not json" in e["error"]
+
+
+def test_killed_event_has_no_error_field(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: x\n")
+    monkeypatch.setattr(runner, "claude_call", lambda p, timeout=None: "__KILLED__")
+    runner.run_cycle(force=True)
+
+    killed = [e for e in _sched_events(runner)
+              if e["event"] == "task_finish" and e.get("status") == "killed"]
+    assert killed, "killed task_finish event missing"
+    assert "error" not in killed[0]

@@ -36,6 +36,22 @@ else
   echo "⚠️ No calendar_today.md found"
 fi
 
+# 2b. Calendar user-token probe (REQ-83): calendar-sync fetches --as user;
+#     when the user token lapses (6/29-30: ×7) the sync degrades to a stale
+#     snapshot. Probe a 1h agenda window with the same identity so token
+#     death pages HERE, deterministically — doctor.sh only probes the bot
+#     identity. (_GATE_TRIGGERS in the post redacts auth failure details.)
+if command -v lark-cli >/dev/null 2>&1; then
+  _probe_start=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  _probe_end=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  if lark-cli calendar +agenda --as user --format json \
+       --start "$_probe_start" --end "$_probe_end" >/dev/null 2>&1; then
+    echo "User-token probe: ✓"
+  else
+    echo "⚠️ 日历 user token 探针失败 — calendar-sync 只能用旧快照兜底，需要跑 lark-cli auth login 重新授权"
+  fi
+fi
+
 # 3. Repos — last pull times
 echo ""
 echo "--- Repos ---"
@@ -124,6 +140,14 @@ if [ "$_dropped" != "?" ] && [ "${_dropped:-0}" -gt 0 ]; then
 else
   echo "✓ No silently dropped intents in the last 24h"
 fi
+
+# 7d. Skip digest check (REQ-78.2): any intent_occurrence_skipped /
+#     expires_at_lapsed event in the last 24h means the scheduler stalled past
+#     occurrences — ⚠️ line feeds the REQ-39 deterministic alert path.
+echo ""
+echo "--- Skipped Occurrences (24h) ---"
+(cd "$JARVIS_DIR" && python3 -m core.skip_digest --diag 2>/dev/null) \
+  || echo "⚠️ skip-digest 检查本身失败（python3 -m core.skip_digest --diag 非零退出）"
 
 # 8. CLI versions
 echo ""

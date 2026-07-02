@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Post-hook: send morning daily plan as Lark card + log for plan-vs-reality comparison."""
+"""Post-hook: log the morning daily plan for plan-vs-reality comparison.
+
+REQ-84 (2026-07-02): the Lark card build was removed — daily-plan is in
+SILENT_TASKS (6/12 hallucination incident), so the card was assembled and
+then discarded by the heartbeat every single day. PLAN_LOG stays: it has a
+real consumer (daily_reflect_pre.sh reads today's plan for the evening
+plan-vs-reality comparison).
+"""
 
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.card import build_card, build_rich_card
-from core.safety import looks_like_error, parse_json_response, summarize
+from core.safety import looks_like_error, parse_json_response
 from core.jsonl import append_jsonl
 from core.timeutil import now_local_str
 
@@ -47,18 +53,10 @@ def main():
         "plan": message,
     }, keep_last=14)
 
-    # Output as Lark card with richview link for full plan
-    date_str = now_local_str("%Y-%m-%d")
-    # Card shows first lines as summary, full content in richview
-    summary = summarize(message)
-
-    print(build_rich_card(
-        header="🌅 今日",
-        summary=summary,
-        sections=[{"type": "markdown", "content": message}],
-        meta={"source": "daily_plan", "date": date_str},
-        source="daily-plan",
-    ))
+    # No card output (REQ-84): daily-plan is a SILENT_TASK — anything printed
+    # here would be built and then dropped by the heartbeat. Log only.
+    print("daily-plan: plan logged to PLAN_LOG (card build removed, REQ-84)",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -36,13 +36,65 @@ for i in range(31):
 ")
 IFS=$'\n' read -r -d '' -a BOUNDS <<< "$day_boundaries" || true
 
-# Build day boundaries and fetch events for each day
+# Build day boundaries and fetch events for each day.
+# REQ-83: fetch failures are COUNTED, not swallowed — `2>/dev/null` used to
+# render a dead user token (6/29-30, ×7) as "(no events)" and the stale
+# snapshot got rewritten with a fresh synced timestamp. Any failed day fails
+# the whole round: a lapsed token breaks all 30 days at once, and for a
+# single-day transient blip keeping the previous snapshot for one 30-min
+# retry cycle is the conservative choice.
+_fetch_fail=0
+_err_file="$JARVIS_DIR/tmp/.calsync_err"
+mkdir -p "$JARVIS_DIR/tmp"
+: > "$_err_file"
 for i in $(seq 0 29); do
   day_start="${BOUNDS[$i]}"
   day_end="${BOUNDS[$((i+1))]}"
-  day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>/dev/null)
+  day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>>"$_err_file") || _fetch_fail=1
   export "DAY${i}_DATA=$day_data"
 done
+
+# REQ-83 failure branch: empty stdout + exit 1 so the heartbeat records
+# pre_nonzero and the post never runs (the post would rewrite the memory file
+# from RAW_CACHE and stamp stale data with a fresh synced time). The existing
+# snapshot is kept and annotated as stale — the next successful sync rewrites
+# the file and the annotation disappears with it.
+if [ "$_fetch_fail" -ne 0 ]; then
+  _err_summary=$(head -c 200 "$_err_file" | tr '\n' ' ')
+  echo "[calendar-sync] fetch FAILED — keeping previous snapshot (user token expired? run: lark-cli auth login): $_err_summary" >&2
+  CALENDAR_FILE="$calendar_file" python3 - <<'PY' >&2
+# Idempotent stale annotation — never raises, never touches stdout.
+import os, re, sys
+from datetime import datetime
+from pathlib import Path
+try:
+    p = Path(os.environ["CALENDAR_FILE"])
+    if p.exists():
+        MARK = "> ⚠️ 日历同步失败"
+        # strip previous annotations first so repeated failures never stack
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines()
+                 if not ln.startswith(MARK)]
+        m = re.search(r"synced (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", "\n".join(lines))
+        last_ok = m.group(1) if m else "未知时间"
+        note = (f"{MARK}（{datetime.now().strftime('%Y-%m-%d %H:%M')}），"
+                f"以下数据截至 {last_ok} 的最后一次成功同步，可能已过时")
+        out, inserted = [], False
+        for ln in lines:
+            out.append(ln)
+            if not inserted and ln.startswith("# Calendar"):
+                out.append(note)
+                inserted = True
+        if not inserted:
+            out.insert(0, note)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
+        print("[calendar-sync] stale annotation written", file=sys.stderr)
+except Exception as e:
+    print(f"[calendar-sync] stale annotation failed: {e}", file=sys.stderr)
+PY
+  exit 1
+fi
 
 # Load user interests file (if exists)
 interests_file="$MEMORY_DIR/warm/interests.md"

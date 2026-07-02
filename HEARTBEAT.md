@@ -13,12 +13,12 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 | Category | Tasks | User-facing? |
 |---|---|---|
-| Daily Rhythm | daily-plan, activity-log, daily-reflect, free-time-nudge | reflect+nudge yes; daily-plan+activity-log silent |
+| Daily Rhythm | daily-plan, activity-log, daily-reflect | reflect yes; daily-plan+activity-log silent |
 | Check-in | checkin | yes |
-| Calendar & Tasks | calendar-sync, task-triage, weekly-review | calendar silent, task-triage+weekly yes |
+| Calendar & Tasks | calendar-sync, weekly-review | calendar silent, weekly yes |
 | Intentions | intention-check | yes (when intent fires) |
-| Memory Pipeline | memory-hourly → daily → weekly → monthly, memory-consolidate, memory-tidy | silent |
-| EigenFlux | eigenflux-feed-triage, eigenflux-research, eigenflux-messages, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+messages+friends yes, others silent |
+| Memory Pipeline | memory-hourly → daily → weekly, memory-consolidate, memory-tidy | silent |
+| EigenFlux | eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+friends yes, others silent |
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
@@ -100,64 +100,6 @@ SILENT_TASKS, not this doc.
     Almost everything is NOT urgent — default false. 知会/FYI breadth is NEVER urgent.
 
     Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>","urgent":false}
-
-### eigenflux-research
-- interval: 30m
-- pre: tasks/eigenflux_research_pre.sh
-- post: tasks/eigenflux_research_post.py
-- prompt: |
-    [EIGENFLUX DEEP RESEARCH]
-    Items from the feed triage were flagged as "needs research" — they MIGHT be valuable but
-    the triage couldn't determine concretely. Your job: do the deep work NOW and decide.
-
-    For EACH item in the queue:
-    1. If a source URL is available, use WebFetch to read the FULL content first. Do NOT rely on summaries alone.
-    2. READ the full content carefully. If it's a paper, understand the method and contribution.
-    3. CROSS-REFERENCE with EigenFlux's actual codebase:
-       - Repos: check the work_dir configured in jarvis.yaml for available project repos
-       - Check: does this solve a problem we actually have?
-       - Be specific: name the file, module, or component where this would apply.
-    4. CHECK the user's memory files for current priorities and judge relevance against those.
-    5. DECIDE:
-       - "push": CONCRETE, SPECIFIC application found. Write the action recommendation.
-       - "discard": After research, doesn't apply. Explain briefly.
-       - "hold": Need MORE info that you can't get right now.
-
-    For "push" items, write a user_message that:
-    - Leads with the SPECIFIC ACTION
-    - Names the exact file/module in our codebase where this applies
-    - Includes the source URL using markdown clickable format: [description](url), NOT bare URLs
-    - Ends with 📡 Powered by EigenFlux
-
-    CRITICAL: Never assume Pascal has read or consumed any of the content you are referencing.
-    You are PUSHING this to him; he has not seen it. Do NOT write as if he knows the material
-    (no "你已经看过", "这个论文你提过", "基于你之前的阅读"). Only present the finding on its own merits.
-
-    At night, a push here is HELD for the morning digest unless you set top-level "urgent": true.
-    Reserve urgent for findings that genuinely can't wait until morning — almost never; default false.
-
-    Return JSON: {"decisions":[{"item_id":"<id>","decision":"push|discard|hold","reason":"<detailed>"}],"user_message":"<markdown or empty>","urgent":false}
-
-### eigenflux-messages
-- interval: 10m
-- pre: tasks/eigenflux_messages_pre.sh
-- post: tasks/eigenflux_messages_post.py
-- prompt: |
-    [EIGENFLUX MESSAGES]
-    New private messages received on EigenFlux. Review in context of our conversation
-    and decide how to respond on Pascal's behalf.
-    If "entity_matches" is present in the DATA, use it to identify who the sender is
-    (e.g., a team member, investor, known contact). Mention the real identity in your summary.
-
-    Return JSON in this exact format:
-    {"reply_actions": [{"receiver_id": "<sender_agent_id>", "content": "<your reply>", "item_id": null}], "user_message": "<summary for Pascal of what you sent, or empty>"}
-
-    Guidelines:
-    - reply_actions: list of replies to send back. Use the sender's agent ID as receiver_id.
-    - content: write a helpful, concise reply as Pascal's AI assistant.
-    - user_message: brief note to Pascal about what was received and how you replied (shown via Lark).
-    - If nothing actionable or no reply needed, return: {"reply_actions": [], "user_message": ""}
-    - End user_message with: 📡 Powered by EigenFlux
 
 ### eigenflux-publish
 - interval: 60m
@@ -533,18 +475,6 @@ SILENT_TASKS, not this doc.
     "energy dips consistently at 15:00", "watchlater items consumed mainly on weekends"
     Only note patterns with at least 3 data points. Do NOT fabricate patterns from insufficient data.
 
-### memory-monthly
-- interval: 30d
-- pre: tasks/memory_monthly_pre.sh
-- post: tasks/memory_monthly_post.py
-- prompt: |
-    [MONTHLY ARCHIVE UPDATE]
-    Merge the weekly digest below with the existing monthly archive.
-    This is the longest-term memory layer — a compressed timeline of months.
-    Format: 1-2 bullet points per week, each under 30 words.
-    Focus on: milestones, turning points, evolving patterns.
-    Keep under 500 words total.
-
 ## Calendar
 
 ### calendar-sync
@@ -637,20 +567,6 @@ SILENT_TASKS, not this doc.
     If everything looks clean, reply HEARTBEAT_OK.
 
 ## Self-Evolution
-
-### harness-evolve
-- interval: 24h
-- pre: tasks/harness_evolve_pre.sh
-- post: tasks/harness_evolve_post.py
-- heavy: true
-- timeout: 900
-- prompt: |
-    [HARNESS SELF-EVOLUTION]
-    每日自进化任务。基于输入里的「增量」（新反馈/行为信号/提交）+ system prompt
-    里已加载的完整记忆，判断 harness 是否要演化。完整规则、分级（A 卫生自动落 /
-    B 提案走飞书审批）、三道质量闸、和 JSON 输出格式都在下面的输入里——严格按那个
-    JSON 契约输出，别加额外文字。这是自主内务，分析过程不要 triage 给 Pascal；
-    只有 B 级提案才发飞书。没有任何变更就回 HEARTBEAT_OK。
 
 ## Cross-project
 
@@ -816,24 +732,6 @@ SILENT_TASKS, not this doc.
 
     Return JSON: {"user_message": "<markdown>", "patterns_noted": ["<optional pattern strings>"]}
     Or HEARTBEAT_OK if not enough data to reflect on.
-
-### free-time-nudge
-- interval: 1h
-- pre: tasks/free_time_nudge_pre.sh
-- post: tasks/free_time_nudge_post.py
-- prompt: |
-    [FREE TIME NUDGE]
-    A free block is approaching or in progress. Your job:
-    - PRIORITY: If there are saved watch-later items in DATA, pick ONE and include its URL.
-      Format: {"user_message":"<text>","watchlater":{"title":"...","url":"..."}}
-    - If no watchlater but in-progress todos fit, mention ONE casually.
-    - If nothing fits, just note the free time exists ("接下来两小时没安排").
-    - NEVER be pushy. This is information, not a command.
-    - 碎片时间 (<30min): only suggest 无门槛 things (short video, stretch, walk).
-    - Longer blocks: can mention pending work or longer watchlater content.
-    
-    Under 30 words Chinese. Natural, casual tone. No emojis.
-    Return JSON: {"user_message":"<text>","watchlater":{"title":"...","url":"..."}} or HEARTBEAT_OK if not worth sending.
 
 ## Team
 
@@ -1030,34 +928,6 @@ SILENT_TASKS, not this doc.
     Or HEARTBEAT_OK if the site looks current and nothing needs changing.
 
 ## Task System
-
-### task-triage
-- interval: 6h
-- pre: tasks/task_triage_pre.sh
-- post: tasks/task_triage_post.py
-- prompt: |
-    [TASK TRIAGE — Stale detection & decay]
-    Check the DATA below for items needing attention.
-
-    For STALE INBOX items (>48h):
-    - Compose a brief message asking the user to decide: 做/不做/下周？
-    - Tone: casual, no pressure. "这个等了两天了" not "你还没决定".
-
-    For READY TO DECAY items (3+ touches):
-    - Auto-decay them. Include in auto_decay list.
-    - Message tone: "帮你放下了——不是做不到，只是现在不是时候。随时可以捡回来。"
-    - Decay is mercy, never punishment.
-
-    For OVERDUE items:
-    - Just note them for user awareness. No guilt.
-
-    Return JSON: {
-      "user_message": "<markdown, or empty if nothing to say>",
-      "auto_decay": [{"task_id": "<id>", "reason": "<brief>"}]
-    }
-    JSON MUST be valid: inside string values never use bare ASCII double
-    quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
-    If nothing needs attention: HEARTBEAT_OK
 
 ### weekly-review
 - interval: 7d
