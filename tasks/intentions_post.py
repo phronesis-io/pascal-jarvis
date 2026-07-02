@@ -186,7 +186,10 @@ def _closure_buttons(button_specs: list) -> list[dict]:
         prefix = "" if len(button_specs) == 1 else f"{spec['name'][:8]}·"
         buttons += [
             {"text": f"{prefix}✅ 做了",
-             "value": {"action": "intent_close", "id": pid, "outcome": "done"}},
+             # result must be non-empty: REQ-90③ coerces done+empty-result to
+             # 'na', and a ✅ tap IS evidence — mirror the ❌ button's pattern.
+             "value": {"action": "intent_close", "id": pid, "outcome": "done",
+                        "result": "做了（按钮记录）"}},
             {"text": f"{prefix}❌ 没做",
              "value": {"action": "intent_close", "id": pid, "outcome": "recorded",
                         "result": "没做（按钮记录）"}},

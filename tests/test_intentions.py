@@ -1073,6 +1073,334 @@ def test_calendar_no_carry_when_nothing_to_bring(intent_db):
     assert any("calendar-prep" in _tags_of(mod.get_intent(i)) for i in created)
 
 
+# ===========================================================================
+# REQ-85 — all-day status blocks filtered + true-start-day keying
+# (the 15-row Prep:请假 create/cancel churn class, hard deadline 7/11)
+# ===========================================================================
+
+def _multi_day_md(day_events: list[tuple[str, list]]) -> str:
+    """Join several _cal_md day sections. day_events = [(date_str, lines)]."""
+    return "\n".join(_cal_md(d, lines, label=f"Day {i + 1}")
+                     for i, (d, lines) in enumerate(day_events))
+
+
+def _map_entry_for(date_str, time_str, summary, start_local, end_local,
+                   eid="evt_1"):
+    """A calendar_event_mapping.json-style entry. start/end are aware local
+    datetimes, serialized to the Z-suffixed UTC form Lark emits — so the test
+    exercises the .replace('Z', '+00:00') + to-local path for real."""
+    from datetime import timezone
+
+    def z(dt):
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {"event_id": eid, "calendar_id": "cal_x", "summary": summary,
+            "time": time_str, "date": date_str,
+            "start_iso": z(start_local), "end_iso": z(end_local)}
+
+
+def test_calendar_allday_status_block_generates_nothing(intent_db):
+    """REQ-85(a): a 00:00-00:00 status block (婚假/请假/OOO) is calendar STATE —
+    zero prep, zero closure, zero carry, even when the title carries carry
+    (带电脑) and social (饭) cues that would otherwise trigger those roles."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("00:00-00:00", "年假 OOO 带电脑回家吃饭")])
+    created = mod.generate_calendar_intents(md, event_map=[])
+    assert created == []
+    assert _cal_rows() == []
+
+
+def test_calendar_status_filter_does_not_overmatch(intent_db):
+    """REQ-85(a) 防误杀: a 00:00-08:00 红眼航班 (all-night, no keyword) and a
+    14:00-15:00 请假面谈 (keyword, not all-day) both still get their prep."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    # 红眼 two days out so its 00:00 start is always >2h ahead of `now`.
+    day2 = (now_local() + timedelta(days=2)).strftime("%Y-%m-%d")
+    day1 = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _multi_day_md([(day1, [("14:00-15:00", "请假面谈")]),
+                        (day2, [("00:00-08:00", "红眼航班")])])
+    created = mod.generate_calendar_intents(md, event_map=[])
+    preps = [i for i in created
+             if "calendar-prep" in _tags_of(mod.get_intent(i))]
+    assert len(preps) == 2
+
+
+def test_calendar_multiday_event_single_prep_keyed_on_start_day(intent_db):
+    """REQ-85(b) 主修: a multi-day event generates exactly ONE prep, keyed on
+    its true start day; re-sync is idempotent; continuation days create
+    nothing (the per-day cal: key churn cannot recur)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    start_local = (now_local() + timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+    end_local = (start_local + timedelta(days=3)).replace(minute=30)
+    days = [(start_local + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(4)]
+    md = _multi_day_md([(d, [("12:00-12:30", "冲绳旅行")]) for d in days])
+    emap = [_map_entry_for(d, "12:00-12:30", "冲绳旅行", start_local, end_local)
+            for d in days]
+
+    first = mod.generate_calendar_intents(md, event_map=emap)
+    preps = [r for r in _cal_rows() if "calendar-prep" in _tags_of(r)]
+    assert len(first) == 1 and len(preps) == 1
+    assert f"cal:{days[0]}:冲绳旅行" in _tags_of(preps[0])   # start-day key
+    # Re-sync: byte-identical key already present → nothing new.
+    assert mod.generate_calendar_intents(md, event_map=emap) == []
+    assert len([r for r in _cal_rows() if "calendar-prep" in _tags_of(r)]) == 1
+
+
+def test_calendar_multiday_event_in_progress_generates_nothing(intent_db):
+    """REQ-85(b): once a multi-day event has STARTED, every remaining rendered
+    day is a continuation day → zero generation for the rest of the event
+    (请假 from 7/2 must produce nothing through 7/11)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    start_local = (now_local() - timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+    end_local = (start_local + timedelta(days=3)).replace(minute=30)
+    days = [(start_local + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(1, 4)]   # today .. start+3 (start day already past)
+    md = _multi_day_md([(d, [("12:00-12:30", "冲绳旅行")]) for d in days])
+    emap = [_map_entry_for(d, "12:00-12:30", "冲绳旅行", start_local, end_local)
+            for d in days]
+    assert mod.generate_calendar_intents(md, event_map=emap) == []
+    assert _cal_rows() == []
+
+
+def test_calendar_multiday_no_resurrection_of_cancelled_legacy_rows(intent_db):
+    """REQ-85(b) 旧 key 兼容: a hand-cancelled legacy per-day row anywhere in
+    the event's true span blocks a new start-day prep — the 15 cancelled 请假
+    rows must never be recreated (range fallback dedup, zero migration)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    start_local = (now_local() + timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+    end_local = (start_local + timedelta(days=2)).replace(minute=30)
+    days = [(start_local + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(3)]
+    # Legacy row keyed on a MIDDLE day of the span, already cancelled by hand.
+    legacy = mod.create_intent(
+        name="Prep: 冲绳旅行", trigger_type="date",
+        trigger_config={"datetime": "2999-01-01T09:00:00"},
+        tags=[f"cal:{days[1]}:冲绳旅行", "calendar-prep"], source="calendar")
+    mod.cancel_intent(legacy, "manual cleanup")
+
+    md = _multi_day_md([(d, [("12:00-12:30", "冲绳旅行")]) for d in days])
+    emap = [_map_entry_for(d, "12:00-12:30", "冲绳旅行", start_local, end_local)
+            for d in days]
+    assert mod.generate_calendar_intents(md, event_map=emap) == []
+    rows = [r for r in _cal_rows() if "calendar-prep" in _tags_of(r)]
+    assert len(rows) == 1 and rows[0]["id"] == legacy   # nothing revived
+
+
+def test_calendar_multiday_social_closure_uses_true_end(intent_db):
+    """REQ-85(b): a multi-day SOCIAL event's closure fires after the event's
+    REAL end (end_iso), not after the first day's rendered 12:30 slice."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    start_local = (now_local() + timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+    end_local = (start_local + timedelta(days=3)).replace(minute=30)
+    days = [(start_local + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(4)]
+    md = _multi_day_md([(d, [("12:00-12:30", "团建聚会之旅")]) for d in days])
+    emap = [_map_entry_for(d, "12:00-12:30", "团建聚会之旅", start_local, end_local)
+            for d in days]
+    created = mod.generate_calendar_intents(md, event_map=emap)
+    close = [mod.get_intent(i) for i in created
+             if "calendar-close" in _tags_of(mod.get_intent(i))]
+    assert len(close) == 1
+    cfg = json.loads(close[0]["trigger_config"])
+    # snap_to_golden(true end 12:30 + 90min) = last day 14:00 — NOT day 1.
+    assert cfg["datetime"][:10] == days[3]
+    assert close[0]["expires_at"] > end_local.isoformat()[:19]
+
+
+def test_calendar_recurring_daily_meeting_not_merged(intent_db):
+    """REQ-85(b) 例会不误伤: two days of the same-named recurring instance each
+    carry their OWN per-day start_iso → each day is its own start day → two
+    preps (the decisive reason for mapping over a title-merge heuristic)."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    d1 = (now_local() + timedelta(days=1)).replace(hour=10, minute=0,
+                                                   second=0, microsecond=0)
+    d2 = d1 + timedelta(days=1)
+    md = _multi_day_md([
+        (d1.strftime("%Y-%m-%d"), [("10:00-10:15", "每日例会")]),
+        (d2.strftime("%Y-%m-%d"), [("10:00-10:15", "每日例会")]),
+    ])
+    emap = [
+        _map_entry_for(d1.strftime("%Y-%m-%d"), "10:00-10:15", "每日例会",
+                       d1, d1 + timedelta(minutes=15), eid="evt_recur"),
+        _map_entry_for(d2.strftime("%Y-%m-%d"), "10:00-10:15", "每日例会",
+                       d2, d2 + timedelta(minutes=15), eid="evt_recur"),
+    ]
+    created = mod.generate_calendar_intents(md, event_map=emap)
+    preps = [r for r in _cal_rows() if "calendar-prep" in _tags_of(r)]
+    assert len(preps) == 2
+    tags = set().union(*[_tags_of(r) for r in preps])
+    assert f"cal:{d1.strftime('%Y-%m-%d')}:每日例会" in tags
+    assert f"cal:{d2.strftime('%Y-%m-%d')}:每日例会" in tags
+
+
+def test_calendar_event_map_garbage_falls_back_per_day(intent_db):
+    """REQ-85(b) fail-open: a matching entry with garbage start/end_iso must
+    fall back to plain per-day handling — never crash, never drop the prep."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("15:00-16:00", "线上同步会")])
+    emap = [{"event_id": "evt_bad", "summary": "线上同步会", "date": day,
+             "time": "15:00-16:00", "start_iso": "not-a-date", "end_iso": ""}]
+    created = mod.generate_calendar_intents(md, event_map=emap)
+    preps = [i for i in created
+             if "calendar-prep" in _tags_of(mod.get_intent(i))]
+    assert len(preps) == 1
+
+
+# ===========================================================================
+# REQ-85(c) — expires_at lapse leaves a trace; REQ-90 — closure edge cases
+# ===========================================================================
+
+def test_cleanup_expired_emits_trace_event(intent_db, monkeypatch):
+    """REQ-85(c): a date prep dying via expires_at must leave a visible trace
+    (intent_expired reason=expires_at_lapsed) — the lone expired 'Prep: 发散'
+    was undiagnosable under the old bare UPDATE. Idempotent: a second sweep
+    emits nothing new."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    events = []
+    monkeypatch.setattr(mod, "_emit_intent",
+                        lambda ev, iid, **f: events.append((ev, iid, f)))
+    past = (now_local() - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    expired_at = (now_local() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    iid = mod.create_intent(name="Prep: 发散", trigger_type="date",
+                            trigger_config={"datetime": past},
+                            expires_at=expired_at)
+    mod.cleanup_expired()
+    assert mod.get_intent(iid)["status"] == "expired"
+    traces = [(ev, i, f) for ev, i, f in events if ev == "intent_expired"]
+    assert traces == [("intent_expired", iid,
+                       {"reason": "expires_at_lapsed", "name": "Prep: 发散"})]
+    events.clear()
+    mod.cleanup_expired()                       # already expired → no re-emit
+    assert events == []
+
+
+def test_context_moment_closes_na_on_execute(intent_db):
+    """REQ-90①: a context moment (followup=None policy) reaching terminal must
+    CLOSE its closure axis (na + closed_at), not fall through writing nothing —
+    the int_879cb1472b black-hole class. No follow-up row is spawned."""
+    from core.intentions import create_intent, get_intent
+
+    pid = create_intent(name="Prep: 某会", trigger_type="date",
+                        trigger_config={"datetime": "2026-06-30T10:00:00"},
+                        category="context", closure_question="有要跟进的吗？")
+    _fire(pid)
+    row = get_intent(pid)
+    assert row["closure_status"] == "na"
+    assert row["closed_at"]
+    assert "no-followup policy" in row["closure_result"]
+    assert get_intent(f"{pid}__fu") is None      # nothing spawned
+    _fire(pid)                                    # re-execute → guard: no change
+    assert get_intent(pid)["closure_status"] == "na"
+
+
+def test_cron_intent_coerces_closure_question(intent_db):
+    """REQ-90②: cron intents never spawn follow-ups, so closure_question is a
+    dead field on them — coerced to empty at create, never raised."""
+    from core.intentions import create_intent, get_intent
+
+    pid = create_intent(name="每日跟进", trigger_type="cron",
+                        trigger_config={"expression": "0 9 * * *"},
+                        category="external", closure_question="进展如何？")
+    assert get_intent(pid)["closure_question"] == ""
+
+
+def test_record_closure_done_empty_result_coerced_to_na(intent_db):
+    """REQ-90③: done with an empty result is a claim without a record —
+    coerced to na (never raise: a raise would fail the closure write itself
+    and mint a new zombie class)."""
+    from core.intentions import create_intent, get_intent, record_closure
+
+    pid = create_intent(name="p", trigger_type="date",
+                        trigger_config={"datetime": "2999-01-01T09:00:00"})
+    assert record_closure(pid, outcome="done", result="   ") is True
+    row = get_intent(pid)
+    assert row["closure_status"] == "na"
+    assert row["closed_at"]
+
+
+def test_closure_done_button_carries_result(intent_db):
+    """Companion to REQ-90③: the ✅ button must send a non-empty result, or
+    every tap would be silently downgraded to na by the coerce."""
+    from tasks.intentions_post import _closure_buttons
+
+    buttons = _closure_buttons([{"parent": "int_x", "name": "饭局"}])
+    done = [b for b in buttons if b["value"].get("outcome") == "done"]
+    assert done and str(done[0]["value"].get("result", "")).strip()
+
+
+def test_backfill_req90_script_dry_run_and_apply(intent_db, tmp_path):
+    """The backfill script identifies the black-hole rows in dry-run mode and
+    closes exactly them (and only non-terminal ones) with --apply."""
+    import sqlite3 as sq
+    from datetime import datetime
+    from scripts.backfill_req90_context_closures import main as backfill_main
+
+    db_path = tmp_path / "jarvis_copy.db"
+    conn = sq.connect(str(db_path))
+    conn.execute("""CREATE TABLE intentions (
+        id TEXT PRIMARY KEY, name TEXT, status TEXT, category TEXT,
+        closure_status TEXT DEFAULT 'none', closure_result TEXT DEFAULT '',
+        closed_at TEXT)""")
+    conn.executemany(
+        "INSERT INTO intentions (id, name, status, category, closure_status) "
+        "VALUES (?, ?, 'executed', 'context', ?)",
+        [("int_879cb1472b", "blackhole-1", "none"),
+         ("int_d9aa5c5668", "blackhole-2", "none")])
+    conn.commit(); conn.close()
+
+    # Dry run: identifies both, writes nothing.
+    assert backfill_main(["--db", str(db_path)]) == 0
+    conn = sq.connect(str(db_path))
+    assert conn.execute("SELECT COUNT(*) FROM intentions "
+                        "WHERE closure_status = 'none'").fetchone()[0] == 2
+    conn.close()
+
+    # Apply: both closed na with closed_at; second apply is a no-op.
+    assert backfill_main(["--db", str(db_path), "--apply"]) == 0
+    conn = sq.connect(str(db_path))
+    rows = conn.execute("SELECT closure_status, closed_at, closure_result "
+                        "FROM intentions").fetchall()
+    conn.close()
+    for status, closed_at, result in rows:
+        assert status == "na" and closed_at
+        assert "backfill REQ-90" in result
+    assert backfill_main(["--db", str(db_path), "--apply"]) == 0
+
+
 # ---------------------------------------------------------------------------
 # update_intent — field whitelist, JSON serialization, edge cases
 # ---------------------------------------------------------------------------
