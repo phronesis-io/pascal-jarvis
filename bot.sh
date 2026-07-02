@@ -70,11 +70,14 @@ LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
 
 # ── Log rotation (on startup) ────────────────────────────────────────
-# Archive 3 generations before truncating — destroyed history made
-# failure-rate audits impossible.
+# Archive 8 generations before truncating — destroyed history made
+# failure-rate audits impossible (REQ-80: 3×500KB covered only ~2.5 days;
+# jarvis.log lives in the repo dir, so deeper archives are safe from the
+# macOS /tmp 3-day sweeper).
 if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
-  mv -f "$LOG_FILE.2" "$LOG_FILE.3" 2>/dev/null || true
-  mv -f "$LOG_FILE.1" "$LOG_FILE.2" 2>/dev/null || true
+  for _gen in 7 6 5 4 3 2 1; do
+    mv -f "$LOG_FILE.$_gen" "$LOG_FILE.$((_gen + 1))" 2>/dev/null || true
+  done
   cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
   tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
 fi
@@ -1274,9 +1277,11 @@ heartbeat_watchdog() {
     if [ $((_ticks % 120)) -eq 0 ]; then
       if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
         # Archive before truncating: tail-only rotation made WARN-rate audits
-        # impossible (history was simply destroyed). Keep 3 generations.
-        mv -f "$LOG_FILE.2" "$LOG_FILE.3" 2>/dev/null || true
-        mv -f "$LOG_FILE.1" "$LOG_FILE.2" 2>/dev/null || true
+        # impossible (history was simply destroyed). Keep 8 generations
+        # (REQ-80: 3 covered only ~2.5 days of history).
+        for _gen in 7 6 5 4 3 2 1; do
+          mv -f "$LOG_FILE.$_gen" "$LOG_FILE.$((_gen + 1))" 2>/dev/null || true
+        done
         cp -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
         # copytruncate, not tail+mv: the python children hold O_APPEND fds
         # from `2>>` redirects — a rename would silently divert their logs

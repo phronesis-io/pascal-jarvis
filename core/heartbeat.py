@@ -26,6 +26,34 @@ from .task_protocol import TaskState
 from .timeutil import now_local_str
 
 
+# REQ-80: failed task_finish events used to carry no error information at all
+# (866 failed events, zero diagnosable). The excerpt below rides along on the
+# emit; it must never leak credentials into sched_events.jsonl (persistent,
+# survives /tmp cleanup) and must never raise.
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{8,}"
+    r"|Bearer\s+\S+"
+    r"|\b(?:token|secret|api_key|password)\b\s*[=:]\s*\S+)",
+    re.IGNORECASE,
+)
+
+
+def _error_excerpt(text: str, limit: int = 500) -> str:
+    """First non-empty line of an error surface, secrets redacted, truncated.
+
+    Never raises — this runs inside scheduler emit paths where a logging
+    helper must not be able to break scheduling.
+    """
+    try:
+        if not text:
+            return ""
+        line = next((ln.strip() for ln in str(text).splitlines()
+                     if ln.strip()), "")
+        return _SECRET_RE.sub("[redacted]", line)[:limit]
+    except Exception:
+        return ""
+
+
 def parse_interval(s: str) -> int:
     """Parse '10m', '2h', '1d' to seconds."""
     s = s.strip()
@@ -227,6 +255,10 @@ class HeartbeatRunner:
         # cycle distinguish task_timeout from a generic failed call when
         # writing the scheduler event log (both return "" from claude_call).
         self._call_timed_out = False
+        # REQ-80: error surface of the LAST claude_call (stderr/stdout first
+        # line, or the exception text). "" on success/kill. Consumed by the
+        # failed/parse_failed emit sites via _error_excerpt().
+        self._last_call_error = ""
 
     def _log(self, msg: str, **kwargs):
         """Structured log with cycle_id for correlation."""
@@ -322,7 +354,8 @@ class HeartbeatRunner:
                             timeout_s=timeout, heavy=True)
             else:
                 self._event("task_finish", task=name, status="failed",
-                            duration_s=dur, heavy=True)
+                            duration_s=dur, heavy=True,
+                            error=_error_excerpt(self._last_call_error))
             self._ack_failed_posts([task])
             if tripped:
                 self._log(f"Circuit TRIPPED for heavy task: {name}", level="warn")
@@ -534,6 +567,7 @@ You have access to the user's memory below. Use it to personalize your responses
 {memory}"""
 
         self._call_timed_out = False
+        self._last_call_error = ""
         attempted: set[str] = set()
         model = self.model
         use_backup = False
@@ -576,12 +610,14 @@ You have access to the user's memory below. Use it to personalize your responses
                 err_text = "\n".join(
                     s for s in (result.stderr.strip(), result.stdout.strip()) if s
                 )
+                self._last_call_error = err_text
                 if err_text:
                     self._log(f"Claude error output: {err_text[:300]}")
                 # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
                 # event (restart/shutdown), not a task failure. Return a sentinel
                 # so run_cycle doesn't punish tasks via circuit breaker.
                 if result.returncode in (137, 143):  # SIGKILL=137, SIGTERM=143
+                    self._last_call_error = ""  # infrastructure, not an error
                     return "__KILLED__"
 
                 try:
@@ -615,12 +651,15 @@ You have access to the user's memory below. Use it to personalize your responses
                 return ""
         except subprocess.TimeoutExpired:
             self._call_timed_out = True
+            self._last_call_error = f"claude call timed out ({call_timeout}s)"
             self._log(f"Claude call timed out ({call_timeout}s)")
             return ""
         except FileNotFoundError:
+            self._last_call_error = "claude CLI not found"
             self._log("Claude CLI not found — is it installed?")
             return ""
         except Exception as e:
+            self._last_call_error = str(e)
             self._log(f"Claude error: {e}")
             return ""
 
@@ -1002,6 +1041,12 @@ You have access to the user's memory below. Use it to personalize your responses
 
         if not raw:
             # Claude call failed (timeout, network, etc.) — record failure
+            #
+            # NOTE for the REQ-79 (batch 3) rewrite of this branch: keep the
+            # error=_error_excerpt(self._last_call_error) field on the
+            # task_finish emit below (REQ-80). Whatever shape the shared-
+            # failure accounting takes, failed events must stay diagnosable —
+            # 866 error-less failed events was the original sin here.
             tripped_names = []
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
@@ -1019,7 +1064,8 @@ You have access to the user's memory below. Use it to personalize your responses
                                 duration_s=call_dur, timeout_s=self.claude_timeout)
                 else:
                     self._event("task_finish", task=task["name"],
-                                status="failed", duration_s=call_dur)
+                                status="failed", duration_s=call_dur,
+                                error=_error_excerpt(self._last_call_error))
             self.save_state(state)
             self._ack_failed_posts(runnable)
             if tripped_names:
@@ -1162,7 +1208,9 @@ You have access to the user's memory below. Use it to personalize your responses
                 state[task["name"]] = ts.to_dict()
                 self._event("task_finish", task=task["name"], status="parse_failed",
                             duration_s=round(time.time() - call_t0, 2),
-                            retry_in_s=retry_delay)
+                            retry_in_s=retry_delay,
+                            error=_error_excerpt(
+                                "envelope unparseable; head: " + raw[:300]))
             env = state.get("__envelope_parse__", {})
             env_fails = int(env.get("consecutive_failures", 0)) + 1
             state["__envelope_parse__"] = {"consecutive_failures": env_fails,
