@@ -125,6 +125,14 @@ else
   echo "✓ No silently dropped intents in the last 24h"
 fi
 
+# 7d. Skip digest check (REQ-78.2): any intent_occurrence_skipped /
+#     expires_at_lapsed event in the last 24h means the scheduler stalled past
+#     occurrences — ⚠️ line feeds the REQ-39 deterministic alert path.
+echo ""
+echo "--- Skipped Occurrences (24h) ---"
+(cd "$JARVIS_DIR" && python3 -m core.skip_digest --diag 2>/dev/null) \
+  || echo "⚠️ skip-digest 检查本身失败（python3 -m core.skip_digest --diag 非零退出）"
+
 # 8. CLI versions
 echo ""
 echo "--- CLI Versions ---"
