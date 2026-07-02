@@ -1549,14 +1549,19 @@ except:
       fi
       printf '%s' "$_dedup_key" > "$_dedup_file"
 
+      # Journal capture (PRD P1, 每日复盘 check-in): if this message quotes the
+      # daily-reflect card, save Pascal's OWN words ("我怎么看一些事") into his
+      # private 《Jarvis 日志》. For DIRECT (non-quote) messages the script is
+      # REQ-86 SHADOW ONLY: it just logs an attribution candidate to
+      # data/journal_capture_shadow.jsonl and never writes the journal.
+      # Backgrounded so it never delays the reply; fully guarded.
+      ( JV_PARENT="$_parent_id" JV_REPLY="$content" JV_CHAT_TYPE="$chat_type" \
+        JV_MSG_TYPE="${msg_type:-text}" JV_SENDER="$sender_id" JV_USER_ID="$USER_ID" \
+        JARVIS_DIR="$JARVIS_DIR" \
+        python3 "$JARVIS_DIR/tasks/journal_capture.py" >>"$LOG_FILE" 2>&1 & )
+
       # ── Quote reply: fetch the quoted message and prepend as context ──
       if [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; then
-        # Journal capture (PRD P1, 每日复盘 check-in): if this reply quotes the
-        # daily-reflect card, save Pascal's OWN words ("我怎么看一些事") into his
-        # private 《Jarvis 日志》. Backgrounded so it never delays the reply; the
-        # capture script is fully guarded and only writes for daily-reflect cards.
-        ( JV_PARENT="$_parent_id" JV_REPLY="$content" JARVIS_DIR="$JARVIS_DIR" \
-          python3 "$JARVIS_DIR/tasks/journal_capture.py" >>"$LOG_FILE" 2>&1 & )
         _quoted_raw=$(lark-cli im +messages-mget --message-ids "$_parent_id" --as bot 2>>"$LOG_FILE")
         _quoted_text=$(echo "$_quoted_raw" | python3 -c "
 import json, sys
