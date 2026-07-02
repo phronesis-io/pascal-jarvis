@@ -134,12 +134,11 @@ class HeartbeatRunner:
         "personal-site": 3600,
         "memory-daily": 3600,
         "memory-weekly": 3600,
-        "memory-monthly": 3600,
         "memory-consolidate": 600,
     }
 
     # Memory pipeline tasks — only one per cycle to prevent races
-    PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly", "memory-monthly"}
+    PIPELINE_TASKS = {"memory-hourly", "memory-daily", "memory-weekly"}
 
     # Tasks exempt from batch cap — they run on every cycle regardless.
     # These are infrastructure tasks that must stay fresh for others to work.
@@ -148,7 +147,7 @@ class HeartbeatRunner:
     # occurrences (configured 60s, observed median gap 31min). Its pre is a
     # sub-second sqlite pass (296/304 runs empty), so exemption costs nothing.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "eigenflux-messages", "intention-check"}
+                       "eigenflux-friends", "intention-check"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output

@@ -187,7 +187,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │                                                             │
 │  tasks/                           (pre/post hooks)          │
 │  ├── Daily rhythm:                                          │
-│  │   daily_plan, activity_log, daily_reflect, free_time_nudge│
+│  │   daily_plan, activity_log, daily_reflect                │
 │  ├── Calendar & Tasks:                                      │
 │  │   calendar_sync, calendar_write, task_triage,            │
 │  │   weekly_review                                          │

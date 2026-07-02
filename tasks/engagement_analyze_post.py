@@ -179,7 +179,7 @@ def _apply_adaptations(adaptations: list[dict]):
     # importing the full HeartbeatRunner class and its dependency tree in this
     # subprocess post-hook.
     _PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "eigenflux-messages", "intention-check"}
+                       "eigenflux-friends", "intention-check"}
     _TIER0_TASKS = {"calendar-sync"}
     protected = _PRIORITY_TASKS | _TIER0_TASKS
 

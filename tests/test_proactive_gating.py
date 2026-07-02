@@ -8,8 +8,14 @@ earning it:
 
 Pascal's principle: every proactive message must earn its interruption. These
 tests pin the GATING LOGIC of the two pre-scripts (the empty-output contract:
-empty pre output → the heartbeat skips the task) plus the per-block dedup that
-collapses the historical double-fire.
+empty pre output → the heartbeat skips the task).
+
+2026-07-02 (REQ-89): free-time-nudge is unscheduled (removed from HEARTBEAT.md;
+0 conversions over 11 sends). The pre-script file is kept for easy revival, so
+the empty-output contract + syntax tests remain. The four "fires when content
+exists" tests (nonempty_when_watchlater / nonempty_when_todo / double_fire /
+state_stamp) were wall-clock dependent (flaky near midnight / block boundaries)
+and pinned behavior of a task that no longer runs — deleted, not skipped.
 
 Isolation: every test uses tmp_path for JARVIS_DIR/MEMORY_DIR and a synthetic
 tmp jarvis.yaml. The real watchlater store and the real
@@ -82,14 +88,6 @@ def _add_watchlater(mem_dir: Path, *, status: str = "pending") -> None:
         )
         + "\n",
         encoding="utf-8",
-    )
-
-
-def _add_todo(mem_dir: Path) -> None:
-    sysd = mem_dir / "system"
-    sysd.mkdir(parents=True, exist_ok=True)
-    (sysd / "todos.md").write_text(
-        "# Todos\n- [ ] Finish the deck (due: today)\n", encoding="utf-8"
     )
 
 
@@ -182,19 +180,6 @@ def test_free_time_empty_when_no_watchlater_or_todo(tmp_path):
     assert result.stdout.strip() == "", f"expected silence, got: {result.stdout!r}"
 
 
-def test_free_time_nonempty_when_watchlater_pending(tmp_path):
-    """A pending watch-later item is genuine content → the nudge fires."""
-    mem = tmp_path / "mem"
-    mem.mkdir(parents=True, exist_ok=True)
-    _calendar_with_free_block(mem)
-    _add_watchlater(mem)
-    result = _run_free_time(tmp_path)
-    assert result.returncode == 0
-    assert result.stdout.strip() != ""
-    assert "SAVED FOR LATER" in result.stdout
-    assert "https://example.com/v" in result.stdout
-
-
 def test_free_time_ignores_already_watched_items(tmp_path):
     """A non-pending (already watched) item is NOT genuine content → silence."""
     mem = tmp_path / "mem"
@@ -204,18 +189,6 @@ def test_free_time_ignores_already_watched_items(tmp_path):
     result = _run_free_time(tmp_path)
     assert result.returncode == 0
     assert result.stdout.strip() == ""
-
-
-def test_free_time_nonempty_when_todo_fits(tmp_path):
-    """A fitting todo/deadline is genuine content → the nudge fires."""
-    mem = tmp_path / "mem"
-    mem.mkdir(parents=True, exist_ok=True)
-    _calendar_with_free_block(mem)
-    _add_todo(mem)
-    result = _run_free_time(tmp_path)
-    assert result.returncode == 0
-    assert result.stdout.strip() != ""
-    assert "TODOS / DEADLINES THAT FIT" in result.stdout
 
 
 def test_free_time_empty_when_no_free_block(tmp_path):
@@ -240,42 +213,8 @@ def test_free_time_empty_when_no_calendar(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# free-time-nudge: per-block double-fire collapse
+# free-time-nudge: daily rate limit
 # ──────────────────────────────────────────────────────────────────────────
-
-def test_free_time_double_fire_suppressed_same_block(tmp_path):
-    """Two cycles inside the SAME free block → first fires, second is suppressed.
-    Collapses the historical pre-block + in-progress double-fire."""
-    mem = tmp_path / "mem"
-    mem.mkdir(parents=True, exist_ok=True)
-    _calendar_with_free_block(mem)
-    _add_watchlater(mem)
-
-    first = _run_free_time(tmp_path)
-    assert first.stdout.strip() != "", "first fire should emit"
-
-    second = _run_free_time(tmp_path)
-    assert second.returncode == 0
-    assert second.stdout.strip() == "", "second fire in same block must be suppressed"
-
-
-def test_free_time_state_stamp_written(tmp_path):
-    """When the nudge fires, a per-block stamp is written to line 3 of the
-    state file (lines 1-2 = date/count, owned by the post-script)."""
-    mem = tmp_path / "mem"
-    mem.mkdir(parents=True, exist_ok=True)
-    _calendar_with_free_block(mem)
-    _add_watchlater(mem)
-
-    result = _run_free_time(tmp_path)
-    assert result.stdout.strip() != ""
-
-    state = (tmp_path / "jarvis" / ".free_time_nudge_state").read_text().splitlines()
-    assert len(state) >= 3, f"expected 3-line state, got {state!r}"
-    assert state[2].strip() != "", "block id (line 3) must be set"
-    # block id keyed on the END boundary (next event), not on 'now'
-    assert "until-23:30" in state[2] or "until-eod" in state[2]
-
 
 def test_free_time_respects_daily_rate_limit(tmp_path):
     """If today's count already hit NUDGE_MAX, stay silent even with content."""

@@ -113,6 +113,37 @@ def _intent_close_payload(value: dict) -> dict:
     }
 
 
+def _handle_card_action(value: dict) -> dict:
+    """Dispatch one parsed card action; returns the callback response payload.
+
+    REQ-81.3: each success path logs one stderr line — card taps previously
+    left zero trace on success, so "点选无反应" reports (6/19) could neither
+    be confirmed nor disproven from the sidecar log.
+    """
+    action = value.get("action", "")
+    if action == "feedback":
+        _record_feedback(value)
+        print(f"card feedback recorded: source={value.get('source', '')} "
+              f"rating={value.get('rating', '')}", file=sys.stderr)
+        return {"toast": {"type": "success", "content": "已记录"}}
+    if action == "watchlater":
+        out = subprocess.run(
+            ["python3", str(JARVIS_DIR / "tasks" / "watchlater_save.py"),
+             str(value.get("title", "")), str(value.get("url", "")), "button"],
+            timeout=5, capture_output=True, text=True)
+        dup = "已在" in (out.stdout or "")
+        print(f"card watchlater saved: title={value.get('title', '')} "
+              f"dup={dup}", file=sys.stderr)
+        return {"toast": {"type": "success",
+                          "content": "已在收藏列表里" if dup else "已收藏，空闲时提醒你"}}
+    if action == "intent_close":
+        payload = _intent_close_payload(value)
+        print(f"card intent_close handled: id={value.get('id', '')} "
+              f"outcome={value.get('outcome', 'done')}", file=sys.stderr)
+        return payload
+    return {}
+
+
 def main() -> int:
     try:
         import lark_oapi as lark
@@ -142,22 +173,7 @@ def main() -> int:
             value = (data.event.action.value or {}) if data.event and data.event.action else {}
             if isinstance(value, str):
                 value = json.loads(value)
-            action = value.get("action", "")
-            if action == "feedback":
-                _record_feedback(value)
-                return P2CardActionTriggerResponse(
-                    {"toast": {"type": "success", "content": "已记录"}})
-            if action == "watchlater":
-                out = subprocess.run(
-                    ["python3", str(JARVIS_DIR / "tasks" / "watchlater_save.py"),
-                     str(value.get("title", "")), str(value.get("url", "")), "button"],
-                    timeout=5, capture_output=True, text=True)
-                dup = "已在" in (out.stdout or "")
-                return P2CardActionTriggerResponse(
-                    {"toast": {"type": "success",
-                               "content": "已在收藏列表里" if dup else "已收藏，空闲时提醒你"}})
-            if action == "intent_close":
-                return P2CardActionTriggerResponse(_intent_close_payload(value))
+            return P2CardActionTriggerResponse(_handle_card_action(value))
         except Exception as e:
             print(f"card handler error: {e}", file=sys.stderr)
         return P2CardActionTriggerResponse({})

@@ -688,3 +688,23 @@ def test_circuit_trip_does_not_message_user(tmp_path, monkeypatch):
     out = runner.run_cycle(force=True)
     assert "连续失败" not in out and "自动暂停" not in out
     assert out == ""                                            # nothing to chat
+
+
+def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
+    """Roster-drift guard (REQ-81.1). Every hard-coded task-name collection in
+    HeartbeatRunner must only reference tasks that exist in the REAL
+    HEARTBEAT.md — 2026-07-02 the zombie sweep found eigenflux-messages still
+    in PRIORITY_TASKS and memory-monthly in PIPELINE/EMPTY_RETRY while their
+    task blocks were being deleted. A stale name is not harmless: it silently
+    grants ghost tasks scheduling privileges (priority, retry pacing, silence)
+    and hides the fact that the list and the doc have diverged."""
+    hb = Path(__file__).resolve().parent.parent / "HEARTBEAT.md"
+    real_names = {t["name"] for t in parse_heartbeat(hb)}
+    for set_name in ("PRIORITY_TASKS", "PIPELINE_TASKS", "EMPTY_RETRY_DELAYS",
+                     "SILENT_TASKS", "TIER0_TASKS"):
+        members = set(getattr(HeartbeatRunner, set_name))
+        stale = members - real_names
+        assert not stale, (
+            f"HeartbeatRunner.{set_name} references tasks absent from "
+            f"HEARTBEAT.md: {sorted(stale)} — remove them or restore the task block"
+        )
