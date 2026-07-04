@@ -41,6 +41,16 @@ CHECK_INTERVAL = 30           # seconds between health checks
 HEARTBEAT_STALE_THRESHOLD = 1800  # 30 min without heartbeat = stale (Claude calls take 30-90s, cycles ~20min apart)
 WAKE_GRACE_SECONDS = 180      # after host sleep/wake, suppress stale-heartbeat restarts briefly
 SLEEP_GAP_THRESHOLD = 120     # daemon loop slept > expected by this much ⇒ host sleep/pause
+# Brain-death alerting needs a much longer post-wake grace than the restart
+# path: after hours of laptop sleep (or a forced-macOS-update reboot) EVERY
+# task's last_success is stale by the nap length, and the first post-wake
+# retries routinely fail (network/VPN come up after we do). That is not
+# brain-death. 30min covers a full heartbeat cycle plus its ≤5min fast-retries.
+BRAIN_WAKE_GRACE = 30 * 60
+# _check_brain_health runs every ~4min; a hole > this in our own check cadence
+# means the host slept or was shut down. This catches reboots, where the
+# in-memory last_wake_time mark is wiped but BRAIN_STATE_FILE survives.
+BRAIN_CHECK_GAP_THRESHOLD = 15 * 60
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"
@@ -466,24 +476,48 @@ def _check_brain_health():
             prev = {}
         prev_samples = prev.get("samples", {}) or {}
         last_alert = prev.get("last_alert", 0) or 0
+        last_check_ts = prev.get("last_check_ts", 0) or 0
+        grace_until = prev.get("grace_until", 0) or 0
+
+        # Post-sleep/reboot grace: a stale last_success right after the host
+        # was asleep or powered off is expected, not brain-death. Two gap
+        # signals — the in-process wake mark (laptop lid), and a hole in our
+        # own check cadence (reboot wipes last_wake_time; this file survives).
+        now = time.time()
+        if last_wake_time:
+            grace_until = max(grace_until, last_wake_time + BRAIN_WAKE_GRACE)
+        if last_check_ts and now - last_check_ts > BRAIN_CHECK_GAP_THRESHOLD:
+            grace_until = max(grace_until, now + BRAIN_WAKE_GRACE)
+            log("INFO", f"brain-health: host sleep/shutdown gap "
+                f"({int(now - last_check_ts)}s since last check) — alerts on "
+                f"hold for {BRAIN_WAKE_GRACE // 60}min while heartbeat catches up")
+        in_grace = now < grace_until
+        if in_grace:
+            # Pre-sleep failure-window deltas are meaningless across the nap;
+            # rebaseline so priority windows can't accumulate during grace.
+            prev_samples = {}
 
         result = brain_health.assess(
             state=state, tasks=tasks, overrides=overrides,
             priority_tasks=HeartbeatRunner.PRIORITY_TASKS,
-            prev_samples=prev_samples, now=time.time(),
+            prev_samples=prev_samples, now=now,
             failure_threshold=CircuitState.FAILURE_THRESHOLD,
         )
 
-        now = time.time()
         new_last_alert = last_alert
-        if result["brain_dead"] and now - last_alert >= PROBE_ALERT_WINDOW:
+        if result["brain_dead"] and in_grace:
+            log("INFO", "brain-health: would alert but in post-wake grace: "
+                + "; ".join(result["alerts"]))
+        elif result["brain_dead"] and now - last_alert >= PROBE_ALERT_WINDOW:
             new_last_alert = now
             log("WARN", "BRAIN-DEAD heartbeat: " + "; ".join(result["alerts"]))
             notify_lark(result["summary"])
 
         # Atomic persist: samples carry the per-priority failure windows across
-        # hot-reloads; last_alert enforces the 4h dedup.
-        new_state = {"samples": result["samples"], "last_alert": new_last_alert}
+        # hot-reloads; last_alert enforces the 4h dedup; last_check_ts/grace_until
+        # drive the sleep-gap detection above.
+        new_state = {"samples": result["samples"], "last_alert": new_last_alert,
+                     "last_check_ts": now, "grace_until": grace_until}
         tmp = BRAIN_STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(new_state))
         os.replace(tmp, BRAIN_STATE_FILE)

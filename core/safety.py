@@ -125,13 +125,17 @@ def extract_json(raw: str) -> str:
     """
     import json
     import re
-    # Strip code fence markers
-    cleaned = re.sub(r'^```json?\s*', '', raw.strip())
-    cleaned = re.sub(r'```\s*$', '', cleaned.strip())
-    # If there's still a ``` in the middle (trailing text after code fence),
-    # take only the part before it
-    if '```' in cleaned:
-        cleaned = cleaned[:cleaned.index('```')].strip()
+    cleaned = raw.strip()
+    # A fenced block can appear ANYWHERE in the reply: models emit both
+    # "```json ... ``` trailing prose" and "leading prose ... ```json ..."
+    # (the 7/3 heartbeat outage: every envelope was preceded by analysis
+    # prose, so cutting at the first ``` threw the envelope away and kept
+    # the prose). Prefer the first ```json fence; fall back to any fence
+    # that opens a JSON object.
+    fenced = (re.search(r'```json\s*(.*?)(?:```|\Z)', cleaned, re.DOTALL)
+              or re.search(r'```\s*(\{.*?)(?:```|\Z)', cleaned, re.DOTALL))
+    if fenced:
+        cleaned = fenced.group(1).strip()
     # Try to find a JSON object
     json_start = cleaned.find('{')
     json_end = cleaned.rfind('}')

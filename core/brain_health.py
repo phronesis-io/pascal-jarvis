@@ -67,10 +67,10 @@ _DEFAULT_INTERVAL = 600
 
 def _fmt_age(seconds: float) -> str:
     if seconds >= 86400:
-        return f"{seconds / 86400:.1f}d"
+        return f"{seconds / 86400:.1f} 天"
     if seconds >= 3600:
-        return f"{seconds / 3600:.1f}h"
-    return f"{int(seconds / 60)}min"
+        return f"{seconds / 3600:.1f} 小时"
+    return f"{int(seconds / 60)} 分钟"
 
 
 def _interval_for(name: str, ts: dict, task_interval: float, overrides: dict) -> float:
@@ -160,23 +160,26 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
 
     brain_dead = bool(priority_dead) or len(starved) >= MIN_STARVED_FOR_SYSTEMIC
 
+    # Alert text is boss-facing (it lands in Pascal's Lark): plain sentences,
+    # no internal jargon (last_success / envelope / PRIORITY / circuit). The
+    # diagnostic detail he'd never act on directly lives in jarvis.log, not here.
     alerts: list[str] = []
     for name, fw in priority_dead:
-        alerts.append(
-            f"PRIORITY 任务 {name} 连续 {fw} 个检查窗口只失败无成功")
+        alerts.append(f"{name} 最近一直在失败，没有一次成功")
     for name, age, interval in starved:
         alerts.append(
-            f"{name}：last_success 在 {_fmt_age(age)} 前（应每 {_fmt_age(interval)}），"
-            f"但仍在被调度且失败")
+            f"{name} 已经 {_fmt_age(age)} 没有跑成过了"
+            f"（正常应该每 {_fmt_age(interval)} 成功一次）")
 
     summary = ""
     if brain_dead:
+        shown = alerts[:4]
+        more = f"\n（还有 {len(alerts) - 4} 个类似的没列出）" if len(alerts) > 4 else ""
         summary = (
-            "⚠️ Heartbeat 脑死检测：" + "；".join(alerts[:4])
-            + "。心跳在转但这些任务持续只失败不成功——可能是 claude 二进制/PATH/额度"
-            + "（last_status=failed/timeout）或 envelope 解析失败（parse_failed）。"
-            + "查 jarvis.log 的 'Claude failed' / 'Claude CLI not found' / 'parse failed'。"
-            + "（守护进程只告警不代管。）")
+            "⚠️ 我有几个后台任务卡住了——它们还在反复重试，但每次都失败：\n"
+            + "\n".join(f"· {a}" for a in shown) + more
+            + "\n\n通常是我调用 Claude 的环节出了问题。我只会提醒、不会自己动手修。"
+            + "方便的时候在电脑上对 Jarvis 说一句「查一下后台任务为什么失败」就能排查。")
 
     return {"brain_dead": brain_dead, "alerts": alerts,
             "summary": summary, "samples": samples}
