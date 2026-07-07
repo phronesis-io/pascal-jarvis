@@ -389,6 +389,9 @@ def test_missing_restart_state_file_falls_back_to_defaults(restart_env):
 def deadletter_env(tmp_path, monkeypatch):
     f = tmp_path / ".delivery_deadletter.jsonl"
     monkeypatch.setattr(daemon_mod, "DEADLETTER_FILE", f)
+    # log() writes to the REAL daemon.log — unpatched, every pytest run
+    # pollutes production logs with fake WARN/ERROR lines.
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     sent = []
     monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: sent.append(msg))
     return f, sent
