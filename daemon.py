@@ -56,6 +56,11 @@ RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = JARVIS_DIR / "daemon.log"
 DAEMON_PID_FILE = JARVIS_DIR / ".daemon.pid"
 BOT_PID_FILE = JARVIS_DIR / ".bot.pid"
+# Restart budget persisted across daemon hot-reloads (REQ-42 respawns): the
+# in-memory counters reset on every reincarnation, so a crash-looping stack
+# used to get MAX_RESTART_ATTEMPTS fresh attempts per respawn, defeating the
+# breaker. Same load/save robustness as BRAIN_STATE_FILE.
+RESTART_STATE_FILE = JARVIS_DIR / ".daemon_restart_state.json"
 MAX_LOG_LINES = 1000
 
 # Lark config (read from jarvis.yaml)
@@ -78,6 +83,29 @@ last_restart_time = 0
 restart_count = 0
 running = True
 last_wake_time = 0.0
+
+
+def _load_restart_state():
+    """Restore the persisted restart budget. Corrupt/missing file → defaults."""
+    global restart_count, last_restart_time
+    try:
+        state = json.loads(RESTART_STATE_FILE.read_text())
+        restart_count = int(state.get("restart_count", 0))
+        last_restart_time = float(state.get("last_restart_time", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        restart_count = 0
+        last_restart_time = 0
+
+
+def _save_restart_state():
+    """Persist the restart budget on every mutation. Never raises."""
+    try:
+        tmp = RESTART_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"restart_count": restart_count,
+                                   "last_restart_time": last_restart_time}))
+        os.replace(tmp, RESTART_STATE_FILE)
+    except OSError:
+        pass
 
 
 def log(level: str, msg: str):
@@ -405,6 +433,100 @@ def _in_deploy_window() -> bool:
         return False
 
 
+def _health_payload(body: bytes) -> dict | None:
+    """Parse a /health response body. Returns the payload iff it is a health
+    report (JSON dict with a "status" field) — i.e. the component answered
+    with its own diagnosis and is therefore alive. Never raises."""
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    if isinstance(payload, dict) and "status" in payload:
+        return payload
+    return None
+
+
+def _note_degraded_health(name: str, payload: dict | None, http_code=None):
+    """Log + alert (never restart) a component that answered its /health probe
+    with a non-ok status. Separate dedup key from the DOWN alert so degraded
+    chatter can't swallow a later genuine 失联 page."""
+    key = f"{name}|degraded"
+    if payload is None or payload.get("status") == "ok":
+        _probe_alert_stamps.pop(key, None)  # recovered, re-arm
+        return
+    detail = f"status={payload.get('status')}"
+    if http_code:
+        detail += f" (HTTP {http_code})"
+    for field in ("circuits_open", "priority_wedged", "error"):
+        if payload.get(field):
+            detail += f" {field}={payload[field]}"
+    log("WARN", f"Observed component DEGRADED (alive): {name} — {detail}")
+    if time.time() - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
+        _probe_alert_stamps[key] = time.time()
+        notify_lark(f"⚠️ 组件降级（进程还活着）：{name} — {detail}。"
+                    f"（守护进程只告警不代管）")
+
+
+DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
+
+_DEADLETTER_KIND_LABELS = {
+    "delivery_failures": "消息发送连续失败",
+    "night_queue_expired": "攒批消息过期没送出去",
+    "night_queue_undeliverable": "攒批消息无法投递",
+}
+
+
+def consume_delivery_deadletters():
+    """Raise alarms the heartbeat loop dead-lettered for us (stability
+    backlog #7, consumer half — producer contract in
+    core/delivery_deadletter.py): the loop's own delivery alert rides the
+    failing channel from the possibly-dead loop, so it also writes each
+    overdue delivery here for us to page through our independent channel.
+
+    Per the contract we flock before read and truncate IN PLACE (keep the
+    inode) — read+unlink would divert a concurrent locked append onto a dead
+    inode. Truncate-then-notify is safe: notify_lark self-dead-letters on
+    failure (REQ-58) and flushes on its next successful send. Never raises.
+    """
+    try:
+        if not DEADLETTER_FILE.exists() or DEADLETTER_FILE.stat().st_size == 0:
+            return
+        import fcntl
+        with open(DEADLETTER_FILE, "r+", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                lines = f.read().splitlines()
+                f.seek(0)
+                f.truncate()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        by_kind: dict = {}
+        for ln in lines:
+            try:
+                row = json.loads(ln)
+            except ValueError:
+                continue
+            by_kind.setdefault(str(row.get("kind", "unknown")), []).append(row)
+        if not by_kind:
+            return
+        parts = []
+        for kind, items in sorted(by_kind.items()):
+            label = _DEADLETTER_KIND_LABELS.get(kind, kind)
+            first = items[0]
+            extra = f"（共 {len(items)} 条）" if len(items) > 1 else ""
+            since = str(first.get("due_since", "")).strip()
+            since_txt = f"，自 {since} 起" if since else ""
+            detail = str(first.get("detail", ""))[:80]
+            parts.append(f"- {label}{extra}{since_txt}：{detail}")
+        n = sum(len(v) for v in by_kind.values())
+        log("WARN", f"Delivery dead-letters: {n} row(s), kinds={sorted(by_kind)}")
+        notify_lark("⚠️ 有本该送到你手上的消息没送出去（心跳自己的告警可能"
+                    "也发不出来，这条走的是守护进程的独立通道）：\n"
+                    + "\n".join(parts))
+    except Exception as e:
+        log("ERROR", f"deadletter consume failed: {e}")
+
+
 def probe_observed_components():
     """Alert (never restart) when :3456/:3457 are down — the dashboard died
     for 23 days because nothing watched it. Errors here never raise."""
@@ -417,19 +539,34 @@ def probe_observed_components():
     import urllib.error
     for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),
                       ("dashboard :3457", "http://127.0.0.1:3457/")):
+        alive = False
+        payload = None
+        code = None
         try:
             with urllib.request.urlopen(url, timeout=3) as resp:
-                if resp.status < 500:
-                    _probe_alert_stamps.pop(name, None)  # recovered
-                    continue
-        except urllib.error.HTTPError:
-            # The server RESPONDED (e.g. /health 503 "degraded" because a
-            # circuit is open). It is alive, not 失联 — never page "探测不通"
-            # for this. Connection-level failures fall through to the alert.
-            _probe_alert_stamps.pop(name, None)
-            continue
+                code = resp.status
+                alive = resp.status < 500
+                if alive:
+                    # admin convention A: 200 with {"status": "degraded"} body
+                    payload = _health_payload(resp.read())
+        except urllib.error.HTTPError as e:
+            # The server RESPONDED (admin convention B: /health 503 with a
+            # JSON body when status=="error"). A health-JSON body means it is
+            # alive-but-degraded, not 失联 — never page "探测不通" for this.
+            # Only connection failures/timeouts and non-JSON 5xx (crashed
+            # handler, proxy error page) fall through to the DOWN alert.
+            code = e.code
+            try:
+                payload = _health_payload(e.read())
+            except Exception:
+                payload = None
+            alive = payload is not None or e.code < 500
         except Exception:
             pass
+        if alive:
+            _probe_alert_stamps.pop(name, None)  # recovered
+            _note_degraded_health(name, payload, code)
+            continue
         last = _probe_alert_stamps.get(name, 0)
         if time.time() - last >= PROBE_ALERT_WINDOW:
             _probe_alert_stamps[name] = time.time()
@@ -543,6 +680,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
         notify_lark(f"⚠️ {msg}\n\nIssues:\n" + "\n".join(f"- {i}" for i in issues))
         restart_count = 0
         last_restart_time = now + 600  # 10min extra cooldown
+        _save_restart_state()
         return msg
 
     log("INFO", f"Attempting fix for: {issues}")
@@ -615,6 +753,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
 
     last_restart_time = now
     restart_count += 1
+    _save_restart_state()
 
     # Wait for first heartbeat cycle to complete.
     # The first cycle after restart may batch multiple tasks into one Claude call,
@@ -632,6 +771,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
         notify_lark(f"✅ Jarvis was down. {msg}.\n\nOriginal issues:\n" +
                     "\n".join(f"- {i}" for i in issues))
         restart_count = 0
+        _save_restart_state()
         return msg
     else:
         msg = f"Restart attempt {restart_count} — still unhealthy: {post_check['issues']}"
@@ -678,11 +818,16 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    # A hot-reload respawn (REQ-42) must NOT refresh the restart budget
+    _load_restart_state()
+
     log("INFO", "Guardian daemon started")
     log("INFO", f"  PID: {os.getpid()}")
     log("INFO", f"  JARVIS_DIR: {JARVIS_DIR}")
     log("INFO", f"  USER_ID: {USER_ID[:10]}..." if USER_ID else "  USER_ID: not set")
     log("INFO", f"  Check interval: {CHECK_INTERVAL}s")
+    if restart_count:
+        log("INFO", f"  Restart budget restored: {restart_count}/{MAX_RESTART_ATTEMPTS} attempts used")
 
     consecutive_failures = 0
     # Stale-code hot reload (REQ-42): the long-lived daemon never noticed its
@@ -707,6 +852,9 @@ def main():
                 probe_tick += 1
                 if probe_tick % 4 == 0:
                     probe_observed_components()
+                    # Delivery dead-letters (backlog #7): alarms the heartbeat
+                    # loop couldn't send ride our independent channel.
+                    consume_delivery_deadletters()
                 # Brain-death detection (alert-only) every ~8th check (~4min).
                 # Cheaper than a restart-spiral; runs in the daemon because it
                 # must survive a dead claude binary that the heartbeat can't.

@@ -61,8 +61,11 @@ def test_night_queue_kept_when_send_fails(tmp_path, monkeypatch):
     (tmp_path / ".heartbeat_last_source").write_text("heartbeat")
     _queue_for_morning("消息", tmp_path)
     monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: False)
-    assert not _flush_night_queue(tmp_path, "ou_test")
-    assert (tmp_path / NIGHT_QUEUE_FILE).exists()  # retained for retry
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_RETRYABLE
+    # retained for retry, now carrying a retry count (backlog #4)
+    kept = [json.loads(l) for l in
+            (tmp_path / NIGHT_QUEUE_FILE).read_text().splitlines()]
+    assert len(kept) == 1 and kept[0]["retries"] == 1
 
 
 def test_flush_empty_queue_is_noop(tmp_path):
@@ -291,11 +294,13 @@ def test_normal_source_still_queues(tmp_path):
 
 def test_flush_scrubs_legacy_silent_entries(tmp_path, monkeypatch):
     # Entries queued BEFORE the silence gate existed must not reach the digest
+    # (fresh ts so the backlog-#4 age expiry doesn't kick in first)
+    ts = hbl.now_local_str("%Y-%m-%d %H:%M")
     queue = tmp_path / NIGHT_QUEUE_FILE
     queue.write_text(
-        json.dumps({"ts": "2026-06-12 08:12", "text": "🌅 今日 plan card",
+        json.dumps({"ts": ts, "text": "🌅 今日 plan card",
                     "source": "daily-plan"}, ensure_ascii=False) + "\n"
-        + json.dumps({"ts": "2026-06-12 08:30", "text": "深夜推荐",
+        + json.dumps({"ts": ts, "text": "深夜推荐",
                       "source": "content-recommend"}, ensure_ascii=False) + "\n")
     sent = []
     monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)

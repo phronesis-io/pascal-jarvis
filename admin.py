@@ -1472,6 +1472,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if tripped:
                 health["circuits_open"] = tripped
                 health["status"] = "degraded"
+            # PRIORITY wedge check (6/15 brain-death postmortem): heartbeat_age
+            # above is max(last_run) across ALL tasks, so any healthy task masks
+            # a wedged PRIORITY one. empty_pre runs refresh last_success even
+            # when the Claude call fails (core/brain_health.py detector 2), so
+            # staleness alone lies — it only counts when last_status is itself
+            # a failure; consecutive_failures>=3 covers the refreshed case.
+            if state_file.exists():
+                from core.brain_health import (FAILURE_STATUSES,
+                                               STARVATION_FACTOR, _interval_for)
+                from core.heartbeat import HeartbeatRunner, parse_heartbeat
+                try:
+                    defaults = {t["name"]: t["interval"]
+                                for t in parse_heartbeat(ROOT / "HEARTBEAT.md")}
+                except OSError:
+                    defaults = {}
+                try:
+                    overrides = json.loads(
+                        (ROOT / "interval_overrides.json").read_text())
+                except (OSError, ValueError):
+                    overrides = {}
+                wedged = []
+                now = _t.time()
+                for name in sorted(HeartbeatRunner.PRIORITY_TASKS):
+                    ts = state.get(name) or {}
+                    if not ts:
+                        continue
+                    consec = (ts.get("circuit") or {}).get(
+                        "consecutive_failures", 0) or 0
+                    interval = _interval_for(
+                        name, ts, defaults.get(name, 0), overrides)
+                    last_run = ts.get("last_run", 0) or 0
+                    last_success = ts.get("last_success", 0) or last_run
+                    success_stale = (last_success > 0 and
+                                     now - last_success > STARVATION_FACTOR * interval)
+                    failing = ts.get("last_status", "") in FAILURE_STATUSES
+                    if consec >= 3 or (success_stale and failing):
+                        wedged.append(name)
+                if wedged:
+                    health["priority_wedged"] = wedged
+                    health["status"] = "degraded"
         except Exception as e:
             health["status"] = "error"
             health["error"] = str(e)
@@ -1479,7 +1519,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # "degraded" (an open circuit on some heartbeat task) means the admin
         # process is alive and serving — it is NOT a web-server outage. Return
         # 200 so liveness probes pass; reserve 5xx for genuine endpoint errors.
-        # Body still carries circuits_open for body-aware consumers.
+        # Body still carries circuits_open/priority_wedged for body-aware consumers.
         status = 503 if health["status"] == "error" else 200
         self.send_response(status)
         self.send_header("Content-Type", "application/json")

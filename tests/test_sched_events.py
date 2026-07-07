@@ -331,10 +331,12 @@ def test_queue_for_morning_silent_drop_emits_skip(tmp_path):
 
 
 def test_flush_emits_batch_flush_with_count(tmp_path, monkeypatch):
+    # fresh ts so the backlog-#4 age expiry doesn't eat the entries first
+    ts = hbl.now_local_str("%Y-%m-%d %H:%M")
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     with open(queue, "w") as f:
-        f.write(json.dumps({"ts": "2026-06-12 08:12", "text": "a", "source": "checkin"}) + "\n")
-        f.write(json.dumps({"ts": "2026-06-12 09:00", "text": "b", "source": "content-recommend"}) + "\n")
+        f.write(json.dumps({"ts": ts, "text": "a", "source": "checkin"}) + "\n")
+        f.write(json.dumps({"ts": ts, "text": "b", "source": "content-recommend"}) + "\n")
     monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
     assert _flush_night_queue(tmp_path, "ou_test")
     flushes = [e for e in _read_events(tmp_path) if e["event"] == "batch_flush"]
@@ -345,9 +347,9 @@ def test_flush_emits_batch_flush_with_count(tmp_path, monkeypatch):
 
 def test_failed_flush_emits_no_batch_flush(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
-    queue.write_text(json.dumps({"ts": "2026-06-12 08:12", "text": "a",
-                                 "source": "checkin"}) + "\n")
+    queue.write_text(json.dumps({"ts": hbl.now_local_str("%Y-%m-%d %H:%M"),
+                                 "text": "a", "source": "checkin"}) + "\n")
     monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: False)
     monkeypatch.setattr(hbl.time, "sleep", lambda s: None)
-    assert not _flush_night_queue(tmp_path, "ou_test")
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_RETRYABLE
     assert [e for e in _read_events(tmp_path) if e["event"] == "batch_flush"] == []
