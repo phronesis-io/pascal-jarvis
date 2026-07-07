@@ -68,12 +68,27 @@ def append_entry(content: str, heading: str | None = None, timeout: int = 60) ->
             capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode != 0:
+            _warn(f"lark-cli exited {proc.returncode}: {(proc.stderr or proc.stdout or '')[:200]}")
             return False
         # lark-cli may prefix non-JSON status lines; parse from first '{'.
         out = proc.stdout or ""
         brace = out.find("{")
         if brace < 0:
+            _warn(f"no JSON in lark-cli output: {out[:200]}")
             return False
-        return bool(json.loads(out[brace:]).get("ok"))
-    except Exception:
+        resp = json.loads(out[brace:])
+        if not resp.get("ok"):
+            _warn(f"append rejected: {json.dumps(resp.get('error', {}), ensure_ascii=False)[:200]}")
+            return False
+        return True
+    except Exception as e:
+        _warn(f"append raised {type(e).__name__}: {e}")
         return False
+
+
+def _warn(msg: str) -> None:
+    """Journal failures must be LOUD in the heartbeat log. The 6/20 journal
+    doc was deleted and every nightly append failed with zero trace for 17
+    days — a guarded bool return is not observability. stderr is captured
+    into jarvis.log by the heartbeat's script runner."""
+    print(f"[journal] append FAILED — {msg}", file=sys.stderr)
