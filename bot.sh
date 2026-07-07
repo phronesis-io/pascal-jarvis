@@ -1279,6 +1279,15 @@ cleanup() {
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   kill "$HEARTBEAT_PID" 2>/dev/null || true
+  # $HEARTBEAT_PID can be STALE: the watchdog respawns heartbeat inside its
+  # own subshell, so its updates never reach this shell's variable (7/6
+  # incident: cleanup killed a long-dead pid, orphaning the real heartbeat,
+  # which then held the singleton flock through the next bot for 2.5 days).
+  # Sweep by exact process identity, mirroring the startup sweep. Worst case
+  # during an overlapping restart this kills the NEW bot's just-spawned
+  # heartbeat — its watchdog respawns it within 30s, which beats an orphan.
+  ps -eo pid,comm,args | awk '$4 == "-m" && $5 == "core.heartbeat_loop" {print $1}' \
+    | xargs kill 2>/dev/null || true
   # Kill any lingering eigenflux stream processes (may be reparented to
   # openclaw-gateway or init, so pkill -P doesn't reach them)
   pkill -f "eigenflux stream" 2>/dev/null || true
