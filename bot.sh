@@ -65,6 +65,21 @@ if [ "$_competing_streams" -gt 0 ]; then
   sleep 1
 fi
 
+# Orphan heartbeats: the double-start guard above proved no other bot.sh is
+# alive, so any surviving core.heartbeat_loop belongs to a dead instance and
+# runs pre-restart code. Kill it — it holds the singleton flock, and our own
+# fresh heartbeat below would otherwise exit on the lock (7/7 incident: a
+# 2.5-day-old orphan kept the lock through a guardian restart).
+# ps+awk, NOT pgrep -f: same reason as the stream check above — a bare
+# substring match also hits Claude/monitor shells that merely MENTION the
+# module name, and killing those is friendly fire.
+_orphan_hb=$(ps -eo pid,comm,args | awk '$4 == "-m" && $5 == "core.heartbeat_loop" {print $1}')
+if [ -n "$_orphan_hb" ]; then
+  echo "WARN: Found orphan heartbeat_loop process(es): $_orphan_hb — killing" >&2
+  echo "$_orphan_hb" | xargs kill 2>/dev/null || true
+  sleep 1
+fi
+
 LOG_FILE="$JARVIS_DIR/jarvis.log"
 LOG_MAX_BYTES=500000  # 500KB — rotate on startup if exceeded
 MEMORY_CACHE_FILE="$JARVIS_DIR/.memory_cache"   # last-known-good memory snapshot
@@ -1252,7 +1267,14 @@ cleanup() {
     [ -f "$_lock" ] || continue
     basename "$_lock" | sed 's/^\.session_lock_//' >> "$_queue_file"
   done
-  rm -f "$PIDFILE"
+  # Only remove the pidfile if it is still OURS. During a guardian/daemon
+  # restart the new bot.sh writes its pid before the old instance finishes
+  # shutting down — an unconditional rm here deletes the NEW instance's
+  # pidfile (7/7 incident: left .bot.pid missing, health checks went blind
+  # and the double-start guard was disarmed).
+  if [ "$(awk '{print $1}' "$PIDFILE" 2>/dev/null)" = "$$" ]; then
+    rm -f "$PIDFILE"
+  fi
   [ -n "$ADMIN_PID" ] && kill "$ADMIN_PID" 2>/dev/null || true
   [ -n "$STREAM_PID" ] && kill "$STREAM_PID" 2>/dev/null || true
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
@@ -1311,7 +1333,29 @@ heartbeat_watchdog() {
       sleep 30
       continue
     fi
+    # Re-assert the pidfile (self-heal): an overlapping old instance's cleanup
+    # can delete OUR pidfile during a guardian restart (pre-7/7 code did an
+    # unconditional rm). Without it the daemon's health checks go pgrep-blind
+    # and the double-start guard is disarmed. $$ is the main bot pid here —
+    # bash keeps $$ stable inside background functions (BASHPID differs).
+    if [ "$(awk '{print $1}' "$PIDFILE" 2>/dev/null)" != "$$" ]; then
+      log_warn "[watchdog] Pidfile missing or foreign — re-asserting ($$)"
+      echo "$$ $_BOOT_TS" > "$PIDFILE"
+    fi
     if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
+      # Adopt a surviving singleton before declaring death (7/7 incident: an
+      # orphaned heartbeat from a previous bot held the flock for 2.5 days;
+      # every respawn exited on the lock instantly, so the watchdog logged
+      # 107 phantom "crashes" while the real heartbeat beat happily).
+      # ps+awk, NOT pgrep -f: a substring match would "adopt" any shell that
+      # merely mentions the module name, leaving the real heartbeat dead.
+      local _survivor
+      _survivor=$(ps -eo pid,comm,args | awk '$4 == "-m" && $5 == "core.heartbeat_loop" {print $1}' | head -1)
+      if [ -n "$_survivor" ]; then
+        log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID gone but PID $_survivor holds the singleton — adopting it"
+        HEARTBEAT_PID=$_survivor
+        _fails=0
+      else
       local _now
       _now=$(date +%s)
       # Reset the failure counter once the heartbeat has stayed up for 10min,
@@ -1333,6 +1377,7 @@ heartbeat_watchdog() {
       python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
       HEARTBEAT_PID=$!
       log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
+      fi
     fi
     # Supervision dead zones closed (REQ-40): ef_stream_loop and admin.py
     # previously had NO watchdog — their death was invisible until the next
