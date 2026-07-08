@@ -520,19 +520,23 @@ class TestTaskHealth:
         events = telemetry.read_sched_events(tmp_path)
         hb_tasks = [
             {"name": "alpha", "interval": 600},    # spawned 10m ago → alive
-            {"name": "beta", "interval": 300},     # never spawned → dead
+            # beta never spawned but skips empty_pre every minute — the
+            # scheduler runs it, there's just nothing to do. Counting only
+            # spawns false-flagged 7 healthy tasks on 2026-07-08.
+            {"name": "beta", "interval": 300},     # skipping → ALIVE
             {"name": "gamma", "interval": 900},    # no events at all → dead
             {"name": "weekly", "interval": 7 * 86400},  # interval ≥ 6h → exempt
         ]
         dead = {d["name"] for d in detect_silently_dead(hb_tasks, events, now_ts=now_ts)}
-        assert dead == {"beta", "gamma"}
+        assert dead == {"gamma"}
 
     def test_silently_dead_three_intervals(self, tmp_path):
         from dashboard.pages.agent_calendar import detect_silently_dead
         telemetry.reset_cache()
         now_ts = self._seed_events(tmp_path)
         events = telemetry.read_sched_events(tmp_path)
-        # alpha last spawned 10m ago: dead for 3×interval < 10m, alive above
+        # alpha's newest event is the timeout 9m ago: dead when 3×interval
+        # < 9m, alive above
         assert detect_silently_dead(
             [{"name": "alpha", "interval": 150}], events, now_ts=now_ts)
         assert not detect_silently_dead(

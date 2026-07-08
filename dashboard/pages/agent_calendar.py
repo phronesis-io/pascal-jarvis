@@ -5,7 +5,11 @@ from synthetic heartbeat_state watermarks. This board renders REALITY:
 per task the last actual run (max task_finish ts), failure rate, p50/max
 duration, every skip reason with counts, and the circuit-breaker state —
 plus a red-flag banner for tasks that are silently dead (interval < 6h yet
-zero task_spawn within 3×interval, the repos-sync failure class).
+ZERO events of any kind within 3×interval, the repos-sync failure class).
+Liveness counts skips too: an event-driven task (intention-check, checkin,
+eigenflux-friends…) legitimately goes days without a spawn — its empty_pre
+skips ARE proof the scheduler runs it. Counting only task_spawn false-flagged
+7 healthy tasks on 2026-07-08; a dead scheduler emits nothing at all.
 
 Data layer: dashboard.telemetry incremental tail-reader — each ui.timer(15)
 refresh reads only the bytes appended since the last one.
@@ -25,7 +29,8 @@ JARVIS_DIR = Path(__file__).parent.parent.parent
 # 健康板只看任务执行事件；intent_* 等生命周期事件归 /intentions
 _TASK_EVENTS = ("task_spawn", "task_finish", "task_skip", "task_timeout")
 
-# 红旗判定: interval < 6h 的任务，3×interval 内零 task_spawn → 静默死亡
+# 红旗判定: interval < 6h 的任务，3×interval 内零事件（spawn/skip/finish/timeout
+# 都算活）→ 静默死亡
 DEAD_MAX_INTERVAL_S = 6 * 3600
 DEAD_FACTOR = 3
 
@@ -117,25 +122,30 @@ def aggregate_task_health(events: list[dict], window_s: float = 86400,
 
 def detect_silently_dead(hb_tasks: list[dict], events: list[dict],
                          now_ts: float | None = None) -> list[dict]:
-    """HEARTBEAT.md tasks with interval<6h and zero task_spawn in 3×interval."""
+    """HEARTBEAT.md tasks with interval<6h and ZERO events in 3×interval.
+
+    Any _TASK_EVENTS entry counts as liveness — a task_skip(empty_pre) means
+    the scheduler ran the task and its pre-script found nothing to do, which
+    is healthy. Only a task the scheduler never even touches (zero events of
+    any kind) is silently dead."""
     now_ts = now_ts if now_ts is not None else time.time()
-    last_spawn: dict[str, float] = {}
+    last_event: dict[str, float] = {}
     for e in events:
-        if e.get("event") != "task_spawn":
+        if e.get("event") not in _TASK_EVENTS:
             continue
         ts = _parse_ts(str(e.get("ts", "")))
         task = str(e.get("task", "") or "")
-        if ts is not None and task and ts > last_spawn.get(task, 0):
-            last_spawn[task] = ts
+        if ts is not None and task and ts > last_event.get(task, 0):
+            last_event[task] = ts
 
     dead = []
     for t in hb_tasks:
         interval = t.get("interval", 0) or 0
         if not 0 < interval < DEAD_MAX_INTERVAL_S:
             continue
-        spawn = last_spawn.get(t["name"])
-        silent_for = now_ts - spawn if spawn else None
-        if spawn is None or silent_for > DEAD_FACTOR * interval:
+        seen = last_event.get(t["name"])
+        silent_for = now_ts - seen if seen else None
+        if seen is None or silent_for > DEAD_FACTOR * interval:
             dead.append({"name": t["name"], "interval": interval,
                          "silent_for_s": silent_for})
     return dead
@@ -208,8 +218,8 @@ def task_health_page():
                 with ui.element("div").classes("dead-banner w-full"):
                     ui.label("⚠ silently dead").classes("font-bold text-red-600")
                     for d in dead:
-                        silent = (_format_interval(d["silent_for_s"]) + " 无 spawn"
-                                  ) if d["silent_for_s"] is not None else "从未 spawn"
+                        silent = (_format_interval(d["silent_for_s"]) + " 无任何事件"
+                                  ) if d["silent_for_s"] is not None else "从未有事件"
                         ui.label(
                             f"{d['name']} — interval {_format_interval(d['interval'])}，{silent}"
                             f"（阈值 {DEAD_FACTOR}×interval）"
