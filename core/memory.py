@@ -39,8 +39,10 @@ Structured dated facts (REQ-71):
 
 import re
 import sys
+import time
 from pathlib import Path
 
+from core.log import log
 from core.timeutil import now_local
 
 # Max chars for the entire memory payload.
@@ -68,6 +70,36 @@ _TIMELINE_SKIP = {
     "hourly_archive.md", "daily_archive.md",
     "longterm_digest.bak.md", "monthly_archive.bak.md",
 }
+
+# Append-only system files (new entries at the TAIL): when a hard cut lands
+# mid-section, keep the tail, not the head. todos.md grows via dated
+# auto-update appends since April — the head-keep cut had the model reading
+# April/May todos while the same-day entries were exactly what got dropped
+# (2026-07-07 memory audit). Curated files (open_threads) stay head-keep, so
+# this is per-file, not tier-wide. Keys = section header lines.
+_TAIL_KEEP_SECTIONS = {"## System: todos"}
+
+# Load-time caps (chars, tail-keep) for the bulky perception inbox buffers.
+# INBOX_MAX_LINES=500 lets each buffer reach ~40KB — the two of them alone
+# exceed SYSTEM_BUDGET, so they were evicting cross_session_digest /
+# pending_updates on every call (2026-07-07 memory audit). Capping at load
+# keeps the newest signals visible without letting raw buffers starve the
+# load-bearing system files; the full files stay on disk for on-demand Read.
+_SYSTEM_FILE_CAPS = {
+    "inbox_ops.md": 12000,
+    "inbox_private_mail.md": 12000,
+}
+
+# Per-tier timestamp of the last structured truncation warn — heartbeat calls
+# the loader every cycle, and 400+ identical warns/day buried the signal (the
+# multi-day truncation of 2026-07 stayed invisible). The original once-per-
+# PROCESS set re-suppressed the very thing it was built to surface: a long-
+# lived heartbeat process warned once and then stayed silent for a NEW
+# truncation episode days later, invisible to selfmon's window-based counting
+# (2026-07-08 red-team fix). Re-warn when >1h has passed for that tier —
+# per-call CLI processes still warn at most once per run.
+_TRUNCATION_WARN_INTERVAL_S = 3600
+_TRUNCATION_WARNED_AT: dict[str, float] = {}
 
 # Example skeleton written by set_fact() when no structured_facts file exists.
 # Deliberately contains NO real dates — just the field convention.
@@ -230,7 +262,8 @@ def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
         if purpose == "outbound" and (f.name.startswith("inbox_private")
                                       or f.name.startswith("inbox_secret")):
             continue
-        _append_file(parts, f, f"System: {f.stem}")
+        _append_file(parts, f, f"System: {f.stem}",
+                     cap=_SYSTEM_FILE_CAPS.get(f.name))
     return parts
 
 
@@ -295,39 +328,89 @@ def _join_within_budget(parts: list[str], budget: int, tier: str) -> str:
         # Over budget. Try to fit a partial slice of this section, then stop.
         remaining = budget - used - (len(sep) if out else 0)
         marker = f"\n\n[{tier} memory truncated — over tier budget]"
+        dropped_sections: list[str] = []
         if remaining > len(marker) + 200:
             keep = remaining - len(marker)
-            out.append(section[:keep] + marker)
-            dropped_chars += len(section) - keep
+            header, _, body = section.partition("\n")
+            if header in _TAIL_KEEP_SECTIONS and keep > len(header) + 1:
+                # Append-only file: keep the header + newest TAIL — the head
+                # is months-old history (see _TAIL_KEEP_SECTIONS). The
+                # omission note sits ABOVE the kept tail (right after the
+                # header) and names the OLDEST entries as the casualty — the
+                # old bottom marker read as "newest entries were cut", the
+                # exact confusion tail-keep was built to remove (2026-07-08
+                # red-team fix).
+                omitted = max(0, len(section) - remaining)
+                fname = (header.rpartition(":")[2].strip() or "todos") + ".md"
+                note = (f"\n[oldest ~{omitted} chars omitted — tail kept; "
+                        f"full file on disk: {fname}]\n")
+                tail = body[len(body) - max(0, remaining - len(header) - len(note)):]
+                # Snap forward to the next entry boundary so the tail never
+                # opens mid-entry (best-effort — raw slice when none found).
+                snap = tail.find("\n<!-- auto-update")
+                if snap != -1:
+                    tail = tail[snap + 1:]
+                out.append(header + note + tail)
+                dropped_chars += max(0, len(section) - len(header) - len(tail))
+            else:
+                out.append(section[:keep] + marker)
+                dropped_chars += len(section) - keep
+            # Name the partially-cut section too — with a single big file
+            # (the todos case) dropped_sections was [] exactly when the warn
+            # mattered most (2026-07-08 red-team fix).
+            dropped_sections.append(f"{header} (partial)")
         else:
             dropped_chars += len(section)
+            dropped_sections.append(section.split("\n", 1)[0])
         truncated = True
         # Everything after this is dropped (count it for the warning).
         idx = parts.index(section)
+        dropped_sections += [p.split("\n", 1)[0] for p in parts[idx + 1:]]
         for later in parts[idx + 1:]:
             dropped_chars += len(later) + len(sep)
         break
 
     if truncated:
+        # Bare stderr line kept for backward compat (tests + historical grep
+        # of jarvis.log count this exact string).
         print(
             f"[memory] WARNING: {tier} tier truncated — dropped ~{dropped_chars} "
             f"chars (budget {budget})",
             file=sys.stderr,
         )
+        # Structured leveled warn so selfmon/alerting can see it — the bare
+        # print bypassed leveled logging and a multi-day truncation stayed
+        # invisible (2026-07-07 memory audit). Rate-limited per tier (see
+        # _TRUNCATION_WARNED_AT) so heartbeat doesn't emit 400+/day, but a
+        # persistent or NEW episode keeps re-surfacing hourly.
+        now = time.time()
+        if now - _TRUNCATION_WARNED_AT.get(tier, 0) >= _TRUNCATION_WARN_INTERVAL_S:
+            _TRUNCATION_WARNED_AT[tier] = now
+            log("memory", "tier_truncated", level="warn", tier=tier,
+                dropped_chars=dropped_chars, budget=budget,
+                dropped_sections=dropped_sections)
 
     return sep.join(out)
 
 
-def _append_file(parts: list[str], path: Path, title: str):
+def _append_file(parts: list[str], path: Path, title: str, cap: int | None = None):
     """Read a file and append as a titled section.
 
     For calendar_today.md: if the synced date doesn't match today,
     prepend a visible warning so Claude knows the data is stale.
+
+    cap: optional per-file char cap (tail-keep — inbox buffers append newest
+    at the bottom). See _SYSTEM_FILE_CAPS for why this exists.
     """
     try:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             return
+        if cap is not None and len(content) > cap:
+            content = (
+                f"[capped — oldest {len(content) - cap} chars omitted; "
+                f"full file on disk: {path.name}]\n" + content[-cap:]
+            )
         # Stale calendar detection
         if path.name == "calendar_today.md":
             m = re.search(r"synced (\d{4}-\d{2}-\d{2})", content)

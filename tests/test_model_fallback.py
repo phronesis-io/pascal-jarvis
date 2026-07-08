@@ -1,4 +1,7 @@
-"""REQ-77 model-crash / spend-limit graceful fallback."""
+"""REQ-77 model-crash / spend-limit graceful fallback + sticky provider gate."""
+import json
+import time
+
 from core import model_fallback as mf
 
 
@@ -19,11 +22,31 @@ def test_fallback_chain():
     assert mf.fallback_for_stderr("haiku", "invalid model") is None  # exhausted
 
 
-def test_spend_limit_jumps_to_cheapest():
-    assert mf.fallback_for_stderr("opus", "monthly spend limit") == "haiku"
-    assert mf.fallback_for_stderr("sonnet", "spend limit") == "haiku"
+def test_hard_spend_limit_skips_same_provider_retry():
+    # 2026-07-07: a monthly spend limit is account-wide — the old opus→haiku
+    # detour just burned a second doomed call per reply. No same-provider
+    # fallback; is_model_error stays True so callers hit their backup branch.
+    assert mf.fallback_for_stderr("opus", "monthly spend limit") is None
+    assert mf.fallback_for_stderr("sonnet", "spend limit") is None
+    assert mf.fallback_for_stderr("haiku", "spend limit") is None
+    assert mf.is_model_error("monthly spend limit")
+
+
+def test_rate_limit_still_jumps_to_cheapest():
+    # Transient throttling may be per-model/tier — the haiku detour stays.
     assert mf.fallback_for_stderr("opus", "rate limit exceeded") == "haiku"
-    assert mf.fallback_for_stderr("haiku", "spend limit") is None  # already cheapest
+    assert mf.fallback_for_stderr("sonnet", "too many requests") == "haiku"
+    assert mf.fallback_for_stderr("haiku", "rate limit reached") is None
+
+
+def test_is_spend_limit_hard_exhaustion_only():
+    # The sticky gate trips on THIS predicate — a transient 429 must never
+    # divert whole processes to the backup provider for 30 min.
+    assert mf.is_spend_limit("You've hit your monthly spend limit")
+    assert mf.is_spend_limit("credit balance is too low")
+    assert not mf.is_spend_limit("rate limit exceeded")
+    assert not mf.is_spend_limit("too many requests")
+    assert not mf.is_spend_limit("")
 
 
 def test_transient_error_no_fallback():
@@ -54,6 +77,138 @@ def test_cli_is_model_error_predicate():
     assert r.returncode == 1
 
 
+def test_cli_is_spend_limit_predicate():
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-m", "core.model_fallback", "--is-spend-limit"],
+                       input="You've hit your monthly spend limit",
+                       capture_output=True, text=True)
+    assert r.returncode == 0
+    r = subprocess.run([sys.executable, "-m", "core.model_fallback", "--is-spend-limit"],
+                       input="rate limit exceeded",
+                       capture_output=True, text=True)
+    assert r.returncode == 1
+
+
+# ── Sticky provider gate (2026-07-07 spend-limit incident) ──────────────────
+
+
+def _gate_state(tmp_path):
+    return json.loads((tmp_path / "data" / "provider_state.json").read_text())
+
+
+def _set_gate_state(tmp_path, state):
+    (tmp_path / "data" / "provider_state.json").write_text(json.dumps(state))
+
+
+def _deadletter_rows(tmp_path):
+    f = tmp_path / "data" / ".delivery_deadletter.jsonl"
+    if not f.exists():
+        return []
+    return [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
+
+
+def test_gate_trip_probe_clear_cycle(tmp_path):
+    assert mf.gate(tmp_path) == "primary"
+    mf.trip("spend_limit", tmp_path)
+    assert mf.gate(tmp_path) == "backup"        # probe stamp is fresh
+    # Probe due: exactly ONE caller wins the election (the stamp is rewritten
+    # inside gate), concurrent callers keep getting backup.
+    st = _gate_state(tmp_path)
+    st["last_primary_probe"] = time.time() - mf.PROBE_INTERVAL_S - 1
+    _set_gate_state(tmp_path, st)
+    assert mf.gate(tmp_path) == "probe"
+    assert mf.gate(tmp_path) == "backup"
+    # Auxiliary callers (background jobs, idle judge) never win the election —
+    # they can't clear() on success, so a won slot would never reopen primary.
+    st = _gate_state(tmp_path)
+    st["last_primary_probe"] = 0
+    _set_gate_state(tmp_path, st)
+    assert mf.gate(tmp_path, probe=False) == "backup"
+    assert mf.gate(tmp_path) == "probe"         # slot still available for main
+    mf.clear(tmp_path)
+    assert mf.gate(tmp_path) == "primary"
+
+
+def test_failed_probe_retrip_rearms_timer(tmp_path):
+    mf.trip("spend_limit", tmp_path)
+    since0 = _gate_state(tmp_path)["spend_limit_since"]
+    st = _gate_state(tmp_path)
+    st["last_primary_probe"] = time.time() - mf.PROBE_INTERVAL_S - 1
+    _set_gate_state(tmp_path, st)
+    assert mf.gate(tmp_path) == "probe"
+    mf.trip("spend_limit", tmp_path)            # elected probe failed again
+    assert mf.gate(tmp_path) == "backup"
+    # the incident start survives re-trips (it anchors the page's 自...起)
+    assert _gate_state(tmp_path)["spend_limit_since"] == since0
+
+
+def test_trip_pages_pascal_once_per_cooldown(tmp_path):
+    mf.trip("spend_limit", tmp_path)
+    mf.trip("spend_limit", tmp_path)            # within 6h cooldown — no re-page
+    rows = _deadletter_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "provider_failover"
+    assert "备用通道" in rows[0]["detail"]      # plain Chinese, no provider names
+    # clear after a paged trip → one recovery note
+    mf.clear(tmp_path)
+    rows = _deadletter_rows(tmp_path)
+    assert len(rows) == 2
+    assert "恢复" in rows[1]["detail"]
+    # re-trip inside the cooldown: gate re-arms but Pascal is NOT paged again
+    # (and the later clear stays silent too — no lone 恢复了 for a page he
+    # never saw)
+    mf.trip("spend_limit", tmp_path)
+    assert mf.gate(tmp_path) == "backup"
+    mf.clear(tmp_path)
+    assert len(_deadletter_rows(tmp_path)) == 2
+
+
+def test_trip_pages_once_per_episode_not_every_6h(tmp_path):
+    """2026-07-08 red-team fix: one ongoing outage = ONE page. The old
+    6h-cadence check re-paged Pascal ~4×/day for the whole month-end spend
+    limit (every failed 30-min probe re-trips). Same-episode re-trips never
+    re-page however old the first page is; a genuinely NEW episode (clear +
+    quiet period) pages exactly once again."""
+    mf.trip("spend_limit", tmp_path)
+    assert len(_deadletter_rows(tmp_path)) == 1
+    # +7h into the SAME episode: the elected prober fails again → re-trip.
+    # Cooldown has expired, but the episode is unchanged — NO re-page.
+    t0 = time.time() - 7 * 3600
+    st = _gate_state(tmp_path)
+    st["spend_limit_since"] = t0
+    st["notified_at"] = t0
+    _set_gate_state(tmp_path, st)
+    mf.trip("spend_limit", tmp_path)
+    assert len(_deadletter_rows(tmp_path)) == 1
+    assert _gate_state(tmp_path)["notified_at"] == t0  # stamp untouched
+    # Recovery pages 恢复了 (episode was paged) …
+    mf.clear(tmp_path)
+    assert len(_deadletter_rows(tmp_path)) == 2
+    # … and a NEW episode after a quiet period pages once again.
+    mf.trip("spend_limit", tmp_path)
+    rows = _deadletter_rows(tmp_path)
+    assert len(rows) == 3
+    assert "备用通道" in rows[2]["detail"]
+    # But NOT a fourth time on the next failed probe of that episode.
+    mf.trip("spend_limit", tmp_path)
+    assert len(_deadletter_rows(tmp_path)) == 3
+
+
+def test_cli_gate_verbs(tmp_path):
+    import os
+    import subprocess, sys
+    env = {**os.environ, "JARVIS_DIR": str(tmp_path)}
+    run = lambda *args: subprocess.run(
+        [sys.executable, "-m", "core.model_fallback", *args],
+        capture_output=True, text=True, env=env)
+    assert run("--gate").stdout.strip() == "primary"
+    assert run("--trip", "spend_limit").returncode == 0
+    assert run("--gate").stdout.strip() == "backup"
+    assert run("--gate", "no-probe").stdout.strip() == "backup"
+    assert run("--clear").returncode == 0
+    assert run("--gate").stdout.strip() == "primary"
+
+
 def test_bot_sh_wires_reply_closure_and_model_fallback():
     from pathlib import Path
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
@@ -63,7 +218,12 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
     assert "ANTHROPIC_BASE_URL" in bot
-    assert "Model: ${_answer_provider} ${_answer_model}" in bot
+    # 7/7: English "Model: Claude backup opus" footer was jargon in Pascal's
+    # chat — plain-Chinese caption on non-primary replies only, silent on
+    # primary.
+    assert "Model: ${_answer_provider}" not in bot
+    assert "（备用通道）" in bot
+    assert "（GPT 兜底）" in bot
     assert '"Claude primary"' in bot
     assert '"Claude backup"' in bot
     assert '"GPT fallback"' in bot
@@ -71,6 +231,22 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "_model_error_text" in bot       # stdout errors feed model fallback
     assert "_busy_notice_sent" in bot       # queued follow-ups get one Lark ack
     assert "前一条还在处理" in bot
+
+
+def test_bot_sh_wires_sticky_provider_gate():
+    from pathlib import Path
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+    assert "core.model_fallback --gate" in bot          # attempt 1 consults gate
+    assert "core.model_fallback --is-spend-limit" in bot  # trip on HARD spend only
+    assert "core.model_fallback --trip" in bot
+    assert "core.model_fallback --clear" in bot         # probe success reopens
+    assert "--gate no-probe" in bot                     # background jobs follow flag
+    # 2026-07-08 red-team fix: the backup-tried OpenAI arm needs a COMPLETED
+    # backup failure in this run (the gate presets _claude_backup_tried=1
+    # before attempt 1) — one transient relay blip must retry backup, not
+    # jump to a context-free GPT reply.
+    assert ('[ "$_claude_backup_tried" -eq 1 ] && [ "$_attempt" -ge 2 ]'
+            in bot)
 
 
 def test_bot_progress_narration_never_sends_claude_error_text():
@@ -108,7 +284,7 @@ def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(t
         if model == "opus":
             return CompletedProcess(
                 cmd, 1,
-                stdout="You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+                stdout="There's an issue with the selected model (claude-fable-5)",
                 stderr="",
             )
         return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
@@ -117,7 +293,7 @@ def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(t
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert calls[0][calls[0].index("--model") + 1] == "opus"
-    assert calls[1][calls[1].index("--model") + 1] == "haiku"
+    assert calls[1][calls[1].index("--model") + 1] == "sonnet"
 
 
 def test_heartbeat_claude_call_suppresses_nonfallback_error_stdout(tmp_path, monkeypatch):
@@ -137,6 +313,10 @@ def test_heartbeat_claude_call_suppresses_nonfallback_error_stdout(tmp_path, mon
         idle_judge=False,
     )
     runner._claude_bin = "claude"
+    # Deterministic: no backup/OpenAI escape hatches in this test's env.
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     monkeypatch.setattr(
         "subprocess.run",
@@ -189,6 +369,12 @@ def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert any(env.get("ANTHROPIC_BASE_URL") == "https://backup.example"
                for _, env in calls)
+    # Spend limit is account-wide: exactly ONE doomed primary call (no haiku
+    # detour), and the sticky gate is tripped for every other process.
+    primary_models = [cmd[cmd.index("--model") + 1] for cmd, env in calls
+                      if env.get("ANTHROPIC_AUTH_TOKEN") != "backup-token"]
+    assert primary_models == ["opus"]
+    assert mf.gate(tmp_path) == "backup"
 
 
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
@@ -235,6 +421,119 @@ def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path
     monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
-    assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus", "haiku"]
+    # No haiku detour on spend limit: one doomed opus call, then straight past
+    # the (unconfigured) backup tier to OpenAI.
+    assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus"]
     assert openai_calls
     assert openai_calls[0][0]["model"] == "gpt-test"
+
+
+def _gate_runner(tmp_path):
+    from core.heartbeat import HeartbeatRunner
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("### t\n- interval: 1h\n- prompt: hi\n")
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path,
+        heartbeat_file=heartbeat_file,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        model="opus",
+        idle_judge=False,
+    )
+    runner._claude_bin = "claude"
+    return runner
+
+
+def test_heartbeat_claude_call_starts_on_backup_when_gate_tripped(tmp_path, monkeypatch):
+    """Tripped gate ⇒ ZERO primary probes — the 7/7 outage burned 2 doomed
+    subprocess spawns per cycle re-discovering the same account-wide limit."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    mf.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        env = kwargs.get("env") or {}
+        calls.append((cmd, env))
+        return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert len(calls) == 1
+    assert calls[0][1].get("ANTHROPIC_AUTH_TOKEN") == "backup-token"
+    assert calls[0][1].get("ANTHROPIC_BASE_URL") == "https://backup.example"
+    # backup success is NOT proof primary recovered — flag must stay
+    assert mf.gate(tmp_path, probe=False) == "backup"
+
+
+def test_heartbeat_probe_success_reopens_primary(tmp_path, monkeypatch):
+    """The elected prober tries primary once; success clears the flag for
+    every process (recovery is automatic, no human retry button)."""
+    import json as _json
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    mf.trip("spend_limit", tmp_path)
+    state_path = tmp_path / "data" / "provider_state.json"
+    st = _json.loads(state_path.read_text())
+    st["last_primary_probe"] = time.time() - mf.PROBE_INTERVAL_S - 1
+    state_path.write_text(_json.dumps(st))
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env")))
+        return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert len(calls) == 1
+    assert calls[0][1] is None                  # probe ran on PRIMARY env
+    assert mf.gate(tmp_path) == "primary"       # flag cleared
+
+
+def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch):
+    """An auth error from the backup relay matches no model-error signature
+    (kept tight after the red-team fix) — but with primary known-dead it must
+    still fall through to the OpenAI tier, not dead-end silently."""
+    from subprocess import CompletedProcess
+    from core import openai_fallback
+
+    runner = _gate_runner(tmp_path)
+    mf.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_FALLBACK_MODEL", "gpt-test")
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kwargs: CompletedProcess(
+            cmd, 1, stdout="",
+            stderr="authentication_error: invalid x-api-key",
+        ),
+    )
+    openai_calls = []
+
+    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
+        openai_calls.append(payload)
+        return {"output_text": "HEARTBEAT_OK"}
+
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert openai_calls and openai_calls[0]["model"] == "gpt-test"

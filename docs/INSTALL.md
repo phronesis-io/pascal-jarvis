@@ -167,7 +167,7 @@ lark:
 
 **最终验证清单**（agent 逐项确认）：
 1. `./restart.sh --status` 三行全绿
-2. `grep 'Beat sent' jarvis.log | tail -1` 时间戳在 1 分钟内
+2. `grep 'Beat sent' jarvis.log | tail -1` 时间戳在 10 分钟内（心跳线程首拍后按 ≤1 条/10 分钟节流）
 3. （配了 Lark）人类从手机发一句话，收到回复
 4. （配了 sidecar）点一个卡片按钮，弹 toast
 

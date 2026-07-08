@@ -135,7 +135,12 @@ class PerceptionRuntime:
 
     def _trim_inbox(self, buffer_name: str):
         """Authoritative retention (§5.4): last 500 lines or 7 days; overflow
-        archives to warm/perception_archive_YYYYMM.md (never auto-injected)."""
+        archives to warm/archive/perception_archive_YYYYMM.md (never
+        auto-injected — the loader skips warm/archive/). Writing to top-level
+        warm/ violated that contract: the loader injects every warm/*.md
+        newest-mtime-first, so the constantly-appended archive won the
+        ordering and squatted the surviving warm budget on every call
+        (2026-07-07 memory audit)."""
         path = self.system_dir / buffer_name
         if not path.exists():
             return
@@ -143,7 +148,7 @@ class PerceptionRuntime:
         if len(lines) <= INBOX_MAX_LINES:
             return
         overflow, keep = lines[:-INBOX_MAX_LINES], lines[-INBOX_MAX_LINES:]
-        archive_dir = self.memory_dir / "warm"
+        archive_dir = self.memory_dir / "warm" / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
         archive = archive_dir / f"perception_archive_{now_local_str('%Y%m')}.md"
         with open(archive, "a", encoding="utf-8") as f:

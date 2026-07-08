@@ -178,8 +178,11 @@ def test_inbox_retention_trim(tmp_path):
     rt._trim_inbox("inbox_ops.md")
     kept = inbox.read_text().splitlines()
     assert len(kept) == 500 and kept[0] == "line100"
-    archives = list((rt.memory_dir / "warm").glob("perception_archive_*.md"))
+    # Overflow must land in warm/archive/ (loader skips it) — NOT top-level
+    # warm/, which is auto-injected newest-first (2026-07-07 memory audit).
+    archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
     assert archives and "line0" in archives[0].read_text()
+    assert not list((rt.memory_dir / "warm").glob("perception_archive_*.md"))
 
 
 # ── sensitivity outbound view (PRD §3.4/§6 steps 1-2) ────────────────

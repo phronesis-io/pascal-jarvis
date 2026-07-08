@@ -119,3 +119,46 @@ def test_record_engagement_skips_silent_sources(tmp_path):
     sources = {r["source"] for r in rows if r["type"] == "sent"}
     assert "checkin" in sources            # non-silent logged
     assert "daily-plan" not in sources     # silent skipped (REQ-61)
+
+
+def test_beat_throttles_and_keeps_daemon_greppable_format(capsys, monkeypatch):
+    """Log-hygiene fix (2026-07-07): per-tick 'Beat sent' was 65% of
+    jarvis.log. The throttled line must still (a) emit on the FIRST call of a
+    fresh process — daemon.py/doctor.sh find a beat right after start — and
+    (b) keep the exact format daemon.py's _find_last_heartbeat regex greps,
+    or the daemon restarts a healthy loop."""
+    import re
+    from core import heartbeat_loop as hl
+
+    monkeypatch.setattr(hl._beat, "_last_emit", 0.0, raising=False)
+    assert hl._beat("working") is True            # first call always emits
+    line = capsys.readouterr().err.strip()
+    # daemon.py:_find_last_heartbeat's bracket-format regex, verbatim.
+    assert re.search(
+        r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Beat sent", line)
+    assert "(working)" in line
+
+    assert hl._beat("working") is False           # inside interval: suppressed
+    assert capsys.readouterr().err == ""
+
+    assert hl._beat("idle", force=True) is True   # transition edge bypasses
+    assert "(idle)" in capsys.readouterr().err
+
+
+def test_beat_interval_plus_max_cycle_stays_under_stale_threshold():
+    """daemon.py restarts the heartbeat past HEARTBEAT_STALE_THRESHOLD=1800s.
+    Worst-case beat gap = full throttle suppression + one long cycle (heavy
+    solo task + shared batch call) — red-team 7/8: at 600s the gap reached
+    ~2200s and the daemon killed the stack mid-heavy-task. The invariant in
+    heartbeat_loop.py's BEAT_LOG_INTERVAL_S comment, machine-checked."""
+    import daemon as daemon_mod
+    from core import heartbeat_loop as hl
+    from core.heartbeat import HeartbeatRunner
+
+    batch_timeout = 600  # HEARTBEAT_TIMEOUT default (bot.sh → run_loop)
+    worst_gap = (hl.BEAT_LOG_INTERVAL_S
+                 + HeartbeatRunner.HEAVY_DEFAULT_TIMEOUT
+                 + batch_timeout)
+    assert worst_gap < daemon_mod.HEARTBEAT_STALE_THRESHOLD, \
+        f"worst-case beat gap {worst_gap}s crosses the daemon's " \
+        f"{daemon_mod.HEARTBEAT_STALE_THRESHOLD}s stale threshold"

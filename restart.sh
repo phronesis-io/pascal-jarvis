@@ -148,12 +148,25 @@ kill_bot() {
   pkill -f "core\\.ef_stream_loop" 2>/dev/null || true
   pkill -f "$JARVIS_DIR/admin\\.py" 2>/dev/null || true
 
-  # Kill stuck claude sessions (lock format: "<pid> <token>")
+  # Kill stuck claude sessions (lock format: "<pid> <token>"). Verify process
+  # identity before kill — locks survive crashed handlers, and killing a
+  # recycled PID blind hits an arbitrary user process (7/7 audit; same class
+  # as af35420). The lock holds a backgrounded bot.sh pipeline subshell, so
+  # ps shows 'bash .../bot.sh' (the parent argv), never 'claude' — match ONLY
+  # the repo's bot.sh path. (A '*claude*' fallback arm was removed 7/8
+  # red-team: a real lock holder can never show 'claude', so it could only
+  # ever match a recycled PID landing on an unrelated claude process — e.g.
+  # an interactive Claude Code session — the banned substring-match class.)
   for lock in "$JARVIS_DIR"/.session_lock_*; do
     [ -f "$lock" ] || continue
     pid=$(awk '{print $1}' "$lock" 2>/dev/null)
     if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null || true
+      pid_args=$(ps -p "$pid" -o args= 2>/dev/null || true)
+      case "$pid_args" in
+        *bash*"$JARVIS_DIR/bot.sh"*)
+          kill "$pid" 2>/dev/null || true
+          ;;
+      esac
     fi
     rm -f "$lock"
   done

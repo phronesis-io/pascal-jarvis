@@ -591,6 +591,23 @@ You have access to the user's memory below. Use it to personalize your responses
         model = self.model
         use_backup = False
         backup_tried = False
+        # Sticky provider gate (2026-07-07 spend-limit incident): when the
+        # primary account is known-exhausted, start on the backup provider
+        # instead of re-probing primary every cycle (2 doomed subprocess
+        # spawns per call, 114 wasted error lines in one evening). 'probe'
+        # means this call was elected to try primary once and report back.
+        gate_state = "primary"
+        try:
+            from core.model_fallback import gate as _provider_gate
+            gate_state = _provider_gate(self.jarvis_dir)
+        except Exception:
+            gate_state = "primary"
+        if (gate_state == "backup"
+                and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
+                and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
+            use_backup = True
+            backup_tried = True
         try:
             while True:
                 cmd = [
@@ -623,15 +640,29 @@ You have access to the user's memory below. Use it to personalize your responses
                     start_new_session=True,  # isolate from parent process group signals
                 )
                 if result.returncode == 0:
+                    if gate_state != "primary" and not use_backup:
+                        # Primary answered while the outage flag was set (we
+                        # were the elected prober, or backup env is missing)
+                        # — reopen it for every process.
+                        try:
+                            from core.model_fallback import clear as _gate_clear
+                            _gate_clear(self.jarvis_dir)
+                        except Exception:
+                            pass
                     return result.stdout.strip()
 
-                self._log(f"Claude exited with code {result.returncode}")
+                # warn, not info: the 7/7 spend-limit outage sat at level=info
+                # for 6.5h — 216 lines nobody was ever alerted to. (This also
+                # logs the 137/143 infra kills below at warn — acceptable.)
+                self._log(f"Claude exited with code {result.returncode}",
+                          level="warn")
                 err_text = "\n".join(
                     s for s in (result.stderr.strip(), result.stdout.strip()) if s
                 )
                 self._last_call_error = err_text
                 if err_text:
-                    self._log(f"Claude error output: {err_text[:300]}")
+                    self._log(f"Claude error output: {err_text[:300]}",
+                              level="warn")
                 # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
                 # event (restart/shutdown), not a task failure. Return a sentinel
                 # so run_cycle doesn't punish tasks via circuit breaker.
@@ -641,12 +672,25 @@ You have access to the user's memory below. Use it to personalize your responses
 
                 try:
                     from core.model_fallback import (fallback_for_stderr,
-                                                     is_model_error)
+                                                     is_model_error,
+                                                     is_spend_limit)
                     nxt = fallback_for_stderr(model or "", err_text)
                     model_problem = is_model_error(err_text)
+                    spend_limited = is_spend_limit(err_text)
                 except Exception:
                     nxt = None
                     model_problem = False
+                    spend_limited = False
+                if spend_limited and not use_backup:
+                    # Account-wide: persist it so EVERY process (bot replies,
+                    # background jobs, next cycles) skips the doomed primary.
+                    # trip() also pages Pascal once (6h cooldown) through the
+                    # daemon's Claude-independent dead-letter channel.
+                    try:
+                        from core.model_fallback import trip as _gate_trip
+                        _gate_trip("spend_limit", self.jarvis_dir)
+                    except Exception:
+                        pass
                 if nxt and f"{provider}:{nxt}" not in attempted:
                     self._log(
                         f"Retrying Claude heartbeat with {provider} fallback model: {nxt}")
@@ -662,7 +706,12 @@ You have access to the user's memory below. Use it to personalize your responses
                     model = self.model
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
-                if model_problem:
+                # `or use_backup`: an auth/network error from the backup relay
+                # matches no model-error signature (kept tight after the
+                # red-team fix), but once we're on backup, primary is already
+                # known-dead — dead-ending here would silence the whole
+                # heartbeat even though the OpenAI route works.
+                if model_problem or use_backup:
                     fallback = self._openai_fallback_call(system_prompt, prompt)
                     if fallback:
                         return fallback
@@ -716,11 +765,28 @@ You have access to the user's memory below. Use it to personalize your responses
             "--model", "haiku",
             "-p", judge_prompt,
         ]
+        # Provider gate (2026-07-07): during the primary spend-limit outage
+        # every judge call failed → fail-open → noise filtering was
+        # effectively disabled. Auxiliary caller: never wins the probe
+        # election (probe=False), just follows the flag to the backup env.
+        env = None
+        try:
+            from core.model_fallback import gate as _provider_gate
+            if (_provider_gate(self.jarvis_dir, probe=False) == "backup"
+                    and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
+                    and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
+                env = os.environ.copy()
+                env["ANTHROPIC_AUTH_TOKEN"] = os.environ["CLAUDE_BACKUP_AUTH_TOKEN"]
+                env["ANTHROPIC_BASE_URL"] = os.environ["CLAUDE_BACKUP_BASE_URL"]
+        except Exception:
+            env = None
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=60, stdin=subprocess.DEVNULL,
                 cwd=str(self.work_dir),
+                env=env,
                 start_new_session=True,
             )
             if result.returncode != 0:
@@ -1241,7 +1307,12 @@ You have access to the user's memory below. Use it to personalize your responses
                 parse_failed = True
                 self._log(f"JSON parse failed for {n}-task response — "
                           "recording failure (will retry shortly)", level="warn")
+                # Head AND tail: the head alone cannot distinguish a relay
+                # truncating the completion mid-body (7/7 backup-relay
+                # suspicion — starts as well-formed JSON) from genuinely
+                # malformed output.
                 self._log(f"Raw response (first 300 chars): {raw[:300]}")
+                self._log(f"Raw response (last 300 chars): {raw[-300:]}")
                 self._ack_failed_posts(runnable)
 
         # Update state. Parse failure used to fall through to the success
@@ -1268,11 +1339,16 @@ You have access to the user's memory below. Use it to personalize your responses
                 ts.last_run = now - task["interval"] + retry_delay
                 ts.last_status = "parse_failed"
                 state[task["name"]] = ts.to_dict()
+                # Flattened to one line: _error_excerpt keeps only the first
+                # non-empty line, so a newline in the head would drop the tail
+                # — and the tail is what proves/refutes relay truncation.
                 self._event("task_finish", task=task["name"], status="parse_failed",
                             duration_s=round(time.time() - call_t0, 2),
                             retry_in_s=retry_delay,
                             error=_error_excerpt(
-                                "envelope unparseable; head: " + raw[:300]))
+                                "envelope unparseable; head: "
+                                + " ".join(raw[:200].split())
+                                + " …tail: " + " ".join(raw[-200:].split())))
             env = state.get("__envelope_parse__", {})
             env_fails = int(env.get("consecutive_failures", 0)) + 1
             state["__envelope_parse__"] = {"consecutive_failures": env_fails,

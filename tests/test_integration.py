@@ -82,9 +82,11 @@ def test_heartbeat_loop_starts_and_runs(integration_env):
     _, stderr = proc.communicate(timeout=5)
     output = stderr.decode(errors="replace")
 
-    # Should have "Beat sent" markers
+    # Should have a "Beat sent" marker. Exactly one in a short run: beats are
+    # throttled to BEAT_LOG_INTERVAL_S (per-tick beats were 65% of jarvis.log,
+    # 2026-07-07) but the FIRST tick always emits.
     beat_count = output.count("Beat sent")
-    assert beat_count >= 2, f"Expected ≥2 beats, got {beat_count}. Output:\n{output[:500]}"
+    assert beat_count >= 1, f"Expected ≥1 beat, got {beat_count}. Output:\n{output[:500]}"
 
 
 def test_heartbeat_loop_no_crash_on_missing_files(integration_env):

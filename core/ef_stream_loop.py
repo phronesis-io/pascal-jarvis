@@ -136,20 +136,41 @@ If the message is routine/no action needed, reply HEARTBEAT_OK.
 Otherwise reply with a brief Chinese note (≤60 words) for the user."""
 
     try:
+        # Spend-limit gate (probe=False: this aux caller never clear()s, so it
+        # must not win the probe election). 2026-07-07: with no gate and no
+        # returncode check, claude's spend-limit error text on stdout was
+        # returned as the "analysis" and sent to Pascal verbatim as a 💡 note.
+        env = None
+        try:
+            from core.model_fallback import gate
+            if gate(jarvis_dir, probe=False) == "backup" \
+                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN") \
+                    and os.environ.get("CLAUDE_BACKUP_BASE_URL"):
+                env = os.environ.copy()
+                env["ANTHROPIC_AUTH_TOKEN"] = env["CLAUDE_BACKUP_AUTH_TOKEN"]
+                env["ANTHROPIC_BASE_URL"] = env["CLAUDE_BACKUP_BASE_URL"]
+        except Exception:
+            pass
         p = subprocess.Popen(
             [resolve_claude_bin(), "--model", "opus", "--dangerously-skip-permissions",
              "--no-session-persistence", "--disable-slash-commands", "-p", prompt],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, env=env,
         )
         if procs is not None:
             procs["analysis"] = p
         try:
-            out, _ = p.communicate(timeout=120)
+            out, err = p.communicate(timeout=120)
         except subprocess.TimeoutExpired:
             p.kill()
             p.communicate()
-            out = ""
+            return ""
+        if p.returncode != 0:
+            # Nonzero exit → stdout is an error surface, never user content.
+            excerpt = ((out or "") + " " + (err or "")).strip()[:200]
+            log("ef-stream", f"Claude analysis failed (exit={p.returncode}): {excerpt}",
+                level="warn")
+            return ""
         return (out or "").strip()
     except Exception as e:
         log("ef-stream", f"Claude analysis failed: {e}", level="warn")

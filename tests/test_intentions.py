@@ -25,6 +25,10 @@ def intent_db(tmp_path, monkeypatch):
         return conn
 
     monkeypatch.setattr(intentions_mod, "_get_db", _test_get_db)
+    # Keep the skip-log dedup sidecar out of the real repo data/ dir (and
+    # give every test a fresh seen-set).
+    monkeypatch.setattr(intentions_mod, "SKIP_LOG_SEEN_FILE",
+                        tmp_path / ".cal_skip_log_seen.json")
     intentions_mod._ensure_table()
     return db_path
 
@@ -1176,6 +1180,33 @@ def test_calendar_multiday_event_in_progress_generates_nothing(intent_db):
             for d in days]
     assert mod.generate_calendar_intents(md, event_map=emap) == []
     assert _cal_rows() == []
+
+
+def test_calendar_continuation_skip_logged_once_per_day(intent_db, capsys):
+    """Log-hygiene fix (2026-07-07): the continuation-day skip line fired for
+    every rendered future day on EVERY cycle (~1,475 请假 lines/day in
+    jarvis.log). It must log on the first sync of the day and stay silent on
+    re-syncs — while the skip itself (zero generation) keeps working."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    start_local = (now_local() - timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+    end_local = (start_local + timedelta(days=3)).replace(minute=30)
+    days = [(start_local + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(1, 4)]
+    md = _multi_day_md([(d, [("12:00-12:30", "冲绳旅行")]) for d in days])
+    emap = [_map_entry_for(d, "12:00-12:30", "冲绳旅行", start_local, end_local)
+            for d in days]
+
+    assert mod.generate_calendar_intents(md, event_map=emap) == []
+    first = capsys.readouterr().err
+    assert first.count("skip continuation day") == len(days)
+    # Same cycle content again (the every-10-min re-sync): still skipped,
+    # but no repeat log lines.
+    assert mod.generate_calendar_intents(md, event_map=emap) == []
+    assert "skip continuation day" not in capsys.readouterr().err
 
 
 def test_calendar_multiday_no_resurrection_of_cancelled_legacy_rows(intent_db):

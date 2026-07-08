@@ -106,6 +106,94 @@ def test_daemon_stale_heartbeat_still_fails_outside_wake_grace(tmp_path, monkeyp
     assert any("Heartbeat stale" in issue for issue in result["issues"])
 
 
+# ── beat-age-None guards (red-team 7/8) ──
+# With beats throttled, a busy conversation's log burst can push the newest
+# beat out of the tail window → beat_age=None. That branch used to append
+# 'No heartbeat found' UNCONDITIONALLY — no session-lock / wake-grace guard —
+# so the daemon restarted the stack mid-conversation, killing the very reply
+# whose logging caused the burst.
+
+@pytest.fixture
+def beat_none_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: None)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    return tmp_path
+
+
+def test_daemon_no_beat_with_active_session_is_suppressed(beat_none_env):
+    (beat_none_env / ".session_lock_abc").write_text("999 token")
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result["issues"] == []
+    # fake-healthy must be marked so the breaker unlatch can't fire on it
+    assert result.get("note") == "session-active"
+
+
+def test_daemon_no_beat_in_wake_grace_is_suppressed(beat_none_env, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: True)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result["issues"] == []
+    assert result.get("note") == "wake-grace"
+
+
+def test_daemon_no_beat_without_session_or_grace_still_fails(beat_none_env):
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is False
+    assert any("No heartbeat found" in issue for issue in result["issues"])
+    assert "note" not in result
+
+
+def test_daemon_stale_beat_with_active_session_carries_note(tmp_path, monkeypatch):
+    """The stale-branch suppression is fake-healthy too — it must carry the
+    same note (red-team 7/8 finding: this path used to auto-clear the
+    breaker latch, see test_fake_healthy_via_session_lock_does_not_unlatch)."""
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat",
+                        lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    (tmp_path / ".session_lock_abc").write_text("999 token")
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result.get("note") == "session-active"
+
+
+def test_find_last_heartbeat_survives_busy_log_tail(tmp_path, monkeypatch):
+    """The tail read must span a busy stretch of non-beat traffic (now 256KB;
+    red-team 7/8: the old 10KB window was sized for the per-10s beat spam —
+    with beats throttled, ~11KB of handler/ef-stream lines after the newest
+    beat made it invisible → false 'No heartbeat found' restart)."""
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    # Hermetic: divert the /tmp/jarvis_restart.log probe to a missing file so
+    # the machine's real restart log can't supply a beat.
+    real_path = daemon_mod.Path
+    monkeypatch.setattr(
+        daemon_mod, "Path",
+        lambda p="": (tmp_path / "absent_restart.log")
+        if str(p) == "/tmp/jarvis_restart.log" else real_path(p))
+
+    beat = "[2026-07-08 00:00:00] [INFO] [heartbeat] Beat sent (working)\n"
+    noise = ("[2026-07-08 00:00:01] [INFO] [handler] chunk "
+             + "x" * 120 + "\n") * 400          # ~66KB of non-beat traffic
+    (tmp_path / "jarvis.log").write_text(beat + noise)
+
+    assert daemon_mod._find_last_heartbeat() is not None
+
+
 def test_kill_patterns_include_eigenflux(tmp_path, monkeypatch):
     """diagnose_and_fix must kill eigenflux stream processes during restart.
 
@@ -115,6 +203,7 @@ def test_kill_patterns_include_eigenflux(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
     monkeypatch.setattr(daemon_mod, "RESTART_STATE_FILE", tmp_path / ".daemon_restart_state.json")
+    monkeypatch.setattr(daemon_mod, "BREAKER_LATCH_FILE", tmp_path / "data" / "restart_breaker.latched")
     monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
     monkeypatch.setattr(daemon_mod, "restart_count", 0)
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
@@ -149,6 +238,7 @@ def test_restart_wait_is_at_least_60s(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
     monkeypatch.setattr(daemon_mod, "RESTART_STATE_FILE", tmp_path / ".daemon_restart_state.json")
+    monkeypatch.setattr(daemon_mod, "BREAKER_LATCH_FILE", tmp_path / "data" / "restart_breaker.latched")
     monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
     monkeypatch.setattr(daemon_mod, "restart_count", 0)
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
@@ -206,11 +296,15 @@ def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
 
 
 @pytest.fixture
-def probe_env(monkeypatch):
+def probe_env(monkeypatch, tmp_path):
     """Wire probe_observed_components with capture sinks; returns (logs, alerts)."""
     logs, alerts = [], []
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
     monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+    # Stamps persist on every mutation — point the state file at tmp so tests
+    # can't write dedup state into the production data/ dir.
+    monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE",
+                        tmp_path / ".daemon_probe_alert_state.json")
     monkeypatch.setattr(daemon_mod, "log", lambda lvl, msg: logs.append((lvl, msg)))
     monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
     return logs, alerts
@@ -303,6 +397,8 @@ def restart_env(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
     monkeypatch.setattr(daemon_mod, "RESTART_STATE_FILE", state_file)
+    monkeypatch.setattr(daemon_mod, "BREAKER_LATCH_FILE",
+                        tmp_path / "data" / "restart_breaker.latched")
     monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
     monkeypatch.setattr(daemon_mod, "restart_count", 0)
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
@@ -345,23 +441,210 @@ def test_restart_budget_reset_on_success_is_persisted(monkeypatch, restart_env):
     assert json.loads(state_file.read_text())["restart_count"] == 0
 
 
-def test_max_attempts_latch_cooldown_survives_reload(monkeypatch, restart_env):
+def test_max_attempts_latches_breaker(monkeypatch, restart_env):
+    """After max attempts the breaker LATCHES: no more auto-restarts until the
+    flag file is removed (manual re-arm) or recovery is observed.
+
+    Bug (7/7 audit): the old branch zeroed restart_count with only a 10min
+    extra cooldown — a permanently broken stack got 3 restart storms + 1 Lark
+    page per ~35min forever.
+    """
     state_file = restart_env
+    latch = daemon_mod.BREAKER_LATCH_FILE
     monkeypatch.setattr(daemon_mod, "restart_count",
                         daemon_mod.MAX_RESTART_ATTEMPTS)
+    monkeypatch.setattr(daemon_mod, "check_health",
+                        lambda: {"healthy": True, "issues": []})
+    alerts = []
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    popens = []
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: popens.append(a) or None)
 
     msg = daemon_mod.diagnose_and_fix(["bot.sh is not running"])
-    assert "max restart attempts" in msg.lower()
 
-    saved = json.loads(state_file.read_text())
-    assert saved["restart_count"] == 0
-    assert saved["last_restart_time"] > time.time()  # 10min extra cooldown
+    assert "latched" in msg
+    assert latch.exists()
+    assert popens == []                                # no restart attempted
+    assert len(alerts) == 1
+    assert "restart_breaker.latched" in alerts[0]      # tells Pascal how to re-arm
+    # Counter reset is safe now that the flag gates all restarts; the flag
+    # survives hot-reload respawns because it lives on disk.
+    assert json.loads(state_file.read_text())["restart_count"] == 0
 
-    # A respawned daemon must still honor the latch cooldown
-    daemon_mod.restart_count = 0
-    daemon_mod.last_restart_time = 0
-    daemon_mod._load_restart_state()
-    assert daemon_mod.diagnose_and_fix(["x"]).startswith("restart cooldown")
+    # Latched → further failures neither restart nor re-page (daily dedup:
+    # the latch alert itself counts as today's reminder)
+    msg2 = daemon_mod.diagnose_and_fix(["bot.sh is not running"])
+    assert "latched" in msg2
+    assert popens == []
+    assert len(alerts) == 1
+
+    # Manual re-arm: deleting the flag restores auto-restart with fresh budget
+    latch.unlink()
+    daemon_mod.diagnose_and_fix(["bot.sh is not running"])
+    assert popens, "restart must resume after manual re-arm"
+
+
+def test_latched_breaker_daily_reminder(monkeypatch, restart_env):
+    """A latched breaker + dead stack must not become a silent outage: at
+    most one reminder per day, stamped inside the latch file."""
+    latch = daemon_mod.BREAKER_LATCH_FILE
+    latch.parent.mkdir(parents=True, exist_ok=True)
+    latch.write_text(json.dumps(
+        {"latched_at": 0, "last_reminder": time.time() - 25 * 3600}))
+    alerts = []
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+
+    daemon_mod.diagnose_and_fix(["bot.sh is not running"])
+    assert len(alerts) == 1
+    assert "自动重启" in alerts[0]
+    assert "restart_breaker.latched" in alerts[0]
+
+    # stamp refreshed → a second check within the day stays silent
+    daemon_mod.diagnose_and_fix(["bot.sh is not running"])
+    assert len(alerts) == 1
+
+
+def test_clear_breaker_latch_rearms_and_persists(monkeypatch, restart_env):
+    """Observed recovery removes the flag and refreshes the persisted budget —
+    without this, a transient incident whose post-checks failed would disable
+    the auto-restart safety net forever."""
+    state_file = restart_env
+    latch = daemon_mod.BREAKER_LATCH_FILE
+    latch.parent.mkdir(parents=True, exist_ok=True)
+    latch.write_text(json.dumps({"latched_at": 0, "last_reminder": 0}))
+    monkeypatch.setattr(daemon_mod, "restart_count", 2)
+    alerts = []
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+
+    daemon_mod._clear_breaker_latch("test recovery")
+
+    assert not latch.exists()
+    assert daemon_mod.restart_count == 0
+    assert json.loads(state_file.read_text())["restart_count"] == 0
+    assert len(alerts) == 1 and "恢复" in alerts[0]
+
+    # Idempotent: no flag → no-op, no duplicate page
+    daemon_mod._clear_breaker_latch("test recovery")
+    assert len(alerts) == 1
+
+
+def test_fake_healthy_via_session_lock_does_not_unlatch(monkeypatch, restart_env):
+    """Red-team 7/8: check_health has a SECOND fake-healthy path besides the
+    deploy window — stale/missing heartbeat suppressed by an active session
+    lock. It used to return note-less healthy, so the main loop unlatched the
+    breaker (false '恢复正常' page + fresh restart budget) while the heartbeat
+    was still dead, resuming the restart storm the latch exists to stop."""
+    latch = daemon_mod.BREAKER_LATCH_FILE
+    latch.parent.mkdir(parents=True, exist_ok=True)
+    latch.write_text(json.dumps({"latched_at": 0, "last_reminder": 0}))
+    alerts = []
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat",
+                        lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    (daemon_mod.JARVIS_DIR / ".session_lock_abc").write_text("999 token")
+
+    result = daemon_mod.check_health()
+    assert result["healthy"] is True          # suppression still holds
+
+    daemon_mod._maybe_clear_breaker_latch(result)
+
+    assert latch.exists(), "fake-healthy (session lock) must NOT unlatch"
+    assert alerts == []                       # no false 恢复正常 page
+
+    # A genuinely healthy, note-less result still unlatches
+    daemon_mod._maybe_clear_breaker_latch({"healthy": True, "issues": []})
+    assert not latch.exists()
+    assert len(alerts) == 1 and "恢复" in alerts[0]
+
+
+# ── Session-lock kill identity check (7/7 audit, same class as af35420) ──
+# The lock stores the $! of a backgrounded bot.sh pipeline subshell — ps shows
+# 'bash .../bot.sh' (parent argv), NEVER 'claude'. A recycled PID must not be
+# killed blind.
+
+def test_session_lock_pid_identity_check(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", Path("/repo"))
+
+    class _R:
+        def __init__(self, out):
+            self.stdout = out
+
+    def fake_ps(out):
+        return lambda *a, **k: _R(out)
+
+    # The real lock-holder signature: backgrounded bot.sh subshell
+    monkeypatch.setattr(subprocess, "run", fake_ps("bash /repo/bot.sh\n"))
+    assert daemon_mod._session_lock_pid_is_ours(123) is True
+
+    # A recycled PID landing on ANY claude process (e.g. Pascal's interactive
+    # Claude Code session) must NOT match: a legitimate lock holder never
+    # shows 'claude' in argv, so a substring arm could only ever hit a wrong
+    # process (red-team 7/8; banned pgrep-substring class).
+    monkeypatch.setattr(subprocess, "run", fake_ps("claude -p --resume abc\n"))
+    assert daemon_mod._session_lock_pid_is_ours(123) is False
+
+    # Recycled PID → arbitrary user process must NOT be killed
+    monkeypatch.setattr(subprocess, "run", fake_ps("/usr/bin/vim thesis.txt\n"))
+    assert daemon_mod._session_lock_pid_is_ours(123) is False
+
+    # Another repo's bot.sh is not ours either
+    monkeypatch.setattr(subprocess, "run", fake_ps("bash /other/bot.sh\n"))
+    assert daemon_mod._session_lock_pid_is_ours(123) is False
+
+    # Dead PID → empty ps output → no kill
+    monkeypatch.setattr(subprocess, "run", fake_ps(""))
+    assert daemon_mod._session_lock_pid_is_ours(123) is False
+
+
+# ── Probe-alert stamp persistence (7/7 audit debt ③) ──
+# Hot-reload respawns (5x in 13min on 7/7) wiped the in-memory dedup dict,
+# re-paging 组件失联 on every deploy in a burst.
+
+def test_probe_alert_stamps_roundtrip(tmp_path, monkeypatch):
+    state_file = tmp_path / ".daemon_probe_alert_state.json"
+    monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE", state_file)
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+
+    daemon_mod._probe_alert_stamps["admin :3456"] = 123.0
+    daemon_mod._save_probe_alert_stamps()
+    assert json.loads(state_file.read_text()) == {"admin :3456": 123.0}
+
+    # Simulated respawn: dict wiped, startup load restores it
+    daemon_mod._probe_alert_stamps.clear()
+    daemon_mod._load_probe_alert_stamps()
+    assert daemon_mod._probe_alert_stamps == {"admin :3456": 123.0}
+
+
+@pytest.mark.parametrize("content", ["{not json!!", "[1, 2, 3]", ""])
+def test_corrupt_probe_alert_state_falls_back_to_empty(tmp_path, monkeypatch, content):
+    state_file = tmp_path / ".daemon_probe_alert_state.json"
+    state_file.write_text(content)
+    monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE", state_file)
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {"stale": 1.0})
+
+    daemon_mod._load_probe_alert_stamps()  # must not raise
+
+    assert daemon_mod._probe_alert_stamps == {}
+
+
+def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
+    """The DOWN page's dedup stamp must hit disk so a hot-reload respawn
+    can't re-page within the 4h window."""
+    logs, alerts = probe_env
+
+    def fake_urlopen(url, timeout=None):
+        raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    daemon_mod.probe_observed_components()
+
+    assert any("失联" in a for a in alerts)
+    saved = json.loads(daemon_mod.PROBE_ALERT_STATE_FILE.read_text())
+    assert "admin :3456" in saved and "dashboard :3457" in saved
 
 
 @pytest.mark.parametrize("content", ["{not json!!", "[1, 2, 3]", ""])
@@ -448,3 +731,51 @@ def test_deadletter_consume_never_raises(deadletter_env, monkeypatch):
     monkeypatch.setattr(daemon_mod, "notify_lark",
                         lambda msg: (_ for _ in ()).throw(RuntimeError("boom")))
     daemon_mod.consume_delivery_deadletters()   # must not propagate
+
+
+# ── provider_failover rendering (red-team 7/8) ──
+# provider_failover rows are status notes ("已切到备用通道"/"已切回"), not
+# failed deliveries: wrapping them in the '消息没送出去' banner asserts a
+# delivery failure that never happened, and rendering the OLDEST row could
+# re-announce an outage the newest row says is already over.
+
+def test_deadletter_provider_failover_standalone_full_detail(deadletter_env):
+    f, sent = deadletter_env
+    detail = ("Claude 主通道本月额度用完了，我已自动切到备用通道，功能不受影响。"
+              "月初恢复后我会自动切回主通道，用量情况可以在 "
+              "claude.ai/settings/usage 页面查看，有问题随时叫我。")
+    assert len(detail) > 80                     # would trip the old [:80] cap
+    f.write_text(_dl_line("provider_failover", detail))
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert len(sent) == 1
+    assert sent[0] == detail                    # full text, no truncation
+    assert "没送出去" not in sent[0]            # no delivery-failure framing
+
+
+def test_deadletter_provider_failover_trip_plus_clear_sends_only_newest(deadletter_env):
+    f, sent = deadletter_env
+    f.write_text(_dl_line("provider_failover", "额度用完了，我已自动切到备用通道。")
+                 + _dl_line("provider_failover", "主通道恢复了，已切回。"))
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert len(sent) == 1
+    assert sent[0] == "主通道恢复了，已切回。"
+    assert "备用通道" not in sent[0]            # stale trip note suppressed
+
+
+def test_deadletter_mixed_batch_keeps_wrapper_for_failure_kinds(deadletter_env):
+    f, sent = deadletter_env
+    f.write_text(_dl_line("delivery_failures", "3 consecutive send failures")
+                 + _dl_line("provider_failover", "主通道恢复了，已切回。"))
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert len(sent) == 2
+    assert sent.count("主通道恢复了，已切回。") == 1
+    wrapped = [m for m in sent if "没送出去" in m]
+    assert len(wrapped) == 1
+    assert "消息发送连续失败" in wrapped[0]
+    assert "模型通道切换" not in wrapped[0]     # failover row not double-listed

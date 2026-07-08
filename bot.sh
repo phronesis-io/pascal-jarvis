@@ -657,6 +657,24 @@ except Exception:
   # looping to empty death ("Continue / No response requested").
   local _cur_model="$MAIN_MODEL"
 
+  # Sticky provider gate (2026-07-07 spend-limit incident): a monthly spend
+  # limit is account-wide, yet every message re-probed primary from scratch —
+  # ~11s of doomed attempts per reply AND two raw error turns written into
+  # the live session transcript each time. When the gate says the flag is
+  # fresh, start attempt 1 on backup; _claude_backup_tried=1 keeps the
+  # OpenAI rung reachable if backup itself fails. 'probe' elects this
+  # message to try primary once — success clears the flag below.
+  local _provider_gate="primary"
+  _provider_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
+  if [ "$_provider_gate" = "backup" ] \
+    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
+    && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
+    _use_claude_backup=1
+    _claude_backup_tried=1
+    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup provider"
+  fi
+
   for _attempt in 1 2 3 4; do
     if [ "$_attempt" -gt 1 ]; then
       log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
@@ -926,9 +944,22 @@ except Exception:
       if [ "${_exit_code:-0}" -eq 143 ]; then
         break
       fi
+      # Sticky provider gate: a HARD spend limit from PRIMARY is account-wide
+      # — persist it so every caller (replies, heartbeat, background jobs)
+      # starts on backup instead of re-walking the doomed primary ladder.
+      # --trip also pages Pascal once per outage episode (never again for the
+      # same ongoing episode; 6h anti-flap across episodes) via the daemon's
+      # Claude-independent dead-letter channel.
+      if [ "$_use_claude_backup" -eq 0 ] \
+        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-spend-limit 2>/dev/null; then
+        python3 -m core.model_fallback --trip spend_limit >/dev/null 2>&1 || true
+      fi
       # REQ-77: if the empty answer was a MODEL error (unavailable / banned /
-      # spend limit) rather than a transient blip, degrade the model for the
+      # rate-limited) rather than a transient blip, degrade the model for the
       # next attempt instead of retrying the same broken model to death.
+      # A HARD spend limit yields NO same-provider fallback (empty _fallback):
+      # degrading opus→haiku on an exhausted account just burned a second
+      # doomed call — the elif below jumps straight to the backup provider.
       _fallback=$(printf '%s' "$_model_error_text" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
       if [ -n "$_fallback" ]; then
         log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
@@ -941,12 +972,25 @@ except Exception:
         && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
         _claude_backup_tried=1
         _use_claude_backup=1
-        _cur_model="$MAIN_MODEL"
+        # Log BEFORE resetting _cur_model: the old order reported "exhausted
+        # on opus" even when haiku was the model that actually failed.
         log_warn "[$session_id] Primary Claude exhausted on $_cur_model → trying Claude Code backup provider"
+        _cur_model="$MAIN_MODEL"
       elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
         && [ -n "${OPENAI_API_KEY:-}" ] \
         && [ "$_openai_tried" -eq 0 ] \
-        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null \
+             || { [ "$_claude_backup_tried" -eq 1 ] && [ "$_attempt" -ge 2 ] \
+                  && [ -n "${_model_error_text//[[:space:]]/}" ]; }; }; then
+        # The || arm: an auth/network error from the backup relay matches no
+        # model-error signature (kept tight after the red-team fix), but once
+        # backup has been tried primary is known-dead — dead-ending here left
+        # a silent total outage while a working OpenAI route existed.
+        # _attempt >= 2 (2026-07-08 red-team fix): the gate PRESETS
+        # _claude_backup_tried=1 before attempt 1, so without it one transient
+        # relay blip skipped the whole retry ladder and answered with a
+        # context-free GPT reply; requiring a completed failed attempt means
+        # backup really failed at least once in THIS handler run.
         _openai_tried=1
         log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.2})"
         answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
@@ -969,6 +1013,11 @@ except Exception:
         _answer_provider="Claude backup"
       else
         _answer_provider="Claude primary"
+        if [ "$_provider_gate" != "primary" ]; then
+          # Elected probe succeeded on primary while the spend-limit flag was
+          # set — reopen primary for every process (also pages Pascal 恢复了).
+          python3 -m core.model_fallback --clear >/dev/null 2>&1 || true
+        fi
       fi
       _answer_model="$_cur_model"
       break
@@ -1051,9 +1100,15 @@ except Exception:
     return
   fi
 
+  # Reply footer: only when NOT served by primary, and in plain Chinese —
+  # the old English "Model: Claude backup opus" on EVERY reply was jargon in
+  # Pascal's chat (2026-07-07; feedback-no-jargon-dashboards). Silence on
+  # primary = normal operation needs no caption.
   local _model_footer=""
-  if [ -n "$_answer_provider" ] && [ -n "$_answer_model" ]; then
-    _model_footer="Model: ${_answer_provider} ${_answer_model}"
+  if [ "$_answer_provider" = "Claude backup" ]; then
+    _model_footer="（备用通道）"
+  elif [ "$_answer_provider" = "GPT fallback" ]; then
+    _model_footer="（GPT 兜底）"
   fi
 
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
@@ -1149,6 +1204,20 @@ except Exception:
     print('')
 " 2>/dev/null || echo "")
 
+  # Provider gate (2026-07-07): background jobs had NO fallback tier at all —
+  # every promoted/forked job failed outright during the spend-limit outage
+  # while the backup relay sat healthy. Auxiliary caller: never wins the
+  # probe election (no-probe) — jobs can't clear the flag on success, so
+  # letting them probe would burn the slot without ever reopening primary.
+  local _bg_backup=0
+  if [ "$(python3 -m core.model_fallback --gate no-probe 2>/dev/null || echo primary)" = "backup" ] \
+    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
+    && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
+    _bg_backup=1
+    log_info "[bg:$job_id] Provider gate: primary spend-limited — running on backup provider"
+  fi
+
   # set -m: give the job its OWN process group (REQ-38). Without it the
   # subshell shares bot.sh's group and cancel_job's killpg SIGTERMed the
   # ENTIRE bot — user-facing "cancel <job>" restarted the whole product.
@@ -1156,14 +1225,18 @@ except Exception:
   set -m
   if [ -n "$_main_sid" ] && [ -f "$CLAUDE_PROJECT_DIR/${_main_sid}.jsonl" ]; then
     log_info "[bg:$job_id] Forking from session $_main_sid"
-    (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
+    (cd "$WORK_DIR" && \
+      if [ "$_bg_backup" -eq 1 ]; then export ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL"; fi && \
+      with_timeout 6000 claude -p "$content" \
       --resume "$_main_sid" --fork-session \
       --model "$MAIN_MODEL" \
       --append-system-prompt "$sys_prompt" \
       --dangerously-skip-permissions \
       < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
   else
-    (cd "$WORK_DIR" && with_timeout 6000 claude -p "$content" \
+    (cd "$WORK_DIR" && \
+      if [ "$_bg_backup" -eq 1 ]; then export ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL"; fi && \
+      with_timeout 6000 claude -p "$content" \
       --session-id "$bg_session_id" \
       --model "$MAIN_MODEL" \
       --append-system-prompt "$sys_prompt" \

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Post-hook: apply memory update directives directly to target files.
 
-Outputs the diary portion (non-UPDATE lines) to stdout so bot.sh sends it to Lark.
+The diary portion (non-directive lines) is archived to silent_outputs.jsonl,
+NEVER printed to stdout: post-script stdout becomes a Lark message, and on
+2026-07-07 21:08 the internal third-person diary (bookkeeping about Pascal,
+ops jargon, a wrong 「我这边没有直接对话」 claim) was delivered to his chat —
+HEARTBEAT.md classifies the whole Memory Pipeline as silent.
 """
 import os
 import re
@@ -9,11 +13,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.jsonl import append_jsonl
 from core.safety import looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
+    Path(__file__).resolve().parent.parent))
 
 
 def _resolve_target(memory_dir: Path, filename: str) -> Path | None:
@@ -103,12 +110,23 @@ def main() -> int:
             _apply_update(MEMORY_DIR, filename, content, ts)
         print(f"[memory-consolidate] applied {len(updates)} update(s) directly", file=sys.stderr)
 
-    # Output diary portion (non-directive lines) — this becomes the Lark message
+    # Diary portion (non-directive lines): archive only, never stdout — see
+    # module docstring. Same capped file the SILENT_TASKS path uses
+    # (heartbeat.py _collect_output), so the full text survives for debugging
+    # (jarvis.log keeps only 80-char prefixes). append_jsonl's
+    # read-modify-write is safe here: posts run serialized under the cycle
+    # flock, same condition heartbeat.py relies on.
     diary_lines = [l for l in raw.splitlines()
                    if not l.startswith("→ UPDATE:") and not l.startswith("→ REPLACE:")]
     diary = "\n".join(diary_lines).strip()
     if diary:
-        print(diary)
+        try:
+            append_jsonl(JARVIS_DIR / "silent_outputs.jsonl",
+                         {"ts": now_local_str("%Y-%m-%d %H:%M"),
+                          "task": "memory-consolidate", "text": diary},
+                         keep_last=100)
+        except Exception as e:
+            print(f"[memory-consolidate] diary archive failed: {e}", file=sys.stderr)
     return 0
 
 

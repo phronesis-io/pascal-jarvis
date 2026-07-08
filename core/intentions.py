@@ -1341,6 +1341,42 @@ def _load_cal_index(db) -> tuple[set, dict]:
 # fresh cal: key → the 15-row Prep:请假 create/cancel churn).
 EVENT_MAP_FILE = ROOT / "calendar_event_mapping.json"
 
+# Continuation-day skip logging dedup (log hygiene, 2026-07-07): the Pass-1
+# skip in generate_calendar_intents fires for EVERY rendered future day of a
+# multi-day event on EVERY cycle — the 请假 span alone put ~1,475 identical
+# stderr lines/day into jarvis.log via the intentions_pre relay, crowding
+# real history out of the 500KB rotation. Each (date,title) skip is logged
+# once per LOCAL DAY; the stamp date rolls the seen-set over so a daily trace
+# survives. Fail-open both ways: a corrupt sidecar logs again (the bridge
+# must never crash on it), a failed write just means one extra line next cycle.
+SKIP_LOG_SEEN_FILE = ROOT / "data" / ".cal_skip_log_seen.json"
+
+
+def _skip_log_once(key: str) -> bool:
+    """True exactly once per local day per key — the caller may log then."""
+    today = now_local_str("%Y-%m-%d")
+    try:
+        state = json.loads(SKIP_LOG_SEEN_FILE.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or state.get("date") != today:
+            state = {"date": today, "seen": []}
+    except Exception:
+        state = {"date": today, "seen": []}
+    seen = state.get("seen")
+    if not isinstance(seen, list):
+        seen = state["seen"] = []
+    if key in seen:
+        return False
+    seen.append(key)
+    try:
+        import os
+        SKIP_LOG_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SKIP_LOG_SEEN_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False))
+        os.replace(tmp, SKIP_LOG_SEEN_FILE)
+    except Exception:
+        pass
+    return True
+
 
 def _load_event_map() -> list:
     """Read calendar_event_mapping.json. Fail-open: a missing/corrupt file
@@ -1520,8 +1556,10 @@ def generate_calendar_intents(calendar_md: str,
             except Exception:
                 true_start = None  # garbage start/end_iso → per-day fallback
             if true_start and current_date > true_start:
-                print(f"[calendar-intents] skip continuation day {current_date} "
-                      f"of {title!r} (true start {true_start})", file=sys.stderr)
+                # Once per (date,title) per day — see SKIP_LOG_SEEN_FILE.
+                if _skip_log_once(f"{current_date}:{title[:20]}"):
+                    print(f"[calendar-intents] skip continuation day {current_date} "
+                          f"of {title!r} (true start {true_start})", file=sys.stderr)
                 continue
             if true_start == current_date and true_end > true_start:
                 ev["true_end_date"] = true_end

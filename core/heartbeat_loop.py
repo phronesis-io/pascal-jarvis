@@ -875,6 +875,44 @@ def _sleep_gap_seconds(slept_for_s: float, expected_s: float,
     return gap if gap >= threshold_s else 0.0
 
 
+# "Beat sent" lines are load-bearing, not narration: daemon.py's
+# _find_last_heartbeat greps the newest one from jarvis.log and RESTARTS the
+# heartbeat when it is older than HEARTBEAT_STALE_THRESHOLD=1800s, and
+# scripts/doctor.sh + tests/test_integration.py grep the same string. But the
+# per-tick version (working+idle every 10s) was 65% of jarvis.log, rotating
+# real history away in ~6h (2026-07-07). The throttle interval must stay WELL
+# under 1800s: the pre-cycle beat may be suppressed for up to the full
+# interval before a long multi-task cycle starts, and interval + cycle
+# duration must not cross the daemon's staleness threshold.
+#
+# DO NOT raise this back above 120 (red-team 7/8): worst-case beat gap =
+# full suppression (120s) + one heavy solo task (HEAVY_DEFAULT_TIMEOUT=900s,
+# core/heartbeat.py) + one shared batch call (HEARTBEAT_TIMEOUT default
+# 600s) = 1620s < 1800s stale threshold. At the previous 600s the same cycle
+# reached ~2200s and the daemon restarted the stack mid-heavy-task. 120s is
+# still a 12x spam reduction vs per-tick. Machine-checked by
+# tests/test_heartbeat_loop.py::test_beat_interval_plus_max_cycle_stays_under_stale_threshold.
+BEAT_LOG_INTERVAL_S = 120
+
+
+def _beat(label: str, *, force: bool = False) -> bool:
+    """Emit one 'Beat sent (label)' liveness line, throttled to
+    BEAT_LOG_INTERVAL_S. Returns True if the line was emitted.
+
+    State is a function attribute so a fresh process always emits its first
+    beat — doctor.sh's "wait ~30s after start" hint and test_integration's
+    beat count rely on that. Line format must stay matchable by daemon.py's
+    regex: [YYYY-MM-DD HH:MM:SS] … heartbeat … Beat sent.
+    """
+    now = time.time()
+    if not force and now - getattr(_beat, "_last_emit", 0.0) < BEAT_LOG_INTERVAL_S:
+        return False
+    _beat._last_emit = now
+    print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent ({label})",
+          file=sys.stderr)
+    return True
+
+
 def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
              work_dir: str = "", check_interval: int = 10, user_id: str = "",
              claude_timeout: int = 600):
@@ -904,6 +942,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
     log("heartbeat", f"Starting ({check_interval}s cycle)")
 
     ticks = 0
+    was_active = False  # previous tick produced output (working↔idle edge)
     while True:
         ticks += 1
         # Background-job sweeper (REQ-16 MVP-3, ~every 60s): a job whose
@@ -972,9 +1011,10 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             if force_tasks:
                 log("heartbeat", f"Force trigger(s): {force_tasks}")
 
-        # Emit "working" marker for daemon health check
-        print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (working)",
-              file=sys.stderr)
+        # "working" marker for the daemon health check. BEFORE the cycle so a
+        # long multi-task cycle doesn't look dead, throttled (see _beat) so
+        # steady 10s ticks don't rotate jarvis.log history away.
+        _beat("working")
 
         # Run cycle(s). Forced runs REPLACE the normal cadence cycle this tick
         # (matches prior semantics); when nothing is forced, the normal
@@ -1047,8 +1087,12 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             log("heartbeat", "Suppressed error-like output", level="warn")
             _clear_delivery_sidecars(jd)
         else:
-            print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent (idle)",
-                  file=sys.stderr)
+            # Transition-only (working→idle): steady idle is covered by the
+            # throttled (working) line above; per-tick idle beats were the
+            # bulk of the 65% log spam.
+            if was_active:
+                _beat("idle", force=True)
+        was_active = bool(output)
 
         sleep_started = time.time()
         time.sleep(check_interval)

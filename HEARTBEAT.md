@@ -22,7 +22,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync | silent |
+| Analytics | engagement-analyze, cross-session-sync | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup) |
 | Team | phronesis-monitor | yes (if relevant) |
 | Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
 
@@ -559,7 +559,9 @@ SILENT_TASKS, not this doc.
 - prompt: |
     [MEMORY TIDY]
     Review the memory health report below. Your job:
-    1. Check hot/ total size — if over 6000 chars, suggest what to trim
+    1. Check tier sizes against the REAL loader budgets (core/memory.py): hot/ 25000,
+       system/ 40000, timeline/ 15000 chars; warm/ gets the remainder of the 200000
+       global cap (~120000). If a tier is over, suggest what to trim/archive
     2. Check for duplicate entries in timeline files
     3. Regenerate _index.md with accurate one-line descriptions for each warm/ file
     4. Flag any stale system/ entries (e.g. open_threads items older than 2 weeks)
@@ -591,6 +593,21 @@ SILENT_TASKS, not this doc.
        that affects Jarvis/EigenFlux, a request that cross-references this session,
        or an error/incident — include a "user_message" field with a brief Chinese
        note (≤80 words) for the user.
+
+    Grounding rules (2026-07-07: an already-merged "3 个 PR 等批" claim was
+    re-pushed 8 times from stale transcript turns):
+    - Lines starting with "[context]" were already digested in earlier runs —
+      background only; never re-surface them as news or user_message material.
+    - State-of-the-world claims (open PRs, pending approvals, running jobs)
+      whose [MM-DD HH:MM] stamp is older than ~2h must be phrased as of when
+      they were observed, never as a current call to action. Use COARSE time
+      words only —「今早」「上午」「昨晚」or a full date（如 7 月 7 日）—
+      NEVER copy a bare HH:MM clock time from the stamp into the
+      user_message: anchor_guard 会拦裸 HH:MM（transcript 里的时刻在 jarvis
+      日志里查不到对应行，整条 user_message 会被压掉）. Good:「今早还挂着」;
+      bad:「今早 10:12 时还挂着」.
+      The post-hook independently verifies "PR 等批" claims against live gh
+      state and drops anything it cannot confirm.
 
     Return JSON: {"digest": "...", "user_message": "..."} or just {"digest": "..."}
     if nothing needs the user's attention.

@@ -11,7 +11,7 @@ echo "Timestamp: $(date '+%Y-%m-%d %H:%M')"
 echo ""
 
 # Hot files — size check (budget: 6K total)
-echo "## hot/ (budget: 6000 chars)"
+echo "## hot/ (budget: 25000 chars — core/memory.py HOT_BUDGET)"
 hot_total=0
 for f in "$MEMORY_DIR"/hot/*.md; do
   [ -f "$f" ] || continue

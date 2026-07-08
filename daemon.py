@@ -53,7 +53,11 @@ BRAIN_WAKE_GRACE = 30 * 60
 BRAIN_CHECK_GAP_THRESHOLD = 15 * 60
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
-LOG_FILE = JARVIS_DIR / "daemon.log"
+# Overridable so pytest can point log writes at tmp_path: on 7/7 a deadletter
+# test ran log() unstubbed and wrote fake WARN/ERROR rows into the real
+# daemon.log (fixture stub added in 072cf2f — this is the belt-and-braces for
+# future tests that forget it).
+LOG_FILE = Path(os.environ.get("JARVIS_DAEMON_LOG") or JARVIS_DIR / "daemon.log")
 DAEMON_PID_FILE = JARVIS_DIR / ".daemon.pid"
 BOT_PID_FILE = JARVIS_DIR / ".bot.pid"
 # Restart budget persisted across daemon hot-reloads (REQ-42 respawns): the
@@ -61,6 +65,12 @@ BOT_PID_FILE = JARVIS_DIR / ".bot.pid"
 # used to get MAX_RESTART_ATTEMPTS fresh attempts per respawn, defeating the
 # breaker. Same load/save robustness as BRAIN_STATE_FILE.
 RESTART_STATE_FILE = JARVIS_DIR / ".daemon_restart_state.json"
+# Breaker latch (7/7 audit): the max-attempts branch used to zero its own
+# counter with only a 10min cooldown, so a permanently broken stack got
+# 3 restart storms + 1 page per ~35min forever. While this flag file exists
+# ALL auto-restarts are held; deleting it (manual re-arm) or an observed
+# healthy check clears it.
+BREAKER_LATCH_FILE = JARVIS_DIR / "data" / "restart_breaker.latched"
 MAX_LOG_LINES = 1000
 
 # Lark config (read from jarvis.yaml)
@@ -216,22 +226,30 @@ def _find_last_heartbeat() -> float | None:
         if not log_path.exists():
             continue
         try:
-            # Only read last 10KB to avoid memory issues on large logs
+            # Read the last 256KB (jarvis.log rotates at ~500KB so cost is
+            # bounded). Red-team 7/8: the old 10KB tail was sized for the
+            # per-10s beat spam — with beats throttled to BEAT_LOG_INTERVAL_S
+            # any busy stretch (conversation handler lines, ef-stream, outage
+            # warnings) pushed the newest beat out of the window → false
+            # "No heartbeat found" → full-stack restart mid-conversation.
             size = log_path.stat().st_size
             with open(log_path, "r", errors="ignore") as f:
-                if size > 10_000:
-                    f.seek(size - 10_000)
+                if size > 262_144:
+                    f.seek(size - 262_144)
                     f.readline()  # skip partial line
                 text = f.read()
             # Match both old format [YYYY-MM-DD HH:MM:SS]...Beat sent
-            # and new JSON format {"ts":"YYYY-MM-DDTHH:MM:SS",...,"msg":"Beat sent"...}
+            # and new JSON format {"ts": "YYYY-MM-DDTHH:MM:SS",...}
             beats = re.findall(
                 r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*heartbeat.*Beat sent",
                 text
             )
-            # Also check structured JSON logs
+            # Also check structured JSON logs. \s* after the colons: core/
+            # log.py emits '"ts": "' WITH a space — the old tight regex
+            # matched zero real lines (red-team 7/8). Any heartbeat-component
+            # JSON line proves the loop is alive, so no 'Beat sent' required.
             json_beats = re.findall(
-                r'"ts":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})".*"component":"heartbeat"',
+                r'"ts":\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})".*"component":\s*"heartbeat"',
                 text
             )
             for tb in json_beats:
@@ -380,21 +398,30 @@ def check_health() -> dict:
         issues.append("Lark event listener is not running")
 
     # 3. Is heartbeat alive? (check BOTH log files for recent beat)
+    # The beat-age-None case gets the SAME guards as the stale case (red-team
+    # 7/8): with beats throttled, a busy conversation's own log burst can push
+    # the newest beat out of the tail window — "no beat found" during an
+    # active session or right after wake is the traffic's fault, not the
+    # heartbeat's, and restarting would kill the in-flight user reply.
+    note = None
     beat_age = _find_last_heartbeat()
-    if beat_age is None:
-        issues.append("No heartbeat found in any log file")
-    elif beat_age > HEARTBEAT_STALE_THRESHOLD:
+    if beat_age is None or beat_age > HEARTBEAT_STALE_THRESHOLD:
         # Check if a user message is being processed (session lock exists).
         # Long Claude calls for user conversations (5-10 min) block heartbeat.
         # Restarting during an active conversation KILLS the user's response.
         import glob as _glob
         active_locks = _glob.glob(str(JARVIS_DIR / ".session_lock_*"))
+        age_txt = "not found" if beat_age is None else f"stale ({int(beat_age)}s)"
         if active_locks:
-            log("INFO", f"Heartbeat stale ({int(beat_age)}s) but {len(active_locks)} "
+            log("INFO", f"Heartbeat {age_txt} but {len(active_locks)} "
                 f"session(s) active — NOT restarting (would kill user's response)")
+            note = "session-active"
         elif _in_wake_grace():
-            log("INFO", f"Heartbeat stale ({int(beat_age)}s) but host just woke — "
+            log("INFO", f"Heartbeat {age_txt} but host just woke — "
                 f"grace {WAKE_GRACE_SECONDS}s, NOT restarting")
+            note = "wake-grace"
+        elif beat_age is None:
+            issues.append("No heartbeat found in any log file")
         else:
             issues.append(f"Heartbeat stale ({int(beat_age)}s since last beat)")
 
@@ -406,7 +433,15 @@ def check_health() -> dict:
     # The bot/heartbeat/lark health checks above are sufficient.
     # Script-level errors are handled by circuit breaker, not daemon restarts.
 
-    return {"healthy": len(issues) == 0, "issues": issues}
+    # A suppressed heartbeat issue is FAKE-healthy: the note (mirroring the
+    # .deploying note above) keeps the main loop's breaker auto-unlatch from
+    # firing on it (red-team 7/8: a Lark reply's session lock suppressed the
+    # stale heartbeat, the note-less healthy result cleared the latch, and
+    # the restart storm the latch exists to stop resumed).
+    result = {"healthy": len(issues) == 0, "issues": issues}
+    if note:
+        result["note"] = note
+    return result
 
 
 # Components the daemon observes but does NOT own (REQ-40): :3456 admin and
@@ -415,6 +450,35 @@ def check_health() -> dict:
 # restart spiral lesson). One Lark line per component per 4h.
 _probe_alert_stamps: dict = {}
 PROBE_ALERT_WINDOW = 4 * 3600
+# The stamps must survive hot-reload respawns (REQ-42): on 7/7 the daemon
+# respawned 5x in 13min during a deploy burst — each reincarnation wiped the
+# dict and could re-page 组件失联 immediately instead of once per 4h. Same
+# load/save robustness as RESTART_STATE_FILE; the dict above stays the live
+# in-memory store.
+PROBE_ALERT_STATE_FILE = JARVIS_DIR / "data" / ".daemon_probe_alert_state.json"
+
+
+def _load_probe_alert_stamps():
+    """Restore the probe-alert dedup stamps. Corrupt/missing file → empty."""
+    try:
+        loaded = json.loads(PROBE_ALERT_STATE_FILE.read_text())
+        stamps = {str(k): float(v) for k, v in loaded.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        stamps = {}
+    _probe_alert_stamps.clear()
+    _probe_alert_stamps.update(stamps)
+
+
+def _save_probe_alert_stamps():
+    """Persist on every stamp mutation. Never raises — a full disk must not
+    take down the alert path itself."""
+    try:
+        PROBE_ALERT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PROBE_ALERT_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_probe_alert_stamps))
+        os.replace(tmp, PROBE_ALERT_STATE_FILE)
+    except (OSError, ValueError, TypeError):
+        pass
 
 # Persisted across daemon hot-reloads: per-priority-task failure-window samples
 # (so a brain-death verdict survives the REQ-42 respawn churn) + the last
@@ -452,7 +516,8 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     chatter can't swallow a later genuine 失联 page."""
     key = f"{name}|degraded"
     if payload is None or payload.get("status") == "ok":
-        _probe_alert_stamps.pop(key, None)  # recovered, re-arm
+        if _probe_alert_stamps.pop(key, None) is not None:  # recovered, re-arm
+            _save_probe_alert_stamps()
         return
     detail = f"status={payload.get('status')}"
     if http_code:
@@ -463,6 +528,7 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     log("WARN", f"Observed component DEGRADED (alive): {name} — {detail}")
     if time.time() - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
         _probe_alert_stamps[key] = time.time()
+        _save_probe_alert_stamps()
         notify_lark(f"⚠️ 组件降级（进程还活着）：{name} — {detail}。"
                     f"（守护进程只告警不代管）")
 
@@ -473,6 +539,7 @@ _DEADLETTER_KIND_LABELS = {
     "delivery_failures": "消息发送连续失败",
     "night_queue_expired": "攒批消息过期没送出去",
     "night_queue_undeliverable": "攒批消息无法投递",
+    "provider_failover": "模型通道切换通知",
 }
 
 
@@ -509,6 +576,20 @@ def consume_delivery_deadletters():
             by_kind.setdefault(str(row.get("kind", "unknown")), []).append(row)
         if not by_kind:
             return
+        n = sum(len(v) for v in by_kind.values())
+        log("WARN", f"Delivery dead-letters: {n} row(s), kinds={sorted(by_kind)}")
+        # provider_failover 是状态通知，不是没送出去的消息 —— 内容本身就是
+        # 给 Pascal 的一句人话（“已切到备用通道”/“已切回”），套“消息没送
+        # 出去”的帽子是在报假警（red-team 7/8）。单独原文发出，不截断
+        # （producer 端已限 500 字）；同一批里新旧几条只发最新一条 ——
+        # trip+clear 同批时，把已过时的“切换”播报补发出去等于恢复后又喊
+        # 一次故障。其余 kind 保持原来的打包告警不变。
+        failover = by_kind.pop("provider_failover", None)
+        if failover:
+            detail = str(failover[-1].get("detail", "")).strip()
+            notify_lark(detail or _DEADLETTER_KIND_LABELS["provider_failover"])
+        if not by_kind:
+            return
         parts = []
         for kind, items in sorted(by_kind.items()):
             label = _DEADLETTER_KIND_LABELS.get(kind, kind)
@@ -518,8 +599,6 @@ def consume_delivery_deadletters():
             since_txt = f"，自 {since} 起" if since else ""
             detail = str(first.get("detail", ""))[:80]
             parts.append(f"- {label}{extra}{since_txt}：{detail}")
-        n = sum(len(v) for v in by_kind.values())
-        log("WARN", f"Delivery dead-letters: {n} row(s), kinds={sorted(by_kind)}")
         notify_lark("⚠️ 有本该送到你手上的消息没送出去（心跳自己的告警可能"
                     "也发不出来，这条走的是守护进程的独立通道）：\n"
                     + "\n".join(parts))
@@ -564,12 +643,14 @@ def probe_observed_components():
         except Exception:
             pass
         if alive:
-            _probe_alert_stamps.pop(name, None)  # recovered
+            if _probe_alert_stamps.pop(name, None) is not None:  # recovered
+                _save_probe_alert_stamps()
             _note_degraded_health(name, payload, code)
             continue
         last = _probe_alert_stamps.get(name, 0)
         if time.time() - last >= PROBE_ALERT_WINDOW:
             _probe_alert_stamps[name] = time.time()
+            _save_probe_alert_stamps()
             log("WARN", f"Observed component DOWN: {name}")
             notify_lark(f"⚠️ 组件失联：{name} 探测不通。"
                         f"（守护进程只告警不代管；如未自愈请重启或查 launchd）")
@@ -662,11 +743,104 @@ def _check_brain_health():
         log("ERROR", f"brain-health check failed: {e}")
 
 
+def _remind_breaker_latched():
+    """While the breaker stays latched, remind Pascal at most once per day —
+    a latched breaker plus a dead stack is otherwise a silent outage (the
+    latch alert itself fires exactly once). Reminder stamp lives inside the
+    latch file so it dies with the latch. Never raises."""
+    now = time.time()
+    state: dict = {}
+    try:
+        loaded = json.loads(BREAKER_LATCH_FILE.read_text())
+        if isinstance(loaded, dict):
+            state = loaded
+    except (OSError, ValueError):
+        pass
+    try:
+        last_ping = float(state.get("last_reminder", 0) or 0)
+    except (TypeError, ValueError):
+        last_ping = 0.0
+    if now - last_ping < 24 * 3600:
+        return
+    state["last_reminder"] = now
+    try:
+        tmp = BREAKER_LATCH_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False))
+        os.replace(tmp, BREAKER_LATCH_FILE)
+    except OSError:
+        return  # can't record the stamp — skip rather than page every check
+    log("WARN", "Restart breaker still latched — daily reminder sent")
+    notify_lark("⚠️ 提醒：我这边的自动重启还停着（之前连续重启失败后暂停的），"
+                "系统可能还没恢复。修好之后删掉这个文件，我就恢复自动看护：\n"
+                f"{BREAKER_LATCH_FILE}")
+
+
+def _clear_breaker_latch(reason: str):
+    """Re-arm a latched restart breaker: delete the flag + refresh the budget.
+    Called when the stack is observed healthy again — without an automatic
+    clear, a transient incident whose post-checks failed (slow warm-up) would
+    disable the auto-restart safety net forever. Never raises."""
+    global restart_count, last_restart_time
+    if not BREAKER_LATCH_FILE.exists():
+        return
+    try:
+        BREAKER_LATCH_FILE.unlink()
+    except OSError:
+        return
+    restart_count = 0
+    last_restart_time = 0
+    _save_restart_state()
+    log("INFO", f"Restart breaker re-armed ({reason})")
+    notify_lark("✅ 系统恢复正常了，我已经解除自动重启的暂停，恢复正常看护。")
+
+
+def _maybe_clear_breaker_latch(result: dict):
+    """Re-arm a latched breaker only on a GENUINELY healthy check. ANY "note"
+    marks fake-healthy (deploy window / active session / wake grace) — those
+    suppress issues without observing recovery, so unlatching on them re-pages
+    a false '恢复正常' and re-enables the restart storm the latch exists to
+    stop (red-team 7/8)."""
+    if result.get("healthy") and "note" not in result:
+        _clear_breaker_latch("system healthy again")
+
+
+def _session_lock_pid_is_ours(pid: int) -> bool:
+    """Identity check before killing a session-lock PID (same class af35420
+    fixed in bot.sh cleanup()): lock files outlive crashed handlers, and a
+    recycled PID may belong to an arbitrary user process. The lock stores the
+    $! of a backgrounded bot.sh pipeline subshell, so ps shows the parent argv
+    ('bash .../bot.sh') — never 'claude'; match ONLY the repo's bot.sh path.
+    (An `or "claude" in args` fallback was removed 7/8 red-team: a legitimate
+    lock holder can never show 'claude', so the substring arm could only ever
+    match a recycled PID landing on someone ELSE's claude process — e.g.
+    Pascal's interactive Claude Code session — the exact wrong-kill this check
+    exists to prevent, and the substring-matching class the 7/7 watchdog
+    postmortem banned. If the subshell ever execs claude directly, add an
+    anchored full-path match then.)"""
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                           capture_output=True, text=True, timeout=5)
+        args = r.stdout.strip()
+    except Exception:
+        return False
+    if not args:
+        return False
+    return bool(re.search(rf"bash.*{re.escape(str(JARVIS_DIR))}/bot\.sh", args))
+
+
 def diagnose_and_fix(issues: list[str]) -> str:
     """Kill existing processes and restart bot.sh."""
     global last_restart_time, restart_count
 
     now = time.time()
+
+    # Breaker latched: hold ALL auto-restarts until a human deletes the flag
+    # or the main loop observes a genuinely healthy check (7/7 audit: the old
+    # max-attempts branch re-armed itself, giving a permanently broken stack
+    # 3 restart storms + 1 page per ~35min forever).
+    if BREAKER_LATCH_FILE.exists():
+        _remind_breaker_latched()
+        return "restart breaker latched — waiting for manual re-arm"
 
     # Cooldown check
     if now - last_restart_time < RESTART_COOLDOWN:
@@ -675,11 +849,35 @@ def diagnose_and_fix(issues: list[str]) -> str:
         return f"restart cooldown ({remaining}s remaining)"
 
     if restart_count >= MAX_RESTART_ATTEMPTS:
-        msg = f"Reached max restart attempts ({MAX_RESTART_ATTEMPTS}). Manual intervention needed."
+        msg = (f"Reached max restart attempts ({MAX_RESTART_ATTEMPTS}) — "
+               f"breaker latched, auto-restart disabled until manual re-arm")
         log("ERROR", msg)
-        notify_lark(f"⚠️ {msg}\n\nIssues:\n" + "\n".join(f"- {i}" for i in issues))
+        latched = False
+        try:
+            BREAKER_LATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = BREAKER_LATCH_FILE.with_suffix(".tmp")
+            # last_reminder starts now: the latch alert below IS today's page
+            tmp.write_text(json.dumps(
+                {"latched_at": now,
+                 "latched_at_human": _daemon_now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "issues": issues,
+                 "last_reminder": now}, ensure_ascii=False))
+            os.replace(tmp, BREAKER_LATCH_FILE)
+            latched = True
+        except OSError:
+            pass
+        notify_lark(f"⚠️ 我连续重启了 {MAX_RESTART_ATTEMPTS} 次都没能把系统救回来，"
+                    "为了不无限折腾，我已经暂停自动重启，需要你人工看一下。\n\n"
+                    "问题：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
+                    f"处理好之后删掉这个文件，我就恢复自动看护：\n{BREAKER_LATCH_FILE}\n"
+                    "（系统自己恢复的话我也会自动解除并告诉你；解除前我每天提醒一次。）")
+        # The latch flag now gates all restarts, so zeroing the counter is
+        # safe — deleting the flag deliberately re-arms with a fresh budget.
         restart_count = 0
-        last_restart_time = now + 600  # 10min extra cooldown
+        if not latched:
+            # Flag write failed (disk?) — fall back to the old 10min extra
+            # cooldown so this branch can't re-fire every check.
+            last_restart_time = now + 600
         _save_restart_state()
         return msg
 
@@ -708,15 +906,21 @@ def diagnose_and_fix(issues: list[str]) -> str:
             pass
 
     # Kill stuck claude processes tracked by session locks
-    # (lock format: "<pid> <token>" — first field is the pid)
+    # (lock format: "<pid> <token>" — first field is the pid). Identity check
+    # first: locks survive crashed handlers, and killing a recycled PID blind
+    # hits an arbitrary user process (7/7 audit; same class as af35420).
     import glob as _glob
     for lock in _glob.glob(str(JARVIS_DIR / ".session_lock_*")):
         try:
             content = Path(lock).read_text().strip()
             pid = content.split()[0] if content else ""
             if pid.isdigit():
-                subprocess.run(["kill", pid], capture_output=True, timeout=5)
-                log("INFO", f"Killed stuck claude process from lock: {pid}")
+                if _session_lock_pid_is_ours(int(pid)):
+                    subprocess.run(["kill", pid], capture_output=True, timeout=5)
+                    log("INFO", f"Killed stuck claude process from lock: {pid}")
+                else:
+                    log("INFO", f"Session lock PID {pid} is not ours "
+                        f"(dead or recycled) — removing lock without killing")
         except Exception:
             pass
 
@@ -772,6 +976,10 @@ def diagnose_and_fix(issues: list[str]) -> str:
                     "\n".join(f"- {i}" for i in issues))
         restart_count = 0
         _save_restart_state()
+        # Defensive: a latch created out-of-band must not outlive a verified
+        # healthy restart (normally the latch check above prevents reaching
+        # this point while latched).
+        _clear_breaker_latch("successful restart")
         return msg
     else:
         msg = f"Restart attempt {restart_count} — still unhealthy: {post_check['issues']}"
@@ -820,6 +1028,8 @@ def main():
 
     # A hot-reload respawn (REQ-42) must NOT refresh the restart budget
     _load_restart_state()
+    # ...nor wipe the component-alert dedup (7/7: 5 respawns in 13min)
+    _load_probe_alert_stamps()
 
     log("INFO", "Guardian daemon started")
     log("INFO", f"  PID: {os.getpid()}")
@@ -867,6 +1077,11 @@ def main():
                     if consecutive_failures > 0:
                         log("INFO", f"System recovered after {consecutive_failures} failed checks")
                         consecutive_failures = 0
+                    # A genuinely healthy stack re-arms a latched breaker.
+                    # Every fake-healthy path (deploy window, active-session
+                    # suppression, wake grace) carries a "note" — those must
+                    # NOT unlatch (gate logic in _maybe_clear_breaker_latch).
+                    _maybe_clear_breaker_latch(result)
                 else:
                     consecutive_failures += 1
                     log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")

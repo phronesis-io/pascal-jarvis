@@ -11,6 +11,7 @@ Claude returns a JSON with actions to take:
 Or HEARTBEAT_OK if nothing needs fixing.
 Also always runs daily_log auto-archive (14-day TTL) as a side-effect.
 """
+import fcntl
 import os
 import sys
 from pathlib import Path
@@ -27,6 +28,14 @@ INDEX_FILE = MEMORY_DIR / "_index.md"
 # Dual-directory paths for one-way sync (auto → heartbeat)
 AUTO_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis/memory"
 HEARTBEAT_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory"
+
+# Budget enforcement (2026-07-07 memory audit): system/todos.md is append-only
+# and grew unbounded since April (70KB) — it alone overflowed the loader's 40k
+# system reserve, so cross_session_digest / pending_updates / the inboxes were
+# dropped from EVERY prompt for days. Tidy is the maintenance path, so it owns
+# the cap. Archive-not-delete, per the file's own 维护规则.
+TODOS_MAX_CHARS = 20000
+_AUTO_UPDATE_PREFIX = "<!-- auto-update"
 
 
 def _sync_warm_auto_to_heartbeat():
@@ -115,6 +124,128 @@ def _sync_open_threads_auto_to_heartbeat():
     print("[memory-tidy] synced auto→heartbeat: open_threads.md", file=sys.stderr)
 
 
+def _enforce_todos_budget():
+    """Archive the oldest auto-update blocks of system/todos.md once the file
+    exceeds TODOS_MAX_CHARS, keeping the curated head (进行中/已完成/维护规则)
+    and the newest blocks intact. Blocks land verbatim in
+    memory/archive/todos_archive_<YYYY>H<N>.md — no tier collector reads
+    archive/ (core.memory globs only hot/, top-level warm/, system/,
+    timeline/), so archived history stays on disk for on-demand recall.
+    """
+    todos = MEMORY_DIR / "system" / "todos.md"
+    if not todos.exists():
+        return
+    # Locked read→archive→replace (2026-07-08 red-team fix): an append landing
+    # between our read and os.replace would be silently reverted — neither
+    # kept nor archived. Sidecar .lock, set_fact recipe (core/memory.py):
+    # os.replace gives todos.md a new inode each run, so flocking the file
+    # itself would let a concurrent opener of the NEW inode take its own
+    # "exclusive" lock (same gotcha as core/session.py). Residual race: the
+    # known writers today take NO lock — memory-consolidate's _apply_update /
+    # _apply_replace are serialized against us only by the heartbeat cycle
+    # flock, and interactive Claude sessions edit the file with no lock at
+    # all — so this lock protects future lock-taking writers; against the
+    # unlocked ones the archive-before-replace ordering below (archive
+    # fsync'd BEFORE todos.md is swapped) guarantees the worst case is a
+    # duplicated block, never a lost one (archive-not-delete contract).
+    lock_path = todos.with_suffix(".lock")
+    with open(lock_path, "w") as lock_fh:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        # Read under the lock — a pre-lock read could be stale.
+        text = todos.read_text(encoding="utf-8")
+        if len(text) <= TODOS_MAX_CHARS:
+            return
+        lines = text.splitlines(keepends=True)
+        starts = [i for i, ln in enumerate(lines) if ln.startswith(_AUTO_UPDATE_PREFIX)]
+        if not starts:
+            # No append blocks — the bulk is curated content; leave that to the
+            # tidy Claude session rather than cutting it mechanically.
+            return
+        head = "".join(lines[:starts[0]])
+        bounds = starts + [len(lines)]
+        blocks = ["".join(lines[bounds[j]:bounds[j + 1]]) for j in range(len(starts))]
+        # Archive oldest-first until at/below half the cap — the headroom keeps
+        # this from re-triggering on every run. Always keep the newest block.
+        keep_size = len(head) + sum(len(b) for b in blocks)
+        cut = 0
+        while cut < len(blocks) - 1 and keep_size > TODOS_MAX_CHARS // 2:
+            keep_size -= len(blocks[cut])
+            cut += 1
+        if cut == 0:
+            return
+        month = int(now_local_str("%m"))
+        archive = (MEMORY_DIR / "archive" /
+                   f"todos_archive_{now_local_str('%Y')}H{1 if month <= 6 else 2}.md")
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with open(archive, "a", encoding="utf-8") as f:
+            f.write(f"\n<!-- memory-tidy auto-archive {now_local_str('%Y-%m-%d %H:%M')} "
+                    f"— {cut} oldest block(s) from system/todos.md -->\n\n")
+            f.write("".join(blocks[:cut]).strip() + "\n")
+            # Persist the archive BEFORE todos.md is replaced — a crash in
+            # between duplicates the blocks instead of losing them.
+            f.flush()
+            os.fsync(f.fileno())
+        tmp = todos.with_suffix(".md.tmp")
+        tmp.write_text(head + "".join(blocks[cut:]), encoding="utf-8")
+        os.replace(tmp, todos)
+    print(f"[memory-tidy] todos.md over {TODOS_MAX_CHARS} chars — archived "
+          f"{cut} oldest block(s) to archive/{archive.name}", file=sys.stderr)
+
+
+def _warn_tiers_over_budget():
+    """ONE leveled warn naming offending files/sizes when the memory payload
+    would still be truncated after enforcement. The loader's own stderr
+    warning bypasses leveled logging, which is how a multi-day truncation
+    stayed invisible (2026-07-07 memory audit). Tier reserves are floors that
+    only bite when the GLOBAL payload exceeds MAX_MEMORY_CHARS, so the warn
+    is gated on that — a warm tier over its floor with global headroom is
+    fine by design and must not cry wolf.
+    """
+    from core.log import log
+    from core.memory import (HOT_BUDGET, MAX_MEMORY_CHARS, SYSTEM_BUDGET,
+                             TIMELINE_BUDGET, WARM_BUDGET,
+                             _SYSTEM_FILE_CAPS, _TIMELINE_SKIP)
+
+    def _tier_sizes(dirpath, skip=frozenset(), caps=None):
+        sizes = {}
+        for f in dirpath.glob("*.md"):  # non-recursive — archive/ excluded
+            if not f.is_file() or f.name in skip:
+                continue
+            try:
+                n = len(f.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if caps and f.name in caps:
+                n = min(n, caps[f.name])
+            sizes[f.name] = n
+        return sizes
+
+    tiers = {
+        "hot": (_tier_sizes(MEMORY_DIR / "hot"), HOT_BUDGET),
+        "warm": (_tier_sizes(MEMORY_DIR / "warm"), WARM_BUDGET),
+        "system": (_tier_sizes(MEMORY_DIR / "system", caps=_SYSTEM_FILE_CAPS),
+                   SYSTEM_BUDGET),
+        "timeline": (_tier_sizes(MEMORY_DIR / "timeline", skip=_TIMELINE_SKIP),
+                     TIMELINE_BUDGET),
+    }
+    total = sum(sum(sizes.values()) for sizes, _ in tiers.values())
+    if total <= MAX_MEMORY_CHARS:
+        return
+    over = {}
+    for tier, (sizes, budget) in tiers.items():
+        tier_total = sum(sizes.values())
+        if tier_total > budget:
+            top = sorted(sizes.items(), key=lambda kv: -kv[1])[:5]
+            over[tier] = {"total": tier_total, "budget": budget,
+                          "largest": [f"{name}:{chars}" for name, chars in top]}
+    if over:
+        log("memory-tidy", "tier_over_budget", level="warn",
+            total=total, cap=MAX_MEMORY_CHARS, tiers=over)
+
+
 def main() -> int:
     # Always run daily_log archive check (independent of Claude's response)
     try:
@@ -139,6 +270,17 @@ def main() -> int:
         _sync_root_feedback_auto_to_heartbeat()
     except Exception as e:
         print(f"[memory-tidy] root feedback sync failed: {e}", file=sys.stderr)
+
+    # Budget enforcement — todos.md cap, then one leveled warn if the payload
+    # would still truncate (2026-07-07 memory audit).
+    try:
+        _enforce_todos_budget()
+    except Exception as e:
+        print(f"[memory-tidy] todos budget enforcement failed: {e}", file=sys.stderr)
+    try:
+        _warn_tiers_over_budget()
+    except Exception as e:
+        print(f"[memory-tidy] tier budget check failed: {e}", file=sys.stderr)
 
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:

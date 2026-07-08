@@ -249,6 +249,126 @@ def test_under_budget_loads_everything_no_truncation(tmp_path):
     assert "[system memory truncated" not in output
 
 
+def test_todos_hard_cut_keeps_tail(tmp_path):
+    """Append-only todos.md: when the system tier is cut mid-file, the NEWEST
+    entries (tail) must survive — head-keep had the model reading April todos
+    while the same-day entries were dropped (2026-07-07 memory audit). The
+    omission note must sit ABOVE the kept tail and say the OLDEST entries
+    were cut — the old bottom marker read as "newest entries truncated", the
+    exact confusion tail-keep was built to remove (2026-07-08 red-team fix)."""
+    _make_full_tree(tmp_path)
+    # Force the over-budget branch so tier budgeting engages.
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    (tmp_path / "system" / "todos.md").write_text(
+        "APRIL_HEAD_MARKER oldest entry\n"
+        + ("x" * (SYSTEM_BUDGET * 2))
+        + "\nJULY_TAIL_MARKER newest entry"
+    )
+    output = load_tiered_memory(tmp_path)
+    assert "JULY_TAIL_MARKER" in output
+    assert "APRIL_HEAD_MARKER" not in output
+    assert "## System: todos" in output          # header survives the cut
+    # Head-omission note: right after the header, above the kept tail.
+    assert "[oldest ~" in output
+    assert "full file on disk: todos.md" in output
+    assert output.index("## System: todos") < output.index("[oldest ~")
+    assert output.index("[oldest ~") < output.index("JULY_TAIL_MARKER")
+    # No trailing "memory truncated" marker after the newest entries — that
+    # was the inverted-semantics bug.
+    assert "[system memory truncated" not in output
+
+
+def test_todos_tail_snaps_to_entry_boundary(tmp_path):
+    """The kept tail opens on a '<!-- auto-update' entry boundary when one is
+    in range, never mid-entry (2026-07-08 red-team fix)."""
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    (tmp_path / "system" / "todos.md").write_text(
+        "APRIL_HEAD_MARKER oldest entry\n"
+        + ("x" * (SYSTEM_BUDGET * 2))
+        + "\nhalf-an-entry fragment\n<!-- auto-update 2026-07-08 -->\n"
+        + "- JULY_TAIL_MARKER newest entry"
+    )
+    output = load_tiered_memory(tmp_path)
+    assert "JULY_TAIL_MARKER" in output
+    assert "half-an-entry fragment" not in output
+    # The tail starts exactly at the boundary comment.
+    note_end = output.index("full file on disk: todos.md]\n") \
+        + len("full file on disk: todos.md]\n")
+    assert output[note_end:].startswith("<!-- auto-update")
+
+
+def test_curated_system_files_still_keep_head(tmp_path):
+    """Tail-keep is per-file (todos.md only): curated files like open_threads
+    are not append-ordered, so they keep their head when cut."""
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    (tmp_path / "system" / "open_threads.md").write_text(
+        "HEAD_THREAD_MARKER\n" + ("y" * (SYSTEM_BUDGET * 2)) + "\nTAIL_NOISE_MARKER"
+    )
+    output = load_tiered_memory(tmp_path)
+    assert "HEAD_THREAD_MARKER" in output
+    assert "TAIL_NOISE_MARKER" not in output
+
+
+def test_inbox_buffers_capped_at_load(tmp_path):
+    """Per-file caps: the perception inbox buffers (2×~40KB > the whole 40k
+    system reserve) can never again evict cross_session_digest & co — they
+    are tail-capped at load time, newest signals kept, file on disk intact
+    (2026-07-07 memory audit)."""
+    _make_full_tree(tmp_path)
+    sysd = tmp_path / "system"
+    (sysd / "inbox_ops.md").write_text(
+        "OLD_SIGNAL_MARKER\n" + ("o" * 20000) + "\nNEW_SIGNAL_MARKER")
+    (sysd / "cross_session_digest.md").write_text("DIGEST_MARKER")
+    output = load_tiered_memory(tmp_path)
+    assert "NEW_SIGNAL_MARKER" in output
+    assert "OLD_SIGNAL_MARKER" not in output
+    assert "[capped" in output
+    assert "DIGEST_MARKER" in output
+    # Cap is load-time only — the file on disk is untouched.
+    assert "OLD_SIGNAL_MARKER" in (sysd / "inbox_ops.md").read_text()
+
+
+def test_truncation_leveled_warn_rate_limited_per_tier(tmp_path, capsys):
+    """The truncation event must reach the structured leveled logger (selfmon
+    consumes leveled JSON, not bare stderr prose) — rate-limited to once per
+    tier per hour, not 400+ identical warns/day (2026-07-07 memory audit),
+    but NOT once per process lifetime: a long-lived heartbeat must re-surface
+    a persistent or new truncation episode (2026-07-08 red-team fix). The
+    bare stderr line stays for backward compat."""
+    import core.memory as memory_mod
+    memory_mod._TRUNCATION_WARNED_AT.clear()
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    load_tiered_memory(tmp_path)
+    load_tiered_memory(tmp_path)
+    err = capsys.readouterr().err
+    assert err.count("warm tier truncated") >= 2   # bare line every time
+    assert err.count('"msg": "tier_truncated"') == 1  # leveled warn deduped
+    assert '"level": "warn"' in err
+    # >1h since the last warn for this tier → warns again (long-lived
+    # heartbeat process, day-10 episode).
+    memory_mod._TRUNCATION_WARNED_AT["warm"] -= (
+        memory_mod._TRUNCATION_WARN_INTERVAL_S + 1)
+    load_tiered_memory(tmp_path)
+    err = capsys.readouterr().err
+    assert err.count('"msg": "tier_truncated"') == 1
+
+
+def test_truncation_warn_names_partially_cut_section(tmp_path, capsys):
+    """When the cut lands INSIDE the last/only big section, dropped_sections
+    must name it ('<header> (partial)') — it was [] exactly in the single-
+    big-file case the 2026-07 audit was about (2026-07-08 red-team fix)."""
+    import core.memory as memory_mod
+    memory_mod._TRUNCATION_WARNED_AT.clear()
+    _make_full_tree(tmp_path)
+    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    load_tiered_memory(tmp_path)
+    err = capsys.readouterr().err
+    assert "(partial)" in err
+
+
 # ── REQ-73: stale warm demotion ──────────────────────────────────────────
 
 
