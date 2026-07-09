@@ -280,23 +280,39 @@ for skill in "${managed[@]}"; do
 done
 if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (jarvis == eigenflux main)"
 else echo "    ✗ skill integrity drift: ${integrity_bad[*]}"; fail+=("skill integrity: ${integrity_bad[*]}"); fi
-# 5f. Live feed-shape check — only when authed (read-only, 1 item)
+# 5f. Live feed-shape check — only when authed (read-only, small sample).
+# Contract (ef-broadcast/references/feed.md): every item carries a STRING
+# item_id (the feedback API 400s on numeric ones — see 5f-ter); `url` is the
+# source link IF PROVIDED — `original` broadcasts have none by design, so only
+# curated/forwarded items must carry one. Server text fields occasionally hold
+# raw control chars (not strict JSON) — parse strict=False like a tolerant
+# consumer would, and report a parse failure as itself, not as field drift.
 if [ "$authed" = true ]; then
-  feed_json="$(bounded 10 eigenflux feed poll --limit 1 --action refresh -f json 2>/dev/null || echo "")"
+  feed_json="$(bounded 10 eigenflux feed poll --limit 3 --action refresh -f json 2>/dev/null || echo "")"
   if [ -z "$feed_json" ]; then
     # Transient: poll timed out / network blip / not yet primed — NOT a contract
     # regression, so don't fail the run on it.
     echo "    • live feed shape: skipped (poll returned no data)"
-  elif echo "$feed_json" | python3 -c "
+  else
+    shape_msg="$(echo "$feed_json" | python3 -c "
 import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(2)
+try: d=json.loads(sys.stdin.read(), strict=False)
+except Exception as e:
+    print('unparseable even with strict=False: %s' % e); sys.exit(2)
 items=d.get('items') or d.get('data',{}).get('items') or []
-if not items: sys.exit(0)  # empty feed is fine
-it=items[0]
-sys.exit(0 if ('item_id' in it and ('source_url' in it or 'url' in it)) else 3)
-" 2>/dev/null; then echo "    ✓ live feed shape (item_id + url present)"
-  else echo "    ✗ live feed shape — non-empty feed missing item_id/url (possible CLI contract change)"; fail+=("feed shape regression"); fi
+bad=[]
+for it in items:  # empty feed is fine (loop is a no-op)
+    iid=it.get('item_id')
+    if not (isinstance(iid,str) and iid): bad.append('item_id missing/non-string')
+    if it.get('source_type') in ('curated','forwarded') and not (it.get('url') or it.get('source_url')):
+        bad.append('%s item %s missing url' % (it.get('source_type'), iid))
+if bad: print('; '.join(sorted(set(bad)))); sys.exit(3)
+" 2>&1)"
+    shape_rc=$?
+    if [ "$shape_rc" -eq 0 ]; then echo "    ✓ live feed shape (string item_id; url on curated/forwarded)"
+    elif [ "$shape_rc" -eq 2 ]; then echo "    ✗ live feed JSON $shape_msg"; fail+=("feed JSON parse failure")
+    else echo "    ✗ live feed shape drift — $shape_msg"; fail+=("feed shape drift"); fi
+  fi
 fi
 # 5f-ter. Feedback WRITE round-trip — actually EXERCISE the submit path, which a
 # read-only smoke can't. This is the bug that black-holed every feedback: the API
