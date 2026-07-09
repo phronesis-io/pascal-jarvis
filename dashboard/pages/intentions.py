@@ -20,6 +20,8 @@ from core.intentions import _coerce, CLOSURE_POLICY
 
 from nicegui import ui
 
+from ..uiutil import guarded_refresh_timer
+
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
 # Import lazily to avoid circular issues at module load
@@ -412,7 +414,7 @@ def intentions_page():
                 ui.label("No executed intents yet.").classes("text-gray-400 text-sm italic")
 
         content()
-        ui.timer(30, content.refresh)
+        guarded_refresh_timer(30, content.refresh)
 
         # Create new intent form
         ui.separator()

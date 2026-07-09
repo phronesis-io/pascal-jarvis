@@ -15,6 +15,8 @@ from pathlib import Path
 
 from nicegui import ui
 
+from ..uiutil import guarded_refresh_timer
+
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
 
@@ -235,4 +237,4 @@ def engagement_page():
                         ).classes("text-sm")
 
         content()
-        ui.timer(30, content.refresh)
+        guarded_refresh_timer(30, content.refresh)

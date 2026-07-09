@@ -14,6 +14,8 @@ from pathlib import Path
 
 from nicegui import ui
 
+from ..uiutil import guarded_refresh_timer
+
 from ..telemetry import read_json, read_sched_events
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
@@ -256,4 +258,4 @@ def ops_page():
                     "text-gray-400 text-sm italic")
 
         content()
-        ui.timer(15, content.refresh)
+        guarded_refresh_timer(15, content.refresh)

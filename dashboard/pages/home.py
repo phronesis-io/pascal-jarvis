@@ -15,6 +15,8 @@ from pathlib import Path
 
 from nicegui import ui
 
+from ..uiutil import guarded_refresh_timer
+
 from ..db import engagement_stats, bookmark_list
 from ..telemetry import read_jsonl_tail, read_sched_events, read_json
 
@@ -239,7 +241,7 @@ def home_page():
                 )
 
         live_content()
-        ui.timer(10, live_content.refresh)
+        guarded_refresh_timer(10, live_content.refresh)
 
         # Navigation
         ui.separator()
@@ -247,6 +249,7 @@ def home_page():
             ui.link("Tasks", "/tasks").classes("text-blue-600")
             ui.link("Task Health", "/agent-calendar").classes("text-green-600")
             ui.link("Engagement", "/engagement").classes("text-green-600")
+            ui.link("Usage", "/usage").classes("text-green-600")
             ui.link("Ops", "/ops").classes("text-red-600")
             ui.link("Thinking", "/thinking").classes("text-purple-600")
             ui.link("Intentions", "/intentions").classes("text-purple-600")
