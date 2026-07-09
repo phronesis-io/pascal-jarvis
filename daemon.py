@@ -72,6 +72,39 @@ RESTART_STATE_FILE = JARVIS_DIR / ".daemon_restart_state.json"
 # healthy check clears it.
 BREAKER_LATCH_FILE = JARVIS_DIR / "data" / "restart_breaker.latched"
 MAX_LOG_LINES = 1000
+# Touched by core/heartbeat_loop._beat() on every call (including throttled
+# ones) — log-format-independent liveness after two log-parsing regressions
+# in a row (10KB tail; beats[-1] concatenation order, audit 7/8). Absent until
+# the loop redeploys, so the log grep in _find_last_heartbeat stays.
+HEARTBEAT_BEAT_STAMP = JARVIS_DIR / "data" / ".heartbeat_beat"
+# A restart whose 90s post-check missed a slow warm-up leaks its increment
+# into RESTART_STATE_FILE forever — three unrelated incidents weeks apart then
+# latch the breaker with zero actual restart attempts (audit 7/8). A sustained
+# healthy stretch returns the budget; hours, not minutes, so a stack flapping
+# faster than this still accumulates to the latch it deserves.
+RESTART_BUDGET_RESET_WINDOW = 6 * 3600
+# Self-diagnostic watch (stability backlog #5): the 4h task is the system's
+# only aggregated health alarm, and nothing watched the watcher. The stamp is
+# SHARED with tasks/self_diagnostic_post.py (same {"ts", "lines"} shape) so
+# both delivery paths honour one dedup window.
+DIAG_PRE_FILE = JARVIS_DIR / ".diag_last_pre.txt"
+DIAG_ALERT_STAMP = JARVIS_DIR / ".diag_last_alert.json"
+DIAG_ALERT_WINDOW = 4 * 3600      # = self_diagnostic_post.DEDUP_WINDOW_S
+# Two missed runs + margin; coupled to self-diagnostic's 4h interval in
+# HEARTBEAT.md — tune together.
+DIAG_STALE_THRESHOLD = 9 * 3600
+# heartbeat_state.json's last_run carries the cycle-START time (run_cycle
+# captures `now` before pre-scripts run), while .diag_last_pre.txt is written
+# mid-cycle after up to ~10min of sequential 60s-bounded pre-scripts — so
+# even a COMPLETED cycle shows last_run slightly behind the pre mtime. Leg B's
+# "the post had its turn" comparison allows this much skew. An in-flight
+# cycle's last_run (the previous run, ~4h back) never comes close.
+DIAG_CYCLE_START_SKEW = 15 * 60
+# Manifest-critical probes run every ~2min (probe_tick%4 × 30s); bot.sh's own
+# watchdog respawns a dead ef-stream within ≤30s. Page only when a component
+# stays red across TWO consecutive probes at least this far apart — a
+# watchdog-healed transient never pages, a real outage pages within ~4min.
+MANIFEST_CONFIRM_WINDOW = 2 * 60
 
 # Lark config (read from jarvis.yaml)
 USER_ID = ""
@@ -93,6 +126,10 @@ last_restart_time = 0
 restart_count = 0
 running = True
 last_wake_time = 0.0
+# Process start. Hot-reload respawns reset it by design: a fresh daemon can't
+# tell a reboot from a redeploy, so both get the same post-start alert grace
+# (reboot wipes last_wake_time; see _check_diag_staleness).
+_daemon_started = time.time()
 
 
 def _load_restart_state():
@@ -213,8 +250,8 @@ def notify_lark(msg: str):
 
 
 def _find_last_heartbeat() -> float | None:
-    """Find the most recent 'Beat sent' timestamp from any log file.
-    Returns age in seconds, or None if not found."""
+    """Find the most recent heartbeat liveness signal — beat stamp file or
+    'Beat sent' log line. Returns age in seconds, or None if not found."""
     # Check both log locations
     log_files = [
         Path("/tmp/jarvis_restart.log"),
@@ -255,15 +292,29 @@ def _find_last_heartbeat() -> float | None:
             for tb in json_beats:
                 beats.append(tb.replace("T", " "))
             if beats:
-                beat_time = datetime.strptime(beats[-1], "%Y-%m-%d %H:%M:%S")
+                # max(), not beats[-1]: JSON matches are appended AFTER all
+                # bracket matches, so list order is not file order — with a
+                # quiet-but-alive loop the last JSON line can predate a fresh
+                # 'Beat sent' by >25min, overstating beat_age toward a false
+                # restart (audit 7/8, armed by ea62974's regex fix). Both
+                # formats are fixed-width local time, so lexicographic max is
+                # chronological.
+                beat_time = datetime.strptime(max(beats), "%Y-%m-%d %H:%M:%S")
                 if latest_beat is None or beat_time > latest_beat:
                     latest_beat = beat_time
         except Exception:
             continue
 
+    ages = []
     if latest_beat:
-        return (_daemon_now().replace(tzinfo=None) - latest_beat).total_seconds()
-    return None
+        ages.append((_daemon_now().replace(tzinfo=None) - latest_beat).total_seconds())
+    # Beat stamp file: freshest source wins. Tolerated absent — the loop code
+    # touching it may not be deployed yet, and log parsing still covers that.
+    try:
+        ages.append(time.time() - HEARTBEAT_BEAT_STAMP.stat().st_mtime)
+    except OSError:
+        pass
+    return min(ages) if ages else None
 
 
 def _record_wake_gap(slept_for_s: float, expected_s: float = CHECK_INTERVAL) -> float:
@@ -510,10 +561,34 @@ def _health_payload(body: bytes) -> dict | None:
     return None
 
 
+# What each component is called when talking to Pascal — alerts carry these,
+# never the internal names/raw /health fields (feedback 7/8: he should not
+# have to decode status=degraded / priority_wedged=[...]).
+_COMPONENT_LABELS = {
+    "admin :3456": "管理面板",
+    "dashboard :3457": "监控看板",
+    "ef-stream": "EigenFlux 实时消息接收",
+    "heartbeat-loop": "心跳调度",
+    "lark-sidecar": "飞书事件监听",
+    "bot": "机器人主进程",
+}
+
+
 def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     """Log + alert (never restart) a component that answered its /health probe
     with a non-ok status. Separate dedup key from the DOWN alert so degraded
-    chatter can't swallow a later genuine 失联 page."""
+    chatter can't swallow a later genuine 失联 page.
+
+    priority_wedged alone never pages HERE: _check_brain_health owns the
+    wedged-PRIORITY-task alert via core/brain_health.py's detector 3, which
+    was ADDED 7/9 to make that ownership real — red-team proved the original
+    claim false against the 7/8 intention-check wedge (16:04→23:37: admin
+    flagged priority_wedged for 7.5h, zero BRAIN-DEAD pages, and this
+    degraded page was the only Lark signal). Detector 3 now mirrors admin's
+    exact wedge rule, so suppressing here is a dedup, not a deletion. A
+    second Lark line for the same condition was a duplicate channel
+    (Pascal, 7/8). Raw fields stay in the log line; the Lark text is plain
+    Chinese only."""
     key = f"{name}|degraded"
     if payload is None or payload.get("status") == "ok":
         if _probe_alert_stamps.pop(key, None) is not None:  # recovered, re-arm
@@ -526,11 +601,29 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
         if payload.get(field):
             detail += f" {field}={payload[field]}"
     log("WARN", f"Observed component DEGRADED (alive): {name} — {detail}")
+    reasons = []
+    circuits = payload.get("circuits_open") or []
+    if circuits:
+        shown = "、".join(str(c) for c in circuits[:5])
+        more = " 等" if len(circuits) > 5 else ""
+        reasons.append(f"有定时任务连续失败、暂时停跑了（{shown}{more}）")
+    if payload.get("bot_alive") is False:
+        reasons.append("它看不到机器人主进程")
+    if payload.get("error"):
+        reasons.append("自检的时候报了错")
+    if not reasons:
+        if payload.get("priority_wedged"):
+            # Wedge-only: the log line above is enough — brain_health's
+            # detector 3 (same rule as admin's flag) pages it with the task
+            # named in plain Chinese, 4h dedup + wake grace included.
+            return
+        reasons.append("没说具体原因")
+    label = _COMPONENT_LABELS.get(name, name)
     if time.time() - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
         _probe_alert_stamps[key] = time.time()
         _save_probe_alert_stamps()
-        notify_lark(f"⚠️ 组件降级（进程还活着）：{name} — {detail}。"
-                    f"（守护进程只告警不代管）")
+        notify_lark(f"⚠️ {label}进程还活着，但内部报告自己有问题："
+                    f"{'；'.join(reasons)}。（守护进程只告警不代管）")
 
 
 DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
@@ -656,14 +749,87 @@ def probe_observed_components():
                         f"（守护进程只告警不代管；如未自愈请重启或查 launchd）")
 
 
+# Manifest criticals that check_health / probe_observed_components already
+# watch through richer paths: bot/heartbeat-loop/lark-sidecar drive the restart
+# path, and admin/dashboard get the degraded-body-aware probe above (which
+# the manifest's plain status<500 check would regress). The manifest probe
+# only adds what nothing else covers — today that is ef-stream.
+_MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar",
+                     "admin", "dashboard"}
+
+
+def _probe_manifest_criticals():
+    """Alert (never restart) on dead critical components from components.yaml.
+    The manifest promised 'critical: true → daemon checks it' but the daemon
+    kept its own hardcoded list, so critical ef-stream had no daemon coverage
+    on any path (audit 7/8). Alert-only, deploy-guarded, same persisted 4h
+    dedup as the hardcoded probes, debounced across two consecutive red
+    probes so a watchdog-healed transient never pages (red-team 7/9).
+    Never raises."""
+    if _in_deploy_window():
+        return
+    try:
+        # Right after our own diagnose_and_fix restart the children are
+        # legitimately still coming up; and with bot.sh itself down every
+        # owned_by_pidfile check is red — that outage belongs to the restart
+        # path, not to a page per child.
+        if time.time() - last_restart_time < RESTART_COOLDOWN:
+            return
+        if not _bot_pid():
+            return
+        from core.components import check_components
+        for r in check_components(critical_only=True):
+            name = str(r.get("name", "?"))
+            if name in _MANIFEST_COVERED:
+                continue
+            pending_key = f"{name}|pending"
+            if r.get("ok"):
+                # Recovered: re-arm the 4h dedup AND clear any pending
+                # first-seen mark, so a healed transient never pages later.
+                popped = (_probe_alert_stamps.pop(name, None) is not None)
+                popped |= (_probe_alert_stamps.pop(pending_key, None) is not None)
+                if popped:
+                    _save_probe_alert_stamps()
+                continue
+            # Debounce (red-team 7/9): bot.sh's watchdog respawns a dead
+            # ef-stream within ≤30s, and a single crash landing inside a
+            # probe used to page 组件失联 for a component that healed seconds
+            # later — with the 4h-sticky dedup meaning nothing corrected it.
+            # First red probe only marks the component pending (persisted, so
+            # hot-reload respawns keep the mark); the page needs a SECOND
+            # consecutive red probe >= MANIFEST_CONFIRM_WINDOW later.
+            first_seen = _probe_alert_stamps.get(pending_key, 0)
+            if not first_seen:
+                _probe_alert_stamps[pending_key] = time.time()
+                _save_probe_alert_stamps()
+                log("INFO", f"Manifest-critical component red (1st probe, "
+                    f"awaiting confirmation): {name} — {r.get('detail')}")
+                continue
+            if time.time() - first_seen < MANIFEST_CONFIRM_WINDOW:
+                continue
+            if time.time() - _probe_alert_stamps.get(name, 0) >= PROBE_ALERT_WINDOW:
+                _probe_alert_stamps[name] = time.time()
+                _save_probe_alert_stamps()
+                log("WARN", f"Manifest-critical component DOWN: {name} — "
+                    f"{r.get('detail')}")
+                label = _COMPONENT_LABELS.get(name, name)
+                notify_lark(f"⚠️ 组件失联：{label}没有在运行。（守护进程只告警"
+                            f"不代管；一直没恢复的话需要人工重启）")
+    except Exception as e:
+        log("ERROR", f"manifest component probe failed: {e}")
+
+
 def _check_brain_health():
     """Alert (never restart) when the heartbeat loop is ALIVE BUT BRAIN-DEAD —
     ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
     was missing from the launchd PATH for ~1h and EVERY liveness signal stayed
     fresh (beat-marker, /health heartbeat_age, per-task circuit), so nothing
     caught it. The daemon is Claude-independent and can: it reads
-    heartbeat_state.json directly and applies the 'ran-but-failing' detectors in
-    core/brain_health.py. Alert-only, 4h dedup, deploy-guarded. Never raises."""
+    heartbeat_state.json directly and applies core/brain_health.py's three
+    detectors (ran-but-failing starvation, priority failure windows, and the
+    priority WEDGE rule mirrored from admin /health — the 7/8 intention-check
+    wedge class whose only page used to be the deleted degraded-channel
+    alert). Alert-only, 4h dedup, deploy-guarded. Never raises."""
     if _in_deploy_window():
         return
     try:
@@ -743,6 +909,117 @@ def _check_brain_health():
         log("ERROR", f"brain-health check failed: {e}")
 
 
+def _check_diag_staleness():
+    """Alert (never restart) when self-diagnostic — the system's only
+    aggregated health alarm — stops running, or when its ⚠️ warnings die on
+    the heartbeat-side delivery path (stability backlog #5: nothing watched
+    the watcher, the same structural silence that let the dashboard die for
+    23 days). Two legs:
+      A. .diag_last_pre.txt missing/stale → the 4h task itself stopped
+         (scheduler wedge, open circuit, task removed).
+      B. pre fresh with ⚠️ lines but the shared alert stamp never advanced
+         after the pre run → the post-script's own send failed; re-deliver
+         through our channel. (The pre mtime only proves the PRE stage ran —
+         leg B is what covers the delivery half.)
+    Alert-only, deploy-guarded, never raises."""
+    if _in_deploy_window():
+        return
+    try:
+        now = time.time()
+        # Same post-wake reasoning as brain-health: after hours of lid-close
+        # every mtime is stale by the nap length; after a reboot
+        # last_wake_time is wiped but our own process age gives the
+        # equivalent grace (launchd starts us at login).
+        if last_wake_time and now - last_wake_time < BRAIN_WAKE_GRACE:
+            return
+        if now - _daemon_started < BRAIN_WAKE_GRACE:
+            return
+        # A fully dead loop already pages through the bot/heartbeat checks —
+        # a diag staleness page on top of that outage is noise.
+        beat_age = _find_last_heartbeat()
+        if beat_age is None or beat_age > HEARTBEAT_STALE_THRESHOLD:
+            return
+
+        try:
+            pre_age = now - DIAG_PRE_FILE.stat().st_mtime
+        except OSError:
+            pre_age = None
+
+        key = "self-diagnostic|stale"
+        if pre_age is None or pre_age > DIAG_STALE_THRESHOLD:
+            if now - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
+                _probe_alert_stamps[key] = now
+                _save_probe_alert_stamps()
+                if pre_age is None:
+                    log("WARN", "self-diagnostic pre report missing")
+                    notify_lark("⚠️ 自诊断任务好像一直没跑成过（找不到它的"
+                                "体检报告），系统健康这块现在没人盯。"
+                                "（守护进程只告警不代管）")
+                else:
+                    log("WARN", f"self-diagnostic stale "
+                        f"({int(pre_age)}s since last pre run)")
+                    notify_lark(f"⚠️ 自诊断任务已经 {int(pre_age // 3600)} 小时"
+                                "没有运行了（正常每 4 小时一次），这段时间系统"
+                                "健康没人体检。（守护进程只告警不代管）")
+            return
+        if _probe_alert_stamps.pop(key, None) is not None:  # running again
+            _save_probe_alert_stamps()
+
+        # Leg B — only on EVIDENCE the post had its turn (red-team 7/9: the
+        # old 15min wall-clock grace fired mid-cycle whenever pre→post ran
+        # long — a failover retry chain or 4-pre batch routinely takes
+        # 16-27min — falsely paging "post delivery path dead" while the
+        # warnings were merely queued behind the in-flight Claude call, and
+        # the daemon's stamp write then suppressed the post's own send).
+        # last_run advances only when the task's cycle FINISHES, post-script
+        # routing included (and failure paths BACKDATE it by ~a full
+        # interval), so last_run catching up to this pre file proves the
+        # post ran for it. See DIAG_CYCLE_START_SKEW for why the comparison
+        # is not a strict >=.
+        pre_mtime = now - pre_age
+        try:
+            hb = json.loads((JARVIS_DIR / "heartbeat_state.json").read_text())
+            diag_last_run = float(
+                (hb.get("self-diagnostic") or {}).get("last_run", 0) or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return  # can't prove the post ran — never re-deliver on a guess
+        if diag_last_run < pre_mtime - DIAG_CYCLE_START_SKEW:
+            return  # cycle still in flight (or failed and awaiting fast retry)
+        try:
+            stamp_ts = float(json.loads(
+                DIAG_ALERT_STAMP.read_text()).get("ts", 0) or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            stamp_ts = 0.0  # unreadable = never alerted, matching the post
+        # Delivery failed only if, AT THE PRE RUN, the stamp was already past
+        # the post's dedup window (so the post should have sent) yet it never
+        # advanced. A stamp within the window before the pre means the post
+        # suppressed on purpose; a stamp after the pre means it delivered.
+        if pre_mtime - stamp_ts < DIAG_ALERT_WINDOW:
+            return
+        try:
+            from tasks.self_diagnostic_post import extract_warnings
+        except Exception:
+            return  # tasks/ tree unreadable — leg A above still stands
+        warnings = extract_warnings(
+            DIAG_PRE_FILE.read_text(encoding="utf-8", errors="replace"))
+        if not warnings:
+            return
+        log("WARN", f"self-diagnostic warnings undelivered "
+            f"({len(warnings)}) — re-sending via daemon channel")
+        notify_lark("🩺 自诊断发现 " + str(len(warnings)) + " 个问题（它自己的"
+                    "告警没发出去，这条由守护进程代发）：\n"
+                    + "\n".join(warnings[:12])
+                    + ("\n…（其余略）" if len(warnings) > 12 else "")
+                    + "\n（4 小时内同类告警只发一次）")
+        try:
+            DIAG_ALERT_STAMP.write_text(json.dumps(
+                {"ts": now, "lines": warnings[:20]}, ensure_ascii=False))
+        except OSError:
+            pass
+    except Exception as e:
+        log("ERROR", f"diag staleness check failed: {e}")
+
+
 def _remind_breaker_latched():
     """While the breaker stays latched, remind Pascal at most once per day —
     a latched breaker plus a dead stack is otherwise a silent outage (the
@@ -802,6 +1079,28 @@ def _maybe_clear_breaker_latch(result: dict):
     stop (red-team 7/8)."""
     if result.get("healthy") and "note" not in result:
         _clear_breaker_latch("system healthy again")
+
+
+def _maybe_reset_restart_budget(result: dict):
+    """Zero the persisted restart budget after a sustained healthy stretch —
+    same fake-healthy "note" gate as _maybe_clear_breaker_latch. Without this,
+    an increment whose 90s post-check merely missed a slow warm-up outlives
+    the incident in RESTART_STATE_FILE, and leaks from unrelated incidents
+    weeks apart eventually latch the breaker with zero restarts attempted.
+    The window comparison also holds when last_restart_time sits in the
+    FUTURE (failed-latch-write fallback stores now+600): the delta goes
+    negative, which never clears the window."""
+    global restart_count
+    if restart_count <= 0:
+        return
+    if not result.get("healthy") or "note" in result:
+        return
+    if time.time() - last_restart_time < RESTART_BUDGET_RESET_WINDOW:
+        return
+    log("INFO", f"Restart budget reset after sustained healthy stretch "
+        f"(was {restart_count}/{MAX_RESTART_ATTEMPTS})")
+    restart_count = 0
+    _save_restart_state()
 
 
 def _session_lock_pid_is_ours(pid: int) -> bool:
@@ -1062,6 +1361,7 @@ def main():
                 probe_tick += 1
                 if probe_tick % 4 == 0:
                     probe_observed_components()
+                    _probe_manifest_criticals()
                     # Delivery dead-letters (backlog #7): alarms the heartbeat
                     # loop couldn't send ride our independent channel.
                     consume_delivery_deadletters()
@@ -1070,6 +1370,7 @@ def main():
                 # must survive a dead claude binary that the heartbeat can't.
                 if probe_tick % 8 == 0:
                     _check_brain_health()
+                    _check_diag_staleness()
 
                 result = check_health()
 
@@ -1082,6 +1383,7 @@ def main():
                     # suppression, wake grace) carries a "note" — those must
                     # NOT unlatch (gate logic in _maybe_clear_breaker_latch).
                     _maybe_clear_breaker_latch(result)
+                    _maybe_reset_restart_budget(result)
                 else:
                     consecutive_failures += 1
                     log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")

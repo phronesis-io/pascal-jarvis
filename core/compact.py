@@ -110,6 +110,25 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
 
     prompt = COMPACT_PROMPT + content
 
+    # Provider gate (2026-07-09 red-team [9]): compaction was the one claude
+    # caller the failover architecture forgot. During the monthly-spend-limit
+    # outage its ungated call hits the dead primary — and the CLI prints the
+    # spend-limit error on STDOUT with rc=1. Auxiliary caller: never wins the
+    # probe election (probe=False), just follows the flag to the backup env —
+    # same pattern as the heartbeat idle-noise judge.
+    env = None
+    try:
+        from core.model_fallback import gate as _provider_gate
+        if (_provider_gate(jarvis_dir, probe=False) == "backup"
+                and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
+                and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
+            env = os.environ.copy()
+            env["ANTHROPIC_AUTH_TOKEN"] = os.environ["CLAUDE_BACKUP_AUTH_TOKEN"]
+            env["ANTHROPIC_BASE_URL"] = os.environ["CLAUDE_BACKUP_BASE_URL"]
+    except Exception:
+        env = None
+
     # Call Claude via CLI (opus — Pascal 2026-06-07: 全部用最好的模型，不计 token)
     try:
         result = subprocess.run(
@@ -120,11 +139,20 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
             text=True,
             timeout=60,
             cwd=work_dir or jarvis_dir,
+            env=env,
         )
         if result.returncode != 0:
+            # NEVER treat rc!=0 stdout as content: the CLI prints spend-limit /
+            # model errors on STDOUT, and saving one would inject the error
+            # line into the next session's prompt as its "previous summary"
+            # (2026-07-09 red-team [9]). Empty compact degrades gracefully.
             print(f"[compact] Claude exited with code {result.returncode}", file=sys.stderr)
             if result.stderr.strip():
                 print(f"[compact] stderr: {result.stderr.strip()[:200]}", file=sys.stderr)
+            if result.stdout.strip():
+                print(f"[compact] stdout (discarded): {result.stdout.strip()[:200]}",
+                      file=sys.stderr)
+            return ""
         compact_text = result.stdout.strip()
     except subprocess.TimeoutExpired:
         print("[compact] Claude call timed out (60s)", file=sys.stderr)

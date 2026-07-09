@@ -13,6 +13,7 @@ Design notes:
 
 import json
 import subprocess
+import sys
 
 from core.config import Config
 from core.timeutil import now_local_str

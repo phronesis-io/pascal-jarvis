@@ -145,6 +145,37 @@ def test_beat_throttles_and_keeps_daemon_greppable_format(capsys, monkeypatch):
     assert "(idle)" in capsys.readouterr().err
 
 
+def test_beat_touches_stamp_on_every_call_even_when_throttled(tmp_path, monkeypatch):
+    """F15 (7/8 audit): the daemon's liveness check stats the stamp file's
+    mtime instead of parsing jarvis.log, so the stamp must be touched on
+    EVERY _beat() call — including the throttled common path where no log
+    line is emitted."""
+    import os
+    import time
+    from core import heartbeat_loop as hl
+
+    monkeypatch.setattr(hl, "_BEAT_STAMP_PATH", None)  # register for restore
+    hl._init_beat_stamp(tmp_path)
+    assert hl._BEAT_STAMP_PATH == tmp_path / "data" / ".heartbeat_beat"
+
+    monkeypatch.setattr(hl._beat, "_last_emit", 0.0, raising=False)
+    assert hl._beat("working") is True
+    assert hl._BEAT_STAMP_PATH.exists()
+
+    old = time.time() - 3600
+    os.utime(hl._BEAT_STAMP_PATH, (old, old))
+    assert hl._beat("working") is False        # log line throttled…
+    assert hl._BEAT_STAMP_PATH.stat().st_mtime > old + 3000  # …stamp still fresh
+
+
+def test_beat_stamp_write_failure_never_kills_the_loop(tmp_path, monkeypatch):
+    from core import heartbeat_loop as hl
+    monkeypatch.setattr(hl, "_BEAT_STAMP_PATH",
+                        tmp_path / "no-such-dir" / ".heartbeat_beat")
+    monkeypatch.setattr(hl._beat, "_last_emit", 0.0, raising=False)
+    assert hl._beat("working") is True  # OSError swallowed, beat still emitted
+
+
 def test_beat_interval_plus_max_cycle_stays_under_stale_threshold():
     """daemon.py restarts the heartbeat past HEARTBEAT_STALE_THRESHOLD=1800s.
     Worst-case beat gap = full throttle suppression + one long cycle (heavy

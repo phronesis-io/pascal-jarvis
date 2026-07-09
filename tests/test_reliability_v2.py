@@ -310,8 +310,15 @@ def test_pre_timeout_records_circuit_failure(tmp_path, monkeypatch):
 def test_daemon_deploy_guard(tmp_path, monkeypatch):
     import daemon as daemon_mod
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
-    # Force the underlying checks to report unhealthy
-    monkeypatch.setattr(daemon_mod, "_is_bot_alive", lambda: False)
+    # Sever every live-machine probe (7/8 audit): BOT_PID_FILE binds the real
+    # .bot.pid at import, check_health calls _bot_pid directly (never
+    # _is_bot_alive), _find_last_heartbeat reads the real /tmp restart log,
+    # and last_wake_time is process-global — unhealthy must come from these
+    # stubs, not from whatever the production stack happens to be doing.
+    monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", tmp_path / ".bot.pid")
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: None)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: None)
+    monkeypatch.setattr(daemon_mod, "last_wake_time", 0.0)
     # Fresh .deploying → suspended, healthy
     (tmp_path / ".deploying").write_text("")
     result = daemon_mod.check_health()
@@ -322,6 +329,7 @@ def test_daemon_deploy_guard(tmp_path, monkeypatch):
     os.utime(tmp_path / ".deploying", (old, old))
     result = daemon_mod.check_health()
     assert result["healthy"] is False
+    assert "bot.sh is not running" in result["issues"]
     assert not (tmp_path / ".deploying").exists()
 
 

@@ -272,6 +272,32 @@ start_daemon() {
   fi
 }
 
+restart_daemon() {
+  # In production the daemon is launchd-owned (KeepAlive). pkill + nohup here
+  # races the KeepAlive respawn against an unsupervised twin — the 6/12
+  # double-daemon class — so when the job is loaded, hand the restart to
+  # launchd instead. Don't touch .daemon.pid on this path: racing an rm
+  # against the fresh daemon's pidfile write can delete the winner's file
+  # (acquire_singleton handles stale leftovers itself). kickstart can fail
+  # from a non-GUI context (SSH without a user session) — fall through to
+  # the manual kill+nohup path then, same as when the job isn't loaded.
+  if launchctl print "gui/$UID/com.pascal.jarvis.daemon" >/dev/null 2>&1; then
+    echo "Restarting daemon via launchd..."
+    if launchctl kickstart -k "gui/$UID/com.pascal.jarvis.daemon" 2>/dev/null; then
+      sleep 2
+      if pgrep -f "$JARVIS_DIR/daemon\\.py" >/dev/null 2>&1; then
+        green "  Daemon restarted (launchd)."
+        return 0
+      fi
+      red "  Daemon not up after kickstart! Check: tail -20 /tmp/jarvis-daemon-stderr.log"
+      return 1
+    fi
+    red "  launchctl kickstart failed — falling back to manual restart."
+  fi
+  kill_daemon
+  start_daemon
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 # --yes anywhere in argv skips the in-flight-conversation confirmation
@@ -305,9 +331,13 @@ case "${1:-}" in
     echo ""
     _set_deploy_guard
     kill_bot
-    kill_daemon
     echo ""
-    start_daemon
+    # Fault-tolerant on purpose (2026-07-09 red-team [10]): under set -e a
+    # restart_daemon failure here would abort AFTER kill_bot but BEFORE
+    # start_bot — bot left dead with the daemon (its reviver/alert channel)
+    # also down. The bot must always be started; a broken daemon is loud but
+    # survivable.
+    restart_daemon || red "  DAEMON RESTART FAILED — starting bot anyway; check: tail -20 /tmp/jarvis-daemon-stderr.log"
     start_bot
     settle_bot
     echo ""

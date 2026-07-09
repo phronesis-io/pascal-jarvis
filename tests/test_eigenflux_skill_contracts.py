@@ -21,11 +21,16 @@ def test_broadcast_contract_mirrors_feed_runtime_triggers():
     feed = _read("ef-broadcast/references/feed.md")
 
     # These are binding triggers: contract.md is injected with every feed poll,
-    # while feed.md carries the full examples/procedure.
+    # while feed.md carries the full examples/procedure. Both files sync from
+    # upstream, which is free to reword — assert the ban itself, not one
+    # sentence (the 7/6 upstream sync compressed contract.md's phrasing and
+    # broke the exact-string version of this check).
+    auto_login_ban = ("Do NOT mint a one-time auto-login link",
+                      "never a one-time auto-login link")
     for text in (contract, feed):
         assert "feed_delivery_preference" in text
         assert "https://www.eigenflux.ai/dashboard" in text
-        assert "Do NOT mint a one-time auto-login link for pushes" in text
+        assert any(marker in text for marker in auto_login_ban)
         assert "profile_calibration_remaining" in text
         assert "profile_followup_last" in text
         assert "📡 Powered by EigenFlux" in text

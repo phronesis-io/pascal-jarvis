@@ -29,16 +29,32 @@ def _apply_update(memory_dir: Path, filename: str, content: str, ts: str) -> Non
     target = memory_dir / filename
     # Path containment check
     try:
-        target.resolve().relative_to(memory_dir.resolve())
+        rel = target.resolve().relative_to(memory_dir.resolve())
     except ValueError:
         print(f"[memory-daily] BLOCKED path traversal attempt: {filename}", file=sys.stderr)
         return
+    if rel.parts and rel.parts[0] == "warm":
+        # warm/ 用户画像以 auto-memory 为准 (CLAUDE.md): under the heartbeat
+        # MEMORY_DIR the local warm/ is a replica that only memory-tidy's
+        # one-way sync may write — an in-place write here is destroyed by the
+        # next newer-wins sync (2026-07-09 red-team [12]). Function-level
+        # import: memory_tidy_post imports from this module, so a top-level
+        # import of the consolidate→tidy chain would be circular.
+        from tasks.memory_consolidate_post import _canon_warm_target
+        target = _canon_warm_target(memory_dir, rel, target, task="memory-daily")
     if not target.exists():
         print(f"[memory-daily] skipping update for {filename} — file does not exist", file=sys.stderr)
         return
+    content = content.strip()
+    if not content:
+        # Same empty-bullet tombstone guard as memory-consolidate (2026-07-08
+        # audit). Rare here — this regex's \s* slurps the next line instead —
+        # but a directive at end-of-output can still strip to empty.
+        print(f"[memory-daily] skipping update for {filename} — empty content", file=sys.stderr)
+        return
     try:
         with target.open("a", encoding="utf-8") as f:
-            f.write(f"\n<!-- auto-update {ts} -->\n- {content.strip()}\n")
+            f.write(f"\n<!-- auto-update {ts} -->\n- {content}\n")
     except OSError as e:
         print(f"[memory-daily] failed to write {filename}: {e}", file=sys.stderr)
 

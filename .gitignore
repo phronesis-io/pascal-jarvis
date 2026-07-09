@@ -82,6 +82,11 @@ watchdog.log
 # Runtime data
 engagement_log.jsonl
 heartbeat_outbox.jsonl
+# sched_events rotation family: *.jsonl covers the base file only; the
+# rotated .1–.7 archives (core/sched_events.py GENERATIONS=7) and the flock
+# sidecar match nothing without these. .1 is read back for replay — never clean.
+sched_events.jsonl.*
+*.jsonl.lock
 tmp/
 jobs/
 secrets/

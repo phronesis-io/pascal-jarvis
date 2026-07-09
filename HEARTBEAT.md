@@ -5,7 +5,7 @@ All due tasks are batched into a single Claude call (max 4 regular tasks per cyc
 If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 **Priority tasks** bypass the batch cap and run every cycle when due:
-`calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`, `eigenflux-friends`, `eigenflux-messages`
+`calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`, `eigenflux-friends`, `intention-check`
 
 **Tier 0 tasks** bypass Claude entirely (pre→post direct pipe): `calendar-sync`
 
@@ -243,7 +243,7 @@ SILENT_TASKS, not this doc.
 
     HARD LENGTH CAP: user_message ≤ 700 characters. Lead with the most important.
 
-    URGENCY (night gate): emails are HELD at night (22:00–09:00) and batched into a
+    URGENCY (night gate): emails are HELD at night (23:30–10:00) and batched into a
     morning card. Set "urgent": true ONLY for the rare email Pascal would regret not
     seeing within hours (time-critical reply, security/billing emergency). Default false.
 

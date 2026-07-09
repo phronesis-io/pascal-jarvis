@@ -74,6 +74,12 @@ components:
     label: com.pascal.jarvis.daemon
     critical: false
 
+  - name: caffeinate-launchd
+    check: launchctl
+    label: com.pascal.jarvis.caffeinate
+    critical: false
+    note: caffeinate -s keeps the Mac awake on AC only (REQ-56, 电池策略不动) — sleeping on battery is not this component failing
+
   - name: session-backup
     check: file_age
     path: .last_backup_ok

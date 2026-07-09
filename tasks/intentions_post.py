@@ -21,6 +21,7 @@ sidecar straight into record_closure — one tap closes the loop, zero LLM.
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -47,6 +48,9 @@ _STATUS_TOKENS = {
     "success", "succeeded", "completed", "complete", "executed", "executing",
     "notified", "silent", "notify", "chain", "failed", "none", "null", "n/a",
     "已发送", "已发", "发送成功", "完成", "已完成", "好的", "收到", "无", "成功",
+    # claim-of-write tokens (F2): a file-product intent saying "已写入" is a
+    # claim, not a product — must never gate executed or reach a card.
+    "已写入", "已记录", "written", "logged",
 }
 
 
@@ -63,6 +67,142 @@ def _is_contentless(response: str) -> bool:
     if not s:
         return True
     return s in _STATUS_TOKENS
+
+
+def _strip_fences(text: str) -> str:
+    """Peel a leading/trailing ``` code fence (with optional language tag)."""
+    s = (text or "").strip()
+    s = re.sub(r"^```[\w-]*\s*", "", s)
+    s = re.sub(r"\s*```\s*$", "", s)
+    return s.strip()
+
+
+def _is_empty_product(product: str) -> bool:
+    """True when a fence-stripped response is a dead-call husk: empty,
+    stray backticks, or the runner's HEARTBEAT_OK protocol token leaking into
+    an intent slot. Deliberately narrower than _is_contentless — internal
+    intents legitimately report bare status tokens ('sent', '已发送') and
+    those must still count as executed; a husk means the model produced
+    NOTHING for this occurrence (the 7/7-7/8 fallback-envelope shape that
+    fake-executed the 小时报/日报 with zero delivered content)."""
+    s = product.strip("`").strip()
+    return not s or s.upper() == "HEARTBEAT_OK"
+
+
+def _is_quiet_sentinel(product: str) -> bool:
+    """True for a bare/fenced HEARTBEAT_OK in an intent slot.
+
+    For the file-product intent (小时报) this token is DOCUMENTED protocol:
+    its own prompt says 「仅当本条含可决策/有冲突/出成果的料时才推飞书，否则
+    静默累积、HEARTBEAT_OK」 — a model alive enough to build a valid envelope
+    and put this token in the slot is reporting a quiet hour, not a dead
+    call (a dead call's whole reply is HEARTBEAT_OK/empty and takes the
+    __NO_ENVELOPE__ path, never reaching a slot). The shape is admittedly
+    indistinguishable from a degraded fallback that happens to emit the same
+    token in-envelope; treating it as done-with-no-product loses at most one
+    hour's report in that rare case, while treating it as a husk would
+    re-fire every genuine quiet hour for 6h at intention-check's 1-minute
+    cadence (hundreds of paid calls per occurrence)."""
+    return product.strip("`").strip().upper() == "HEARTBEAT_OK"
+
+
+# Heading-shape parsers for the product-log hour dedup (F-16): date and
+# first HH:MM wherever they sit in a '### ' heading line.
+_HEAD_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_HEAD_TIME = re.compile(r"(\d{1,2}):\d{2}")
+
+
+def _heading_matches_hour(line: str, day: str, hour: int) -> bool:
+    """True when a '### ' heading line carries this execution date-hour —
+    wherever the date/time sit in the line. Observed real in-call shapes:
+    '### 2026-07-07 22:08' (bare), '### 小时报 21:09 (2026-07-02)'
+    (name-first), '### 2026-06-22 (小时报 12:29)', '### 2026-07-04 23:00
+    小时报'. A heading with no time (or another date) never matches."""
+    m_d = _HEAD_DATE.search(line)
+    if not m_d or m_d.group(0) != day:
+        return False
+    m_t = _HEAD_TIME.search(line)
+    return bool(m_t) and int(m_t.group(1)) == hour
+
+
+# Canonical memory root for deterministic product writes. bot.sh exports
+# MEMORY_DIR (the heartbeat memory tier) to every heartbeat child — the ONE
+# root the 小时报 timeline actually lives in; when the model chose where to
+# write in-call, entries landed scattered across all three memory roots.
+_MEMORY_DIR = Path(os.environ.get(
+    "MEMORY_DIR", str(Path.home() / ".jarvis" / "memory")))
+
+# Deterministic product write (F2 audit 2026-07-08): intents listed here
+# declare a target log — the post script itself appends the delivered content,
+# so "did it happen" is verifiable on disk instead of trusting the model's
+# in-call file write (which died with the 7/7 provider failover while every
+# occurrence was still marked executed; 小时报 fake-fresh ~23h). Per-intent
+# opt-in ONLY: 27+ unrelated intents share _apply_action and must never have
+# their responses blanket-appended anywhere. Target is hourly_log.md, the
+# fresh-write buffer (memory_daily_post rotates it into hourly_archive.md
+# nightly) and the same file a behaving in-call run writes — the hour-header
+# dedup in _append_product_log only works against the file the model uses.
+PRODUCT_LOGS = {
+    "int_6362ae1606": _MEMORY_DIR / "timeline" / "hourly_log.md",  # 小时报
+}
+
+
+def _append_product_log(intent_id: str, content: str) -> bool:
+    """Append the intent's delivered content under an hour header.
+
+    Returns True when this hour's entry is on disk — written now, or already
+    written in-call by the model. False on write failure: executed is gated
+    on the file write for these intents.
+
+    Dedup (F-16): the old rule required the intent name in a heading line
+    starting with the exact '### YYYY-MM-DD HH' prefix, but the model's real
+    in-call headings are usually name-first ('### 小时报 21:09 (2026-07-02)')
+    or carry the date elsewhere — none matched, so healthy hours got double
+    entries in the file loaded into every heartbeat prompt. An hour counts
+    as already-written when:
+      a) a heading whose parsed date-hour matches the execution hour carries
+         the intent name anywhere in the line, or
+      b) such a heading's FIRST body line leads with the name ('[小时报] …'
+         — the label-on-next-line shape), or
+      c) the content's own first 40 chars are already on disk (the
+         near-identical double-entry, regardless of heading shape).
+    The hour alone is deliberately NOT enough: memory_hourly_post.py appends
+    its own bare '### YYYY-MM-DD HH:MM' HOURLY INDEX entries to the SAME
+    file every hour (and those bodies may merely MENTION 小时报) — keying on
+    the hour alone would swallow the real report behind the index entry.
+    """
+    target = PRODUCT_LOGS[intent_id]
+    try:
+        name = (get_intent(intent_id) or {}).get("name") or intent_id
+    except Exception:
+        name = intent_id
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    day, hour = stamp[:10], int(stamp[11:13])
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        prefix = content.strip()[:40]
+        if len(prefix) >= 20 and prefix in existing:
+            return True  # (c) the report text itself already landed
+        lines = existing.splitlines()
+        for i, line in enumerate(lines):
+            if not line.startswith("### ") or not _heading_matches_hour(
+                    line, day, hour):
+                continue
+            if name in line:
+                return True  # (a) hour already logged in-call
+            for nxt in lines[i + 1:]:
+                if nxt.strip():
+                    if name in nxt.strip()[:20]:
+                        return True  # (b) label on the body's first line
+                    break
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(f"\n### {stamp} {name}\n{content.strip()}\n")
+        return True
+    except OSError as e:
+        print(f"[intentions_post] product log append failed for {intent_id} "
+              f"({target}): {e}", file=sys.stderr)
+        return False
 
 
 def _root_id(iid: str) -> str:
@@ -139,7 +279,7 @@ def _ledger_append(intent_ids: list[str], card_roots: list[str] | None = None) -
 
 def _apply_action(intent_id: str, response: str, action: str,
                   user_messages: list, closure: dict | None = None,
-                  button_specs: list | None = None) -> None:
+                  button_specs: list | None = None) -> bool:
     """Mark the intent and optionally surface a user message.
 
     If a `closure` sub-object is present, this row is a FOLLOW-UP recording a
@@ -149,13 +289,49 @@ def _apply_action(intent_id: str, response: str, action: str,
     nag). A follow-up that is still *asking* (no answer yet) carries no closure
     field, so its response cards normally — and gets one-tap closure buttons
     (REQ-34) targeting its parent.
+
+    Returns False when the occurrence was NOT resolved: a contentless envelope
+    slot (F2 guard) must leave the row 'triggered' and drop out of `covered`,
+    so reconcile_inflight applies the bounded-retry policy and the occurrence
+    re-fires — instead of a dead Claude call / fallback husk counting as
+    executed (7/7-7/8: 小时报 fake-executed ~23h straight, 日报 skipped, zero
+    product, health all green).
     """
     if action == "failed":
         mark_failed(intent_id, error=response)
-        return
+        return True
+    is_closure = bool(closure and isinstance(closure, dict) and closure.get("parent"))
+    product = _strip_fences(response)
+    # Executed requires real product. Closure rows are exempt — the
+    # record_closure write below IS the product (response may be empty).
+    quiet_hour = False
+    if not is_closure:
+        if intent_id in PRODUCT_LOGS:
+            if _is_quiet_sentinel(product):
+                # Deliberate quiet-hour sentinel (documented in the 小时报's
+                # own prompt): nothing to report this hour. Executed with NO
+                # product — no junk log entry (the 7/7-7/8 leak wrote a bare
+                # 'HEARTBEAT_OK' line into the timeline AND dedup-blocked the
+                # hour's real report), no card, and no endless re-fire of a
+                # genuinely quiet occurrence.
+                quiet_hour = True
+            # File-product intent: the log entry is the product; a bare
+            # status token ('已写入') or a husk can't be one — gate executed
+            # on the deterministic write, never on the model's claim.
+            elif (_is_contentless(product) or _is_empty_product(product)
+                    or not _append_product_log(intent_id, product)):
+                print(f"[intentions_post] {intent_id}: no appendable product "
+                      f"(action={action}) — left for reconcile retry",
+                      file=sys.stderr)
+                return False
+        elif _is_empty_product(product):
+            print(f"[intentions_post] {intent_id}: contentless response "
+                  f"(action={action}) — not executed, left for reconcile retry",
+                  file=sys.stderr)
+            return False
     # notify | silent | chain | (anything else) → executed
     mark_executed(intent_id, result=response)
-    if closure and isinstance(closure, dict) and closure.get("parent"):
+    if is_closure:
         try:
             record_closure(str(closure["parent"]).strip(),
                            outcome=closure.get("outcome", "done"),
@@ -163,8 +339,10 @@ def _apply_action(intent_id: str, response: str, action: str,
                            via="followup")
         except Exception as e:
             print(f"[intentions_post] closure record failed: {e}", file=sys.stderr)
-        return  # closure rows never card
-    if action != "silent" and response and not _is_contentless(response):
+        return True  # closure rows never card
+    # quiet_hour: HEARTBEAT_OK is protocol, never user-facing content.
+    if action != "silent" and response and not _is_contentless(response) \
+            and not quiet_hour:
         user_messages.append(response)
         # One-tap closure buttons for a follow-up that is ASKING (REQ-34).
         if button_specs is not None:
@@ -176,6 +354,7 @@ def _apply_action(intent_id: str, response: str, action: str,
                         {"parent": parent_id, "name": (row or {}).get("name", "")})
             except Exception as e:
                 print(f"[intentions_post] button spec failed: {e}", file=sys.stderr)
+    return True
 
 
 def _closure_buttons(button_specs: list) -> list[dict]:
@@ -213,9 +392,10 @@ def main():
         # everything inflight. Breaches that rode this cycle are NOT marked
         # shown — no card rendered, so their notify budget is untouched.
         result = reconcile_inflight([])
-        if result["retried"] or result["expired"]:
+        if result["retried"] or result["expired"] or result.get("skipped"):
             print(f"[intentions_post] no-envelope reconcile: "
-                  f"retried={result['retried']} expired={result['expired']}",
+                  f"retried={result['retried']} expired={result['expired']} "
+                  f"skipped={result.get('skipped', [])}",
                   file=sys.stderr)
         return
 
@@ -252,7 +432,7 @@ def main():
             if not isinstance(result, dict):
                 result = {"response": str(result), "action": "notify"}
             try:
-                _apply_action(
+                resolved = _apply_action(
                     intent_id,
                     response=result.get("response", ""),
                     action=result.get("action", "notify"),
@@ -263,6 +443,11 @@ def main():
             except Exception as e:
                 print(f"[intentions_post] Error processing {intent_id}: {e}",
                       file=sys.stderr)
+            else:
+                # F2 guard: a contentless slot is NOT coverage — drop it so
+                # reconcile_inflight re-fires the still-'triggered' row.
+                if not resolved and intent_id in covered:
+                    covered.remove(intent_id)
 
     elif isinstance(data, dict) and "response" in data:
         # Single-intent shape (no envelope). The manifest replaces the old
@@ -272,7 +457,7 @@ def main():
         if intent_id:
             covered = [intent_id]
             try:
-                _apply_action(
+                resolved = _apply_action(
                     intent_id,
                     response=data.get("response", ""),
                     action=data.get("action", "notify"),
@@ -283,6 +468,9 @@ def main():
             except Exception as e:
                 print(f"[intentions_post] Error processing single intent: {e}",
                       file=sys.stderr)
+            else:
+                if not resolved:
+                    covered = []
         else:
             print("[intentions_post] Ambiguous single-intent response — "
                   "manifest reconcile will retry the uncovered ids.",
@@ -298,9 +486,10 @@ def main():
     # Deterministic reconcile: whatever the envelope did not cover gets the
     # bounded-retry policy NOW (REQ-30c). Also clears the manifest.
     result = reconcile_inflight(covered)
-    if result["retried"] or result["expired"]:
+    if result["retried"] or result["expired"] or result.get("skipped"):
         print(f"[intentions_post] reconcile: retried={result['retried']} "
-              f"expired={result['expired']}", file=sys.stderr)
+              f"expired={result['expired']} skipped={result.get('skipped', [])}",
+              file=sys.stderr)
 
     if user_messages:
         combined = "\n\n".join(m for m in user_messages if m and m.strip())

@@ -11,6 +11,8 @@ import fcntl
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -39,6 +41,26 @@ def _locked(path: Path):
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             except Exception:
                 pass
+
+
+def _pid_lstart(pid: int) -> str:
+    """Start time of a live process, used as its identity.
+
+    A bare PID can be recycled by the OS after the job dies; comparing
+    lstart before signalling stops cancel/sweep from acting on an
+    unrelated process (same class of bug as the heartbeat pidfile race).
+    Returns "" whenever ps fails — callers must treat "" as unknown,
+    never as a match.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -92,6 +114,11 @@ class JobManager:
 
     def update_job(self, job_id: str, **kwargs) -> None:
         """Update fields on a job entry."""
+        if kwargs.get("pid"):
+            # Capture identity alongside the PID (covers the set-pid CLI
+            # arm) so cancel/sweep can detect reuse. Done before taking
+            # the lock — ps may block up to its 5s timeout.
+            kwargs["pid_lstart"] = _pid_lstart(kwargs["pid"])
         with _locked(self.registry_path):
             registry = self._read_registry()
             if job_id not in registry:
@@ -128,7 +155,35 @@ class JobManager:
                 return False
 
             pid = job.get("pid")
+            # PID-reuse guard: only signal a process we can prove is still
+            # the one registered for this job. Recorded lstart must match
+            # the current one; "" (capture failed at set-pid) means we can
+            # never prove it, so close the entry without killing. A missing
+            # key is a pre-guard entry — keep the old kill behavior rather
+            # than silently leaving a legacy job running.
+            kill_skipped = ""
             if pid:
+                recorded = job.get("pid_lstart")
+                if recorded is None:
+                    allow_kill = True
+                elif recorded == "":
+                    # Identity was never captured — the process may well be
+                    # OURS and still running; we just can't prove it.
+                    allow_kill = False
+                    kill_skipped = "identity_unproven"
+                else:
+                    current = _pid_lstart(pid)
+                    if current == recorded:
+                        allow_kill = True
+                    elif current == "":
+                        # ps flaked at cancel time — unprovable this instant.
+                        allow_kill = False
+                        kill_skipped = "identity_unproven"
+                    else:
+                        # PID provably reused: OUR process is already dead,
+                        # so skipping the kill is correct, not a lie.
+                        allow_kill = False
+            if pid and allow_kill:
                 try:
                     # Kill the job's process group — but ONLY if it actually
                     # has its own group (REQ-38). A job spawned without
@@ -145,6 +200,15 @@ class JobManager:
                         os.kill(pid, signal.SIGTERM)
                     except (ProcessLookupError, PermissionError):
                         pass
+            elif pid and kill_skipped:
+                # F-17: a skipped kill must never be silent — the entry is
+                # closed as cancelled, but the real process may still be
+                # running and burning tokens. Record the skip on the entry
+                # so list/sweep surface it, and say so on stderr.
+                job["kill_skipped"] = kill_skipped
+                print(f"[jobs] 取消 {job_id}：无法确认进程 {pid} 就是这个任务"
+                      f"（进程身份信息缺失），没有发送终止信号；任务已按取消"
+                      f"处理，但后台进程可能还在运行", file=sys.stderr)
 
             job["status"] = "cancelled"
             job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
@@ -223,6 +287,14 @@ class JobManager:
                         alive = True
                     except (ProcessLookupError, PermissionError):
                         alive = False
+                if alive and job.get("pid_lstart"):
+                    # PID exists but may be a recycled one wearing the dead
+                    # job's number. Only demote to dead on a successful ps
+                    # read that disagrees — a transient ps failure ("")
+                    # must not mark a healthy job lost.
+                    current = _pid_lstart(pid)
+                    if current and current != job["pid_lstart"]:
+                        alive = False
                 if not alive:
                     job["status"] = "lost"
                     job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
@@ -285,6 +357,9 @@ class JobManager:
                 line += f" (since {j['started_at'][11:]})"
             elif j.get("finished_at"):
                 line += f" ({j['finished_at'][11:]})"
+            if j.get("kill_skipped"):
+                # F-17: the cancel closed the entry without a provable kill.
+                line += "（取消时没能确认后台进程已停，可能还在运行）"
             lines.append(line)
 
         return "\n".join(lines)

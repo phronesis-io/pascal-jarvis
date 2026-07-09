@@ -13,8 +13,21 @@ set -uo pipefail
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+JARVIS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 export JARVIS_DIR
+
+# Canonicalize argv before anything else (2026-07-08): every identity check
+# in the stack — the session-lock kill case-glob, restart.sh's pkill, and
+# daemon.py's _session_lock_pid_is_ours — anchors on the ABSOLUTE
+# "$JARVIS_DIR/bot.sh" argv. A manual `./bot.sh` start keeps the relative
+# argv, so all of them miss it: locks get deleted while the holder survives,
+# and a daemon-driven restart spawns a SECOND bot. exec keeps our PID (the
+# pidfile/$$ logic below is unaffected) and cannot loop: after the exec,
+# "$0" IS the canonical path. pwd -P above matters — daemon.py resolves
+# symlinks (Path.resolve()), so the argv must be the physical path to match.
+if [ "$0" != "$JARVIS_DIR/$(basename "$0")" ]; then
+  exec bash "$JARVIS_DIR/$(basename "$0")" "$@"
+fi
 
 # Ensure the native-installer `claude` (~/.local/bin/claude → versions/<x>) is on
 # PATH for EVERY child — most importantly the heartbeat loop, which shells out to
@@ -227,6 +240,41 @@ fi
 unset OPENAI_API_KEY_CONFIG
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
+
+# Scrub inherited Anthropic overrides (2026-07-08 P0): the stack was once
+# restarted from a shell that still exported the backup relay's ANTHROPIC_*
+# (set for manual testing). Primary claude calls deliberately inherit the
+# ambient env, so ALL "primary" traffic silently rode the third-party relay
+# and the failover gate's recovery probe could never touch the real primary
+# — it "cleared" against the relay and reported a false recovery. Nothing
+# legitimate needs these ambient: every backup path re-injects them per
+# call from CLAUDE_BACKUP_* (the `env` wrappers below, heartbeat.py and
+# ef_stream_loop.py env copies). ANTHROPIC_MODEL and the DEFAULT_*_MODEL
+# aliases ride along in the relay profile and would steer model selection
+# past the MAIN_MODEL pin above, so they go too.
+_scrubbed=""
+for _var in ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL \
+    ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL; do
+  if [ -n "${!_var+x}" ]; then
+    _scrubbed="$_scrubbed $_var"
+    unset "$_var"
+  fi
+done
+if [ -n "$_scrubbed" ]; then
+  log_warn "Scrubbed inherited Anthropic env from the startup shell:$_scrubbed — channel selection is provider_state-driven; backup creds are injected per call from CLAUDE_BACKUP_*"
+fi
+unset _scrubbed
+# ANTHROPIC_API_KEY can be a legitimate primary credential, so only scrub
+# it when it provably equals the backup token (startup-shell pollution);
+# otherwise leave it but warn — it overrides the claude.ai login.
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  if [ "$ANTHROPIC_API_KEY" = "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ]; then
+    unset ANTHROPIC_API_KEY
+    log_warn "Scrubbed inherited ANTHROPIC_API_KEY (identical to the backup token — startup-shell pollution)"
+  else
+    log_warn "ANTHROPIC_API_KEY is set and takes precedence over the claude.ai login for every primary call — unset it before starting bot.sh unless intentional"
+  fi
+fi
 
 log_info "Starting jarvis-harness..."
 log_info "  JARVIS_DIR: $JARVIS_DIR"

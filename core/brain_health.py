@@ -20,7 +20,7 @@ free core it calls: given a snapshot of heartbeat_state.json + the task table +
 the previous sample, it returns the verdict and the alert text. No I/O here, so
 it is trivially unit-testable.
 
-Two complementary detectors (a brain-dead loop trips at least one):
+Three complementary detectors (a brain-dead loop trips at least one):
 
   1. STARVATION / ran-but-failing (STATELESS). A task whose last_run is recent
      (it IS being scheduled) but whose last_success is stale past
@@ -37,7 +37,22 @@ Two complementary detectors (a brain-dead loop trips at least one):
      failures advanced with ZERO successes is a "failing window". N consecutive
      failing windows ⇒ brain-dead. total_failures is the ONLY durable per-cycle
      Claude-failure signal for priority tasks — consecutive_failures is reset to
-     0 on every trip (task_protocol.py:76), so it must NOT be used.
+     0 on every trip (task_protocol.py:76), so it must NOT be used for window
+     COUNTING (its instantaneous value is still a valid threshold — detector 3).
+
+  3. PRIORITY WEDGE (STATELESS). A single PRIORITY task stuck in a sustained
+     failure state. Mirrors admin /health's priority_wedged rule exactly
+     (admin.py _serve_health): consecutive_failures >= WEDGE_CONSEC_THRESHOLD,
+     OR last_success stale past STARVATION_FACTOR×interval with a failing
+     last_status. Red-team 7/9: on 7/8 intention-check wedged 16:04→23:37 and
+     BOTH detectors above missed it — the wedged task stopped advancing
+     total_runs, so detector 2 held its window count forever (the d_r == 0
+     branch), and detector 1 needs recently_ran plus TWO starved tasks. The
+     only page Pascal got was the duplicate degraded-channel alert he had
+     just asked to be deleted; this detector is what makes that deletion's
+     premise ("brain-health owns the wedge alert") actually true. A single
+     wedged PRIORITY task pages — priority tasks are infrastructure, there
+     is no "one flaky task" excuse for them.
 """
 
 from __future__ import annotations
@@ -60,6 +75,15 @@ FAIL_WINDOWS_THRESHOLD = 2
 # channel) only when this many tasks are simultaneously ran-but-failing. A
 # single starved task is already reported by the watermark/self-diagnostic path.
 MIN_STARVED_FOR_SYSTEMIC = 2
+
+# Detector 3: a PRIORITY task with consecutive_failures at/above this is
+# wedged. Mirrors admin /health's priority_wedged rule — keep the two in
+# lockstep, or a wedge admin can see becomes invisible again (the exact 7/8
+# gap this closes). consecutive_failures resets on circuit trip
+# (task_protocol.py) and on real successes, but empty_pre cycles refresh
+# last_success WITHOUT resetting it — so a frozen >=3 is a durable "the
+# Claude side of this task keeps failing / stopped running" signal.
+WEDGE_CONSEC_THRESHOLD = 3
 
 # Safety default when a task has no parseable interval (seconds).
 _DEFAULT_INTERVAL = 600
@@ -110,6 +134,7 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
     samples: dict = {}
     starved: list[tuple[str, float, float]] = []   # (name, success_age, interval)
     priority_dead: list[tuple[str, int]] = []      # (name, fail_windows)
+    wedged: list[tuple[str, float]] = []           # (name, success_age)
 
     for task in tasks:
         name = task.get("name")
@@ -124,6 +149,20 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
         total_failures = circuit.get("total_failures", 0) or 0
         total_runs = circuit.get("total_runs", 0) or 0
         disabled_until = circuit.get("disabled_until", 0) or 0
+        consecutive = circuit.get("consecutive_failures", 0) or 0
+
+        # ── Detector 3: PRIORITY wedge (stateless) ──
+        # Same rule as admin /health's priority_wedged (see module docstring).
+        # Deliberately BEFORE the disabled_until skip below: priority circuits
+        # are forced closed by the loop, so an open one is itself wedge-shaped,
+        # and admin does not skip open circuits either.
+        if name in priority:
+            success_age = (now - last_success) if last_success > 0 else 0.0
+            success_stale = (last_success > 0
+                             and success_age > STARVATION_FACTOR * interval)
+            if (consecutive >= WEDGE_CONSEC_THRESHOLD
+                    or (success_stale and last_status in FAILURE_STATUSES)):
+                wedged.append((name, success_age))
 
         # ── Detector 2: PRIORITY total_failures windows (stateful) ──
         if name in priority:
@@ -158,25 +197,40 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
         if recently_ran and success_stale and last_status in FAILURE_STATUSES:
             starved.append((name, now - last_success, interval))
 
-    brain_dead = bool(priority_dead) or len(starved) >= MIN_STARVED_FOR_SYSTEMIC
+    brain_dead = (bool(priority_dead) or bool(wedged)
+                  or len(starved) >= MIN_STARVED_FOR_SYSTEMIC)
 
     # Alert text is boss-facing (it lands in Pascal's Lark): plain sentences,
     # no internal jargon (last_success / envelope / PRIORITY / circuit). The
     # diagnostic detail he'd never act on directly lives in jarvis.log, not here.
+    # One line per task — a task tripping two detectors must not read twice.
     alerts: list[str] = []
+    named: set = set()
     for name, fw in priority_dead:
         alerts.append(f"{name} 最近一直在失败，没有一次成功")
+        named.add(name)
+    for name, age in wedged:
+        if name in named:
+            continue
+        if age > 0:
+            alerts.append(f"心跳任务 {name} 卡住 {_fmt_age(age)} 了，一直没有成功跑完")
+        else:
+            alerts.append(f"心跳任务 {name} 卡住了，一直没有成功跑完")
+        named.add(name)
     for name, age, interval in starved:
+        if name in named:
+            continue
         alerts.append(
             f"{name} 已经 {_fmt_age(age)} 没有跑成过了"
             f"（正常应该每 {_fmt_age(interval)} 成功一次）")
+        named.add(name)
 
     summary = ""
     if brain_dead:
         shown = alerts[:4]
         more = f"\n（还有 {len(alerts) - 4} 个类似的没列出）" if len(alerts) > 4 else ""
         summary = (
-            "⚠️ 我有几个后台任务卡住了——它们还在反复重试，但每次都失败：\n"
+            "⚠️ 我有后台任务卡住了，一直没有成功跑完：\n"
             + "\n".join(f"· {a}" for a in shown) + more
             + "\n\n通常是我调用 Claude 的环节出了问题。我只会提醒、不会自己动手修。"
             + "方便的时候在电脑上对 Jarvis 说一句「查一下后台任务为什么失败」就能排查。")

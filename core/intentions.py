@@ -19,11 +19,13 @@ Architecture:
   - Every transition emits an intent_* event to sched_events.jsonl (REQ-35)
 """
 
+import fcntl
 import json
 import re
 import sqlite3
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +36,41 @@ ROOT = Path(__file__).parent.parent
 # Sidecar state files (repo-root data/, all writers use atomic tmp+rename)
 INFLIGHT_FILE = ROOT / "data" / ".intention_inflight.json"
 BREACH_QUEUE = ROOT / "data" / ".intent_breach_queue.jsonl"
+
+
+@contextmanager
+def breach_queue_lock(queue: Path):
+    """Exclusive sidecar lock every breach-queue WRITER must hold (F-6 fix).
+
+    The queue has concurrent writers in different processes: _queue_breach
+    (heartbeat, via lifecycle_sweep/reconcile_inflight), skip_digest's
+    backfill/aggregate appends (heartbeat pre), and clear_breaches /
+    mark_breaches_shown rewrites (BOT process, on Pascal's reply-closure
+    path). An unlocked append racing an unlocked read→tmp→os.replace rewrite
+    could land the rewrite AFTER the append and silently destroy it — for a
+    skip-digest bill backfill that loss is permanent (the event is already
+    marked consumed). Same fcntl pattern as core/delivery_deadletter.py, but
+    on a SIDECAR .lock file (never replaced, so the lock inode is stable
+    while the queue itself may be atomically swapped by rewrites — same
+    protocol as core.jobs._locked). core/skip_digest.py imports this helper
+    so both modules share the exact lock path: <queue>.lock.
+
+    Deadlock note: this is a LEAF lock — no holder ever waits on sqlite or
+    another lock while holding it (callers like reconcile_inflight may hold
+    an open sqlite transaction when acquiring, but flock holders here only
+    touch the queue file, so no cycle is possible). Never nested.
+    """
+    lock_path = queue.with_suffix(queue.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 # Bounded-retry policy for one-shot date intents stuck in 'triggered'
 # (REQ-31). One failed cycle no longer means permanent silent death: retry up
@@ -729,7 +766,9 @@ def _queue_breach(intent: dict, now: datetime) -> None:
     intentions_pre.sh drains this queue into the next intention-check cycle so
     Pascal hears '我没能按时把「X」提醒出来' instead of silence. The original
     prompt rides along — the reminder's value isn't lost with its schedule.
-    Atomic-ish append (O_APPEND single line); never raises.
+    Append under breach_queue_lock (F-6): an unlocked append racing a
+    rewrite (clear_breaches in the bot process) could be silently destroyed
+    by the rewrite's os.replace. Never raises.
     """
     try:
         BREACH_QUEUE.parent.mkdir(parents=True, exist_ok=True)
@@ -740,8 +779,9 @@ def _queue_breach(intent: dict, now: datetime) -> None:
             "attempt": intent.get("attempt") or 0,
             "ts": now.strftime("%Y-%m-%dT%H:%M:%S"), "notify_attempts": 0,
         }
-        with open(BREACH_QUEUE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with breach_queue_lock(BREACH_QUEUE):
+            with open(BREACH_QUEUE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[intentions] breach queue append failed: {e}", file=sys.stderr)
 
@@ -1935,7 +1975,9 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
     # "breached" = ids this call newly appended to the breach queue. The caller
     # must NOT mark these shown this cycle — they were queued AFTER the pre's
     # apology-card prompt, so they haven't ridden a card yet (red-team fix).
-    out = {"retried": [], "expired": [], "breached": []}
+    # "skipped" = cron occurrences retired after exhausting their retry budget
+    # (F-14) — surfaced to Pascal via the skip-digest path, never silently.
+    out = {"retried": [], "expired": [], "breached": [], "skipped": []}
     if not inflight:
         return out
     db = _get_db()
@@ -1950,6 +1992,41 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
             continue  # already resolved by someone else
         attempt = it.get("attempt") or 0
         if it.get("trigger_type") != "date":
+            if it.get("trigger_type") == "cron" and attempt >= MAX_ATTEMPTS:
+                # F-14: bound the re-fire burn. intention-check runs at a
+                # 1-minute cadence; without a cap, a fast degraded fallback
+                # answering with husks converts one occurrence into a retry
+                # every cycle for up to 6h (hundreds of paid calls). After
+                # MAX_ATTEMPTS the OCCURRENCE is retired through the same
+                # path as a stale occurrence: intent_occurrence_skipped is
+                # emitted (skip_digest folds it into the 停摆汇总/补发 card,
+                # so it is never silently closed), next_fire_at advances,
+                # and the row returns to pending for the NEXT occurrence
+                # with a fresh attempt budget.
+                expr = ""
+                try:
+                    cfg = json.loads(it["trigger_config"]) if isinstance(
+                        it["trigger_config"], str) else it["trigger_config"]
+                    expr = (cfg or {}).get("expression", "")
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    pass
+                missed_dt = None
+                for raw in (it.get("next_fire_at"), it.get("triggered_at")):
+                    if not raw:
+                        continue
+                    try:
+                        missed_dt = _coerce(datetime.fromisoformat(raw))
+                        break
+                    except (ValueError, TypeError):
+                        continue
+                _skip_stale_cron_occurrence(db, it, expr, missed_dt or now, now)
+                db.execute(
+                    "UPDATE intentions SET status = 'pending', attempt = 0, "
+                    "last_error = ? WHERE id = ?",
+                    (f"occurrence retired after {attempt} contentless attempts "
+                     f"— surfaced via skip digest", iid))
+                out["skipped"].append(iid)
+                continue
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 ("retry: envelope missing", iid))
@@ -2045,23 +2122,27 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
     shown = set(ids)
     keep = []
     try:
-        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if e.get("id") in shown:
-                e["notify_attempts"] = int(e.get("notify_attempts", 0)) + 1
-                if e["notify_attempts"] >= max_notify_attempts:
-                    continue  # shown enough — retire
-            keep.append(e)
-        tmp = BREACH_QUEUE.with_suffix(".tmp")
-        tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in keep)
-                       + ("\n" if keep else ""), encoding="utf-8")
-        import os
-        os.replace(tmp, BREACH_QUEUE)
+        # F-6: the whole read→rewrite must hold the writer lock, or a
+        # concurrent append (skip-digest backfill, _queue_breach) lands
+        # between our read and os.replace and is silently destroyed.
+        with breach_queue_lock(BREACH_QUEUE):
+            for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("id") in shown:
+                    e["notify_attempts"] = int(e.get("notify_attempts", 0)) + 1
+                    if e["notify_attempts"] >= max_notify_attempts:
+                        continue  # shown enough — retire
+                keep.append(e)
+            tmp = BREACH_QUEUE.with_suffix(".tmp")
+            tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in keep)
+                           + ("\n" if keep else ""), encoding="utf-8")
+            import os
+            os.replace(tmp, BREACH_QUEUE)
     except OSError as e:
         print(f"[intentions] breach mark-shown failed: {e}", file=sys.stderr)
 
@@ -2080,16 +2161,19 @@ def clear_breaches(ids: list[str] | None = None) -> None:
     try:
         drop = set(ids)
         keep = []
-        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
-            try:
-                if json.loads(line).get("id") not in drop:
-                    keep.append(line)
-            except json.JSONDecodeError:
-                continue
-        tmp = BREACH_QUEUE.with_suffix(".tmp")
-        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
-        import os
-        os.replace(tmp, BREACH_QUEUE)
+        # F-6: locked read→rewrite — this runs in the BOT process on the
+        # reply-closure path and used to race the heartbeat's appends.
+        with breach_queue_lock(BREACH_QUEUE):
+            for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+                try:
+                    if json.loads(line).get("id") not in drop:
+                        keep.append(line)
+                except json.JSONDecodeError:
+                    continue
+            tmp = BREACH_QUEUE.with_suffix(".tmp")
+            tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+            import os
+            os.replace(tmp, BREACH_QUEUE)
     except OSError as e:
         print(f"[intentions] breach clear failed: {e}", file=sys.stderr)
 

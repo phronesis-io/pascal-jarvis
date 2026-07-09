@@ -328,8 +328,9 @@ def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env
     assert degraded, logs
     assert "status=error" in degraded[0]
     assert "newsapi" in degraded[0]  # circuits_open surfaced
-    # alert-only discipline: a degraded (not 失联) Lark line went out
-    assert any("降级" in a and "newsapi" in a for a in alerts)
+    # alert-only discipline: a degraded (not 失联) Lark line went out — in the
+    # 2026-07-09 plain-Chinese wording (Pascal killed the status=/HTTP jargon)
+    assert any("内部报告自己有问题" in a and "newsapi" in a for a in alerts)
 
 
 def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):

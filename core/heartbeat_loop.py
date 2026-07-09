@@ -256,8 +256,20 @@ BATCH_WINDOWS_MIN = (10 * 60, 13 * 60 + 30, 17 * 60 + 30)  # 10:00/13:30/17:30
 BREAKPOINT_RECENCY_SECONDS = 300
 LAST_MSG_MARKER = "/tmp/jarvis-last-msg"  # touched by bot.sh on every inbound msg
 NIGHT_QUEUE_FILE = "night_queue.jsonl"
-NIGHT_QUEUE_MAX = 20
+# 40, was 20: the 7/7 spend-limit night queued 33 entries and the cap
+# destroyed the 13 oldest. Length-capped entries now roll over to the next
+# flush instead of expiring, so a deeper queue actually drains (3 windows/day
+# plus breakpoint flushes); the 48h/5-retry expiry gate still bounds growth.
+NIGHT_QUEUE_MAX = 40
 BATCH_FLUSH_STAMP = ".batch_last_flush"
+# Floor for the user-activity breakpoint flush AND for burning a deferred
+# entry's retry budget. A successful flush with length-cap deferrals leaves
+# the queue file alive, so an activity breakpoint used to re-fire on EVERY
+# 10s tick while the user chatted: a multi-digest burst that contradicted
+# the just-sent "下个时段补发" line, and each burst bumped the crowded-out
+# tail's retries — at a deep queue that expired entries in under a minute
+# with zero send failures.
+BREAKPOINT_FLUSH_MIN_GAP_S = 900
 PROMPT_VARIANTS_FILE = ".heartbeat_prompt_variants"
 
 
@@ -325,6 +337,14 @@ def _user_recently_active(now: float | None = None) -> bool:
         return False
 
 
+def _read_flush_stamp(jarvis_dir: Path) -> float:
+    """Epoch of the last successful batch flush (0.0 when none recorded)."""
+    try:
+        return float((jarvis_dir / BATCH_FLUSH_STAMP).read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
 def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
                   now: float | None = None) -> bool:
     """Flush the batch queue when a batch window has opened since the last
@@ -334,17 +354,21 @@ def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
         return False
     if _in_quiet_hours(minutes_of_day):
         return False
-    if _user_recently_active(now):
+    now = now if now is not None else time.time()
+    last_flush = _read_flush_stamp(jarvis_dir)
+    # Min-gap floor on the breakpoint path only: deferred (length-capped)
+    # entries keep the queue file alive after a SUCCESSFUL flush, so an
+    # unconditional True here re-flushed on every 10s tick while the user
+    # was at the phone — a multi-digest burst right after promising
+    # "下个时段补发". An active user with the floor unmet falls through to
+    # the window arithmetic below, which stays exactly as it was.
+    if (_user_recently_active(now)
+            and now - last_flush > BREAKPOINT_FLUSH_MIN_GAP_S):
         return True
     if minutes_of_day is None:
         from core.timeutil import now_local
         t = now_local()
         minutes_of_day = t.hour * 60 + t.minute
-    now = now if now is not None else time.time()
-    try:
-        last_flush = float((jarvis_dir / BATCH_FLUSH_STAMP).read_text().strip())
-    except (OSError, ValueError):
-        last_flush = 0.0
     # Minutes since midnight of the last flush, same-day comparison: if the
     # last flush was >24h ago any window counts.
     passed_windows = [w for w in BATCH_WINDOWS_MIN if minutes_of_day >= w]
@@ -377,6 +401,10 @@ QUIET_FLUSH_AUDIT_KEEP = 500                             # lines kept on rewrite
 QUIET_FLUSH_AUDIT_REWRITE_AT = 2 * QUIET_FLUSH_AUDIT_KEEP  # rewrite past this
 NIGHT_ENTRY_MAX_AGE_S = 48 * 3600  # queued longer than this → expired
 NIGHT_FLUSH_MAX_RETRIES = 5        # failed flush attempts before an entry expires
+# Terminal drops keep near-full text in their audit row: the 80-char preview
+# made the 7/7-7/8 drops (31 of 57 queued entries) permanently unrecoverable —
+# the queue file held the only full copy and it is unlinked after flush.
+AUDIT_DROP_TEXT_CHARS = 2000
 
 
 def _audit_flush(jarvis_dir: Path, entries: list, status: str, detail: str = ""):
@@ -397,6 +425,9 @@ def _audit_flush(jarvis_dir: Path, entries: list, status: str, detail: str = "")
                        "queued_ts": e.get("ts", ""),
                        "retries": int(e.get("retries", 0) or 0),
                        "text_preview": (e.get("text") or "")[:80]}
+                if status in ("expired", FLUSH_PERMANENT):
+                    # This row is about to become the only surviving copy.
+                    row["text"] = (e.get("text") or "")[:AUDIT_DROP_TEXT_CHARS]
                 if detail:
                     row["detail"] = detail
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -476,6 +507,28 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
                reason="queued_quiet_hours" if quiet else "queued_daytime_batch")
 
 
+def _shadow_audit_claims(output: str, jarvis_dir: Path) -> None:
+    """REQ-88 shadow write-claim audit, heartbeat delivery path.
+
+    The bot.sh reply hook only sees interactive replies, but most real
+    "已记录/已写入" claims ride heartbeat cards/digests (7/8 audit: 7 of 9
+    claim-bearing messages flowed here unaudited). Mirror of that hook's
+    contract: record-only, runs on the human-visible text (never raw card
+    JSON), never sends, never raises — delivery must not depend on it.
+    When extraction yields nothing human-visible the audit is SKIPPED —
+    scanning the raw envelope/card JSON instead would count claims no human
+    ever saw and skew the REQ-88 gate-review confirmed rate.
+    """
+    try:
+        from tasks.write_claim_audit import audit_message
+        readable = extract_readable_from_output(output)
+        if not readable:
+            return
+        audit_message(readable, str(jarvis_dir), channel="heartbeat")
+    except Exception:
+        pass
+
+
 def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
     """Send queued night messages as one digest.
 
@@ -485,24 +538,34 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
     never succeed in this process (no user_id — entries move to the audit
     instead of queueing forever). "" when there was nothing to send
     (missing/scrubbed-empty queue). Every entry that leaves the queue gets
-    one accounting row in data/quiet_flush_audit.jsonl.
+    one accounting row in data/quiet_flush_audit.jsonl; entries the digest
+    budget can't fit stay queued for the next flush (7/8 audit: they used to
+    expire, silently destroying 31 of 57 entries in two days).
     """
     queue_path = jarvis_dir / NIGHT_QUEUE_FILE
     if not queue_path.exists():
         return ""
     now = time.time()
     all_lines = queue_path.read_text().splitlines()
+    overflow = []
     if len(all_lines) > NIGHT_QUEUE_MAX:
         # No silent caps: say what was dropped — and account for it
         log("heartbeat", f"Night queue overflow: dropping {len(all_lines) - NIGHT_QUEUE_MAX} "
             f"oldest of {len(all_lines)} entries", level="warn")
-        overflow = []
         for line in all_lines[:-NIGHT_QUEUE_MAX]:
             try:
                 overflow.append(json.loads(line))
             except (json.JSONDecodeError, ValueError):
                 continue
         _audit_flush(jarvis_dir, overflow, "expired", detail="queue_overflow")
+        if overflow:
+            # ONE aggregated dead-letter row, not one per entry — 7/7 would
+            # have paged 13 lines at once. Reuses the existing kind so the
+            # daemon's plain-Chinese label applies.
+            record_overdue(jarvis_dir, kind="night_queue_expired",
+                           detail=f"攒批队列满了，最早的 {len(overflow)} 条被挤掉"
+                                  "（原文留了底，想看可以问我）",
+                           due_since=overflow[0].get("ts", ""))
     entries, seen_texts, expired = [], set(), []
     for line in all_lines[-NIGHT_QUEUE_MAX:]:
         try:
@@ -544,9 +607,12 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
         queue_path.unlink(missing_ok=True)
         return ""
 
-    parts = [f"📦 **攒批的 {len(entries)} 条消息**"]
-    used = len(parts[0])
-    len_dropped = []
+    dropped_for_good = len(overflow) + len(expired)
+    included, pieces, len_dropped = [], [], []
+    # Budget with the pre-cap count (±1 digit vs the real header below, which
+    # states the DELIVERED count — it used to count entries the length cap
+    # then dropped: 7/8 said "15 条" while delivering 9).
+    used = len(f"📦 **攒批的 {len(entries)} 条消息**")
     # Fair split of the digest budget: one entry can use almost all of it,
     # many entries each get at least the old 600-char floor.
     per_entry = max(NIGHT_ENTRY_MAX_CHARS,
@@ -554,15 +620,27 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
     for e in entries:
         text = _truncate_entry(e.get("text", ""), per_entry)
         piece = f"\n— {e.get('ts', '')} · {e.get('source', '')} —\n{text}"
-        if used + len(piece) > NIGHT_DIGEST_MAX_CHARS:
+        # Over-budget entries roll over to the next flush (13:30/17:30 window
+        # or a breakpoint) instead of expiring — they used to be destroyed
+        # with only an 80-char trace (7/7: 12 of 20, incl. 行动-tagged items).
+        # The first entry always ships so a lone oversized entry can't wedge
+        # the FIFO forever.
+        if included and used + len(piece) > NIGHT_DIGEST_MAX_CHARS:
             len_dropped.append(e)
             continue
-        parts.append(piece)
+        included.append(e)
+        pieces.append(piece)
         used += len(piece)
+    parts = [f"📦 **攒批的 {len(included)} 条消息**"] + pieces
     if len_dropped:
-        parts.append(f"\n（另有 {len(len_dropped)} 条因长度省略）")
-        log("heartbeat", f"Night digest length cap: dropped {len(len_dropped)} entries",
-            level="warn")
+        parts.append(f"\n（还有 {len(len_dropped)} 条这次放不下，下个时段补发）")
+        log("heartbeat", f"Night digest length cap: {len(len_dropped)} entries "
+            "deferred to next flush", level="warn")
+    if dropped_for_good:
+        # Drops must never be silent to the user — only the length-cap count
+        # used to be disclosed, never overflow/expiry.
+        parts.append(f"\n（另有 {dropped_for_good} 条积压过久没能送出，"
+                     "原文留了底，想看可以问我）")
     digest = "\n".join(parts)
 
     if not user_id:
@@ -580,20 +658,35 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
         return FLUSH_PERMANENT
 
     if _lark_send_text(digest, user_id):
-        queue_path.unlink(missing_ok=True)
+        if len_dropped:
+            # Deferred entries go back in for the next flush (NOT the old
+            # unconditional unlink). retries++ so an entry that never fits
+            # eventually expires into the full-text audit instead of looping
+            # — but only when this flush stands alone: in a burst (previous
+            # successful flush <BREAKPOINT_FLUSH_MIN_GAP_S ago) a deferral
+            # just means "crowded out by position", and bumping would burn a
+            # deep queue's tail to expiry with zero send failures.
+            if time.time() - _read_flush_stamp(jarvis_dir) \
+                    > BREAKPOINT_FLUSH_MIN_GAP_S:
+                for e in len_dropped:
+                    e["retries"] = int(e.get("retries", 0) or 0) + 1
+            write_jsonl(queue_path, len_dropped)
+        else:
+            queue_path.unlink(missing_ok=True)
         _stamp_flush(jarvis_dir)
         _write_outbox(digest, jarvis_dir)
         # Engagement accounting: queued sends bypassed _record_engagement, so
         # without this the morning digest is invisible to engagement-analyze.
+        # Deferred entries are NOT counted sent — they will be when delivered.
         ts = now_local_str("%Y-%m-%d %H:%M")
         epoch = int(time.time())
         digest_ids = list(_LAST_SENT_IDS)
         _LAST_SENT_IDS.clear()
         with open(jarvis_dir / "engagement_log.jsonl", "a") as f:
-            for source in sorted({e.get("source", "heartbeat") for e in entries}):
+            for source in sorted({e.get("source", "heartbeat") for e in included}):
                 row = {"ts": ts, "source": source, "type": "sent",
                        "via": "night-digest", "epoch": epoch}
-                for e in entries:
+                for e in included:
                     if e.get("source", "heartbeat") != source:
                         continue
                     _merge_prompt_variant(row, e.get("prompt_variants", {}).get(source))
@@ -601,14 +694,16 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
                 if digest_ids:
                     row["message_ids"] = digest_ids
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        log("heartbeat", f"Flushed night queue ({len(entries)} entries)")
-        sched_emit(jarvis_dir, "batch_flush", count=len(entries),
-                   sources=sorted({e.get("source", "heartbeat") for e in entries}),
-                   dropped_len_cap=len(len_dropped))
-        _audit_flush(jarvis_dir,
-                     [e for e in entries if not any(e is d for d in len_dropped)],
-                     FLUSH_DELIVERED)
-        _audit_flush(jarvis_dir, len_dropped, "expired", detail="digest_length_cap")
+        log("heartbeat", f"Flushed night queue ({len(included)} entries"
+            + (f", {len(len_dropped)} deferred" if len_dropped else "") + ")")
+        sched_emit(jarvis_dir, "batch_flush", count=len(included),
+                   sources=sorted({e.get("source", "heartbeat") for e in included}),
+                   deferred_len_cap=len(len_dropped),
+                   dropped=dropped_for_good)
+        _audit_flush(jarvis_dir, included, FLUSH_DELIVERED)
+        _audit_flush(jarvis_dir, len_dropped, FLUSH_RETRYABLE,
+                     detail="digest_length_cap")
+        _shadow_audit_claims(digest, jarvis_dir)
         return FLUSH_DELIVERED
     # Retryable: entries stay queued, each carrying a bumped retry count so
     # the expiry gate above can eventually stop a forever-failing flush.
@@ -894,16 +989,41 @@ def _sleep_gap_seconds(slept_for_s: float, expected_s: float,
 # tests/test_heartbeat_loop.py::test_beat_interval_plus_max_cycle_stays_under_stale_threshold.
 BEAT_LOG_INTERVAL_S = 120
 
+# Liveness stamp (7/8 audit F15): the daemon's primary liveness check now
+# stats this file's mtime — log-tail parsing of 'Beat sent' regressed three
+# times (10KB tail, tight JSON regex, beats[-1] masking) and stays only as
+# the daemon's fallback for the mixed-version deploy window. Set by run_loop
+# (jd/data/.heartbeat_beat); module-level so _beat can touch it on EVERY
+# invocation, including throttled ones — one utime syscall proves liveness
+# even when the log line is suppressed.
+_BEAT_STAMP_PATH: Path | None = None
+
+
+def _init_beat_stamp(jd: Path) -> None:
+    global _BEAT_STAMP_PATH
+    _BEAT_STAMP_PATH = jd / "data" / ".heartbeat_beat"
+    try:
+        _BEAT_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
 
 def _beat(label: str, *, force: bool = False) -> bool:
     """Emit one 'Beat sent (label)' liveness line, throttled to
-    BEAT_LOG_INTERVAL_S. Returns True if the line was emitted.
+    BEAT_LOG_INTERVAL_S; touch _BEAT_STAMP_PATH unthrottled first. Returns
+    True if the line was emitted.
 
     State is a function attribute so a fresh process always emits its first
     beat — doctor.sh's "wait ~30s after start" hint and test_integration's
     beat count rely on that. Line format must stay matchable by daemon.py's
-    regex: [YYYY-MM-DD HH:MM:SS] … heartbeat … Beat sent.
+    regex: [YYYY-MM-DD HH:MM:SS] … heartbeat … Beat sent (fallback liveness
+    path — see _BEAT_STAMP_PATH).
     """
+    if _BEAT_STAMP_PATH is not None:
+        try:
+            _BEAT_STAMP_PATH.touch()
+        except OSError:
+            pass  # read-only / full disk must not kill the loop
     now = time.time()
     if not force and now - getattr(_beat, "_last_emit", 0.0) < BEAT_LOG_INTERVAL_S:
         return False
@@ -919,6 +1039,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
     """Main heartbeat loop. Runs forever until killed."""
     jd = Path(jarvis_dir)
     heartbeat_trigger = Path("/tmp/jarvis-heartbeat-trigger")
+    _init_beat_stamp(jd)
 
     # Trim logs on startup
     _trim_file(jd / "heartbeat_outbox.jsonl", 20)
@@ -1072,6 +1193,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 if delivered:
                     _write_outbox(output, jd)
                     _record_engagement(jd)
+                    _shadow_audit_claims(output, jd)
                     print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
                           file=sys.stderr)
                 else:

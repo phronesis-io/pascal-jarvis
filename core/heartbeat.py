@@ -54,6 +54,109 @@ def _error_excerpt(text: str, limit: int = 500) -> str:
         return ""
 
 
+# The claude CLI prints benign notice lines BEFORE the real error whenever an
+# auth env var is set (the "connectors are disabled" banner). Left in, the
+# banner became the recorded error for every failure — 40 distinct failures
+# on 7/8 all carried the identical benign string in sched_events while the
+# real causes (context thrash, prompt too long) were invisible — and it ate
+# most of the log-excerpt budget. Filtered at err_text CONSTRUCTION in
+# claude_call, NOT in _error_excerpt: _error_excerpt also receives non-CLI
+# sentinel strings (timeout / CLI-not-found) that must pass through intact.
+# Case-insensitive substring so CLI wording drift on the rest of the line
+# stays harmless.
+_BENIGN_CLI_NOTICES = ("connectors are disabled",)
+
+
+def _drop_benign_notices(text: str) -> str:
+    """Remove known-benign CLI notice lines so the first line is the cause.
+
+    Falls back to the original text when nothing substantive remains — a
+    call whose entire output IS the notice must stay diagnosable rather
+    than record error="".
+    """
+    if not text:
+        return text
+    kept = [ln for ln in text.splitlines()
+            if not any(n in ln.lower() for n in _BENIGN_CLI_NOTICES)]
+    cleaned = "\n".join(kept).strip()
+    return cleaned or text
+
+
+# Deterministic per-call prompt/payload-size failures. Both mean THIS batch's
+# prompt/DATA payload is too large — a retry or a channel backoff can never
+# heal them, so they set _call_context_overflow and are exempted from the
+# shared-call streak. 'Autocompact is thrashing' = the CLI compacted
+# repeatedly and gave up; 'Prompt is too long' = the API rejected the payload
+# outright (the 7/8 22:48-23:05 memory-tidy failures — same class, different
+# wording, and it re-tripped the roster-wide backoff the first fix targeted).
+# Case-insensitive substring match so CLI wording drift stays harmless.
+_OVERFLOW_SIGNATURES = ("autocompact is thrashing", "prompt is too long")
+
+
+# Code-fence marker lines ('```json', '```') are formatting, not content.
+_FENCE_LINE_RE = re.compile(r"^[ \t]*```[\w-]*[ \t]*$", re.MULTILINE)
+
+
+def _strip_code_fences(text: str) -> str:
+    """Drop code-fence marker lines, keeping everything else."""
+    return _FENCE_LINE_RE.sub("", text).strip()
+
+
+def _fence_residue(text: str) -> str:
+    """Prose left beside a blocked JSON payload — "" when it is only a husk.
+
+    The embedded-JSON guard keeps whatever text surrounds the payload it
+    blocks; for fenced model output that residue is the literal '```json'
+    opener, which became the ENTIRE first card personal-site ever delivered
+    (2026-07-08). Fence lines are stripped, then the remainder must contain
+    at least one alphanumeric character (stray backticks ignored) to count
+    as a message — 'Here is my idea:' survives, '```json' dies.
+    """
+    cleaned = _strip_code_fences(text)
+    if any(ch.isalnum() for ch in cleaned.replace("`", "")):
+        return cleaned
+    return ""
+
+
+# Same shape as the embedded-JSON probe in run_cycle — one top-level object,
+# at most one nesting level, which matches the envelope/status stubs models
+# actually emit.
+_EMBEDDED_JSON_RE = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}')
+
+
+def _screen_json_residue(residue: str) -> str:
+    """One-level re-screen of the prose kept beside a blocked JSON payload.
+
+    The both-sides recovery can itself surface a SECOND raw JSON fragment —
+    a routine model stutter is [big fenced payload][small trailing status
+    object], and the old prefix-only slice happened to suppress the trailing
+    stub. Re-applies the same two probes run_cycle uses on the full message:
+    a residue that IS valid JSON dies; an embedded valid-JSON fragment >50%
+    of the residue is cut out, keeping prose from both sides. One level only
+    — anything survives this and it is delivered as-is.
+    """
+    if not residue:
+        return ""
+    # _fence_residue already stripped fence lines, so probe the bare text.
+    if ((residue.startswith('{') and residue.endswith('}'))
+            or (residue.startswith('[') and residue.endswith(']'))):
+        try:
+            json.loads(residue)
+            return ""
+        except json.JSONDecodeError:
+            pass
+    match = _EMBEDDED_JSON_RE.search(residue)
+    if match and len(match.group()) > len(residue) * 0.5:
+        try:
+            json.loads(match.group())
+            return "\n\n".join(p for p in (
+                _fence_residue(residue[:match.start()]),
+                _fence_residue(residue[match.end():])) if p)
+        except json.JSONDecodeError:
+            pass
+    return residue
+
+
 def parse_interval(s: str) -> int:
     """Parse '10m', '2h', '1d' to seconds."""
     s = s.strip()
@@ -159,6 +262,9 @@ class HeartbeatRunner:
         "checkin": 300,
         "daily-plan": 1800,       # retry every 30min until window hits
         "daily-reflect": 1800,    # retry every 30min until window hits
+        "weekly-review": 1800,    # pre gate = Sunday 10-12 only; the 7d
+                                  # re-arm skipped it for 26 days straight
+                                  # (every due-point landed on a Saturday)
         "personal-site": 3600,
         "memory-daily": 3600,
         "memory-weekly": 3600,
@@ -278,6 +384,13 @@ class HeartbeatRunner:
         # line, or the exception text). "" on success/kill. Consumed by the
         # failed/parse_failed emit sites via _error_excerpt().
         self._last_call_error = ""
+        # True iff the LAST claude_call died on the context-overflow
+        # signature ('Autocompact is thrashing'): a DETERMINISTIC
+        # prompt/payload-size failure that retry and backoff can never heal.
+        # run_cycle keeps it out of the shared-call streak — counting it
+        # tripped the roster-wide 300s hold twice on 7/8 while the hourly
+        # 小时报 batch kept overflowing, freezing innocent tasks for hours.
+        self._call_context_overflow = False
 
     def _log(self, msg: str, **kwargs):
         """Structured log with cycle_id for correlation."""
@@ -360,8 +473,11 @@ class HeartbeatRunner:
             # day's silence instead of a few minutes — see 2026-07-02 incident,
             # ConnectionRefused/401 during a flaky-network window stalled
             # pgc-improvement/engagement-analyze/eigenflux-preinstall for days).
-            retry_delay = min(300, task["interval"])
-            ts.last_run = now - task["interval"] + retry_delay
+            # Backdate against the effective interval (the due-check's chain),
+            # never the raw base — see _effective_interval.
+            interval = self._effective_interval(task, ts)
+            retry_delay = min(300, interval)
+            ts.last_run = now - interval + retry_delay
             ts.last_status = "timeout" if self._call_timed_out else "failed"
             tripped = ts.circuit.record_failure()
             if name in self.PRIORITY_TASKS and ts.circuit.is_open:
@@ -375,6 +491,10 @@ class HeartbeatRunner:
                 self._event("task_finish", task=name, status="failed",
                             duration_s=dur, heavy=True,
                             error=_error_excerpt(self._last_call_error))
+            if self._call_context_overflow:
+                self._log(f"Context overflow killed heavy task {name} — its "
+                          "prompt/DATA payload is too large, a retry cannot "
+                          "heal this", level="warn")
             self._ack_failed_posts([task])
             if tripped:
                 self._log(f"Circuit TRIPPED for heavy task: {name}", level="warn")
@@ -469,6 +589,24 @@ class HeartbeatRunner:
             return {k: int(v) for k, v in data.items() if int(v) > 0}
         except (OSError, ValueError, TypeError):
             return {}
+
+    def _effective_interval(self, task: dict, ts: TaskState,
+                            overrides: dict | None = None) -> int:
+        """The ONE interval-resolution chain: sidecar override (W3.1) →
+        legacy effective_interval in state → HEARTBEAT.md default.
+
+        The due-check and every retry-backdate site must share this chain.
+        Backdating against the raw base interval while the due-check honored
+        an override skewed every retry: checkin's designed 300s empty-pre
+        re-probe silently ran at 5700s under the live 4x reduce override, and
+        an 'increase' override (engagement-analyze writes them down to
+        base//4) would have made a failed task due again on every 10s tick.
+        """
+        if overrides is None:
+            overrides = self.load_interval_overrides()
+        return overrides.get(task["name"]) \
+            or (ts.effective_interval if ts.effective_interval > 0
+                else task["interval"])
 
     def save_state(self, state: dict):
         """Atomic write: temp + rename prevents corrupted state on crash."""
@@ -587,6 +725,7 @@ You have access to the user's memory below. Use it to personalize your responses
 
         self._call_timed_out = False
         self._last_call_error = ""
+        self._call_context_overflow = False
         attempted: set[str] = set()
         model = self.model
         use_backup = False
@@ -656,12 +795,16 @@ You have access to the user's memory below. Use it to personalize your responses
                 # logs the 137/143 infra kills below at warn — acceptable.)
                 self._log(f"Claude exited with code {result.returncode}",
                           level="warn")
-                err_text = "\n".join(
+                err_text = _drop_benign_notices("\n".join(
                     s for s in (result.stderr.strip(), result.stdout.strip()) if s
-                )
+                ))
                 self._last_call_error = err_text
+                # Reassigned per attempt so the flag reflects the FINAL
+                # failure, not an earlier fallback attempt's.
+                self._call_context_overflow = any(
+                    s in err_text.lower() for s in _OVERFLOW_SIGNATURES)
                 if err_text:
-                    self._log(f"Claude error output: {err_text[:300]}",
+                    self._log(f"Claude error output: {err_text[:500]}",
                               level="warn")
                 # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
                 # event (restart/shutdown), not a task failure. Return a sentinel
@@ -720,14 +863,17 @@ You have access to the user's memory below. Use it to personalize your responses
         except subprocess.TimeoutExpired:
             self._call_timed_out = True
             self._last_call_error = f"claude call timed out ({call_timeout}s)"
+            self._call_context_overflow = False
             self._log(f"Claude call timed out ({call_timeout}s)")
             return ""
         except FileNotFoundError:
             self._last_call_error = "claude CLI not found"
+            self._call_context_overflow = False
             self._log("Claude CLI not found — is it installed?")
             return ""
         except Exception as e:
             self._last_call_error = str(e)
+            self._call_context_overflow = False
             self._log(f"Claude error: {e}")
             return ""
 
@@ -891,9 +1037,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 # Event-log the skip only when the task was actually DUE —
                 # an open circuit is re-checked every tick (~10s) and a
                 # per-tick event would flood the replay log.
-                _itv = interval_overrides.get(task["name"]) \
-                    or (ts.effective_interval if ts.effective_interval > 0
-                        else task["interval"])
+                _itv = self._effective_interval(task, ts, interval_overrides)
                 if force or (now - last_run >= _itv):
                     self._event("task_skip", task=task["name"],
                                 reason="circuit_open", retry_in_s=remaining)
@@ -902,10 +1046,7 @@ You have access to the user's memory below. Use it to personalize your responses
             # (e.g. multiple Lark session rotations in quick succession).
             if force and (now - last_run) < self.FORCE_COOLDOWN_SECONDS:
                 continue
-            # Auto-tuned interval precedence: sidecar override (W3.1) →
-            # legacy effective_interval in state → HEARTBEAT.md default
-            interval = interval_overrides.get(task["name"]) \
-                or (ts.effective_interval if ts.effective_interval > 0 else task["interval"])
+            interval = self._effective_interval(task, ts, interval_overrides)
             if force or (now - last_run >= interval):
                 if task["name"] in self.PIPELINE_TASKS:
                     if pipeline_picked:
@@ -938,16 +1079,37 @@ You have access to the user's memory below. Use it to personalize your responses
             due_tasks = [t for t in due_tasks if t["name"] in self.TIER0_TASKS]
             if gated:
                 retry_in = int(_backoff_until - now)
-                self._log(f"Shared-call backoff active ({retry_in}s left) — "
-                          f"holding {gated}", level="warn")
-                # One aggregate event per cycle (task="*"), not one per task —
-                # an open backoff is re-checked every tick and per-task rows
-                # would flood the replay log.
-                self._event("task_skip", task="*",
-                            reason="shared_call_backoff",
-                            retry_in_s=retry_in, skipped=gated)
+                # Announce a window ONCE when first seen, and again only when
+                # backoff_until itself moves (each further failed cycle after
+                # a lapse rewrites it with a doubled duration). The old
+                # per-tick warn+event repeated ~1450 times in one night with
+                # only the countdown changing, burying real warnings — repeats
+                # within an unchanged window are now silent (one aggregate
+                # task="*" row, never per-task). Accepted loss: tasks that
+                # become due mid-window join the hold unannounced.
+                if float(_shared.get("announced_until", 0) or 0) != _backoff_until:
+                    self._log(f"Shared-call backoff active ({retry_in}s left) — "
+                              f"holding {gated}", level="warn")
+                    self._event("task_skip", task="*",
+                                reason="shared_call_backoff",
+                                retry_in_s=retry_in, skipped=gated)
+                    _shared["announced_until"] = _backoff_until
+                    state["__shared_call__"] = _shared
+                    # Persist immediately: the all-gated path below returns
+                    # without reaching a save_state, and an unsaved flag would
+                    # re-announce every tick.
+                    self.save_state(state)
             if not due_tasks:
                 return ""
+        elif _shared.get("announced_until"):
+            # Window lapsed by timeout — say so once and drop the window keys.
+            # The failure streak stays: a follow-up failed call must still
+            # escalate. (A successful call pops the whole record below.)
+            self._log("Shared-call backoff lapsed — roster released")
+            _shared.pop("announced_until", None)
+            _shared.pop("backoff_until", None)
+            state["__shared_call__"] = _shared
+            self.save_state(state)
 
         # Separate priority tasks (exempt from batch cap) from regular tasks
         priority = [t for t in due_tasks if t["name"] in self.PRIORITY_TASKS]
@@ -976,9 +1138,18 @@ You have access to the user's memory below. Use it to personalize your responses
                 data = self.run_script(task["pre"])
                 if not data:
                     outcome = getattr(self, "_last_script_outcome", "ok")
-                    retry_delay = self.EMPTY_RETRY_DELAYS.get(task["name"], task["interval"])
                     ts = TaskState.from_dict(state.get(task["name"], {}))
-                    ts.last_run = now - task["interval"] + retry_delay
+                    # Backdate against the effective interval (the due-check's
+                    # chain — see _effective_interval). Unlisted tasks default
+                    # to no fast retry (due again after one full effective
+                    # interval); the min() clamp keeps last_run from landing
+                    # in the future when an override is shorter than the
+                    # configured retry delay.
+                    interval = self._effective_interval(task, ts, interval_overrides)
+                    retry_delay = min(
+                        self.EMPTY_RETRY_DELAYS.get(task["name"], interval),
+                        interval)
+                    ts.last_run = now - interval + retry_delay
                     if outcome in ("timeout", "error", "nonzero"):
                         # Pre failure is a FAILURE (REQ-51), not "nothing to
                         # do": the breaker sees it and last_status records it
@@ -1169,8 +1340,9 @@ You have access to the user's memory below. Use it to personalize your responses
             # instead of re-dialing a dead API every cycle.
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
-                retry_delay = min(300, task["interval"])
-                ts.last_run = now - task["interval"] + retry_delay
+                interval = self._effective_interval(task, ts, interval_overrides)
+                retry_delay = min(300, interval)
+                ts.last_run = now - interval + retry_delay
                 ts.last_status = "timeout" if self._call_timed_out else "failed"
                 state[task["name"]] = ts.to_dict()
                 if self._call_timed_out:
@@ -1180,6 +1352,22 @@ You have access to the user's memory below. Use it to personalize your responses
                     self._event("task_finish", task=task["name"],
                                 status="failed", duration_s=call_dur,
                                 error=_error_excerpt(self._last_call_error))
+            if self._call_context_overflow:
+                # An _OVERFLOW_SIGNATURES failure ('Autocompact is thrashing'
+                # / 'Prompt is too long') is deterministic for this batch's
+                # payload — the shared backoff exists for CHANNEL trouble and
+                # can never heal an overflow. Counting it wedged the whole
+                # non-Tier0 roster in 300s holds all day on 7/8 while only
+                # the hourly batch was actually sick. Fast retry above stays;
+                # the shared streak is left untouched.
+                self._log("Context overflow killed "
+                          f"the batch {[t['name'] for t in runnable]} — "
+                          "prompt/DATA payload too large, NOT counted toward "
+                          "shared-call backoff", level="warn")
+                self.save_state(state)
+                self._ack_failed_posts(runnable)
+                self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
+                return ""
             # One shared streak +1 per failed CYCLE, not per task — six tasks
             # in one dead call are one failure, not six.
             shared = state.get("__shared_call__", {})
@@ -1335,8 +1523,9 @@ You have access to the user's memory below. Use it to personalize your responses
             # a shared envelope counter absorbs the failure instead.
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
-                retry_delay = min(300, task["interval"])
-                ts.last_run = now - task["interval"] + retry_delay
+                interval = self._effective_interval(task, ts, interval_overrides)
+                retry_delay = min(300, interval)
+                ts.last_run = now - interval + retry_delay
                 ts.last_status = "parse_failed"
                 state[task["name"]] = ts.to_dict()
                 # Flattened to one line: _error_excerpt keeps only the first
@@ -1389,10 +1578,16 @@ You have access to the user's memory below. Use it to personalize your responses
             m = m.strip()
             if not m or m.startswith('{"config":'):
                 continue
-            # Safety net: never send raw JSON to user — strip JSON-looking content
-            if (m.startswith('{') and m.endswith('}')) or (m.startswith('[') and m.endswith(']')):
+            # Safety net: never send raw JSON to user — strip JSON-looking
+            # content. Judged on the fence-stripped form so '```json\n{...}\n```'
+            # counts as a whole-JSON message (before this, fenced payloads fell
+            # through to the embedded-JSON branch below and their '```json'
+            # opener was delivered as the entire message). Delivery of anything
+            # that survives still uses the original m.
+            bare = _strip_code_fences(m)
+            if (bare.startswith('{') and bare.endswith('}')) or (bare.startswith('[') and bare.endswith(']')):
                 try:
-                    json.loads(m)
+                    json.loads(bare)
                     # It's valid JSON that isn't a card — log and skip
                     self._log(f"Blocked raw JSON from reaching user: {m[:100]}...")
                     continue
@@ -1405,11 +1600,24 @@ You have access to the user's memory below. Use it to personalize your responses
                 try:
                     json.loads(json_match.group())
                     self._log(f"Blocked embedded JSON from reaching user: {m[:100]}...")
-                    # Extract any non-JSON text and keep it
-                    text_part = m[:json_match.start()].strip()
-                    if text_part:
-                        texts.append(text_part)
-                    continue
+                    # Keep real prose from BOTH sides of the payload (the old
+                    # code kept only the raw prefix — the '```json' husk — and
+                    # silently ate trailing prose). A husk-only residue is
+                    # noise, not a message. Surviving prose falls through the
+                    # placeholder/sentinel/judge nets below instead of being
+                    # delivered unchecked.
+                    residue = "\n\n".join(p for p in (
+                        _fence_residue(m[:json_match.start()]),
+                        _fence_residue(m[json_match.end():])) if p)
+                    # The residue itself can be a second raw JSON stub the
+                    # old prefix-only slice suppressed — re-screen it once
+                    # so the recovery never delivers raw JSON.
+                    residue = _screen_json_residue(residue)
+                    if not residue:
+                        self._log("Embedded-JSON message had no prose besides "
+                                  "the payload — delivery suppressed")
+                        continue
+                    m = residue
                 except json.JSONDecodeError:
                     pass
             # Drop dangling-placeholder heartbeats: a hook with no payload

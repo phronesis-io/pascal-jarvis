@@ -101,3 +101,20 @@ def _isolate_intent_telemetry(monkeypatch):
         monkeypatch.setattr(_intents, "_emit_intent", lambda *a, **k: None)
     except ImportError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_daemon_log(monkeypatch, tmp_path):
+    """Daemon log() must never reach the LIVE daemon.log.
+
+    daemon.LOG_FILE binds at import time and nothing sets JARVIS_DAEMON_LOG
+    under pytest, so it points at the real repo daemon.log. On 7/7 a
+    deadletter test ran log() unstubbed and wrote fake WARN/ERROR rows into
+    it (072cf2f stubbed that one fixture — per-fixture opt-in stays
+    forgettable). Tests that assert on log output re-patch explicitly.
+    """
+    try:
+        import daemon as _daemon
+        monkeypatch.setattr(_daemon, "LOG_FILE", tmp_path / "daemon.log")
+    except ImportError:
+        pass

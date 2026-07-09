@@ -13,6 +13,10 @@ STRICTLY LOG-ONLY: it never sends a message, never writes memory/journal on
 Jarvis's behalf, never mutates anything except its own audit JSONL. It is
 invoked fire-and-forget (backgrounded) from bot.sh's reply path and is fully
 guarded — any failure is silent, so it can never delay or break a reply.
+core.heartbeat_loop imports audit_message() directly for the card/digest
+send path (the coverage gap the 7/8 audit found: most real claims flowed
+through heartbeat sends this script never saw); rows carry a "channel"
+field so the two paths stay distinguishable in the gate review.
 
 Detection is deliberately narrow (评审红线: 宁漏勿误纠): only first-person
 perfective + persistence-pointing phrasing counts. "之前已记录" (past
@@ -198,45 +202,62 @@ def _now_str() -> str:
         return time.strftime("%Y-%m-%d %H:%M")
 
 
-def main() -> None:
-    reply = (os.environ.get("JV_REPLY") or "").strip()
-    if not reply or not JARVIS_DIR:
-        return
-    claims = detect_claims(reply)
-    if not claims:
-        return
+def audit_message(text: str, jarvis_dir: str, *, channel: str = "reply",
+                  window_min: int | None = None) -> None:
+    """Reconcile write-claims in one outbound message; append shadow rows.
 
+    Importable entry point (core.heartbeat_loop hooks the card/digest send
+    path through it). Same contract as the bot.sh invocation: record-only,
+    swallows every failure — the caller's delivery must never depend on it.
+    """
     try:
-        window_min = int(os.environ.get("JV_WRITE_CLAIM_WINDOW_MIN", "") or DEFAULT_WINDOW_MIN)
-    except ValueError:
-        window_min = DEFAULT_WINDOW_MIN
-    cutoff = time.time() - window_min * 60
+        text = (text or "").strip()
+        if not text or not jarvis_dir:
+            return
+        claims = detect_claims(text)
+        if not claims:
+            return
 
-    checked, hit = [], []
-    for name, path in _surfaces(JARVIS_DIR).items():
-        result = _changed_since(Path(path), cutoff)
-        if result is None:
-            continue  # surface doesn't exist on this machine — not checked
-        checked.append(name)
-        if result:
-            hit.append(name)
+        if window_min is None:
+            try:
+                window_min = int(os.environ.get("JV_WRITE_CLAIM_WINDOW_MIN", "")
+                                 or DEFAULT_WINDOW_MIN)
+            except ValueError:
+                window_min = DEFAULT_WINDOW_MIN
+        cutoff = time.time() - window_min * 60
 
-    verdict = "confirmed" if hit else "unverified"
-    ts = _now_str()
-    out = Path(JARVIS_DIR) / "data" / AUDIT_FILE
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "a", encoding="utf-8") as f:
-        for claim in claims:
-            row = {
-                "ts": ts,
-                "claim": claim[:120],
-                "surfaces_hit": hit,
-                "surfaces_checked": checked,
-                "unchecked": ["journal"],  # Feishu doc: not locally observable
-                "window_min": window_min,
-                "verdict": verdict,
-            }
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        checked, hit = [], []
+        for name, path in _surfaces(jarvis_dir).items():
+            result = _changed_since(Path(path), cutoff)
+            if result is None:
+                continue  # surface doesn't exist on this machine — not checked
+            checked.append(name)
+            if result:
+                hit.append(name)
+
+        verdict = "confirmed" if hit else "unverified"
+        ts = _now_str()
+        out = Path(jarvis_dir) / "data" / AUDIT_FILE
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "a", encoding="utf-8") as f:
+            for claim in claims:
+                row = {
+                    "ts": ts,
+                    "channel": channel,
+                    "claim": claim[:120],
+                    "surfaces_hit": hit,
+                    "surfaces_checked": checked,
+                    "unchecked": ["journal"],  # Feishu doc: not locally observable
+                    "window_min": window_min,
+                    "verdict": verdict,
+                }
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def main() -> None:
+    audit_message(os.environ.get("JV_REPLY") or "", JARVIS_DIR)
 
 
 if __name__ == "__main__":

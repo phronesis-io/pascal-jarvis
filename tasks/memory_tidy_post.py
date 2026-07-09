@@ -13,6 +13,7 @@ Also always runs daily_log auto-archive (14-day TTL) as a side-effect.
 """
 import fcntl
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -25,7 +26,11 @@ MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
 INDEX_FILE = MEMORY_DIR / "_index.md"
 
-# Dual-directory paths for one-way sync (auto → heartbeat)
+# Dual-directory paths for one-way sync (auto → heartbeat). CLAUDE.md
+# source-of-truth rule: warm/ 用户画像以 auto-memory 为准; the heartbeat copy
+# is a read-only replica that only this sync may write. Single home of the
+# hardcoded pair — memory_consolidate_post imports it to reroute its warm/
+# directives to canon instead of writing the replica (2026-07-08 memory audit).
 AUTO_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis/memory"
 HEARTBEAT_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory"
 
@@ -36,6 +41,24 @@ HEARTBEAT_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-
 # the cap. Archive-not-delete, per the file's own 维护规则.
 TODOS_MAX_CHARS = 20000
 _AUTO_UPDATE_PREFIX = "<!-- auto-update"
+
+# An auto-update block as the memory post-scripts write it: marker line plus
+# the single bullet line that follows (see _apply_update in
+# memory_consolidate_post / memory_daily_post).
+_AUTO_UPDATE_BLOCK = re.compile(r"<!--\s*auto-update[^>]*-->\n(?:[^\n]*\n?)?")
+
+
+def _replica_only_update_blocks(src_content: str, dst_content: str) -> list[str]:
+    """Auto-update blocks present in the replica but absent from canon.
+
+    Divergence guard for the newer-wins sync (2026-07-09 red-team [12]): any
+    writer that still lands an auto-update on the heartbeat replica (a stale
+    code path, a manual edit) would otherwise be silently destroyed the next
+    time the auto copy's mtime is bumped. Non-empty result = do NOT overwrite;
+    the operator reconciles heartbeat→auto by hand.
+    """
+    return [b for b in _AUTO_UPDATE_BLOCK.findall(dst_content)
+            if b not in src_content]
 
 
 def _sync_warm_auto_to_heartbeat():
@@ -58,6 +81,14 @@ def _sync_warm_auto_to_heartbeat():
             src_content = src.read_text(encoding="utf-8")
             dst_content = dst.read_text(encoding="utf-8")
             if src_content == dst_content:
+                continue
+            missing = _replica_only_update_blocks(src_content, dst_content)
+            if missing:
+                print(f"[memory-tidy] WARNING: NOT syncing warm/{src.name} — "
+                      f"heartbeat replica holds {len(missing)} auto-update "
+                      f"block(s) absent from the canonical auto copy; "
+                      f"overwriting would destroy them. Reconcile "
+                      f"heartbeat→auto manually.", file=sys.stderr)
                 continue
         else:
             src_content = src.read_text(encoding="utf-8")
@@ -88,8 +119,20 @@ def _sync_root_feedback_auto_to_heartbeat():
         if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
             continue
         content = src.read_text(encoding="utf-8")
-        if dst.exists() and dst.read_text(encoding="utf-8") == content:
-            continue
+        if dst.exists():
+            dst_content = dst.read_text(encoding="utf-8")
+            if dst_content == content:
+                continue
+            # Same divergence guard as warm/ — root files have no directive
+            # reroute, so a heartbeat-side auto-update is a live possibility.
+            missing = _replica_only_update_blocks(content, dst_content)
+            if missing:
+                print(f"[memory-tidy] WARNING: NOT syncing {src.name} — "
+                      f"heartbeat replica holds {len(missing)} auto-update "
+                      f"block(s) absent from the canonical auto copy; "
+                      f"overwriting would destroy them. Reconcile "
+                      f"heartbeat→auto manually.", file=sys.stderr)
+                continue
         dst.write_text(content, encoding="utf-8")
         synced.append(src.name)
     if synced:

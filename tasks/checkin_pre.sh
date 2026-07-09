@@ -74,61 +74,9 @@ if [ -f "$lark_plugin" ] && command -v lark-cli &>/dev/null; then
   # Get events in the [-1h, +2h] window
   freebusy=$(lark_freebusy "$past_iso" "$future_iso")
 
-  transition_context=$(echo "$freebusy" | python3 -c "
-import sys, json
-from datetime import datetime, timezone, timedelta
-
-try:
-    data = json.load(sys.stdin)
-    items = data.get('data') or []
-    now = datetime.now(timezone.utc)
-    signals = []
-
-    currently_busy = False
-    just_ended = None       # meeting that ended in last 15 min
-    next_event = None       # next upcoming event
-    free_until = None       # how long until next event
-
-    for item in items:
-        start = datetime.fromisoformat(item['start_time'])
-        end = datetime.fromisoformat(item['end_time'])
-
-        # Currently in a meeting → skip checkin
-        if start <= now < end:
-            print('BUSY')
-            sys.exit(0)
-
-        # Meeting ended in the last 15 min → transition moment!
-        if end <= now and (now - end) < timedelta(minutes=15):
-            just_ended = item
-            signals.append(f'transition: meeting ended {int((now - end).total_seconds() / 60)}m ago')
-
-        # Next upcoming event
-        if start > now and (next_event is None or start < datetime.fromisoformat(next_event['start_time'])):
-            next_event = item
-
-    if next_event:
-        next_start = datetime.fromisoformat(next_event['start_time'])
-        gap_min = int((next_start - now).total_seconds() / 60)
-        signals.append(f'next_event_in: {gap_min}m')
-        if gap_min < 20:
-            signals.append('tight_window: true (less than 20m, maybe skip)')
-        elif gap_min > 90:
-            signals.append(f'large_free_block: {gap_min}m available')
-    else:
-        signals.append('no_upcoming_events: rest of day is clear')
-
-    if just_ended:
-        signals.append('best_moment: post-meeting transition')
-    elif next_event and int((datetime.fromisoformat(next_event['start_time']) - now).total_seconds() / 60) < 20:
-        # Too close to next meeting — bad time to interrupt
-        print('BUSY')
-        sys.exit(0)
-
-    print('\\n'.join(signals))
-except Exception as e:
-    print(f'calendar_error: {e}')
-" 2>/dev/null || echo "calendar_unavailable")
+  # Filter/transition logic lives in checkin_busy_filter.py: all-day/multi-day
+  # events (trips) must not read as BUSY, and that needed unit tests.
+  transition_context=$(echo "$freebusy" | python3 "$JARVIS_DIR/tasks/checkin_busy_filter.py" 2>/dev/null || echo "calendar_unavailable")
 
   # If calendar says busy, skip
   if [ "$transition_context" = "BUSY" ]; then
