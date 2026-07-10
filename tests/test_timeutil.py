@@ -14,9 +14,11 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
+import core.timeutil as timeutil
 from core.timeutil import now_local, now_local_str, system_tz_name
 
 
@@ -113,3 +115,114 @@ def test_memory_hourly_post_writes_local_tz_under_TZ_UTC(tmp_path):
         f"wrote hour={written_hour} but system-local expected {t_local.hour} "
         f"(UTC was {utc_hour}) — timeutil did not override TZ env correctly"
     )
+
+
+# ---------------------------------------------------------------------------
+# Mid-process system timezone changes (2026-07-10 incident).
+#
+# The production bug these guard against: the timezone was detected once at
+# import, so a heartbeat started under Atlantic/Reykjavik kept writing
+# Reykjavik timestamps (8h behind) for hours after the Mac had switched back
+# to Asia/Shanghai — quiet hours, batching windows, injected 'Current time'
+# and every log ts were all skewed until restart. now_local() must follow
+# /etc/localtime within the cache TTL.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _restore_tz_cache():
+    """Save/restore timeutil's module-level tz cache around a test."""
+    saved = (timeutil._TZ_NAME, timeutil._LOCAL_TZ, timeutil._tz_checked_at)
+    yield
+    timeutil._TZ_NAME, timeutil._LOCAL_TZ, timeutil._tz_checked_at = saved
+
+
+def _expire_tz_cache():
+    """Age the cache stamp so the next call re-detects (simulates TTL expiry)."""
+    timeutil._tz_checked_at = (
+        time.monotonic() - timeutil._TZ_CACHE_TTL_SECONDS - 1
+    )
+
+
+def test_follows_system_tz_change_after_ttl(monkeypatch, _restore_tz_cache):
+    """Simulate travel: /etc/localtime re-pointed while the process runs.
+
+    After the TTL expires, now_local() and system_tz_name() must reflect the
+    new zone without a process restart.
+    """
+    # Start in Reykjavik (UTC+0 year-round)
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Atlantic/Reykjavik")
+    timeutil._refresh_local_tz(force=True)
+    assert system_tz_name() == "Atlantic/Reykjavik"
+    ref = datetime.now(timezone.utc)
+    assert now_local().utcoffset() == ref.astimezone(
+        ZoneInfo("Atlantic/Reykjavik")).utcoffset()
+
+    # OS switches back to Shanghai (UTC+8) — 2026-07-10 scenario
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Asia/Shanghai")
+    _expire_tz_cache()
+    t = now_local()
+    assert timeutil._TZ_NAME == "Asia/Shanghai"
+    assert t.utcoffset() == ref.astimezone(ZoneInfo("Asia/Shanghai")).utcoffset()
+    assert system_tz_name() == "Asia/Shanghai"
+
+
+def test_ttl_avoids_redetect_on_every_call(monkeypatch, _restore_tz_cache):
+    """Within the TTL the symlink is NOT re-resolved (hot-loop cheapness)."""
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Asia/Shanghai")
+    timeutil._refresh_local_tz(force=True)
+
+    calls = []
+
+    def _counting_detect():
+        calls.append(1)
+        return "America/New_York"
+
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name", _counting_detect)
+    # Cache is fresh (just refreshed) → no re-detection, old zone kept
+    now_local()
+    now_local()
+    assert calls == []
+    assert timeutil._TZ_NAME == "Asia/Shanghai"
+
+    # Once the TTL expires the new zone is picked up
+    _expire_tz_cache()
+    now_local()
+    assert calls == [1]
+    assert timeutil._TZ_NAME == "America/New_York"
+
+
+def test_transient_detection_failure_keeps_last_known_good(
+        monkeypatch, _restore_tz_cache):
+    """If /etc/localtime is momentarily unreadable, keep the cached zone
+    instead of degrading to naive datetimes (which follow a possibly
+    polluted TZ env)."""
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Asia/Shanghai")
+    timeutil._refresh_local_tz(force=True)
+
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name", lambda: None)
+    timeutil._refresh_local_tz(force=True)
+    assert timeutil._TZ_NAME == "Asia/Shanghai"
+    assert timeutil._LOCAL_TZ is not None
+    assert now_local().tzinfo is not None
+
+
+def test_msg_timestamp_prefix_follows_tz_change(monkeypatch, _restore_tz_cache):
+    """The dual-display (abroad) vs single-line (home) decision must be based
+    on the CURRENT zone, not the one cached at import."""
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Atlantic/Reykjavik")
+    timeutil._refresh_local_tz(force=True)
+    abroad = timeutil.msg_timestamp_prefix()
+    assert "当地" in abroad and "上海" in abroad
+
+    monkeypatch.setattr(timeutil, "_detect_system_tz_name",
+                        lambda: "Asia/Shanghai")
+    _expire_tz_cache()
+    home = timeutil.msg_timestamp_prefix()
+    assert "当地" not in home
+    assert re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} 周.\]$", home)

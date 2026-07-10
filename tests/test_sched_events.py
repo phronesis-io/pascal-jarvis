@@ -337,7 +337,7 @@ def test_flush_emits_batch_flush_with_count(tmp_path, monkeypatch):
     with open(queue, "w") as f:
         f.write(json.dumps({"ts": ts, "text": "a", "source": "checkin"}) + "\n")
         f.write(json.dumps({"ts": ts, "text": "b", "source": "content-recommend"}) + "\n")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     assert _flush_night_queue(tmp_path, "ou_test")
     flushes = [e for e in _read_events(tmp_path) if e["event"] == "batch_flush"]
     assert len(flushes) == 1
@@ -349,7 +349,7 @@ def test_failed_flush_emits_no_batch_flush(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     queue.write_text(json.dumps({"ts": hbl.now_local_str("%Y-%m-%d %H:%M"),
                                  "text": "a", "source": "checkin"}) + "\n")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: False)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: False)
     monkeypatch.setattr(hbl.time, "sleep", lambda s: None)
     assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_RETRYABLE
     assert [e for e in _read_events(tmp_path) if e["event"] == "batch_flush"] == []

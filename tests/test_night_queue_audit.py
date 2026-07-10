@@ -85,7 +85,7 @@ def test_overflow_drops_keep_full_text_and_deadletter_once(tmp_path, monkeypatch
     long_b = "体育适配器卡点等你：" + "补充" * 60
     _plant(queue, [long_a, long_b, "短消息一", "短消息二"])
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
 
     dropped = [r for r in _audit_rows(tmp_path)
@@ -112,7 +112,7 @@ def test_age_expired_entry_disclosed_and_recoverable(tmp_path, monkeypatch):
     queue.write_text(json.dumps(old, ensure_ascii=False) + "\n")
     _plant(queue, ["新消息"])
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     assert "另有 1 条" in sent[0]
     exp = [r for r in _audit_rows(tmp_path) if r["status"] == "expired"]
@@ -129,7 +129,7 @@ def test_length_capped_entries_requeue_not_expire(tmp_path, monkeypatch):
     texts = ["甲" * 90, "乙" * 90, "丙" * 90]
     _plant(queue, texts)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
 
     # header counts DELIVERED entries (7/8 digest said 15, delivered 9)
@@ -160,7 +160,7 @@ def test_deferred_entries_drain_across_flushes(tmp_path, monkeypatch):
     texts = ["甲" * 90, "乙" * 90, "丙" * 90]
     _plant(queue, texts)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     for _ in range(3):
         assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     assert not queue.exists()
@@ -173,7 +173,7 @@ def test_retry_exhausted_entry_keeps_full_text(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     text = "屡次放不下的长内容：" + "详情" * 1200   # > AUDIT_DROP_TEXT_CHARS
     _plant(queue, [text], retries=hbl.NIGHT_FLUSH_MAX_RETRIES)
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     assert not hbl._flush_night_queue(tmp_path, "ou_test")
     rows = _audit_rows(tmp_path)
     assert rows[0]["status"] == "expired"
@@ -185,7 +185,7 @@ def test_single_oversized_entry_still_ships(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     _plant(queue, ["长" * (hbl.NIGHT_DIGEST_MAX_CHARS + 500)])
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     assert "攒批的 1 条消息" in sent[0]
     assert not queue.exists()              # a lone big entry can't wedge FIFO
@@ -229,7 +229,7 @@ def test_burst_flush_does_not_burn_deferred_retries(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     texts = ["甲" * 90, "乙" * 90, "丙" * 90]
     _plant(queue, texts)
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     hbl._stamp_flush(tmp_path, time.time() - 100)   # previous flush <15min ago
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     kept = [json.loads(l) for l in queue.read_text().splitlines()]
@@ -248,7 +248,7 @@ def test_burst_drain_delivers_everything_without_expiry(tmp_path, monkeypatch):
     texts = [f"第{i}条：" + "内" * 90 for i in range(8)]
     _plant(queue, texts)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     for _ in range(10):
         if not queue.exists():
             break
@@ -268,7 +268,7 @@ def test_standalone_flush_still_bumps_deferred_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(hbl, "NIGHT_ENTRY_MAX_CHARS", 100)
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     _plant(queue, ["甲" * 90, "乙" * 90])
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     hbl._stamp_flush(tmp_path, time.time() - 2 * 3600)   # last flush 2h ago
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     kept = [json.loads(l) for l in queue.read_text().splitlines()]
@@ -350,7 +350,7 @@ def test_shadow_audit_claims_swallows_hook_failures(tmp_path, monkeypatch):
 def test_flush_digest_flows_through_shadow_audit(tmp_path, monkeypatch):
     queue = tmp_path / hbl.NIGHT_QUEUE_FILE
     _plant(queue, ["刚才的结论已写入记忆。"], source="cross-session-sync")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     assert hbl._flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
     rows = _claim_rows(tmp_path)
     assert rows and rows[0]["channel"] == "heartbeat"

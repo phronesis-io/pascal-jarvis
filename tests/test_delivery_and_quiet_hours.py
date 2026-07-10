@@ -48,7 +48,7 @@ def test_night_queue_roundtrip(tmp_path, monkeypatch):
     _queue_for_morning("深夜推荐内容 B", tmp_path)
 
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: sent.append(text) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: sent.append(text) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
 
     assert len(sent) == 1  # ONE digest, not N messages
@@ -60,7 +60,7 @@ def test_night_queue_roundtrip(tmp_path, monkeypatch):
 def test_night_queue_kept_when_send_fails(tmp_path, monkeypatch):
     (tmp_path / ".heartbeat_last_source").write_text("heartbeat")
     _queue_for_morning("消息", tmp_path)
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: False)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: False)
     assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_RETRYABLE
     # retained for retry, now carrying a retry count (backlog #4)
     kept = [json.loads(l) for l in
@@ -84,7 +84,7 @@ def _fails(tmp_path):
 
 def test_alert_fires_once_past_threshold(tmp_path, monkeypatch):
     alerts = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: alerts.append(text) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: alerts.append(text) or True)
 
     t0 = time.time()
     for i in range(DELIVERY_ALERT_THRESHOLD + 2):
@@ -98,7 +98,7 @@ def test_alert_fires_once_past_threshold(tmp_path, monkeypatch):
 
 def test_alert_repeats_after_cooldown(tmp_path, monkeypatch):
     alerts = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: alerts.append(text) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: alerts.append(text) or True)
 
     t0 = time.time()
     for i in range(DELIVERY_ALERT_THRESHOLD):
@@ -108,7 +108,7 @@ def test_alert_repeats_after_cooldown(tmp_path, monkeypatch):
 
 
 def test_success_resets_counter(tmp_path, monkeypatch):
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: True)
     _note_delivery(tmp_path, ok=False, user_id="u")
     _note_delivery(tmp_path, ok=False, user_id="u")
     _note_delivery(tmp_path, ok=True, user_id="u")
@@ -153,7 +153,7 @@ def test_flush_dedups_and_records_engagement(tmp_path, monkeypatch):
         (tmp_path / ".heartbeat_last_source").write_text("content-recommend")
         _queue_for_morning(text, tmp_path)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
 
     assert sent[0].count("重复内容") == 1  # duplicate collapsed
@@ -194,7 +194,7 @@ def test_night_digest_preserves_prompt_variant_metadata(tmp_path, monkeypatch):
     _queue_for_morning("推荐内容", tmp_path)
 
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
 
     row = json.loads((tmp_path / "engagement_log.jsonl").read_text().splitlines()[0])
@@ -303,7 +303,7 @@ def test_flush_scrubs_legacy_silent_entries(tmp_path, monkeypatch):
         + json.dumps({"ts": ts, "text": "深夜推荐",
                       "source": "content-recommend"}, ensure_ascii=False) + "\n")
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
 
     assert len(sent) == 1
@@ -321,7 +321,7 @@ def test_flush_with_only_silent_entries_sends_nothing(tmp_path, monkeypatch):
     queue.write_text(json.dumps(
         {"ts": "2026-06-12 08:12", "text": "plan", "source": "daily-plan"}) + "\n")
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert not _flush_night_queue(tmp_path, "ou_test")
     assert sent == []
     assert not queue.exists()  # scrubbed queue is cleared, not retried forever
@@ -337,7 +337,7 @@ def test_single_long_entry_not_truncated_at_600(tmp_path, monkeypatch):
     (tmp_path / ".heartbeat_last_source").write_text("eigenflux-feed-triage")
     _queue_for_morning(text, tmp_path)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
     assert "截断" not in sent[0]
     assert "条目2" in sent[0]  # last bullet survives
@@ -350,7 +350,7 @@ def test_many_entries_share_budget_with_floor(tmp_path, monkeypatch):
         (tmp_path / ".heartbeat_last_source").write_text("checkin")
         _queue_for_morning(f"头{i}\n" + "\n".join("行" * 50 for _ in range(30)), tmp_path)
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test")
     assert len(sent[0]) <= hbl.NIGHT_DIGEST_MAX_CHARS + 200  # header slack
     assert "截断" in sent[0]

@@ -95,8 +95,17 @@ def _extract_message_id(stdout: str) -> str:
     return ""
 
 
-def _lark_send_text(text: str, user_id: str) -> bool:
-    """Send plain text to Lark, with retries on transient failure."""
+def _lark_send_text(text: str, user_id: str, *,
+                    assume_delivered_on_timeout: bool = True) -> bool:
+    """Send plain text to Lark, with retries on transient failure.
+
+    assume_delivered_on_timeout: the single-message default (True) trades a
+    possible silent loss against guaranteed duplicates (see the card variant).
+    The night-queue digest passes False — inheriting "assume delivered" there
+    let one 15s timeout destroy the whole queue (≤40 entries) while the audit
+    recorded a false "delivered". A retried digest is cheap (entries carry
+    timestamps, retries are spaced and budgeted); a vanished queue is not.
+    """
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
@@ -118,10 +127,15 @@ def _lark_send_text(text: str, user_id: str) -> bool:
                 return True
         except subprocess.TimeoutExpired:
             # Local timeout ≠ undelivered; assume delivered (see card variant
-            # for the duplicate-vs-loss tradeoff analysis).
-            log("heartbeat", "lark_send_text timed out — assuming delivered, no retry",
-                level="warn")
-            return True
+            # for the duplicate-vs-loss tradeoff analysis) — unless the caller
+            # opted out (digest flush: entries must stay queued for retry).
+            if assume_delivered_on_timeout:
+                log("heartbeat", "lark_send_text timed out — assuming delivered, no retry",
+                    level="warn")
+                return True
+            log("heartbeat", "lark_send_text timed out — NOT assuming delivered "
+                "(caller keeps content for retry)", level="warn")
+            return False
         except Exception:
             pass
     return False
@@ -262,6 +276,12 @@ NIGHT_QUEUE_FILE = "night_queue.jsonl"
 # plus breakpoint flushes); the 48h/5-retry expiry gate still bounds growth.
 NIGHT_QUEUE_MAX = 40
 BATCH_FLUSH_STAMP = ".batch_last_flush"
+# Written on every FAILED flush attempt (7/9 incident): _should_flush's
+# window arithmetic is True on every 10s tick once a window has passed, so
+# during an outage the 5-retry expiry budget burned in ~1 minute and the
+# whole queue expired. Failed attempts are spaced by the breakpoint floor
+# below, so 5 retries cover ≥75 minutes of outage instead of one.
+BATCH_ATTEMPT_STAMP = ".batch_last_attempt"
 # Floor for the user-activity breakpoint flush AND for burning a deferred
 # entry's retry budget. A successful flush with length-cap deferrals leaves
 # the queue file alive, so an activity breakpoint used to re-fire on EVERY
@@ -345,6 +365,14 @@ def _read_flush_stamp(jarvis_dir: Path) -> float:
         return 0.0
 
 
+def _read_attempt_stamp(jarvis_dir: Path) -> float:
+    """Epoch of the last FAILED flush attempt (0.0 when none recorded)."""
+    try:
+        return float((jarvis_dir / BATCH_ATTEMPT_STAMP).read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
 def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
                   now: float | None = None) -> bool:
     """Flush the batch queue when a batch window has opened since the last
@@ -355,6 +383,13 @@ def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
     if _in_quiet_hours(minutes_of_day):
         return False
     now = now if now is not None else time.time()
+    # Retry floor after a FAILED flush (7/9: 13 entries expired inside one
+    # minute of offline ticks): both paths below re-fire every 10s tick
+    # while the send keeps failing, so space retries by the same floor as
+    # breakpoint flushes. The stamp is only written on failure, so it never
+    # delays a first flush or a post-success one.
+    if now - _read_attempt_stamp(jarvis_dir) < BREAKPOINT_FLUSH_MIN_GAP_S:
+        return False
     last_flush = _read_flush_stamp(jarvis_dir)
     # Min-gap floor on the breakpoint path only: deferred (length-capped)
     # entries keep the queue file alive after a SUCCESSFUL flush, so an
@@ -657,7 +692,11 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
         queue_path.unlink(missing_ok=True)
         return FLUSH_PERMANENT
 
-    if _lark_send_text(digest, user_id):
+    # No assume-delivered here: a 15s local timeout counted as success used
+    # to unlink the ENTIRE queue and write a false FLUSH_DELIVERED audit row.
+    # Worst case now is one duplicate digest on a slow link — bounded by the
+    # attempt-stamp retry floor and the per-entry retry budget.
+    if _lark_send_text(digest, user_id, assume_delivered_on_timeout=False):
         if len_dropped:
             # Deferred entries go back in for the next flush (NOT the old
             # unconditional unlink). retries++ so an entry that never fits
@@ -707,11 +746,18 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
         return FLUSH_DELIVERED
     # Retryable: entries stay queued, each carrying a bumped retry count so
     # the expiry gate above can eventually stop a forever-failing flush.
+    # The attempt stamp makes _should_flush space the retries out — without
+    # it every 10s tick was a retry and the budget burned in ~1 minute.
     for e in entries:
         e["retries"] = int(e.get("retries", 0) or 0) + 1
     write_jsonl(queue_path, entries)
+    try:
+        (jarvis_dir / BATCH_ATTEMPT_STAMP).write_text(str(time.time()))
+    except OSError:
+        pass
     _audit_flush(jarvis_dir, entries, FLUSH_RETRYABLE)
-    log("heartbeat", "Night queue flush failed — will retry next cycle", level="warn")
+    log("heartbeat", "Night queue flush failed — will retry after "
+        f"{BREAKPOINT_FLUSH_MIN_GAP_S // 60}min", level="warn")
     return FLUSH_RETRYABLE
 
 

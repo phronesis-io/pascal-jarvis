@@ -537,3 +537,44 @@ def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert openai_calls and openai_calls[0]["model"] == "gpt-test"
+
+
+def test_heartbeat_probe_nonmodel_failure_falls_back_to_backup(tmp_path, monkeypatch):
+    """7/10 audit: an elected probe that hit a primary-side NON-model error
+    ('403 Request not allowed', ConnectionRefused) matched no signature, so
+    the whole cycle failed and pushed the shared backoff to 3600s — while
+    the backup was demonstrably healthy. Any probe failure = probe not
+    passed → fall back to backup for this call, keeping the outage flag
+    (only a primary SUCCESS may clear it)."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    mf.trip("spend_limit", tmp_path)
+    state_path = tmp_path / "data" / "provider_state.json"
+    st = json.loads(state_path.read_text())
+    st["last_primary_probe"] = time.time() - mf.PROBE_INTERVAL_S - 1
+    state_path.write_text(json.dumps(st))
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        env = kwargs.get("env") or {}
+        calls.append(env)
+        if env.get("ANTHROPIC_AUTH_TOKEN") == "backup-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        return CompletedProcess(
+            cmd, 1, stdout="",
+            stderr="Failed to authenticate. API Error: 403 Request not allowed",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert len(calls) == 2                          # one probe, one backup
+    assert calls[0] == {}                           # probe ran on PRIMARY env
+    assert calls[1].get("ANTHROPIC_AUTH_TOKEN") == "backup-token"
+    # a failed probe is NOT proof of recovery — the flag must survive
+    assert mf.gate(tmp_path, probe=False) == "backup"
