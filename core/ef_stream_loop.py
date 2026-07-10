@@ -32,6 +32,7 @@ from pathlib import Path
 
 from core.card import linkify_bare_urls
 from core.claude_bin import resolve_claude_bin
+from core.delivery_deadletter import record_overdue
 from core.ef_stream import (
     extract_detail,
     extract_item_ids,
@@ -46,6 +47,26 @@ from core.ef_stream import (
     save_seen,
 )
 from core.log import log
+from core.timeutil import now_local_str
+
+# ── Stall watchdog (audit 2026-07-10) ───────────────────────────────
+# A half-open TCP connection can leave `eigenflux stream` alive but silent
+# forever: the blocking `for line in proc.stdout:` never returns, the
+# reconnect backoff after it is unreachable, and every supervisor
+# (components.yaml pgrep, kill -0) still sees a live process. After a long
+# silence we kill the child so the existing respawn+backoff path takes over.
+# This is a backstop, not the primary path — the CLI reconnects on its own
+# and TCP keepalive reaps most half-open connections in minutes. Quiet
+# stretches with zero PMs are real, so a false-positive kill must be (and is)
+# harmless: the respawn resumes from the persisted cursor and the seen-set
+# dedups any replay.
+STALL_KILL_AFTER_S = 30 * 60
+STALL_POLL_S = 60
+
+
+def _is_stalled(proc, idle_s: float, threshold: float = STALL_KILL_AFTER_S) -> bool:
+    """True when the stream subprocess is alive but has been silent too long."""
+    return proc is not None and proc.poll() is None and idle_s > threshold
 
 
 def _lark_send(text: str, user_id: str) -> bool:
@@ -73,6 +94,42 @@ def _write_outbox(msg: str, metadata: dict, jarvis_dir: Path):
     entry = f'{{"role":"assistant","text":{text_json},"ts":"{ts}","source":"eigenflux-stream","meta":{meta_json}}}\n'
     with open(jarvis_dir / "heartbeat_outbox.jsonl", "a") as f:
         f.write(entry)
+
+
+def _deadletter_failed_send(jarvis_dir: Path, kind: str, text: str) -> None:
+    """Record a failed Lark send as a dead-letter, not a delivery.
+
+    Audit 2026-07-10: a failed _lark_send used to fall through to
+    remember_seen + outbox + a "Delivered" log line — the dedup set then
+    guaranteed the message could never be re-delivered while every ledger
+    claimed success. The dead-letter row lets daemon.py (separate process,
+    own notify channel) tell the user something was missed. Never raises.
+    """
+    log("ef-stream", f"Lark send failed — dead-lettering instead of "
+        f"marking delivered ({kind})", level="warn")
+    try:
+        record_overdue(jarvis_dir, kind=kind, detail=(text or "")[:200],
+                       due_since=now_local_str())
+    except Exception as e:  # the stream loop must outlive any bookkeeping
+        log("ef-stream", f"dead-letter write failed: {e}", level="warn")
+
+
+def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
+                      success_log: str = "Delivered real-time message"):
+    """Send one formatted event to Lark; only a REAL success is recorded.
+
+    Returns (seen, delivered). On failure nothing is marked seen and no
+    outbox entry is written, so a gateway re-delivery gets a second chance
+    and the session ledger can't show a phantom success.
+    """
+    if not _lark_send(msg, user_id):
+        _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
+        return seen, False
+    _write_outbox(msg, metadata, jd)
+    log("ef-stream", success_log)
+    seen = remember_seen(seen, ids)
+    save_seen(seen_file, seen)
+    return seen, True
 
 
 def _fetch_history(conv_id: str) -> str:
@@ -226,6 +283,30 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
         except (ValueError, OSError):
             pass  # not in main thread (e.g. under test) — skip handler install
 
+    # Stall watchdog thread — see STALL_KILL_AFTER_S above. A killed child
+    # EOFs the read loop below, so the existing respawn+backoff path takes
+    # over; the timestamp reset ensures one kill per stall, not a kill storm.
+    last_output = {"ts": time.monotonic()}
+
+    def _stall_watchdog():
+        while not stop.is_set():
+            if stop.wait(STALL_POLL_S):
+                return
+            p = procs.get("stream")
+            idle = time.monotonic() - last_output["ts"]
+            if _is_stalled(p, idle):
+                log("ef-stream", f"No stream output for {int(idle)}s — killing "
+                    "stalled subprocess to force the reconnect path",
+                    level="warn")
+                last_output["ts"] = time.monotonic()
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_stall_watchdog, daemon=True,
+                     name="ef-stall-watchdog").start()
+
     if stop.wait(5):
         return
     log("ef-stream", "Starting real-time message stream")
@@ -254,8 +335,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 text=True,
             )
             procs["stream"] = proc
+            last_output["ts"] = time.monotonic()
 
             for line in proc.stdout:
+                last_output["ts"] = time.monotonic()
                 if stop.is_set():
                     break
                 line = line.strip()
@@ -283,11 +366,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     if rel_ids and is_duplicate_event(rel_ids, set(seen)):
                         log("ef-stream", "Skipping already-delivered friend event (dedup)")
                     else:
-                        _lark_send(rel, user_id)
-                        _write_outbox(rel, {"kind": "relation"}, jd)
-                        seen = remember_seen(seen, rel_ids)
-                        save_seen(seen_file, seen)
-                        log("ef-stream", "Delivered friend-request/relation event")
+                        seen, _ = _deliver_and_mark(
+                            rel, rel_ids, {"kind": "relation"}, user_id,
+                            seen, seen_file, jd,
+                            success_log="Delivered friend-request/relation event")
                     continue
 
                 # Format and deliver
@@ -301,13 +383,13 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     log("ef-stream", "Skipping already-delivered message (dedup)")
                     continue
 
-                _lark_send(msg, user_id)
-                metadata = extract_metadata(line)
-                _write_outbox(msg, metadata, jd)
-                log("ef-stream", "Delivered real-time message")
-
-                seen = remember_seen(seen, ids)
-                save_seen(seen_file, seen)
+                seen, delivered = _deliver_and_mark(
+                    msg, ids, extract_metadata(line), user_id,
+                    seen, seen_file, jd)
+                if not delivered:
+                    # Skip the background analysis too — its 💡 note rides
+                    # the same broken channel, about a message never seen.
+                    continue
 
                 # Background analysis (skip if shutting down)
                 details = extract_detail(line)

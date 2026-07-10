@@ -365,11 +365,83 @@ print(load_tiered_memory(os.environ['MEMORY_DIR']))
 }
 
 # ── Send to Lark (only user-facing content — never errors) ────────────
-# Thin wrapper around the Lark plugin's lark_send, with a local log line.
+# Reliable delivery for the conversation channel (audit 2026-07-10): the
+# reply path used to be a single lark-cli attempt — on failure the finished
+# reply vanished with the $reply variable (the exact REQ-11 pain, previously
+# fixed only on the heartbeat channel). Mirror core/heartbeat_loop.py
+# semantics here: per-attempt timeout (lark-cli has no socket timeout, so a
+# half-open connection would otherwise wedge the handler subshell forever),
+# (2,5)s backoff retries, then a dead-letter row so daemon.py's independent
+# channel can tell the user a reply was lost (stability backlog #7 consumer).
+LARK_SEND_TIMEOUT="${LARK_SEND_TIMEOUT:-30}"
+
+# with_fn_timeout <secs> <shell_fn> <args...>
+# with_timeout can't wrap shell functions on its coreutils branch (timeout(1)
+# execs a binary, which can't see them), so reuse its pure-bash fallback
+# pattern. A killed attempt returns 143 → callers treat it as a failure.
+with_fn_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local _wf_cmd_pid=$!
+  ( sleep "$secs"; kill "$_wf_cmd_pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local _wf_killer_pid=$!
+  wait "$_wf_cmd_pid"
+  local _wf_rc=$?
+  kill "$_wf_killer_pid" 2>/dev/null
+  wait "$_wf_killer_pid" 2>/dev/null
+  return $_wf_rc
+}
+
+# _deadletter_reply <message_id> <content>
+# Out-of-band record (core/delivery_deadletter.py producer) consumed by
+# daemon.py: keeps message_id + the head of the lost text for forensics and
+# for the daemon's own-channel notification. Best-effort — never fails caller.
+_deadletter_reply() {
+  JV_MID="$1" JV_REPLY="$2" python3 -c "
+import os, sys
+sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.delivery_deadletter import record_overdue
+from core.timeutil import now_local_str
+head = ' '.join(os.environ.get('JV_REPLY', '').split())[:120]
+mid = os.environ.get('JV_MID') or '-'
+record_overdue(os.environ['JARVIS_DIR'], 'reply_send_failed',
+               f'mid={mid} 回复前段: {head}', now_local_str())
+" 2>>"$LOG_FILE" || true
+}
+
+# lark_reply_reliable <message_id> <markdown>
+# Timeout-wrapped attempt, then (2,5)s backoff retries (same schedule as the
+# heartbeat's SEND_RETRY_DELAYS), then dead-letter. Returns 0 iff delivered.
+lark_reply_reliable() {
+  local message_id="$1" content="$2" _delay
+  with_fn_timeout "$LARK_SEND_TIMEOUT" lark_reply "$message_id" "$content" && return 0
+  for _delay in 2 5; do
+    log_warn "lark_reply failed (mid=$message_id) — retrying in ${_delay}s"
+    sleep "$_delay"
+    with_fn_timeout "$LARK_SEND_TIMEOUT" lark_reply "$message_id" "$content" && return 0
+  done
+  _deadletter_reply "$message_id" "$content"
+  return 1
+}
+
+# lark_send_reliable <markdown> — same contract for the non-reply sender.
+lark_send_reliable() {
+  local content="$1" _delay
+  with_fn_timeout "$LARK_SEND_TIMEOUT" lark_send "$content" && return 0
+  for _delay in 2 5; do
+    log_warn "lark_send failed — retrying in ${_delay}s"
+    sleep "$_delay"
+    with_fn_timeout "$LARK_SEND_TIMEOUT" lark_send "$content" && return 0
+  done
+  _deadletter_reply "" "$content"
+  return 1
+}
+
+# Thin wrapper around lark_send_reliable, with a local log line.
 send_to_lark() {
   local content="$1"
   [ -z "$content" ] && return
-  if ! lark_send "$content"; then
+  if ! lark_send_reliable "$content"; then
     log_warn "Failed to send message to Lark"
   fi
 }
@@ -1203,8 +1275,8 @@ ${_model_footer}"
 
   # Remove the "working on it" reaction and send the real reply
   [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
-  if ! lark_reply "$message_id" "$reply"; then
-    log_err "[$session_id] Failed to send reply to Lark"
+  if ! lark_reply_reliable "$message_id" "$reply"; then
+    log_err "[$session_id] Failed to send reply to Lark after retries — dead-lettered for daemon follow-up"
   else
     # Write-claim audit (REQ-88, SHADOW): if the reply claims "已记录/已写入",
     # reconcile against actual write-surface mtimes and append the verdict to

@@ -13,11 +13,14 @@ import json
 import os
 import signal
 import subprocess
+import time
 
 import core.jobs as jobs_mod
 from core.jobs import JobManager
 
-OLD = "2026-07-08 10:00:00"  # started_at safely past sweep grace
+# started_at safely past sweep grace (300s) but inside list_jobs's 24h age
+# window — a hardcoded date here rots into a time bomb after one day.
+OLD = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3600))
 
 
 def _job(jm, pid=None, lstart_stub=None, monkeypatch=None):

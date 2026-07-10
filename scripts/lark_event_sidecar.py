@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +44,71 @@ JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
 # the rootdir). Bootstrap the repo root explicitly, same idiom as
 # tasks/mail_triage_post.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# ── Disconnect watchdog (audit 2026-07-10) ──────────────────────────
+# The SDK's reconnect has known zombie paths — the endpoint-discovery POST
+# has no timeout and can freeze the whole asyncio loop; a ClientException
+# kills the orphaned receive task; a server-pushed finite ReconnectCount can
+# run out — while the main coroutine (_select) keeps the process alive
+# forever. Every supervisor (bot.sh 5s loop, components.yaml pgrep, daemon
+# ps-match) only checks process EXISTENCE, so a dead link means Pascal's
+# messages silently drop with zero alerts. Translate "link down" into the one
+# signal supervision understands: process exit (bot.sh respawns within 5s).
+#
+# Calibration (verified 7/10): the server actually hands out
+# ReconnectCount=-1 (infinite retry) and websockets pings every 20s, so SDK
+# self-healing is the PRIMARY path — this watchdog is a backstop. Hence the
+# generous ~10min threshold, and it only arms after the first successful
+# connection: a cold start that can't connect (offline flight) must ride the
+# SDK's infinite local retry instead of turning bot.sh's 5s loop into a
+# restart storm.
+DISCONNECT_EXIT_AFTER_S = 600
+WATCHDOG_POLL_S = 15
+
+
+class DisconnectWatchdog:
+    """Decides when a once-connected process that lost its link should die."""
+
+    def __init__(self, is_connected, exit_after_s: float = DISCONNECT_EXIT_AFTER_S,
+                 clock=time.monotonic):
+        self._is_connected = is_connected
+        self._exit_after_s = exit_after_s
+        self._clock = clock
+        self._connected_once = False
+        self._down_since: float | None = None
+
+    def should_exit(self) -> bool:
+        """One poll tick → True when the process should be replaced."""
+        if self._is_connected():
+            self._connected_once = True
+            self._down_since = None
+            return False
+        if not self._connected_once:
+            return False  # never connected: SDK's infinite retry owns this
+        if self._down_since is None:
+            self._down_since = self._clock()
+            return False
+        return self._clock() - self._down_since >= self._exit_after_s
+
+
+def _redirect_sdk_logs_to_stderr():
+    """Move lark_oapi's logger off stdout (audit 2026-07-10).
+
+    The SDK logs to stdout (lark_oapi/core/log.py: StreamHandler(sys.stdout)),
+    which (a) pollutes the NDJSON event pipe bot.sh consumes — jq drops the
+    lines — and (b) hid every connect/reconnect message from jarvis.log, so a
+    dead connection left zero forensics. client.sh already routes our stderr
+    into LOG_FILE; pointing the SDK handlers there fixes both.
+    """
+    import logging
+    try:
+        from lark_oapi.core.log import logger as sdk_logger
+    except ImportError:
+        sdk_logger = logging.getLogger("Lark")
+    for h in sdk_logger.handlers:
+        if isinstance(h, logging.StreamHandler) \
+                and getattr(h, "stream", None) is sys.stdout:
+            h.setStream(sys.stderr)
 
 
 def _app_id() -> str:
@@ -187,6 +254,14 @@ def main() -> int:
               "and app id (lark-cli config or LARK_APP_ID)", file=sys.stderr)
         return 1
 
+    # Bound the SDK's synchronous, timeout-less requests.post (endpoint
+    # discovery): on a middlebox that accepts TCP but never answers it would
+    # otherwise block the whole asyncio loop — ping loop included — forever.
+    # Only blocking sockets are affected; asyncio's non-blocking websockets
+    # are untouched.
+    socket.setdefaulttimeout(30)
+    _redirect_sdk_logs_to_stderr()
+
     def forward(data):
         try:
             _emit(lark.JSON.marshal(data))
@@ -212,8 +287,27 @@ def main() -> int:
                .build())
     client = lark.ws.Client(app_id, app_secret, event_handler=handler,
                             log_level=lark.LogLevel.INFO)
+
+    def _watchdog_loop():
+        # `_conn` is set on connect and cleared to None by _disconnect() on
+        # every loss — polling it from a thread survives even a frozen asyncio
+        # loop (the endpoint-POST hang case). getattr keeps a future SDK
+        # rename fail-safe: unknown attr → never fires.
+        wd = DisconnectWatchdog(
+            lambda: getattr(client, "_conn", None) is not None)
+        while True:
+            time.sleep(WATCHDOG_POLL_S)
+            if wd.should_exit():
+                print("disconnect watchdog: link down for "
+                      f">{DISCONNECT_EXIT_AFTER_S}s after a successful "
+                      "connect — exiting so bot.sh respawns a fresh process",
+                      file=sys.stderr, flush=True)
+                os._exit(1)
+
+    threading.Thread(target=_watchdog_loop, daemon=True,
+                     name="disconnect-watchdog").start()
     print("lark-event-sidecar connecting (single-connection mode)…", file=sys.stderr)
-    client.start()  # blocks; reconnects internally
+    client.start()  # blocks; SDK reconnects internally, watchdog backstops it
     return 0
 
 

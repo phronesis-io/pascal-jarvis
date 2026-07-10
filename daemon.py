@@ -14,6 +14,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -51,6 +52,24 @@ BRAIN_WAKE_GRACE = 30 * 60
 # means the host slept or was shut down. This catches reboots, where the
 # in-memory last_wake_time mark is wiped but BRAIN_STATE_FILE survives.
 BRAIN_CHECK_GAP_THRESHOLD = 15 * 60
+# Grace penetration (audit 7/10): BRAIN_WAKE_GRACE was re-armed on EVERY wake
+# and check-gap with no memory of what it kept suppressing, so on a lid-open-
+# 10-40min commute day (7/10: 09:20/09:54/10:37/11:07) a wedge that persisted
+# 17.5h never produced a single page — 'would alert but in post-wake grace'
+# forever. The grace exists to filter the stale-looking first minutes AFTER a
+# wake; a failure still present in a SECOND awake window (it survived a full
+# sleep without healing), or suppressed for a cumulative hour, is precisely
+# NOT that artefact and must page through.
+BRAIN_SUPPRESS_MAX_WINDOWS = 2
+BRAIN_SUPPRESS_MAX_SECONDS = 3600
+# 2s TCP probe to tell "system broken" from "host offline" before a
+# brain-death page (7/9 flight day: awake >30min with no network made
+# calendar-sync et al look wedged and a BRAIN-DEAD page fired — the system
+# was merely offline, and the page could only land in the dead-letter file
+# to be re-delivered stale after landing). Same host notify_lark needs, so
+# unreachable ⇒ the page couldn't be delivered now anyway.
+REACHABILITY_PROBE = ("open.feishu.cn", 443)
+REACHABILITY_TIMEOUT = 2.0
 MAX_RESTART_ATTEMPTS = 3
 RESTART_COOLDOWN = 300        # 5 min between restart attempts
 # Overridable so pytest can point log writes at tmp_path: on 7/7 a deadletter
@@ -819,6 +838,21 @@ def _probe_manifest_criticals():
         log("ERROR", f"manifest component probe failed: {e}")
 
 
+def _network_reachable() -> bool:
+    """2s TCP dial to the Lark endpoint — the daemon's own alert channel.
+    False ⇒ the host is offline (flight / captive portal / hotspot switch),
+    where every network-dependent task fails and the brain-death heuristics
+    lie: that is a connectivity outage, not brain-death. Note the diag-
+    staleness leg needs no such gate — it watches a local file mtime, not
+    network-dependent task failures."""
+    try:
+        with socket.create_connection(REACHABILITY_PROBE,
+                                      timeout=REACHABILITY_TIMEOUT):
+            return True
+    except OSError:
+        return False
+
+
 def _check_brain_health():
     """Alert (never restart) when the heartbeat loop is ALIVE BUT BRAIN-DEAD —
     ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
@@ -862,16 +896,24 @@ def _check_brain_health():
         last_alert = prev.get("last_alert", 0) or 0
         last_check_ts = prev.get("last_check_ts", 0) or 0
         grace_until = prev.get("grace_until", 0) or 0
+        # Suppression ledger (audit 7/10): {"since": ts, "windows": n} — how
+        # long / across how many awake windows the SAME brain-dead verdict
+        # has been swallowed by grace. Persisted so it survives sleeps and
+        # daemon hot-reload respawns; cleared the moment a check comes back
+        # healthy or the page actually goes out.
+        suppressed = prev.get("suppressed") or {}
 
         # Post-sleep/reboot grace: a stale last_success right after the host
         # was asleep or powered off is expected, not brain-death. Two gap
         # signals — the in-process wake mark (laptop lid), and a hole in our
         # own check cadence (reboot wipes last_wake_time; this file survives).
         now = time.time()
+        new_window = False
         if last_wake_time:
             grace_until = max(grace_until, last_wake_time + BRAIN_WAKE_GRACE)
         if last_check_ts and now - last_check_ts > BRAIN_CHECK_GAP_THRESHOLD:
             grace_until = max(grace_until, now + BRAIN_WAKE_GRACE)
+            new_window = True
             log("INFO", f"brain-health: host sleep/shutdown gap "
                 f"({int(now - last_check_ts)}s since last check) — alerts on "
                 f"hold for {BRAIN_WAKE_GRACE // 60}min while heartbeat catches up")
@@ -888,20 +930,57 @@ def _check_brain_health():
             failure_threshold=CircuitState.FAILURE_THRESHOLD,
         )
 
+        if not result["brain_dead"]:
+            suppressed = {}
+        elif in_grace:
+            if not suppressed:
+                suppressed = {"since": now, "windows": 1}
+            elif new_window:
+                suppressed["windows"] = int(suppressed.get("windows", 1)) + 1
+        # A verdict that crossed a sleep (second awake window) or ate a full
+        # hour of suppression is a persistent failure, not a wake artefact —
+        # it punches through the grace (still subject to the 4h dedup below).
+        penetrates = bool(suppressed) and (
+            int(suppressed.get("windows", 1)) >= BRAIN_SUPPRESS_MAX_WINDOWS
+            or now - float(suppressed.get("since", now)) >= BRAIN_SUPPRESS_MAX_SECONDS)
+
         new_last_alert = last_alert
-        if result["brain_dead"] and in_grace:
-            log("INFO", "brain-health: would alert but in post-wake grace: "
+        if (result["brain_dead"] and (penetrates or not in_grace)
+                and now - last_alert >= PROBE_ALERT_WINDOW):
+            if not _network_reachable():
+                # Offline ⇒ connectivity outage, not brain-death (7/9 flight
+                # day false page). Defer, and re-arm the grace so the page
+                # can't fire until ~BRAIN_WAKE_GRACE past the last offline
+                # check — the heartbeat needs that long to retry once the
+                # network returns. Resetting the ledger keeps offline-accrued
+                # suppression from penetrating right at recovery.
+                grace_until = max(grace_until, now + BRAIN_WAKE_GRACE)
+                suppressed = {}
+                log("INFO", "brain-health: would alert but host looks offline "
+                    "(Lark endpoint unreachable) — deferring; grace re-armed "
+                    f"for {BRAIN_WAKE_GRACE // 60}min while the network returns")
+            else:
+                new_last_alert = now
+                # Tag goes at the END: conversation_audit.py classifies on
+                # the literal "BRAIN-DEAD heartbeat:" prefix.
+                tag = (" [persisted across post-wake grace]" if in_grace
+                       else "")
+                log("WARN", "BRAIN-DEAD heartbeat: "
+                    + "; ".join(result["alerts"]) + tag)
+                notify_lark(result["summary"])
+                suppressed = {}
+        elif result["brain_dead"] and in_grace:
+            log("INFO", "brain-health: would alert but in post-wake grace "
+                f"(suppressed {int(now - float(suppressed.get('since', now)))}s "
+                f"across {int(suppressed.get('windows', 1))} awake window(s)): "
                 + "; ".join(result["alerts"]))
-        elif result["brain_dead"] and now - last_alert >= PROBE_ALERT_WINDOW:
-            new_last_alert = now
-            log("WARN", "BRAIN-DEAD heartbeat: " + "; ".join(result["alerts"]))
-            notify_lark(result["summary"])
 
         # Atomic persist: samples carry the per-priority failure windows across
         # hot-reloads; last_alert enforces the 4h dedup; last_check_ts/grace_until
-        # drive the sleep-gap detection above.
+        # drive the sleep-gap detection above; suppressed drives grace penetration.
         new_state = {"samples": result["samples"], "last_alert": new_last_alert,
-                     "last_check_ts": now, "grace_until": grace_until}
+                     "last_check_ts": now, "grace_until": grace_until,
+                     "suppressed": suppressed}
         tmp = BRAIN_STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(new_state))
         os.replace(tmp, BRAIN_STATE_FILE)
@@ -1292,19 +1371,58 @@ def handle_signal(signum, frame):
     running = False
 
 
+def _daemon_pid_is_ours(pid: int) -> bool:
+    """Identity check for the singleton pidfile — same recycled-PID class as
+    _session_lock_pid_is_ours / bot.sh's BOOT_TS guard (audit 7/10: the same-
+    family fixes covered every pidfile EXCEPT the daemon's own). launchd and
+    restart.sh both start us as `python3 <JARVIS_DIR>/daemon.py`, so a real
+    daemon's argv always carries the repo's absolute daemon.py path — anchored
+    full-path match, never a bare substring (7/7 watchdog postmortem rule).
+    Fails CLOSED (True) when ps itself errors: wrongly exiting costs one 10s
+    launchd throttle cycle; wrongly starting costs a second guardian."""
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                           capture_output=True, text=True, timeout=5)
+        args = r.stdout.strip()
+    except Exception:
+        return True
+    if not args:
+        return False  # process gone between kill(0) and ps ⇒ stale
+    return bool(re.search(
+        rf"python[^\s]*\s+.*{re.escape(str(JARVIS_DIR))}/daemon\.py", args))
+
+
 def acquire_singleton():
-    """Ensure only one daemon instance runs. Exit if another is alive."""
+    """Ensure only one daemon instance runs. Exit if another is alive.
+
+    os.kill(pid, 0) alone is NOT an identity check (audit 7/10): a forced
+    power-off skips release_singleton, the stale pidfile survives the reboot,
+    and if the old PID got recycled by a boot process the daemon exited
+    'already running' forever — launchd (KeepAlive + ThrottleInterval=10)
+    re-ran it into the same wall every 10s, and since the daemon is the only
+    thing that starts bot.sh AND the only independent alert channel, the
+    whole stack stayed down with zero pages. Alive PIDs must also LOOK like
+    a daemon; PermissionError means a foreign (usually root) process — we run
+    as a user LaunchAgent, so it can never be us — and is treated as stale
+    instead of exiting."""
     if DAEMON_PID_FILE.exists():
+        old_pid = None
         try:
             old_pid = int(DAEMON_PID_FILE.read_text().strip())
             os.kill(old_pid, 0)  # Check if alive
-            print(f"Daemon already running (PID {old_pid}). Exiting.", file=sys.stderr)
-            sys.exit(1)
         except (ValueError, ProcessLookupError):
-            pass  # Stale PID file
+            old_pid = None  # Stale PID file
         except PermissionError:
-            print(f"Daemon PID {old_pid} exists but permission denied. Exiting.", file=sys.stderr)
-            sys.exit(1)
+            print(f"Daemon PID {old_pid} recycled by a foreign process "
+                  "(permission denied) — treating pidfile as stale.",
+                  file=sys.stderr)
+            old_pid = None
+        if old_pid is not None:
+            if _daemon_pid_is_ours(old_pid):
+                print(f"Daemon already running (PID {old_pid}). Exiting.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Daemon PID {old_pid} is alive but not a daemon.py process "
+                  "— treating pidfile as stale.", file=sys.stderr)
 
     DAEMON_PID_FILE.write_text(str(os.getpid()))
 

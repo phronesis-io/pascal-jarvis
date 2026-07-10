@@ -56,7 +56,7 @@ def _queue_entry(tmp_path, text, source="content-recommend"):
 
 def test_flush_delivered_returns_tristate_and_audits(tmp_path, monkeypatch):
     _queue_entry(tmp_path, "早间内容")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     assert _flush_night_queue(tmp_path, "ou_test") == FLUSH_DELIVERED
     rows = _audit_rows(tmp_path)
     assert len(rows) == 1
@@ -67,7 +67,7 @@ def test_flush_delivered_returns_tristate_and_audits(tmp_path, monkeypatch):
 
 def test_flush_retryable_keeps_entries_and_bumps_retry(tmp_path, monkeypatch):
     _queue_entry(tmp_path, "夜间内容")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: False)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: False)
     assert _flush_night_queue(tmp_path, "ou_test") == FLUSH_RETRYABLE
     kept = [json.loads(l) for l in
             (tmp_path / NIGHT_QUEUE_FILE).read_text().splitlines()]
@@ -80,7 +80,7 @@ def test_flush_retryable_keeps_entries_and_bumps_retry(tmp_path, monkeypatch):
 def test_flush_permanent_when_no_user_id(tmp_path, monkeypatch):
     _queue_entry(tmp_path, "无处可送")
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "") == FLUSH_PERMANENT
     assert sent == []
     assert not (tmp_path / NIGHT_QUEUE_FILE).exists()  # never queued forever
@@ -105,7 +105,7 @@ def test_old_entry_expires_to_audit_not_digest(tmp_path, monkeypatch):
     with open(tmp_path / NIGHT_QUEUE_FILE, "a") as f:
         f.write(json.dumps(old, ensure_ascii=False) + "\n")
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert _flush_night_queue(tmp_path, "ou_test") == FLUSH_DELIVERED
     assert "旧内容" not in sent[0] and "新内容" in sent[0]
     by_status = {r["status"]: r for r in _audit_rows(tmp_path)}
@@ -126,7 +126,7 @@ def test_retry_exhausted_entry_expires(tmp_path, monkeypatch):
     (tmp_path / NIGHT_QUEUE_FILE).write_text(
         json.dumps(entry, ensure_ascii=False) + "\n")
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: sent.append(t) or True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: sent.append(t) or True)
     assert not _flush_night_queue(tmp_path, "ou_test")  # nothing left to send
     assert sent == []
     assert not (tmp_path / NIGHT_QUEUE_FILE).exists()
@@ -137,7 +137,7 @@ def test_retry_exhausted_entry_expires(tmp_path, monkeypatch):
 
 def test_forever_failing_flush_expires_after_max_retries(tmp_path, monkeypatch):
     _queue_entry(tmp_path, "永远发不出去")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: False)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: False)
     for _ in range(NIGHT_FLUSH_MAX_RETRIES):
         assert _flush_night_queue(tmp_path, "ou_test") == FLUSH_RETRYABLE
     # retry budget exhausted → next flush expires it instead of retrying forever
@@ -149,7 +149,7 @@ def test_forever_failing_flush_expires_after_max_retries(tmp_path, monkeypatch):
 def test_unparseable_legacy_ts_expires(tmp_path, monkeypatch):
     (tmp_path / NIGHT_QUEUE_FILE).write_text(
         json.dumps({"text": "无时间戳", "source": "checkin"}) + "\n")
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     assert not _flush_night_queue(tmp_path, "ou_test")
     assert _audit_rows(tmp_path)[0]["status"] == "expired"
 
@@ -222,7 +222,7 @@ def test_deadletter_producer_side_cap(tmp_path):
 
 
 def test_note_delivery_writes_deadletter_at_threshold(tmp_path, monkeypatch):
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     t0 = time.time()
     for i in range(DELIVERY_ALERT_THRESHOLD):
         _note_delivery(tmp_path, ok=False, user_id="ou_test", now=t0 + i)
@@ -233,7 +233,7 @@ def test_note_delivery_writes_deadletter_at_threshold(tmp_path, monkeypatch):
 
 
 def test_note_delivery_success_clears_streak_start(tmp_path, monkeypatch):
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u: True)
+    monkeypatch.setattr(hbl, "_lark_send_text", lambda t, u, **kw: True)
     _note_delivery(tmp_path, ok=False, user_id="u")
     _note_delivery(tmp_path, ok=True, user_id="u")
     st = json.loads((tmp_path / hbl.DELIVERY_STATE_FILE).read_text())

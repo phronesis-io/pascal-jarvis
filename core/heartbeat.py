@@ -571,7 +571,25 @@ class HeartbeatRunner:
 
     def load_state(self) -> dict:
         if self.state_file.exists():
-            return json.loads(self.state_file.read_text())
+            try:
+                return json.loads(self.state_file.read_text())
+            except (OSError, ValueError) as e:
+                # A torn/corrupt state file (e.g. power loss mid-save) must
+                # not wedge the scheduler forever: this runs at the top of
+                # every cycle, the loop's blanket except would swallow the
+                # crash each tick, and the pre-cycle beat keeps watchdogs
+                # happy — so no task would ever run again and nothing would
+                # restart us. Archive the evidence and reseed from empty
+                # (all tasks eligible again, same as a fresh install).
+                corrupt = self.state_file.with_suffix(
+                    self.state_file.suffix + ".corrupt")
+                try:
+                    os.replace(self.state_file, corrupt)
+                except OSError:
+                    pass
+                self._log(f"heartbeat_state.json unreadable ({e}) — archived "
+                          f"to {corrupt.name}, reseeding from empty state",
+                          level="error")
         return {}
 
     def load_interval_overrides(self) -> dict:
@@ -609,10 +627,17 @@ class HeartbeatRunner:
                 else task["interval"])
 
     def save_state(self, state: dict):
-        """Atomic write: temp + rename prevents corrupted state on crash."""
+        """Atomic write: temp + fsync + rename. The rename alone protects
+        against a process crash, but not power loss: APFS may commit the
+        rename metadata before the temp file's DATA reaches disk, leaving a
+        0-byte/truncated file under the final name after a forced shutdown.
+        fsync before the rename closes that window."""
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
-        tmp.write_text(json.dumps(state, indent=2))
+        with open(tmp, "w") as f:
+            f.write(json.dumps(state, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.state_file)
 
     def run_script(self, script_path: str, stdin_data: str = "") -> str:
@@ -839,11 +864,21 @@ You have access to the user's memory below. Use it to personalize your responses
                         f"Retrying Claude heartbeat with {provider} fallback model: {nxt}")
                     model = nxt
                     continue
+                # `or gate_state != "primary"`: while the outage flag is set,
+                # this call is an elected probe — a probe that fails for ANY
+                # reason (403 auth wall, ConnectionRefused, captive portal)
+                # simply failed its probe and must fall back to the known-good
+                # backup, not report a failed cycle. The tight model-error
+                # signatures don't match those errors, so before this the
+                # probe dead-ended: 7/10 two probes burned on '403 Request
+                # not allowed' pushed the shared backoff to 3600s while the
+                # backup was healthy. The gate flag is deliberately NOT
+                # cleared here — only a primary success (above) clears it.
                 if (not use_backup and not backup_tried
                         and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
                         and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP_BASE_URL")
-                        and model_problem):
+                        and (model_problem or gate_state != "primary")):
                     backup_tried = True
                     use_backup = True
                     model = self.model

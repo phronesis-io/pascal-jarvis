@@ -2,6 +2,8 @@
 
 import importlib.util
 import json
+import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -171,3 +173,75 @@ def test_handle_card_memorial_failure_returns_info_toast(monkeypatch, capsys):
                                  "content": "出错了，直接在对话里告诉我"}}
     err = capsys.readouterr().err
     assert "card memorial failed" in err and "ledger on fire" in err
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Audit 2026-07-10 — disconnect watchdog: a once-connected sidecar whose link
+# stays down must exit (bot.sh's 5s loop respawns it); a cold start that never
+# connected must NOT exit (offline flight → SDK infinite retry, no restart
+# storm).
+# ──────────────────────────────────────────────────────────────────────────
+
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_watchdog_never_fires_before_first_connect():
+    clock = _Clock()
+    wd = sidecar.DisconnectWatchdog(lambda: False, exit_after_s=600,
+                                    clock=clock)
+    for _ in range(100):
+        clock.t += 300  # hours offline, never connected once
+        assert wd.should_exit() is False
+
+
+def test_watchdog_fires_after_sustained_disconnect():
+    clock = _Clock()
+    state = {"up": True}
+    wd = sidecar.DisconnectWatchdog(lambda: state["up"], exit_after_s=600,
+                                    clock=clock)
+    assert wd.should_exit() is False  # connected → watchdog armed
+    state["up"] = False
+    assert wd.should_exit() is False  # first down tick starts the timer
+    clock.t += 599
+    assert wd.should_exit() is False  # still within SDK self-heal budget
+    clock.t += 2
+    assert wd.should_exit() is True   # sustained outage → die, get respawned
+
+
+def test_watchdog_reconnect_resets_timer():
+    clock = _Clock()
+    state = {"up": True}
+    wd = sidecar.DisconnectWatchdog(lambda: state["up"], exit_after_s=600,
+                                    clock=clock)
+    wd.should_exit()
+    state["up"] = False
+    wd.should_exit()  # timer starts
+    clock.t += 590
+    assert wd.should_exit() is False
+    state["up"] = True
+    assert wd.should_exit() is False  # SDK self-healed (the primary path)
+    state["up"] = False
+    wd.should_exit()  # timer restarts from zero
+    clock.t += 599
+    assert wd.should_exit() is False
+
+
+def test_sdk_logs_move_to_stderr():
+    # lark_oapi logs to a StreamHandler(sys.stdout) — on the sidecar that
+    # stream IS the NDJSON event pipe. The redirect must leave no handler
+    # writing to stdout (forensics go to stderr → LOG_FILE instead).
+    sdk_logger = logging.getLogger("Lark")
+    h = logging.StreamHandler(sys.stdout)
+    sdk_logger.addHandler(h)
+    try:
+        sidecar._redirect_sdk_logs_to_stderr()
+        assert all(getattr(x, "stream", None) is not sys.stdout
+                   for x in sdk_logger.handlers)
+        assert h.stream is sys.stderr
+    finally:
+        sdk_logger.removeHandler(h)
