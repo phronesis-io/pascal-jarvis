@@ -13,6 +13,7 @@ Input (stdin): Claude's reply, e.g.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -113,16 +114,25 @@ def main() -> int:
     # Push mail now goes out as a memorial (奏折) card — fyi buttons
     # (已阅 / 重要，持续盯) plus「💬 聊聊这个」. Silent triage, dedup and the
     # quiet-hours gate above are untouched; only the push CARRIER changed.
-    # If the direct send fails, print the SAME memorial card so the heartbeat
-    # CARD: channel (with its own retries) delivers it — buttons still work,
-    # the sidecar doesn't care who sent the card. If memorial itself blows
-    # up, fall back to the legacy plain card so mail is never lost.
+    # This post-hook owns no delivery channel: create the ledger entry without
+    # sending, then print the card for heartbeat_loop's reliable CARD route.
+    # Keeping one sender avoids double-delivery and makes retry/dead-letter /
+    # outbox accounting uniform. If memorial itself blows up, fall back to the
+    # legacy plain card so mail is never lost.
     try:
         from core import memorial
-        mem_id, sent = memorial.create(source="mail", title="邮件", body=body,
-                                       preset="fyi")
-        if not sent:
-            print(memorial.card_json(mem_id))
+        mem_id, _ = memorial.create(source="mail", title="邮件", body=body,
+                                    preset="fyi", send=False)
+        if urgent:
+            # Bypass heartbeat_loop's own quiet-hours queue too; this item has
+            # already passed the mail task's explicit urgent gate.
+            try:
+                Path(os.environ.get(
+                    "JARVIS_DIR", Path(__file__).resolve().parent.parent
+                )).joinpath(".urgent_send").touch()
+            except OSError:
+                pass
+        print(memorial.card_json(mem_id))
     except Exception as e:
         print(f"[mail-triage] memorial failed, using plain card: {e}",
               file=sys.stderr)

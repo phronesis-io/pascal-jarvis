@@ -35,6 +35,14 @@ from pathlib import Path
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
                                  Path(__file__).resolve().parent.parent))
 
+# Script execution puts scripts/ (not the repo root) at sys.path[0], and the
+# cwd is never added — so the lazy `import core.*` below (memorial, and the
+# long-latent core.intentions in _intent_close_payload) raises
+# ModuleNotFoundError in production while pytest masks it (conftest inserts
+# the rootdir). Bootstrap the repo root explicitly, same idiom as
+# tasks/mail_triage_post.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 def _app_id() -> str:
     if os.environ.get("LARK_APP_ID"):
@@ -144,7 +152,8 @@ def _handle_card_action(value: dict) -> dict:
     if action == "memorial":
         # 奏折 batch route: every memorial card's buttons land here —
         # opt=="chat" opens a conversation, anything else is a 批红.
-        # Lazy import like intent_close (bot.sh starts us with cwd=JARVIS_DIR).
+        # Lazy import like intent_close (works via the repo-root sys.path
+        # bootstrap at the top of this file — cwd alone is NOT enough).
         mem_id = str(value.get("id", ""))
         opt = str(value.get("opt", ""))
         try:

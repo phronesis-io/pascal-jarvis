@@ -195,6 +195,7 @@ def test_post_urgent_breaks_through_quiet_hours(tmp_path):
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
     assert "紧急" in out
+    assert (tmp_path / ".urgent_send").exists()
 
 
 def test_post_parse_failure_does_not_record(tmp_path):

@@ -36,6 +36,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(memorial, "_send_card", fake_send_card)
     monkeypatch.setattr(memorial, "_send_text", fake_send_text)
     monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    # Most tests care about chat semantics, not thread scheduling. Keep them
+    # deterministic; the dedicated async test below covers non-blocking send.
+    monkeypatch.setattr(memorial, "_send_opener_async",
+                        lambda text, chat_id: memorial._deliver_opener(text, chat_id))
     return rec
 
 
@@ -55,11 +60,12 @@ def test_create_writes_ledger_sends_card_and_mirrors_outbox(env):
     assert mid.startswith("mem_")
     assert sent is True
     events = _ledger_events(env.dir)
-    assert len(events) == 1
+    assert [e["ev"] for e in events] == ["create", "delivery"]
     ev = events[0]
     assert ev["ev"] == "create" and ev["id"] == mid
     assert ev["source"] == "mail" and ev["title"] == "测试标题"
     assert [o["key"] for o in ev["options"]] == ["approve", "defer", "reject"]
+    assert events[1]["status"] == "delivered"
     # direct send mirrored into the outbox so the main session knows
     outbox = (env.dir / "heartbeat_outbox.jsonl").read_text()
     assert "测试标题" in outbox and '"source": "memorial"' in outbox
@@ -177,8 +183,8 @@ def test_decide_runs_action_through_action_processor(env, monkeypatch):
 
     assert calls == ["id=int_1|outcome=done"]
     assert payload["toast"]["type"] == "success"
-    decides = [e for e in _ledger_events(env.dir) if e["ev"] == "decide"]
-    assert decides[0]["action_result"] == "Closure recorded"
+    results = [e for e in _ledger_events(env.dir) if e["ev"] == "action_result"]
+    assert results[0]["result"] == "Closure recorded"
     # result surfaced on the replacement card
     assert "Closure recorded" in payload["card"]["data"]["elements"][0]["text"]["content"]
 
@@ -202,8 +208,8 @@ def test_decide_action_failure_still_records_with_info_toast(env, monkeypatch):
 
     assert payload["toast"]["type"] == "info"
     assert "出错" in payload["toast"]["content"]
-    decides = [e for e in _ledger_events(env.dir) if e["ev"] == "decide"]
-    assert decides[0]["action_result"].startswith("FAILED")
+    results = [e for e in _ledger_events(env.dir) if e["ev"] == "action_result"]
+    assert results[0]["result"].startswith("FAILED")
     assert memorial.get_memorial(mid)["status"] == "decided"
 
 
@@ -233,7 +239,9 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert len(entry["summary"]) <= 1500
 
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
-    assert [e["ev"] for e in _ledger_events(env.dir)] == ["create", "chat"]
+    assert [e["ev"] for e in _ledger_events(env.dir)] == [
+        "create", "delivery", "chat"
+    ]
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
     assert "💬 聊天中" in body
@@ -269,6 +277,18 @@ def test_chat_group_card_uses_chat_id_as_conv_key(env):
     assert entry["conv_key"] == "oc_group1"
 
 
+def test_chat_retap_does_not_duplicate_opener_or_injection(env):
+    mid, _ = memorial.create("mail", "t", "b", preset="fyi")
+    memorial.chat(mid)
+    payload = memorial.chat(mid)
+
+    assert payload["toast"]["type"] == "info"
+    assert len(env.texts) == 1
+    pending = (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()
+    assert len(pending) == 1
+    assert len([e for e in _ledger_events(env.dir) if e["ev"] == "chat"]) == 1
+
+
 # ── ledger fold / list ───────────────────────────────────────────────────
 
 
@@ -290,8 +310,40 @@ def test_fold_skips_malformed_ledger_lines(env):
 
 
 def test_ids_are_unique(env):
-    ids = {memorial.create("x", "t", "b", preset="fyi")[0] for _ in range(5)}
+    ids = {memorial.create("x", "t", f"b{i}", preset="fyi")[0]
+           for i in range(5)}
     assert len(ids) == 5
+
+
+def test_duplicate_delivered_memorial_is_not_resent(env):
+    first, sent = memorial.create("x", "t", "b", preset="fyi")
+    second, resent = memorial.create("x", "t", "b", preset="fyi")
+
+    assert sent is True and resent is True
+    assert second == first
+    assert len(env.cards) == 1
+
+
+def test_duplicate_failed_memorial_retries_same_ledger_entry(env):
+    env.send_ok = False
+    first, sent = memorial.create("x", "t", "b", preset="fyi")
+    env.send_ok = True
+    second, resent = memorial.create("x", "t", "b", preset="fyi")
+
+    assert sent is False and resent is True
+    assert second == first
+    assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
+    assert memorial.get_memorial(first)["delivery_status"] == "delivered"
+
+
+def test_quiet_hours_queue_records_delivery_without_direct_send(env, monkeypatch):
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: True)
+    mid, queued = memorial.create("x", "t", "b", preset="fyi")
+
+    assert queued is True
+    assert env.cards == []
+    assert memorial.get_memorial(mid)["delivery_status"] == "queued"
+    assert mid in (env.dir / "night_queue.jsonl").read_text()
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -349,10 +401,24 @@ def test_cli_bad_option_spec_is_usage_error(env, capsys):
     assert _ledger_events(env.dir) == []
 
 
+def test_send_timeout_retries_and_never_claims_delivery(monkeypatch):
+    calls = []
+
+    def timeout(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise memorial.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(memorial.subprocess, "run", timeout)
+    monkeypatch.setattr(memorial.time, "sleep", lambda _seconds: None)
+
+    assert memorial._send(["--user-id", "ou_test", "--markdown", "x"]) is False
+    assert len(calls) == 3
+
+
 # ── mail triage integration (post script carrier swap) ──────────────────
 
 
-def test_mail_post_sends_memorial_card(tmp_path, monkeypatch):
+def test_mail_post_emits_memorial_card(tmp_path, monkeypatch, capsys):
     """mail_triage_post push path now goes through memorial.create; the
     quiet-hours / triaged bookkeeping is exercised by test_mail_triage.py —
     here we only pin the carrier swap at the module level."""
@@ -362,11 +428,6 @@ def test_mail_post_sends_memorial_card(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
     monkeypatch.setenv("JARVIS_EF_QUIET_OVERRIDE", "awake")
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    sent = []
-    monkeypatch.setattr(memorial, "_send_card",
-                        lambda cj, chat_id="": sent.append(cj) or True)
-    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
-
     spec = importlib.util.spec_from_file_location(
         "mail_triage_post_t", root / "tasks" / "mail_triage_post.py")
     post = importlib.util.module_from_spec(spec)
@@ -376,8 +437,7 @@ def test_mail_post_sends_memorial_card(tmp_path, monkeypatch):
     spec.loader.exec_module(post)
     assert post.main() == 0
 
-    assert len(sent) == 1
-    card = json.loads(sent[0])
+    card = json.loads(capsys.readouterr().out)
     assert card["header"]["title"]["content"] == "📜 📬 邮件"
     assert "来自 X 的邮件" in card["elements"][0]["text"]["content"]
     labels = [a["text"]["content"] for a in card["elements"][1]["actions"]]

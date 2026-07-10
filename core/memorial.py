@@ -15,10 +15,11 @@ on read. Writes are O_APPEND single small lines (atomic, safe across the
 sidecar process and any CLI caller; core.jsonl.append_jsonl's
 read-modify-write is NOT safe here).
 
-Sending clones core.heartbeat_loop._lark_send_card (the production-proven
-lark-cli path, including the timeout-means-delivered tradeoff). Successful
-sends are mirrored into heartbeat_outbox.jsonl so the main session knows the
-card went out (direct sends bypass the heartbeat delivery loop's outbox).
+Direct sending uses the same bounded retry profile as the heartbeat delivery
+layer. A timeout is a failed attempt, never proof of delivery. Delivery state
+is appended to the ledger so dedup does not turn a failed first attempt into
+six hours of silence. Successful direct sends are mirrored into
+heartbeat_outbox.jsonl so the main session knows the card went out.
 
 CLI (any emitter can send a memorial in one line):
     python3 -m core.memorial send --source mail --title "..." --body "..." \
@@ -35,6 +36,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -50,10 +52,21 @@ JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
 CHAT_OPT_KEY = "chat"
 CHAT_BUTTON_LABEL = "💬 聊聊这个"
 
-# Same retry profile as core.heartbeat_loop (REQ-11). A local lark-cli
-# timeout is treated as delivered — see _send() for the duplicate-vs-loss
-# tradeoff inherited from heartbeat_loop._lark_send_card.
+# Same retry profile as core.heartbeat_loop (REQ-11).
 SEND_RETRY_DELAYS = (2, 5)
+
+# A re-tap of「聊聊这个」within this window is a no-op (the first tap already
+# sent the opener + queued the injection): Lark re-pushes un-ACKed callback
+# events and Pascal re-taps after a client-side "操作失败", so chat() must not
+# stack duplicate openers/injections.
+CHAT_RETAP_THROTTLE_S = 120
+
+# Identical pending memorial within this window → don't create/send another.
+# Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
+# same error card 7 times in 12h); the outbox-based dedup there can't see
+# memorial cards because each embeds a unique id, so we dedup on content at
+# the ledger level instead.
+DEDUP_WINDOW_S = 6 * 3600
 
 # Common 批红 combos so emitters don't hand-roll options. All record-only
 # (action=None): the tap writes the ledger, which heartbeat tasks and the
@@ -149,6 +162,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
             states[mid] = {
                 "id": mid,
                 "ts": e.get("ts", ""),
+                "epoch": e.get("epoch", 0),
                 "source": str(e.get("source", "")),
                 "title": str(e.get("title", "")),
                 "body": str(e.get("body", "")),
@@ -161,6 +175,9 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "decided_ts": "",
                 "action_result": "",
                 "chat_ts": "",
+                "chat_epoch": 0,
+                "delivery_status": "not_sent",
+                "delivery_ts": "",
             }
         elif ev == "decide":
             st = states.get(mid)
@@ -170,10 +187,23 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 st["decided_label"] = str(e.get("label", ""))
                 st["decided_ts"] = str(e.get("ts", ""))
                 st["action_result"] = str(e.get("action_result", ""))
+        elif ev == "action_result":
+            # Written after the decide event once the option action ran —
+            # decide() appends the decide event BEFORE executing the action so
+            # a crash mid-action can't lead to a double execution on re-tap.
+            st = states.get(mid)
+            if st is not None:
+                st["action_result"] = str(e.get("result", ""))
         elif ev == "chat":
             st = states.get(mid)
             if st is not None:
                 st["chat_ts"] = str(e.get("ts", ""))
+                st["chat_epoch"] = e.get("epoch", 0)
+        elif ev == "delivery":
+            st = states.get(mid)
+            if st is not None:
+                st["delivery_status"] = str(e.get("status", "unknown"))
+                st["delivery_ts"] = str(e.get("ts", ""))
     return states
 
 
@@ -259,11 +289,7 @@ def _send(args: list[str]) -> bool:
             if r.returncode == 0:
                 return True
         except subprocess.TimeoutExpired:
-            # Local timeout ≠ undelivered — on a slow link the message is
-            # usually already out. Assume delivered rather than re-send a
-            # duplicate (same tradeoff as heartbeat_loop._lark_send_card).
-            print("memorial send timed out — assuming delivered", file=sys.stderr)
-            return True
+            print(f"memorial send attempt {attempt} timed out", file=sys.stderr)
         except Exception as e:
             print(f"memorial send attempt {attempt} failed: {e}", file=sys.stderr)
     return False
@@ -302,6 +328,64 @@ def _write_outbox(text: str) -> None:
                                   "ts": now_local_str(), "source": "memorial"})
 
 
+def _record_delivery(memorial_id: str, status: str) -> None:
+    _append_line(_ledger_path(), {
+        "ev": "delivery", "id": memorial_id, "status": status,
+        "ts": now_local_str(),
+    })
+
+
+def _quiet_hours_now() -> bool:
+    """Delegate to the delivery layer's quiet-hours clock (23:30-10:00).
+
+    Direct sends must respect the same night gate as everything else — the
+    whole point of the night queue is that a 2am non-urgent ask waits for
+    morning. Fail-open (send) if the import ever breaks: losing a delivery
+    is worse than a rare night ping."""
+    try:
+        from core.heartbeat_loop import _in_quiet_hours
+        return _in_quiet_hours()
+    except Exception:
+        return False
+
+
+def _queue_for_morning(mid: str, card_json_str: str, title: str) -> None:
+    """Append the memorial's readable text to the heartbeat night queue.
+
+    Same entry schema heartbeat_loop._queue_for_morning writes; the morning
+    batch flush delivers it inside the digest (audited, capped). Buttons don't
+    survive the text digest, but the memorial stays pending in the ledger —
+    Pascal can批示 by replying, and `list --pending` keeps it visible."""
+    readable = extract_card_text(card_json_str) or f"📜 {title}"
+    text = readable + f"\n\n（奏折 {mid} 夜间入队，直接回消息批示即可）"
+    _append_line(JARVIS_DIR / "night_queue.jsonl",
+                 {"ts": now_local_str(), "epoch": int(time.time()),
+                  "text": text, "source": "memorial"})
+
+
+# Handle to the last opener-send thread — chat() runs inside the sidecar's
+# websocket callback, which must return within Lark's 3s ACK budget; a
+# synchronous lark-cli send (retries + sleeps, worst case ~52s) would freeze
+# the single event loop that forwards ALL of Pascal's messages. Module-level
+# so tests can join() it deterministically.
+_opener_thread: threading.Thread | None = None
+
+
+def _deliver_opener(text: str, chat_id: str) -> None:
+    try:
+        if _send_text(text, chat_id):
+            _write_outbox(text)
+    except Exception as e:
+        print(f"memorial opener send failed: {e}", file=sys.stderr)
+
+
+def _send_opener_async(text: str, chat_id: str) -> None:
+    global _opener_thread
+    _opener_thread = threading.Thread(target=_deliver_opener,
+                                      args=(text, chat_id), daemon=True)
+    _opener_thread.start()
+
+
 # ── option normalization ────────────────────────────────────────────────
 
 
@@ -331,20 +415,74 @@ def _normalize_options(options: list[dict] | None, preset: str | None) -> list[d
 # ── public API ──────────────────────────────────────────────────────────
 
 
+def _find_recent_duplicate(source: str, title: str, body: str) -> dict | None:
+    """A still-pending memorial with identical content created within the
+    dedup window — the signature of an emitter stuck in a retry loop."""
+    now = time.time()
+    for st in _fold(read_jsonl(_ledger_path())).values():
+        if (st["status"] == "pending"
+                and st["source"] == source and st["title"] == title
+                and st["body"] == body
+                and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
+            return st
+    return None
+
+
+def _deliver_existing(state: dict, urgent: bool = False) -> bool:
+    """Deliver an already-ledgered memorial and record the outcome."""
+    mid = state["id"]
+    cj = build_card(_header(state), state["body"], buttons=_buttons(state))
+    if not urgent and _quiet_hours_now():
+        _queue_for_morning(mid, cj, state["title"])
+        _record_delivery(mid, "queued")
+        print(f"memorial {mid}: quiet hours — queued for the morning digest",
+              file=sys.stderr)
+        return True
+
+    sent = _send_card(cj, state.get("chat_id", ""))
+    _record_delivery(mid, "delivered" if sent else "failed")
+    if sent:
+        readable = extract_card_text(cj) or f"📜 {state['title']}"
+        _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
+    return sent
+
+
 def create(source: str, title: str, body: str, options: list[dict] | None = None,
            preset: str | None = None, context: str = "",
-           chat_id: str = "") -> tuple[str, bool]:
+           chat_id: str = "", send: bool = True,
+           urgent: bool = False) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and send the card.
 
     Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
     so a failed send still leaves a queryable record (list --pending) and the
     caller can re-deliver via card_json().
+
+    send=False skips delivery entirely (no direct send, no outbox mirror) —
+    for emitters that own a delivery channel with its own retries/dedup/night
+    gate, e.g. a heartbeat post-script printing card_json() to the CARD pipe.
+
+    Direct sends respect the delivery layer's gates: an identical pending
+    memorial within 6h is not re-created (returns the existing id), and
+    non-urgent sends during quiet hours (23:30-10:00) go to the night queue
+    instead of buzzing the phone — urgent=True bypasses the night gate.
     """
     opts = _normalize_options(options, preset)
+    source, title, body = str(source), str(title), str(body)
+
+    dup = _find_recent_duplicate(source, title, body)
+    if dup is not None:
+        print(f"memorial dedup: identical pending {dup['id']} within "
+              f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
+        if not send:
+            return dup["id"], False
+        if dup.get("delivery_status") in {"delivered", "queued"}:
+            return dup["id"], True
+        return dup["id"], _deliver_existing(dup, urgent=urgent)
+
     mid = _new_id()
     ts = now_local_str()
-    ev = {"ev": "create", "id": mid, "ts": ts, "source": str(source),
-          "title": str(title), "body": str(body), "options": opts,
+    ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
+          "source": source, "title": title, "body": body, "options": opts,
           "context": str(context)}
     if chat_id:
         ev["chat_id"] = str(chat_id)
@@ -352,11 +490,9 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     state = _fold([ev])[mid]
     cj = build_card(_header(state), state["body"], buttons=_buttons(state))
-    sent = _send_card(cj, chat_id)
-    if sent:
-        readable = extract_card_text(cj) or f"📜 {title}"
-        _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
-    return mid, sent
+    if not send:
+        return mid, False
+    return mid, _deliver_existing(state, urgent=urgent)
 
 
 def _execute_action(action: dict) -> str:
@@ -397,6 +533,14 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     if opt is None:
         return {"toast": {"type": "info", "content": "出错了，直接在对话里告诉我"}}
 
+    # Ledger BEFORE action: if the process dies mid-action, a re-tap hits the
+    # 「已批过」idempotence branch instead of re-running the side effect (a
+    # lost action beats a double calendar event). The result is back-filled
+    # as a separate action_result event.
+    ts = now_local_str()
+    _append_line(_ledger_path(), {"ev": "decide", "id": memorial_id, "ts": ts,
+                                  "opt": opt_key, "label": opt.get("label", "")})
+
     action_result, action_failed = "", False
     if opt.get("action"):
         try:
@@ -404,11 +548,10 @@ def decide(memorial_id: str, opt_key: str) -> dict:
         except Exception as e:
             action_result = f"FAILED: {e}"
             action_failed = True
+        _append_line(_ledger_path(), {"ev": "action_result", "id": memorial_id,
+                                      "ts": now_local_str(),
+                                      "result": action_result})
 
-    ts = now_local_str()
-    _append_line(_ledger_path(), {"ev": "decide", "id": memorial_id, "ts": ts,
-                                  "opt": opt_key, "label": opt.get("label", ""),
-                                  "action_result": action_result})
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
@@ -426,48 +569,75 @@ def _status_line(st: dict) -> str:
     return f"待批（选项：{labels}）"
 
 
+def _injection_queued(conv_key: str, job_id: str) -> bool:
+    """True if this memorial's context injection is already waiting in
+    pending_merge (queued but not yet consumed by bot.sh)."""
+    return any(e.get("conv_key") == conv_key and e.get("job_id") == job_id
+               for e in read_jsonl(_pending_merge_path()))
+
+
 def chat(memorial_id: str) -> dict:
-    """「聊聊这个」: send a conversation opener + inject the memorial's full
-    context into bot.sh's pending-merge channel so Pascal's next message
-    arrives with the topic loaded. Returns the card-callback payload."""
+    """「聊聊这个」: inject the memorial's full context into bot.sh's
+    pending-merge channel (so Pascal's next message arrives with the topic
+    loaded) + send a conversation opener. Returns the card-callback payload.
+
+    Runs inside the sidecar's websocket callback (3s ACK budget, single event
+    loop): only fast local file ops happen here — the opener's lark-cli send
+    (retries, worst case tens of seconds) goes to a background thread.
+
+    Idempotent-ish: a re-tap within CHAT_RETAP_THROTTLE_S (client-side
+    "操作失败" re-taps, Lark re-pushing un-ACKed events) is a no-op, and the
+    injection is never queued twice while unconsumed.
+    """
     st = get_memorial(memorial_id)
     if st is None:
         return {"toast": {"type": "info",
                           "content": "这张卡对应的事项找不到了，直接在对话里告诉我"}}
     ts = now_local_str()
 
-    # 1. Opener so Pascal has something to reply to.
-    snippet = st["body"][:200]
-    opener = f"📜 聊聊：{st['title']}\n{snippet}\n——你想怎么处理这件事？"
-    opener_sent = _send_text(opener, st.get("chat_id", ""))
-    if opener_sent:
-        _write_outbox(opener)
+    if st.get("chat_epoch") and time.time() - st["chat_epoch"] < CHAT_RETAP_THROTTLE_S:
+        print(f"memorial chat re-tap throttled: id={memorial_id}", file=sys.stderr)
+        return {"toast": {"type": "info", "content": "已在聊了——直接回消息就行"},
+                "card": {"type": "raw",
+                         "data": _chatting_card(st, st["chat_ts"] or ts)}}
 
-    # 2. One-shot context injection: bot.sh prepends matching lines to the
-    #    next message from this conv_key and consumes them (multiple queued
+    # 1. One-shot context injection FIRST (it's the soul of the flow — the
+    #    opener is only garnish): bot.sh prepends matching lines to the next
+    #    message from this conv_key and consumes them (multiple queued
     #    memorials merge automatically). conv_key mirrors bot.sh: p2p =
-    #    Pascal's open_id, group = chat_id.
+    #    Pascal's open_id, group = chat_id. Injecting before the opener send
+    #    means Pascal's immediate reply can't race past a slow opener.
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if conv_key:
-        parts = [
-            "[奏折上下文] Pascal 在奏折卡上点了「💬 聊聊这个」，他接下来要聊的就是这件事：",
-            f"来源: {st['source']}",
-            f"标题: {st['title']}",
-            f"正文: {st['body']}",
-        ]
-        if st.get("context"):
-            parts.append(f"背景: {st['context']}")
-        parts.append(f"当前状态: {_status_line(st)}")
-        parts.append("直接接住这个话题，别重复念卡片内容。")
-        _append_line(_pending_merge_path(), {
-            "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
-            "ts": ts, "summary": "\n".join(parts)[:1500],
-        })
+        if _injection_queued(conv_key, f"memorial:{memorial_id}"):
+            print(f"memorial chat: injection for {memorial_id} already queued",
+                  file=sys.stderr)
+        else:
+            parts = [
+                "[奏折上下文] Pascal 在奏折卡上点了「💬 聊聊这个」，他接下来要聊的就是这件事：",
+                f"来源: {st['source']}",
+                f"标题: {st['title']}",
+                f"正文: {st['body']}",
+            ]
+            if st.get("context"):
+                parts.append(f"背景: {st['context']}")
+            parts.append(f"当前状态: {_status_line(st)}")
+            parts.append("直接接住这个话题，别重复念卡片内容。")
+            _append_line(_pending_merge_path(), {
+                "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
+                "ts": ts, "summary": "\n".join(parts)[:1500],
+            })
     else:
         print(f"memorial chat: no conv_key for {memorial_id} — context not injected",
               file=sys.stderr)
 
-    _append_line(_ledger_path(), {"ev": "chat", "id": memorial_id, "ts": ts})
+    _append_line(_ledger_path(), {"ev": "chat", "id": memorial_id, "ts": ts,
+                                  "epoch": int(time.time())})
+
+    # 2. Opener so Pascal has something to reply to — off the callback thread.
+    snippet = st["body"][:200]
+    opener = f"📜 聊聊：{st['title']}\n{snippet}\n——你想怎么处理这件事？"
+    _send_opener_async(opener, st.get("chat_id", ""))
 
     return {"toast": {"type": "success", "content": "开聊——直接回消息就行"},
             "card": {"type": "raw", "data": _chatting_card(st, ts)}}
