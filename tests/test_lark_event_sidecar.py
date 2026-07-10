@@ -107,3 +107,67 @@ def test_handle_card_intent_close_logs_success(monkeypatch, capsys):
 
 def test_handle_card_unknown_action_returns_empty(capsys):
     assert sidecar._handle_card_action({"action": "nonsense"}) == {}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Memorial (奏折) batch route — one generic branch dispatches every memorial
+# card button to core.memorial.decide/chat. Legacy actions must not regress
+# (covered by the tests above running against the same _handle_card_action).
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_handle_card_memorial_decide_routes_and_logs(monkeypatch, capsys):
+    import core.memorial as memorial
+    sentinel = {"toast": {"type": "success", "content": "已批：已阅 ✓"}}
+    calls = []
+
+    def fake_decide(mid, opt):
+        calls.append((mid, opt))
+        return sentinel
+
+    monkeypatch.setattr(memorial, "decide", fake_decide)
+    monkeypatch.setattr(memorial, "chat",
+                        lambda mid: (_ for _ in ()).throw(AssertionError("chat called")))
+
+    payload = sidecar._handle_card_action(
+        {"action": "memorial", "id": "mem_1", "opt": "read"})
+
+    assert payload is sentinel
+    assert calls == [("mem_1", "read")]
+    assert "card memorial handled: id=mem_1 opt=read" in capsys.readouterr().err
+
+
+def test_handle_card_memorial_chat_routes_to_chat(monkeypatch, capsys):
+    import core.memorial as memorial
+    sentinel = {"toast": {"type": "success", "content": "开聊"}}
+    calls = []
+
+    def fake_chat(mid):
+        calls.append(mid)
+        return sentinel
+
+    monkeypatch.setattr(memorial, "chat", fake_chat)
+    monkeypatch.setattr(
+        memorial, "decide",
+        lambda *a: (_ for _ in ()).throw(AssertionError("decide called")))
+
+    payload = sidecar._handle_card_action(
+        {"action": "memorial", "id": "mem_2", "opt": "chat"})
+
+    assert payload is sentinel
+    assert calls == ["mem_2"]
+    assert "card memorial handled: id=mem_2 opt=chat" in capsys.readouterr().err
+
+
+def test_handle_card_memorial_failure_returns_info_toast(monkeypatch, capsys):
+    import core.memorial as memorial
+    monkeypatch.setattr(
+        memorial, "decide",
+        lambda *a: (_ for _ in ()).throw(RuntimeError("ledger on fire")))
+
+    payload = sidecar._handle_card_action(
+        {"action": "memorial", "id": "mem_3", "opt": "read"})
+
+    assert payload == {"toast": {"type": "info",
+                                 "content": "出错了，直接在对话里告诉我"}}
+    err = capsys.readouterr().err
+    assert "card memorial failed" in err and "ledger on fire" in err

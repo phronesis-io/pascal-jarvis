@@ -141,6 +141,22 @@ def _handle_card_action(value: dict) -> dict:
         print(f"card intent_close handled: id={value.get('id', '')} "
               f"outcome={value.get('outcome', 'done')}", file=sys.stderr)
         return payload
+    if action == "memorial":
+        # 奏折 batch route: every memorial card's buttons land here —
+        # opt=="chat" opens a conversation, anything else is a 批红.
+        # Lazy import like intent_close (bot.sh starts us with cwd=JARVIS_DIR).
+        mem_id = str(value.get("id", ""))
+        opt = str(value.get("opt", ""))
+        try:
+            import core.memorial as memorial
+            payload = (memorial.chat(mem_id) if opt == "chat"
+                       else memorial.decide(mem_id, opt))
+            print(f"card memorial handled: id={mem_id} opt={opt}", file=sys.stderr)
+            return payload
+        except Exception as e:
+            print(f"card memorial failed: id={mem_id} opt={opt}: {e}",
+                  file=sys.stderr)
+            return {"toast": {"type": "info", "content": "出错了，直接在对话里告诉我"}}
     return {}
 
 

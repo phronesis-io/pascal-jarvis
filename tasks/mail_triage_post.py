@@ -110,7 +110,23 @@ def main() -> int:
     if not parts:
         return 0
     body = "\n\n———\n\n".join(parts)
-    print(build_card(header="📬 邮件", body=body, source="mail-triage"))
+    # Push mail now goes out as a memorial (奏折) card — fyi buttons
+    # (已阅 / 重要，持续盯) plus「💬 聊聊这个」. Silent triage, dedup and the
+    # quiet-hours gate above are untouched; only the push CARRIER changed.
+    # If the direct send fails, print the SAME memorial card so the heartbeat
+    # CARD: channel (with its own retries) delivers it — buttons still work,
+    # the sidecar doesn't care who sent the card. If memorial itself blows
+    # up, fall back to the legacy plain card so mail is never lost.
+    try:
+        from core import memorial
+        mem_id, sent = memorial.create(source="mail", title="邮件", body=body,
+                                       preset="fyi")
+        if not sent:
+            print(memorial.card_json(mem_id))
+    except Exception as e:
+        print(f"[mail-triage] memorial failed, using plain card: {e}",
+              file=sys.stderr)
+        print(build_card(header="📬 邮件", body=body, source="mail-triage"))
     return 0
 
 

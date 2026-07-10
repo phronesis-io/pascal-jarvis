@@ -37,6 +37,16 @@ audit trail is `sched_events.jsonl` (task_skip reason=silent_output). Do NOT
 "fix" this by re-surfacing them; changing the list requires editing
 SILENT_TASKS, not this doc.
 
+**奏折（Memorial）请示** — 任何任务要请示 Pascal 的事项（拍板、知会、跟进确认），
+用 memorial CLI 发一张带批示按钮的奏折卡，不要发纯文本长段：
+
+    python3 -m core.memorial send --source <task> --title "一句话说清这件事" --body "人话正文，短" --preset decision
+
+presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`（做了/改天/别问）。
+卡片自动带「💬 聊聊这个」按钮。自定义选项：`--option '准=intent_close:id=xxx,outcome=done'`
+（`标签=动作类型:参数` 执行动作，纯 `标签` 只记录）。批示落在 `memorials.jsonl`，
+`python3 -m core.memorial list --pending` 查未批事项。卡片正文说人话：无 SLA/HTTP 码/内部黑话。
+
 ## EigenFlux
 
 ### eigenflux-feed-triage
