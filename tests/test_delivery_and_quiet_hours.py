@@ -8,6 +8,7 @@ import json
 import time
 
 import core.heartbeat_loop as hbl
+from core.card import build_card
 from core.heartbeat_loop import (
     DELIVERY_ALERT_COOLDOWN,
     DELIVERY_ALERT_THRESHOLD,
@@ -55,6 +56,68 @@ def test_night_queue_roundtrip(tmp_path, monkeypatch):
     assert "深夜推荐内容 A" in sent[0] and "深夜推荐内容 B" in sent[0]
     assert "2" in sent[0]  # count in header
     assert not (tmp_path / NIGHT_QUEUE_FILE).exists()  # cleared after flush
+
+
+def _memorial_card(mid: str = "mem_test") -> str:
+    return build_card(
+        "📜 测试奏折", "一张卡说清一件事",
+        buttons=[{"text": "已阅", "value": {
+            "action": "memorial", "id": mid, "opt": "read"}},
+                 {"text": "💬 聊聊这个", "value": {
+                     "action": "memorial", "id": mid, "opt": "chat"}}],
+    )
+
+
+def test_memorial_queues_and_flushes_as_intact_card(tmp_path, monkeypatch):
+    card = _memorial_card()
+    (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
+    _queue_for_morning("CARD:" + card, tmp_path)
+
+    assert not (tmp_path / NIGHT_QUEUE_FILE).exists()
+    queued = [json.loads(line) for line in
+              (tmp_path / hbl.MEMORIAL_QUEUE_FILE).read_text().splitlines()]
+    assert queued[0]["card_json"] == card
+    assert queued[0]["memorial_id"] == "mem_test"
+
+    sent_cards = []
+    sent_texts = []
+    monkeypatch.setattr(
+        hbl, "_lark_send_card",
+        lambda payload, uid, log_file, **kw: sent_cards.append(payload) or True)
+    monkeypatch.setattr(
+        hbl, "_lark_send_text",
+        lambda payload, uid, **kw: sent_texts.append(payload) or True)
+
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
+    assert sent_cards == [card]
+    assert sent_texts == []
+    assert not (tmp_path / hbl.MEMORIAL_QUEUE_FILE).exists()
+    # The outbox keeps readable text, while the sent payload kept its buttons.
+    assert "一张卡说清一件事" in (tmp_path / "heartbeat_outbox.jsonl").read_text()
+    assert "memorial-card-queue" in (tmp_path / "engagement_log.jsonl").read_text()
+
+
+def test_failed_memorial_flush_retains_exact_card(tmp_path, monkeypatch):
+    card = _memorial_card("mem_retry")
+    (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
+    _queue_for_morning(card, tmp_path)
+    monkeypatch.setattr(hbl, "_lark_send_card", lambda *a, **kw: False)
+
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_RETRYABLE
+    kept = json.loads(
+        (tmp_path / hbl.MEMORIAL_QUEUE_FILE).read_text().splitlines()[0])
+    assert kept["card_json"] == card
+    assert kept["retries"] == 1
+    assert not (tmp_path / "heartbeat_outbox.jsonl").exists()
+
+
+def test_memorial_card_timeout_can_be_treated_as_retryable(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise hbl.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(hbl.subprocess, "run", timeout)
+    assert not hbl._lark_send_card(
+        _memorial_card(), "ou_test", "", assume_delivered_on_timeout=False)
 
 
 def test_night_queue_kept_when_send_fails(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+from core.card import build_card
 from core.heartbeat_loop import (
     _route_output, _write_outbox, _record_engagement, _trim_file,
     _sleep_gap_seconds,
@@ -83,6 +84,40 @@ def test_route_output_card():
         mock_card.return_value = True
         _route_output(f"CARD:{card}", "user123", Path("/tmp"))
         mock_card.assert_called_once()
+
+
+def _route_memorial_card(mid="mem_route"):
+    return build_card(
+        "📜 Route", "body",
+        buttons=[{"text": "已阅", "value": {
+            "action": "memorial", "id": mid, "opt": "read"}}],
+    )
+
+
+def test_route_output_records_memorial_delivery(tmp_path):
+    card = _route_memorial_card()
+    with patch("core.heartbeat_loop._lark_send_card", return_value=True):
+        assert _route_output("CARD:" + card, "user123", tmp_path)
+
+    event = json.loads((tmp_path / "memorials.jsonl").read_text().strip())
+    assert event["id"] == "mem_route" and event["status"] == "delivered"
+
+
+def test_route_output_failed_memorial_keeps_card_not_text_fallback(tmp_path):
+    card = _route_memorial_card("mem_failed")
+    (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
+    with patch("core.heartbeat_loop._lark_send_card", return_value=False), \
+         patch("core.heartbeat_loop._lark_send_text") as mock_text:
+        assert not _route_output("CARD:" + card, "user123", tmp_path)
+
+    mock_text.assert_not_called()
+    queued = json.loads(
+        (tmp_path / "memorial_queue.jsonl").read_text().strip())
+    assert queued["memorial_id"] == "mem_failed"
+    assert queued["card_json"] == card
+    events = [json.loads(line) for line in
+              (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    assert events[-1]["status"] == "retry_queued"
 
 
 def test_route_output_blocks_raw_json():

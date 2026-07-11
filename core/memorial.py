@@ -68,6 +68,12 @@ CHAT_RETAP_THROTTLE_S = 120
 # the ledger level instead.
 DEDUP_WINDOW_S = 6 * 3600
 
+# Memorials are never flattened into the ordinary night digest.  A card is
+# the product contract: one event, one intact card, with its options and
+# 「聊聊这个」button still present when it is released after quiet hours.
+# heartbeat_loop owns draining this queue at the normal batch windows.
+MEMORIAL_QUEUE_FILE = "memorial_queue.jsonl"
+
 # Common 批红 combos so emitters don't hand-roll options. All record-only
 # (action=None): the tap writes the ledger, which heartbeat tasks and the
 # main session read back.
@@ -349,18 +355,20 @@ def _quiet_hours_now() -> bool:
         return False
 
 
-def _queue_for_morning(mid: str, card_json_str: str, title: str) -> None:
-    """Append the memorial's readable text to the heartbeat night queue.
+def _queue_for_morning(mid: str, card_json_str: str, title: str,
+                       source: str = "memorial") -> None:
+    """Queue one intact memorial card for the next delivery window.
 
-    Same entry schema heartbeat_loop._queue_for_morning writes; the morning
-    batch flush delivers it inside the digest (audited, capped). Buttons don't
-    survive the text digest, but the memorial stays pending in the ledger —
-    Pascal can批示 by replying, and `list --pending` keeps it visible."""
+    Do not put memorials in ``night_queue.jsonl``: that queue deliberately
+    composes a length-capped text digest, which destroys the card buttons and
+    recreates the exact long/truncated interaction this surface replaces.
+    ``heartbeat_loop._flush_memorial_queue`` sends these entries one by one.
+    """
     readable = extract_card_text(card_json_str) or f"📜 {title}"
-    text = readable + f"\n\n（奏折 {mid} 夜间入队，直接回消息批示即可）"
-    _append_line(JARVIS_DIR / "night_queue.jsonl",
+    _append_line(JARVIS_DIR / MEMORIAL_QUEUE_FILE,
                  {"ts": now_local_str(), "epoch": int(time.time()),
-                  "text": text, "source": "memorial"})
+                  "text": readable, "source": source or "memorial",
+                  "memorial_id": mid, "card_json": card_json_str})
 
 
 # Handle to the last opener-send thread — chat() runs inside the sidecar's
@@ -433,9 +441,9 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     mid = state["id"]
     cj = build_card(_header(state), state["body"], buttons=_buttons(state))
     if not urgent and _quiet_hours_now():
-        _queue_for_morning(mid, cj, state["title"])
+        _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
         _record_delivery(mid, "queued")
-        print(f"memorial {mid}: quiet hours — queued for the morning digest",
+        print(f"memorial {mid}: quiet hours — queued as an intact morning card",
               file=sys.stderr)
         return True
 
@@ -444,6 +452,12 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     if sent:
         readable = extract_card_text(cj) or f"📜 {state['title']}"
         _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
+    else:
+        # A direct CLI emitter has no outer retry loop.  Keep the exact card
+        # for heartbeat_loop to retry at the next delivery window instead of
+        # stranding a pending ledger row that nobody automatically revisits.
+        _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
+        _record_delivery(mid, "retry_queued")
     return sent
 
 
@@ -475,7 +489,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
         if not send:
             return dup["id"], False
-        if dup.get("delivery_status") in {"delivered", "queued"}:
+        if dup.get("delivery_status") in {"delivered", "queued", "retry_queued"}:
             return dup["id"], True
         return dup["id"], _deliver_existing(dup, urgent=urgent)
 
@@ -690,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="'标签[=动作类型:k=v,k=v]'")
     sp.add_argument("--context", default="")
     sp.add_argument("--chat-id", dest="chat_id", default="")
+    sp.add_argument("--urgent", action="store_true",
+                    help="bypass quiet hours (only for genuinely urgent asks)")
 
     lp = sub.add_parser("list", help="print folded ledger states (JSON lines)")
     lp.add_argument("--pending", action="store_true")
@@ -702,7 +718,8 @@ def main(argv: list[str] | None = None) -> int:
                         for i, s in enumerate(args.option, 1)] or None)
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
-                               context=args.context, chat_id=args.chat_id)
+                               context=args.context, chat_id=args.chat_id,
+                               urgent=args.urgent)
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2

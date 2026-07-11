@@ -36,8 +36,15 @@ from core.sched_events import emit as sched_emit
 from core.timeutil import now_local_str
 
 
-def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
-    """Send a Lark interactive card, with retries. Returns True on success."""
+def _lark_send_card(card_json: str, user_id: str, log_file: str,
+                    *, assume_delivered_on_timeout: bool = True) -> bool:
+    """Send a Lark interactive card, with retries. Returns True on success.
+
+    A normal one-off send keeps the historical timeout tradeoff (avoid a
+    duplicate card when the server accepted it but the local response was
+    slow).  A durable queued memorial passes ``False``: its queue entry must
+    survive an ambiguous timeout instead of being deleted as a fake success.
+    """
     if not user_id:
         return False
     for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
@@ -66,9 +73,13 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str) -> bool:
             # toward the user alert. Assume delivered: worst case one message
             # is silently lost on a true network drop, vs guaranteed
             # duplicates the other way.
-            log("heartbeat", "lark_send_card timed out — assuming delivered, no retry",
+            if assume_delivered_on_timeout:
+                log("heartbeat", "lark_send_card timed out — assuming delivered, no retry",
+                    level="warn")
+                return True
+            log("heartbeat", "queued memorial card timed out — keeping it for retry",
                 level="warn")
-            return True
+            return False
         except Exception as e:
             log("heartbeat", f"lark_send_card attempt {attempt} failed: {e}", level="warn")
     return False
@@ -156,20 +167,48 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
 
         if line.startswith("CARD:"):
             card_json = line[5:]
-            if _lark_send_card(card_json, user_id, ""):
+            memorial_id = _memorial_id_from_card(card_json)
+            if _lark_send_card(
+                    card_json, user_id, "",
+                    assume_delivered_on_timeout=not bool(memorial_id)):
                 results.append(True)
+                if memorial_id:
+                    _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
             else:
-                # Fallback to text
-                text = extract_card_text(card_json)
-                if text:
-                    results.append(_lark_send_text(text, user_id))
-                else:
-                    log("heartbeat", "Card send + text extraction both failed", level="warn")
+                if memorial_id:
+                    # A text fallback destroys every 批红/Chat action. Keep
+                    # the exact card for the durable retry queue instead.
+                    _append_memorial_queue_entry(
+                        jarvis_dir, memorial_id, card_json,
+                        _peek_source(jarvis_dir) or "memorial")
+                    _record_memorial_delivery(
+                        jarvis_dir, memorial_id, "retry_queued")
                     results.append(False)
+                else:
+                    # Ordinary legacy cards retain the historical readable
+                    # text fallback; only memorials have a strict card-only
+                    # interaction contract.
+                    text = extract_card_text(card_json)
+                    if text:
+                        results.append(_lark_send_text(text, user_id))
+                    else:
+                        log("heartbeat", "Card send + text extraction both failed", level="warn")
+                        results.append(False)
 
         elif line.startswith('{"config":'):
             # Legacy card format
-            results.append(_lark_send_card(line, user_id, ""))
+            memorial_id = _memorial_id_from_card(line)
+            delivered = _lark_send_card(
+                line, user_id, "",
+                assume_delivered_on_timeout=not bool(memorial_id))
+            if delivered and memorial_id:
+                _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
+            elif not delivered and memorial_id:
+                _append_memorial_queue_entry(
+                    jarvis_dir, memorial_id, line,
+                    _peek_source(jarvis_dir) or "memorial")
+                _record_memorial_delivery(jarvis_dir, memorial_id, "retry_queued")
+            results.append(delivered)
 
         else:
             # Block raw JSON from reaching user
@@ -270,6 +309,12 @@ BATCH_WINDOWS_MIN = (10 * 60, 13 * 60 + 30, 17 * 60 + 30)  # 10:00/13:30/17:30
 BREAKPOINT_RECENCY_SECONDS = 300
 LAST_MSG_MARKER = "/tmp/jarvis-last-msg"  # touched by bot.sh on every inbound msg
 NIGHT_QUEUE_FILE = "night_queue.jsonl"
+# Interactive memorial cards use a separate durable queue.  They must never
+# be folded into NIGHT_QUEUE_FILE's text digest: doing so removes every button
+# and reintroduces long/truncated pushes.  The same quiet-hour/batch-window
+# clock drains both queues, but memorials are sent one card per event.
+MEMORIAL_QUEUE_FILE = "memorial_queue.jsonl"
+MEMORIAL_FLUSH_MAX_CARDS = 6
 # 40, was 20: the 7/7 spend-limit night queued 33 entries and the cap
 # destroyed the 13 oldest. Length-capped entries now roll over to the next
 # flush instead of expiring, so a deeper queue actually drains (3 windows/day
@@ -378,7 +423,8 @@ def _should_flush(jarvis_dir: Path, minutes_of_day: int | None = None,
     """Flush the batch queue when a batch window has opened since the last
     flush, or on a user-activity breakpoint. Never during quiet hours."""
     queue_path = jarvis_dir / NIGHT_QUEUE_FILE
-    if not queue_path.exists():
+    memorial_queue_path = jarvis_dir / MEMORIAL_QUEUE_FILE
+    if not queue_path.exists() and not memorial_queue_path.exists():
         return False
     if _in_quiet_hours(minutes_of_day):
         return False
@@ -510,12 +556,75 @@ def _truncate_entry(text: str, limit: int) -> str:
     return cut.rstrip() + "…(截断)"
 
 
+def _memorial_id_from_card(card_json: str) -> str:
+    """Return the memorial id carried by a card action, or ``""``.
+
+    Looking at the action payload (rather than the header emoji) keeps this
+    robust if the visual design changes and avoids treating ordinary cards as
+    memorials merely because their title contains 📜.
+    """
+    try:
+        card = json.loads(card_json)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    for element in card.get("elements", []):
+        for action in element.get("actions", []):
+            value = action.get("value") or {}
+            if value.get("action") == "memorial" and value.get("id"):
+                return str(value["id"])
+    return ""
+
+
+def _split_memorial_cards(output: str) -> tuple[list[tuple[str, str]], str]:
+    """Extract memorial cards while preserving any unrelated output.
+
+    Returns ``[(memorial_id, card_json), ...], remainder``.  A forced cycle
+    can contain multiple task outputs separated by ``---``; separators left
+    alone after extracting cards are discarded instead of becoming a useless
+    one-line digest entry.
+    """
+    cards: list[tuple[str, str]] = []
+    remainder: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        card_json = line[5:] if line.startswith("CARD:") else line
+        mid = _memorial_id_from_card(card_json) if line else ""
+        if mid:
+            cards.append((mid, card_json))
+        elif line and line != "---":
+            remainder.append(raw_line)
+    return cards, "\n".join(remainder).strip()
+
+
+def _append_memorial_queue_entry(jarvis_dir: Path, memorial_id: str,
+                                 card_json: str, source: str,
+                                 prompt_variants: dict | None = None) -> None:
+    """Append one intact card to the durable memorial delivery queue."""
+    queue_path = jarvis_dir / MEMORIAL_QUEUE_FILE
+    try:
+        for line in queue_path.read_text(encoding="utf-8").splitlines():
+            try:
+                if json.loads(line).get("memorial_id") == memorial_id:
+                    return
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    except OSError:
+        pass
+    entry = {
+        "ts": now_local_str("%Y-%m-%d %H:%M"),
+        "epoch": int(time.time()),
+        "text": extract_card_text(card_json) or f"📜 奏折 {memorial_id}",
+        "source": source or "memorial",
+        "memorial_id": memorial_id,
+        "card_json": card_json,
+    }
+    if prompt_variants:
+        entry["prompt_variants"] = prompt_variants
+    with open(queue_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def _queue_for_morning(output: str, jarvis_dir: Path):
-    readable = extract_readable_from_output(output) or output
-    # Store near-full text; the fair per-entry cap is applied at flush time
-    # when the batch size is known (a single queued message used to be cut
-    # to 600 chars even though the whole digest budget was free).
-    readable = _truncate_entry(readable, NIGHT_DIGEST_MAX_CHARS)
     source = _peek_source(jarvis_dir)
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
     prompt_variants = _consume_prompt_variants(jarvis_dir)
@@ -525,9 +634,34 @@ def _queue_for_morning(output: str, jarvis_dir: Path):
         log("heartbeat", f"Dropped silent-task output instead of queueing (source={source})")
         sched_emit(jarvis_dir, "task_skip", task=source, reason="silent_output")
         return
+    memorial_cards, remainder = _split_memorial_cards(output)
+    queued_ts = now_local_str("%Y-%m-%d %H:%M")
+    queued_epoch = int(time.time())
+
+    # One event stays one intact card.  Never feed these through the ordinary
+    # digest composer, which truncates text and cannot preserve callbacks.
+    if memorial_cards:
+        for mid, card_json in memorial_cards:
+            _append_memorial_queue_entry(
+                jarvis_dir, mid, card_json, source or "memorial",
+                prompt_variants=prompt_variants)
+        log("heartbeat", f"Queued {len(memorial_cards)} intact memorial card(s) "
+            f"(source={source or 'memorial'})")
+
+    if not remainder:
+        quiet = _in_quiet_hours()
+        sched_emit(jarvis_dir, "task_skip", task=source or "heartbeat",
+                   reason="queued_quiet_hours" if quiet else "queued_daytime_batch")
+        return
+
+    readable = extract_readable_from_output(remainder) or remainder
+    # Store near-full text; the fair per-entry cap is applied at flush time
+    # when the batch size is known (a single queued message used to be cut
+    # to 600 chars even though the whole digest budget was free).
+    readable = _truncate_entry(readable, NIGHT_DIGEST_MAX_CHARS)
     # epoch rides along for the age-based expiry check (backlog #4) — the ts
     # string stays the display/legacy field.
-    entry = {"ts": now_local_str("%Y-%m-%d %H:%M"), "epoch": int(time.time()),
+    entry = {"ts": queued_ts, "epoch": queued_epoch,
              "text": readable, "source": source or "heartbeat"}
     if prompt_variants:
         entry["prompt_variants"] = prompt_variants
@@ -564,7 +698,165 @@ def _shadow_audit_claims(output: str, jarvis_dir: Path) -> None:
         pass
 
 
-def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
+def _record_memorial_delivery(jarvis_dir: Path, memorial_id: str,
+                              status: str) -> None:
+    """Append a delivery event to the memorial ledger in this runtime root."""
+    if not memorial_id:
+        return
+    try:
+        with open(jarvis_dir / "memorials.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ev": "delivery", "id": memorial_id,
+                                "status": status, "ts": now_local_str()},
+                               ensure_ascii=False) + "\n")
+    except OSError as e:
+        log("heartbeat", f"memorial delivery ledger update failed: {e}",
+            level="warn")
+
+
+def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
+    """Flush durable memorials one intact card at a time.
+
+    At most ``MEMORIAL_FLUSH_MAX_CARDS`` go out in one window so opening the
+    laptop after a long offline stretch does not create a notification storm.
+    A first transient failure stops the batch (the channel is probably down),
+    keeps that card plus every untouched card, and spaces the retry via the
+    shared attempt stamp.
+    """
+    queue_path = jarvis_dir / MEMORIAL_QUEUE_FILE
+    if not queue_path.exists():
+        return ""
+
+    now = time.time()
+    active: list[dict] = []
+    expired: list[dict] = []
+    malformed: list[dict] = []
+    seen: set[str] = set()
+    try:
+        lines = queue_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return FLUSH_RETRYABLE
+
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        mid = str(entry.get("memorial_id", ""))
+        card_json = str(entry.get("card_json", ""))
+        if not mid or _memorial_id_from_card(card_json) != mid:
+            malformed.append(entry)
+            continue
+        if (_entry_age_seconds(entry, now) > NIGHT_ENTRY_MAX_AGE_S
+                or int(entry.get("retries", 0) or 0) >= NIGHT_FLUSH_MAX_RETRIES):
+            expired.append(entry)
+            continue
+        dedup_key = mid or card_json
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        active.append(entry)
+
+    terminal = malformed + expired
+    if terminal:
+        _audit_flush(jarvis_dir, terminal, "expired",
+                     detail="malformed_card" if malformed and not expired
+                     else "card_expired")
+        for entry in terminal:
+            record_overdue(
+                jarvis_dir, kind="memorial_queue_expired",
+                detail=f"{entry.get('source', 'memorial')}: "
+                       f"{(entry.get('text') or '')[:80]}",
+                due_since=entry.get("ts", ""),
+            )
+            mid = str(entry.get("memorial_id", ""))
+            _record_memorial_delivery(jarvis_dir, mid, "expired")
+
+    if not active:
+        queue_path.unlink(missing_ok=True)
+        return FLUSH_PERMANENT if terminal else ""
+
+    if not user_id:
+        # Configuration may be repaired without restarting this process, so
+        # preserve the cards instead of moving irreplaceable asks to an audit.
+        write_jsonl(queue_path, active)
+        try:
+            (jarvis_dir / BATCH_ATTEMPT_STAMP).write_text(str(now))
+        except OSError:
+            pass
+        _audit_flush(jarvis_dir, active[:1], FLUSH_RETRYABLE,
+                     detail="no user_id; intact cards retained")
+        return FLUSH_RETRYABLE
+
+    selected = active[:MEMORIAL_FLUSH_MAX_CARDS]
+    deferred = active[MEMORIAL_FLUSH_MAX_CARDS:]
+    delivered: list[dict] = []
+    retained: list[dict] = []
+    attempted_failure: dict | None = None
+
+    for index, entry in enumerate(selected):
+        if _lark_send_card(entry["card_json"], user_id, "",
+                           assume_delivered_on_timeout=False):
+            delivered.append(entry)
+            _write_outbox("CARD:" + entry["card_json"], jarvis_dir)
+            mid = str(entry.get("memorial_id", ""))
+            _record_memorial_delivery(jarvis_dir, mid, "delivered")
+            continue
+
+        attempted_failure = entry
+        attempted_failure["retries"] = int(
+            attempted_failure.get("retries", 0) or 0) + 1
+        # Channel is likely down; do not spend minutes retrying every card.
+        retained = selected[index:] + deferred
+        break
+    else:
+        retained = deferred
+
+    if retained:
+        write_jsonl(queue_path, retained)
+    else:
+        queue_path.unlink(missing_ok=True)
+
+    if delivered:
+        _audit_flush(jarvis_dir, delivered, FLUSH_DELIVERED,
+                     detail="intact_memorial_card")
+        ts = now_local_str("%Y-%m-%d %H:%M")
+        epoch = int(time.time())
+        sent_ids = list(_LAST_SENT_IDS)
+        _LAST_SENT_IDS.clear()
+        with open(jarvis_dir / "engagement_log.jsonl", "a", encoding="utf-8") as f:
+            for source in sorted({e.get("source", "memorial") for e in delivered}):
+                row = {"ts": ts, "source": source, "type": "sent",
+                       "via": "memorial-card-queue", "epoch": epoch}
+                for entry in delivered:
+                    if entry.get("source", "memorial") == source:
+                        _merge_prompt_variant(
+                            row, entry.get("prompt_variants", {}).get(source))
+                        break
+                if sent_ids:
+                    row["message_ids"] = sent_ids
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        sched_emit(jarvis_dir, "batch_flush", count=len(delivered),
+                   sources=sorted({e.get("source", "memorial") for e in delivered}),
+                   carrier="memorial-card", deferred_len_cap=len(deferred), dropped=0)
+
+    if attempted_failure is not None:
+        _audit_flush(jarvis_dir, [attempted_failure], FLUSH_RETRYABLE,
+                     detail="intact memorial card retained")
+        try:
+            (jarvis_dir / BATCH_ATTEMPT_STAMP).write_text(str(time.time()))
+        except OSError:
+            pass
+        log("heartbeat", "Memorial card flush failed — intact card retained for retry",
+            level="warn")
+        return FLUSH_RETRYABLE
+
+    _stamp_flush(jarvis_dir)
+    log("heartbeat", f"Flushed {len(delivered)} memorial card(s)"
+        + (f", {len(deferred)} deferred" if deferred else ""))
+    return FLUSH_DELIVERED if delivered else ""
+
+
+def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
     """Send queued night messages as one digest.
 
     Tri-state return (stability backlog #4): FLUSH_DELIVERED when the digest
@@ -759,6 +1051,20 @@ def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
     log("heartbeat", "Night queue flush failed — will retry after "
         f"{BREAKPOINT_FLUSH_MIN_GAP_S // 60}min", level="warn")
     return FLUSH_RETRYABLE
+
+
+def _flush_night_queue(jarvis_dir: Path, user_id: str) -> str:
+    """Flush both quiet-hour carriers, preserving each carrier's contract."""
+    memorial_status = _flush_memorial_queue(jarvis_dir, user_id)
+    text_status = _flush_text_queue(jarvis_dir, user_id)
+    statuses = {memorial_status, text_status}
+    if FLUSH_RETRYABLE in statuses:
+        return FLUSH_RETRYABLE
+    if FLUSH_DELIVERED in statuses:
+        return FLUSH_DELIVERED
+    if FLUSH_PERMANENT in statuses:
+        return FLUSH_PERMANENT
+    return ""
 
 
 DEDUP_WINDOW_SECONDS = 6 * 3600

@@ -112,9 +112,15 @@ def test_create_send_failure_still_ledgered(env):
     mid, sent = memorial.create("mail", "t", "b", preset="fyi")
     assert sent is False
     assert memorial.get_memorial(mid)["status"] == "pending"
+    assert memorial.get_memorial(mid)["delivery_status"] == "retry_queued"
     # no outbox mirror for an unsent card
     assert not (env.dir / "heartbeat_outbox.jsonl").exists()
-    # card_json lets the caller re-deliver through another channel
+    # Exact card is queued for automatic retry; buttons are not flattened.
+    queued = [json.loads(line) for line in
+              (env.dir / memorial.MEMORIAL_QUEUE_FILE).read_text().splitlines()]
+    assert queued[0]["memorial_id"] == mid
+    assert json.loads(queued[0]["card_json"])["elements"][1]["tag"] == "action"
+    # card_json also lets a caller explicitly inspect/re-deliver it.
     card = json.loads(memorial.card_json(mid))
     assert card["header"]["title"]["content"].startswith("📜")
 
@@ -324,7 +330,7 @@ def test_duplicate_delivered_memorial_is_not_resent(env):
     assert len(env.cards) == 1
 
 
-def test_duplicate_failed_memorial_retries_same_ledger_entry(env):
+def test_duplicate_failed_memorial_reuses_durable_queue_entry(env):
     env.send_ok = False
     first, sent = memorial.create("x", "t", "b", preset="fyi")
     env.send_ok = True
@@ -333,7 +339,8 @@ def test_duplicate_failed_memorial_retries_same_ledger_entry(env):
     assert sent is False and resent is True
     assert second == first
     assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
-    assert memorial.get_memorial(first)["delivery_status"] == "delivered"
+    assert memorial.get_memorial(first)["delivery_status"] == "retry_queued"
+    assert len((env.dir / memorial.MEMORIAL_QUEUE_FILE).read_text().splitlines()) == 1
 
 
 def test_quiet_hours_queue_records_delivery_without_direct_send(env, monkeypatch):
@@ -343,7 +350,9 @@ def test_quiet_hours_queue_records_delivery_without_direct_send(env, monkeypatch
     assert queued is True
     assert env.cards == []
     assert memorial.get_memorial(mid)["delivery_status"] == "queued"
-    assert mid in (env.dir / "night_queue.jsonl").read_text()
+    queued_text = (env.dir / memorial.MEMORIAL_QUEUE_FILE).read_text()
+    assert mid in queued_text and '"card_json"' in queued_text
+    assert not (env.dir / "night_queue.jsonl").exists()
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -356,6 +365,16 @@ def test_cli_send_prints_id(env, capsys):
     mid = capsys.readouterr().out.strip()
     assert mid.startswith("mem_")
     assert memorial.get_memorial(mid)["title"] == "T"
+
+
+def test_cli_urgent_bypasses_quiet_hours(env, monkeypatch, capsys):
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: True)
+    rc = memorial.main(["send", "--source", "selfmon", "--title", "T",
+                        "--body", "B", "--preset", "fyi", "--urgent"])
+    assert rc == 0
+    assert len(env.cards) == 1
+    assert not (env.dir / memorial.MEMORIAL_QUEUE_FILE).exists()
+    capsys.readouterr()
 
 
 def test_cli_option_spec_parsing(env, capsys):
