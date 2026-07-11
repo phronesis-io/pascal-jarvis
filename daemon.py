@@ -652,6 +652,8 @@ _DEADLETTER_KIND_LABELS = {
     "night_queue_expired": "攒批消息过期没送出去",
     "night_queue_undeliverable": "攒批消息无法投递",
     "provider_failover": "模型通道切换通知",
+    "reply_send_failed": "对话回复没送出去",
+    "ef_stream_send_failed": "EigenFlux 实时消息没送出去",
 }
 
 
