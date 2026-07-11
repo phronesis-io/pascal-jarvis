@@ -40,7 +40,11 @@ def _user_id() -> str:
     try:
         import yaml
         cfg = yaml.safe_load((ROOT / "jarvis.yaml").read_text()) or {}
-        return (cfg.get("lark", {}) or {}).get("user_open_id", "") or ""
+        lark = cfg.get("lark", {}) or {}
+        # Production config and bot.sh use `user_id`; older installs used
+        # `user_open_id`. Accept both so the independent diagnostic alarm
+        # cannot silently disable itself over a naming drift.
+        return lark.get("user_id", "") or lark.get("user_open_id", "") or ""
     except Exception:
         return ""
 

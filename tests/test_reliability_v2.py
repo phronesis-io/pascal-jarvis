@@ -183,6 +183,13 @@ def test_diag_extract_warnings_scrubs_gate_triggers():
     assert any("repos-sync" in w for w in warns)
 
 
+def test_diag_user_id_accepts_production_config_key(tmp_path, monkeypatch):
+    dp = _load_diag_post()
+    monkeypatch.setattr(dp, "ROOT", tmp_path)
+    (tmp_path / "jarvis.yaml").write_text("lark:\n  user_id: ou_production\n")
+    assert dp._user_id() == "ou_production"
+
+
 def test_diag_alert_dedup_window(tmp_path, monkeypatch):
     dp = _load_diag_post()
     monkeypatch.setattr(dp, "STAMP", tmp_path / "stamp.json")

@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +25,80 @@ from .safety import parse_json_response
 from .sched_events import emit as sched_emit
 from .task_protocol import TaskState
 from .timeutil import now_local_str
+
+
+_ORIGINAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _run_isolated(cmd: list[str], *, timeout: float,
+                  cwd: str | None = None, env: dict | None = None,
+                  input_text: str | None = None) -> subprocess.CompletedProcess:
+    """Run a subprocess with a hard wall-clock timeout on its whole group.
+
+    ``subprocess.run(..., timeout=...)`` kills only the direct child. Claude
+    Code can spawn workflow descendants that inherit stdout/stderr; when the
+    parent is killed those descendants keep the pipes open and Python's
+    post-timeout ``communicate()`` can hang for another hour. A fresh session
+    plus TERM→KILL on the process group makes the timeout a real upper bound.
+
+    The patched-``subprocess.run`` branch preserves the repository's existing
+    lightweight test seam; production always uses the Popen path.
+    """
+    if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+        kwargs = {
+            "capture_output": True, "text": True, "timeout": timeout,
+            "cwd": cwd, "env": env, "start_new_session": True,
+        }
+        if input_text is None:
+            kwargs["stdin"] = subprocess.DEVNULL
+        else:
+            kwargs["input"] = input_text
+        return subprocess.run(cmd, **kwargs)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        # Kill the group even if its leader already exited: descendants may
+        # still own the capture pipes and are the reason run() exceeded its
+        # advertised timeout in the first place.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (proc.stdout, proc.stderr, proc.stdin):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        raise subprocess.TimeoutExpired(
+            cmd=cmd, timeout=timeout,
+            output=getattr(exc, "output", None),
+            stderr=getattr(exc, "stderr", None),
+        ) from None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 # REQ-80: failed task_finish events used to carry no error information at all
@@ -653,13 +728,9 @@ class HeartbeatRunner:
                 cmd = ["python3", str(full_path)]
             else:
                 cmd = [str(full_path)]
-            result = subprocess.run(
-                cmd,
-                input=stdin_data,
-                capture_output=True, text=True,
-                timeout=60,
-                cwd=str(self.jarvis_dir),
-            )
+            result = _run_isolated(
+                cmd, input_text=stdin_data, timeout=60,
+                cwd=str(self.jarvis_dir))
             # stderr is logged regardless of exit code (REQ-35): post-scripts
             # exit 0 by design while reporting failures on stderr — under the
             # old returncode guard the exact failures killing half the fired
@@ -796,13 +867,8 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._log(
                     f"Calling Claude heartbeat provider={provider} model={model or '(default)'}"
                 )
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    timeout=call_timeout, stdin=subprocess.DEVNULL,
-                    cwd=str(self.work_dir),
-                    env=env,
-                    start_new_session=True,  # isolate from parent process group signals
-                )
+                result = _run_isolated(
+                    cmd, timeout=call_timeout, cwd=str(self.work_dir), env=env)
                 if result.returncode == 0:
                     if gate_state != "primary" and not use_backup:
                         # Primary answered while the outage flag was set (we
@@ -963,13 +1029,8 @@ You have access to the user's memory below. Use it to personalize your responses
         except Exception:
             env = None
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=60, stdin=subprocess.DEVNULL,
-                cwd=str(self.work_dir),
-                env=env,
-                start_new_session=True,
-            )
+            result = _run_isolated(
+                cmd, timeout=60, cwd=str(self.work_dir), env=env)
             if result.returncode != 0:
                 return False  # fail-open: deliver
             verdict = result.stdout.strip().upper()
