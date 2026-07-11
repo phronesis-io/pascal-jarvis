@@ -33,6 +33,9 @@ calendar_event_mapping.json
 .session_lock_*
 
 # EigenFlux plugin data (tokens, feed, messages, state)
+# the whole runtime-state dir (anchored: plugins/eigenflux stays tracked) —
+# individual entries below kept for older checkouts that track siblings
+/eigenflux/
 eigenflux/credentials.json
 eigenflux/credentials.json.tmp
 eigenflux/seen_items.json
