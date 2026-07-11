@@ -435,6 +435,11 @@ class ActionProcessor:
         if not iid:
             return ""
         outcome = p.get("outcome", "done").strip()
+        # via must appear BEFORE result= in the params (everything after
+        # result= is folded into the result text below). Memorial closure
+        # buttons pass via=button so closure telemetry keeps distinguishing
+        # one-tap from CLI/marker closures.
+        via = str(p.get("via", "")).strip() or "cli"
         result = ""
         segs = raw.split("|")
         for i, seg in enumerate(segs):
@@ -443,7 +448,7 @@ class ActionProcessor:
                 break
         try:
             from core.intentions import record_closure
-            ok = record_closure(iid, outcome=outcome, result=result)
+            ok = record_closure(iid, outcome=outcome, result=result, via=via)
             return "Closure recorded" if ok else "Intent not found or already closed"
         except Exception:
             return "FAILED"

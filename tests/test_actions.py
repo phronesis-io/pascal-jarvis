@@ -223,3 +223,23 @@ def test_praxis_lifecycle(tmp_path):
     ap.process(f"[ACTION:praxis_remove|id={pid}]")
     items = [json.loads(l) for l in praxis_file.read_text().splitlines() if l.strip()]
     assert len(items) == 0
+
+
+def test_intent_close_via_passthrough(tmp_path, monkeypatch):
+    """Memorial closure buttons pass via=button (placed BEFORE result=); the
+    handler must forward it to record_closure so one-tap telemetry survives
+    the memorial migration. Everything after result= still folds into the
+    result text."""
+    from core import intentions as mod
+    ap = _make_processor(tmp_path)
+    seen = {}
+
+    def fake_record_closure(pid, outcome="done", result="", via="cli"):
+        seen.update(pid=pid, outcome=outcome, result=result, via=via)
+        return True
+
+    monkeypatch.setattr(mod, "record_closure", fake_record_closure)
+    raw = "id=int_x|outcome=done|via=button|result=做了（按钮记录）"
+    assert ap._do_intent_close(raw) == "Closure recorded"
+    assert seen["via"] == "button"
+    assert seen["result"] == "做了（按钮记录）"

@@ -53,6 +53,7 @@ fi
 mkdir -p "$BACKUP_DIR/state"
 for f in heartbeat_state.json active_sessions.json interval_overrides.json \
          engagement_log.jsonl sched_events.jsonl heartbeat_outbox.jsonl \
+         memorials.jsonl memorial_queue.jsonl \
          calendar_event_mapping.json perception_state.json; do
   [ -f "$REPO_DIR/$f" ] && cp "$REPO_DIR/$f" "$BACKUP_DIR/state/" 2>/dev/null
 done

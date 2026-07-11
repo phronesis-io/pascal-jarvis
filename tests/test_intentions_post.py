@@ -18,6 +18,16 @@ ip = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ip)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_memorial(tmp_path, monkeypatch):
+    """Single-intent asks now emit via core.memorial, whose module-level
+    JARVIS_DIR points at the real repo — without this, running the suite
+    writes test memorials into the PRODUCTION ledger (same failure class as
+    the heartbeat-trigger leak fixed in 4cfad93)."""
+    import core.memorial as memorial
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+
+
 @pytest.mark.parametrize("token", [
     "sent", "Sent", "SENT", "done.", "ok", "OK!", "hello", "noted",
     "completed", "已发送", "完成", "收到", "  done  ", "",
@@ -137,9 +147,10 @@ def test_envelope_reconciles_covered_ids(monkeypatch, capsys):
     assert recon_calls == [["int_a"]]
 
 
-def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
-    """REQ-34: a follow-up that is ASKING gets one-tap ✅/❌/🚫 buttons whose
-    value routes intent_close to the sidecar."""
+def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys, tmp_path):
+    """REQ-34 → v1.2 memorial migration: a single-intent ASK goes out as a
+    native memorial — the card's buttons route memorial.decide (plus the
+    auto「聊聊这个」), and the intent_close binding lives in the ledger."""
     import json
     monkeypatch.setattr(ip, "read_inflight", lambda: ["int_fu"])
     monkeypatch.setattr(ip, "reconcile_inflight",
@@ -157,8 +168,44 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys):
     out = capsys.readouterr().out.strip()
     card = json.loads(out)
     blob = json.dumps(card, ensure_ascii=False)
-    assert "intent_close" in blob
-    assert "int_parent" in blob
+    assert '"action": "memorial"' in blob          # buttons route the framework
+    assert '"opt": "chat"' in blob                  # 聊聊这个 auto-appended
+    assert "闭环: 约学妹" in blob                    # title = the intent's name
+    ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
+    assert "intent_close" in ledger and "int_parent" in ledger
+    assert '"via": "button"' in ledger
+
+
+def test_two_intent_ask_keeps_legacy_combined_card(capsys):
+    """memorial.decide locks the whole card on first tap — two intents on one
+    memorial would deadlock each other, so the combined card stays legacy."""
+    import json
+    ip._emit_closure_card("两件事的合并问句", [
+        {"parent": "int_a", "name": "饭局"},
+        {"parent": "int_b", "name": "康复"},
+    ])
+    card = json.loads(capsys.readouterr().out.strip())
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "intent_close" in blob and "int_a" in blob and "int_b" in blob
+    assert '"action": "memorial"' not in blob
+
+
+def test_single_intent_memorial_failure_falls_back_to_legacy(monkeypatch, capsys):
+    """If the memorial layer blows up, the ask still reaches Pascal as the
+    old intent_close card — a framework bug must never eat a follow-up."""
+    import json
+    import core.memorial as memorial
+
+    def boom(*a, **k):
+        raise RuntimeError("ledger on fire")
+
+    monkeypatch.setattr(memorial, "create", boom)
+    ip._emit_closure_card("饭局要跟进吗？", [{"parent": "int_a", "name": "饭局"}])
+    captured = capsys.readouterr()
+    card = json.loads(captured.out.strip())
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "intent_close" in blob and "int_a" in blob
+    assert "memorial failed" in captured.err
 
 
 def test_rendered_closure_card_records_touch(monkeypatch, capsys):

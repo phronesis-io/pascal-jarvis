@@ -358,7 +358,11 @@ def _apply_action(intent_id: str, response: str, action: str,
 
 
 def _closure_buttons(button_specs: list) -> list[dict]:
-    """Build the ✅/❌/🚫 button row(s) for asking follow-ups."""
+    """Build the ✅/❌/🚫 button row(s) for asking follow-ups.
+
+    Legacy path — only used for the rare 2-intent combined card (see
+    _emit_closure_card): memorial decide() locks the whole card on first
+    tap, so two intents' buttons on one memorial would deadlock each other."""
     buttons = []
     for spec in button_specs[:2]:  # at most 2 intents' rows — cards stay small
         pid = spec["parent"]
@@ -376,6 +380,54 @@ def _closure_buttons(button_specs: list) -> list[dict]:
              "value": {"action": "intent_close", "id": pid, "outcome": "na"}},
         ]
     return buttons
+
+
+def _memorial_closure_options(pid: str) -> list[dict]:
+    """单意图闭环问句的三枚批红（对应旧 ✅/❌/🚫 按钮）。
+
+    动作经 memorial.decide → ActionProcessor._do_intent_close 执行；via 必须
+    排在 result 之前（result= 之后的参数会被并进 result 文本），via=button
+    保持闭环遥测能区分一键批红和 CLI/marker。"""
+    return [
+        {"key": "done", "label": "✅ 做了",
+         "action": {"type": "intent_close",
+                    "params": {"id": pid, "outcome": "done", "via": "button",
+                               "result": "做了（按钮记录）"}}},
+        {"key": "recorded", "label": "❌ 没做",
+         "action": {"type": "intent_close",
+                    "params": {"id": pid, "outcome": "recorded", "via": "button",
+                               "result": "没做（按钮记录）"}}},
+        {"key": "na", "label": "🚫 不用追了",
+         "action": {"type": "intent_close",
+                    "params": {"id": pid, "outcome": "na", "via": "button"}}},
+    ]
+
+
+def _emit_closure_card(combined: str, button_specs: list) -> None:
+    """Print the closure-ask card. Single intent (the common case) goes out
+    as a native memorial — ledgered, idempotent 批红, auto「聊聊这个」. Two
+    intents keep the legacy combined card (memorial locks a card on first
+    decide, which would deadlock the second intent's buttons); the delivery
+    layer still adopts it with its native buttons preserved."""
+    if len(button_specs) == 1:
+        try:
+            from core import memorial
+            spec = button_specs[0]
+            # Title = the intent's name (one card says one thing); memorial's
+            # header already prefixes 📜 + the source emoji, no 🎯 here.
+            title = (str(spec.get("name", "")).strip() or "跟进")[:24]
+            mid, _ = memorial.create(
+                source="intentions", title=title, body=combined,
+                options=_memorial_closure_options(spec["parent"]),
+                send=False)
+            print(memorial.card_json(mid))
+            return
+        except Exception as e:
+            print(f"[intentions_post] memorial failed, using plain card: {e}",
+                  file=sys.stderr)
+    buttons = _closure_buttons(button_specs) if button_specs else None
+    print(build_card("🎯 Intent", combined, source="intentions",
+                     buttons=buttons))
 
 
 def main():
@@ -511,10 +563,8 @@ def main():
                       f"root(s) {sorted(nag_roots)} — already sent within "
                       f"{CARD_DEDUP_MINUTES}min (REQ-59)", file=sys.stderr)
             else:
-                buttons = _closure_buttons(button_specs) if button_specs else None
                 _ledger_append(covered, card_roots=sorted(nag_roots))
-                print(build_card("🎯 Intent", combined, source="intentions",
-                                 buttons=buttons))
+                _emit_closure_card(combined, button_specs)
                 # Proactive closure budget counts Pascal-visible asks, not row
                 # creation. Duplicate-suppressed cards do not call this path.
                 for spec in button_specs:

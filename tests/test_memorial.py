@@ -521,3 +521,50 @@ def test_mail_post_emits_memorial_card(tmp_path, monkeypatch, capsys):
     assert "来自 X 的邮件" in card["elements"][0]["text"]["content"]
     labels = [a["text"]["content"] for a in card["elements"][1]["actions"]]
     assert labels == ["已阅", "重要，持续盯", "💬 聊聊这个"]
+
+
+# ── engagement accounting (v1.2 follow-up: memorial ↔ engagement_log) ────
+
+
+def _engagement_rows(dirpath):
+    p = dirpath / "engagement_log.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def test_direct_delivery_writes_engagement_sent_row(env):
+    """A direct send (CLI / urgent) must leave the same "sent" row the
+    heartbeat flush writes, so engagement-analyze stops seeing memorial
+    sources as zero-output."""
+    mid, ok = memorial.create(source="release", title="t", body="b")
+    assert ok
+    sent = [r for r in _engagement_rows(env.dir) if r["type"] == "sent"]
+    assert len(sent) == 1
+    assert sent[0]["source"] == "release"
+    assert sent[0]["via"] == "memorial-direct"
+    assert isinstance(sent[0]["epoch"], int)
+
+
+def test_failed_delivery_writes_no_sent_row(env):
+    env.send_ok = False
+    memorial.create(source="release", title="t", body="b")
+    assert [r for r in _engagement_rows(env.dir) if r["type"] == "sent"] == []
+
+
+def test_decide_writes_feedback_row(env):
+    """批红 = engagement — same "feedback" shape the legacy buttons write."""
+    mid, _ = memorial.create(source="mail", title="t", body="b")
+    memorial.decide(mid, "read")
+    fb = [r for r in _engagement_rows(env.dir) if r["type"] == "feedback"]
+    assert len(fb) == 1
+    assert fb[0]["source"] == "mail" and fb[0]["rating"] == "read"
+
+
+def test_chat_writes_feedback_row(env):
+    mid, _ = memorial.create(source="mail", title="t", body="b")
+    memorial.chat(mid)
+    fb = [r for r in _engagement_rows(env.dir) if r["type"] == "feedback"]
+    assert len(fb) == 1
+    assert fb[0]["rating"] == "chat"

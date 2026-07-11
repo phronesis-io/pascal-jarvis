@@ -372,11 +372,31 @@ def _write_outbox(text: str) -> None:
                                   "ts": now_local_str(), "source": "memorial"})
 
 
-def _record_delivery(memorial_id: str, status: str) -> None:
+def _record_engagement(row: dict) -> None:
+    """One row into engagement_log.jsonl — same shapes bot.sh / heartbeat_loop
+    already write ("sent" / "feedback"), so engagement-analyze sees memorial
+    sources and Pascal's 批红 without a new schema. Accounting must never
+    break a delivery or a card callback, hence the broad except."""
+    try:
+        row.setdefault("ts", now_local_str("%Y-%m-%d %H:%M"))
+        row.setdefault("epoch", int(time.time()))
+        _append_line(JARVIS_DIR / "engagement_log.jsonl", row)
+    except Exception as e:
+        print(f"memorial engagement log failed: {e}", file=sys.stderr)
+
+
+def _record_delivery(memorial_id: str, status: str, source: str = "") -> None:
     _append_line(_ledger_path(), {
         "ev": "delivery", "id": memorial_id, "status": status,
         "ts": now_local_str(),
     })
+    # Queue-path deliveries get their "sent" rows from heartbeat_loop's flush
+    # (via=memorial-card-queue); this covers DIRECT sends only, so sources
+    # like a CLI-sent release card stop reading as zero-output to
+    # engagement-analyze.
+    if status == "delivered" and source:
+        _record_engagement({"source": source, "type": "sent",
+                            "via": "memorial-direct"})
 
 
 def _quiet_hours_now() -> bool:
@@ -510,7 +530,8 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
         return True
 
     sent = _send_card(cj, state.get("chat_id", ""))
-    _record_delivery(mid, "delivered" if sent else "failed")
+    _record_delivery(mid, "delivered" if sent else "failed",
+                     source=state.get("source", "memorial"))
     if sent:
         readable = extract_card_text(cj) or f"📜 {state['title']}"
         _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
@@ -741,6 +762,10 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     ts = now_local_str()
     _append_line(_ledger_path(), {"ev": "decide", "id": memorial_id, "ts": ts,
                                   "opt": opt_key, "label": opt.get("label", "")})
+    # 批红 = engagement：same "feedback" shape the legacy card buttons write,
+    # so engagement-analyze sees which sources Pascal actually acts on.
+    _record_engagement({"source": st.get("source", "memorial"),
+                        "type": "feedback", "rating": opt_key})
 
     action_result, action_failed = "", False
     if opt.get("action"):
@@ -834,6 +859,8 @@ def chat(memorial_id: str) -> dict:
 
     _append_line(_ledger_path(), {"ev": "chat", "id": memorial_id, "ts": ts,
                                   "epoch": int(time.time())})
+    _record_engagement({"source": st.get("source", "memorial"),
+                        "type": "feedback", "rating": "chat"})
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
     snippet = st["body"][:200]
