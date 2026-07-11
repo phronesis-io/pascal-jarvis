@@ -173,19 +173,35 @@ def test_post_silent_when_no_message(tmp_path):
     assert {r["event_id"] for r in rows} == {"a1", "b2"}
 
 
-def test_post_quiet_hours_holds_message_but_records_triaged(tmp_path):
+def test_post_quiet_hours_emits_intact_card_for_central_queue(tmp_path):
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"}],
         "user_message": "📬 夜间来信", "urgent": False})
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
-    assert out.strip() == ""  # held, not sent
+    assert "夜间来信" in out  # heartbeat_loop will hold the intact card
     # still recorded as triaged (won't be re-read)
     rows = (tmp_path / "mail" / "triaged.jsonl").read_text()
     assert "a1" in rows
-    # message parked in backlog
-    backlog = (tmp_path / "mail" / "mail_backlog.jsonl").read_text()
-    assert "夜间来信" in backlog
+    assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
+
+
+def test_post_emits_one_memorial_per_pushed_email(tmp_path):
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"},
+                   {"event_id": "b2", "decision": "push"}],
+        "user_messages": [
+            {"event_id": "a1", "title": "安全提醒", "body": "新设备登录"},
+            {"event_id": "b2", "title": "合作来信", "body": "有人约你聊项目"},
+        ],
+        "urgent": False,
+    })
+    out = _run_post(reply, tmp_path, pending=PENDING)
+    cards = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(cards) == 2
+    assert [c["header"]["title"]["content"] for c in cards] == [
+        "📜 📬 安全提醒", "📜 📬 合作来信"]
+    assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
 
 
 def test_post_urgent_breaks_through_quiet_hours(tmp_path):

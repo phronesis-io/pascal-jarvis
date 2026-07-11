@@ -1537,26 +1537,42 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                            task=",".join(sorted(cycle_sources)) or "heartbeat",
                            reason="duplicate_send")
                 _clear_delivery_sidecars(jd)
-            elif _should_queue(jd):
-                _queue_for_morning(output, jd)
             else:
-                delivered = _route_output(output, user_id, jd)
-                _note_delivery(jd, delivered, user_id)
-                if delivered:
-                    _write_outbox(output, jd)
-                    _record_engagement(jd)
-                    _shadow_audit_claims(output, jd)
-                    print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
-                          file=sys.stderr)
-                else:
-                    # Do NOT write outbox/engagement on failure: an outbox
-                    # entry would make the dedup window suppress the retry
-                    # (REQ-04 cancelling REQ-11), and a "sent" record would
-                    # poison engagement stats with messages never delivered.
-                    _clear_delivery_sidecars(jd)
-                    _LAST_SENT_IDS.clear()  # drop ids from partial successes
-                    log("heartbeat", "Delivery failed — output not recorded as sent",
+                # Product surface invariant: every proactive event is one
+                # memorial card with useful choices +「聊聊这个」. Existing
+                # task-native buttons/links are adopted, not discarded.
+                try:
+                    from core.memorial import memorialize_output
+                    memorialized = memorialize_output(
+                        output, _peek_source(jd) or "heartbeat")
+                    if memorialized:
+                        output = memorialized
+                except Exception as e:
+                    # Delivery remains fail-open during migration: a broken
+                    # adapter must not suppress the underlying alert/event.
+                    log("heartbeat", f"memorialize output failed: {e}",
                         level="warn")
+
+                if _should_queue(jd):
+                    _queue_for_morning(output, jd)
+                else:
+                    delivered = _route_output(output, user_id, jd)
+                    _note_delivery(jd, delivered, user_id)
+                    if delivered:
+                        _write_outbox(output, jd)
+                        _record_engagement(jd)
+                        _shadow_audit_claims(output, jd)
+                        print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
+                              file=sys.stderr)
+                    else:
+                        # Do NOT write outbox/engagement on failure: an outbox
+                        # entry would make the dedup window suppress the retry
+                        # (REQ-04 cancelling REQ-11), and a "sent" record would
+                        # poison engagement stats with messages never delivered.
+                        _clear_delivery_sidecars(jd)
+                        _LAST_SENT_IDS.clear()  # drop ids from partial successes
+                        log("heartbeat", "Delivery failed — output not recorded as sent",
+                            level="warn")
         elif output:
             log("heartbeat", "Suppressed error-like output", level="warn")
             _clear_delivery_sidecars(jd)

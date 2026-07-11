@@ -37,8 +37,9 @@ audit trail is `sched_events.jsonl` (task_skip reason=silent_output). Do NOT
 "fix" this by re-surfacing them; changing the list requires editing
 SILENT_TASKS, not this doc.
 
-**奏折（Memorial）请示** — 任何任务要请示 Pascal 的事项（拍板、知会、跟进确认），
-用 memorial CLI 发一张带批示按钮的奏折卡，不要发纯文本长段：
+**奏折（Memorial）请示** — 所有主动输出在 delivery 层自动变成奏折：
+一件事一张卡，保留任务原有按钮/链接，补常用批红选项和「💬 聊聊这个」。
+任务也可以显式用 memorial CLI 指定更合适的选项：
 
     python3 -m core.memorial send --source <task> --title "一句话说清这件事" --body "人话正文，短" --preset decision
 
@@ -88,9 +89,10 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
     - "silent": scored (for the network) but not delivered this cycle. Use for the surplus
       relevant items beyond the 知会 cap, and for score<=0.
 
-    Compose user_message in two sections (omit a section if it's empty; if BOTH empty, return ""):
-    🎯 行动 — push items, detailed, action-first, with link
-    📡 知会 — fyi items. Each is ONE tight line, but it must do MORE than headline:
+    Compose one user_messages item PER delivered feed item — never combine separate
+    events into one card. For each item, use title "行动" or "知会" and a body that is:
+    - push: detailed, action-first, with link
+    - fyi: ONE tight line, but it must do MORE than headline:
       • Unpack any term Pascal may not know in plain words, inline (a protocol, method, company,
         acronym). ASSUME he has never met the term — break the jargon, don't just name-drop it.
         He has told you directly: some of these concepts he genuinely doesn't know.
@@ -98,18 +100,18 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
         (product/holdings/projects/goals): why it matters to HIM, or what he could do/look at.
         If you can't write an honest hook, mark the item silent instead of shipping a bare headline.
       Concision is the whole point — he's scanning on his phone, not studying. One readable line.
-    Keep push few and deep; let 知会 carry the breadth. End with 📡 Powered by EigenFlux.
-    HARD LENGTH CAP: user_message total ≤ 900 characters. Engagement data shows
+    Keep push few and deep; let 知会 carry the breadth. Each body may end with
+    📡 Powered by EigenFlux. HARD LENGTH CAP: each body ≤ 500 characters. Engagement data shows
     long cards (up to 1276 chars) get late replies or none — phone-scannable wins.
     If a push item can't fit, lead with the 2-3 line core + link and trust the link.
 
-    URGENCY (night gate): At night Pascal's EigenFlux cards are HELD and batched into a
-    single morning digest — he asked not to be pinged at 2am. Set top-level "urgent": true
-    ONLY for the rare item he would genuinely regret not seeing within hours (a holding-moving
+    URGENCY (night gate): At night Pascal's EigenFlux cards are held intact and released
+    separately — never condensed into a morning blob. Set per-item "urgent": true ONLY
+    for the rare item he would genuinely regret not seeing within hours (a holding-moving
     shock, a direct competitive/existential threat or opportunity that needs same-night action).
     Almost everything is NOT urgent — default false. 知会/FYI breadth is NEVER urgent.
 
-    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_message":"<markdown or empty>","urgent":false}
+    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_messages":[{"item_id":"<id>","title":"行动|知会","body":"<markdown>","source_url":"<url>","urgent":false}]}
 
 ### eigenflux-publish
 - interval: 60m
@@ -244,20 +246,22 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
     who matters. Recognize names like alice/Luma, MiniMax/LLaMA-era contacts,
     EigenFlux teammates, Polytechnique/校友.
 
-    Compose user_message ONLY from the "push" emails. For each: who it's from in
-    plain words (and why they matter if non-obvious) + the one thing it's asking or
-    offering + what Pascal might do. One tight line each, phone-scannable. If a
+    Compose one user_messages item PER "push" email — never combine separate
+    emails into one blob. Each item says: who it's from in plain words (and why
+    they matter if non-obvious) + the one thing it's asking or offering + what
+    Pascal might do. Keep each body phone-scannable. If a
     newsletter genuinely contains something high-value for his work, you may lift the
     single relevant nugget into one line — but the email itself stays silent unless
     it needs action. If nothing is push-worthy, return user_message "".
 
-    HARD LENGTH CAP: user_message ≤ 700 characters. Lead with the most important.
+    HARD LENGTH CAP: each body ≤ 500 characters. Lead with the most important.
 
-    URGENCY (night gate): emails are HELD at night (23:30–10:00) and batched into a
-    morning card. Set "urgent": true ONLY for the rare email Pascal would regret not
-    seeing within hours (time-critical reply, security/billing emergency). Default false.
+    URGENCY (night gate): non-urgent cards are held intact at night (23:30–10:00)
+    and released one card per email. Set "urgent": true ONLY for the rare email
+    Pascal would regret not seeing within hours (time-critical reply,
+    security/billing emergency). Default false.
 
-    Return JSON: {"triage":[{"event_id":"<id>","decision":"push|silent","reason":"<brief>"}],"user_message":"<markdown or empty>","urgent":false}
+    Return JSON: {"triage":[{"event_id":"<id>","decision":"push|silent","reason":"<brief>"}],"user_messages":[{"event_id":"<id>","title":"<short title>","body":"<markdown>"}],"urgent":false}
     Include EVERY email's event_id in "triage" (even silent ones) so they're not re-read.
     If DATA is empty: HEARTBEAT_OK
 

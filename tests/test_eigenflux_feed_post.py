@@ -1,4 +1,4 @@
-"""Tests for tasks/eigenflux_feed_post.py — the '阅读原文' footer button.
+"""Tests for EigenFlux feed cards: one event per card + source links.
 
 A single-source card gets a tappable "阅读原文" button. A multi-item digest
 (the FYI/知会 tier) carries one inline link per item, so a single footer button
@@ -46,6 +46,22 @@ def test_multi_item_digest_suppresses_footer_button(tmp_path):
     assert "https://example.com/a" in out
     assert "https://example.com/b" in out
     assert "https://example.com/c" in out
+
+
+def test_structured_items_emit_one_card_each(tmp_path):
+    payload = json.dumps({
+        "user_messages": [
+            {"item_id": "1", "title": "知会", "body": "第一件事",
+             "source_url": "https://example.com/1"},
+            {"item_id": "2", "title": "行动", "body": "第二件事",
+             "source_url": "https://example.com/2"},
+        ]
+    })
+    out = _run(payload, tmp_path)
+    cards = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(cards) == 2
+    assert "第一件事" in cards[0]["elements"][0]["text"]["content"]
+    assert "第二件事" in cards[1]["elements"][0]["text"]["content"]
 
 
 def test_bare_source_url_field_still_buttons_when_single(tmp_path):

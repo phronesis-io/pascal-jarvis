@@ -60,6 +60,35 @@ def test_successful_send_marks_seen_and_outbox(monkeypatch, tmp_path):
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
+def test_memorial_queue_acceptance_marks_event_seen(monkeypatch, tmp_path):
+    monkeypatch.setattr(efsl.memorial, "create",
+                        lambda **kw: ("mem_queued", False))
+    monkeypatch.setattr(efsl.memorial, "get_memorial",
+                        lambda mid: {"delivery_status": "retry_queued"})
+    seen_file = tmp_path / ".ef-seen"
+
+    seen, accepted, visible = efsl._deliver_memorial_and_mark(
+        "外部消息", ["evt1"], {"conv_id": "c1"}, "u1",
+        [], seen_file, tmp_path, title="EigenFlux 消息")
+
+    assert accepted is True and visible is False
+    assert seen == ["evt1"] and load_seen(seen_file) == ["evt1"]
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+
+
+def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
+    monkeypatch.setattr(efsl.memorial, "create",
+                        lambda **kw: ("mem_sent", True))
+    monkeypatch.setattr(efsl.memorial, "get_memorial",
+                        lambda mid: {"delivery_status": "delivered"})
+
+    _, accepted, visible = efsl._deliver_memorial_and_mark(
+        "好友申请", ["evt2"], {"kind": "relation"}, "u1",
+        [], tmp_path / ".ef-seen", tmp_path, title="EigenFlux 好友动态")
+
+    assert accepted is True and visible is True
+
+
 def test_deadletter_failure_does_not_raise(monkeypatch, tmp_path):
     # Bookkeeping must never kill the stream loop.
     def boom(*a, **k):

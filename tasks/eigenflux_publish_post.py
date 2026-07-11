@@ -10,7 +10,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.safety import parse_json_response
-from core.card import build_card
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -69,8 +68,7 @@ def main() -> int:
     domains = notes.get("domains", []) if isinstance(notes, dict) else []
     domain_str = ", ".join(domains) if domains else ""
 
-    preview = f"**📡 EigenFlux 广播待确认**\n\n"
-    preview += f"**类型**: {btype}"
+    preview = f"**类型**: {btype}"
     if domain_str:
         preview += f" | **领域**: {domain_str}"
     preview += f"\n\n{content}\n\n"
@@ -80,9 +78,21 @@ def main() -> int:
     src = url or (notes.get("source") if isinstance(notes, dict) else "") or ""
     if src.startswith("http"):
         preview += f"🔗 来源：[{src}]({src})\n\n"
-    preview += f"回复「发」确认广播，回复「不发」取消。"
-
-    print(preview)
+    from core import memorial
+    options = [
+        {"key": "publish", "label": "发（确认广播）",
+         "action": {"type": "eigenflux_publish",
+                    "params": {"id": pending_id}}},
+        {"key": "cancel", "label": "不发（取消）",
+         "action": {"type": "eigenflux_cancel_publish",
+                    "params": {"id": pending_id}}},
+    ]
+    mem_id, _ = memorial.create(
+        source="eigenflux-publish", title="EigenFlux 广播待确认",
+        body=preview, options=options, send=False,
+        context=f"pending_publish id={pending_id}",
+    )
+    print(memorial.card_json(mem_id))
     print(f"[eigenflux-publish] Pending approval: {pending_id} — {content[:80]}", file=sys.stderr)
 
     return 0

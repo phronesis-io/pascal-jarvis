@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import core.memorial as memorial
+from core.card import build_card
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────
@@ -321,6 +322,53 @@ def test_ids_are_unique(env):
     assert len(ids) == 5
 
 
+def test_adopt_readonly_card_preserves_link_and_adds_fyi_chat(env):
+    legacy = build_card("📡 EigenFlux", "一件外部动态",
+                        buttons=[{"text": "阅读原文",
+                                  "url": "https://example.com/a"}])
+    adopted = json.loads(memorial.adopt_card("eigenflux-feed-triage", legacy))
+    actions = adopted["elements"][1]["actions"]
+    labels = [a["text"]["content"] for a in actions]
+    assert labels == ["阅读原文", "已阅", "重要，持续盯", "💬 聊聊这个"]
+    assert actions[0]["url"] == "https://example.com/a"
+
+
+def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
+    legacy = build_card(
+        "🎯 Intent", "这件事做了吗？",
+        buttons=[{"text": "做了", "value": {
+            "action": "intent_close", "id": "int_1", "outcome": "done"}}])
+    adopted = json.loads(memorial.adopt_card("intention-check", legacy))
+    actions = adopted["elements"][1]["actions"]
+    assert [a["text"]["content"] for a in actions] == ["做了", "💬 聊聊这个"]
+    assert actions[0]["value"]["action"] == "intent_close"
+
+
+def test_memorialize_output_makes_one_card_per_prose_event(env):
+    output = "跨 Session 有一件进展\n---\n另一件独立进展"
+    rendered = memorial.memorialize_output(output, "cross-session-sync")
+    cards = [json.loads(line) for line in rendered.splitlines()]
+    assert len(cards) == 2
+    bodies = [c["elements"][0]["text"]["content"] for c in cards]
+    assert bodies == ["跨 Session 有一件进展", "另一件独立进展"]
+    assert all(c["header"]["title"]["content"].startswith("📜 🧠") for c in cards)
+
+
+def test_memorialize_output_does_not_double_wrap_memorial(env):
+    mid, _ = memorial.create("mail", "邮件", "正文", preset="fyi", send=False)
+    card = memorial.card_json(mid)
+    assert memorial.memorialize_output(card, "mail-triage") == card
+    assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
+
+
+def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
+    legacy = build_card("📡 EigenFlux", "同一条动态")
+    first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")
+    mid = json.loads(first)["elements"][1]["actions"][-1]["value"]["id"]
+    memorial._record_delivery(mid, "delivered")
+    assert memorial.memorialize_output(legacy, "eigenflux-feed-triage") == ""
+
+
 def test_duplicate_delivered_memorial_is_not_resent(env):
     first, sent = memorial.create("x", "t", "b", preset="fyi")
     second, resent = memorial.create("x", "t", "b", preset="fyi")
@@ -328,6 +376,18 @@ def test_duplicate_delivered_memorial_is_not_resent(env):
     assert sent is True and resent is True
     assert second == first
     assert len(env.cards) == 1
+
+
+def test_same_body_different_native_action_is_not_deduped(env):
+    first = build_card("🎯 Intent", "做了吗？", buttons=[{"text": "做了", "value": {
+        "action": "intent_close", "id": "int_1", "outcome": "done"}}])
+    second = build_card("🎯 Intent", "做了吗？", buttons=[{"text": "做了", "value": {
+        "action": "intent_close", "id": "int_2", "outcome": "done"}}])
+    card1 = json.loads(memorial.adopt_card("intention-check", first))
+    card2 = json.loads(memorial.adopt_card("intention-check", second))
+    ids = [card["elements"][1]["actions"][-1]["value"]["id"]
+           for card in (card1, card2)]
+    assert ids[0] != ids[1]
 
 
 def test_duplicate_failed_memorial_reuses_durable_queue_entry(env):

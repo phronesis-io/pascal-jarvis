@@ -1,8 +1,7 @@
-"""Tests for the EigenFlux quiet-hours delivery gate (tasks/_ef_delivery.py)
-and its integration into eigenflux_feed_post.py.
+"""Legacy EigenFlux backlog helpers + one-way migration into intact cards.
 
-Pascal asked (2026-06-07): hold EigenFlux pushes at night, deliver one
-consolidated card in the morning, let only urgent items break through.
+Quiet-hour policy now lives in heartbeat_loop; these helpers only drain
+pre-migration backlog files without condensing them.
 """
 import json
 import subprocess
@@ -88,15 +87,13 @@ def test_render_caps_lines():
 
 # ---- integration: feed_post quiet-hours gate ------------------------------
 
-def test_feed_post_holds_at_night(tmp_path):
+def test_feed_post_emits_card_at_night_for_central_queue(tmp_path):
     payload = json.dumps({"user_message": "夜里的一条 [l](https://example.com/a)"})
     out = _run_feed(payload, tmp_path, {"JARVIS_EF_QUIET_OVERRIDE": "quiet"})
-    # nothing pushed to Lark
-    assert out.strip() == ""
-    # but it landed in the backlog
+    # Post hook emits the intact card; heartbeat_loop owns the actual hold.
+    assert "夜里的一条" in out
     backlog = tmp_path / "eigenflux" / "feed_backlog.jsonl"
-    assert backlog.exists()
-    assert "夜里的一条" in backlog.read_text()
+    assert not backlog.exists()
 
 
 def test_feed_post_urgent_breaks_through_at_night(tmp_path):
@@ -116,20 +113,20 @@ def test_feed_post_delivers_when_awake(tmp_path):
     assert "白天的一条" in out
 
 
-def test_morning_digest_flushes_backlog(tmp_path):
+def test_legacy_backlog_drains_as_separate_cards(tmp_path):
     # Seed a backlog as if held overnight.
     eg = tmp_path / "eigenflux"
     eg.mkdir(parents=True)
-    (eg / "feed_backlog.jsonl").write_text(
+    (eg / "feed_backlog.jsonl").write_text("\n".join([
         json.dumps({"ts": "t", "source": "eigenflux-feed",
-                    "message": "📡 知会\n• 攒下的一条 → 你看看"}) + "\n",
-        encoding="utf-8")
-    # Awake + force flush window: no new feed items (empty stdin payload still
-    # runs main()), should emit the digest card and clear the backlog.
+                    "message": "第一件旧消息"}),
+        json.dumps({"ts": "t", "source": "eigenflux-research",
+                    "message": "第二件旧消息"}),
+    ]) + "\n", encoding="utf-8")
     out = _run_feed("", tmp_path, {
         "JARVIS_EF_QUIET_OVERRIDE": "awake",
-        "JARVIS_EF_FLUSH_HOUR": "0",  # any awake hour counts as flush window
     })
-    assert "早报" in out
-    assert "攒下的一条" in out
+    cards = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(cards) == 2
+    assert "第一件旧消息" in out and "第二件旧消息" in out
     assert not (eg / "feed_backlog.jsonl").exists()  # drained

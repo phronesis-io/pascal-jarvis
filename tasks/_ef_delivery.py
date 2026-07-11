@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Quiet-hours delivery gating for EigenFlux pushes.
+"""Legacy EigenFlux quiet-hours backlog compatibility helpers.
 
 Pascal asked (2026-06-07, ~00:08): stop pinging me with EigenFlux feed / 知会
 at night. Hold them, and give me ONE consolidated card in the morning at a
 good time — not a one-by-one drip at midnight, and not a giant dump either.
 Only genuinely urgent items break through at night.
 
-This gate is DETERMINISTIC (wall-clock based), not a soft LLM "preference",
-precisely because the LLM kept forgetting. Night EigenFlux cards get appended
-to a backlog file instead of being sent; the next morning the first feed-triage
-cycle drains the backlog into a single tight digest card.
+New delivery is centralized in ``core.heartbeat_loop`` and preserves one
+intact memorial card per event.  This module remains only to drain backlog
+files created by older versions; no active post-hook calls ``hold`` anymore.
 
 Knobs (env, all optional):
   JARVIS_TZ              timezone name           (default Asia/Shanghai)

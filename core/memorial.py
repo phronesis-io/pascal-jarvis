@@ -97,12 +97,44 @@ PRESETS: dict[str, list[dict]] = {
 # Header reads 「📜 {source emoji} {title}」; unknown sources just get 📜.
 SOURCE_EMOJI = {
     "mail": "📬",
+    "mail-triage": "📬",
     "eigenflux": "📡",
+    "eigenflux-feed-triage": "📡",
+    "eigenflux-friends": "📡",
+    "eigenflux-messages": "📡",
+    "eigenflux-publish": "📡",
+    "eigenflux-research": "📡",
     "selfmon": "🩺",
     "intent": "🎯",
     "intentions": "🎯",
+    "intention-check": "🎯",
     "memory": "🧠",
+    "cross-session-sync": "🧠",
+    "checkin": "🌿",
+    "calendar-sync": "📅",
+    "content-recommend": "📺",
+    "weekly-review": "📊",
+    "daily-reflect": "🪞",
+    "phronesis-monitor": "🧭",
+    "watchlater-remind": "⏰",
+    "task-triage": "📋",
     "heartbeat": "🫀",
+}
+
+SOURCE_TITLE = {
+    "mail-triage": "邮件",
+    "eigenflux-feed-triage": "EigenFlux 动态",
+    "eigenflux-friends": "EigenFlux 好友",
+    "eigenflux-messages": "EigenFlux 消息",
+    "eigenflux-publish": "EigenFlux 广播待确认",
+    "eigenflux-research": "EigenFlux 深度",
+    "cross-session-sync": "跨 Session 动态",
+    "checkin": "关怀",
+    "calendar-sync": "日程变动",
+    "intention-check": "Intent",
+    "content-recommend": "推荐",
+    "weekly-review": "周回顾",
+    "daily-reflect": "复盘",
 }
 
 _ID_COUNTER = itertools.count(1)
@@ -173,6 +205,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "title": str(e.get("title", "")),
                 "body": str(e.get("body", "")),
                 "options": e.get("options") or [],
+                "extra_buttons": e.get("extra_buttons") or [],
                 "context": str(e.get("context", "")),
                 "chat_id": str(e.get("chat_id", "")),
                 "status": "pending",
@@ -235,11 +268,16 @@ def _header(state: dict) -> str:
 
 
 def _buttons(state: dict, include_chat: bool = True) -> list[dict]:
-    btns = [
+    # Preserve useful task-native actions (open source, save for later,
+    # close an intent, etc.) when an existing card is adopted into the
+    # memorial surface.  They keep their original URL/value callback; the
+    # framework-owned options below remain the recorded 批红 choices.
+    btns = [dict(b) for b in state.get("extra_buttons", [])]
+    btns.extend([
         {"text": o.get("label", o.get("key", "")),
          "value": {"action": "memorial", "id": state["id"], "opt": o.get("key", "")}}
         for o in state["options"]
-    ]
+    ])
     if include_chat:
         btns.append({"text": CHAT_BUTTON_LABEL,
                      "value": {"action": "memorial", "id": state["id"],
@@ -398,7 +436,7 @@ def _send_opener_async(text: str, chat_id: str) -> None:
 
 
 def _normalize_options(options: list[dict] | None, preset: str | None) -> list[dict]:
-    if options:
+    if options is not None:
         normalized = []
         seen: set[str] = set()
         for i, o in enumerate(options, 1):
@@ -420,10 +458,30 @@ def _normalize_options(options: list[dict] | None, preset: str | None) -> list[d
     return [dict(o) for o in PRESETS[name]]
 
 
+def _normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
+    """Validate task-native buttons carried into an adopted memorial card."""
+    normalized: list[dict] = []
+    for i, button in enumerate(buttons or [], 1):
+        text = str(button.get("text", "")).strip()
+        if not text:
+            raise ValueError(f"extra button #{i} has no text")
+        item = {"text": text}
+        if button.get("url"):
+            item["url"] = str(button["url"])
+        elif isinstance(button.get("value"), dict):
+            item["value"] = dict(button["value"])
+        else:
+            raise ValueError(f"extra button #{i} needs url or value")
+        normalized.append(item)
+    return normalized
+
+
 # ── public API ──────────────────────────────────────────────────────────
 
 
-def _find_recent_duplicate(source: str, title: str, body: str) -> dict | None:
+def _find_recent_duplicate(source: str, title: str, body: str,
+                           options: list[dict], extra_buttons: list[dict],
+                           context: str, chat_id: str) -> dict | None:
     """A still-pending memorial with identical content created within the
     dedup window — the signature of an emitter stuck in a retry loop."""
     now = time.time()
@@ -431,6 +489,10 @@ def _find_recent_duplicate(source: str, title: str, body: str) -> dict | None:
         if (st["status"] == "pending"
                 and st["source"] == source and st["title"] == title
                 and st["body"] == body
+                and st.get("options", []) == options
+                and st.get("extra_buttons", []) == extra_buttons
+                and st.get("context", "") == context
+                and st.get("chat_id", "") == chat_id
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
             return st
     return None
@@ -464,7 +526,8 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
 def create(source: str, title: str, body: str, options: list[dict] | None = None,
            preset: str | None = None, context: str = "",
            chat_id: str = "", send: bool = True,
-           urgent: bool = False) -> tuple[str, bool]:
+           urgent: bool = False,
+           extra_buttons: list[dict] | None = None) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and send the card.
 
     Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
@@ -481,9 +544,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     instead of buzzing the phone — urgent=True bypasses the night gate.
     """
     opts = _normalize_options(options, preset)
+    native_buttons = _normalize_extra_buttons(extra_buttons)
     source, title, body = str(source), str(title), str(body)
 
-    dup = _find_recent_duplicate(source, title, body)
+    dup = _find_recent_duplicate(
+        source, title, body, opts, native_buttons, str(context), str(chat_id))
     if dup is not None:
         print(f"memorial dedup: identical pending {dup['id']} within "
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
@@ -497,7 +562,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     ts = now_local_str()
     ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
           "source": source, "title": title, "body": body, "options": opts,
-          "context": str(context)}
+          "extra_buttons": native_buttons, "context": str(context)}
     if chat_id:
         ev["chat_id"] = str(chat_id)
     _append_line(_ledger_path(), ev)
@@ -507,6 +572,128 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     if not send:
         return mid, False
     return mid, _deliver_existing(state, urgent=urgent)
+
+
+def _card_memorial_id(card: dict) -> str:
+    for element in card.get("elements", []):
+        for action in element.get("actions", []):
+            value = action.get("value") or {}
+            if value.get("action") == "memorial" and value.get("id"):
+                return str(value["id"])
+    return ""
+
+
+def _clean_adopted_title(header: str, source: str) -> str:
+    """Remove transport chrome from a legacy card title."""
+    import re
+    cleaned = re.sub(r"^[\s📜📡📬🩺🎯🧠🫀🌿📅💡⏰📺📊🪞🧭📋]+", "",
+                     header or "")
+    cleaned = cleaned.strip(" ·|-")
+    return cleaned or SOURCE_TITLE.get(source, source or "一件事")
+
+
+def adopt_card(source: str, legacy_card_json: str, context: str = "",
+               suppress_accepted: bool = False) -> str:
+    """Adopt an existing Lark card into the memorial interaction surface.
+
+    Task-native actions/links are preserved. Cards that already offer a real
+    action keep those choices and gain「聊聊这个」; read-only/link-only cards
+    also gain the common「已阅／持续盯」批红 pair.
+    """
+    card = json.loads(legacy_card_json)
+    if _card_memorial_id(card):
+        return legacy_card_json
+
+    header = str(card.get("header", {}).get("title", {}).get("content", ""))
+    body_parts: list[str] = []
+    native_buttons: list[dict] = []
+    for element in card.get("elements", []):
+        text = element.get("text", {}).get("content", "")
+        if text:
+            body_parts.append(str(text))
+        for action in element.get("actions", []):
+            label = str(action.get("text", {}).get("content", "")).strip()
+            if not label:
+                continue
+            if action.get("url"):
+                native_buttons.append({"text": label, "url": action["url"]})
+            elif isinstance(action.get("value"), dict):
+                native_buttons.append({"text": label,
+                                       "value": dict(action["value"])})
+
+    body = "\n\n".join(body_parts).strip()
+    title = _clean_adopted_title(header, source)
+    if not body:
+        body = title
+    has_native_action = any("value" in button for button in native_buttons)
+    # An existing callback already represents the card's decision options;
+    # don't bury it under generic FYI buttons. URL-only cards are read-only,
+    # so the common FYI choices remain useful.
+    options = [] if has_native_action else None
+    mid, _ = create(
+        source=source or "heartbeat", title=title, body=body,
+        options=options, preset=None if has_native_action else "fyi",
+        context=context, send=False, extra_buttons=native_buttons,
+    )
+    if suppress_accepted:
+        state = get_memorial(mid) or {}
+        if state.get("delivery_status") in {
+                "delivered", "queued", "retry_queued"}:
+            return ""
+    return card_json(mid)
+
+
+def memorialize_output(output: str, source: str = "heartbeat") -> str:
+    """Convert proactive heartbeat output to one memorial card per event.
+
+    Existing memorial cards pass through. Legacy cards are adopted while
+    preserving their native actions; prose chunks separated by ``---`` become
+    compact FYI memorials. Raw internal JSON remains blocked.
+    """
+    source_names = [s.strip() for s in str(source).split(",") if s.strip()]
+    single_source = source_names[0] if len(source_names) == 1 else "heartbeat"
+    rendered: list[str] = []
+    prose: list[str] = []
+
+    def flush_prose() -> None:
+        text = "\n".join(prose).strip()
+        prose.clear()
+        if not text:
+            return
+        try:
+            json.loads(text)
+            return
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        title = SOURCE_TITLE.get(single_source, single_source or "一件事")
+        mid, _ = create(single_source, title, text, preset="fyi", send=False)
+        state = get_memorial(mid) or {}
+        if state.get("delivery_status") in {
+                "delivered", "queued", "retry_queued"}:
+            return
+        rendered.append(card_json(mid))
+
+    for raw_line in str(output).splitlines():
+        line = raw_line.strip()
+        if line == "---":
+            flush_prose()
+            continue
+        card_raw = line[5:] if line.startswith("CARD:") else line
+        try:
+            card = json.loads(card_raw) if card_raw else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            card = None
+        if isinstance(card, dict) and "config" in card and "elements" in card:
+            flush_prose()
+            adopted = (card_raw if _card_memorial_id(card)
+                       else adopt_card(single_source, card_raw,
+                                       suppress_accepted=True))
+            if adopted:
+                rendered.append(adopted)
+        elif line:
+            prose.append(raw_line)
+    flush_prose()
+    return "\n".join(rendered)
 
 
 def _execute_action(action: dict) -> str:

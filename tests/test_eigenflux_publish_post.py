@@ -7,6 +7,7 @@ card must render the source as a tappable link.
 
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "eigenflux_publish_post.py"
@@ -37,6 +38,9 @@ def test_supply_broadcast_carded(tmp_path):
     out = _run(_mk("supply"), tmp_path)
     assert "广播待确认" in out
     assert "supply" in out
+    card = json.loads(out)
+    labels = [a["text"]["content"] for a in card["elements"][1]["actions"]]
+    assert labels == ["发（确认广播）", "不发（取消）", "💬 聊聊这个"]
 
 
 def test_demand_broadcast_carded(tmp_path):

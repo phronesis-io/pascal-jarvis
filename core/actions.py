@@ -154,6 +154,44 @@ class ActionProcessor:
             )
         return ""  # silent
 
+    def _pending_broadcast_path(self, pending_id: str) -> Path | None:
+        pending_id = str(pending_id or "").strip()
+        if not re.fullmatch(r"\d+_\d+", pending_id):
+            return None
+        return self.jarvis_dir / "eigenflux" / "pending_publish" / f"{pending_id}.json"
+
+    def _do_eigenflux_publish(self, raw: str) -> str:
+        """Publish one specifically approved pending EigenFlux broadcast."""
+        path = self._pending_broadcast_path(parse_params(raw).get("id", ""))
+        if path is None or not path.exists():
+            return "没有找到这条待广播内容（可能已经处理过了）"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            content = str(data.get("content", "")).strip()
+            notes = json.dumps(data.get("notes") or {}, ensure_ascii=False)
+            if not content:
+                return "广播内容为空，未发送"
+            cmd = ["eigenflux", "publish", "--content", content,
+                   "--notes", notes, "--accept-reply", "-f", "json"]
+            if data.get("url"):
+                cmd.extend(["--url", str(data["url"])])
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=30, cwd=str(self.jarvis_dir))
+            if result.returncode != 0:
+                return f"广播失败，内容仍保留待重试：{(result.stderr or '').strip()[:160]}"
+            path.unlink(missing_ok=True)
+            return "✅ 已广播"
+        except Exception as e:
+            return f"广播失败，内容仍保留待重试：{e}"
+
+    def _do_eigenflux_cancel_publish(self, raw: str) -> str:
+        """Cancel one specifically selected pending broadcast."""
+        path = self._pending_broadcast_path(parse_params(raw).get("id", ""))
+        if path is None or not path.exists():
+            return "这条广播已经处理过了"
+        path.unlink(missing_ok=True)
+        return "已取消广播"
+
     # ── Heartbeat ──
 
     def _do_heartbeat(self, raw: str) -> str:

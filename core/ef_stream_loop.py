@@ -48,6 +48,7 @@ from core.ef_stream import (
 )
 from core.log import log
 from core.timeutil import now_local_str
+from core import memorial
 
 # ── Stall watchdog (audit 2026-07-10) ───────────────────────────────
 # A half-open TCP connection can leave `eigenflux stream` alive but silent
@@ -130,6 +131,57 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
     seen = remember_seen(seen, ids)
     save_seen(seen_file, seen)
     return seen, True
+
+
+def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
+                               title: str) -> tuple[list, bool, bool]:
+    """Deliver an EigenFlux event through the memorial card surface.
+
+    Returns ``(seen, accepted, visible_now)``. ``accepted`` includes a card
+    durably queued because the host is offline/inside quiet hours; once the
+    intact card is on disk the upstream event can safely be marked seen.
+    ``visible_now`` is false for queued cards, so follow-up analysis waits
+    instead of commenting on a message Pascal has not received yet.
+    """
+    try:
+        mid, _ = memorial.create(
+            source="eigenflux", title=title, body=msg, preset="fyi",
+            context=json.dumps(metadata or {}, ensure_ascii=False)[:1500],
+        )
+        state = memorial.get_memorial(mid) or {}
+        delivery = state.get("delivery_status", "")
+        accepted = delivery in {"delivered", "queued", "retry_queued"}
+        if not accepted:
+            _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
+            return seen, False, False
+        seen = remember_seen(seen, ids)
+        save_seen(seen_file, seen)
+        log("ef-stream", f"Accepted {title} as memorial card ({delivery})")
+        return seen, True, delivery == "delivered"
+    except Exception as e:
+        # The interaction adapter must never become a new message-loss mode.
+        log("ef-stream", f"Memorial delivery failed ({e}); using legacy sender",
+            level="warn")
+        seen, delivered = _deliver_and_mark(
+            msg, ids, metadata, user_id, seen, seen_file, jd)
+        return seen, delivered, delivered
+
+
+def _send_memorial_notice(title: str, body: str, user_id: str,
+                          urgent: bool = False) -> bool:
+    """Best-effort memorial notice with a legacy emergency fallback."""
+    try:
+        mid, _ = memorial.create(
+            source="eigenflux", title=title, body=body, preset="fyi",
+            urgent=urgent,
+        )
+        state = memorial.get_memorial(mid) or {}
+        return state.get("delivery_status") in {
+            "delivered", "queued", "retry_queued"}
+    except Exception as e:
+        log("ef-stream", f"Memorial notice failed ({e}); using legacy sender",
+            level="warn")
+        return _lark_send(body, user_id)
 
 
 def _fetch_history(conv_id: str) -> str:
@@ -366,10 +418,9 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     if rel_ids and is_duplicate_event(rel_ids, set(seen)):
                         log("ef-stream", "Skipping already-delivered friend event (dedup)")
                     else:
-                        seen, _ = _deliver_and_mark(
+                        seen, _, _ = _deliver_memorial_and_mark(
                             rel, rel_ids, {"kind": "relation"}, user_id,
-                            seen, seen_file, jd,
-                            success_log="Delivered friend-request/relation event")
+                            seen, seen_file, jd, title="EigenFlux 好友动态")
                     continue
 
                 # Format and deliver
@@ -383,12 +434,16 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     log("ef-stream", "Skipping already-delivered message (dedup)")
                     continue
 
-                seen, delivered = _deliver_and_mark(
+                seen, accepted, visible_now = _deliver_memorial_and_mark(
                     msg, ids, extract_metadata(line), user_id,
-                    seen, seen_file, jd)
-                if not delivered:
+                    seen, seen_file, jd, title="EigenFlux 消息")
+                if not accepted:
                     # Skip the background analysis too — its 💡 note rides
                     # the same broken channel, about a message never seen.
+                    continue
+                if not visible_now:
+                    # The card is durable but deferred; analysis can wait for
+                    # the next stream event instead of racing ahead of it.
                     continue
 
                 # Background analysis (skip if shutting down)
@@ -398,7 +453,8 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     conv_id = details[0].get("conv_id", "")
                     analysis = _run_analysis(detail_str, conv_id, jarvis_dir, log_file, procs)
                     if analysis and "HEARTBEAT_OK" not in analysis:
-                        _lark_send(f"💡 {analysis}", user_id)
+                        _send_memorial_notice(
+                            "EigenFlux 分析", f"💡 {analysis}", user_id)
                         log("ef-stream", "Follow-up analysis sent")
 
                 # Reset backoff on successful message
@@ -424,7 +480,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
 
         if exit_code == 4:
             log("ef-stream", "Auth required — token may be expired", level="warn")
-            _lark_send("⚠️ EigenFlux token expired. Please re-authenticate: `eigenflux auth login`", user_id)
+            _send_memorial_notice(
+                "EigenFlux 需要重新登录",
+                "EigenFlux token 已过期，请运行 `eigenflux auth login` 重新认证。",
+                user_id, urgent=True)
             if stop.wait(300):
                 break
             continue

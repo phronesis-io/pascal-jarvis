@@ -88,6 +88,55 @@ def test_multiple_actions(tmp_path):
     assert len(tasks) == 2
 
 
+def _pending_broadcast(tmp_path, pending_id="123_456"):
+    path = tmp_path / "eigenflux" / "pending_publish" / f"{pending_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "id": pending_id, "content": "need collaborators",
+        "notes": {"type": "demand"}, "url": "https://example.com",
+    }))
+    return path
+
+
+def test_eigenflux_publish_action_sends_selected_pending(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    pending = _pending_broadcast(tmp_path)
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    monkeypatch.setattr("core.actions.subprocess.run",
+                        lambda cmd, **kw: calls.append(cmd) or Result())
+    result = ap._do_eigenflux_publish("id=123_456")
+    assert result == "✅ 已广播"
+    assert calls[0][:2] == ["eigenflux", "publish"]
+    assert not pending.exists()
+
+
+def test_eigenflux_publish_failure_keeps_pending(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    pending = _pending_broadcast(tmp_path)
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "offline"
+
+    monkeypatch.setattr("core.actions.subprocess.run", lambda *a, **kw: Result())
+    assert "仍保留" in ap._do_eigenflux_publish("id=123_456")
+    assert pending.exists()
+
+
+def test_eigenflux_cancel_publish_action(tmp_path):
+    ap = _make_processor(tmp_path)
+    pending = _pending_broadcast(tmp_path)
+    assert ap._do_eigenflux_cancel_publish("id=123_456") == "已取消广播"
+    assert not pending.exists()
+
+
 def test_intent_create(tmp_path):
     """Intent create should not crash even without the DB (graceful error).
 

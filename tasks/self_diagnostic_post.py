@@ -63,6 +63,20 @@ def _mark_alerted(lines: list[str]) -> None:
 
 def _send(text: str, user_id: str) -> bool:
     try:
+        from core import memorial
+        mid, _ = memorial.create(
+            source="selfmon", title="自诊断发现问题", body=text,
+            preset="fyi", urgent=True)
+        state = memorial.get_memorial(mid) or {}
+        if state.get("delivery_status") in {
+                "delivered", "queued", "retry_queued"}:
+            return True
+    except Exception as e:
+        print(f"[self_diagnostic_post] memorial send failed: {e}",
+              file=sys.stderr)
+    # Emergency fallback: if memorial imports/storage itself is broken, keep
+    # the old independent plain-text path and then the macOS local alert.
+    try:
         r = subprocess.run(
             ["lark-cli", "im", "+send", "--receive-id", user_id,
              "--receive-id-type", "open_id", "--msg-type", "text",

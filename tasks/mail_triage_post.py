@@ -3,12 +3,14 @@
 
 Reads Claude's JSON reply (per-email decisions + an optional surfaced message),
 records EVERY email shown this cycle as triaged (so it's never re-read), and
-emits one Lark card for the surface-worthy ones. Night-held into a backlog that
-drains on the first morning cycle, same gate EigenFlux uses.
+emits one memorial card per surface-worthy email. Quiet-hour deferral belongs
+to heartbeat_loop's intact-card queue; this hook never aggregates mail into a
+long morning blob.
 
 Input (stdin): Claude's reply, e.g.
   {"triage":[{"event_id":"...","decision":"push|silent","reason":"..."}],
-   "user_message":"<markdown or empty>","urgent":false}
+   "user_messages":[{"event_id":"...","title":"...","body":"..."}],
+   "urgent":false}
 """
 from __future__ import annotations
 
@@ -23,29 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.card import build_card  # noqa: E402
 from core.jsonl import read_jsonl, write_jsonl  # noqa: E402
 from core.safety import parse_json_response  # noqa: E402
-from core.timeutil import now_local_str  # noqa: E402
-import _ef_delivery as efd  # noqa: E402
-from mail_triage_lib import pending_path, triaged_path, _mail_dir  # noqa: E402
+from mail_triage_lib import pending_path, triaged_path  # noqa: E402
 
 TRIAGED_KEEP = 3000
-
-
-def _mail_backlog() -> Path:
-    return _mail_dir() / "mail_backlog.jsonl"
-
-
-def _hold(message: str) -> None:
-    rows = read_jsonl(_mail_backlog())
-    rows.append({"ts": now_local_str(), "message": message})
-    write_jsonl(_mail_backlog(), rows)
-
-
-def _drain() -> list[str]:
-    p = _mail_backlog()
-    rows = read_jsonl(p)
-    if p.exists():
-        p.unlink()
-    return [r.get("message", "") for r in rows if r.get("message")]
 
 
 def _record_triaged(decisions: dict) -> None:
@@ -60,6 +42,7 @@ def _record_triaged(decisions: dict) -> None:
             pending = []
     rows = read_jsonl(triaged_path())
     have = {r.get("event_id") for r in rows}
+    from core.timeutil import now_local_str
     ts = now_local_str()
     for item in pending:
         eid = item.get("event_id")
@@ -97,20 +80,22 @@ def main() -> int:
     msg = str(data.get("user_message", "")).strip()
     urgent = bool(data.get("urgent", False))
 
-    # Morning flush: prepend anything held overnight onto today's first card.
-    held = []
-    if not efd.in_quiet_hours():
-        held = _drain()
-
-    if efd.in_quiet_hours() and not urgent:
-        if msg:
-            _hold(msg)
+    surface_items = []
+    for item in data.get("user_messages", []) or []:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("body") or item.get("message") or "").strip()
+        if body:
+            surface_items.append({
+                "title": str(item.get("title") or "邮件").strip() or "邮件",
+                "body": body,
+                "event_id": str(item.get("event_id", "")),
+            })
+    # Backward compatibility while the model prompt rolls over.
+    if not surface_items and msg:
+        surface_items.append({"title": "邮件", "body": msg, "event_id": ""})
+    if not surface_items:
         return 0
-
-    parts = held + ([msg] if msg else [])
-    if not parts:
-        return 0
-    body = "\n\n———\n\n".join(parts)
     # Push mail now goes out as a memorial (奏折) card — fyi buttons
     # (已阅 / 重要，持续盯) plus「💬 聊聊这个」. Silent triage, dedup and the
     # quiet-hours gate above are untouched; only the push CARRIER changed.
@@ -121,8 +106,6 @@ def main() -> int:
     # legacy plain card so mail is never lost.
     try:
         from core import memorial
-        mem_id, _ = memorial.create(source="mail", title="邮件", body=body,
-                                    preset="fyi", send=False)
         if urgent:
             # Bypass heartbeat_loop's own quiet-hours queue too; this item has
             # already passed the mail task's explicit urgent gate.
@@ -132,11 +115,20 @@ def main() -> int:
                 )).joinpath(".urgent_send").touch()
             except OSError:
                 pass
-        print(memorial.card_json(mem_id))
+        for item in surface_items:
+            mem_id, _ = memorial.create(
+                source="mail", title=item["title"], body=item["body"],
+                preset="fyi", send=False,
+                context=(f"mail event_id={item['event_id']}"
+                         if item["event_id"] else ""),
+            )
+            print(memorial.card_json(mem_id))
     except Exception as e:
         print(f"[mail-triage] memorial failed, using plain card: {e}",
               file=sys.stderr)
-        print(build_card(header="📬 邮件", body=body, source="mail-triage"))
+        for item in surface_items:
+            print(build_card(header=f"📬 {item['title']}", body=item["body"],
+                             source="mail-triage"))
     return 0
 
 

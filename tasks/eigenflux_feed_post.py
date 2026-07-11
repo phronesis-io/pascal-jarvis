@@ -68,29 +68,28 @@ def run_eigenflux(*args: str, stdin_data: str | None = None) -> dict:
         return {}
 
 
-def _emit_morning_digest() -> None:
-    """If we've crossed into the morning flush window with an overnight backlog,
-    drain it into ONE consolidated card. Runs every feed-triage cycle but the
-    date stamp makes it fire only once per day."""
-    if not efd.should_flush():
+def _emit_legacy_backlog_cards() -> None:
+    """Drain pre-migration backlog entries as separate intact cards.
+
+    New items never enter this file; heartbeat_loop owns quiet-hour deferral.
+    This one-way compatibility drain prevents old held messages from being
+    stranded while refusing to recreate the truncated morning digest.
+    """
+    p = efd.backlog_path()
+    if not p.exists() or p.stat().st_size == 0:
         return
     held = efd.drain()
-    efd.mark_flushed()
-    if not held:
-        return
-    body, n_total = efd.render_digest_body(held)
-    print(f"[eigenflux-feed] morning digest: flushed {n_total} held lines "
-          f"from {len(held)} night cards", file=LOG)
-    print(build_card(
-        header="📡 EigenFlux · 早报",
-        body=body,
-        source="eigenflux-feed-digest",
-    ))
+    print(f"[eigenflux-feed] migrated {len(held)} legacy held card(s) into "
+          "the intact memorial carrier", file=LOG)
+    for entry in held:
+        message = str(entry.get("message", "")).strip()
+        if message:
+            print(build_card(header="📡 EigenFlux", body=message,
+                             source=str(entry.get("source") or "eigenflux-feed")))
 
 
 def main() -> int:
-    # Flush last night's held EigenFlux backlog first (once per morning).
-    _emit_morning_digest()
+    _emit_legacy_backlog_cards()
 
     raw = sys.stdin.read().strip()
     if not raw:
@@ -158,16 +157,23 @@ def main() -> int:
     # truncation) and link "阅读原文" to the public source — not a localhost
     # richview page, which is dead on Pascal's phone. build_card auto-linkifies
     # any bare URL in the body so it's tappable on mobile too.
-    msg = str(data.get("user_message", "")).strip()
-    if msg:
-        # Quiet-hours gate: at night, hold non-urgent EigenFlux pushes for the
-        # morning digest instead of pinging Pascal. Only items the triage marked
-        # urgent break through. The gate is wall-clock based, not LLM judgment.
-        urgent = bool(data.get("urgent", False))
-        if efd.in_quiet_hours() and not urgent:
-            efd.hold(msg, source="eigenflux-feed")
-            print("[eigenflux-feed] quiet hours — held for morning digest", file=LOG)
-            return 0
+    surface_items = []
+    for item in data.get("user_messages", []) or []:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("body") or item.get("message") or "").strip()
+        if body:
+            surface_items.append({**item, "body": body})
+    legacy_msg = str(data.get("user_message", "")).strip()
+    if not surface_items and legacy_msg:
+        surface_items.append({"body": legacy_msg,
+                              "source_url": data.get("source_url") or data.get("url", "")})
+    if surface_items:
+        # heartbeat_loop owns quiet-hour deferral so the exact card (including
+        # links, 批红 and Chat) survives. This hook only marks rare urgent items
+        # that should bypass that central gate.
+        urgent = bool(data.get("urgent", False)) or any(
+            bool(item.get("urgent", False)) for item in surface_items)
         if urgent:
             # Tell the downstream heartbeat send layer to bypass ITS batch
             # queue too: it only sees the task-name sidecar, and
@@ -178,21 +184,16 @@ def main() -> int:
                 (Path(os.environ.get("JARVIS_DIR", ".")) / ".urgent_send").touch()
             except OSError:
                 pass
-        # A single "阅读原文" button only makes sense when the card has ONE
-        # source. Multi-item digests (FYI/知会) carry a per-item inline link
-        # each; the footer button would point to just the first item and
-        # mislead, so suppress it and let the inline links do the navigation.
-        if len(_distinct_links(msg)) >= 2:
-            buttons = None
-        else:
-            src = _source_url(data, msg)
+        for item in surface_items:
+            msg = item["body"]
+            src = "" if len(_distinct_links(msg)) >= 2 else _source_url(item, msg)
             buttons = [{"text": "阅读原文", "url": src}] if src else None
-        print(build_card(
-            header="📡 EigenFlux",
-            body=msg,
-            buttons=buttons,
-            source="eigenflux-feed",
-        ))
+            print(build_card(
+                header="📡 EigenFlux",
+                body=msg,
+                buttons=buttons,
+                source="eigenflux-feed",
+            ))
     return 0
 
 
