@@ -63,7 +63,8 @@ def linkify_bare_urls(text: str) -> str:
 
 
 def build_card(header: str, body: str, buttons: list[dict] | None = None,
-               source: str = "") -> str:
+               source: str = "",
+               button_groups: list[list[dict]] | None = None) -> str:
     """Build a Lark interactive card JSON string (single line).
 
     Args:
@@ -71,6 +72,10 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
         body: Markdown body text
         buttons: Optional list of {"text": "label", "url": "https://..."} dicts
         source: Task source name (e.g. "checkin") — if set, adds feedback buttons
+        button_groups: Optional rows of buttons. Use this for mobile cards where
+            choices, source links, and a conversation affordance should not be
+            squeezed into one four-or-five-button row. Mutually exclusive with
+            ``buttons``.
 
     Returns:
         Single-line JSON string starting with {"config":...}
@@ -79,13 +84,19 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     if body:
         body = linkify_bare_urls(body)
         elements.append({"tag": "div", "text": {"content": body, "tag": "lark_md"}})
-    if buttons:
+    if buttons and button_groups:
+        raise ValueError("use buttons or button_groups, not both")
+    groups = button_groups if button_groups is not None else ([buttons] if buttons else [])
+    for group_index, group in enumerate(groups):
+        if not group:
+            continue
         actions = []
-        for i, btn in enumerate(buttons):
+        for i, btn in enumerate(group):
             action = {
                 "tag": "button",
                 "text": {"content": btn["text"], "tag": "plain_text"},
-                "type": "primary" if i == 0 else "default",
+                "type": btn.get(
+                    "type", "primary" if group_index == 0 and i == 0 else "default"),
             }
             if "url" in btn:
                 action["url"] = btn["url"]

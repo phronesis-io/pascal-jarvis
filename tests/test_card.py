@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import core.richview
 from core.card import (
     _sections_to_markdown,
@@ -78,6 +80,26 @@ def test_build_card_with_buttons():
     assert actions[1]["value"] == {"action": "save"}
     assert actions[0]["type"] == "primary"
     assert actions[1]["type"] == "default"
+
+
+def test_build_card_with_phone_first_button_groups():
+    result = build_card("Title", "Body", button_groups=[
+        [{"text": "同意", "value": {"k": "yes"}},
+         {"text": "不采纳", "value": {"k": "no"}}],
+        [{"text": "聊聊这个", "type": "default", "value": {"k": "chat"}}],
+    ])
+    card = json.loads(result)
+    rows = [e["actions"] for e in card["elements"] if e.get("tag") == "action"]
+    assert [[a["text"]["content"] for a in row] for row in rows] == [
+        ["同意", "不采纳"], ["聊聊这个"]]
+    assert rows[0][0]["type"] == "primary"
+    assert rows[1][0]["type"] == "default"
+
+
+def test_build_card_rejects_buttons_and_groups_together():
+    with pytest.raises(ValueError):
+        build_card("T", "B", buttons=[{"text": "A"}],
+                   button_groups=[[{"text": "B"}]])
 
 
 def test_build_card_empty_body():

@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -78,8 +78,9 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import home, tasks, settings, agent_calendar, engagement, ops
-    for mod in (home, tasks, settings, agent_calendar, engagement, ops):
+    from dashboard.pages import (home, memorials, tasks, settings,
+                                 agent_calendar, engagement, ops)
+    for mod in (home, memorials, tasks, settings, agent_calendar, engagement, ops):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -761,6 +762,56 @@ class TestOpsBoard:
         assert snap["flagged_count"] == 1
         assert len(snap["events"]) == 5
         assert [e["task"] for e in snap["failed_events"]] == ["beta", "gamma", "epsilon"]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# (5d) decision-first home + memorial inbox
+# ═════════════════════════════════════════════════════════════════════════
+
+class TestDecisionSurface:
+    def test_home_hides_routine_polling_and_duplicate_card_deliveries(self, tmp_path):
+        from dashboard.pages.home import build_activity_feed
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        _write_jsonl(tmp_path / "sched_events.jsonl", [
+            {"ts": now, "event": "task_skip", "task": "poll",
+             "reason": "empty_pre"},
+            {"ts": now, "event": "task_skip", "task": "batch",
+             "reason": "queued_quiet_hours"},
+            {"ts": now, "event": "task_timeout", "task": "mail"},
+        ])
+        _write_jsonl(tmp_path / "heartbeat_outbox.jsonl", [
+            {"ts": now[:16], "text": "**📜 📡 card** body"},
+            {"ts": now[:16], "text": "一条真正的非卡片变化"},
+        ])
+        feed = build_activity_feed(tmp_path)
+        assert [e["message"] for e in feed] == [
+            "mail 超时，系统会继续重试", "一条真正的非卡片变化"]
+
+    def test_memorial_inbox_folds_pending_and_uses_specific_display_title(self, tmp_path):
+        from dashboard.pages.memorials import memorial_states
+        from dashboard.uiutil import memorial_display_title, memorial_option_label
+        now = int(time.time())
+        _write_jsonl(tmp_path / "memorials.jsonl", [
+            {"ev": "create", "id": "m1", "epoch": now, "ts": "2026-07-12 09:00",
+             "source": "eigenflux-feed-triage", "title": "EigenFlux",
+             "body": "OpenAI 发布新的语音模型。后面是详情", "options": [],
+             "extra_buttons": [], "context": ""},
+        ])
+        states = memorial_states(tmp_path)
+        assert states[0]["status"] == "pending"
+        assert memorial_display_title(states[0]) == "OpenAI 发布新的语音模型"
+        assert memorial_option_label("重要，持续盯") == "标为重点"
+
+    def test_personal_memorials_rank_ahead_of_newer_ambient_feed(self):
+        from dashboard.uiutil import memorial_attention_rank
+        rows = [
+            {"source": "eigenflux-feed-triage", "epoch": 200},
+            {"source": "daily-reflect", "epoch": 100},
+            {"source": "mail", "epoch": 50},
+        ]
+        rows.sort(key=memorial_attention_rank, reverse=True)
+        assert [r["source"] for r in rows] == [
+            "mail", "daily-reflect", "eigenflux-feed-triage"]
 
 
 # ═════════════════════════════════════════════════════════════════════════

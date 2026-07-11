@@ -61,6 +61,13 @@ SEND_RETRY_DELAYS = (2, 5)
 # stack duplicate openers/injections.
 CHAT_RETAP_THROTTLE_S = 120
 
+# The ledger keeps the full event; the phone card is the decision surface, not
+# the archive.  This bound prevents an emitter regression from recreating the
+# old wall-of-text experience while「聊聊这个」still receives richer context.
+CARD_BODY_MAX_CHARS = 900
+CARD_BODY_MAX_LINES = 8
+CHAT_CONTEXT_MAX_CHARS = 1500
+
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
 # same error card 7 times in 12h); the outbox-based dedup there can't see
@@ -79,18 +86,18 @@ MEMORIAL_QUEUE_FILE = "memorial_queue.jsonl"
 # main session read back.
 PRESETS: dict[str, list[dict]] = {
     "decision": [
-        {"key": "approve", "label": "准（去做）", "action": None},
-        {"key": "defer", "label": "缓（改天提我）", "action": None},
-        {"key": "reject", "label": "驳（不做了）", "action": None},
+        {"key": "approve", "label": "同意", "action": None},
+        {"key": "defer", "label": "暂不处理", "action": None},
+        {"key": "reject", "label": "不采纳", "action": None},
     ],
     "fyi": [
         {"key": "read", "label": "已阅", "action": None},
-        {"key": "watch", "label": "重要，持续盯", "action": None},
+        {"key": "watch", "label": "标为重点", "action": None},
     ],
     "followup": [
         {"key": "done", "label": "做了", "action": None},
-        {"key": "later", "label": "没做，改天", "action": None},
-        {"key": "stop", "label": "别再问了", "action": None},
+        {"key": "later", "label": "还没做", "action": None},
+        {"key": "stop", "label": "这次跳过", "action": None},
     ],
 }
 
@@ -267,22 +274,58 @@ def _header(state: dict) -> str:
     return " ".join(p for p in ("📜", emoji, state["title"]) if p)
 
 
-def _buttons(state: dict, include_chat: bool = True) -> list[dict]:
-    # Preserve useful task-native actions (open source, save for later,
-    # close an intent, etc.) when an existing card is adopted into the
-    # memorial surface.  They keep their original URL/value callback; the
-    # framework-owned options below remain the recorded 批红 choices.
-    btns = [dict(b) for b in state.get("extra_buttons", [])]
-    btns.extend([
-        {"text": o.get("label", o.get("key", "")),
-         "value": {"action": "memorial", "id": state["id"], "opt": o.get("key", "")}}
-        for o in state["options"]
-    ])
+def _button_groups(state: dict, include_options: bool = True,
+                   include_chat: bool = True) -> list[list[dict]]:
+    """Phone-first action rows: choices, source actions, then conversation.
+
+    The old single row compressed up to five controls into tiny, truncated
+    buttons.  Separate rows also encode the real hierarchy: 批示 is the main
+    decision, opening a source is supporting context, and Chat is the escape
+    hatch that must remain available after a decision.
+    """
+    groups: list[list[dict]] = []
+    if include_options and state.get("options"):
+        groups.append([
+            {"text": o.get("label", o.get("key", "")),
+             "type": "primary" if i == 0 else "default",
+             "value": {"action": "memorial", "id": state["id"],
+                       "opt": o.get("key", "")}}
+            for i, o in enumerate(state["options"])
+        ])
+    if state.get("extra_buttons"):
+        groups.append([{**dict(button), "type": "default"}
+                       for button in state["extra_buttons"]])
     if include_chat:
-        btns.append({"text": CHAT_BUTTON_LABEL,
-                     "value": {"action": "memorial", "id": state["id"],
-                               "opt": CHAT_OPT_KEY}})
-    return btns
+        groups.append([{"text": CHAT_BUTTON_LABEL, "type": "default",
+                        "value": {"action": "memorial", "id": state["id"],
+                                  "opt": CHAT_OPT_KEY}}])
+    return groups
+
+
+def _display_body(body: str) -> str:
+    """Compact card copy while preserving the full ledger/chat context."""
+    raw = str(body or "").strip()
+    lines = raw.splitlines()
+    clipped = len(lines) > CARD_BODY_MAX_LINES
+    text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
+    if len(text) > CARD_BODY_MAX_CHARS:
+        text = text[:CARD_BODY_MAX_CHARS].rstrip()
+        clipped = True
+    if clipped:
+        text += "\n\n…完整背景可点「聊聊这个」"
+    return text
+
+
+def _render_card(state: dict, *, body: str | None = None,
+                 status_line: str = "", include_options: bool = True,
+                 include_chat: bool = True) -> str:
+    content = _display_body(state["body"] if body is None else body)
+    if status_line:
+        content += "\n\n" + status_line
+    return build_card(
+        _header(state), content,
+        button_groups=_button_groups(state, include_options, include_chat),
+    )
 
 
 def card_json(memorial_id: str) -> str:
@@ -295,7 +338,7 @@ def card_json(memorial_id: str) -> str:
     st = get_memorial(memorial_id)
     if st is None:
         raise KeyError(f"memorial not found: {memorial_id}")
-    return build_card(_header(st), st["body"], buttons=_buttons(st))
+    return _render_card(st)
 
 
 def _hhmm(ts: str) -> str:
@@ -304,19 +347,21 @@ def _hhmm(ts: str) -> str:
 
 
 def _decided_card(state: dict) -> dict:
-    """Replacement card after 批红: original title+body, status line, no buttons."""
-    body = state["body"] + f"\n\n✅ 已批：{state['decided_label']} · {_hhmm(state['decided_ts'])}"
+    """Replacement after 批红: durable proof plus a conversation escape hatch."""
+    status = f"✅ 已批：{state['decided_label']} · {_hhmm(state['decided_ts'])}"
     if state.get("action_result"):
-        body += f"\n{state['action_result']}"
-    return json.loads(build_card(_header(state), body))
+        status += f"\n{state['action_result']}"
+    return json.loads(_render_card(state, status_line=status, include_options=False,
+                                   include_chat=True))
 
 
 def _chatting_card(state: dict, ts: str) -> dict:
     """Replacement card after「聊聊这个」: chatting banner, remaining options
     stay tappable so Pascal can still 批 while (or after) chatting."""
-    body = state["body"] + f"\n\n💬 聊天中 · {_hhmm(ts)} — 直接回消息就行"
-    buttons = _buttons(state, include_chat=False) if state["status"] == "pending" else None
-    return json.loads(build_card(_header(state), body, buttons=buttons))
+    status = f"💬 聊天中 · {_hhmm(ts)} — 直接回消息就行"
+    return json.loads(_render_card(
+        state, status_line=status, include_options=state["status"] == "pending",
+        include_chat=False))
 
 
 # ── sending (clone of heartbeat_loop's production lark-cli path) ────────
@@ -521,7 +566,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
 def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     """Deliver an already-ledgered memorial and record the outcome."""
     mid = state["id"]
-    cj = build_card(_header(state), state["body"], buttons=_buttons(state))
+    cj = _render_card(state)
     if not urgent and _quiet_hours_now():
         _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
         _record_delivery(mid, "queued")
@@ -589,7 +634,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     _append_line(_ledger_path(), ev)
 
     state = _fold([ev])[mid]
-    cj = build_card(_header(state), state["body"], buttons=_buttons(state))
+    cj = _render_card(state)
     if not send:
         return mid, False
     return mid, _deliver_existing(state, urgent=urgent)
@@ -619,7 +664,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
 
     Task-native actions/links are preserved. Cards that already offer a real
     action keep those choices and gain「聊聊这个」; read-only/link-only cards
-    also gain the common「已阅／持续盯」批红 pair.
+    also gain the common「已阅／标为重点」批红 pair.
     """
     card = json.loads(legacy_card_json)
     if _card_memorial_id(card):
@@ -781,6 +826,7 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
+    _queue_decision_context(st, opt.get("label", ""), action_result)
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
     else:
@@ -792,7 +838,7 @@ def _status_line(st: dict) -> str:
     if st["status"] == "decided":
         return f"已批：{st['decided_label']}（{st['decided_ts']}）"
     labels = "／".join(o.get("label", "") for o in st["options"])
-    return f"待批（选项：{labels}）"
+    return f"待批（选项：{labels}）" if labels else "待处理"
 
 
 def _injection_queued(conv_key: str, job_id: str) -> bool:
@@ -800,6 +846,54 @@ def _injection_queued(conv_key: str, job_id: str) -> bool:
     pending_merge (queued but not yet consumed by bot.sh)."""
     return any(e.get("conv_key") == conv_key and e.get("job_id") == job_id
                for e in read_jsonl(_pending_merge_path()))
+
+
+def _bounded_chat_context(st: dict) -> str:
+    """Build a bounded injection without truncating away state/instructions."""
+    fixed = [
+        "[奏折上下文] Pascal 点了「聊聊这个」，下一条消息讨论这件事：",
+        f"来源: {st['source']}",
+        f"标题: {st['title']}",
+        f"当前状态: {_status_line(st)}",
+        "直接接住话题，不要复述卡片。",
+    ]
+    # Reserve the fixed tail first. Variable fields are clipped independently,
+    # so a huge body can never erase the current state or instruction.
+    budget = max(CHAT_CONTEXT_MAX_CHARS - len("\n".join(fixed)) - 32, 200)
+    body = str(st.get("body", "")).strip()
+    context = str(st.get("context", "")).strip()
+    body_budget = min(900, int(budget * 0.7))
+    body = body[:body_budget].rstrip()
+    context = context[:max(budget - len(body), 0)].rstrip()
+    variable = [f"正文: {body}"]
+    if context:
+        variable.append(f"背景: {context}")
+    return "\n".join(fixed[:3] + variable + fixed[3:])[:CHAT_CONTEXT_MAX_CHARS]
+
+
+def _queue_decision_context(st: dict, label: str, action_result: str = "") -> None:
+    """Carry a card tap into the next conversation turn.
+
+    A record-only 批红 used to disappear into analytics: the assistant could
+    ask again because the conversational session never learned the choice.
+    The existing pending-merge bridge is the durable per-conversation handoff.
+    """
+    conv_key = st.get("chat_id", "") or _resolve_user_id()
+    if not conv_key:
+        return
+    job_id = f"memorial-decision:{st['id']}"
+    if _injection_queued(conv_key, job_id):
+        return
+    lines = [
+        f"[奏折批示] Pascal 对「{st['title']}」选择了「{label}」。",
+        "把它视为已经确认的偏好或决定，不要原样再问一次。",
+    ]
+    if action_result:
+        lines.append(f"动作结果: {action_result[:400]}")
+    _append_line(_pending_merge_path(), {
+        "conv_key": conv_key, "job_id": job_id,
+        "ts": now_local_str(), "summary": "\n".join(lines),
+    })
 
 
 def chat(memorial_id: str) -> dict:
@@ -839,19 +933,9 @@ def chat(memorial_id: str) -> dict:
             print(f"memorial chat: injection for {memorial_id} already queued",
                   file=sys.stderr)
         else:
-            parts = [
-                "[奏折上下文] Pascal 在奏折卡上点了「💬 聊聊这个」，他接下来要聊的就是这件事：",
-                f"来源: {st['source']}",
-                f"标题: {st['title']}",
-                f"正文: {st['body']}",
-            ]
-            if st.get("context"):
-                parts.append(f"背景: {st['context']}")
-            parts.append(f"当前状态: {_status_line(st)}")
-            parts.append("直接接住这个话题，别重复念卡片内容。")
             _append_line(_pending_merge_path(), {
                 "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
-                "ts": ts, "summary": "\n".join(parts)[:1500],
+                "ts": ts, "summary": _bounded_chat_context(st),
             })
     else:
         print(f"memorial chat: no conv_key for {memorial_id} — context not injected",
@@ -863,8 +947,8 @@ def chat(memorial_id: str) -> dict:
                         "type": "feedback", "rating": "chat"})
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
-    snippet = st["body"][:200]
-    opener = f"📜 聊聊：{st['title']}\n{snippet}\n——你想怎么处理这件事？"
+    opener = (f"📜 已带上「{st['title']}」的背景。"
+              "直接说你想追问什么，或告诉我你的倾向。")
     _send_opener_async(opener, st.get("chat_id", ""))
 
     return {"toast": {"type": "success", "content": "开聊——直接回消息就行"},

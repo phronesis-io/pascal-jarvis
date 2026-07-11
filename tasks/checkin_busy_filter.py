@@ -70,11 +70,11 @@ def transition_context(items, now=None):
     return '\n'.join(signals)
 
 
-def main():
+def main(now=None):
     try:
         data = json.load(sys.stdin)
         items = data.get('data') or []
-        print(transition_context(items))
+        print(transition_context(items, now=now))
     except Exception as e:
         print(f'calendar_error: {e}')
 

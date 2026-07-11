@@ -52,6 +52,15 @@ def _ledger_events(tmp_path) -> list[dict]:
     return [json.loads(x) for x in p.read_text().splitlines() if x.strip()]
 
 
+def _action_rows(card: dict) -> list[list[dict]]:
+    return [el["actions"] for el in card.get("elements", [])
+            if el.get("tag") == "action"]
+
+
+def _actions(card: dict) -> list[dict]:
+    return [action for row in _action_rows(card) for action in row]
+
+
 # ── create ───────────────────────────────────────────────────────────────
 
 
@@ -78,8 +87,9 @@ def test_create_card_structure_and_button_value_round_trip(env):
 
     assert card["header"]["title"]["content"] == "📜 📬 标题"
     assert card["elements"][0]["text"]["content"] == "正文"
-    actions = card["elements"][1]["actions"]
-    # 3 preset options + framework-appended 聊聊这个
+    rows = _action_rows(card)
+    assert [len(row) for row in rows] == [3, 1]  # choices, then full-row Chat
+    actions = _actions(card)
     assert len(actions) == 4
     assert actions[0]["type"] == "primary"
     assert actions[-1]["text"]["content"] == "💬 聊聊这个"
@@ -92,7 +102,16 @@ def test_create_card_structure_and_button_value_round_trip(env):
 def test_create_defaults_to_fyi_preset(env):
     mid, _ = memorial.create("selfmon", "t", "b")
     st = memorial.get_memorial(mid)
-    assert [o["label"] for o in st["options"]] == ["已阅", "重要，持续盯"]
+    assert [o["label"] for o in st["options"]] == ["已阅", "标为重点"]
+
+
+def test_card_compacts_long_body_but_ledger_keeps_full_context(env):
+    body = "\n".join(f"第{i}行 " + "细节" * 80 for i in range(12))
+    mid, _ = memorial.create("mail", "长邮件", body, preset="fyi")
+    card_body = json.loads(env.cards[0][0])["elements"][0]["text"]["content"]
+    assert len(card_body) < len(body)
+    assert "完整背景可点「聊聊这个」" in card_body
+    assert memorial.get_memorial(mid)["body"] == body
 
 
 def test_create_rejects_reserved_chat_key_and_unknown_preset(env):
@@ -134,15 +153,19 @@ def test_decide_records_and_replaces_card(env):
     payload = memorial.decide(mid, "approve")
 
     assert payload["toast"]["type"] == "success"
-    assert "已批：准（去做）" in payload["toast"]["content"]
+    assert "已批：同意" in payload["toast"]["content"]
     assert payload["card"]["type"] == "raw"
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
-    assert "正文" in body and "✅ 已批：准（去做）" in body
-    # buttons removed on the replacement card
-    assert all(el.get("tag") != "action" for el in card["elements"])
+    assert "正文" in body and "✅ 已批：同意" in body
+    # The decision choices are removed, but Chat remains available.
+    assert [a["text"]["content"] for a in _actions(card)] == ["💬 聊聊这个"]
     st = memorial.get_memorial(mid)
     assert st["status"] == "decided" and st["decided_opt"] == "approve"
+    decision = next(json.loads(line) for line in
+                    (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()
+                    if "memorial-decision" in line)
+    assert "选择了「同意」" in decision["summary"]
 
 
 def test_decide_is_idempotent(env):
@@ -228,11 +251,11 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
                              preset="fyi", context="来自 alice 的邮件")
     payload = memorial.chat(mid)
 
-    # 1. opener message sent (body truncated to ~200 chars)
+    # 1. opener is concise and does not repeat the card body
     opener = env.texts[0][0]
-    assert opener.startswith("📜 聊聊：邮件标题")
-    assert "你想怎么处理这件事" in opener
-    assert len(opener) < 300
+    assert opener.startswith("📜 已带上「邮件标题」的背景")
+    assert "正文" not in opener
+    assert len(opener) < 100
 
     # 2. context injected into bot.sh's pending-merge channel
     pm = env.dir / "jobs" / "pending_merge.jsonl"
@@ -252,9 +275,20 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
     assert "💬 聊天中" in body
-    actions = card["elements"][1]["actions"]
-    labels = [a["text"]["content"] for a in actions]
-    assert labels == ["已阅", "重要，持续盯"]  # no 聊聊这个 button
+    labels = [a["text"]["content"] for a in _actions(card)]
+    assert labels == ["已阅", "标为重点"]  # no 聊聊这个 button
+
+
+def test_chat_context_keeps_state_when_body_and_background_are_huge(env):
+    mid, _ = memorial.create("mail", "很长的上下文", "正文" * 2000,
+                             preset="fyi", context="背景" * 2000)
+    memorial.chat(mid)
+    entry = json.loads(
+        (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()[0])
+    summary = entry["summary"]
+    assert len(summary) <= memorial.CHAT_CONTEXT_MAX_CHARS
+    assert "当前状态: 待批" in summary
+    assert summary.endswith("直接接住话题，不要复述卡片。")
 
 
 def test_chat_after_decide_shows_status_no_buttons(env):
@@ -262,8 +296,9 @@ def test_chat_after_decide_shows_status_no_buttons(env):
     memorial.decide(mid, "read")
     payload = memorial.chat(mid)
 
-    entry = json.loads(
-        (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()[0])
+    entries = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    entry = next(e for e in entries if e["job_id"] == f"memorial:{mid}")
     assert "已批：已阅" in entry["summary"]
     card = payload["card"]["data"]
     assert all(el.get("tag") != "action" for el in card["elements"])
@@ -327,10 +362,11 @@ def test_adopt_readonly_card_preserves_link_and_adds_fyi_chat(env):
                         buttons=[{"text": "阅读原文",
                                   "url": "https://example.com/a"}])
     adopted = json.loads(memorial.adopt_card("eigenflux-feed-triage", legacy))
-    actions = adopted["elements"][1]["actions"]
-    labels = [a["text"]["content"] for a in actions]
-    assert labels == ["阅读原文", "已阅", "重要，持续盯", "💬 聊聊这个"]
-    assert actions[0]["url"] == "https://example.com/a"
+    rows = _action_rows(adopted)
+    assert [[a["text"]["content"] for a in row] for row in rows] == [
+        ["已阅", "标为重点"], ["阅读原文"], ["💬 聊聊这个"]]
+    actions = _actions(adopted)
+    assert next(a for a in actions if a["text"]["content"] == "阅读原文")["url"] == "https://example.com/a"
 
 
 def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
@@ -339,7 +375,7 @@ def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
         buttons=[{"text": "做了", "value": {
             "action": "intent_close", "id": "int_1", "outcome": "done"}}])
     adopted = json.loads(memorial.adopt_card("intention-check", legacy))
-    actions = adopted["elements"][1]["actions"]
+    actions = _actions(adopted)
     assert [a["text"]["content"] for a in actions] == ["做了", "💬 聊聊这个"]
     assert actions[0]["value"]["action"] == "intent_close"
 
@@ -364,7 +400,7 @@ def test_memorialize_output_does_not_double_wrap_memorial(env):
 def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
     legacy = build_card("📡 EigenFlux", "同一条动态")
     first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")
-    mid = json.loads(first)["elements"][1]["actions"][-1]["value"]["id"]
+    mid = _actions(json.loads(first))[-1]["value"]["id"]
     memorial._record_delivery(mid, "delivered")
     assert memorial.memorialize_output(legacy, "eigenflux-feed-triage") == ""
 
@@ -385,7 +421,7 @@ def test_same_body_different_native_action_is_not_deduped(env):
         "action": "intent_close", "id": "int_2", "outcome": "done"}}])
     card1 = json.loads(memorial.adopt_card("intention-check", first))
     card2 = json.loads(memorial.adopt_card("intention-check", second))
-    ids = [card["elements"][1]["actions"][-1]["value"]["id"]
+    ids = [_actions(card)[-1]["value"]["id"]
            for card in (card1, card2)]
     assert ids[0] != ids[1]
 
@@ -519,8 +555,8 @@ def test_mail_post_emits_memorial_card(tmp_path, monkeypatch, capsys):
     card = json.loads(capsys.readouterr().out)
     assert card["header"]["title"]["content"] == "📜 📬 邮件"
     assert "来自 X 的邮件" in card["elements"][0]["text"]["content"]
-    labels = [a["text"]["content"] for a in card["elements"][1]["actions"]]
-    assert labels == ["已阅", "重要，持续盯", "💬 聊聊这个"]
+    labels = [a["text"]["content"] for a in _actions(card)]
+    assert labels == ["已阅", "标为重点", "💬 聊聊这个"]
 
 
 # ── engagement accounting (v1.2 follow-up: memorial ↔ engagement_log) ────

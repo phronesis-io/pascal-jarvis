@@ -60,6 +60,7 @@ def test_structured_items_emit_only_best_card_per_cycle(tmp_path):
     out = _run(payload, tmp_path)
     cards = [json.loads(line) for line in out.splitlines() if line.strip()]
     assert len(cards) == 1
+    assert cards[0]["header"]["title"]["content"] == "📡 知会"
     assert "第一件事" in cards[0]["elements"][0]["text"]["content"]
 
 
@@ -75,6 +76,32 @@ def test_urgent_surface_bypasses_cooldown(tmp_path):
     urgent = _run(json.dumps({"user_message": "紧急第二条", "urgent": True}),
                   tmp_path)
     assert "紧急第二条" in urgent
+
+
+def test_nonurgent_surface_has_three_per_day_budget(tmp_path):
+    import time
+    history = tmp_path / "eigenflux" / ".feed_surface_history.jsonl"
+    history.parent.mkdir(parents=True)
+    now = int(time.time())
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    history.write_text("\n".join(json.dumps({"epoch": now - i * 7200,
+                                               "day": day})
+                                   for i in range(3)) + "\n")
+    out = _run(json.dumps({"user_message": "第四条不应打扰"}), tmp_path)
+    assert out.strip() == ""
+
+
+def test_urgent_surface_bypasses_daily_budget(tmp_path):
+    import time
+    history = tmp_path / "eigenflux" / ".feed_surface_history.jsonl"
+    history.parent.mkdir(parents=True)
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    history.write_text("\n".join(json.dumps({"epoch": int(time.time()),
+                                               "day": day})
+                                   for _ in range(3)) + "\n")
+    out = _run(json.dumps({"user_message": "真正紧急", "urgent": True}),
+               tmp_path)
+    assert "真正紧急" in out
 
 
 def test_cooldown_bootstraps_from_existing_memorial_queue(tmp_path):

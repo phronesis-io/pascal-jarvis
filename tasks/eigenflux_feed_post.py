@@ -57,16 +57,45 @@ try:
         os.environ.get("JARVIS_FEED_SURFACE_MIN_GAP_S", 90 * 60))
 except ValueError:
     FEED_SURFACE_MIN_GAP_S = 90 * 60
+try:
+    FEED_SURFACE_MAX_PER_DAY = max(1, int(
+        os.environ.get("JARVIS_FEED_SURFACE_MAX_PER_DAY", 3)))
+except ValueError:
+    FEED_SURFACE_MAX_PER_DAY = 3
 
 
 def _surface_stamp() -> Path:
     return JARVIS_DIR / "eigenflux" / ".feed_last_surface"
 
 
+def _surface_history() -> Path:
+    return JARVIS_DIR / "eigenflux" / ".feed_surface_history.jsonl"
+
+
+def _daily_surface_count(now: float) -> int:
+    """Non-urgent interruptions already spent on the user's local day."""
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    count = 0
+    try:
+        lines = _surface_history().read_text(encoding="utf-8").splitlines()[-200:]
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            row = json.loads(line)
+            if row.get("day") == day:
+                count += 1
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return count
+
+
 def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
     if urgent:
         return True
     now = time.time() if now is None else now
+    if _daily_surface_count(now) >= FEED_SURFACE_MAX_PER_DAY:
+        return False
     try:
         last = float(_surface_stamp().read_text().strip())
     except (OSError, ValueError):
@@ -93,9 +122,15 @@ def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
 
 
 def _mark_surfaced(now: float | None = None) -> None:
+    now = time.time() if now is None else now
     stamp = _surface_stamp()
     stamp.parent.mkdir(parents=True, exist_ok=True)
-    stamp.write_text(str(time.time() if now is None else now))
+    stamp.write_text(str(now))
+    with _surface_history().open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "epoch": int(now),
+            "day": time.strftime("%Y-%m-%d", time.localtime(now)),
+        }) + "\n")
 
 
 def run_eigenflux(*args: str, stdin_data: str | None = None) -> dict:
@@ -228,8 +263,8 @@ def main() -> int:
         # intact-card delivery windows and building an undeliverable backlog.
         surface_items = (urgent_items or surface_items)[:1]
         if not _surface_allowed(urgent):
-            print("[eigenflux-feed] user surface suppressed by 90m cooldown; "
-                  "feedback still submitted", file=LOG)
+            print("[eigenflux-feed] user surface suppressed by interruption "
+                  "budget (90m gap, max 3/day); feedback still submitted", file=LOG)
             return 0
         if urgent:
             # Tell the downstream heartbeat send layer to bypass ITS batch
@@ -245,8 +280,9 @@ def main() -> int:
             msg = item["body"]
             src = "" if len(_distinct_links(msg)) >= 2 else _source_url(item, msg)
             buttons = [{"text": "阅读原文", "url": src}] if src else None
+            title = str(item.get("title") or "EigenFlux").strip() or "EigenFlux"
             print(build_card(
-                header="📡 EigenFlux",
+                header=f"📡 {title}",
                 body=msg,
                 buttons=buttons,
                 source="eigenflux-feed",

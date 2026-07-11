@@ -97,7 +97,7 @@ def main() -> int:
     if not surface_items:
         return 0
     # Push mail now goes out as a memorial (奏折) card — fyi buttons
-    # (已阅 / 重要，持续盯) plus「💬 聊聊这个」. Silent triage, dedup and the
+    # (已阅 / 标为重点) plus「💬 聊聊这个」. Silent triage, dedup and the
     # quiet-hours gate above are untouched; only the push CARRIER changed.
     # This post-hook owns no delivery channel: create the ledger entry without
     # sending, then print the card for heartbeat_loop's reliable CARD route.

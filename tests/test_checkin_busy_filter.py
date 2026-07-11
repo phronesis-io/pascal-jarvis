@@ -89,7 +89,7 @@ def test_empty_calendar():
 def test_main_prints_context(monkeypatch, capsys):
     payload = json.dumps({"ok": True, "data": [TRIP]})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
-    f.main()
+    f.main(now=NOW)
     out = capsys.readouterr().out
     assert "multi_day_event" in out
     assert "BUSY" not in out

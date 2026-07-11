@@ -43,7 +43,7 @@ SILENT_TASKS, not this doc.
 
     python3 -m core.memorial send --source <task> --title "一句话说清这件事" --body "人话正文，短" --preset decision
 
-presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`（做了/改天/别问）。
+presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为重点）、`followup`（做了/还没做/这次跳过）。
 卡片自动带「💬 聊聊这个」按钮。自定义选项：`--option '准=intent_close:id=xxx,outcome=done'`
 （`标签=动作类型:参数` 执行动作，纯 `标签` 只记录）。批示落在 `memorials.jsonl`，
 `python3 -m core.memorial list --pending` 查未批事项。卡片正文说人话：无 SLA/HTTP 码/内部黑话。
@@ -84,7 +84,8 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
     - "fyi": relevant, worth knowing, no concrete action today. ONE line + link. This is the
       知会 tier — its whole job is that Pascal stops feeling blind. Default for score>=1 that
       isn't push-worthy. Surface AT MOST ONE item per cycle: pick the single most relevant,
-      mark the rest silent. The post-hook also enforces a 90-minute non-urgent cooldown;
+      mark the rest silent. The post-hook also enforces a 90-minute non-urgent cooldown
+      and a hard ceiling of 3 non-urgent feed cards per local day;
       scoring still lands every 10 minutes even when user delivery is suppressed.
     - "hold": genuinely needs deep research first → set needs_research: true (score>=1 only).
       The research task picks it up later.
@@ -113,7 +114,7 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
     shock, a direct competitive/existential threat or opportunity that needs same-night action).
     Almost everything is NOT urgent — default false. 知会/FYI breadth is NEVER urgent.
 
-    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_messages":[{"item_id":"<id>","title":"行动|知会","body":"<markdown>","source_url":"<url>","urgent":false}]}
+    Return JSON: {"feedback":[{"item_id":"<id>","score":<int>,"action":"<push|fyi|hold|silent>","needs_research":true/false,"reason":"<brief>"}],"user_messages":[{"item_id":"<id>","title":"<12字内的具体事件标题，不要只写行动/知会>","body":"<markdown>","source_url":"<url>","urgent":false}]}
 
 ### eigenflux-publish
 - interval: 60m
