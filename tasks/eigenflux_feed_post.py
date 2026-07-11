@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -50,6 +51,51 @@ def _distinct_links(msg: str) -> list[str]:
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
+try:
+    FEED_SURFACE_MIN_GAP_S = int(
+        os.environ.get("JARVIS_FEED_SURFACE_MIN_GAP_S", 90 * 60))
+except ValueError:
+    FEED_SURFACE_MIN_GAP_S = 90 * 60
+
+
+def _surface_stamp() -> Path:
+    return JARVIS_DIR / "eigenflux" / ".feed_last_surface"
+
+
+def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
+    if urgent:
+        return True
+    now = time.time() if now is None else now
+    try:
+        last = float(_surface_stamp().read_text().strip())
+    except (OSError, ValueError):
+        # Upgrade-safe bootstrap: if the new stamp does not exist yet, honor
+        # recent cards already in the memorial ledger/queue instead of adding
+        # one more item to an existing backlog immediately after deployment.
+        last = 0.0
+        for path in (JARVIS_DIR / "memorial_queue.jsonl",
+                     JARVIS_DIR / "memorials.jsonl"):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()[-300:]
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if row.get("source") == "eigenflux-feed-triage":
+                    last = max(last, float(row.get("epoch", 0) or 0))
+        if not last:
+            return True
+    return now - last >= FEED_SURFACE_MIN_GAP_S
+
+
+def _mark_surfaced(now: float | None = None) -> None:
+    stamp = _surface_stamp()
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(str(time.time() if now is None else now))
 
 
 def run_eigenflux(*args: str, stdin_data: str | None = None) -> dict:
@@ -135,7 +181,7 @@ def main() -> int:
                 traceback.print_exc(file=LOG)
 
     # Queue items flagged for deep research
-    research_queue = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent)) / "eigenflux" / "needs_research.jsonl"
+    research_queue = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"
     research_queue.parent.mkdir(parents=True, exist_ok=True)
     queued = 0
     for item in fb:
@@ -174,6 +220,17 @@ def main() -> int:
         # that should bypass that central gate.
         urgent = bool(data.get("urgent", False)) or any(
             bool(item.get("urgent", False)) for item in surface_items)
+        urgent_items = [item for item in surface_items
+                        if bool(item.get("urgent", False))]
+        # Scoring stays high-frequency; interruption does not. The model orders
+        # user_messages by value, so take one best item per cycle. A persistent
+        # 90-minute floor prevents a 10-minute poller from outrunning the
+        # intact-card delivery windows and building an undeliverable backlog.
+        surface_items = (urgent_items or surface_items)[:1]
+        if not _surface_allowed(urgent):
+            print("[eigenflux-feed] user surface suppressed by 90m cooldown; "
+                  "feedback still submitted", file=LOG)
+            return 0
         if urgent:
             # Tell the downstream heartbeat send layer to bypass ITS batch
             # queue too: it only sees the task-name sidecar, and
@@ -194,6 +251,7 @@ def main() -> int:
                 buttons=buttons,
                 source="eigenflux-feed",
             ))
+        _mark_surfaced()
     return 0
 
 

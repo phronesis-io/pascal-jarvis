@@ -83,7 +83,9 @@ presets：`decision`（准/缓/驳）、`fyi`（已阅/持续盯）、`followup`
       research you should have done.
     - "fyi": relevant, worth knowing, no concrete action today. ONE line + link. This is the
       知会 tier — its whole job is that Pascal stops feeling blind. Default for score>=1 that
-      isn't push-worthy. Cap ~5 per cycle: pick the MOST relevant, mark the rest silent.
+      isn't push-worthy. Surface AT MOST ONE item per cycle: pick the single most relevant,
+      mark the rest silent. The post-hook also enforces a 90-minute non-urgent cooldown;
+      scoring still lands every 10 minutes even when user delivery is suppressed.
     - "hold": genuinely needs deep research first → set needs_research: true (score>=1 only).
       The research task picks it up later.
     - "silent": scored (for the network) but not delivered this cycle. Use for the surplus

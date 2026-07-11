@@ -48,7 +48,7 @@ def test_multi_item_digest_suppresses_footer_button(tmp_path):
     assert "https://example.com/c" in out
 
 
-def test_structured_items_emit_one_card_each(tmp_path):
+def test_structured_items_emit_only_best_card_per_cycle(tmp_path):
     payload = json.dumps({
         "user_messages": [
             {"item_id": "1", "title": "知会", "body": "第一件事",
@@ -59,9 +59,32 @@ def test_structured_items_emit_one_card_each(tmp_path):
     })
     out = _run(payload, tmp_path)
     cards = [json.loads(line) for line in out.splitlines() if line.strip()]
-    assert len(cards) == 2
+    assert len(cards) == 1
     assert "第一件事" in cards[0]["elements"][0]["text"]["content"]
-    assert "第二件事" in cards[1]["elements"][0]["text"]["content"]
+
+
+def test_nonurgent_surface_has_90_minute_cooldown(tmp_path):
+    first = _run(json.dumps({"user_message": "第一条"}), tmp_path)
+    second = _run(json.dumps({"user_message": "十分钟后的第二条"}), tmp_path)
+    assert "第一条" in first
+    assert second.strip() == ""
+
+
+def test_urgent_surface_bypasses_cooldown(tmp_path):
+    _run(json.dumps({"user_message": "普通第一条"}), tmp_path)
+    urgent = _run(json.dumps({"user_message": "紧急第二条", "urgent": True}),
+                  tmp_path)
+    assert "紧急第二条" in urgent
+
+
+def test_cooldown_bootstraps_from_existing_memorial_queue(tmp_path):
+    import time
+    (tmp_path / "memorial_queue.jsonl").write_text(json.dumps({
+        "source": "eigenflux-feed-triage", "epoch": int(time.time()),
+        "memorial_id": "mem_existing", "card_json": "{}", "text": "existing",
+    }) + "\n")
+    out = _run(json.dumps({"user_message": "不应继续加积压"}), tmp_path)
+    assert out.strip() == ""
 
 
 def test_bare_source_url_field_still_buttons_when_single(tmp_path):
