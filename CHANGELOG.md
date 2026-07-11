@@ -5,6 +5,64 @@ All notable changes to Pascal Jarvis. This project tracks requirements as
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
 prd_interaction_v4, REQ-78~90).
 
+## [1.2.0] — 2026-07-11 — memorial cards + mobile resilience（奏折 + 移动韧性）
+
+Two workstreams born from one day (7/10, Pascal's directive): (1) **memorial
+(奏折) cards** — every proactive output facing Pascal becomes ONE card per
+event with quick-verdict buttons plus a「聊聊这个」hand-off into conversation
+(long truncated text pushes are dead); (2) **mobile resilience** — an
+8-dimension audit through the carry-the-laptop lens (lid-close sleep, offline,
+captive portals, timezone jumps, power loss) confirmed 8 P1s via adversarial
+verification; all eight approved item-by-item and fixed. 1380 tests passing
+(was 960). Every fix red-teamed; the memorial framework's DOA P0 (sidecar
+couldn't import core.memorial in production) was caught by red team before
+deploy.
+
+### Memorial cards (奏折)
+- `core/memorial.py`: create / decide / chat; `memorials.jsonl` event ledger
+  (O_APPEND, fold-by-id); presets decision/fyi/followup; every card auto-gets
+  「💬 聊聊这个」. Ledger-before-action: a crash mid-action can never double-
+  execute on re-tap; decide is idempotent, cards replaced in place with the
+  verdict (`✅ 已批：… · HH:MM`).
+- Sidecar generic routing (`value.action == "memorial"`); legacy
+  feedback/watchlater/intent_close untouched; all sends run off the event-loop
+  thread (the ws connection that carries Pascal's messages never blocks).
+- 「聊聊这个」: opener message + memorial context injected via
+  `jobs/pending_merge.jsonl`, consumed by the next user message — live-proven
+  in prod 7/11 17:46→17:54 (tap → "SLA 到底是什么?" answered in context).
+- Delivery: memorial cards ride the heartbeat pipeline (quiet hours, batching,
+  dedup all apply); send timeouts are NOT assumed delivered — cards persist in
+  `memorial_queue.jsonl` and drain ≤6 per window (`MEMORIAL_FLUSH_MAX_CARDS`).
+- Surfaces: proactive outputs auto-wrap at the delivery layer; mail-triage
+  push emits memorials (`send=False`, rides the CARD: path); EigenFlux
+  feed/PM cards rate-floored at one per 90 min (urgent bypass);
+  `python3 -m core.memorial send|list` CLI for any task; HEARTBEAT.md §奏折.
+
+### Mobile resilience (audit 2026-07-10 — 8/8 confirmed P1s fixed)
+- **Timezone**: `core/timeutil` re-resolves /etc/localtime on a 60s TTL (was:
+  cached at import — the running heartbeat sat 8h behind after
+  Reykjavik→Shanghai until this release's restart).
+- **Zombie connections**: sidecar disconnect watchdog (exit → supervisor
+  respawn, only after a successful first connect), SDK logs moved off the
+  NDJSON stdout pipe; ef-stream stall watchdog kills a silent-but-alive child.
+- **Outbound loss**: chat replies retry with backoff then dead-letter
+  (`reply_send_failed`); ef-stream send failures dead-letter instead of being
+  marked seen with a fake "Delivered"; night-queue send timeouts keep the
+  queue (retry floor 900s) instead of unlinking 40 entries on a lie.
+- **Alerting honesty**: brain-death suppression is now ledgered — a wedge
+  surviving ≥2 wake windows or 1h cumulative suppression pierces the post-wake
+  grace (7/10's 17.5h silent wedge would page in window two); a 2s
+  reachability probe treats offline as grace (kills the flight-day false
+  BRAIN-DEAD); new dead-letter kinds carry human labels.
+- **Power-loss durability**: heartbeat `load_state` archives a torn state file
+  and reseeds instead of silently killing every task forever; `save_state`
+  fsyncs before rename; daemon singleton validates pidfile process identity
+  (PID reuse no longer deadlocks boot).
+- **Escape hatches**: provider-gate probe cycles fall back to backup on ANY
+  primary failure (was: model-shaped errors only); heartbeat `run_script`
+  kills the whole process group on timeout; the test suite is isolated from
+  the production heartbeat trigger.
+
 ## [1.1.0] — 2026-07-02 — delivery reliability (v4, REQ-78~90)
 
 Theme shift from "interaction annoyances" (v3) to **"promised actions that
