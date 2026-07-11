@@ -34,6 +34,7 @@ def _make_processor(tmp_path) -> ActionProcessor:
         jarvis_dir=tmp_path,
         memory_dir=tmp_path / "memory",
         jobs_dir=tmp_path / "jobs",
+        heartbeat_trigger_path=tmp_path / "heartbeat-trigger",
     )
 
 
@@ -49,6 +50,7 @@ def test_marker_stripping(tmp_path):
     result = ap.process(reply)
     assert "[ACTION:" not in result
     assert "I'll save that." in result
+    assert (tmp_path / "heartbeat-trigger").read_text() == "intention-check\n"
 
 
 def test_task_capture_creates_task(tmp_path):

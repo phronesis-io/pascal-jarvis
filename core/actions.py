@@ -78,11 +78,13 @@ class ActionProcessor:
     """Processes [ACTION:...] markers in Claude's reply text."""
 
     def __init__(self, jarvis_dir: str | Path, memory_dir: str | Path,
-                 jobs_dir: str | Path, log_file: str = ""):
+                 jobs_dir: str | Path, log_file: str = "",
+                 heartbeat_trigger_path: str | Path = "/tmp/jarvis-heartbeat-trigger"):
         self.jarvis_dir = Path(jarvis_dir)
         self.memory_dir = Path(memory_dir)
         self.jobs_dir = Path(jobs_dir)
         self.log_file = log_file
+        self.heartbeat_trigger_path = Path(heartbeat_trigger_path)
         self._tm = None  # lazy TaskManager
 
     @property
@@ -210,7 +212,7 @@ class ActionProcessor:
         # (b) last-writer-wins → a concurrent admin 'Run Now' or chat trigger
         # was silently dropped. An O_APPEND single small write is atomic and
         # loss-free; heartbeat_loop drains every line per tick.
-        with open("/tmp/jarvis-heartbeat-trigger", "a") as f:
+        with self.heartbeat_trigger_path.open("a") as f:
             f.write(task + "\n")
         return ""
 
