@@ -5,18 +5,26 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
-        run: pip install pyyaml pytest
+        # requirements.txt (not a hand-picked subset) — otherwise the dashboard
+        # suite silently skips and broken dashboard PRs merge green.
+        run: pip install -r requirements.txt pytest
 
       - name: Syntax check
         run: bash -n bot.sh

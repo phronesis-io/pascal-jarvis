@@ -813,6 +813,15 @@ class TestDecisionSurface:
         assert [r["source"] for r in rows] == [
             "mail", "daily-reflect", "eigenflux-feed-triage"]
 
+    def test_corrupt_epoch_does_not_blank_the_decision_surface(self):
+        from dashboard.uiutil import memorial_attention_rank
+        rows = [
+            {"source": "mail", "epoch": "not-a-number"},
+            {"source": "mail", "epoch": 50},
+        ]
+        rows.sort(key=memorial_attention_rank, reverse=True)  # must not raise
+        assert rows[0]["epoch"] == 50
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Route smoke tests — all pages 200 + write APIs accept JSON bodies

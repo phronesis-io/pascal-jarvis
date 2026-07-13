@@ -56,7 +56,12 @@ def memorial_attention_rank(state: dict) -> tuple[int, float]:
         tier = 0
     else:
         tier = 1
-    return tier, float(state.get("epoch", 0) or 0)
+    try:
+        epoch = float(state.get("epoch", 0) or 0)
+    except (TypeError, ValueError):
+        # One corrupt ledger row must not blank the whole decision surface.
+        epoch = 0.0
+    return tier, epoch
 
 
 def add_dashboard_head() -> None:

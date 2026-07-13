@@ -309,7 +309,14 @@ def _display_body(body: str) -> str:
     clipped = len(lines) > CARD_BODY_MAX_LINES
     text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
     if len(text) > CARD_BODY_MAX_CHARS:
-        text = text[:CARD_BODY_MAX_CHARS].rstrip()
+        cut = text[:CARD_BODY_MAX_CHARS]
+        # Clip on a line/space boundary so the cut can't land inside a
+        # markdown link and leave a broken `[label](https://…` fragment.
+        for sep in ("\n", " "):
+            if sep in cut[CARD_BODY_MAX_CHARS // 2:]:
+                cut = cut.rsplit(sep, 1)[0]
+                break
+        text = cut.rstrip()
         clipped = True
     if clipped:
         text += "\n\n…完整背景可点「聊聊这个」"

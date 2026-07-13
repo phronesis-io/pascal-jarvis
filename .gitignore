@@ -132,3 +132,7 @@ eigenflux/.ef-cursor
 eigenflux/.ef-seen
 alerts_deadletter.jsonl
 .daemon_brain_state.json
+
+# Virtualenvs (setup instructions suggest an in-repo .venv)
+.venv/
+venv/

@@ -2,7 +2,9 @@
 
 Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI agent with continuous heartbeat, self-evolving memory, closed-loop proactive intents, and bidirectional IM integration.
 
-**Release: `v1.0.0` (2026-06-15)** — see [CHANGELOG.md](CHANGELOG.md). 779 tests passing.
+**Release: `v1.3.0` (2026-07-13)** — see [CHANGELOG.md](CHANGELOG.md). 1400+ tests passing.
+
+**Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -108,7 +110,6 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
    - *Daily plan* — morning overview of calendar, priorities, and open threads (time-gated 8:00-9:30)
    - *Activity log* — silent background tracker that logs what you're working on
    - *Daily reflect* — evening review with wins, patterns, and tomorrow prep
-   - *Free-time nudge* — detects idle calendar blocks and sends casual suggestions
    - *Calendar read/write* — 30-day rolling window (7 days detailed + 8-30 days compact), with create/update/delete write-back
    - *Task triage* — philosophical task system (praxis/poiesis capture → commit → decay)
    - *Weekly review* — end-of-week summary and planning
@@ -116,13 +117,13 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
    - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with a two-stage pipeline: feed triage for quick scoring, plus deep research for high-value items.
-   - *Content recommend* and *watch-later* — curates content for you; saved items resurface through free-time nudges when your calendar shows an idle block.
+   - *Content recommend* and *watch-later* — curates content for you; saved items resurface later at calmer moments.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
 5. **Background Jobs & Auto-Promotion** — Any Claude call running longer than ~2 minutes is automatically promoted to a background job: the conversation is released immediately (you can keep chatting), the long task keeps running, and its result is delivered as a reply *and* merged into the conversation's context. Send `jobs` to list them, `cancel <id>` to kill one; a sweeper reconciles jobs whose process died so you're never left waiting on a ghost.
 
-6. **Attention Engineering** — Proactive messages respect your attention budget: quiet hours (23:30–10:00) queue everything non-urgent into a single morning digest; general-interest content (feeds, recommendations) batches into 3 daytime windows; if you just sent a message (you're at the phone), pending batches release immediately. Identical content is never sent twice within 6 hours, and infrastructure errors never reach you raw — repeated delivery failures surface as one aggregated alert instead.
+6. **Attention Engineering** — Proactive outputs arrive as decision-first "memorial" cards (奏折): one card per event with quick-verdict buttons plus a 「聊聊这个」hand-off into conversation, tracked in a durable ledger. Messages respect your attention budget: quiet hours (23:30–10:00) queue everything non-urgent into a single morning digest; general-interest content (feeds, recommendations) batches into 3 daytime windows; if you just sent a message (you're at the phone), pending batches release immediately. Identical content is never sent twice within 6 hours, and infrastructure errors never reach you raw — repeated delivery failures surface as one aggregated alert instead.
 
 7. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source* — no new scripts. Signals are deduplicated across sources, buffered into memory (so the next Claude call "knows"), and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. A new source type = one `sources/<type>.py` adapter implementing `collect(cfg, state)`.
 

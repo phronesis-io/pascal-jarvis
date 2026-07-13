@@ -5,6 +5,53 @@ All notable changes to Pascal Jarvis. This project tracks requirements as
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
 prd_interaction_v4, REQ-78~90).
 
+## [1.3.0] — 2026-07-13 — internal release: decision-first UI + collaboration readiness
+
+The first release cut for the multi-collaborator model (everyone works on
+their own `dev/<name>` branch; Pascal alone merges to `main`). Three threads:
+
+### Decision-first cards & dashboard
+- Memorial presets reworded to real decisions（同意/暂不处理/不采纳 ·
+  已阅/标为重点 · 做了/还没做/这次跳过）; cards support button *groups* (rows)
+  so choices, source links, and the chat affordance stop crowding one row
+  (`core/card.py button_groups`).
+- Dashboard: new `/memorials` inbox page + home page rebuilt around a pending-
+  decisions panel (`dashboard/pages/memorials.py`, `dashboard/uiutil.py`);
+  attention ranking puts direct asks above ambient feed signals, and a corrupt
+  ledger row can no longer blank the decision surface.
+- EigenFlux feed cards: hard ceiling of 3 non-urgent cards/day on top of the
+  90-min cooldown; feed titles must name the event (no more bare 行动/知会).
+- Memorial follow-ups closed out: engagement accounting for direct sends and
+  verdicts, ledgers included in session backups, single-intent closure
+  questions ride native memorial cards (dual-intent kept on legacy cards).
+- Card-body clipping no longer cuts through a markdown link.
+
+### Privacy scrub (pre-collaboration audit, 2026-07-13)
+- A 78-agent audit swept the tracked tree before inviting collaborators:
+  personal data (health schedule, financial figures, a real mailbox, real
+  contact/family names, address) removed from code, prompts, tests, and docs.
+  Principle now documented in CONTRIBUTING.md: **user-specific content lives
+  in gitignored per-user files** (`data/checkin_personal.sh`,
+  `data/checkin_topics_personal.txt`, `jarvis.yaml`), never in tracked files.
+- Test fixtures fully synthetic; `tests/test_public_repo_hygiene.py` now also
+  greps tracked content for real-mailbox and full-length Lark-ID shapes.
+- Stale one-shot scripts with embedded personal data deleted
+  (`scripts/seed_intentions.py`, `scripts/migrate_intent_closure.py`,
+  `docs/conversation_audit_2026-06-16.md`).
+- NOTE: pre-1.3.0 git history still contains the scrubbed content; see the
+  release notes for the private-repo / history-rewrite decision.
+
+### Collaboration & CI
+- CONTRIBUTING.md (branch-per-user model, per-user-data rule, conventions);
+  `.github/CODEOWNERS` routes every PR to Pascal; branch protection on `main`
+  (PR + green `test` check + code-owner review; no force pushes).
+- CI installs `requirements.txt` (the old pyyaml-only env silently skipped the
+  entire dashboard suite), adds pip cache, 15-min timeout, per-ref concurrency.
+- `pgc_improvement_pre.sh` honors empty-stdout=skip when Pascal's PGC host is
+  unreachable — non-Pascal installs no longer burn a daily 900s Claude call.
+- Time-bomb test fixture fixed (checkin busy-filter now takes `now=`); CI on
+  `main` had been red since 7/11 because the fixture's end date passed.
+
 ## [1.2.0] — 2026-07-11 — memorial cards + mobile resilience（奏折 + 移动韧性）
 
 Two workstreams born from one day (7/10, Pascal's directive): (1) **memorial

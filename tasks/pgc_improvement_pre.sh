@@ -90,8 +90,11 @@ PYEOF
 )"
 
 if [ -z "${OUT//[$'\n\t ']/}" ]; then
-  echo "=== PGC DAILY PULSE ==="
-  echo "PGC_UNREACHABLE: could not ssh aliap or read products today (network/host). Skip — reply HEARTBEAT_OK."
+  # Unreachable host (no ssh alias / offline / not Pascal's machine): emit
+  # NOTHING — empty stdout means the heartbeat skips the task without ever
+  # spending a Claude call (empty-stdout=skip convention).
+  echo "pgc-improvement: aliap unreachable, skipping" >&2
+  exit 0
 else
   echo "$OUT"
 fi
