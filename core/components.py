@@ -20,12 +20,74 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 MANIFEST = ROOT / "components.yaml"
+
+# Per-root config cache — check_components can be called every 30s by the
+# daemon; re-parsing jarvis.yaml per component would be wasteful.
+_config_cache: dict[str, object] = {}
+
+
+def _config_get(root: Path, dotpath: str):
+    """Read a dotted key from <root>/jarvis.yaml. Missing/broken config →
+    None (treated as 'not configured'). Never raises."""
+    key = str(root)
+    if key not in _config_cache:
+        try:
+            from core.config import Config
+            _config_cache[key] = Config(root / "jarvis.yaml")
+        except Exception:
+            _config_cache[key] = None
+    cfg = _config_cache[key]
+    if cfg is None:
+        return None
+    try:
+        return cfg.get(dotpath)
+    except Exception:
+        return None
+
+
+def _gate_reason(comp: dict, root: Path) -> str | None:
+    """Fresh-install/optional-feature gate (2026-07-13): components.yaml used
+    to mark ef-stream/lark-sidecar/admin critical UNCONDITIONALLY while
+    doctor.sh calls the same features optional — a collaborator's default
+    install (admin.enabled: false, no eigenflux CLI, no launchd services)
+    alarmed [critical] forever on components that were never supposed to run.
+    A component whose declared precondition is unmet is SKIPPED (reported ok,
+    marked skipped), not red. Preconditions:
+      requires_cmd:    <binary>            — command must exist on PATH
+      requires_file:   <path>              — file must exist (~ expanded;
+                                             relative paths resolve from root)
+      requires_config: <dot.path>[=value]  — jarvis.yaml key truthy / == value
+    Returns the human-readable skip reason, or None when armed."""
+    cmd = comp.get("requires_cmd")
+    if cmd and shutil.which(str(cmd)) is None:
+        return f"{cmd} not installed"
+    fpath = comp.get("requires_file")
+    if fpath:
+        p = Path(os.path.expanduser(str(fpath)))
+        if not p.is_absolute():
+            p = root / p
+        if not p.exists():
+            return f"{fpath} not installed"
+    ckey = comp.get("requires_config")
+    if ckey:
+        ckey = str(ckey)
+        expected = None
+        if "=" in ckey:
+            ckey, expected = ckey.split("=", 1)
+        val = _config_get(root, ckey)
+        if expected is None:
+            if not val:
+                return f"{ckey} not enabled in jarvis.yaml"
+        elif str(val) != expected:
+            return f"{ckey} != {expected} in jarvis.yaml"
+    return None
 
 
 def load_manifest(path: Path | None = None) -> list[dict]:
@@ -122,7 +184,10 @@ def _check_pgrep(comp: dict, root: Path) -> tuple[bool, str]:
                 detail += f" owned by {owner}"
             return True, detail
         if owner:
-            return False, f"no process owned by pid {owner}"
+            # Wording matters: "no process owned by pid X" read as if two
+            # components shared one PID (X is the BOT's pid, the same owner
+            # for every child — 2026-07-13 confusion). Say what it means.
+            return False, f"not running (bot pid {owner} has no matching child process)"
         return False, "no process"
     except Exception as e:
         return False, f"pgrep error: {e}"
@@ -190,6 +255,16 @@ def check_components(critical_only: bool = False,
     for comp in load_manifest(manifest_path):
         if critical_only and not comp.get("critical", False):
             continue
+        reason = _gate_reason(comp, root)
+        if reason:
+            # ok=True keeps every consumer (daemon critical probe, ⚠️ line
+            # extraction, exit code) treating an unconfigured optional
+            # feature as healthy; skipped=True lets reports label it.
+            results.append({"name": comp.get("name", "?"), "ok": True,
+                            "skipped": True,
+                            "detail": f"skipped — {reason}",
+                            "critical": bool(comp.get("critical", False))})
+            continue
         fn = _CHECKS.get(comp.get("check", ""))
         if fn is None:
             results.append({"name": comp.get("name", "?"), "ok": False,
@@ -210,11 +285,15 @@ def format_report(results: list[dict]) -> str:
     """Human/diagnostic report — failures as ⚠️ lines (REQ-39 picks them up)."""
     lines = ["--- Components ---"]
     for r in results:
-        mark = "✓" if r["ok"] else "⚠️"
+        mark = "○" if r.get("skipped") else ("✓" if r["ok"] else "⚠️")
         crit = " [critical]" if r["critical"] and not r["ok"] else ""
         lines.append(f"  {mark} {r['name']}: {r['detail']}{crit}")
     bad = sum(1 for r in results if not r["ok"])
-    lines.append(f"  ({len(results) - bad}/{len(results)} healthy)")
+    skipped = sum(1 for r in results if r.get("skipped"))
+    tail = f"  ({len(results) - bad}/{len(results)} healthy"
+    if skipped:
+        tail += f", {skipped} skipped — optional features not configured"
+    lines.append(tail + ")")
     return "\n".join(lines)
 
 

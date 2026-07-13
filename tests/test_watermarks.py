@@ -45,10 +45,44 @@ def test_starved_channel_flagged(tmp_path):
     assert "checkin: " not in report  # healthy channel not listed
 
 
+def _age_install_stamp(tmp_path, age_s):
+    """Pre-create the install stamp `age_s` seconds in the past."""
+    import os
+    stamp = tmp_path / "data" / ".install_stamp"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.touch()
+    old = time.time() - age_s
+    os.utime(stamp, (old, old))
+
+
 def test_never_ran_flagged(tmp_path):
+    # Install old enough that the fresh-install grace (2x interval) is over
+    _age_install_stamp(tmp_path, 3 * 3600)  # feed interval 1h → grace 2h
     _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
     report = channel_watermark_report(tmp_path)
     assert "feed" in report and "NEVER run" in report
+
+
+def test_never_ran_suppressed_during_fresh_install_grace(tmp_path):
+    # 2026-07-13: a collaborator's FIRST self-diagnostic listed six
+    # "has NEVER run" ⚠️ lines minutes after install — including
+    # self-diagnostic reporting itself. Within 2x interval of the install
+    # stamp a missing first run is informational, never ⚠️.
+    _age_install_stamp(tmp_path, 600)  # installed 10min ago
+    _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
+    report = channel_watermark_report(tmp_path)
+    assert "NEVER run" not in report
+    assert "first run pending" in report and "feed" in report
+
+
+def test_missing_install_stamp_self_heals_as_fresh(tmp_path):
+    # No stamp (pre-existing install upgrading to this code): the first
+    # report stamps `now`, so never-run suppression applies — harmless,
+    # because live installs already carry last_success for real tasks.
+    _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
+    report = channel_watermark_report(tmp_path)
+    assert "NEVER run" not in report
+    assert (tmp_path / "data" / ".install_stamp").exists()
 
 
 def test_override_interval_respected(tmp_path):

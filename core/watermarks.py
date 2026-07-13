@@ -13,6 +13,7 @@ Usage (from tasks/self_diagnostic_pre.sh):
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -21,6 +22,33 @@ from core.heartbeat import parse_heartbeat
 # A task is "starved" when it hasn't run for longer than this multiple of its
 # expected interval. 2x tolerates one missed slot before alarming.
 STARVATION_FACTOR = 2.0
+
+# Fresh-install grace: a collaborator's first-ever self-diagnostic (v1.3.0,
+# 2026-07-13) listed SIX "has NEVER run" ⚠️ lines — including self-diagnostic
+# reporting ITSELF, whose last_success only lands after its first cycle
+# finishes — because last_success==0 alarmed with no notion of how long the
+# install had existed. A task that never succeeded is only an outage once the
+# install is older than the same 2x-interval bar used for starvation; younger
+# than that it is simply a schedule that has not reached the task yet.
+INSTALL_STAMP = Path("data") / ".install_stamp"
+
+
+def _install_ts(jd: Path, now: float) -> float:
+    """Mtime of the install stamp; self-heals by creating it on first use
+    (existing installs get it stamped `now`, which is harmless — their tasks
+    already carry last_success). Falls back to `now` if data/ is unwritable."""
+    stamp = jd / INSTALL_STAMP
+    try:
+        return stamp.stat().st_mtime
+    except OSError:
+        pass
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        os.utime(stamp, (now, now))
+    except OSError:
+        pass
+    return now
 
 
 def _fmt_age(seconds: float) -> str:
@@ -89,8 +117,9 @@ def channel_watermark_report(jarvis_dir: str | Path,
 
     state = _load(jd / "heartbeat_state.json")
     overrides = _load(jd / "interval_overrides.json")
+    install_ts = _install_ts(jd, now)
 
-    starved, circuits = [], []
+    starved, circuits, pending_first = [], [], []
     for task in parse_heartbeat(hb):
         name = task["name"]
         ts = state.get(name, {})
@@ -120,7 +149,13 @@ def channel_watermark_report(jarvis_dir: str | Path,
                 f"  ⚠️ {name}: pre-script failing ({last_status} ×"
                 f"{ts['circuit']['consecutive_failures']}) — channel data-gathering DEAD")
         if last_success == 0:
-            starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
+            # Within the fresh-install grace (2x the task's own interval since
+            # install) a missing first run is the schedule, not an outage —
+            # report it as an info line, never a ⚠️ alert.
+            if now - install_ts < STARVATION_FACTOR * interval:
+                pending_first.append(name)
+            else:
+                starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
         elif now - last_success > STARVATION_FACTOR * interval:
             starved.append(
                 f"  ⚠️ {name}: last real success {_fmt_age(now - last_success)} ago "
@@ -141,6 +176,10 @@ def channel_watermark_report(jarvis_dir: str | Path,
         lines.extend(starved)
     if circuits:
         lines.extend(circuits)
+    if pending_first:
+        lines.append(
+            f"  ○ first run pending (installed {_fmt_age(now - install_ts)} ago"
+            f" — normal): {', '.join(pending_first)}")
     if consec_fails > 0:
         lines.append(f"  ⚠️ Lark delivery: {consec_fails} consecutive send failures")
     if queue_line:

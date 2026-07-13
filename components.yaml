@@ -17,13 +17,20 @@
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
 # by self-diagnostic every 4h, doctor.sh at install, restart.sh --status on
 # demand.
+#
+# Optional-feature gates (2026-07-13, collaborator fresh-install audit):
+# a component whose requires_cmd / requires_file / requires_config
+# precondition is unmet is SKIPPED (reported "○ skipped", never ⚠️/critical).
+# doctor.sh calls Lark/EigenFlux/admin/launchd optional — this manifest must
+# agree, or every default install alarms forever on features it never enabled.
 
 components:
   - name: daemon
     check: pid
     path: .daemon.pid
     critical: false          # daemon can't check itself; launchd owns it
-    note: launchd KeepAlive com.pascal.jarvis.daemon
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.daemon.plist
+    note: launchd KeepAlive com.pascal.jarvis.daemon (scripts/launchd/install.sh)
 
   - name: bot
     check: pid
@@ -43,6 +50,7 @@ components:
     pattern: "core.ef_stream_loop"
     owned_by_pidfile: .bot.pid
     critical: true
+    requires_cmd: eigenflux
     note: EigenFlux PM/friend stream; bot watchdog restarts it (REQ-40)
 
   - name: lark-sidecar
@@ -50,34 +58,40 @@ components:
     pattern: "lark_event_sidecar.py"
     owned_by_pidfile: .bot.pid
     critical: true
+    requires_config: lark.event_backend=sidecar
     note: card callbacks + read receipts die silently without it
 
   - name: admin
     check: http
     url: "http://127.0.0.1:3456/health"
     critical: true
+    requires_config: admin.enabled
     note: ops console + Lark RichView links; bot watchdog restarts it
 
   - name: dashboard
     check: http
     url: "http://127.0.0.1:3457/"
     critical: true
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
     note: launchd KeepAlive com.pascal.jarvis.dashboard; the 23-day corpse
 
   - name: dashboard-launchd
     check: launchctl
     label: com.pascal.jarvis.dashboard
     critical: false
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
 
   - name: daemon-launchd
     check: launchctl
     label: com.pascal.jarvis.daemon
     critical: false
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.daemon.plist
 
   - name: caffeinate-launchd
     check: launchctl
     label: com.pascal.jarvis.caffeinate
     critical: false
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.caffeinate.plist
     note: caffeinate -s keeps the Mac awake on AC only (REQ-56, 电池策略不动) — sleeping on battery is not this component failing
 
   - name: session-backup
@@ -85,6 +99,7 @@ components:
     path: .last_backup_ok
     max_age_hours: 48
     critical: false
+    requires_file: ~/Library/LaunchAgents/com.jarvis.session-backup.plist
     note: backup silently failed for 27 days before this check existed (REQ-41)
 
   - name: conversation-audit
@@ -92,4 +107,5 @@ components:
     path: data/conversation_audit.db
     max_age_hours: 48
     critical: false
+    requires_file: ~/Library/LaunchAgents/com.jarvis.conversation-audit.plist
     note: audit had no scheduler mount and sat idle 13 days (REQ-82); launchd com.jarvis.conversation-audit 04:20 daily

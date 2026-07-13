@@ -138,3 +138,9 @@ plugins:
 phronesis:
   chat_id: ""          # oc_xxx — the group chat to monitor
   user_open_id: ""     # ou_xxx — whose mentions matter (defaults to lark.user_id)
+
+# Optional: personal-website auto-updater (tasks/personal_site_pre.sh).
+# Point at a LOCAL CLONE of your site repo (absolute path, ~ ok).
+# Leave empty to disable the task and its health checks entirely.
+personal_site:
+  repo_dir: ""         # e.g. ~/projects/yourname.github.io

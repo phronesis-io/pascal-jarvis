@@ -165,6 +165,22 @@ lark:
 ./scripts/doctor.sh    # 任何时候的全面体检
 ```
 
+**（可选，macOS）launchd 常驻监督** —— 让守护进程/看板/备份在重启和崩溃后
+自动拉活。plist 是模板（`__JARVIS_DIR__` 等占位符），脚本安装时替换成本机
+真实路径，**不要手动拷贝 plist**：
+
+```bash
+./scripts/launchd/install.sh   # 幂等；输出每个服务 loaded 与否
+```
+
+**首装后的健康告警预期**（转述给人类，避免虚惊）：
+- 没配置的可选功能（EigenFlux、sidecar、admin、launchd 服务）在体检里显示
+  `○ skipped`，**不告警**。看到 `⚠️` 才需要处理。
+- 刚装好时各任务还没轮到第一次运行，watermark 有按任务间隔计算的宽限期，
+  不会在第一天刷 "has NEVER run"。
+- 唯一预期中的首装 ⚠️：配了 Lark 但还没跑 `lark-cli auth login`（user 身份）
+  时的日历 token 探针——按提示补授权即可。
+
 **最终验证清单**（agent 逐项确认）：
 1. `./restart.sh --status` 三行全绿
 2. `grep 'Beat sent' jarvis.log | tail -1` 时间戳在 10 分钟内（心跳线程首拍后按 ≤1 条/10 分钟节流）

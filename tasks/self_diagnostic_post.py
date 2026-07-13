@@ -81,10 +81,16 @@ def _send(text: str, user_id: str) -> bool:
     # Emergency fallback: if memorial imports/storage itself is broken, keep
     # the old independent plain-text path and then the macOS local alert.
     try:
+        # --as bot: without it lark-cli falls back to the USER identity, which
+        # fails on installs that never ran `lark-cli auth login` — exactly the
+        # machines where this emergency path matters (daemon.py's own sends
+        # always pass --as bot; 2026-07-13 the collaborator's first-install
+        # alert only got out because the daemon re-delivered it).
         r = subprocess.run(
             ["lark-cli", "im", "+send", "--receive-id", user_id,
              "--receive-id-type", "open_id", "--msg-type", "text",
-             "--content", json.dumps({"text": text}, ensure_ascii=False)],
+             "--content", json.dumps({"text": text}, ensure_ascii=False),
+             "--as", "bot"],
             capture_output=True, text=True, timeout=15)
         return r.returncode == 0
     except Exception as e:

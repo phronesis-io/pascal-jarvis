@@ -59,6 +59,15 @@ UPGRADE_RESULT="$JARVIS_DIR/eigenflux/.cli_upgrade_result"
 LOG_FILE="${LOG_FILE:-/dev/null}"
 CDN_URL="${EIGENFLUX_CDN_URL:-https://cdn.eigenflux.ai}"
 
+# Maintainer-machine gate (2026-07-13 fresh-install audit): parity tracking
+# only makes sense where the upstream EigenFlux clones live next to this repo.
+# On any other install, empty output = heartbeat skips (no Claude call, no
+# "NEVER run" watermark noise).
+if ! command -v eigenflux >/dev/null 2>&1 \
+    || [ ! -d "$MAIN_DIR/.git" ] || [ ! -d "$PLUGIN_DIR/.git" ]; then
+  exit 0
+fi
+
 # ── Bounded runner (macOS has no `timeout`) ───────────────────────────
 if command -v timeout >/dev/null 2>&1; then
   bounded() { local s="$1"; shift; timeout "$s" "$@"; }

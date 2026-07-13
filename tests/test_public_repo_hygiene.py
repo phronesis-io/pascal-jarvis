@@ -132,3 +132,24 @@ def test_no_full_length_lark_ids_in_tracked_files():
         for m in LARK_ID_RE.finditer(text):
             offenders.append(f"{path.relative_to(ROOT)}: {m.group(0)}")
     assert offenders == []
+
+
+# Owner-identifying tokens (GitHub usernames) must never appear in tracked
+# content — 2026-07-13: the personal-site repo name was hardcoded in two
+# tasks/ scripts, so every collaborator install alarmed on (and displayed)
+# the owner's GitHub identity. Assembled from parts so this file never
+# matches itself.
+OWNER_TOKENS = ("huyong" + "yi", "yongyi" + "hu")
+
+
+def test_no_owner_usernames_in_tracked_files():
+    offenders = []
+    for path in _tracked_text_files():
+        try:
+            text = path.read_text(encoding="utf-8").lower()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for token in OWNER_TOKENS:
+            if token in text:
+                offenders.append(f"{path.relative_to(ROOT)}: {token}")
+    assert offenders == []

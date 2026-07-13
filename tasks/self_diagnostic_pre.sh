@@ -10,31 +10,54 @@ MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_work_slug/memory}"
 # delivery are split so SILENT_TASKS can never mute a real alarm again).
 exec > >(tee "$JARVIS_DIR/.diag_last_pre.txt")
 
+# Optional-feature switches (2026-07-13 fresh-install audit): a collaborator's
+# default install got ⚠️ lines every 4h for features they never enabled
+# (EigenFlux, Lark user calendar, Pascal's personal site). Every ⚠️ below must
+# be gated on the feature actually being configured.
+_HAS_EF=0; command -v eigenflux >/dev/null 2>&1 && _HAS_EF=1
+_LARK_UID=$(python3 -c "
+import sys; sys.path.insert(0, '$JARVIS_DIR')
+from core.config import Config
+print(Config('$JARVIS_DIR/jarvis.yaml').lark.get('user_id', '') or '')" 2>/dev/null)
+_SITE_DIR=$(python3 -c "
+import sys, os; sys.path.insert(0, '$JARVIS_DIR')
+from core.config import Config
+v = Config('$JARVIS_DIR/jarvis.yaml').get('personal_site.repo_dir') or ''
+print(os.path.expanduser(v))" 2>/dev/null)
+
 echo "=== SYSTEM HEALTH CHECK ==="
 echo "Time: $(date '+%Y-%m-%d %H:%M %A')"
 echo ""
 
 # 1. EigenFlux profile staleness
 echo "--- EigenFlux Profile ---"
-profile_ts=$(eigenflux profile show 2>/dev/null | python3 -c "
+if [ "$_HAS_EF" -eq 1 ]; then
+  profile_ts=$(eigenflux profile show 2>/dev/null | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 ts = d.get('profile', {}).get('updated_at', 0) / 1000
 from datetime import datetime
 print(datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M'))
 " 2>/dev/null || echo "unknown")
-echo "Last updated: $profile_ts"
+  echo "Last updated: $profile_ts"
+else
+  echo "(eigenflux CLI not installed — skipped)"
+fi
 
-# 2. Calendar freshness
+# 2. Calendar freshness (needs a configured Lark user)
 echo ""
 echo "--- Calendar ---"
-cal_file="$MEMORY_DIR/calendar_today.md"
-[ ! -f "$cal_file" ] && cal_file="$MEMORY_DIR/hot/calendar_today.md"
-if [ -f "$cal_file" ]; then
-  cal_sync=$(grep -o 'synced [0-9-]* [0-9:]*' "$cal_file" | head -1)
-  echo "Last sync: $cal_sync"
+if [ -z "$_LARK_UID" ]; then
+  echo "(lark.user_id not configured — skipped)"
 else
-  echo "⚠️ No calendar_today.md found"
+  cal_file="$MEMORY_DIR/calendar_today.md"
+  [ ! -f "$cal_file" ] && cal_file="$MEMORY_DIR/hot/calendar_today.md"
+  if [ -f "$cal_file" ]; then
+    cal_sync=$(grep -o 'synced [0-9-]* [0-9:]*' "$cal_file" | head -1)
+    echo "Last sync: $cal_sync"
+  else
+    echo "⚠️ No calendar_today.md found"
+  fi
 fi
 
 # 2b. Calendar user-token probe (REQ-83): calendar-sync fetches --as user;
@@ -42,7 +65,7 @@ fi
 #     snapshot. Probe a 1h agenda window with the same identity so token
 #     death pages HERE, deterministically — doctor.sh only probes the bot
 #     identity. (_GATE_TRIGGERS in the post redacts auth failure details.)
-if command -v lark-cli >/dev/null 2>&1; then
+if [ -n "$_LARK_UID" ] && command -v lark-cli >/dev/null 2>&1; then
   _probe_start=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   _probe_end=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   if lark-cli calendar +agenda --as user --format json \
@@ -63,14 +86,18 @@ for repo in "$WORK_DIR/repos"/*/; do
   echo "  $name: last fetch $last_fetch"
 done
 
-# 4. Personal site
-echo ""
-echo "--- Personal Site ---"
-if [ -d "$WORK_DIR/repos/huyongyi-cpu.github.io" ]; then
-  last_commit=$(git -C "$WORK_DIR/repos/huyongyi-cpu.github.io" log -1 --format="%ci %s" 2>/dev/null || echo "unknown")
-  echo "Last commit: $last_commit"
-else
-  echo "⚠️ Repo not found"
+# 4. Personal site (per-user config: jarvis.yaml personal_site.repo_dir —
+#    2026-07-13: the repo name was hardcoded here, so every non-owner install
+#    alarmed "⚠️ Repo not found" forever, with no subject in the message)
+if [ -n "$_SITE_DIR" ]; then
+  echo ""
+  echo "--- Personal Site ---"
+  if [ -d "$_SITE_DIR" ]; then
+    last_commit=$(git -C "$_SITE_DIR" log -1 --format="%ci %s" 2>/dev/null || echo "unknown")
+    echo "Last commit: $last_commit"
+  else
+    echo "⚠️ personal-site 仓库不存在：$_SITE_DIR（jarvis.yaml personal_site.repo_dir 指向的目录）"
+  fi
 fi
 
 # 5. Memory health
@@ -84,10 +111,17 @@ echo "Behavioral rules: $([ -f "$MEMORY_DIR/hot/behavioral_rules.md" ] && echo "
 # 6. EigenFlux stream health
 echo ""
 echo "--- EigenFlux Stream ---"
+if [ "$_HAS_EF" -ne 1 ]; then
+  echo "(eigenflux CLI not installed — skipped)"
+else
 # Match only processes whose command starts with "eigenflux stream"
 # (avoids matching Claude prompts that mention "eigenflux stream" in text)
 _stream_pids=$(ps -eo pid,comm,args | awk '$2 == "eigenflux" && $3 ~ /eigenflux/ && $4 == "stream" {print $1}')
-_stream_count=$(echo "$_stream_pids" | grep -c '[0-9]' 2>/dev/null || echo 0)
+# grep -c prints the count ITSELF even on no match (exit 1) — the old
+# `|| echo 0` produced "0\n0", both -eq tests errored out, and a dead stream
+# printed a bare "⚠️ 0" instead of "Stream NOT running" (2026-07-13 audit,
+# the least decodable line on the collaborator's first-install alert card).
+_stream_count=$(echo "$_stream_pids" | grep -c '[0-9]')
 if [ "$_stream_count" -eq 1 ]; then
   _stream_pid=$(echo "$_stream_pids" | head -1)
   _stream_uptime=$(ps -p "$_stream_pid" -o etime= 2>/dev/null | tr -d ' ')
@@ -104,6 +138,7 @@ elif [ "$_stream_count" -eq 0 ]; then
 else
   echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
 fi
+fi  # _HAS_EF
 
 # 7a. Card callback support watch: lark-cli 1.0.44 can't consume
 #     card.action.trigger (larksuite/cli#1051) — callback buttons are disabled

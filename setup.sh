@@ -111,6 +111,14 @@ else
   ok "sources.yaml created from sources.example.yaml (perception layer — optional, edit to enable sources)"
 fi
 
+# Install stamp: health checks (core/watermarks.py) use its mtime to give
+# never-run tasks a fresh-install grace period instead of alarming on day one.
+mkdir -p data
+if [ ! -f data/.install_stamp ]; then
+  touch data/.install_stamp
+  ok "install stamp created (health checks now know this is a fresh install)"
+fi
+
 # ── 5. Seed memory directory ─────────────────────────────────────────
 step "Seeding memory directory"
 
@@ -186,15 +194,29 @@ cat <<'EOF'
          # eigenflux auth verify --challenge-id <id> --code <code>
          # full walkthrough: plugins/eigenflux/README.md
 
-  4. Start the bot:
+  4. Verify the install (each FAIL prints its own fix command):
+     ./scripts/doctor.sh
+
+  5. Start the bot:
      ./bot.sh
 
      If no Lark is configured, it runs in heartbeat-only mode (still does
      memory consolidation, etc) — you'll see "heartbeat-only mode" in logs.
 
-  5. Admin dashboard (optional, enable admin.enabled: true in jarvis.yaml):
+  6. (Optional, macOS) Install supervision so everything survives reboots
+     and crashes — guardian daemon, dashboard, backups:
+     ./scripts/launchd/install.sh
+     # The plists are templates; the script fills in YOUR paths. Without
+     # this step the bot only runs while your terminal session lives.
+
+  7. Admin dashboard (optional, enable admin.enabled: true in jarvis.yaml):
      python3 admin.py
      # open http://localhost:3456
+
+  Health-check behavior on a fresh install: optional features you have not
+  configured (EigenFlux, Lark sidecar, admin, launchd services) are reported
+  as "○ skipped", never alarmed. Tasks that simply haven't had their first
+  run yet get a grace period before any "NEVER run" warning.
 
 EOF
 

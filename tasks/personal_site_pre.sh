@@ -4,9 +4,17 @@ JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 _jarvis_slug=$(python3 -c "from pathlib import Path; print(str(Path('$JARVIS_DIR').resolve()).replace('/','-').replace('.','-'))")
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_jarvis_slug/memory}"
 WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
-SITE_DIR="$WORK_DIR/repos/huyongyi-cpu.github.io"
+# Per-user config (2026-07-13): the site repo was hardcoded to the owner's
+# GitHub username — personal data in tracked code, and a permanently-skipping
+# task on every other install. Unset = feature off, task skips silently.
+SITE_DIR=$(python3 -c "
+import sys, os; sys.path.insert(0, '$JARVIS_DIR')
+from core.config import Config
+v = Config('$JARVIS_DIR/jarvis.yaml').get('personal_site.repo_dir') or ''
+print(os.path.expanduser(v))" 2>/dev/null)
 
-# Site repo must exist
+# Feature not configured, or repo missing → empty output = heartbeat skips
+[ -n "$SITE_DIR" ] || exit 0
 [ -d "$SITE_DIR" ] || exit 0
 
 # Pull latest
