@@ -7,7 +7,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SESSION_DIR = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.claude_projects import auto_memory_dir
+
+SESSION_DIR = auto_memory_dir().parent
 
 
 def load_sessions() -> list[dict]:

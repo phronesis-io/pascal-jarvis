@@ -168,6 +168,15 @@ def test_decide_records_and_replaces_card(env):
     assert "选择了「同意」" in decision["summary"]
 
 
+def test_fyi_tap_does_not_inject_context(env):
+    mid, _ = memorial.create("mail", "通知", "无需回复", preset="fyi")
+    memorial.decide(mid, "read")
+
+    pm = env.dir / "jobs" / "pending_merge.jsonl"
+    lines = pm.read_text().splitlines() if pm.exists() else []
+    assert not any("memorial-decision" in l for l in lines)
+
+
 def test_decide_is_idempotent(env):
     mid, _ = memorial.create("mail", "t", "b", preset="fyi")
     memorial.decide(mid, "read")

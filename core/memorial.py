@@ -833,7 +833,9 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
-    _queue_decision_context(st, opt.get("label", ""), action_result)
+    _FYI_KEYS = {"read", "watch"}
+    if opt_key not in _FYI_KEYS:
+        _queue_decision_context(st, opt.get("label", ""), action_result)
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
     else:

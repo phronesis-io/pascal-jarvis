@@ -18,7 +18,7 @@ PRE = ROOT / "tasks" / "cross_session_pre.sh"
 
 
 def _setup(tmp_path: Path) -> Path:
-    proj = tmp_path / "home" / ".claude" / "projects" / "-Users-pascal-Desktop-testproj"
+    proj = tmp_path / "home" / ".claude" / "projects" / "-tmp-testproj"
     proj.mkdir(parents=True)
     return proj / "s1.jsonl"
 

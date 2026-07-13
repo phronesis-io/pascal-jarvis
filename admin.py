@@ -24,6 +24,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from core import search as core_search
+from core.claude_projects import project_dir as _claude_project_dir
 from core.config import Config
 from core.richview import get_view, list_views
 from core.session import NAMESPACE as SESSION_NAMESPACE
@@ -144,7 +145,7 @@ SESSION_TRACKER = ROOT / "active_sessions.json"
 # Also check legacy paths so history from before a work_dir change is visible.
 SESSION_SEARCH_PATHS = [
     PROJECT_DIR,
-    CLAUDE_DIR / "projects" / "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis",
+    _claude_project_dir(ROOT),
 ]
 
 # ── Caches ───────────────────────────────────────────────────────────

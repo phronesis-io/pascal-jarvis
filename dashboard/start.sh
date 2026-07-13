@@ -68,7 +68,9 @@ from dashboard.bookmark_pipeline import migrate_from_jsonl
 from pathlib import Path
 wl = Path('$JARVIS_DIR').parent / 'memory' / 'system' / 'watchlater.jsonl'
 if not wl.exists():
-    wl = Path.home() / '.claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory/system/watchlater.jsonl'
+    import sys; sys.path.insert(0, '.')
+    from core.claude_projects import heartbeat_memory_dir
+    wl = heartbeat_memory_dir() / 'system' / 'watchlater.jsonl'
 if wl.exists():
     count = migrate_from_jsonl(str(wl))
     print(f'Migrated {count} bookmarks from {wl}')

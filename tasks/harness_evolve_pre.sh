@@ -11,7 +11,8 @@ JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK_DIR="${WORK_DIR:-$JARVIS_DIR}"
 FORCE="${FORCE:-}"
 
-AUTO_MEMORY="$HOME/.claude/projects/-Users-pascal-Desktop-jarvis/memory"
+_work_slug=$(python3 -c "from pathlib import Path; print(str(Path('$WORK_DIR').resolve()).replace('/','-').replace('.','-'))")
+AUTO_MEMORY="$HOME/.claude/projects/$_work_slug/memory"
 STATE_FILE="$JARVIS_DIR/.harness_evolve_state"
 PENDING="$JARVIS_DIR/harness_proposals_pending.jsonl"
 

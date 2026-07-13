@@ -18,8 +18,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from core.claude_projects import jarvis_project_dirs
 from core.search import load_chat_messages
 from core.timeutil import now_local
+
+
+def _jarvis_session_dirs() -> list[Path]:
+    """Session dirs for all three jarvis project roots."""
+    return jarvis_project_dirs()
 
 
 LOG_RE = re.compile(r"^\[(?P<ts>[^]]+)\] \[(?P<level>[^]]+)\] (?P<msg>.*)$")
@@ -107,11 +113,7 @@ def default_paths(jarvis_dir: Path | None = None) -> AuditPaths:
             root / "daemon.log",
             Path("/tmp/jarvis_restart.log"),
         ],
-        session_dirs=[
-            Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis",
-            Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos",
-            Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis",
-        ],
+        session_dirs=_jarvis_session_dirs(),
         db_path=root / "data/conversation_audit.db",
     )
 

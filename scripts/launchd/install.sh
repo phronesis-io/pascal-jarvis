@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install/verify the launchd supervision config (REQ-40).
 #
-# The fixes that revived the dashboard and session-backup previously lived
-# ONLY in ~/Library/LaunchAgents — a fresh install reproduced the 23-day
-# dashboard outage. These plists are the versioned source of truth.
+# The plist files in this directory are TEMPLATES with __JARVIS_DIR__,
+# __WORK_DIR__, and __HOME__ placeholders. This script substitutes them
+# with real paths at install time — no hardcoded user paths in tracked code.
 #
 # TCC hard constraints on this Mac (memory: jarvis-launchd-tcc-gotchas):
 #  1. StandardOut/ErrorPath must NOT point under ~/Desktop (launchd has no
@@ -17,16 +17,26 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/Library/LaunchAgents"
 UID_N=$(id -u)
 
+JARVIS_DIR="$(cd "$HERE/../.." && pwd)"
+WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/../.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
+
 for plist in "$HERE"/com.*.plist; do
   name=$(basename "$plist")
   label="${name%.plist}"
-  if ! cmp -s "$plist" "$DEST/$name" 2>/dev/null; then
-    cp "$plist" "$DEST/$name"
+  # Template substitution → installed copy
+  sed \
+    -e "s|__JARVIS_DIR__|$JARVIS_DIR|g" \
+    -e "s|__WORK_DIR__|$WORK_DIR|g" \
+    -e "s|__HOME__|$HOME|g" \
+    "$plist" > "$DEST/$name.tmp"
+  if ! cmp -s "$DEST/$name.tmp" "$DEST/$name" 2>/dev/null; then
+    mv "$DEST/$name.tmp" "$DEST/$name"
     echo "installed $name"
     launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
     launchctl bootstrap "gui/$UID_N" "$DEST/$name"
     echo "  (re)bootstrapped $label"
   else
+    rm "$DEST/$name.tmp"
     echo "up-to-date $name"
   fi
   launchctl print "gui/$UID_N/$label" >/dev/null 2>&1 \

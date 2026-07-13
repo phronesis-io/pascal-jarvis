@@ -19,7 +19,7 @@
 
 set -u
 
-REPO_DIR="/Users/pascal/Desktop/jarvis/repos/pascal-jarvis"
+REPO_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
 cd "$REPO_DIR" || { echo "[conversation-audit] cannot cd $REPO_DIR" >&2; exit 1; }
 
 exec /opt/homebrew/bin/python3 -m core.conversation_audit \

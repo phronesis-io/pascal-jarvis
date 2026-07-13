@@ -65,7 +65,8 @@ def test_behavioral_rules_carry_the_new_discipline():
     """The REQ-65/69/74 rules must be in the loaded behavioral_rules.md so the
     bot actually follows them (the deterministic helper alone isn't enough)."""
     from pathlib import Path
-    md = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory/hot/behavioral_rules.md"
+    from core.claude_projects import heartbeat_memory_dir
+    md = heartbeat_memory_dir() / "hot" / "behavioral_rules.md"
     if not md.exists():
         import pytest
         pytest.skip("behavioral_rules.md not present in this environment")

@@ -7,10 +7,10 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
-        <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis/daemon.py</string>
+        <string>__JARVIS_DIR__/daemon.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis</string>
+    <string>__JARVIS_DIR__</string>
     <key>KeepAlive</key>
     <true/>
     <key>RunAtLoad</key>
@@ -18,9 +18,13 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/pascal/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
-        <string>/Users/pascal</string>
+        <string>__HOME__</string>
+        <key>JARVIS_DIR</key>
+        <string>__JARVIS_DIR__</string>
+        <key>WORK_DIR</key>
+        <string>__WORK_DIR__</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/tmp/jarvis-daemon-stdout.log</string>

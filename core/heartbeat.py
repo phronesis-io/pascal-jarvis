@@ -326,6 +326,13 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
             del current["_in_prompt"]
         tasks.append(current)
 
+    overlay_dir = Path(path).parent / "data" / "heartbeat_overlay"
+    if overlay_dir.is_dir():
+        for t in tasks:
+            overlay = overlay_dir / f"{t['name']}.md"
+            if overlay.is_file():
+                t["prompt"] += "\n" + overlay.read_text(encoding="utf-8")
+
     return tasks
 
 

@@ -146,7 +146,8 @@ def settings_page():
             wl_path = JARVIS_DIR.parent / "memory" / "system" / "watchlater.jsonl"
             if not wl_path.exists():
                 # Try alternative path
-                wl_path = Path.home() / ".claude" / "projects" / "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis" / "memory" / "system" / "watchlater.jsonl"
+                from core.claude_projects import heartbeat_memory_dir
+                wl_path = heartbeat_memory_dir() / "system" / "watchlater.jsonl"
             count = migrate_from_jsonl(str(wl_path))
             ui.notify(f"Migrated {count} bookmarks from watchlater.jsonl", type="positive")
 

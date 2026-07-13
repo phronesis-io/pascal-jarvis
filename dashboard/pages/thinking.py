@@ -12,8 +12,9 @@ from pathlib import Path
 import yaml
 from nicegui import ui
 
-# Auto-memory directory (source of truth)
-AUTO_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis/memory/warm"
+from core.claude_projects import auto_memory_dir
+
+AUTO_MEMORY = auto_memory_dir() / "warm"
 
 
 def _load_typed_files(file_type: str) -> list[dict]:

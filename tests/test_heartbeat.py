@@ -47,6 +47,18 @@ def test_parse_heartbeat_basic(tmp_path):
     assert tasks[0]["timeout"] is None
 
 
+def test_parse_heartbeat_overlay(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("### task-one\n- prompt: Base prompt.\n")
+    overlay_dir = tmp_path / "data" / "heartbeat_overlay"
+    overlay_dir.mkdir(parents=True)
+    (overlay_dir / "task-one.md").write_text("Extra personal context.")
+
+    tasks = parse_heartbeat(hb)
+    assert "Base prompt." in tasks[0]["prompt"]
+    assert "Extra personal context." in tasks[0]["prompt"]
+
+
 def test_parse_heartbeat_heavy_fields(tmp_path):
     hb = tmp_path / "HEARTBEAT.md"
     hb.write_text("""

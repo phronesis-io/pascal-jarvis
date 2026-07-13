@@ -31,8 +31,9 @@ INDEX_FILE = MEMORY_DIR / "_index.md"
 # is a read-only replica that only this sync may write. Single home of the
 # hardcoded pair — memory_consolidate_post imports it to reroute its warm/
 # directives to canon instead of writing the replica (2026-07-08 memory audit).
-AUTO_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis/memory"
-HEARTBEAT_MEMORY = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/memory"
+from core.claude_projects import auto_memory_dir as _auto_mem, heartbeat_memory_dir as _hb_mem
+AUTO_MEMORY = _auto_mem()
+HEARTBEAT_MEMORY = _hb_mem()
 
 # Budget enforcement (2026-07-07 memory audit): system/todos.md is append-only
 # and grew unbounded since April (70KB) — it alone overflowed the loader's 40k

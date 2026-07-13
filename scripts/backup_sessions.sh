@@ -15,33 +15,38 @@
 
 set -u
 
-BACKUP_BASE="/Users/pascal/Desktop/jarvis/session_backups"
-REPO_DIR="/Users/pascal/Desktop/jarvis/repos/pascal-jarvis"
+REPO_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
+WORK_DIR="${WORK_DIR:-$(cd "$REPO_DIR/../.." 2>/dev/null && pwd)}"
+BACKUP_BASE="${WORK_DIR}/session_backups"
 TODAY=$(date '+%Y-%m-%d')
 BACKUP_DIR="$BACKUP_BASE/$TODAY"
 FAILED=0
 
+_slug() { python3 -c "from pathlib import Path; print(str(Path('$1').resolve()).replace('/','-').replace('.','-'))"; }
+_SLUGS=$(_slug "$WORK_DIR")$'\n'$(_slug "$WORK_DIR/repos")$'\n'$(_slug "$REPO_DIR")
+_SLUGS=$(echo "$_SLUGS" | sort -u)
+
 mkdir -p "$BACKUP_DIR"
 
 # ── 1. Session transcripts — BOTH project slugs ─────────────────────────
-for slug in "-Users-pascal-Desktop-jarvis" "-Users-pascal-Desktop-jarvis-repos" \
-            "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis"; do
-  src="/Users/pascal/.claude/projects/$slug"
+while IFS= read -r slug; do
+  [ -z "$slug" ] && continue
+  src="$HOME/.claude/projects/$slug"
   [ -d "$src" ] || continue
   dest="$BACKUP_DIR/sessions$slug"
   mkdir -p "$dest"
   rsync -a --include='*.jsonl' --exclude='*/' --exclude='*' "$src/" "$dest/" || FAILED=1
-done
+done <<< "$_SLUGS"
 
 # ── 2. Memory directories — the most irreplaceable data in the system ───
-for slug in "-Users-pascal-Desktop-jarvis" "-Users-pascal-Desktop-jarvis-repos" \
-            "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis"; do
-  src="/Users/pascal/.claude/projects/$slug/memory"
+while IFS= read -r slug; do
+  [ -z "$slug" ] && continue
+  src="$HOME/.claude/projects/$slug/memory"
   [ -d "$src" ] || continue
   dest="$BACKUP_DIR/memory$slug"
   mkdir -p "$dest"
   rsync -a "$src/" "$dest/" || FAILED=1
-done
+done <<< "$_SLUGS"
 
 # ── 3. SQLite DB — WAL-safe via .backup (a raw file copy would lose every
 #      transaction still in the -wal, currently larger than the db itself) ──
@@ -78,7 +83,7 @@ ln -sfn "$BACKUP_DIR" "$BACKUP_BASE/latest"
 
 # ── 6. Protect OLD session files from accidental deletion (read-only) ───
 # Skip ALL sessions referenced in active_sessions.json (bot may resume them).
-SESSION_DIR="/Users/pascal/.claude/projects/-Users-pascal-Desktop-jarvis"
+SESSION_DIR="$HOME/.claude/projects/$(_slug "$WORK_DIR")"
 TRACKER="$REPO_DIR/active_sessions.json"
 
 active_ids=""

@@ -383,12 +383,15 @@ def _load_session_compact():
 def test_session_compact_binds_memory_dirs_by_exact_slug():
     sc = _load_session_compact()
 
-    # The regression: "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis" also
-    # ends with "-jarvis", so suffix matching bound BOTH names to the
-    # heartbeat dir and jarvis-root was never compacted.
-    assert sc.AUTO_MEMORY.parent.name == "-Users-pascal-Desktop-jarvis"
-    assert sc.HEARTBEAT_MEMORY.parent.name == (
-        "-Users-pascal-Desktop-jarvis-repos-pascal-jarvis")
+    # The regression: the repo slug also ends with "-jarvis", so suffix
+    # matching bound BOTH names to the heartbeat dir and jarvis-root was
+    # never compacted.  Verify the two dirs differ and match their expected
+    # slugs (derived, not hardcoded).
+    from core.claude_projects import path_slug, JARVIS_DIR
+    expected_auto_slug = path_slug(JARVIS_DIR.parents[1])
+    expected_hb_slug = path_slug(JARVIS_DIR)
+    assert sc.AUTO_MEMORY.parent.name == expected_auto_slug
+    assert sc.HEARTBEAT_MEMORY.parent.name == expected_hb_slug
     assert sc.AUTO_MEMORY != sc.HEARTBEAT_MEMORY
 
 

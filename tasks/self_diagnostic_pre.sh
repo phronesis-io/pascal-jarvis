@@ -2,7 +2,8 @@
 # Pre-hook: collect system health data for self-diagnostic
 WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/-Users-pascal-Desktop-jarvis/memory}"
+_work_slug=$(python3 -c "from pathlib import Path; print(str(Path('${WORK_DIR:-$JARVIS_DIR}').resolve()).replace('/','-').replace('.','-'))")
+MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_work_slug/memory}"
 
 # REQ-39: leave a copy of this report for the deterministic alert post-script
 # (tasks/self_diagnostic_post.py scans it for ⚠️ lines — detection and

@@ -13,14 +13,14 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis</string>
+    <string>__JARVIS_DIR__</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>PYTHONPATH</key>
-        <string>/Users/pascal/Desktop/jarvis/repos/pascal-jarvis</string>
+        <string>__JARVIS_DIR__</string>
     </dict>
 
     <key>RunAtLoad</key>

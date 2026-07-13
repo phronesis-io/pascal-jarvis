@@ -31,10 +31,15 @@ fi
 # default as tasks/cross_session_post.py).
 export CROSS_SESSION_SEEN_FILE="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/cross_session_seen.json"
 
-# Find JSONL files modified in the last 24h, excluding jarvis project dirs
+# Find JSONL files modified in the last 24h, excluding jarvis project dirs.
+# Slug vars are empty when the corresponding env var is unset (test harness).
+_jarvis_slug=""
+[ -n "${JARVIS_DIR:-}" ] && _jarvis_slug=$(python3 -c "from pathlib import Path; print(str(Path('${JARVIS_DIR}').resolve()).replace('/','-').replace('.','-'))")
+_work_slug=""
+[ -n "${WORK_DIR:-}" ] && _work_slug=$(python3 -c "from pathlib import Path; print(str(Path('${WORK_DIR}').resolve()).replace('/','-').replace('.','-'))")
 recent_files=$(find "$PROJECTS_DIR" -name '*.jsonl' -mtime -1 \
-  -not -path '*-Users-pascal-Desktop-jarvis-repos-pascal-jarvis/*' \
-  -not -path '*-Users-pascal-Desktop-jarvis/*' \
+  ${_jarvis_slug:+-not -path "*${_jarvis_slug}/*"} \
+  ${_work_slug:+-not -path "*${_work_slug}/*"} \
   2>/dev/null | sort -t/ -k6,6 || true)
 
 if [ -z "$recent_files" ]; then
@@ -75,17 +80,15 @@ for filepath in sys.stdin:
     try:
         proj_idx = parts.index('projects') + 1
         project_name = parts[proj_idx]
-        # Clean up the slug: -Users-pascal-Desktop-X -> X (last component)
+        # Clean up the slug: -Users-<user>-Desktop-X -> X (last component)
         segments = project_name.split('-')
-        # Find meaningful name: everything after the path prefix
-        # e.g. -Users-pascal-Desktop-jarvis-repos-eigenflux -> eigenflux
-        # e.g. -Users-pascal-Desktop-eigenflux-whitepaper -> eigenflux-whitepaper
-        # Strategy: drop leading empty + Users + pascal + Desktop, rejoin rest
+        username = os.path.basename(os.path.expanduser('~')).lower()
+        skip_words = {'', 'users', username, 'desktop', 'jarvis', 'repos'}
         cleaned = []
         skip = True
         for s in segments:
             if skip:
-                if s.lower() in ('', 'users', 'pascal', 'desktop', 'jarvis', 'repos'):
+                if s.lower() in skip_words:
                     continue
                 skip = False
             cleaned.append(s)

@@ -26,10 +26,9 @@ from pathlib import Path
 # ── Locate data files ──────────────────────────────────────────────
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
-MEMORY_DIR = Path(os.environ.get(
-    "MEMORY_DIR",
-    os.path.expanduser("~/.claude/projects/-Users-pascal-Desktop-jarvis/memory"),
-))
+sys.path.insert(0, str(JARVIS_DIR))
+from core.claude_projects import auto_memory_dir as _auto_mem
+MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", str(_auto_mem())))
 
 CONTACTS_FILE = JARVIS_DIR / "data" / "contacts.jsonl"
 TEAM_FILE = MEMORY_DIR / "warm" / "team.md"

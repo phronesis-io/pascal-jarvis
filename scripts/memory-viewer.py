@@ -7,9 +7,13 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.claude_projects import auto_memory_dir, projects_root
+
 CLAUDE_DIR = Path.home() / ".claude"
-PROJECT_DIR = CLAUDE_DIR / "projects/-Users-pascal-Desktop-jarvis"
-MEMORY_DIR = PROJECT_DIR / "memory"
+PROJECT_DIR = auto_memory_dir().parent
+MEMORY_DIR = auto_memory_dir()
 SKILLS_DIR = CLAUDE_DIR / "skills"
 PLUGINS_DIR = CLAUDE_DIR / "plugins/marketplaces"
 PORT = 3456

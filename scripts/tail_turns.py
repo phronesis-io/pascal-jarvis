@@ -16,7 +16,10 @@ import sys
 import uuid
 from pathlib import Path
 
-SESSION_DIR = Path.home() / ".claude/projects/-Users-pascal-Desktop-jarvis"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.claude_projects import auto_memory_dir
+
+SESSION_DIR = auto_memory_dir().parent
 NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 MIN_TURNS_FOR_STANDALONE = 5   # below this, backfill from previous session
