@@ -1383,7 +1383,7 @@ EVENT_MAP_FILE = ROOT / "calendar_event_mapping.json"
 
 # Continuation-day skip logging dedup (log hygiene, 2026-07-07): the Pass-1
 # skip in generate_calendar_intents fires for EVERY rendered future day of a
-# multi-day event on EVERY cycle — the 请假 span alone put ~1,475 identical
+# multi-day event on EVERY cycle — the multi-day leave span alone put ~1,475 identical
 # stderr lines/day into jarvis.log via the intentions_pre relay, crowding
 # real history out of the 500KB rotation. Each (date,title) skip is logged
 # once per LOCAL DAY; the stamp date rolls the seen-set over so a daily trace
@@ -1478,7 +1478,7 @@ def _legacy_span_dup(ev: dict, current_date: str, title: str,
                      existing_tags: set) -> bool:
     """REQ-85(b) resurrection guard (zero-migration dedup). Under the old
     per-day keying a multi-day event left rows keyed on EVERY covered day
-    (cal:2026-06-24:请假 … cal:2026-07-08:请假, all cancelled by hand). Before
+    (a 15-day all-day span, one row per day, all cancelled by hand). Before
     minting the start-day key, scan day 2..N of the true span for any legacy
     key — read old keys, write only the start-day one — so rows Pascal already
     cancelled can never be recreated (_load_cal_index snapshots ALL statuses,

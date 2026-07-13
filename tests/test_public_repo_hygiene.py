@@ -76,3 +76,59 @@ def test_gitignore_keeps_common_secret_shapes_local():
 
     for pattern in REQUIRED_GITIGNORE_PATTERNS:
         assert pattern in ignore_lines
+
+# ── Content guards (added 2026-07-13 pre-internal-release scrub) ──────────
+# The 7/13 audit found real personal data (a private mailbox, full-length
+# Lark IDs, financial figures) pasted into tracked files as "examples" or
+# test fixtures. These guards catch the most identifiable shapes. Personal
+# data belongs in gitignored locations (data/, jarvis.yaml, memory dirs).
+
+import re
+
+TEXT_SUFFIXES = {".py", ".sh", ".md", ".yaml", ".yml", ".json", ".txt", ".css", ".html"}
+
+# Real consumer mailboxes are personal data; the only permitted addresses at
+# these domains are synthetic fixtures, documented placeholders, the 163
+# system sender, and public project addresses.
+ALLOWED_ADDRESSES = {
+    "user_1998@163.com",        # synthetic fixture (test_mail_triage)
+    "u@163.com",                # synthetic fixture (test_perception)
+    "you@163.com",              # placeholder (sources.example.yaml)
+    "mailmaster@163.com",       # 163's own system sender
+    "eigenfluxofficial@gmail.com",  # public project contact
+}
+CONSUMER_MAIL_RE = re.compile(r"[A-Za-z0-9_.+-]+@(?:163|126|qq|gmail|outlook|hotmail)\.[a-z]+")
+
+# Full-length Lark open/chat ids identify a real tenant/user; docs must use
+# truncated (…) or x-padded placeholders.
+LARK_ID_RE = re.compile(r"\b(?:ou|oc|om)_[0-9a-f]{16,}\b")
+
+
+def _tracked_text_files() -> list[Path]:
+    return [ROOT / p for p in _tracked_files()
+            if Path(p).suffix in TEXT_SUFFIXES]
+
+
+def test_no_real_mailboxes_in_tracked_files():
+    offenders = []
+    for path in _tracked_text_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in CONSUMER_MAIL_RE.finditer(text):
+            if m.group(0) not in ALLOWED_ADDRESSES:
+                offenders.append(f"{path.relative_to(ROOT)}: {m.group(0)}")
+    assert offenders == []
+
+
+def test_no_full_length_lark_ids_in_tracked_files():
+    offenders = []
+    for path in _tracked_text_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in LARK_ID_RE.finditer(text):
+            offenders.append(f"{path.relative_to(ROOT)}: {m.group(0)}")
+    assert offenders == []

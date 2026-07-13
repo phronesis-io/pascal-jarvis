@@ -71,7 +71,7 @@ def extract_events(text: str) -> set[str]:
 
 def _normalise_title(raw: str) -> str:
     """Strip location (@…) and parenthetical description, truncate to 30 chars."""
-    t = re.sub(r"\s*@.+", "", raw)          # drop "@ 华山路…"
+    t = re.sub(r"\s*@.+", "", raw)          # drop "@ 某某路…"
     t = re.sub(r"\s*[（(].*", "", t)         # drop "(description…"
     return t.strip()[:30]
 

@@ -604,3 +604,15 @@ def test_chat_writes_feedback_row(env):
     fb = [r for r in _engagement_rows(env.dir) if r["type"] == "feedback"]
     assert len(fb) == 1
     assert fb[0]["rating"] == "chat"
+
+
+def test_display_body_never_cuts_through_a_markdown_link():
+    """A char-limit clip must not leave a dangling `[label](https://…` stub."""
+    filler = "字" * 850
+    link = "[官方公告](https://example.com/a-very-long-path-that-straddles-the-limit)"
+    body = filler + " " + link
+    out = memorial._display_body(body)
+    assert "…完整背景可点「聊聊这个」" in out
+    # every link opener that survived the clip must still have its closer
+    core_text = out.split("…完整背景可点")[0]
+    assert core_text.count("](") == core_text.count(")") or "](" not in core_text

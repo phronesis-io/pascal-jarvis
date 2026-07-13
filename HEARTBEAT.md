@@ -236,7 +236,7 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
       ALSO push (calibrated on Pascal's real 163 inbox, 2026-06-15):
         • SECURITY alerts — 新设备登录提醒 / 异地登录 / 密码或账户变更 / abnormal-login.
           These are the "security anomaly" above; do NOT bury them as 163 routine noise.
-        • A REAL bill with money/deadline — monthly e-statement (招行信用卡电子账单),
+        • A REAL bill with money/deadline — monthly e-statement (信用卡电子账单),
           payment due, 还款提醒, 临时额度调整. Push the statement itself (once) — missing
           a payment is costly. (But the daily "每日信用管家" marketing stays silent, below.)
     - "silent": read and filed, not surfaced. LinkedIn/job-board spam, marketing,
@@ -246,8 +246,8 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
       automated receipts. Default to silent when in doubt — better to under-surface than nag.
 
     Use Pascal's memory files (profile, team, contacts, projects, health) to judge
-    who matters. Recognize names like alice/Luma, MiniMax/LLaMA-era contacts,
-    EigenFlux teammates, Polytechnique/校友.
+    who matters — the memory files, not this prompt, are where specific names,
+    schools and companies live (they are per-user data).
 
     Compose one user_messages item PER "push" email — never combine separate
     emails into one blob. Each item says: who it's from in plain words (and why
@@ -759,8 +759,8 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     3. Make clear his reply lands in his own 日志 (it accumulates; it's his thinking history).
 
     Boundaries: respect 永不催 categories — never push 康复/疗愈. He can reply 「今天不聊」
-    and you stop. You are a daily reflective companion, NOT a replacement;
-    if real distress signals appear, gently point toward his professional support.
+    and you stop. You are a daily reflective companion, NOT a replacement for
+    professional support; if real distress signals appear, gently point toward it.
 
     Under ~90 words Chinese. END WITH the one open question (invite, don't oblige).
 

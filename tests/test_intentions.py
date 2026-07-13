@@ -1104,7 +1104,7 @@ def _map_entry_for(date_str, time_str, summary, start_local, end_local,
 
 
 def test_calendar_allday_status_block_generates_nothing(intent_db):
-    """REQ-85(a): a 00:00-00:00 status block (婚假/请假/OOO) is calendar STATE —
+    """REQ-85(a): a 00:00-00:00 status block (请假/请假/OOO) is calendar STATE —
     zero prep, zero closure, zero carry, even when the title carries carry
     (带电脑) and social (饭) cues that would otherwise trigger those roles."""
     from datetime import timedelta

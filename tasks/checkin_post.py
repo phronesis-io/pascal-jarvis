@@ -77,9 +77,17 @@ def extract_topics(text: str) -> str:
     for m in re.finditer(r"(?<=[\s，。、：:])[\u4e00-\u9fff]{2,5}(?=[\s，。、：:])", text):
         topics.append(m.group(0))
 
-    # Key domain markers
-    for kw in ["NBA", "骑士", "G7", "EigenFlux", "A2A", "Agent", "黄金", "基金",
-               "声乐", "围棋", "死活题", "哲学", "主题A", "主题B"]:
+    # Key domain markers are per-user: interests, projects, recurring themes.
+    # The list lives in the gitignored data/checkin_topics_personal.txt (one
+    # keyword per line); without it, topic extraction just relies on the
+    # generic patterns above.
+    personal_kw = Path(__file__).resolve().parent.parent / "data" / "checkin_topics_personal.txt"
+    try:
+        keywords = [w.strip() for w in
+                    personal_kw.read_text(encoding="utf-8").splitlines() if w.strip()]
+    except OSError:
+        keywords = []
+    for kw in keywords:
         if kw in text:
             topics.append(kw)
 

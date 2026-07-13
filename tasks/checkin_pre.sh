@@ -50,14 +50,17 @@ else
   mode="wellbeing"
 fi
 
-# Tuesday evening → therapy prep (Wed 10:00 session)
-therapy_prep=""
-if [ "$day" = "Tuesday" ] && [ "$hour" -ge 20 ]; then
-  therapy_prep="THERAPY_PREP: [redacted personal schedule]. Compile a brief list of threads he might want to bring up. Present as suggestions, not prescriptions — he chooses what to discuss."
-fi
-
 # ── Calendar context: transition detection + next-event lookahead ──
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+# Recurring-appointment prep (e.g. a weekly session to prepare for). The
+# schedule is personal, so it lives in the gitignored data/checkin_personal.sh
+# which may set $therapy_prep using $day/$hour. Absent file = no prep block.
+therapy_prep=""
+if [ -f "$JARVIS_DIR/data/checkin_personal.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$JARVIS_DIR/data/checkin_personal.sh"
+fi
 lark_plugin="$JARVIS_DIR/plugins/lark/client.sh"
 transition_context=""
 

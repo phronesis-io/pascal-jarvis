@@ -39,7 +39,7 @@ def test_contentless_status_tokens_filtered(token):
 @pytest.mark.parametrize("real", [
     "14:00 鱼刺 11，议题：反馈采集",
     "21:00 康复训练时间，今日四件套",
-    "明天 10:00 例行咨询，可以带的素材：身体警讯",
+    "明天 10:00 复盘会，可以带的素材：上周记录",
     "sent the message to 凌安",   # multi-word: real content, not a bare token
 ])
 def test_real_messages_kept(real):

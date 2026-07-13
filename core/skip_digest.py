@@ -3,7 +3,7 @@
 Evidence (6/30 + 7/1): 8 cron occurrences were retired by
 `_skip_stale_cron_occurrence` during heartbeat stalls; the
 `intent_occurrence_skipped` events had NO consumer anywhere, so a credit-card
-bill reminder (¥12,345.67) and a Tushare token reminder vanished without a
+bill reminder and a Tushare token reminder vanished without a
 trace until Pascal noticed himself.
 
 This module is the consumer. It scans sched_events.jsonl for skip-class
@@ -11,7 +11,7 @@ events in the last 24h and rides the existing intent breach queue (the
 intention-check apology card, BREACH_MAX_SHOWS=1 anti-nag), split by the
 skipped intent's `category` (behavioral_rules §5 — the existing taxonomy):
 
-  - category='hard' (① 硬约束 — 账单/续费/票; the ¥12,345.67 incident class,
+  - category='hard' (① 硬约束 — 账单/续费/票; the credit-card-bill incident class,
     which carried tags=[] so a tags whitelist would have missed it) gets
     PER-ITEM backfill: one breach entry per occurrence with the original
     prompt riding along (batch 4, armed 7/9 after the shadow period).
@@ -37,7 +37,7 @@ trade-off per class:
     awareness, duplicates are nagging).
   - hard backfill: breach line(s) BEFORE consumed keys — a crash in between
     re-delivers on the next scan (宁重勿丢: a rare duplicate bill reminder is
-    acceptable, a lost one recreates the ¥12,345.67 incident). The entry id
+    acceptable, a lost one recreates the vanished-bill incident). The entry id
     is deterministic per occurrence, and appends are deduped against ids
     already in the queue, so the redo path doesn't spam.
 

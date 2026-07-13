@@ -9,7 +9,7 @@
 
 v3（6/15）修的是"交互层的烦"（纳格、重复、假成功）。这两周的数据说明当前最大的问题变了：**是"说了会做的事没有真的发生，而且没人知道"**。三个标志性事实：
 
-1. **信用卡 ¥12,345.67 还款提醒（7/2 到期）和 Tushare token 到期提醒都没按时发出**，靠事后补发道歉（heartbeat_outbox 实录）。根因链：daemon 停摆 >6h → cron occurrence 被判 stale 静默 skip → skip 事件全仓无消费者 → 自诊断也看不见。
+1. **信用卡还款提醒（当月到期）和 Tushare token 到期提醒都没按时发出**，靠事后补发道歉（heartbeat_outbox 实录）。根因链：daemon 停摆 >6h → cron occurrence 被判 stale 静默 skip → skip 事件全仓无消费者 → 自诊断也看不见。
 2. **对话审计管线 6/18 起停摆 13 天**——不是坏了，是从来就只有手动 CLI 入口，没人发现。
 3. **intent_fired 1,953 次 vs 真正 executed 349 次**，intention-check 失败率 57%，且 866 次失败事件全部不带错误信息、文本日志只留 2.5 天——6/19 一夜 ~247 连败已无从考证。
 
@@ -37,7 +37,7 @@ v3（6/15）修的是"交互层的烦"（纳格、重复、假成功）。这两
 ### 主题 A：交付可靠性（P0 核心）
 
 #### REQ-78【P0】cron occurrence 停摆补发与告警
-- **证据**：6/30（09:30-10:00、14:00-14:30 两窗）+ 7/1（08:15-09:30）共 **8 个 occurrence（6 个不同 intent）**被 `_skip_stale_cron_occurrence` 静默跳过；信用卡 ¥12,345.67 与 Tushare token 提醒漏发后补发道歉；`intent_occurrence_skipped` 事件全仓无消费者，self_diagnostic 只查 `status='expired'`。
+- **证据**：6/30（09:30-10:00、14:00-14:30 两窗）+ 7/1（08:15-09:30）共 **8 个 occurrence（6 个不同 intent）**被 `_skip_stale_cron_occurrence` 静默跳过；信用卡还款与 Tushare token 提醒漏发后补发道歉；`intent_occurrence_skipped` 事件全仓无消费者，self_diagnostic 只查 `status='expired'`。
 - **需求**：
   1. 停摆恢复后，对 24h 内被 skip 的 occurrence 分级：提醒/账单类（tag 白名单，不做分类器）补发并标注"迟到 X 小时"；一般类汇总一条"停摆期间跳过了 N 件事"。
   2. self-diagnostic 增加 `intent_occurrence_skipped` 24h 计数检查，>0 即 ⚠️。
@@ -89,7 +89,7 @@ v3（6/15）修的是"交互层的烦"（纳格、重复、假成功）。这两
 #### REQ-85【P0】calendar-prep 源头修：全天状态块不生成 prep + dedup key 修正
 - **证据**："Prep: 请假" 15 次 create→cancel（6/30 一天 5 次），4 夜人工清理 8 条，请假块连到 7/11 还会产噪；根因核实：(a) 全天事件被渲染成 00:00-00:00，intentions.py:1314 无过滤；(b) dedup key `cal:{date}:{title[:20]}`（:1347）按单日切，多天事件每天新 key。另全库唯一 expired 的 "Prep: 发散" 暴露 date 类 prep 静默过期路径。
 - **需求**（评审修订：结构修 key，不加启发式缓存）：
-  1. 00:00-00:00 全天事件跳过 prep 生成（配合请假/婚假/leave 关键词双条件，单测防误杀跨天有时刻的真事件）。
+  1. 00:00-00:00 全天事件跳过 prep 生成（配合请假/请假/leave 关键词双条件，单测防误杀跨天有时刻的真事件）。
   2. dedup key 改为按事件+日期范围键控，多天事件整程只生成一次 prep。~~cancel≥2 负缓存~~（评审砍除：为同一 bug 建第二套启发式防御）。
   3. date 类 prep 静默过期留可见记录（并入 REQ-78 汇总通道）。
 - **时效**：请假持续到 7/11，本条有硬 deadline，批次 2 优先。

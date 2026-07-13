@@ -62,7 +62,7 @@ def _breach_lines(jarvis_dir: Path) -> list[dict]:
             q.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-BILL_PROMPT = "招行信用卡账单 ¥12,345.67 今天到期，提醒 Pascal 还款。"
+BILL_PROMPT = "信用卡账单 ¥12,345.67 今天到期，提醒 Pascal 还款。"
 
 
 def test_hard_category_split_from_aggregate(tmp_path):

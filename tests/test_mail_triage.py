@@ -20,12 +20,12 @@ Date: 2026-06-12 16:57
 Subject: (Gmail) 转发确认
 (正文未注入——需要时: lark-cli mail +message --mailbox 'me' --message-id 'WmgyOE==')
 
-### imap:user_1998@163.com:1:1377189256 | mail_163 | alice <alice@example.org> | 2026-06-11T08:04:38+0800 | private | buffer
-📧 Re: your llama + minimax trajectory
+### imap:user_1998@163.com:1:1000000042 | mail_163 | alice <alice@example.org> | 2026-06-11T08:04:38+0800 | private | buffer
+📧 Re: your dataset proposal
 From: alice <alice@example.org>
-Mailbox: user_1998@163.com [INBOX] UID 1377189256
+Mailbox: user_1998@163.com [INBOX] UID 1000000042
 Date: 2026-06-11T08:04:38+0800
-Subject: Re: your llama + minimax trajectory
+Subject: Re: your dataset proposal
 (正文未注入——163 邮件用 IMAP 按需拉取该 UID)
 """
 
@@ -40,14 +40,14 @@ def test_parse_buffer_extracts_fields():
     assert lark["subject"] == "(Gmail) 转发确认"
     assert imap["source_id"] == "mail_163"
     assert imap["sender"].startswith("alice")
-    assert imap["subject"] == "Re: your llama + minimax trajectory"
+    assert imap["subject"] == "Re: your dataset proposal"
 
 
 def test_imap_coords_extracts_label_and_uid():
-    e = {"event_id": "imap:user_1998@163.com:1:1377189256"}
+    e = {"event_id": "imap:user_1998@163.com:1:1000000042"}
     label, uid = m._imap_coords(e)
     assert label == "user_1998@163.com"
-    assert uid == 1377189256
+    assert uid == 1000000042
 
 
 def test_imap_coords_none_for_lark():
@@ -85,34 +85,34 @@ def test_collect_new_skips_triaged_and_attaches_body(tmp_path, monkeypatch):
     _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
                 triaged=[{"event_id": "WmgyOE=="}])
     monkeypatch.setattr(m, "fetch_imap_bodies",
-                        lambda uids, folder="INBOX": {1377189256: "Hi Yongyi, lets chat"})
+                        lambda uids, folder="INBOX": {1000000042: "Hi there, lets chat"})
     monkeypatch.setattr(m, "fetch_lark_body", lambda mb, mid: "should not be called")
 
     recs = m.collect_new()
     # Lark one already triaged → only the imap one remains.
     assert len(recs) == 1
-    assert recs[0]["event_id"].endswith("1377189256")
-    assert recs[0]["body"] == "Hi Yongyi, lets chat"
+    assert recs[0]["event_id"].endswith("1000000042")
+    assert recs[0]["body"] == "Hi there, lets chat"
 
 
 def test_main_writes_pending_and_prints(tmp_path, monkeypatch, capsys):
     _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
                 triaged=[{"event_id": "WmgyOE=="}])
     monkeypatch.setattr(m, "fetch_imap_bodies",
-                        lambda uids, folder="INBOX": {1377189256: "Hi Yongyi"})
+                        lambda uids, folder="INBOX": {1000000042: "Hi there"})
     rc = m.main()
     assert rc == 0
     out = capsys.readouterr().out
-    assert "EVENT_ID: imap:user_1998@163.com:1:1377189256" in out
-    assert "Hi Yongyi" in out
+    assert "EVENT_ID: imap:user_1998@163.com:1:1000000042" in out
+    assert "Hi there" in out
     pend = json.loads(m.pending_path().read_text())
-    assert [p["event_id"] for p in pend] == ["imap:user_1998@163.com:1:1377189256"]
+    assert [p["event_id"] for p in pend] == ["imap:user_1998@163.com:1:1000000042"]
 
 
 def test_collect_new_empty_when_all_triaged(tmp_path, monkeypatch):
     _setup_dirs(tmp_path, monkeypatch, SAMPLE_BUFFER,
                 triaged=[{"event_id": "WmgyOE=="},
-                         {"event_id": "imap:user_1998@163.com:1:1377189256"}])
+                         {"event_id": "imap:user_1998@163.com:1:1000000042"}])
     monkeypatch.setattr(m, "fetch_imap_bodies", lambda *a, **k: {})
     assert m.collect_new() == []
 
