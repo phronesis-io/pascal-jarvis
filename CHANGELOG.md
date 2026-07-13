@@ -5,6 +5,39 @@ All notable changes to Pascal Jarvis. This project tracks requirements as
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
 prd_interaction_v4, REQ-78~90).
 
+## [1.3.1] — 2026-07-13 — first-install fixes: portable launchd, honest health checks
+
+Everything a collaborator hit installing 1.3.0 on a fresh machine (their
+day-one self-diagnostic card listed 17 warnings), plus the portability
+commit that just missed the 1.3.0 tag:
+
+### Included from post-1.3.0 main
+- All hardcoded user paths eliminated (`core/claude_projects.py`); **launchd
+  plists are now templates** — install via `scripts/launchd/install.sh`,
+  never by copying plists (the 1.3.0 tag shipped them with absolute paths).
+- HEARTBEAT per-task overlay (`data/heartbeat_overlay/<task>.md`, gitignored).
+
+### First-install health-check honesty
+- `components.yaml` entries declare preconditions
+  (`requires_cmd`/`requires_file`/`requires_config`); unconfigured optional
+  features (EigenFlux, sidecar, admin, launchd services) report `○ skipped`
+  instead of alarming `[critical]` forever — now consistent with doctor.sh.
+- Never-run tasks get a fresh-install grace (2× interval from
+  `data/.install_stamp`, created by setup.sh, self-healing) — no more six
+  "has NEVER run" warnings minutes after install, including self-diagnostic
+  reporting itself mid-first-cycle.
+- Real bug: a dead ef-stream printed a bare "⚠️ 0" (grep -c double-zero)
+  instead of "Stream NOT running" — affected production too.
+- Personal-site checks read `jarvis.yaml personal_site.repo_dir` instead of
+  a hardcoded owner repo (subject-less "⚠️ Repo not found" on every
+  non-owner install; hygiene test now bans owner usernames in tracked files).
+- `self_diagnostic_post.py` emergency send passes `--as bot` (user-identity
+  fallback failed on exactly the installs where the fallback matters).
+- `eigenflux-preinstall` skips off the maintainer machine; calendar/EigenFlux
+  diag sections gate on the feature being configured.
+- setup.sh/INSTALL.md: doctor + launchd supervision steps, documented
+  first-install expectations (`○ skipped` ≠ broken). 1415 tests.
+
 ## [1.3.0] — 2026-07-13 — internal release: decision-first UI + collaboration readiness
 
 The first release cut for the multi-collaborator model (everyone works on
