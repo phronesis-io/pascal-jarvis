@@ -144,6 +144,44 @@ if [ -f "$interests_file" ]; then
   interests=$(cat "$interests_file" 2>/dev/null)
 fi
 
+# ── Activity evidence (2026-07-13 feedback_idle_detection_signal) ──
+# "No commits + empty calendar" ≠ idle: strategy work, discussions and
+# external threads leave no commit trail, and a checkin that reads a quiet
+# calendar as "idle" gets corrected by the user (observed 2026-07-13). Give
+# the model ACTUAL interaction volume so it never infers idleness from
+# absence alone.
+# LIVE sources only. data/conversation_audit.db was rejected here: it is
+# ingested once daily (~04:20), so a 12h query returns 0 on a busy evening —
+# which would reproduce the exact misjudgment this block prevents, with
+# hard-rule authority (2026-07-14 red-team catch).
+activity_evidence=""
+last_msg_file="/tmp/jarvis-last-msg"   # bot dedup file; mtime = last inbound msg
+if [ -f "$last_msg_file" ]; then
+  last_epoch=$(stat -f %m "$last_msg_file" 2>/dev/null || stat -c %Y "$last_msg_file" 2>/dev/null)
+  if [ -n "$last_epoch" ]; then
+    mins_ago=$(( ($(date +%s) - last_epoch) / 60 ))
+    activity_evidence="- 最近一次消息互动: ${mins_ago} 分钟前"
+  fi
+fi
+if [ -f "$JARVIS_DIR/jarvis.log" ]; then
+  replies_today=$(grep "^\[$date_ymd" "$JARVIS_DIR/jarvis.log" 2>/dev/null | grep -c "Quote reply" || true)
+  if [ -n "$replies_today" ] && [ "$replies_today" -gt 0 ] 2>/dev/null; then
+    activity_evidence="$activity_evidence
+- 今天对话往来（bot 回复计数）: ${replies_today} 轮"
+  fi
+fi
+eng_log="$JARVIS_DIR/engagement_log.jsonl"
+if [ -f "$eng_log" ]; then
+  eng_today=$(grep "\"$date_ymd" "$eng_log" 2>/dev/null | grep -cv '"type": *"sent"' || true)
+  if [ -n "$eng_today" ] && [ "$eng_today" -gt 0 ] 2>/dev/null; then
+    activity_evidence="$activity_evidence
+- 今天奏折/卡片互动（已读、批示、聊聊）: ${eng_today} 次"
+  fi
+fi
+if [ -z "$activity_evidence" ]; then
+  activity_evidence="(活动信号采集不可用——绝不能据此判断他今天闲/没干活)"
+fi
+
 # Engagement-driven content-mix steering (advisory, not a hard rule). Written
 # by engagement-analyze post-hook; keeps checkins evolving from measured
 # response patterns without letting the analyzer mutate prompts directly.
@@ -160,6 +198,12 @@ $therapy_prep
 
 Calendar context:
 $transition_context
+
+Activity evidence (硬规则：判断他今天忙不忙时，以下面的实际互动量为准；
+若信号缺失或为零，只说明采集面窄，不构成「他闲着」的证据。
+「没有 commit + 日历空」≠ 闲着——战略思考/讨论/接外部线这类最值钱的活不留痕，
+绝不能因为看不到留痕就说他今天闲/没干活):
+$activity_evidence
 
 User interests (for relevant knowledge nuggets):
 $interests

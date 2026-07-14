@@ -74,3 +74,20 @@ def test_error_output_skipped(tmp_path):
     result = _run("Traceback (most recent call last):\n  File ...", tmp_path)
     assert result.returncode == 0
     assert not (tmp_path / "checkin_log.jsonl").exists()
+
+
+def test_json_envelope_unwrapped(tmp_path):
+    # Model sometimes reuses the intention-check {"response","action"} shape;
+    # the raw envelope must never reach the card (2026-07-14 complaint).
+    raw = '{"response": "今天节奏不错，记得下午拉伸一下。", "action": "notify"}'
+    r = _run(raw, tmp_path)
+    assert r.returncode == 0
+    assert '"response"' not in r.stdout and '"action"' not in r.stdout
+    assert "记得下午拉伸" in r.stdout
+
+
+def test_json_envelope_silent_action_suppresses(tmp_path):
+    raw = '{"response": "无事", "action": "silent"}'
+    r = _run(raw, tmp_path)
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""

@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import looks_like_error
+from core.safety import looks_like_error, parse_json_response
 from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
 
@@ -150,6 +150,21 @@ def main() -> int:
     if looks_like_error(message):
         print("[checkin] skipping — looks like error output", file=sys.stderr)
         return 0
+
+    # Unwrap a JSON envelope. The checkin prompt asks for plain markdown, but
+    # the model sometimes reuses the intention-check response shape
+    # ({"response": "...", "action": "notify"}) from elsewhere in the
+    # heartbeat context — and the raw envelope went onto Pascal's card
+    # verbatim (his 2026-07-14 complaint: the card was unreadable JSON).
+    parsed = parse_json_response(message)
+    if isinstance(parsed, dict) and isinstance(parsed.get("response"), str):
+        action = str(parsed.get("action", "notify")).lower()
+        if action in ("silent", "skip", "none"):
+            print(f"[checkin] model chose action={action} — no card", file=sys.stderr)
+            return 0
+        message = parsed["response"].strip()
+        if not message:
+            return 0
 
     # Read existing entries
     entries = read_jsonl(LOG_FILE)
