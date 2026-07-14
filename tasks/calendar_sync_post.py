@@ -83,6 +83,69 @@ def detect_changes(old_events: set[str], new_events: set[str]) -> tuple[set, set
     return added, removed
 
 
+def _date_label(mmdd: str) -> str:
+    """'07/15' → '7/15(周三)' — weekday is best-effort."""
+    if not mmdd:
+        return ""
+    try:
+        from datetime import date
+        from core.timeutil import now_local
+        m, d = (int(x) for x in mmdd.split("/"))
+        today = now_local().date()
+        # A month before the current one almost certainly means next year
+        # (calendar snapshots only cover near-term dates).
+        year = today.year + (1 if m < today.month else 0)
+        wd = "一二三四五六日"[date(year, m, d).weekday()]
+        return f"{m}/{d}(周{wd})"
+    except (ValueError, IndexError):
+        return mmdd
+
+
+def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
+    """Human-complete card body for a calendar change (Pascal's 2026-07-14
+    complaint — the old card said just "新增: 15:00 X" with no date):
+    every line carries the DATE and weekday, a same-title add+remove pair is
+    presented as ONE 改期 line (old→new) instead of a confusing add/cancel
+    pair, and overflow beyond the display cap is counted, never silently
+    dropped."""
+    def _split(e: str) -> tuple[str, str, str]:
+        parts = e.split("|")
+        if len(parts) >= 3:
+            return parts[0], parts[1], parts[2]
+        return "", "", parts[-1]
+
+    added_ev = [t for t in (_split(e) for e in sorted(added)) if t[2].strip()]
+    removed_ev = [t for t in (_split(e) for e in sorted(removed)) if t[2].strip()]
+    if not added_ev and not removed_ev:
+        return []
+
+    moved = []
+    removed_by_title = {t[2]: t for t in removed_ev}
+    still_added = []
+    for a in added_ev:
+        old = removed_by_title.pop(a[2], None)
+        if old is not None:
+            moved.append((old, a))
+        else:
+            still_added.append(a)
+    still_removed = [t for t in removed_ev if t[2] in removed_by_title]
+
+    lines = []
+    for old, new in moved[:cap]:
+        when_old = f"{_date_label(old[0])} {old[1]}".strip()
+        when_new = f"{_date_label(new[0])} {new[1]}".strip()
+        lines.append(f"改期：{new[2]} — {when_old} → {when_new}")
+    for d, t, title in still_added[:cap]:
+        lines.append(f"新增：{_date_label(d)} {t} {title}".replace("  ", " "))
+    for d, t, title in still_removed[:cap]:
+        lines.append(f"取消：{_date_label(d)} {t} {title}".replace("  ", " "))
+    overflow = (max(0, len(moved) - cap) + max(0, len(still_added) - cap)
+                + max(0, len(still_removed) - cap))
+    if overflow:
+        lines.append(f"…另有 {overflow} 项变动（详见日历）")
+    return lines
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
@@ -157,34 +220,14 @@ def main() -> int:
         print(f"[calendar-sync] Change detected but outside working hours ({hour}:xx), silent", file=sys.stderr)
         return 0
 
-    # Build a short natural-language notification (NOT the full schedule)
-    def _event_label(e: str) -> str:
-        """'06/13|14:00|复动肌骨 康复课' → '14:00 复动肌骨 康复课'"""
-        parts = e.split("|")
-        if len(parts) >= 3:
-            return f"{parts[1]} {parts[2]}"
-        return parts[-1]
-
-    added_names = [_event_label(e) for e in list(added)[:3]]
-    removed_names = [_event_label(e) for e in list(removed)[:3]]
-    # Filter out empty names
-    added_names = [n for n in added_names if n.strip()]
-    removed_names = [n for n in removed_names if n.strip()]
-
-    if not added_names and not removed_names:
+    lines = format_change_lines(added, removed)
+    if not lines:
         print(f"[calendar-sync] Cosmetic change only (title rewording), silent", file=sys.stderr)
         return 0
 
-    parts = []
-    if added_names:
-        parts.append(f"新增: {', '.join(added_names)}")
-    if removed_names:
-        parts.append(f"取消: {', '.join(removed_names)}")
-
-    if parts:
-        msg = "日程变动 — " + "；".join(parts)
-        print(build_card("📅 变动", msg, source="calendar-sync"))
-        print(f"[calendar-sync] Notified: {msg}", file=sys.stderr)
+    msg = "\n".join(lines)
+    print(build_card("📅 日程变动", msg, source="calendar-sync"))
+    print(f"[calendar-sync] Notified: {msg!r}", file=sys.stderr)
 
     return 0
 
