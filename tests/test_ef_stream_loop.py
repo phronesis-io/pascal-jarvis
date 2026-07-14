@@ -111,3 +111,17 @@ def test_stall_predicate():
     assert not efsl._is_stalled(live, t - 1)      # silence within budget
     assert not efsl._is_stalled(dead, t + 1)      # exited → respawn path owns it
     assert not efsl._is_stalled(None, t + 1)      # nothing spawned yet
+
+
+# ---- _healthy_churn: lifetime-based backoff reset (REQ-95) -----------------
+
+def test_healthy_churn_policy():
+    t = efsl.HEALTHY_CONN_S
+    # Long-lived connection → healthy churn, reset
+    assert efsl._healthy_churn(t + 1, replaced=False)
+    # Short-lived → real failure path, keep exponential backoff
+    assert not efsl._healthy_churn(t - 1, replaced=False)
+    # 'Connection replaced' NEVER resets — two live sessions would steal the
+    # stream back and forth every second otherwise
+    assert not efsl._healthy_churn(t + 1, replaced=True)
+    assert not efsl._healthy_churn(t - 1, replaced=True)

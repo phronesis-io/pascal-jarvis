@@ -64,10 +64,30 @@ from core import memorial
 STALL_KILL_AFTER_S = 30 * 60
 STALL_POLL_S = 60
 
+# REQ-95 (2026-07-14): a connection that lived this long before dropping was
+# a WORKING connection that went quiet (stall-kill on an idle day, server
+# rolling restart) — not a failing one. Before this, only an incoming message
+# reset the backoff, so on a zero-PM day every 30-min stall-kill incremented
+# `failures` forever (observed: failure #27, permanent 300s backoff = ~2h/day
+# of blind windows) and the counter read like an outage.
+HEALTHY_CONN_S = 10 * 60
+
 
 def _is_stalled(proc, idle_s: float, threshold: float = STALL_KILL_AFTER_S) -> bool:
     """True when the stream subprocess is alive but has been silent too long."""
     return proc is not None and proc.poll() is None and idle_s > threshold
+
+
+def _healthy_churn(lifetime_s: float, replaced: bool,
+                   threshold: float = HEALTHY_CONN_S) -> bool:
+    """True when a dropped connection should reset the reconnect backoff.
+
+    Lifetime-based, NOT output-based: a server that emits one error line and
+    closes would look "productive" and reconnect-storm at 1s. The exception:
+    'Connection replaced' (another session took the stream) must keep the
+    exponential backoff, or two live sessions steal the stream back and
+    forth every second."""
+    return not replaced and lifetime_s >= threshold
 
 
 def _lark_send(text: str, user_id: str) -> bool:
@@ -367,6 +387,12 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     backoff = 1
     max_backoff = 300
     failures = 0
+    # Consecutive long-lived ZERO-OUTPUT connections. An idle day and an
+    # up-but-mute outage (server accepts, delivers nothing) are protocol-
+    # indistinguishable; immediate reconnect is right for both, but the streak
+    # must stay visible or a multi-day mute outage reads as perfect health
+    # (red-team catch on REQ-95).
+    quiet_streak = 0
 
     while not stop.is_set():
         cmd = ["eigenflux", "stream", "-f", "json"]
@@ -379,6 +405,9 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
         log("ef-stream", f"Spawning: {' '.join(cmd)}")
         exit_code = -1
         proc = None
+        replaced = False
+        got_output = False
+        conn_started = time.monotonic()
 
         try:
             proc = subprocess.Popen(
@@ -391,6 +420,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
 
             for line in proc.stdout:
                 last_output["ts"] = time.monotonic()
+                got_output = True
                 if stop.is_set():
                     break
                 line = line.strip()
@@ -400,6 +430,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 # "Connection replaced" comes on stdout — detect and break
                 if "Connection replaced" in line:
                     log("ef-stream", "Connection replaced by another session — backing off")
+                    replaced = True
                     proc.terminate()
                     break
 
@@ -485,6 +516,33 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 "EigenFlux token 已过期，请运行 `eigenflux auth login` 重新认证。",
                 user_id, urgent=True)
             if stop.wait(300):
+                break
+            continue
+
+        # REQ-95: a long-lived connection that dropped (stall-kill on a quiet
+        # day, server restart) is healthy churn, not a failure — reconnect
+        # immediately instead of letting the backoff ratchet to 300s forever.
+        conn_lifetime = time.monotonic() - conn_started
+        if _healthy_churn(conn_lifetime, replaced):
+            failures = 0
+            backoff = 1
+            if got_output:
+                quiet_streak = 0
+                log("ef-stream",
+                    f"Stream connection lived {int(conn_lifetime)}s before dropping "
+                    "— treating as healthy churn, reconnecting immediately")
+            else:
+                quiet_streak += 1
+                # Every 6th consecutive silent connection (~3h at the 30-min
+                # stall cadence) escalates to warn: could be a quiet day,
+                # could be an up-but-mute server — a human should decide.
+                log("ef-stream",
+                    f"Quiet stream reconnect #{quiet_streak} (lived "
+                    f"{int(conn_lifetime)}s, zero output — idle stream or "
+                    "up-but-mute outage)",
+                    level="warn" if quiet_streak % 6 == 0 else "info",
+                    expected=quiet_streak % 6 != 0)
+            if stop.wait(1):
                 break
             continue
 
