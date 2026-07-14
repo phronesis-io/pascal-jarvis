@@ -51,7 +51,10 @@ def tail_log(path: Path, lines: int = 120, grep: str = "") -> dict:
         all_lines = [line for line in all_lines if grep in line]
     out = []
     for line in all_lines[-lines:]:
-        flagged = any(sig in line for sig in LOG_FAILURE_SIGNATURES)
+        # '"expected": true' = emitter-marked by-design event (elected probe,
+        # warm squeeze) — never painted red (REQ-96).
+        flagged = (any(sig in line for sig in LOG_FAILURE_SIGNATURES)
+                   and '"expected": true' not in line)
         out.append({"text": line, "flagged": flagged})
     return {
         "path": str(path),

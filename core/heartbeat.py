@@ -891,8 +891,29 @@ You have access to the user's memory below. Use it to personalize your responses
                 # warn, not info: the 7/7 spend-limit outage sat at level=info
                 # for 6.5h — 216 lines nobody was ever alerted to. (This also
                 # logs the 137/143 infra kills below at warn — acceptable.)
-                self._log(f"Claude exited with code {result.returncode}",
-                          level="warn")
+                # REQ-96: when this call is the elected primary probe, SAY so —
+                # a bare "exited with code 1" + spend-limit text every 30 min
+                # reads exactly like a fresh outage (cost a real investigation
+                # on 2026-07-14). Level stays warn per the 7/7 lesson.
+                # Only an elected probe WITH a working backup path is a
+                # by-design failure: if the backup env is missing/disabled the
+                # cycle really dies on primary — that must keep alarming. And
+                # 137/143 kills are infra events, never probe outcomes.
+                backup_available = (
+                    os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                    and bool(os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN"))
+                    and bool(os.environ.get("CLAUDE_BACKUP_BASE_URL")))
+                is_probe = (gate_state == "probe" and not use_backup
+                            and backup_available
+                            and result.returncode not in (137, 143))
+                probe_note = (
+                    " (elected primary probe while gate tripped — expected "
+                    "until the limit resets; falling back to backup)"
+                    if is_probe else "")
+                # expected=True keeps selfmon's silent-failure count clean of
+                # by-design probe failures (~48/day while the gate is tripped).
+                self._log(f"Claude exited with code {result.returncode}{probe_note}",
+                          level="warn", expected=is_probe)
                 err_text = _drop_benign_notices("\n".join(
                     s for s in (result.stderr.strip(), result.stdout.strip()) if s
                 ))

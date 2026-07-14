@@ -845,7 +845,11 @@ def tail_log(file_key: str, lines: int = 200, grep: str = "") -> dict:
     if grep:
         all_lines = [ln for ln in all_lines if grep in ln]
     tail = all_lines[-lines:]
-    out = [{"text": ln, "flagged": any(sig in ln for sig in LOG_FAILURE_SIGNATURES)}
+    # '"expected": true' = the emitter marked this a by-design event (elected
+    # primary probe, warm-tier squeeze) — don't paint it red (REQ-96).
+    out = [{"text": ln,
+            "flagged": (any(sig in ln for sig in LOG_FAILURE_SIGNATURES)
+                        and '"expected": true' not in ln)}
            for ln in tail]
     return {"file": file_key, "lines": out,
             "flagged_count": sum(1 for e in out if e["flagged"])}
