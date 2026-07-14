@@ -259,8 +259,15 @@ def read_heartbeat_outbox(outbox_path: str | Path, limit: int = 10) -> list[dict
 
 def build_recent_turns(session_dir: str | Path, session_id: str,
                        counter: int, conv_key: str,
-                       limit: int = 20) -> str:
-    """Build recent turns with cross-session backfill + heartbeat outbox merge."""
+                       limit: int = 20,
+                       include_outbox: bool = True) -> str:
+    """Build recent turns with cross-session backfill + heartbeat outbox merge.
+
+    include_outbox=False (REQ-100, group chat): the heartbeat outbox carries
+    OWNER-directed proactive sends (checkins, calendar alerts — his schedule
+    and health) — merging it into a group session's prompt hands that private
+    context to a session strangers can drive. Group prompts must exclude it.
+    """
     turns = read_tail_turns(session_dir, session_id, limit)
 
     # Backfill from previous session if current is too young
@@ -271,7 +278,7 @@ def build_recent_turns(session_dir: str | Path, session_id: str,
 
     # Merge heartbeat outbox (checkins, calendar alerts, etc.)
     jarvis_dir = os.environ.get("JARVIS_DIR", "")
-    if jarvis_dir:
+    if jarvis_dir and include_outbox:
         outbox_path = Path(jarvis_dir) / "heartbeat_outbox.jsonl"
         hb_turns = read_heartbeat_outbox(outbox_path, limit=10)
         if hb_turns:

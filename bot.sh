@@ -685,7 +685,10 @@ handle_message() {
   # not execute anything on this machine), owner-only action markers, and
   # speaker attribution so the model knows who is talking.
   local is_group=0 allow_actions=1 claude_tool_flags=()
-  if [ "$chat_type" != "p2p" ] && [ -n "$chat_type" ]; then
+  # Fail CLOSED on empty/unknown chat_type (red-team: missing field defaults
+  # to p2p → full memory + full tools for a group message). Only an explicit
+  # "p2p" unlocks the private path; everything else is treated as a group.
+  if [ "$chat_type" != "p2p" ]; then
     is_group=1
     # WebSearch ONLY. WebFetch is deliberately excluded: it can reach
     # localhost (admin console :3456, dashboard :3457) — a group member could
@@ -1026,7 +1029,12 @@ $_formatted" \
        # in the interaction audit. The conversation rotates to a fresh session
        # so new messages never resume the transcript this Claude still writes;
        # the result comes back via the normal reply + pending_merge.
-       if [ "$_elapsed" -ge 120 ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
+       # Auto-promotion disabled in groups: the bg job runs with full memory +
+       # full tools (no tool restrictions), and its output merges back to the
+       # group conv_key visible to non-owners. The correct fix is making bg
+       # jobs inherit tool restrictions, but that needs a run_background_job
+       # refactor; for now, group long-running calls stay inline and timeout.
+       if [ "$is_group" -ne 1 ] && [ "$_elapsed" -ge 120 ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
          _bg_job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
            JV_DESC="auto-promoted: ${content:0:120}" JV_MSG_ID="$message_id" \
            python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE")
@@ -1297,6 +1305,15 @@ except Exception:
     elif [ "$_answer_provider" = "GPT fallback" ]; then
       _model_footer="（GPT 兜底）"
     fi
+  fi
+
+  # REQ-102: group sessions must NOT write to ANY owner-private store:
+  # - [SAVE_LATER:] → watchlater (red-team: marker teachable via injection)
+  # - pending_merge → bg job output keyed to group conv_key (red-team: memory
+  #   leak via bg output merge path)
+  # Strip these markers BEFORE any processing, so they never execute.
+  if [ "$is_group" -eq 1 ]; then
+    reply=$(printf '%s' "$reply" | sed 's/\[SAVE_LATER:[^]]*\]//g')
   fi
 
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
@@ -1724,6 +1741,14 @@ run_lark_listener_once() {
           if [ "$_re_op" != "app" ]; then
             _re_mid=$(echo "$line" | jq -r '.event.message_id // empty' 2>/dev/null)
             _re_emoji=$(echo "$line" | jq -r '.event.reaction_type.emoji_type // empty' 2>/dev/null)
+            # REQ-102: reaction-based writes (engagement log + watchlater) are
+            # owner-only. A group member's emoji would write to private stores
+            # and send a confirmation reply visible to all (red-team catch).
+            _re_operator_id=$(echo "$line" | jq -r '.event.user_id.open_id // empty' 2>/dev/null)
+            if [ -n "$_re_operator_id" ] && [ "$_re_operator_id" != "$USER_ID" ]; then
+              log_info "[engagement] skipped non-owner reaction (${_re_operator_id: -6})"
+              continue
+            fi
             jq -cn --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg mid "$_re_mid" \
               --arg emoji "$_re_emoji" --argjson epoch "$(date +%s)" \
               '{ts:$ts,type:"reaction",message_id:$mid,emoji:$emoji,epoch:$epoch}' \
@@ -2187,7 +2212,9 @@ try:
     mentions = (ev.get('mentions')
                 or (ev.get('event') or {}).get('message', {}).get('mentions')) or []
     bot_oid = os.environ.get('JV_BOT_OID', '')
-    for m in mentions:
+    # Longest keys first: replacing '@_user_1' before '@_user_10' would
+    # corrupt the latter (prefix collision).
+    for m in sorted(mentions, key=lambda m: len(m.get('key') or ''), reverse=True):
         key = m.get('key') or ''
         if not key:
             continue
@@ -2334,8 +2361,13 @@ if old_sid:
       log_info "[$session_id] Received: $_log_content"
 
       # ── Engagement tracking (background — independent of the reply, must not
-      # block the ack or dispatch; a fresh Python import here costs ~0.5-2s) ──
-      python3 -m core.engagement "$content" >/dev/null 2>>"$LOG_FILE" &
+      # block the ack or dispatch; a fresh Python import here costs ~0.5-2s).
+      # Groups excluded: a non-owner member's message must not be recorded as
+      # the owner's response to the last proactive send — that would inflate
+      # engagement scores and confuse the checkin cadence (red-team catch). ──
+      if [ "$chat_type" = "p2p" ]; then
+        python3 -m core.engagement "$content" >/dev/null 2>>"$LOG_FILE" &
+      fi
 
       # Concurrency guard: wait if too many handlers are running
       # Note: `jobs -r` doesn't work reliably inside a pipe subshell.

@@ -39,7 +39,10 @@ def _build_group_prompt(
     owner = owner_name or os.environ.get("OWNER_NAME", "") or "主人"
     group_context = load_group_context(memory_dir)
     counter = get_session_counter(tracker_path, conv_key)
-    recent_turns = build_recent_turns(session_dir, session_id, counter, conv_key, 20)
+    # include_outbox=False: the heartbeat outbox is owner-directed private
+    # context (calendar alerts, checkins) — it must never ride a group prompt.
+    recent_turns = build_recent_turns(session_dir, session_id, counter,
+                                      conv_key, 20, include_outbox=False)
     compact = read_compact(jarvis_dir, conv_key)
     session_compact = ""
     if compact:
