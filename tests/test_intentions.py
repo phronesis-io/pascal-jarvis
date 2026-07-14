@@ -987,7 +987,7 @@ def test_calendar_prep_after_event_start_skipped(intent_db, monkeypatch):
     start = (now_local() + timedelta(hours=3)).replace(second=0, microsecond=0)
     day = start.strftime("%Y-%m-%d")
     span = f"{start.strftime('%H:%M')}-{(start + timedelta(hours=1)).strftime('%H:%M')}"
-    md = _cal_md(day, [(span, "复动肌骨 康复课")])
+    md = _cal_md(day, [(span, "运动康复 康复课")])
 
     created = mod.generate_calendar_intents(md)
     prep = [i for i in created
@@ -997,7 +997,7 @@ def test_calendar_prep_after_event_start_skipped(intent_db, monkeypatch):
 
 def test_calendar_carry_reminder_fires_in_morning_not_at_event(intent_db):
     """REQ-70: a morning carry reminder for an AFTERNOON event fires in the
-    morning, not at the event's own prep time. The 复动肌骨 12:30 康复课 伞 must
+    morning, not at the event's own prep time. The 12:30 康复课 伞 must
     be anchored to a sane morning hour, not lunchtime."""
     from datetime import timedelta
     from core.timeutil import now_local
@@ -1006,7 +1006,7 @@ def test_calendar_carry_reminder_fires_in_morning_not_at_event(intent_db):
     # Tomorrow so the morning anchor is safely in the future regardless of
     # the current wall-clock hour.
     day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
-    md = _cal_md(day, [("12:30-13:30", "复动肌骨 康复课 记得带伞")])
+    md = _cal_md(day, [("12:30-13:30", "运动康复 康复课 记得带伞")])
 
     created = mod.generate_calendar_intents(md)
     carry = [mod.get_intent(i) for i in created

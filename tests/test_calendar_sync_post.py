@@ -21,7 +21,7 @@ def test_added_line_carries_date_and_weekday():
 
 
 def test_removed_line_carries_date():
-    lines = format_change_lines(set(), {"07/16|14:00|复动课"})
+    lines = format_change_lines(set(), {"07/16|14:00|瑜伽课"})
     assert len(lines) == 1
     assert lines[0].startswith("取消：7/16(周")
 

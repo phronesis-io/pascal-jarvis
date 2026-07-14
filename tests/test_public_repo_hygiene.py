@@ -153,3 +153,22 @@ def test_no_owner_usernames_in_tracked_files():
             if token in text:
                 offenders.append(f"{path.relative_to(ROOT)}: {token}")
     assert offenders == []
+
+
+def test_no_personal_life_markers_in_tracked_files():
+    """2026-07-13 ruling: 因人而异内容 (人名/机构/项目代号) must live in
+    gitignored per-user config; fixtures are synthetic. These markers were
+    scrubbed on 2026-07-14 — this test stops them from coming back."""
+    markers = ("复动肌骨", "曾逸帆", "bluedoor")
+    offenders = []
+    for path in _tracked_text_files():
+        if path.name == "test_public_repo_hygiene.py":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in markers:
+            if m in text:
+                offenders.append(f"{path.relative_to(ROOT)}: {m}")
+    assert offenders == []

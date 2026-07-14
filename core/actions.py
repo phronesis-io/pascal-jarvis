@@ -41,23 +41,41 @@ def _auto_category(tags_csv: str = "", name: str = "", prompt: str = "") -> str:
     bounds blast radius). Migration re-uses this and shows a --dry-run diff to review.
     """
     strong = f"{tags_csv} {name}".lower()   # tags + name = what the author meant
-    def s(*ks):
-        return any(k in strong for k in ks)
+
+    # Per-user keyword extensions (personal data = config, not code —
+    # 2026-07-13 ruling): data/category_keywords_personal.json maps category →
+    # extra keywords (e.g. a personal project codename → external). The file
+    # is gitignored; absent = generic keywords only.
+    personal: dict = {}
+    try:
+        _pf = Path(__file__).resolve().parent.parent / "data" / "category_keywords_personal.json"
+        personal = {k: [str(w).lower() for w in v]
+                    for k, v in json.loads(_pf.read_text(encoding="utf-8")).items()
+                    if isinstance(v, list)}
+    except (OSError, ValueError):
+        personal = {}
+
+    def s(*ks, cat: str = ""):
+        extra = personal.get(cat, []) if cat else []
+        return any(k in strong for k in (*ks, *extra))
 
     # hard from name/tags only — a prompt that merely *mentions* 到期/续费 (e.g. a
     # daily report told to "watch for expirations") is not itself a hard constraint.
-    if s("票", "续费", "关煤气", "gas", "deadline", "到期", "renew", "expire", "expiry"):
+    if s("票", "续费", "关煤气", "gas", "deadline", "到期", "renew", "expire",
+         "expiry", cat="hard"):
         return "hard"
-    if s("日报", "夜工", "夜间", "深工", "report", "复盘", "小时报", "自主", "autonomous"):
+    if s("日报", "夜工", "夜间", "深工", "report", "复盘", "小时报", "自主",
+         "autonomous", cat="autonomous"):
         return "autonomous"
     if s("external", "follow-up", "followup", "social", "meet", "饭", "约",
-         "面试", "跟进", "对外", "bluedoor", "adapter", "婚礼"):
+         "面试", "跟进", "对外", "adapter", "婚礼", "红包", "请柬",
+         cat="external"):
         return "external"
     if s("health", "rehab", "healing", "reading", "learning", "康复", "疗愈",
          "哲学", "学习", "臀", "拉伸", "阅读", "读", "听", "冥想", "戒断",
-         "训练", "anchor", "课", "讲"):
+         "训练", "anchor", "课", "讲", cat="healing"):
         return "healing"
-    if s("calendar-prep", "prep"):
+    if s("calendar-prep", "prep", cat="context"):
         return "context"
     return "none"
 

@@ -158,11 +158,11 @@ _STATUS_BLOCK_RE = re.compile(r"请假|婚假|年假|休假|调休|leave|OOO|sta
 
 # REQ-70 carry/bring detection. A "要带的东西" reminder (伞/球拍/要还的东西…)
 # must fire in the MORNING before Pascal leaves home, not at the event's own
-# prep time — the 6/13 root cause: 复动肌骨 12:30 康复课的伞被锚到午饭点，
+# prep time — the 6/13 root cause: 12:30 康复课的伞被锚到午饭点，
 # 他早上 9 点出门时根本没收到。匹配事件标题/详情里暗示需要随身携带的线索。
 # Red-team fix: the bare 带 alternative over-matched 纽带/一带一路/带宽/带娃/携带
 # etc. Require 带 to be followed by a concrete carry object, and drop standalone
-# 康复 (logistics-only, prep covers it) — keep 复动肌骨伞 via the 伞 cue.
+# 康复 (logistics-only, prep covers it) — keep the 康复课伞 via the 伞 cue.
 _CARRY_RE = re.compile(
     r"伞|球拍|拍子|带(上|好)?(伞|球拍|拍子|电脑|本|书|材料|文件|证件|护照|钥匙|卡|药|水|包|礼物|东西)|"
     r"要带|要还|要还的|归还|护照|证件|材料|文件|羽毛球|网球|游泳|装备|"
@@ -1516,7 +1516,7 @@ def generate_calendar_intents(calendar_md: str,
     - carry (role='carry', category='context'): ONE morning checklist per day,
       merging every "要带的东西" (伞/球拍/要还的) across that day's events,
       anchored to the FIRST out-of-home event so it fires while Pascal is still
-      home (REQ-70 — the 复动肌骨 伞 was anchored to lunchtime and missed the
+      home (REQ-70 — the 康复课 伞 was anchored to lunchtime and missed the
       morning he actually left).
 
     Idempotency invariants (REQ-68): for each (date,title,role) there is at most
@@ -1768,7 +1768,7 @@ def _generate_carry_intents(by_date: dict, now: datetime,
       2. anchor the fire time to CARRY_LEAD before the day's FIRST out-of-home
          event, clamped into [CARRY_MORNING_FLOOR, CARRY_MORNING_CEILING] —
          so an afternoon-only event still gets a 09:00-by reminder, not a
-         13:30 one (the exact 复动肌骨 12:30 失败);
+         13:30 one (the exact 康复课 12:30 失败);
       3. merge all carry items for the day into ONE intent (one card, not N).
     Upsert-keyed on (date, role='carry') so a re-sync never duplicates.
     Carry intents carry expires_at = first-event start (travel-pause hygiene:

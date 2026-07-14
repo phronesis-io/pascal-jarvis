@@ -301,7 +301,7 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     Quality over quantity — silence is better than a forced/牵强 connection.
 
     GOOD connections (verified, structural):
-      • "王德峰讲的'有限性'和你做 multi-agent 的 bounded rationality 其实是同一个数学约束 —— Simon 1955 年证明的" (specific shared mechanism)
+      • "哲学课讲的'有限性'和 multi-agent 里的 bounded rationality 其实是同一个数学约束 —— Simon 1955 年证明的" (specific shared mechanism)
       • "围棋的 influence function 和 PageRank 用的是同一类 eigenvector centrality" (same math)
     BAD connections (surface metaphor, DO NOT SEND):
       • "围棋讲究布局，创业也要布局" (vague analogy, no mechanism)

@@ -45,61 +45,32 @@ if [ ! -x "$YT_DLP" ]; then
 fi
 
 # ── Interest categories with search queries ──
-# Each category has multiple query variants for diversity.
-# Format: "category|platform|query"
-# platform: yt = YouTube, bili = Bilibili
-QUERIES=(
-  # Philosophy
-  "philosophy|yt|philosophy lecture deep dive"
-  "philosophy|yt|existentialism phenomenology explained"
-  "philosophy|yt|Heidegger Nietzsche lecture"
-  "philosophy|yt|中国哲学 王德峰 王阳明"
-  "philosophy|yt|Stoicism practical philosophy"
-  "philosophy|yt|philosophy of mind consciousness"
-
-  # AI & Agents
-  "ai-agents|yt|AI agent framework multi-agent 2026"
-  "ai-agents|yt|LLM agent architecture design"
-  "ai-agents|yt|autonomous AI agents demo"
-  "ai-agents|yt|agent-to-agent protocol communication"
-
-  # Entrepreneurship & SaaS
-  "startup|yt|SaaS startup founder advice"
-  "startup|yt|AI startup product market fit"
-  "startup|yt|YC startup school founder"
-  "startup|yt|indie hacker bootstrapping"
-
-  # Science & Math
-  "science|yt|Veritasium science explained"
-  "science|yt|3Blue1Brown math visual"
-  "science|yt|physics documentary mind-blowing"
-  "science|yt|complexity systems emergence"
-
-  # Music & Vocal
-  "music|yt|vocal technique singing lesson"
-  "music|yt|music theory composition masterclass"
-  "music|yt|classical music analysis"
-
-  # Investment & Economics
-  "investment|yt|value investing strategy analysis"
-  "investment|yt|macroeconomics gold bond market 2026"
-  "investment|yt|Ray Dalio economic principles"
-
-  # Culture (film, literature, art)
-  "culture|yt|film analysis cinema essay"
-  "culture|yt|great books literature discussion"
-  "culture|yt|art history documentary"
-
-  # Sports / NBA
-  "sports|yt|NBA Cavaliers analysis 2026"
-  "sports|yt|basketball tactics breakdown film"
-
-  # Bilibili picks (Chinese content)
-  "philosophy|bili|哲学 讲座 深度"
-  "ai-agents|bili|AI Agent 多智能体"
-  "culture|bili|电影 深度解析"
-  "science|bili|科普 数学 物理"
-)
+# Personal data = config, not code (2026-07-13 ruling): the query roster IS
+# the user's interest profile, so it lives in the gitignored
+# data/content_queries_personal.txt — one "category|platform|query" per line
+# (platform: yt = YouTube, bili = Bilibili; lines starting with # ignored).
+# Absent/empty file = this optional feature is unconfigured → silent no-op.
+QUERIES_FILE="$JARVIS_DIR/data/content_queries_personal.txt"
+QUERIES=()
+if [ -f "$QUERIES_FILE" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      ""|\#*) continue ;;
+    esac
+    QUERIES+=("$line")
+  done < "$QUERIES_FILE"
+fi
+if [ ${#QUERIES[@]} -eq 0 ]; then
+  # Generic starter set — deliberately impersonal so a fresh install works
+  # out of the box; personalize via data/content_queries_personal.txt.
+  QUERIES=(
+    "science|yt|science documentary explained"
+    "tech|yt|software engineering deep dive"
+    "ai|yt|AI research overview 2026"
+    "culture|yt|film analysis essay"
+    "science|bili|科普 深度"
+  )
+fi
 
 # Pick 2 random queries from different categories
 n_queries=${#QUERIES[@]}
