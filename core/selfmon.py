@@ -72,6 +72,13 @@ LOG_FAILURE_SIGNATURES = (
     "JSON parse failed",
     "exited with code 1",
     "stderr:",
+    # REQ-94: memory tier truncation. core/memory.py emits this structured
+    # warn "so selfmon/alerting can see it" — but until 2026-07-14 nothing
+    # consumed it, and the system tier silently dropped ~24k chars/cycle
+    # (all of inbox_private_mail) for days. warm-tier squeeze (by design)
+    # rides the same event with expected=true — filtered in silent_failures,
+    # not here.
+    "tier_truncated",
 )
 
 # Bound the jarvis.log scan — only the tail can be recent; reading a multi-MB
@@ -376,6 +383,12 @@ def silent_failures(jarvis_dir: Path, since_epoch: float) -> dict:
         if ep is None or ep < since_epoch:
             continue
         msg = str(e.get("msg", ""))
+        # Entries the emitter marked expected=true are BY-DESIGN events that
+        # merely look like failures (warm-tier squeeze, elected primary probe
+        # while the spend-limit gate is tripped). Counting them re-creates the
+        # false-outage reading REQ-94/96 were written to stop.
+        if e.get("expected") is True:
+            continue
         for sig in LOG_FAILURE_SIGNATURES:
             if sig in msg:
                 by_signature[sig] += 1

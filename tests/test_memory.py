@@ -507,3 +507,19 @@ def test_set_fact_atomic_and_dedups(tmp_path):
     # only one line for k
     text = (tmp_path / "hot" / "structured_facts.md").read_text()
     assert text.count("k: ") == 1
+
+
+# ── REQ-91: budget/cap arithmetic must stay self-consistent ────────────────
+
+
+def test_system_budget_covers_named_caps():
+    """The 2026-07-14 audit found the per-file caps summed past SYSTEM_BUDGET,
+    so the tier tail (all of inbox_private_mail) was arithmetically guaranteed
+    to be invisible every cycle. Anyone raising a cap must raise the budget.
+    The 20k slack term covers the uncapped working set (open_threads, digest,
+    insights, roadmap, live issue files) at its measured 2026-07 size."""
+    import core.memory as m
+    from tasks.memory_tidy_post import TODOS_MAX_CHARS
+    uncapped_working_set_allowance = 20000
+    assert (TODOS_MAX_CHARS + sum(m._SYSTEM_FILE_CAPS.values())
+            + uncapped_working_set_allowance) <= m.SYSTEM_BUDGET

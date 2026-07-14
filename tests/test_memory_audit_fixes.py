@@ -466,3 +466,102 @@ def test_compact_daily_log_skips_on_concurrent_append(tmp_path, monkeypatch):
     assert result.get("skipped") == "concurrent_write"
     assert daily.read_text(encoding="utf-8") == original + appended
     assert not (mem / "daily_archive.md").exists()
+
+
+# ── REQ-93 (2026-07-14): resolved issue files auto-archive from system/ ────
+
+
+def _aged_system_file(root: Path, name: str, body: str, age_days: float = 10):
+    sys_dir = root / "system"
+    sys_dir.mkdir(parents=True, exist_ok=True)
+    f = sys_dir / name
+    f.write_text(body, encoding="utf-8")
+    old = time.time() - age_days * 86400
+    os.utime(f, (old, old))
+    return f
+
+
+def test_resolved_issue_archived(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    f = _aged_system_file(
+        tmp_path, "issue_foo.md",
+        "---\nname: issue_foo\nstatus: fixed\n---\n\n# fixed issue\n")
+    mtp._archive_resolved_system_issues()
+    assert not f.exists()
+    dest = tmp_path / "archive" / "system" / "issue_foo.md"
+    assert dest.exists() and "fixed issue" in dest.read_text()
+
+
+def test_resolved_variants_and_survivors(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    gone = _aged_system_file(
+        tmp_path, "issue_a.md",
+        "---\nstatus: fixed-uncommitted\n---\nbody\n")
+    open_issue = _aged_system_file(
+        tmp_path, "issue_b.md", "---\nstatus: open\n---\nbody\n")
+    no_frontmatter = _aged_system_file(
+        tmp_path, "todos.md", "# 进行中\n- stuff\n")
+    fresh_fixed = _aged_system_file(
+        tmp_path, "issue_c.md", "---\nstatus: fixed\n---\nbody\n",
+        age_days=2)
+    mtp._archive_resolved_system_issues()
+    assert not gone.exists()
+    assert open_issue.exists()
+    assert no_frontmatter.exists()
+    assert fresh_fixed.exists()  # <7 days: stays visible for prod verification
+
+
+def test_resolved_status_in_body_not_frontmatter_stays(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    f = _aged_system_file(
+        tmp_path, "notes.md",
+        "# notes (no frontmatter)\n\n---\nstatus: fixed\n---\nquoted block\n")
+    mtp._archive_resolved_system_issues()
+    assert f.exists()  # file doesn't START with frontmatter → operator-owned
+
+
+def test_resolved_symlink_never_touched(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    target = tmp_path / "canonical.md"
+    target.write_text("---\nstatus: fixed\n---\nbody\n")
+    old = time.time() - 10 * 86400
+    os.utime(target, (old, old))
+    sys_dir = tmp_path / "system"
+    sys_dir.mkdir(parents=True, exist_ok=True)
+    link = sys_dir / "open_threads.md"
+    link.symlink_to(target)
+    mtp._archive_resolved_system_issues()
+    assert link.is_symlink() and target.exists()
+
+
+def test_resolved_archive_name_collision_gets_suffix(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    archive_dir = tmp_path / "archive" / "system"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "issue_dup.md").write_text("earlier archived copy")
+    _aged_system_file(tmp_path, "issue_dup.md",
+                      "---\nstatus: closed\n---\nnew copy\n")
+    mtp._archive_resolved_system_issues()
+    copies = sorted(archive_dir.glob("issue_dup*.md"))
+    assert len(copies) == 2
+    assert (archive_dir / "issue_dup.md").read_text() == "earlier archived copy"
+
+
+def test_hr_opening_prose_file_not_treated_as_frontmatter(tmp_path, monkeypatch):
+    # Red-team: a file that merely OPENS with a markdown horizontal rule and
+    # later contains a 'status: fixed' prose line must stay operator-owned.
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    f = _aged_system_file(
+        tmp_path, "ops_notes.md",
+        "---\n# ops notes\nsome prose line\nstatus: fixed\n---\nongoing section\n")
+    mtp._archive_resolved_system_issues()
+    assert f.exists()
+
+
+def test_capitalized_status_still_matches(tmp_path, monkeypatch):
+    monkeypatch.setattr(mtp, "MEMORY_DIR", tmp_path)
+    f = _aged_system_file(
+        tmp_path, "issue_cap.md",
+        "---\nname: issue_cap\nStatus: Fixed\n---\nbody\n")
+    mtp._archive_resolved_system_issues()
+    assert not f.exists()

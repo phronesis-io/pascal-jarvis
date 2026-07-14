@@ -53,9 +53,17 @@ MAX_MEMORY_CHARS = 200000
 # guaranteed floors so an over-budget warm tier can't starve them. warm gets
 # whatever remains of MAX_MEMORY_CHARS after the other tiers' reserves, so the
 # numbers below are reserves/floors, NOT hard caps for warm.
-HOT_BUDGET = 25000        # identity + rules + structured facts (never dropped)
+# REQ-91 (2026-07-14): budgets re-audited against the measured working set.
+# The old numbers were mutually inconsistent with the per-file caps: todos
+# (20k) + open_threads (~12k) + roadmap (~9k) + two inbox load-caps summed to
+# ~64k against a 40k budget, so the tier's tail (inbox_private_mail — ALL of
+# mail-triage's output — and the issue files) was arithmetically guaranteed
+# to be invisible every single cycle. hot sat at 24.5k/25k — one busy
+# calendar day from silently cutting identity files. The consistency test in
+# tests/test_memory.py keeps future cap edits honest against these budgets.
+HOT_BUDGET = 30000        # identity + rules + structured facts (never dropped)
 TIMELINE_BUDGET = 15000   # freshest cross-day continuity — always survives
-SYSTEM_BUDGET = 40000     # todos, open_threads, digest, perception buffers
+SYSTEM_BUDGET = 56000     # todos, open_threads, digest, perception buffers
 # warm budget = MAX_MEMORY_CHARS - (HOT + TIMELINE + SYSTEM) reserves.
 WARM_BUDGET = MAX_MEMORY_CHARS - HOT_BUDGET - TIMELINE_BUDGET - SYSTEM_BUDGET
 
@@ -85,9 +93,13 @@ _TAIL_KEEP_SECTIONS = {"## System: todos"}
 # pending_updates on every call (2026-07-07 memory audit). Capping at load
 # keeps the newest signals visible without letting raw buffers starve the
 # load-bearing system files; the full files stay on disk for on-demand Read.
+# REQ-92 (2026-07-14): this is also the single source of truth for the ON-DISK
+# retention of these buffers — perception._trim_inbox imports it, so what's
+# kept on disk ≈ what the loader injects (the old 500-line disk retention kept
+# ~35k chars of which only the tail 12k was ever loaded — pure dark matter).
 _SYSTEM_FILE_CAPS = {
-    "inbox_ops.md": 12000,
-    "inbox_private_mail.md": 12000,
+    "inbox_ops.md": 8000,
+    "inbox_private_mail.md": 8000,
 }
 
 # Per-tier timestamp of the last structured truncation warn — heartbeat calls
@@ -386,9 +398,14 @@ def _join_within_budget(parts: list[str], budget: int, tier: str) -> str:
         now = time.time()
         if now - _TRUNCATION_WARNED_AT.get(tier, 0) >= _TRUNCATION_WARN_INTERVAL_S:
             _TRUNCATION_WARNED_AT[tier] = now
+            # expected=True on warm: warm absorbing the global squeeze is the
+            # loader's DESIGN, not a failure — selfmon's silent-failure scan
+            # skips expected entries, so only hot/system/timeline truncation
+            # (always a real problem) is counted (REQ-94).
             log("memory", "tier_truncated", level="warn", tier=tier,
                 dropped_chars=dropped_chars, budget=budget,
-                dropped_sections=dropped_sections)
+                dropped_sections=dropped_sections,
+                expected=(tier == "warm"))
 
     return sep.join(out)
 
@@ -407,9 +424,16 @@ def _append_file(parts: list[str], path: Path, title: str, cap: int | None = Non
         if not content:
             return
         if cap is not None and len(content) > cap:
+            tail = content[-cap:]
+            # Snap forward to the next entry boundary so the injected view
+            # never opens mid-entry (capped files are `### `-delimited
+            # perception buffers; raw slice when no boundary is found).
+            snap = tail.find("\n### ")
+            if snap != -1:
+                tail = tail[snap + 1:]
             content = (
-                f"[capped — oldest {len(content) - cap} chars omitted; "
-                f"full file on disk: {path.name}]\n" + content[-cap:]
+                f"[capped — oldest {len(content) - len(tail)} chars omitted; "
+                f"full file on disk: {path.name}]\n" + tail
             )
         # Stale calendar detection
         if path.name == "calendar_today.md":

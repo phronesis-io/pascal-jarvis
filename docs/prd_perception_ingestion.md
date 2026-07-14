@@ -116,7 +116,7 @@ Poll/Stream → Enrich(全文/实体) → Score(LLM, -1..2) → Route(push/fyi/h
 
 一个触达 10+ 信源、每周期可能 LLM 打分的感知层,生死取决于预算、延迟、吞吐、可观测性。MVP 必须显式声明边界:
 
-1. **内存/Token 预算(硬不变量)**:`MAX_MEMORY_CHARS=200KB`(`core/memory.py:30`)不可破。所有 `inbox_*.md` + `system/` + `hot/` + `warm/` 之和须 **<150KB**(给 timeline + 未来增长留 buffer)。每个分域 inbox 只留**近 500 行或 7 天(先到为准)**——见 §5.4/§6 的权威保留策略;已被 reconciler 消费的行就地删除,未消费却超界的溢出行归档到 `memory/warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。
+1. **内存/Token 预算(硬不变量)**:`MAX_MEMORY_CHARS=200KB`(`core/memory.py:30`)不可破。所有 `inbox_*.md` + `system/` + `hot/` + `warm/` 之和须 **<150KB**(给 timeline + 未来增长留 buffer)。每个分域 inbox 的权威保留策略(2026-07-14 REQ-92 修订):有 loader char-cap 的 buffer(见 `core/memory._SYSTEM_FILE_CAPS`)按 **entry 边界留最新条目 ≤ cap 字符,同时 <48h 的条目保护不裁(消费者安全)、>7 天的条目强制离场**;无 cap 的 buffer 沿用近 500 行规则——见 §5.4/§6;已被 reconciler 消费的行就地删除,未消费却超界的溢出行归档到 `memory/warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。
 2. **延迟 SLO**:per-source collect — P0 ≤5s / P1 ≤15s;dedup <1s;route <2s。**一个慢的 Lark 调用不能阻塞 outbox 投递**——adapter 在 `ThreadPoolExecutor` 里跑,带 per-adapter 超时,超时则产 `status='timeout'` 的 Signal。`perception-collect` 周期 P99 <10s。
 3. **打分成本门(关键)**:`route.score` 默认 **`none`**(P1/P2 源);仅高价值源(phronesis、reports、mail)开 `llm`。**批量打分**:把本周期所有 due 源合进**一个** multi-source triage prompt,一次打完(摊薄成本)。每周期并发打分源 **上限 10**(可配),超出顺延下周期。每周期记 token 估算到日志。manifest 据此设默认:`holdings→score=rule`、`eigenflux_feed→score=llm`。
 4. **吞吐/配额**:飞书群 API 配额 ~2000 req/天;N 群 ≈ 2N req/天;MVP 预算 **≤100 群**。每源带 `quota_cost`,当日预算将超则 skip+log。
@@ -331,7 +331,7 @@ core/perception_route.py  # 从 _ef_delivery.py 抽出的通用分级+quiet-hour
 | **Signal** | (内存,§5.1) | TypedDict:`source_id, source_type, event_id, content_hash, ts(ISO8601), actor, sensitivity∈{public,internal,private,secret}, title, summary, body≤2KB, url, payload` | normalize() 校验 |
 | **Per-source 状态** | `heartbeat_state.json['perception_sources'][source_id]` | `{last_ts:ISO8601, last_cursor:opaque, error_type:null|str, error_count:int, last_error_time:int, last_run_ts:int, adapter_state:{}}` | load/save 在 `core/perception.py`;原子写 |
 | **Seen-store** | `memory/system/perception_seen.jsonl` | `{event_id, source_id, content_hash, action:'deliver'|'dedup', ts}` | append-only,上限 10K 条,>30d 启动时清 |
-| **感知缓冲** | `memory/system/inbox_<domain>.md`(team/market/ops) | Markdown,每条 `### <event_id> | <source> | <actor> | <ts> | <sensitivity> | <action>` + 正文 | **权威保留策略**:留近 **500 行或 7 天**(先到为准);已被 reconciler 消费的行就地删除,未消费的溢出行归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读) |
+| **感知缓冲** | `memory/system/inbox_<domain>.md`(team/market/ops) | Markdown,每条 `### <event_id> | <source> | <actor> | <ts> | <sensitivity> | <action>` + 正文 | **权威保留策略(2026-07-14 REQ-92 修订)**:有 char-cap 的 buffer 按 entry 边界留最新 ≤ cap 字符(<48h 保护、>7 天强制离场);无 cap 的留近 500 行;已被 reconciler 消费的行就地删除,未消费的溢出行归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读) |
 | **投递审计** | `memory/system/perception_delivery.jsonl` | `{ts, source_id, source_type, event_id, score, action, reason, seen_before, delivery_ts}` | 30 天后归档 |
 | **配置** | `sources.yaml` 或 `jarvis.yaml#perception` | `perception.defaults + sources[].{id,type,collect,schedule,route,sensitivity,perceive}` | per-adapter 校验 |
 
@@ -395,7 +395,7 @@ def load_perception_sources(self) -> list[dict]:
 三个落地区,全部基于已验证机制:
 
 **① 感知缓冲 `memory/system/inbox_*.md`**
-新信号的"鲜货"surface。被 `load_tiered_memory()` 无条件注入 → 下一回合前台/heartbeat 即感知(§1.2)。按域分文件(`inbox_team.md` / `inbox_market.md` / `inbox_ops.md`)。**权威保留策略**:滚动保留**近 500 行或 7 天**(先触发者为准)。两种离场:① 已被 reconciler 消费的行就地清理(`→ UPDATE` 删行);② 未消费却已超 500 行/7 天边界的溢出行,归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。memory-consolidate 校验清理防 orphan。**这是今天 `cross_session_digest.md` 已在用的模式,只是泛化。**
+新信号的"鲜货"surface。被 `load_tiered_memory()` 无条件注入 → 下一回合前台/heartbeat 即感知(§1.2)。按域分文件(`inbox_team.md` / `inbox_market.md` / `inbox_ops.md`)。**权威保留策略(2026-07-14 REQ-92 修订)**:有 loader char-cap 的 buffer 按 entry 边界滚动保留最新条目 ≤ cap 字符(<48h 条目保护不裁,>7 天条目强制离场);无 cap 的 buffer 保留近 500 行。两种离场:① 已被 reconciler 消费的行就地清理(`→ UPDATE` 删行);② 未消费却已超 500 行/7 天边界的溢出行,归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。memory-consolidate 校验清理防 orphan。**这是今天 `cross_session_digest.md` 已在用的模式,只是泛化。**
 
 **② Reconciler(泛化 `memory-consolidate`,响应式)**
 把"3 个输入概念"改成"消费感知缓冲里所有 `consolidate:true` 的 Signal"。沿用 `→ UPDATE:` / `→ REPLACE:` 指令契约(`memory_consolidate_post.py` 落地逻辑不动),让 durable 事实就地落到 `warm/` 项目文件、去重消矛盾。**触发器**(修 §3.5):

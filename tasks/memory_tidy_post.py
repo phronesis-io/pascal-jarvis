@@ -239,6 +239,74 @@ def _enforce_todos_budget():
           f"{cut} oldest block(s) to archive/{archive.name}", file=sys.stderr)
 
 
+# REQ-93 (2026-07-14): issue/report files parked in system/ ride EVERY
+# heartbeat prompt forever unless someone remembers to move them — two
+# status:fixed issue files from June were still burning system-tier budget in
+# July while inbox_private_mail got truncated away. Only files that OPT IN via
+# a resolved-family frontmatter status are touched; everything else is
+# operator-owned. mtime > 7 days keeps a just-fixed issue visible long enough
+# for the fix to be verified in production.
+_RESOLVED_STATUS = re.compile(
+    r"^status:\s*(?:fixed\S*|resolved\S*|closed|done)\s*$",
+    re.MULTILINE | re.IGNORECASE)
+RESOLVED_ARCHIVE_AFTER_S = 7 * 86400
+
+
+def _yaml_frontmatter(head: str) -> str | None:
+    """The YAML frontmatter block, or None if the file doesn't open with one.
+
+    Strictly line-anchored (red-team fix): a file that merely OPENS with a
+    markdown horizontal rule must not have its prose scanned as frontmatter —
+    every line up to the closing `---` line must look like YAML (key:, list
+    item, comment, blank, or indented continuation), else this is not
+    frontmatter and the file stays operator-owned."""
+    lines = head.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    fm: list[str] = []
+    for ln in lines[1:]:
+        if ln.strip() == "---":
+            for f in fm:
+                if f.strip() and not re.match(r"^(\s|-\s|#|[A-Za-z_][\w-]*:)", f):
+                    return None
+            return "\n".join(fm)
+        fm.append(ln)
+    return None  # unterminated within the scanned head
+
+
+def _archive_resolved_system_issues():
+    """Move system/*.md with a resolved-family frontmatter `status:` and
+    mtime > 7 days to memory/archive/system/ (no tier collector reads
+    archive/). Archive-not-delete; symlinks (open_threads canon pointer) are
+    never touched."""
+    import shutil
+    import time as _time
+    sys_dir = MEMORY_DIR / "system"
+    if not sys_dir.is_dir():
+        return
+    now = _time.time()
+    archive_dir = MEMORY_DIR / "archive" / "system"
+    for f in sorted(sys_dir.glob("*.md")):
+        if f.is_symlink() or not f.is_file():
+            continue
+        try:
+            if now - f.stat().st_mtime < RESOLVED_ARCHIVE_AFTER_S:
+                continue
+            head = f.read_text(encoding="utf-8")[:2000]
+        except OSError:
+            continue
+        frontmatter = _yaml_frontmatter(head)
+        if frontmatter is None or not _RESOLVED_STATUS.search(frontmatter):
+            continue
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dest = archive_dir / f.name
+        if dest.exists():
+            dest = archive_dir / f"{f.stem}_{now_local_str('%Y%m%d%H%M%S')}{f.suffix}"
+        shutil.move(str(f), str(dest))
+        print(f"[memory-tidy] archived resolved system file: {f.name} "
+              f"→ archive/system/{dest.name}", file=sys.stderr)
+
+
 def _warn_tiers_over_budget():
     """ONE leveled warn naming offending files/sizes when the memory payload
     would still be truncated after enforcement. The loader's own stderr
@@ -321,6 +389,11 @@ def main() -> int:
         _enforce_todos_budget()
     except Exception as e:
         print(f"[memory-tidy] todos budget enforcement failed: {e}", file=sys.stderr)
+    # REQ-93: resolved issue files stop riding every heartbeat prompt.
+    try:
+        _archive_resolved_system_issues()
+    except Exception as e:
+        print(f"[memory-tidy] resolved-issue archive failed: {e}", file=sys.stderr)
     try:
         _warn_tiers_over_budget()
     except Exception as e:

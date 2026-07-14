@@ -334,3 +334,26 @@ def test_compute_selfmon_never_raises_on_garbage(jdir):
     m = selfmon.compute_selfmon(jdir, window_hours=24)
     assert m["noise_card_count"]["total_sent"] == 0
     assert m["model_crash_or_skip"]["total"] == 0
+
+
+def test_silent_failures_skips_expected_entries(jdir):
+    # expected=true = emitter-marked by-design event (elected primary probe,
+    # warm-tier squeeze) — never counted as a silent failure (REQ-94/96).
+    now = time.time()
+    rows = [
+        {"ts": _ts(now - 600, sep="T"), "level": "warn", "component": "heartbeat",
+         "msg": "Claude exited with code 1 (elected primary probe while gate "
+                "tripped — expected until the limit resets; falling back to backup)",
+         "expected": True},
+        {"ts": _ts(now - 500, sep="T"), "level": "warn", "component": "memory",
+         "msg": "tier_truncated", "tier": "warm", "expected": True},
+        {"ts": _ts(now - 400, sep="T"), "level": "warn", "component": "memory",
+         "msg": "tier_truncated", "tier": "system", "expected": False},
+        {"ts": _ts(now - 300, sep="T"), "level": "warn", "component": "heartbeat",
+         "msg": "Claude exited with code 1"},   # real failure, no flag
+    ]
+    _write_jsonl(jdir / "jarvis.log", rows)
+    res = selfmon.silent_failures(jdir, since_epoch=now - 24 * 3600)
+    assert res["total"] == 2
+    assert res["by_signature"]["tier_truncated"] == 1
+    assert res["by_signature"]["exited with code 1"] == 1

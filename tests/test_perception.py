@@ -172,10 +172,12 @@ def test_missing_sources_yaml_is_noop(tmp_path):
 
 
 def test_inbox_retention_trim(tmp_path):
+    # An UNCAPPED buffer (not in core.memory._SYSTEM_FILE_CAPS) keeps the
+    # legacy 500-line retention rule.
     rt = _runtime(tmp_path, "perception: {sources: []}")
-    inbox = rt.system_dir / "inbox_ops.md"
+    inbox = rt.system_dir / "inbox_team.md"
     inbox.write_text("\n".join(f"line{i}" for i in range(600)) + "\n")
-    rt._trim_inbox("inbox_ops.md")
+    rt._trim_inbox("inbox_team.md")
     kept = inbox.read_text().splitlines()
     assert len(kept) == 500 and kept[0] == "line100"
     # Overflow must land in warm/archive/ (loader skips it) — NOT top-level
@@ -183,6 +185,86 @@ def test_inbox_retention_trim(tmp_path):
     archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
     assert archives and "line0" in archives[0].read_text()
     assert not list((rt.memory_dir / "warm").glob("perception_archive_*.md"))
+
+
+# ── REQ-92: capped buffers retained to the loader char-cap, entry-aware ──
+
+
+def _entry_ts(days_ago: float) -> str:
+    from datetime import datetime, timedelta
+    return (datetime.now().astimezone() - timedelta(days=days_ago)).isoformat(
+        timespec="seconds")
+
+
+def _entry(i: int, body_chars: int = 200, days_ago: float = 4.0) -> str:
+    # Default timestamp ~4 days old: outside the 48h protect window (so the
+    # cap rule can trim it) but inside the 7-day age bound (not auto-expired).
+    return (f"### evt{i} | src | who | {_entry_ts(days_ago)} | "
+            f"internal | buffer\ntitle {i}\n{'x' * body_chars}\n\n")
+
+
+def test_capped_inbox_trims_to_entry_boundary(tmp_path):
+    from core.memory import _SYSTEM_FILE_CAPS
+    cap = _SYSTEM_FILE_CAPS["inbox_ops.md"]
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_ops.md"
+    entries = [_entry(i) for i in range(80)]  # ~19k chars, well over cap
+    inbox.write_text("".join(entries))
+    rt._trim_inbox("inbox_ops.md")
+    kept = inbox.read_text()
+    assert len(kept) <= cap
+    assert kept.startswith("### ")            # never a mid-entry head
+    assert "evt79" in kept                    # newest survives
+    assert "evt0" not in kept                 # oldest archived
+    archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
+    assert archives and "evt0" in archives[0].read_text()
+
+
+def test_capped_inbox_heals_legacy_fragment_head(tmp_path):
+    from core.memory import _SYSTEM_FILE_CAPS
+    cap = _SYSTEM_FILE_CAPS["inbox_ops.md"]
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_ops.md"
+    fragment = "orphan tail of a half-cut entry\nmore orphan lines\n\n"
+    inbox.write_text(fragment + "".join(_entry(i) for i in range(80)))
+    rt._trim_inbox("inbox_ops.md")
+    kept = inbox.read_text()
+    assert kept.startswith("### ")
+    assert "orphan tail" not in kept
+    archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
+    assert archives and "orphan tail" in archives[0].read_text()
+
+
+def test_capped_inbox_under_cap_is_noop(tmp_path):
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_ops.md"
+    content = "".join(_entry(i) for i in range(3))
+    inbox.write_text(content)
+    rt._trim_inbox("inbox_ops.md")
+    assert inbox.read_text() == content
+    assert not list((rt.memory_dir / "warm" / "archive").glob("*.md"))
+
+
+def test_capped_inbox_no_headers_still_bounded(tmp_path):
+    # Entry format drift must not disable retention — raw tail-keep fallback.
+    from core.memory import _SYSTEM_FILE_CAPS
+    cap = _SYSTEM_FILE_CAPS["inbox_ops.md"]
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_ops.md"
+    inbox.write_text("\n".join(f"plain{i}" for i in range(2000)) + "\n")
+    rt._trim_inbox("inbox_ops.md")
+    kept = inbox.read_text()
+    assert len(kept) <= cap
+    assert kept.endswith("plain1999\n")       # tail kept, not head
+
+
+def test_split_entries_keeps_oversized_newest_entry():
+    from core.perception import split_entries_for_cap
+    huge = _entry(1, body_chars=10)  # small old entry
+    newest = _entry(2, body_chars=9000)  # alone exceeds cap
+    keep, overflow = split_entries_for_cap(huge + newest, 8000)
+    assert "evt2" in keep and keep.startswith("### evt2")
+    assert overflow == huge
 
 
 # ── sensitivity outbound view (PRD §3.4/§6 steps 1-2) ────────────────
@@ -367,3 +449,35 @@ def test_imap_decode_hdr_handles_mime_and_garbage():
     assert imap_mail._decode_hdr("=?utf-8?B?5oub5ZWG?=") == "招商"
     assert imap_mail._decode_hdr("plain text") == "plain text"
     assert imap_mail._decode_hdr("") == ""
+
+
+def test_capped_inbox_protects_recent_entries_over_cap(tmp_path):
+    # A burst of young entries must NOT be trimmed even over the cap —
+    # mail-triage consumes the buffer at ≤15/cycle and would lose them.
+    import time as _t
+    from datetime import datetime
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_private_mail.md"
+    young_ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    old = "".join(_entry(i) for i in range(10))          # 2026-07-14 = old
+    young = "".join(
+        f"### young{i} | lark_mail | who | {young_ts} | private | buffer\n"
+        f"title {i}\n{'y' * 400}\n\n" for i in range(40))  # ~18k, over 8k cap
+    inbox.write_text(old + young)
+    rt._trim_inbox("inbox_private_mail.md")
+    kept = inbox.read_text()
+    assert all(f"young{i}" in kept for i in range(40))   # every young survives
+    assert "evt0" not in kept                            # old ones archived
+
+
+def test_capped_inbox_expires_week_old_entries_even_under_cap(tmp_path):
+    # PRD §5.4: entries older than INBOX_MAX_AGE_DAYS age out even when the
+    # buffer is small — a quiet inbox must not carry months-dead signals.
+    rt = _runtime(tmp_path, "perception: {sources: []}")
+    inbox = rt.system_dir / "inbox_ops.md"
+    inbox.write_text(_entry(1, days_ago=30) + _entry(2, days_ago=1))
+    rt._trim_inbox("inbox_ops.md")
+    kept = inbox.read_text()
+    assert "evt2" in kept and "evt1" not in kept
+    archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
+    assert archives and "evt1" in archives[0].read_text()

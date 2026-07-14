@@ -34,6 +34,104 @@ REQUIRED_FIELDS = ("event_id", "source_id", "source_type", "ts", "title",
 SEEN_MAX_LINES = 10_000
 INBOX_MAX_LINES = 500
 INBOX_MAX_AGE_DAYS = 7
+
+# REQ-92 (2026-07-14): buffers the loader char-caps are retained on disk to
+# the SAME cap, split on whole `### ` entry boundaries. The old 500-line rule
+# kept ~35k chars of which the loader only ever injected the tail 12k — 2/3
+# of retained content was dark matter, and the line split left a mid-entry
+# fragment at the top of the file. Single source of truth for the numbers is
+# core.memory._SYSTEM_FILE_CAPS; buffers without a cap keep the line rule.
+from core.memory import _SYSTEM_FILE_CAPS as _INBOX_CHAR_CAPS
+
+
+# Entries younger than this are never trimmed even when the buffer is over
+# its char cap. inbox_private_mail.md is a WORK QUEUE, not just a display
+# buffer: mail-triage's collect_new() parses it for entries missing from
+# triaged.jsonl at ≤15/cycle — an aggressive cap trim during a mail burst or
+# a triage outage (user-token死 7/5, ~1 day) would delete mail that was never
+# triaged. The loader still tail-caps the PROMPT view at the char cap, so
+# protecting recent entries costs disk only, never prompt budget.
+INBOX_PROTECT_RECENT_S = 48 * 3600
+
+
+def _entry_epoch(header_line: str) -> float | None:
+    """Epoch of a `### <id> | <src> | <who> | <ts> | ...` header, else None."""
+    parts = [p.strip() for p in header_line[4:].split(" | ")]
+    if len(parts) < 4:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(parts[3]).timestamp()
+    except ValueError:
+        return None
+
+
+def split_entries_for_cap(text: str, cap: int,
+                          protect_since: float | None = None,
+                          expire_before: float | None = None) -> tuple[str, str]:
+    """(keep, overflow) — newest whole `### ` entries totalling ≤ cap chars.
+
+    Three rules, in precedence order (§5.4, re-cut 2026-07-14 REQ-92):
+    1. expire_before: entries older than this are ALWAYS overflow, even under
+       the cap — restores the PRD's "或 7 天(先到为准)" age bound that the old
+       line-based trim documented but never implemented.
+    2. protect_since: entries at/after this are kept even OVER the cap — the
+       mail buffer is a work queue (mail-triage drains ≤15/cycle), so a burst
+       or triage outage must not push untriaged mail into the archive.
+    3. Otherwise: newest entries fitting within cap; the newest entry is kept
+       even if it alone exceeds the cap.
+
+    An unparseable header timestamp counts as OLD, so malformed entries can't
+    pin the file open forever. Content before the first `### ` header (e.g. a
+    legacy mid-entry fragment from the old line-based trim) counts as the
+    oldest block, so one pass heals a corrupted head. Text without any `### `
+    structure gets a raw tail-keep on a line boundary — a capped buffer whose
+    entry format drifted must stay bounded, not grow forever.
+    """
+    if len(text) <= cap and expire_before is None:
+        return text, ""
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("### ")]
+    if not starts:
+        if len(text) <= cap:
+            return text, ""
+        keep = text[-cap:]
+        nl = keep.find("\n")
+        if 0 <= nl < len(keep) - 1:
+            keep = keep[nl + 1:]
+        return keep, text[: len(text) - len(keep)]
+    bounds = ([0] if starts[0] != 0 else []) + starts + [len(lines)]
+    blocks = ["".join(lines[b:e]) for b, e in zip(bounds, bounds[1:])]
+
+    def _epoch(block: str) -> float | None:
+        return (_entry_epoch(block.split("\n", 1)[0])
+                if block.startswith("### ") else None)
+
+    n = len(blocks)
+    expired = [False] * n
+    if expire_before is not None:
+        for i, b in enumerate(blocks):
+            e = _epoch(b)
+            expired[i] = e is None or e < expire_before
+    kept = [False] * n
+    size = 0
+    any_kept = False
+    for i in range(n - 1, -1, -1):
+        if expired[i]:
+            continue
+        b = blocks[i]
+        if any_kept and size + len(b) > cap:
+            if protect_since is None:
+                break
+            e = _epoch(b)
+            if e is None or e < protect_since:
+                break
+        kept[i] = True
+        any_kept = True
+        size += len(b)
+    keep = "".join(b for i, b in enumerate(blocks) if kept[i])
+    overflow = "".join(b for i, b in enumerate(blocks) if not kept[i])
+    return keep, overflow
 DEDUP_CLUSTER_WINDOW = 2 * 3600  # ±2h content_hash clustering (§8.0)
 DEFAULT_INTERVAL = 900
 
@@ -134,28 +232,70 @@ class PerceptionRuntime:
             f.write("\n".join(lines).rstrip() + "\n\n")
 
     def _trim_inbox(self, buffer_name: str):
-        """Authoritative retention (§5.4): last 500 lines or 7 days; overflow
-        archives to warm/archive/perception_archive_YYYYMM.md (never
-        auto-injected — the loader skips warm/archive/). Writing to top-level
-        warm/ violated that contract: the loader injects every warm/*.md
-        newest-mtime-first, so the constantly-appended archive won the
-        ordering and squatted the surviving warm budget on every call
-        (2026-07-07 memory audit)."""
+        """Authoritative retention (§5.4, re-cut 2026-07-14 REQ-92): buffers
+        with a loader char-cap keep the newest whole `### ` entries within
+        that same cap (disk content ≈ injected content); others keep the old
+        last-500-lines rule. Overflow archives to
+        warm/archive/perception_archive_YYYYMM.md (never auto-injected — the
+        loader skips warm/archive/). Writing to top-level warm/ violated that
+        contract: the loader injects every warm/*.md newest-mtime-first, so
+        the constantly-appended archive won the ordering and squatted the
+        surviving warm budget on every call (2026-07-07 memory audit)."""
         path = self.system_dir / buffer_name
         if not path.exists():
             return
-        lines = path.read_text(encoding="utf-8").splitlines()
-        if len(lines) <= INBOX_MAX_LINES:
-            return
-        overflow, keep = lines[:-INBOX_MAX_LINES], lines[-INBOX_MAX_LINES:]
-        archive_dir = self.memory_dir / "warm" / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archive = archive_dir / f"perception_archive_{now_local_str('%Y%m')}.md"
-        with open(archive, "a", encoding="utf-8") as f:
-            f.write("\n".join(overflow).rstrip() + "\n")
-        tmp = path.with_suffix(".md.tmp")
-        tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        # Sidecar flock + a size recheck before the swap (same contract as
+        # memory_tidy's todos enforcement, 2026-07-08 red-team race): an
+        # append landing between our read and os.replace would be silently
+        # reverted — neither kept nor archived. Known writers today run in
+        # this same thread (run_collect appends, then trims), so this guards
+        # future/external writers.
+        import fcntl
+        lock_path = path.with_suffix(".lock")
+        with open(lock_path, "w") as lock_fh:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            except OSError:
+                pass
+            stat_before = path.stat()
+            text = path.read_text(encoding="utf-8")
+            cap = _INBOX_CHAR_CAPS.get(buffer_name)
+            if cap is not None:
+                now = time.time()
+                keep_text, overflow_text = split_entries_for_cap(
+                    text, cap,
+                    protect_since=now - INBOX_PROTECT_RECENT_S,
+                    expire_before=now - INBOX_MAX_AGE_DAYS * 86400)
+                if not overflow_text:
+                    return
+            else:
+                lines = text.splitlines()
+                if len(lines) <= INBOX_MAX_LINES:
+                    return
+                overflow_text = "\n".join(lines[:-INBOX_MAX_LINES])
+                keep_text = "\n".join(lines[-INBOX_MAX_LINES:]) + "\n"
+            archive_dir = self.memory_dir / "warm" / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archive = archive_dir / f"perception_archive_{now_local_str('%Y%m')}.md"
+            with open(archive, "a", encoding="utf-8") as f:
+                f.write(overflow_text.rstrip() + "\n")
+                # Persist the archive BEFORE the buffer is replaced — a crash
+                # in between duplicates a block, never loses one.
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                stat_now = path.stat()
+                if (stat_now.st_size, stat_now.st_mtime_ns) != (
+                        stat_before.st_size, stat_before.st_mtime_ns):
+                    # A non-locking writer appended mid-trim: abort this pass
+                    # (worst case = a duplicated archive block next pass,
+                    # never a lost entry) and let the next run re-trim.
+                    return
+            except OSError:
+                return
+            tmp = path.with_suffix(".md.tmp")
+            tmp.write_text(keep_text, encoding="utf-8")
+            os.replace(tmp, path)
 
     # ── main entry ───────────────────────────────────────────────────
 
