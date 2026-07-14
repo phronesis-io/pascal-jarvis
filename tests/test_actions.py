@@ -243,3 +243,24 @@ def test_intent_close_via_passthrough(tmp_path, monkeypatch):
     assert ap._do_intent_close(raw) == "Closure recorded"
     assert seen["via"] == "button"
     assert seen["result"] == "做了（按钮记录）"
+
+
+def test_process_execute_false_strips_all_markers_and_runs_nothing(tmp_path):
+    """REQ-102: non-owner group replies must not execute ANY action —
+    python-handled or bash-layer — and markers must not leak to the group."""
+    from core.actions import ActionProcessor
+    ap = ActionProcessor(str(tmp_path), str(tmp_path / "memory"), "jobs", "")
+    reply = ("好的我来安排。[ACTION:calendar_create|title=测试|time=2026-07-15T10:00]"
+             " 顺便跑个任务 [ACTION:bg|prompt=rm -rf /] 完成。")
+    out = ap.process(reply, execute=False)
+    assert "[ACTION:" not in out
+    assert "动作类指令仅限主人触发" in out
+    assert "好的我来安排。" in out
+    # nothing was created on disk
+    assert not (tmp_path / "jobs").exists() or not any((tmp_path / "jobs").iterdir())
+
+
+def test_process_execute_false_no_markers_passthrough(tmp_path):
+    from core.actions import ActionProcessor
+    ap = ActionProcessor(str(tmp_path), str(tmp_path / "memory"), "jobs", "")
+    assert ap.process("纯聊天回复", execute=False) == "纯聊天回复"

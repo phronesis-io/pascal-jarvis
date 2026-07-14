@@ -190,6 +190,7 @@ def emit(name, value):
     print(f"{name}={shlex.quote(str(value))}")
 emit("USER_ID", c.lark.get("user_id", ""))
 emit("APP_ID", c.lark.get("app_id", ""))
+emit("OWNER_NAME", c.owner_name)
 # Event backend switch + sidecar credentials (jarvis.yaml is gitignored, so
 # the secret never reaches the repo). Empty values keep the lark-cli path.
 emit("JARVIS_EVENT_BACKEND", c.lark.get("event_backend", ""))
@@ -231,7 +232,18 @@ CLAUDE_PROJECT_DIR="$HOME/.claude/projects/$(echo "$WORK_DIR" | sed 's|/|-|g')"
 SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
-export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID OWNER_NAME LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+
+# Bot's own open_id (REQ-100 group chat): a group @-mention references the
+# bot by open_id (ou_...), NOT by APP_ID (cli_...) — matching mentions against
+# APP_ID alone would silently ignore every group @. Resolved once at startup;
+# empty on failure (the gate then falls back to APP_ID matching only).
+BOT_OPEN_ID=""
+if command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}" ]; then
+  BOT_OPEN_ID=$(lark-cli api get /open-apis/bot/v3/info --as bot 2>/dev/null \
+    | jq -r '.bot.open_id // empty' 2>/dev/null || true)
+fi
+export BOT_OPEN_ID
 export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL
 export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
@@ -505,7 +517,7 @@ fi
 # returns the cleaned reply with any action results appended.
 # Usage: cleaned_reply=$(process_actions "$reply" "$conv_key" "$message_id")
 process_actions() {
-  local reply="$1" conv_key="$2" message_id="$3"
+  local reply="$1" conv_key="$2" message_id="$3" allow="${4:-1}"
   local action_results=""
 
   # Extract all action markers
@@ -514,6 +526,20 @@ process_actions() {
 
   if [ -z "$actions" ]; then
     printf '%s' "$reply"
+    return
+  fi
+
+  # REQ-102: non-owner group messages must not drive ANY action — Python
+  # (calendar/intents/broadcast) or bash (bg jobs). Strip every marker and
+  # say so; executing nothing beats silently pretending.
+  if [ "$allow" != "1" ]; then
+    log_info "Actions suppressed (group non-owner): ${actions:0:120}"
+    printf '%s' "$(JV_REPLY="$reply" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.actions import ActionProcessor
+ap = ActionProcessor(os.environ['JARVIS_DIR'], os.environ['MEMORY_DIR'], 'jobs', '')
+print(ap.process(os.environ['JV_REPLY'], execute=False))
+" 2>>"$LOG_FILE" || printf '%s' "$reply")"
     return
   fi
 
@@ -650,7 +676,33 @@ No output found for job: $out_id"
 # Same-session messages serialize via the existing lock file mechanism.
 handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
-  local reaction_id="$5"
+  local reaction_id="$5" chat_type="${6:-p2p}" sender_id="${7:-}"
+
+  # ── Group chat mode (REQ-100~102) ──────────────────────────────────
+  # A group session is visible to and drivable by non-owners: it gets the
+  # curated group context instead of personal memory (core/prompt.py), a
+  # restricted claude tool surface (no Bash/file access — group members must
+  # not execute anything on this machine), owner-only action markers, and
+  # speaker attribution so the model knows who is talking.
+  local is_group=0 allow_actions=1 claude_tool_flags=()
+  if [ "$chat_type" != "p2p" ] && [ -n "$chat_type" ]; then
+    is_group=1
+    # WebSearch ONLY. WebFetch is deliberately excluded: it can reach
+    # localhost (admin console :3456, dashboard :3457) — a group member could
+    # exfiltrate memory/logs through it. Bash/file tools would be code
+    # execution on this machine for anyone in the group.
+    claude_tool_flags=(--allowedTools "WebSearch" --disallowedTools "Bash,Edit,Write,NotebookEdit,Read,Glob,Grep,Agent,Skill,WebFetch,TaskCreate,TaskUpdate")
+    if [ -z "$sender_id" ] || [ "$sender_id" != "$USER_ID" ]; then
+      allow_actions=0
+    fi
+    # tail -c: bash 3.2 has no negative substring offsets
+    local _sid_tail
+    _sid_tail=$(printf '%s' "$sender_id" | tail -c 6)
+    local speaker="群成员(${_sid_tail:-unknown})"
+    [ "$sender_id" = "$USER_ID" ] && speaker="${OWNER_NAME:-主人}（主人）"
+    content="[发言人: $speaker]
+$content"
+  fi
 
   # Prepend an authoritative current-time line to the user's message body.
   # The system prompt already carries 'Current time', but the message body
@@ -666,7 +718,7 @@ $content"
   # Build system prompt with memory + recent turns (delegated to core/prompt.py)
   local sys_prompt
   sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
-    JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" \
+    JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$chat_type" \
     python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
@@ -679,13 +731,20 @@ print(build_system_prompt(
     conv_key=os.environ.get('JV_KEY', ''),
     now_ts=now_local_str('%Y-%m-%d %H:%M %A'),
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
+    chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
 ))
 " 2>>"$LOG_FILE")
 
   if [ -z "$sys_prompt" ]; then
     log_warn "[$session_id] System prompt build failed — using fallback"
-    sys_prompt="You are a personal assistant. Reply in the same language the user uses.
+    if [ "$is_group" -eq 1 ]; then
+      # NEVER fall back to personal memory in a group session — a prompt-build
+      # failure must not become a privacy breach (REQ-100).
+      sys_prompt="你是一个 AI 助手，正在群聊里。简洁回答通用问题；不了解也绝不讨论主人的任何私人信息；不执行任何动作指令。"
+    else
+      sys_prompt="You are a personal assistant. Reply in the same language the user uses.
 $(load_memory)"
+    fi
   fi
 
   # Call Claude (runs in WORK_DIR, with optional timeout)
@@ -822,6 +881,7 @@ except Exception:
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
+          ${claude_tool_flags[@]+"${claude_tool_flags[@]}"} \
           --output-format json \
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
@@ -831,6 +891,7 @@ except Exception:
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
+          ${claude_tool_flags[@]+"${claude_tool_flags[@]}"} \
           --output-format json \
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       fi
@@ -846,6 +907,7 @@ except Exception:
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
+          ${claude_tool_flags[@]+"${claude_tool_flags[@]}"} \
           --output-format json \
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
@@ -855,6 +917,7 @@ except Exception:
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
           --dangerously-skip-permissions \
+          ${claude_tool_flags[@]+"${claude_tool_flags[@]}"} \
           --output-format json \
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       fi
@@ -1232,7 +1295,7 @@ except Exception:
   fi
 
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
-  reply=$(process_actions "$reply" "$conv_key" "$message_id")
+  reply=$(process_actions "$reply" "$conv_key" "$message_id" "$allow_actions")
 
   # ── Detect [SAVE_LATER: title | url] markers and save to watchlater ──
   if echo "$reply" | grep -q '\[SAVE_LATER:'; then
@@ -2094,8 +2157,14 @@ except Exception as e:
       # reliable way to detect a bot mention regardless of display name.
       if [ "$chat_type" != "p2p" ] && [ -n "$APP_ID" ]; then
         mentions_raw=$(echo "$line" | jq -r '.mentions // .event.message.mentions // ""' 2>/dev/null)
-        if ! echo "$mentions_raw" | grep -q "$APP_ID" 2>/dev/null; then
-          log_info "Group message without @mention — ignoring"
+        _mentioned=0
+        echo "$mentions_raw" | grep -q "$APP_ID" 2>/dev/null && _mentioned=1
+        # Lark mentions reference a bot by its open_id (ou_...), not APP_ID.
+        if [ "$_mentioned" -eq 0 ] && [ -n "${BOT_OPEN_ID:-}" ]; then
+          echo "$mentions_raw" | grep -q "$BOT_OPEN_ID" 2>/dev/null && _mentioned=1
+        fi
+        if [ "$_mentioned" -eq 0 ]; then
+          log_info "Group message without @mention — ignoring (mentions_head=${mentions_raw:0:120})"
           continue
         fi
       fi
@@ -2111,8 +2180,16 @@ except Exception as e:
       # ONLY stop/cancel bypass Claude — everything else goes through LLM + action markers
       content_lower=$(echo "$content" | tr '[:upper:]' '[:lower:]')
 
+      # REQ-102: inline commands (broadcast confirm, stop/cancel) are
+      # owner-only in groups — a non-owner's 「发」/「stop」 is just chat and
+      # falls through to the LLM path.
+      _inline_cmd_ok=1
+      if [ "$chat_type" != "p2p" ] && [ -n "$chat_type" ] && [ "$sender_id" != "$USER_ID" ]; then
+        _inline_cmd_ok=0
+      fi
+
       # "发" — confirm pending EigenFlux broadcast; "不发" — cancel it
-      if [ "$content" = "发" ] || [ "$content" = "不发" ]; then
+      if [ "$_inline_cmd_ok" -eq 1 ] && { [ "$content" = "发" ] || [ "$content" = "不发" ]; }; then
         _pending_dir="$JARVIS_DIR/eigenflux/pending_publish"
         _latest_pending=$(ls -t "$_pending_dir"/*.json 2>/dev/null | head -1)
         if [ -z "$_latest_pending" ]; then
@@ -2149,7 +2226,7 @@ except Exception as e:
       case "$_content_trimmed" in
         结束|停|停止|停下|取消|停一下|别跑了) content_lower="stop" ;;
       esac
-      if [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; then
+      if [ "$_inline_cmd_ok" -eq 1 ] && { [ "$content_lower" = "stop" ] || [ "$content_lower" = "cancel" ]; }; then
         _stop_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
 import json, os
 try:
@@ -2272,7 +2349,7 @@ ${content}"
       fi
 
       # Dispatch to background — main loop continues immediately
-      handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" &
+      handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" "$chat_type" "$sender_id" &
       log_info "[$session_id] Dispatched to background handler (PID $!)"
       done
 }

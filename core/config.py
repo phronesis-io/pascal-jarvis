@@ -113,6 +113,12 @@ class Config:
         return None
 
     @property
+    def owner_name(self) -> str:
+        """How the assistant refers to its owner in multi-party contexts
+        (group chats). Per-user config — never hardcode a name in code."""
+        return str(self._raw.get("owner_name", "") or "主人")
+
+    @property
     def lark(self) -> dict:
         return self._raw.get("lark", {})
 

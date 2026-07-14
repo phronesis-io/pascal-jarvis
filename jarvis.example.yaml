@@ -31,6 +31,9 @@ work_dir: ""
 # Leave the whole `lark:` section empty to run in heartbeat-only mode
 # (no IM — everything else still works).
 
+# 群聊等多人场景里助手对主人的称呼（可选，默认「主人」）
+owner_name: ""
+
 lark:
   # ⚙ Your Lark open_id (starts with "ou_"). Find it by sending any message
   # to your bot and checking jarvis.log for "sender_id".

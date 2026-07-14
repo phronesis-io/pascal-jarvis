@@ -410,6 +410,32 @@ def _join_within_budget(parts: list[str], budget: int, tier: str) -> str:
     return sep.join(out)
 
 
+# REQ-100 (2026-07-14 group chat): the ONLY memory a group-chat session gets.
+# Group sessions must never load the tiered memory — hot/warm/system/timeline
+# all carry the owner's private life (health, schedule, contacts, mail
+# summaries) and any group member can drive the session. Opt-in by curation:
+# hot/group_context.md holds what groups MAY know (public professional
+# context); absent file = a minimal generic line.
+_GROUP_CONTEXT_NAME = "group_context.md"
+_GROUP_CONTEXT_FALLBACK = (
+    "## Group Context\n"
+    "(未配置 group_context.md — 你只知道自己是主人的 AI 助手，"
+    "没有关于主人的其他可分享信息。)"
+)
+
+
+def load_group_context(memory_dir) -> str:
+    """Curated group-visible context — NEVER the tiered memory."""
+    path = Path(memory_dir) / "hot" / _GROUP_CONTEXT_NAME
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+        if content:
+            return f"## Group Context (可对群成员使用的上下文)\n{content}"
+    except OSError:
+        pass
+    return _GROUP_CONTEXT_FALLBACK
+
+
 def _append_file(parts: list[str], path: Path, title: str, cap: int | None = None):
     """Read a file and append as a titled section.
 

@@ -112,16 +112,25 @@ class ActionProcessor:
             self._tm = TaskManager(self.memory_dir)
         return self._tm
 
-    def process(self, reply: str) -> str:
+    def process(self, reply: str, execute: bool = True) -> str:
         """Extract actions, execute them, return cleaned reply with results.
 
         Only strips markers for actions this processor handles.
         Unknown actions (bg, jobs, job_cancel, job_output) are left intact
         for the bash layer to process.
+
+        execute=False (REQ-102, group chat): strip EVERY marker (including
+        the bash-layer ones) and execute NOTHING — a non-owner group member
+        must not be able to drive calendar writes / broadcasts / jobs through
+        the reply channel. A short notice replaces the markers so the reply
+        doesn't silently pretend the action happened.
         """
         markers = re.findall(r'\[ACTION:[^\]]*\]', reply)
         if not markers:
             return reply
+        if not execute:
+            cleaned = re.sub(r'\[ACTION:[^\]]*\]', '', reply).strip()
+            return (cleaned + "\n\n（⚙️ 动作类指令仅限主人触发，这里只答疑不执行）").strip()
 
         results = []
         handled_markers = []
