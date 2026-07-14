@@ -134,7 +134,21 @@ if [ "$_stream_count" -eq 1 ]; then
     echo "⚠️ Stream process alive but CONNECTION FAILING (${_recent_fails} recent retries, 0 successes) — EigenFlux messages are NOT flowing (likely server-side outage)"
   fi
 elif [ "$_stream_count" -eq 0 ]; then
-  echo "⚠️ Stream NOT running — real-time messages will not be received"
+  # No CLI child ≠ outage: the supervising loop (core.ef_stream_loop) kills
+  # and respawns the child through backoff windows (stall-kill, deploy
+  # restart, reconnect) — sampling inside such a window produced recurring
+  # false "Stream NOT running" alerts (Pascal 2026-07-14; also fired on the
+  # collaborator's first install). Loop alive = supervised, it WILL respawn;
+  # only a dead loop is a real outage (components.yaml pgrep also catches it).
+  # Anchored ps match (NOT bare pgrep -f substring — the 2026-07-07 phantom
+  # crash loop lesson): only a python interpreter running `-m core.ef_stream_loop`
+  # counts, never an editor/claude prompt that mentions the string.
+  _loop_alive=$(ps -eo args | grep -Ec '^[^ ]*[Pp]ython[^ ]* -m core\.ef_stream_loop' || true)
+  if [ "${_loop_alive:-0}" -ge 1 ]; then
+    echo "✓ Stream between connections (supervisor alive — reconnect/restart window, self-heals)"
+  else
+    echo "⚠️ Stream NOT running — real-time messages will not be received"
+  fi
 else
   echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
 fi
