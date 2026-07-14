@@ -2359,6 +2359,69 @@ def _cli(argv: list[str]) -> int:
     cmd = argv[0] if argv else "list"
     rest = argv[1:]
 
+    if cmd == "create":
+        # argparse (not hand-rolled flag scanning): agents drive this CLI from
+        # prompts, so a typoed flag must be a loud rc=2 error, never a silent
+        # default (the 2026-07-13 "没能把这条埋进 intent" failure class).
+        import argparse
+        ap = argparse.ArgumentParser(
+            prog="create", description="Create an intent.", add_help=True)
+        ap.add_argument("name")
+        # Unknown trigger types insert a row check_due() can never fire — a
+        # permanent zombie that reads as success (REQ-53 class). Reject here.
+        ap.add_argument("trigger_type",
+                        choices=("date", "cron", "interval", "event"))
+        ap.add_argument("trigger_config", help="JSON object")
+        ap.add_argument("--prompt", default="")
+        ap.add_argument("--purpose", default="")
+        ap.add_argument("--priority", type=int, default=5)
+        ap.add_argument("--source", default="agent")
+        ap.add_argument("--tags", default="", help="comma-separated")
+        ap.add_argument("--category", default="none",
+                        choices=tuple(CLOSURE_POLICY))
+        ap.add_argument("--closure-question", default="")
+        ap.add_argument("--expires-at", default=None,
+                        help="ISO datetime, e.g. 2026-08-01T09:00:00")
+        try:
+            args = ap.parse_args(rest)
+        except SystemExit:
+            return 2
+        try:
+            trigger_config = json.loads(args.trigger_config)
+        except json.JSONDecodeError as e:
+            print(f"bad trigger_config JSON: {e}", file=sys.stderr)
+            return 2
+        if args.expires_at:
+            # cleanup compares expires_at lexicographically against an ISO
+            # now-string — a non-ISO value either never expires or expires
+            # instantly. Validate at the boundary.
+            from datetime import datetime as _dt
+            try:
+                _dt.fromisoformat(args.expires_at)
+            except ValueError:
+                print(f"bad --expires-at (need ISO datetime): {args.expires_at!r}",
+                      file=sys.stderr)
+                return 2
+        try:
+            iid = create_intent(
+                name=args.name,
+                trigger_type=args.trigger_type,
+                trigger_config=trigger_config,
+                prompt=args.prompt,
+                purpose=args.purpose,
+                priority=args.priority,
+                source=args.source,
+                tags=[t for t in args.tags.split(",") if t] or None,
+                category=args.category,
+                closure_question=args.closure_question,
+                expires_at=args.expires_at or None,
+            )
+        except ValueError as e:
+            print(f"create rejected: {e}", file=sys.stderr)
+            return 2
+        print(f"created {iid}  {args.name}")
+        return 0
+
     if cmd == "list":
         status = rest[0] if rest else None
         rows = list_intents(status=status, limit=500)
@@ -2449,7 +2512,7 @@ def _cli(argv: list[str]) -> int:
         return 0
 
     print(f"unknown command: {cmd}\n"
-          "commands: list|due|awaiting|get|cancel|close|delete|stats|reset-stale|purge", file=sys.stderr)
+          "commands: create|list|due|awaiting|get|cancel|close|delete|stats|reset-stale|purge", file=sys.stderr)
     return 2
 
 

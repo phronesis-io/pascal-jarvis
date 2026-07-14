@@ -1655,3 +1655,32 @@ def test_cli_awaiting(intent_db):
     rc, out, _ = _run_cli(intent_db, ["awaiting"])
     assert rc == 0
     assert "0 awaiting closure" in out
+
+
+def test_cli_create(intent_db):
+    rc, out, _ = _run_cli(intent_db, [
+        "create", "VC follow-up", "date", '{"datetime":"2099-12-31T09:00:00"}',
+        "--prompt", "follow up with VC", "--purpose", "test",
+        "--priority", "3", "--tags", "vc,inbound",
+    ])
+    assert rc == 0
+    assert "created" in out
+    assert "VC follow-up" in out
+    from core.intentions import get_intent
+    iid = out.split()[1]
+    it = get_intent(iid)
+    assert it["name"] == "VC follow-up"
+    assert it["priority"] == 3
+    assert it["prompt"] == "follow up with VC"
+
+
+def test_cli_create_bad_json(intent_db):
+    rc, _, err = _run_cli(intent_db, ["create", "x", "date", "NOT-JSON"])
+    assert rc == 2
+    assert "bad trigger_config JSON" in err
+
+
+def test_cli_create_missing_args(intent_db):
+    rc, _, err = _run_cli(intent_db, ["create", "x"])
+    assert rc == 2
+    assert "usage" in err
