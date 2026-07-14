@@ -156,6 +156,25 @@ lark:
 改完无需重启等待下个心跳周期（≤15 分钟）自动生效；验证：信号会出现在
 `$data_dir/memory/system/inbox_*.md`。
 
+## Phase 5.5 — 个人化配置（per-user，全部 gitignored）
+
+因人而异的内容（兴趣、日程、联系人、项目代号）**永远不进代码**，都放在
+gitignored 的 `data/` 下。不配任何一项也能跑（用中性默认）；配了体验更贴身。
+
+| 文件 | 作用 | 格式 |
+|---|---|---|
+| `data/checkin_personal.sh` | 周期性预约的 check-in 提醒（如每周固定课程） | bash 片段，可用 `$day`/`$hour` 设置 `$therapy_prep` |
+| `data/checkin_topics_personal.txt` | check-in 话题去重的个人关键词 | 每行一个关键词 |
+| `data/content_queries_personal.txt` | 内容推荐的兴趣搜索词（=用户兴趣画像） | 每行 `category\|platform\|query`，platform: `yt`/`bili`，`#` 开头为注释；缺省时用内置中性 starter 集 |
+| `data/category_keywords_personal.json` | 意图自动分类的个人关键词扩展（项目代号等） | `{"external": ["代号"], "healing": [...]}`，键为分类名 |
+| `data/heartbeat_overlay/<task>.md` | 单个心跳任务的 prompt 追加层 | markdown，追加到该任务 prompt 末尾 |
+
+**纪律**：往任何 tracked 文件写用户个人信息（人名/机构/兴趣/日程）都是 bug，
+`tests/test_public_repo_hygiene.py` 会挡；新增个人化维度时照上表模式加
+gitignored 配置文件 + 中性默认。
+
+---
+
 ## Phase 6 — 启动与日常运维
 
 ```bash

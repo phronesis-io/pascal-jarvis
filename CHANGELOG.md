@@ -5,6 +5,73 @@ All notable changes to Pascal Jarvis. This project tracks requirements as
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
 prd_interaction_v4, REQ-78~90).
 
+## [1.4.0] — 2026-07-14 — self-improvement wave: memory-tier starvation fix, honest ops signals, card quality (REQ-91~99)
+
+Driven by a full self-audit plus the user's own complaints from 7/13-7/14
+(intent CLI error, unreadable checkin card, incomplete calendar card,
+recurring false stream alarm, personal data in tracked scripts). Four-angle
+adversarial review caught 17 tightenings including 3 self-introduced
+regressions. 1440 tests green (+25).
+
+### Memory system tier no longer starved (REQ-91~94) — biggest functional fix
+- Measured: the system tier loaded 63.8k chars against a 40k budget, so
+  `inbox_private_mail` (ALL of mail-triage's output) and issue files were
+  silently invisible to heartbeat for days. The per-file caps never summed
+  against the budget — now arithmetically consistent (SYSTEM 56k, HOT 30k)
+  with a constants-consistency test so future cap edits stay honest.
+- Perception `_trim_inbox` rewritten: entry-boundary char-cap retention
+  aligned with the loader caps (disk ≈ injected; the old 500-line rule kept
+  3× what could ever load and cut mid-entry). Entries <48h are protected
+  (the mail buffer is a WORK QUEUE — mail-triage drains ≤15/cycle; trimming
+  a burst would silently lose untriaged mail); entries >7 days age out
+  (restores the PRD §5.4 bound that was documented but never implemented).
+  flock + size recheck against concurrent writers.
+- memory-tidy auto-archives `system/*.md` with resolved-family frontmatter
+  `status:` after 7 days (line-anchored YAML detection, case-insensitive).
+- `tier_truncated` now feeds selfmon; warm-tier squeeze (by design) is
+  marked `expected` and skipped.
+
+### Honest ops signals (REQ-95/96)
+- ef-stream: a connection that lived ≥10min before dropping resets the
+  reconnect backoff (a quiet day used to ratchet to permanent 300s blind
+  windows — observed failure #27, ~2h/day blind). 'Connection replaced' is
+  exempt (two live sessions would ping-pong). Long-lived ZERO-output
+  connections stay visible via a quiet-streak counter that escalates to
+  warn every 6 consecutive (~3h) — an idle day and an up-but-mute server
+  are protocol-indistinguishable, so neither is silently blessed.
+- heartbeat: elected primary-probe failures during a tripped spend-limit
+  gate are annotated in the log line and flagged `expected` — selfmon,
+  admin console and the ops dashboard all skip expected entries. Only
+  annotated when a backup path actually exists; a missing backup env keeps
+  alarming (that's a real outage).
+- self-diagnostic: "Stream NOT running" now checks the supervisor loop
+  before alarming — sampling inside a reconnect/deploy window (the recurring
+  false alarm, also seen on collaborator first install) reports a
+  self-healing window instead.
+
+### Interaction quality (REQ-97~99)
+- `python3 -m core.intentions create` — agents can file intents from
+  sessions (the 7/13 "CLI 报错" failure). argparse with a trigger_type
+  whitelist (unknown types used to insert never-firing zombie rows),
+  typed --priority, ISO-validated --expires-at.
+- checkin: live activity evidence in the prompt (last-message recency,
+  today's reply count, memorial interactions) with an explicit "missing
+  signal ≠ idle" rule — no more "you seem idle" cards on strategy-work
+  days. The post-hook unwraps a stray {"response","action"} JSON envelope
+  (raw JSON used to reach the user's card verbatim) and honors
+  action=silent.
+- calendar change card: every line carries date+weekday, same-title
+  add+remove pairs render as ONE "改期 old → new" line, overflow beyond the
+  display cap is counted, never dropped.
+
+### Privacy: personal data is config, not code
+- content-recommend interest queries (the user's whole interest profile)
+  → gitignored `data/content_queries_personal.txt` (neutral starter set
+  when absent); intent-categorizer personal keywords →
+  `data/category_keywords_personal.json`; identifying names in comments
+  and test fixtures neutralized. Hygiene test blocks regressions.
+  Per-user config table added to INSTALL.md (Phase 5.5).
+
 ## [1.3.1] — 2026-07-13 — first-install fixes: portable launchd, honest health checks
 
 Everything a collaborator hit installing 1.3.0 on a fresh machine (their
