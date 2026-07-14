@@ -1287,11 +1287,16 @@ except Exception:
   # the old English "Model: Claude backup opus" on EVERY reply was jargon in
   # Pascal's chat (2026-07-07; feedback-no-jargon-dashboards). Silence on
   # primary = normal operation needs no caption.
+  # Never in groups: provider status is the owner's internal ops detail —
+  # "（备用通道）" leaking into a group reply confused the first live test
+  # (2026-07-14 16:04) and tells outsiders about the owner's infra state.
   local _model_footer=""
-  if [ "$_answer_provider" = "Claude backup" ]; then
-    _model_footer="（备用通道）"
-  elif [ "$_answer_provider" = "GPT fallback" ]; then
-    _model_footer="（GPT 兜底）"
+  if [ "$is_group" -ne 1 ]; then
+    if [ "$_answer_provider" = "Claude backup" ]; then
+      _model_footer="（备用通道）"
+    elif [ "$_answer_provider" = "GPT fallback" ]; then
+      _model_footer="（GPT 兜底）"
+    fi
   fi
 
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
@@ -2167,6 +2172,33 @@ except Exception as e:
           log_info "Group message without @mention — ignoring (mentions_head=${mentions_raw:0:120})"
           continue
         fi
+      fi
+
+      # Resolve @mention placeholders (group): Lark text carries opaque
+      # "@_user_N" tokens; unresolved, the bot can't tell IT was the one
+      # being addressed (first live test 2026-07-14 16:04: it read
+      # "@Kalpas hi" as the owner greeting a stranger and bowed out).
+      if [ "$chat_type" != "p2p" ] && [ -n "$content" ]; then
+        content=$(JV_LINE="$line" JV_CONTENT="$content" JV_BOT_OID="${BOT_OPEN_ID:-}" python3 -c "
+import json, os
+content = os.environ['JV_CONTENT']
+try:
+    ev = json.loads(os.environ['JV_LINE'])
+    mentions = (ev.get('mentions')
+                or (ev.get('event') or {}).get('message', {}).get('mentions')) or []
+    bot_oid = os.environ.get('JV_BOT_OID', '')
+    for m in mentions:
+        key = m.get('key') or ''
+        if not key:
+            continue
+        oid = ((m.get('id') or {}).get('open_id')) or ''
+        name = m.get('name') or '某人'
+        label = '@你' if (bot_oid and oid == bot_oid) else f'@{name}'
+        content = content.replace(key, label)
+except Exception:
+    pass
+print(content)
+" 2>>"$LOG_FILE" || printf '%s' "$content")
       fi
 
       # Determine conv_key early (needed by most commands)
