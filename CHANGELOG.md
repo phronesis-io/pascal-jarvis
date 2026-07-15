@@ -5,6 +5,59 @@ All notable changes to Pascal Jarvis. This project tracks requirements as
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
 prd_interaction_v4, REQ-78~90).
 
+## [1.6.0] — 2026-07-15 — input-channel connector layer + sentinel leak fix
+
+The perception layer is now the official channel-plugin surface for a
+multi-user install: contract spec in `sources/README.md`, optional
+`validate_cfg` hook, and a generic `metrics_probe` connector type — any
+command that prints `{"metrics": {...}}` JSON becomes a monitored channel
+(daily snapshot card + threshold alerts) with all personal infra (hosts,
+SQL) in gitignored config. 1497 tests green (+33).
+
+### Connector layer
+- `sources/metrics_probe.py`: generic probe adapter — day-over-day deltas,
+  anomaly rules (`value` / `pct_of_prev` / `pct_of_baseline` with ≥3-day
+  history so slow declines alarm too), one ✅ recovery signal when a
+  previously-tripped metric evaluates clean, history jsonl for the digest.
+- `metrics-digest` heartbeat task: probe records → one card per record
+  (snapshot=daily report, anomaly=alert, absence=missing-report alert,
+  recovery=all-clear), per-user rendering via `digest_hint`; watermark
+  pending/promote handshake so a failed Claude cycle re-emits instead of
+  losing the day's card. Prompt forbids merging/dropping records (a live
+  2-record batch came back as 1 card on day one).
+- Absence alerts: a probe with no daily snapshot by snapshot_hour+2h emits
+  "日报缺席" once per day — silence must not look like health (the
+  server-side improvement loop had been dead for 3 weeks unnoticed).
+- `python3 -m core.perception --dry-run [--source ID]`: validate +
+  trial-collect with nothing persisted, for setting up new sources.
+- The PGC daily pulse migrated from the hardcoded `pgc-improvement`
+  pre-script (ssh host + remote paths in tracked code) to a gitignored
+  probe; legacy task paused via interval override, deleted after parity.
+- `docs/prd_delivery_connectors.md`: design for unwelding the OUTPUT side
+  from Lark (neutral card + per-backend renderers); awaiting scope sign-off.
+
+### Fixed
+- P0 idle-sentinel leak: "prose + trailing HEARTBEAT_OK" reached the user
+  as a memorial card (post-scripts' exact match missed the trailing form —
+  a recurrence of the 2026-06-08 intent-card leak). Now enforced at two
+  choke points every path shares: card builders return "" and
+  `_route_output` drops the whole output, so no individual post-script can
+  leak the sentinel again.
+- phronesis-monitor cross-cycle memory: surfaced cards append to a flagged
+  ledger; the pre-hook injects the last 24h as context and the prompt
+  forbids downgrading a serious flag's follow-up to routine chat (the
+  smell/dizziness flag's AC-adjustment follow-up had been judged "nothing
+  noteworthy" 20 minutes later).
+
+## [1.5.0] — 2026-07-15 — group chat: privacy-bounded multi-party conversations (REQ-100~102)
+
+(Entry backfilled from the annotated tag; released by a parallel session.)
+Red-team pass, 15 tightenings closing group-chat privacy leak paths,
+fail-closed: group sessions get a curated `group_context.md` and NEVER
+personal memory; Claude restricted to WebSearch only in groups (no
+Bash/file/WebFetch); actions (calendar/broadcast/jobs) owner-only with
+non-owner markers stripped; @mention resolution with BOT_OPEN_ID dual-match.
+
 ## [1.4.0] — 2026-07-14 — self-improvement wave: memory-tier starvation fix, honest ops signals, card quality (REQ-91~99)
 
 Driven by a full self-audit plus the user's own complaints from 7/13-7/14
