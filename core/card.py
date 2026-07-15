@@ -78,8 +78,15 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
             ``buttons``.
 
     Returns:
-        Single-line JSON string starting with {"config":...}
+        Single-line JSON string starting with {"config":...}, or "" when the
+        content carries the heartbeat idle sentinel — HEARTBEAT_OK anywhere
+        in a card means the model chose silence and the text around it is
+        leaked scratch work (2026-07-15 phronesis leak); the empty string is
+        ignored by every routing path.
     """
+    from core.safety import sentinel_present
+    if sentinel_present(header) or sentinel_present(body):
+        return ""
     elements = []
     if body:
         body = linkify_bare_urls(body)
@@ -187,8 +194,15 @@ def build_rich_card(
         extra_buttons: Additional buttons to show alongside the view link
 
     Returns:
-        Single-line card JSON string
+        Single-line card JSON string, or "" when any content part carries the
+        heartbeat idle sentinel (see build_card) — checked here too so the
+        scratch work is never even published to a RichView page.
     """
+    from core.safety import sentinel_present
+    if (sentinel_present(header) or sentinel_present(summary)
+            or any(sentinel_present(s.get("content", "")) for s in sections or []
+                   if isinstance(s, dict))):
+        return ""
     from core.richview import publish
 
     url = publish(title=header, sections=sections, meta=meta)

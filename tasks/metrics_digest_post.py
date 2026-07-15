@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import looks_like_error, parse_json_response
+from core.safety import looks_like_error, parse_json_response, sentinel_present
 
 
 def _metrics_dir() -> Path:
@@ -37,7 +37,10 @@ def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw:
         return 0
-    if raw == "HEARTBEAT_OK":
+    if sentinel_present(raw):
+        # Sentinel anywhere = the model chose silence for this cycle (any
+        # surrounding prose is scratch work). That's a VALID outcome for
+        # these records — promote, don't re-emit them forever.
         _promote_watermark()
         return 0
     if looks_like_error(raw):

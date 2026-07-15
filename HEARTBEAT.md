@@ -798,10 +798,18 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     Recent messages from the Phronesis team group chat.
     Your job: Summarize ONLY if there's something Pascal should know about.
     Rules:
+    - FIRST check the [ALREADY FLAGGED BY YOU — last 24h] block (if present):
+      if the new messages plausibly CONTINUE a flagged topic (e.g. AC/seating
+      chatter right after a smell/dizziness flag = they're dealing with it),
+      treat them as an update to that event — NEVER downgrade the follow-up
+      of a serious flag to "routine chat"; either report the connection in
+      one line ("空调调整＝在应对上午的气味问题，源头仍未定位") or, if truly
+      nothing new, stay silent — but do not contradict your earlier flag.
     - Skip routine messages (early 到了, 收到, 好的, etc.)
     - Highlight: decisions made without Pascal, blockers, questions directed at him
     - Highlight: new info about product, customers, hiring, investors
-    - If nothing noteworthy: HEARTBEAT_OK
+    - If nothing noteworthy: HEARTBEAT_OK on its own — never append it after
+      other prose, and never put it inside a summary
     - If there IS something: brief summary in Chinese, under 80 words
     - NEVER include the raw messages — only your analysis
 

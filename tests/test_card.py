@@ -218,3 +218,33 @@ def test_rich_card_truncates_overlong_content(monkeypatch):
     body = _card_body(result)
     assert len(body) < 9000
     assert "已截断" in body
+
+
+# ── idle-sentinel gate (2026-07-15 phronesis leak) ───────────────────
+
+
+def test_build_card_suppresses_trailing_sentinel():
+    # The exact leak shape: prose + blank line + trailing HEARTBEAT_OK.
+    leaked = ("Just team members chatting about seating and air "
+              "conditioning—nothing noteworthy.\n\nHEARTBEAT_OK")
+    assert build_card("🏛️ Phronesis", leaked) == ""
+
+
+def test_build_card_suppresses_sentinel_anywhere():
+    assert build_card("h", "HEARTBEAT_OK") == ""
+    assert build_card("h", "line one\nmid HEARTBEAT_OK text\nline three") == ""
+    assert build_card("HEARTBEAT_OK", "body") == ""
+    # clean content still builds
+    assert build_card("h", "正常内容").startswith('{"config":')
+
+
+def test_build_rich_card_suppresses_sentinel(monkeypatch):
+    monkeypatch.setattr(core.richview, "publish",
+                        lambda **kw: "http://127.0.0.1:3456/view/x")
+    leaked = "analysis text\n\nHEARTBEAT_OK"
+    assert build_rich_card(
+        header="🏛️ Phronesis", summary="ok summary",
+        sections=[{"type": "markdown", "content": leaked}]) == ""
+    assert build_rich_card(
+        header="🏛️ Phronesis", summary=leaked,
+        sections=[{"type": "markdown", "content": "fine"}]) == ""

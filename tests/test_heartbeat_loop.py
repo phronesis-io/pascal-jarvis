@@ -228,3 +228,30 @@ def test_beat_interval_plus_max_cycle_stays_under_stale_threshold():
     assert worst_gap < daemon_mod.HEARTBEAT_STALE_THRESHOLD, \
         f"worst-case beat gap {worst_gap}s crosses the daemon's " \
         f"{daemon_mod.HEARTBEAT_STALE_THRESHOLD}s stale threshold"
+
+
+def test_route_output_suppresses_sentinel_text():
+    """Prose + trailing HEARTBEAT_OK must never reach the user (2026-07-15)."""
+    with patch("core.heartbeat_loop._lark_send_text") as mock_text, \
+         patch("core.heartbeat_loop._lark_send_card") as mock_card:
+        ok = _route_output(
+            "nothing noteworthy here.\n\nHEARTBEAT_OK", "user123", Path("/tmp"))
+        mock_text.assert_not_called()
+        mock_card.assert_not_called()
+        assert ok is True  # silence is a successful outcome, not a failure
+
+
+def test_route_output_suppresses_sentinel_card_line():
+    """Even a pre-built card JSON carrying the sentinel is dropped."""
+    card = json.dumps({"config": {}, "elements": [{
+        "tag": "div", "text": {"content": "scratch\nHEARTBEAT_OK", "tag": "lark_md"}}]})
+    with patch("core.heartbeat_loop._lark_send_card") as mock_card:
+        _route_output(f"CARD:{card}", "user123", Path("/tmp"))
+        mock_card.assert_not_called()
+
+
+def test_route_output_clean_lines_still_flow():
+    with patch("core.heartbeat_loop._lark_send_text") as mock_text:
+        mock_text.return_value = True
+        _route_output("正常心跳消息", "user123", Path("/tmp"))
+        mock_text.assert_called_once()

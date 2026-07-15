@@ -2,6 +2,30 @@
 
 from __future__ import annotations
 
+# The heartbeat idle sentinel. When it appears ANYWHERE in a task's output,
+# the model decided this cycle should stay silent — any surrounding text is
+# leaked scratch work ("...nothing noteworthy.\n\nHEARTBEAT_OK", 2026-07-15
+# phronesis card leak), never a message for the user.
+IDLE_SENTINEL = "HEARTBEAT_OK"
+
+
+def sentinel_present(text) -> bool:
+    """True if the idle sentinel appears on any line of `text`.
+
+    Deliberately a per-line substring match, NOT `strip() == sentinel`:
+    exact-match checks in post-scripts are exactly how "prose + trailing
+    HEARTBEAT_OK" leaked to the user as a card (2026-06-08 intent card,
+    2026-07-15 phronesis card). The trade-off — a legitimate message that
+    merely MENTIONS the token gets suppressed — fails silent, which is the
+    safe direction; the sentinel is an internal protocol word that has no
+    business in user-facing prose. Card builders (core/card.py) and the
+    delivery router (core/heartbeat_loop._route_output) both enforce this,
+    so no individual post-script can leak it again.
+    """
+    if not text:
+        return False
+    return any(IDLE_SENTINEL in line for line in str(text).splitlines())
+
 # Patterns that indicate Claude (or the underlying tooling) returned an error
 # instead of a real answer. Post-scripts and the main bot reply path both
 # check against these so we never send a traceback/auth error to the user.

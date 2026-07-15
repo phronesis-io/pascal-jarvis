@@ -157,6 +157,21 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
 
     Returns True if every part was delivered (used by the delivery ledger).
     """
+    # Idle-sentinel gate (belt-and-braces below the card builders): if
+    # HEARTBEAT_OK appears ANYWHERE in the output — prose, card JSON,
+    # anything — the model decided this cycle stays silent and everything
+    # around the sentinel is leaked scratch work, so the WHOLE output is
+    # dropped, not just the sentinel line (2026-07-15:
+    # "...nothing noteworthy.\n\nHEARTBEAT_OK" reached the user as a
+    # memorial card via a post-script whose exact match
+    # `raw == "HEARTBEAT_OK"` missed the trailing form).
+    from core.safety import sentinel_present
+    if sentinel_present(output):
+        log("heartbeat",
+            f"Idle sentinel suppressed at delivery: {output[:120]!r}",
+            level="warn")
+        return True  # silence is the intended outcome, not a delivery failure
+
     remaining_text_parts = []
     results = []
 

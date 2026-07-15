@@ -139,3 +139,14 @@ def test_failed_cycle_reemits_then_advances(tmp_path):
     _run_post(tmp_path, "HEARTBEAT_OK")
     r3 = _run_pre(tmp_path)
     assert r3.stdout.strip() == ""            # watermark advanced
+
+
+def test_post_prose_plus_trailing_sentinel_promotes(tmp_path):
+    # Sentinel anywhere = model chose silence; that's valid — promote the
+    # watermark instead of re-emitting the records forever. And nothing may
+    # reach stdout (the 2026-07-15 leak shape).
+    mdir = _stage_pending(tmp_path)
+    r = _run_post(tmp_path, "records look routine, nothing to send\n\nHEARTBEAT_OK")
+    assert r.stdout.strip() == ""
+    assert (mdir / ".digest_watermark.json").exists()
+    assert not (mdir / ".digest_pending.json").exists()

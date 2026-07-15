@@ -76,11 +76,54 @@ if [ "$count" = "0" ] || [ "$count" = "null" ]; then
   exit 0
 fi
 
+# Cross-cycle memory: what this monitor already flagged in the last 24h
+# (written by phronesis_monitor_post.py). Without it each cycle judged the
+# chat in isolation — a follow-up to a serious flag (调空调 after 工业味+头晕,
+# 2026-07-15) got misread as idle small talk.
+FLAGGED=$(JARVIS_DIR="$JARVIS_DIR" python3 - <<'PYEOF'
+import datetime as dt
+import json
+import os
+
+path = os.path.join(os.environ.get("JARVIS_DIR", "."), "data",
+                    "phronesis_flagged.jsonl")
+cutoff = dt.datetime.now().astimezone() - dt.timedelta(hours=24)
+out = []
+try:
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            ts = dt.datetime.fromisoformat(entry.get("ts", ""))
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            out.append(f"- [{ts.strftime('%m-%d %H:%M')}] {entry.get('summary', '')}")
+except OSError:
+    pass
+print("\n".join(out[-8:]))
+PYEOF
+)
+
 # Output context for Claude
 cat <<EOF
 [PHRONESIS GROUP — Recent Messages]
 Chat: Phronesis (公司核心群)
 Time window: $start_time → $end_time
+EOF
+
+if [ -n "$FLAGGED" ]; then
+  cat <<EOF
+
+[ALREADY FLAGGED BY YOU — last 24h]
+$FLAGGED
+EOF
+fi
+
+cat <<EOF
+
 Messages ($count new from team):
 
 $messages
