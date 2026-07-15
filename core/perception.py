@@ -331,6 +331,21 @@ class PerceptionRuntime:
                 errors += 1
                 continue
 
+            # Optional adapter hook (sources/README.md): a misconfigured
+            # source is skipped and named in the notes instead of crashing
+            # inside collect() or, worse, half-running with bad config.
+            validate = getattr(adapter, "validate_cfg", None)
+            if callable(validate):
+                try:
+                    cfg_errors = validate(src.get("collect") or {}) or []
+                except Exception as e:  # a broken validator must not kill the pass
+                    cfg_errors = [f"validate_cfg crashed: {e}"]
+                if cfg_errors:
+                    notes.append(f"{sid}: config invalid: "
+                                 + "; ".join(str(x) for x in cfg_errors[:3]))
+                    errors += 1
+                    continue
+
             try:
                 signals, new_adapter_state = adapter.collect(
                     src.get("collect") or {}, src_state.get("adapter_state", {}))

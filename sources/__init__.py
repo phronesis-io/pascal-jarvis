@@ -12,7 +12,15 @@ Each adapter module implements:
 - idempotent: same state in → same signals out; overlap after restart is
   reconciled by the global seen-store
 
+Optionally, an adapter may also implement:
+
+    def validate_cfg(cfg: dict) -> list[str]   # [] = valid
+
+called by the runtime before collect(); non-empty errors skip the source
+for that pass and surface in the collect summary notes.
+
 The runtime discovers adapters by dynamic import of sources.<type> — there
 is no hardcoded registry; adding a new source TYPE is one new module here,
 adding another source of an existing type is one sources.yaml block.
+Full contract spec: sources/README.md.
 """

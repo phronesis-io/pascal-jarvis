@@ -151,6 +151,49 @@ def test_pipeline_dedup_by_event_id(tmp_path):
     assert ("docs", "e1") in primary
 
 
+def test_invalid_cfg_skips_source_but_not_pass(tmp_path):
+    # A misconfigured metrics_probe (no command) is skipped with a note via
+    # the validate_cfg hook; the valid file_watch source still runs.
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    (watched / "pre.md").write_text("existing")
+    rt = _runtime(tmp_path, f"""
+perception:
+  sources:
+    - id: badprobe
+      type: metrics_probe
+      collect: {{name: nope}}
+      schedule: {{interval: 1s}}
+    - id: docs
+      type: file_watch
+      collect: {{globs: ["{watched}/*.md"]}}
+      schedule: {{interval: 1s}}
+""")
+    summary = rt.run_collect()
+    assert "errors=1" in summary
+    assert "badprobe: config invalid" in summary
+    # file_watch ran (baselined) despite the invalid sibling
+    state = json.loads(rt.state_file.read_text())
+    assert state["docs"]["adapter_state"]["baselined"] is True
+    assert "badprobe" not in state
+
+
+def test_validate_cfg_crash_does_not_kill_pass(tmp_path, monkeypatch):
+    from sources import metrics_probe
+    monkeypatch.setattr(metrics_probe, "validate_cfg",
+                        lambda cfg: 1 / 0)
+    rt = _runtime(tmp_path, """
+perception:
+  sources:
+    - id: probe
+      type: metrics_probe
+      collect: {command: "echo x"}
+      schedule: {interval: 1s}
+""")
+    summary = rt.run_collect()
+    assert "errors=1" in summary and "validate_cfg crashed" in summary
+
+
 def test_unknown_adapter_reports_error(tmp_path):
     rt = _runtime(tmp_path, """
 perception:

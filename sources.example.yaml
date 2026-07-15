@@ -3,7 +3,8 @@
 #
 # Adding an information source = adding a block here. No new scripts.
 # Adapter types live in sources/<type>.py and are discovered by dynamic
-# import; bundled adapters: file_watch, git_repo, lark_chat, lark_mail, imap_mail.
+# import; bundled adapters: file_watch, git_repo, lark_chat, lark_mail,
+# imap_mail, metrics_probe. Contract spec: sources/README.md.
 # The bot works fine with no sources enabled — this whole layer is optional.
 
 perception:
@@ -75,3 +76,27 @@ perception:
       schedule: { interval: 15m }
       sensitivity: private
       perceive: { buffer: inbox_private_mail.md }
+
+    # Generic metrics probe: any command that prints {"metrics": {...}} JSON
+    # (e.g. a script that queries YOUR product database or Grafana). Emits a
+    # daily snapshot signal + threshold anomaly signals, and feeds the
+    # metrics-digest heartbeat task (daily digest card + alert cards).
+    # The command and any SQL/hosts it uses are YOUR infrastructure — keep
+    # them here and in data/probes/ (both gitignored), never in tracked code.
+    - id: product_metrics
+      type: metrics_probe
+      enabled: false
+      label: "Product growth metrics"
+      collect:
+        name: product_growth
+        command: "bash data/probes/product_metrics.sh"  # e.g. ssh your-host '...' or a psql wrapper
+        timeout: 45
+        snapshot_hour: 10      # daily snapshot on first collect at/after 10:00 local
+        digest_hint: |
+          Plain language for a non-analyst. Lead with new users + daily
+          actives and the day-over-day change. One suggested action max.
+        rules:                 # optional anomaly rules, checked every collect
+          - { metric: new_today, op: "<=", value: 0, min_hour: 14 }
+          - { metric: dau_yesterday, op: "<", pct_of_prev: 50 }
+      schedule: { interval: 30m }
+      perceive: { buffer: inbox_ops.md }
