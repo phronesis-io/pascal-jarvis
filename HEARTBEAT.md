@@ -22,7 +22,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup) |
+| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup); metrics-digest yes (daily probe snapshot cards + anomaly alerts; skips when no metrics_probe sources configured) |
 | Team | phronesis-monitor | yes (if relevant) |
 | Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
 
@@ -408,6 +408,26 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     Reply HEARTBEAT_OK unless DATA shows "errors=" greater than 0 with the
     same source failing repeatedly (notes mention it) — then report one line
     naming the failing source.
+
+### metrics-digest
+- interval: 30m
+- pre: tasks/metrics_digest_pre.sh
+- post: tasks/metrics_digest_post.py
+- prompt: |
+    [METRICS DIGEST]
+    DATA contains history records from metrics_probe sources (sources.yaml;
+    each record may carry a digest_hint with per-user rendering guidance).
+    Render each record as ONE card — one card, one thing. Reply with JSON:
+    {"cards": [{"header": "...", "body": "..."}]}
+    - kind=snapshot → daily report card: the key numbers + day-over-day
+      change (deltas), in plain language — no analytics jargon; follow the
+      record's digest_hint if present; ≤120 words; end with
+      "👉 想深入哪块直接问我".
+    - kind=anomaly → alert card: lead with what broke and the number, one
+      line on likely impact, end with "👉 要我现在查就说一声".
+    Use the record's name in the header (e.g. "📈 user_growth 日报").
+    Numbers come ONLY from the records — never invent or extrapolate.
+    If DATA is empty or malformed, reply HEARTBEAT_OK.
 
 ## Memory Pipeline
 
