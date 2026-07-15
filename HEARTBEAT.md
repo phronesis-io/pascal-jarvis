@@ -419,6 +419,9 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     each record may carry a digest_hint with per-user rendering guidance).
     Render each record as ONE card — one card, one thing. Reply with JSON:
     {"cards": [{"header": "...", "body": "..."}]}
+    The cards array MUST contain exactly one card per record in DATA — never
+    merge records into one card and never drop a record (2026-07-15: a
+    2-record batch came back as 1 card and that day's PGC digest was lost).
     - kind=snapshot → daily report card: the key numbers + day-over-day
       change (deltas), in plain language — no analytics jargon; follow the
       record's digest_hint if present; ≤120 words; end with
