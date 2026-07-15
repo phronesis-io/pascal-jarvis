@@ -57,6 +57,22 @@ keys and types only — do NOT probe the network here.
 - Never echo secrets or the configured command/credentials into signal
   titles, bodies, or any file the adapter writes.
 
+## Try a source before enabling it
+
+```bash
+# validate + trial-collect ALL sources (nothing is persisted: no state,
+# no inbox, no seen-store; adapters skip external writes too)
+python3 -m core.perception --dry-run
+
+# just one source
+python3 -m core.perception --dry-run --source my_new_source
+```
+
+Output shows per source: config validation errors, collect errors
+(`error_type`), or the signal count with the first few titles. Adapters
+with external write side-effects must check the `PERCEPTION_DRY_RUN` env
+var (set during dry runs) and skip those writes.
+
 ## Bundled adapter types
 
 | type | input |

@@ -428,6 +428,11 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
       "👉 想深入哪块直接问我".
     - kind=anomaly → alert card: lead with what broke and the number, one
       line on likely impact, end with "👉 要我现在查就说一声".
+    - kind=absence → missing-report alert card ("⚠️ <name> 日报缺席"): the
+      probe produced no daily snapshot by expected_by — say data collection
+      itself may be down (ssh/db/upstream), end with "👉 要我现在查就说一声".
+    - kind=recovery → short all-clear card ("✅ <name> 恢复"): the metric
+      that alarmed earlier is back to normal; one line, no drama.
     Use the record's name in the header (e.g. "📈 user_growth 日报").
     Numbers come ONLY from the records — never invent or extrapolate.
     If DATA is empty or malformed, reply HEARTBEAT_OK.

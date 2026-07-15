@@ -232,3 +232,83 @@ def test_pipeline_anomaly_delivered_once_per_day(tmp_path):
     inbox = (rt.system_dir / "inbox_ops.md").read_text()
     assert inbox.count("anomaly:a:") == 1
     assert inbox.count("snapshot:") == 1
+
+
+# ── rules v2: baseline + recovery ────────────────────────────────────
+
+
+def _seed_history(tmp_path, days_vals, name="demo"):
+    """Write snapshot records for the last len(days_vals) days (oldest first)."""
+    from datetime import datetime, timedelta
+    path = tmp_path / f"{name}.jsonl"
+    now = datetime.now().astimezone()
+    with open(path, "a", encoding="utf-8") as f:
+        for i, v in enumerate(days_vals):
+            d = (now - timedelta(days=len(days_vals) - i)).strftime("%Y-%m-%d")
+            f.write(json.dumps({"ts": f"{d}T10:00:00+08:00", "date": d,
+                                "kind": "snapshot", "name": name,
+                                "metrics": {"a": v}}) + "\n")
+
+
+def test_rule_pct_of_baseline_trips_on_slow_decline(tmp_path):
+    # 7-day baseline mean = 10; current a=1 < 30% of baseline → trip.
+    _seed_history(tmp_path, [10, 10, 10, 10])
+    cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": "<", "pct_of_baseline": 30}])
+    signals, _ = metrics_probe.collect(cfg, {"last_snapshot_date":
+                                             datetime.now().strftime("%Y-%m-%d")})
+    anomalies = [s for s in signals if s["event_id"].startswith("anomaly:")]
+    assert len(anomalies) == 1 and "baseline" in anomalies[0]["title"]
+
+
+def test_rule_pct_of_baseline_silent_without_enough_history(tmp_path):
+    _seed_history(tmp_path, [10, 10])  # only 2 days < BASELINE_MIN_DAYS
+    cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": "<", "pct_of_baseline": 30}])
+    signals, _ = metrics_probe.collect(cfg, {"last_snapshot_date":
+                                             datetime.now().strftime("%Y-%m-%d")})
+    assert not [s for s in signals if s["event_id"].startswith("anomaly:")]
+
+
+def test_recovery_emitted_once_after_previous_day_trip(tmp_path):
+    today = datetime.now().strftime("%Y-%m-%d")
+    cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": ">", "value": 100}])
+    # a=1 doesn't trip; metric tripped YESTERDAY per state; snapshot due.
+    state = {"tripped": {"a": "2000-01-01"}}
+    signals, new_state = metrics_probe.collect(cfg, state)
+    recoveries = [s for s in signals if s["event_id"].startswith("recovery:")]
+    assert len(recoveries) == 1
+    assert recoveries[0]["event_id"] == f"recovery:a:{today}"
+    assert "✅" in recoveries[0]["title"]
+    assert "a" not in (new_state.get("tripped") or {})
+    kinds = [r["kind"] for r in _records(tmp_path)]
+    assert kinds.count("recovery") == 1
+
+
+def test_no_recovery_when_rule_gated_by_min_hour(tmp_path, monkeypatch):
+    # Rule gated to the afternoon: a morning snapshot must NOT declare the
+    # metric recovered — it was never evaluated. The trip marker survives
+    # (yesterday's date — recent enough to escape the 7-day GC).
+    from datetime import timedelta
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    fixed = datetime.now().astimezone().replace(hour=10)
+    monkeypatch.setattr(metrics_probe, "_now", lambda: fixed)
+    cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": "<=", "value": 0,
+                                 "min_hour": 14}])
+    state = {"tripped": {"a": yesterday}}
+    signals, new_state = metrics_probe.collect(cfg, state)
+    assert not [s for s in signals if s["event_id"].startswith("recovery:")]
+    assert (new_state.get("tripped") or {}).get("a") == yesterday  # kept
+
+
+def test_same_day_trip_does_not_recover(tmp_path):
+    # tripped earlier TODAY and clean now → no recovery (needs a prior day).
+    today = datetime.now().strftime("%Y-%m-%d")
+    cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": ">", "value": 100}])
+    signals, _ = metrics_probe.collect(cfg, {"tripped": {"a": today}})
+    assert not [s for s in signals if s["event_id"].startswith("recovery:")]
+
+
+def test_dry_run_env_skips_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERCEPTION_DRY_RUN", "1")
+    signals, _ = metrics_probe.collect(_cfg(tmp_path), {})
+    assert signals  # snapshot still emitted for inspection
+    assert _records(tmp_path) == []  # but nothing persisted

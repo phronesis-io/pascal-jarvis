@@ -23,6 +23,15 @@ guidance travels with each record as cfg digest_hint.
 Anomaly event_ids are "anomaly:<metric>:<date>" — stable, so the runtime
 seen-store yields at most one alert per rule per day without any dedup
 logic here.
+
+Rules support three threshold forms:
+- value: absolute number
+- pct_of_prev: percentage of the previous snapshot's value (day-over-day)
+- pct_of_baseline (+ optional window_days, default 7): percentage of the
+  mean over recent snapshot history — catches slow declines that
+  day-over-day comparison never sees; silent until ≥3 days of history.
+A metric that alarmed on a previous day and later evaluates clean emits one
+"recovery:<metric>:<date>" signal at snapshot time.
 """
 
 from __future__ import annotations
@@ -61,6 +70,8 @@ def _history_path(cfg: dict, name: str) -> Path:
 
 
 def _append_history(path: Path, record: dict):
+    if os.environ.get("PERCEPTION_DRY_RUN"):
+        return  # a dry-run record would resurface as a duplicate digest card
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
@@ -91,13 +102,53 @@ def _run_command(command: str, timeout: float) -> tuple[dict | None, str | None]
     return payload, None
 
 
+BASELINE_MIN_DAYS = 3        # pct_of_baseline needs at least this many days
+DEFAULT_BASELINE_WINDOW = 7  # days of snapshot history for the baseline mean
+
+
+def _baseline_mean(history: Path, metric: str, window_days: int,
+                   today: str, now: datetime):
+    """Mean of `metric` over snapshot records from the last `window_days`
+    days (excluding today). None until ≥ BASELINE_MIN_DAYS values exist —
+    an unripe baseline must not fire alarms."""
+    from datetime import timedelta
+    cutoff = (now - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    vals = []
+    try:
+        for line in history.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            date = rec.get("date", "")
+            if rec.get("kind") != "snapshot" or not (cutoff <= date < today):
+                continue
+            v = (rec.get("metrics") or {}).get(metric)
+            if _is_number(v):
+                vals.append(v)
+    except OSError:
+        return None
+    return sum(vals) / len(vals) if len(vals) >= BASELINE_MIN_DAYS else None
+
+
 def _eval_rules(rules: list, metrics: dict, prev_metrics: dict,
-                now: datetime) -> list[dict]:
-    """Tripped rules → [{metric, op, threshold, threshold_desc, actual, rule}]."""
+                now: datetime, history: Path,
+                today: str) -> tuple[list[dict], set]:
+    """(tripped hits, metrics that were EVALUATED and came back clean).
+
+    The clean set only contains metrics whose rules actually ran this pass —
+    a rule skipped by min_hour or a missing baseline must not count as
+    "recovered" (a daily-reset metric like new_today gated to the afternoon
+    would otherwise look healed every morning).
+    """
     import operator
     ops = {"<": operator.lt, "<=": operator.le, ">": operator.gt,
            ">=": operator.ge, "==": operator.eq, "!=": operator.ne}
     tripped = []
+    evaluated_clean = set()
     for rule in rules:
         if not isinstance(rule, dict):
             continue
@@ -110,13 +161,24 @@ def _eval_rules(rules: list, metrics: dict, prev_metrics: dict,
         actual = metrics.get(metric)
         if not _is_number(actual):
             continue
-        pct = rule.get("pct_of_prev")
-        if _is_number(pct):
+        pct_prev = rule.get("pct_of_prev")
+        pct_base = rule.get("pct_of_baseline")
+        if _is_number(pct_prev):
             prev = prev_metrics.get(metric)
             if not _is_number(prev) or prev == 0:
                 continue  # no baseline yet — pct rules need a previous snapshot
-            threshold = prev * pct / 100.0
-            desc = f"{_fmt(pct)}% of prev ({_fmt(threshold)})"
+            threshold = prev * pct_prev / 100.0
+            desc = f"{_fmt(pct_prev)}% of prev ({_fmt(threshold)})"
+        elif _is_number(pct_base):
+            window = rule.get("window_days")
+            if not _is_number(window) or window <= 0:
+                window = DEFAULT_BASELINE_WINDOW
+            base = _baseline_mean(history, metric, int(window), today, now)
+            if base is None or base == 0:
+                continue  # not enough history yet — stay silent, not wrong
+            threshold = base * pct_base / 100.0
+            desc = (f"{_fmt(pct_base)}% of {int(window)}d baseline "
+                    f"({_fmt(threshold)})")
         elif _is_number(rule.get("value")):
             threshold = rule["value"]
             desc = _fmt(threshold)
@@ -126,9 +188,14 @@ def _eval_rules(rules: list, metrics: dict, prev_metrics: dict,
             tripped.append({"metric": metric, "op": op, "threshold": threshold,
                             "threshold_desc": desc, "actual": actual,
                             "rule": {k: rule[k] for k in
-                                     ("metric", "op", "value", "pct_of_prev", "min_hour")
+                                     ("metric", "op", "value", "pct_of_prev",
+                                      "pct_of_baseline", "window_days", "min_hour")
                                      if k in rule}})
-    return tripped
+        else:
+            evaluated_clean.add(metric)
+    # a metric that tripped ANY rule is not clean, whatever other rules said
+    evaluated_clean -= {h["metric"] for h in tripped}
+    return tripped, evaluated_clean
 
 
 def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
@@ -163,7 +230,9 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
     new_state = {"prev_snapshot": prev or None,
                  "last_snapshot_date": state.get("last_snapshot_date")}
 
-    for hit in _eval_rules(cfg.get("rules") or [], metrics, prev_metrics, now):
+    tripped, evaluated_clean = _eval_rules(
+        cfg.get("rules") or [], metrics, prev_metrics, now, history, today)
+    for hit in tripped:
         title = (f"🚨 {name} 异常: {hit['metric']} {hit['op']} "
                  f"{hit['threshold_desc']} (当前 {_fmt(hit['actual'])})")
         signals.append({
@@ -185,6 +254,40 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
 
     snapshot_due = (now.hour >= snapshot_hour
                     and state.get("last_snapshot_date") != today)
+
+    # Recovery: a metric that alarmed on a PREVIOUS day and whose rules were
+    # evaluated clean this pass gets one ✅ all-clear, checked only at
+    # snapshot time (once daily — no intraday flapping).
+    tripped_dates = dict(state.get("tripped") or {})
+    for hit in tripped:
+        tripped_dates[hit["metric"]] = today
+    if snapshot_due:
+        for m in sorted(evaluated_clean):
+            d = tripped_dates.get(m)
+            if d and d < today:
+                title = f"✅ {name} 恢复: {m} 回到正常 (当前 {_fmt(metrics[m])})"
+                signals.append({
+                    "event_id": f"recovery:{m}:{today}",
+                    "ts": ts,
+                    "title": title,
+                    "summary": title,
+                    "body": f"{m} 曾于 {d} 触发告警，本次评估已回到正常范围。",
+                    "actor": {"raw": "", "resolved": ""},
+                    "payload": {"kind": "recovery", "metric": m,
+                                "actual": metrics[m]},
+                })
+                _append_history(history, {
+                    "ts": ts, "date": today, "kind": "recovery", "name": name,
+                    "metric": m, "actual": metrics[m], "tripped_on": d,
+                    "digest_hint": digest_hint,
+                })
+                del tripped_dates[m]
+    # GC: drop trip markers older than a week (rule removed / never re-clean)
+    from datetime import timedelta
+    stale_cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    new_state["tripped"] = {m: d for m, d in tripped_dates.items()
+                            if d >= stale_cutoff}
+
     if snapshot_due:
         lines = []
         for k in sorted(metrics):
@@ -237,8 +340,10 @@ def validate_cfg(cfg: dict) -> list[str]:
             errs.append(f"rules[{i}].metric: required")
         if rule.get("op") not in ALLOWED_OPS:
             errs.append(f"rules[{i}].op: must be one of {', '.join(ALLOWED_OPS)}")
-        if not (_is_number(rule.get("value")) or _is_number(rule.get("pct_of_prev"))):
-            errs.append(f"rules[{i}]: needs numeric value or pct_of_prev")
+        if not (_is_number(rule.get("value")) or _is_number(rule.get("pct_of_prev"))
+                or _is_number(rule.get("pct_of_baseline"))):
+            errs.append(f"rules[{i}]: needs numeric value or pct_of_prev "
+                        "or pct_of_baseline")
     hour = cfg.get("snapshot_hour")
     if hour is not None and (not _is_number(hour) or not 0 <= hour <= 23):
         errs.append("snapshot_hour: must be 0-23")

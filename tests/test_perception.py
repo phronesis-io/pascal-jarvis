@@ -524,3 +524,55 @@ def test_capped_inbox_expires_week_old_entries_even_under_cap(tmp_path):
     assert "evt2" in kept and "evt1" not in kept
     archives = list((rt.memory_dir / "warm" / "archive").glob("perception_archive_*.md"))
     assert archives and "evt1" in archives[0].read_text()
+
+
+# ── dry run (connector setup aid) ────────────────────────────────────
+
+
+def test_dry_run_persists_nothing(tmp_path):
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    (watched / "a.md").write_text("hello")
+    rt = _runtime(tmp_path, SOURCES_FILEWATCH % watched)
+    report = rt.dry_run()
+    assert "docs (file_watch): ✓" in report
+    assert not rt.state_file.exists()          # no state written
+    assert not (rt.system_dir / "inbox_ops.md").exists()
+    assert not rt.seen_file.exists()
+
+
+def test_dry_run_reports_invalid_cfg_and_single_source(tmp_path):
+    rt = _runtime(tmp_path, """
+perception:
+  sources:
+    - id: badprobe
+      type: metrics_probe
+      collect: {name: nope}
+    - id: probe
+      type: metrics_probe
+      collect: {name: ok, command: "echo '{\\"metrics\\": {\\"a\\": 1}}'", snapshot_hour: 0}
+""")
+    report = rt.dry_run()
+    assert "badprobe (metrics_probe): ✗ config invalid" in report
+    assert "probe (metrics_probe): ✓ 1 signal(s)" in report
+    only = rt.dry_run("badprobe")
+    assert "probe (metrics_probe): ✓" not in only
+    assert rt.dry_run("ghost") == "source 'ghost' not found in sources.yaml"
+
+
+def test_dry_run_metrics_probe_writes_no_history(tmp_path):
+    hist = tmp_path / "h.jsonl"
+    rt = _runtime(tmp_path, f"""
+perception:
+  sources:
+    - id: probe
+      type: metrics_probe
+      collect:
+        name: ok
+        command: "echo '{{\\"metrics\\": {{\\"a\\": 1}}}}'"
+        snapshot_hour: 0
+        history_file: "{hist}"
+""")
+    report = rt.dry_run()
+    assert "✓ 1 signal(s)" in report
+    assert not hist.exists()

@@ -150,3 +150,76 @@ def test_post_prose_plus_trailing_sentinel_promotes(tmp_path):
     assert r.stdout.strip() == ""
     assert (mdir / ".digest_watermark.json").exists()
     assert not (mdir / ".digest_pending.json").exists()
+
+
+# ── absence alerts (PRD-1: silence must not look like health) ────────
+
+
+def _write_sources_yaml(tmp_path, snapshot_hour=9, name="demo"):
+    (tmp_path / "sources.yaml").write_text(f"""
+perception:
+  sources:
+    - id: {name}
+      type: metrics_probe
+      enabled: true
+      collect:
+        name: {name}
+        command: "echo x"
+        snapshot_hour: {snapshot_hour}
+        history_file: "{tmp_path}/data/metrics/{name}.jsonl"
+""")
+
+
+def _now_at(hour):
+    from datetime import datetime
+    return datetime.now().astimezone().replace(hour=hour, minute=0)
+
+
+def test_absence_alert_when_snapshot_overdue(tmp_path):
+    from core.metrics_digest import main
+    _write_sources_yaml(tmp_path, snapshot_hour=9)
+    out = main(tmp_path, now=_now_at(12))  # 9 + 2h grace < 12
+    assert '"kind": "absence"' in out
+    assert '"name": "demo"' in out
+    # once per day: second call stays silent
+    assert main(tmp_path, now=_now_at(13)) == ""
+
+
+def test_no_absence_before_grace(tmp_path):
+    from core.metrics_digest import main
+    _write_sources_yaml(tmp_path, snapshot_hour=9)
+    assert main(tmp_path, now=_now_at(10)) == ""  # inside 2h grace
+
+
+def test_no_absence_when_snapshot_exists(tmp_path):
+    from datetime import datetime
+    from core.metrics_digest import main
+    _write_sources_yaml(tmp_path, snapshot_hour=9)
+    today = datetime.now().strftime("%Y-%m-%d")
+    _write_records(tmp_path, [{"ts": f"{today}T09:30:00+08:00", "date": today,
+                               "kind": "snapshot", "name": "demo",
+                               "metrics": {"a": 1}}])
+    out = main(tmp_path, now=_now_at(12))
+    assert '"kind": "absence"' not in out
+    assert '"kind": "snapshot"' in out  # the real record still emits
+
+
+def test_absence_alone_does_not_stage_pending(tmp_path):
+    from core.metrics_digest import main
+    _write_sources_yaml(tmp_path, snapshot_hour=9)
+    main(tmp_path, now=_now_at(12))
+    # absence records are synthetic — nothing to watermark
+    assert not (tmp_path / "data" / "metrics" / ".digest_pending.json").exists()
+
+
+def test_disabled_probe_never_alerts_absence(tmp_path):
+    from core.metrics_digest import main
+    (tmp_path / "sources.yaml").write_text("""
+perception:
+  sources:
+    - id: demo
+      type: metrics_probe
+      enabled: false
+      collect: {name: demo, command: "echo x", snapshot_hour: 0}
+""")
+    assert main(tmp_path, now=_now_at(23)) == ""

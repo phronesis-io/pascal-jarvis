@@ -433,9 +433,82 @@ class PerceptionRuntime:
         return " ".join(parts)
 
 
+    # ── dry run (connector setup aid) ────────────────────────────────
+
+    def dry_run(self, source_id: str | None = None) -> str:
+        """Validate + trial-collect sources WITHOUT persisting anything: no
+        state save, no inbox write, no seen-store entry. Adapters with
+        external write side-effects check PERCEPTION_DRY_RUN (set here) and
+        skip them (e.g. metrics_probe's history jsonl — a dry-run record
+        would come back as a duplicate card). For humans setting up
+        sources.yaml: `python3 -m core.perception --dry-run [--source ID]`.
+        """
+        defaults, sources = self.load_sources()
+        if not sources:
+            return "no sources configured (sources.yaml missing or empty)"
+        state = self._load_state()
+        lines = []
+        os.environ["PERCEPTION_DRY_RUN"] = "1"
+        try:
+            for src in sources:
+                sid = src.get("id")
+                if not sid or (source_id and sid != source_id):
+                    continue
+                stype = src.get("type")
+                prefix = f"{sid} ({stype})"
+                if not src.get("enabled", True):
+                    lines.append(f"{prefix}: DISABLED — skipped")
+                    continue
+                try:
+                    adapter = importlib.import_module(f"sources.{stype}")
+                except ImportError as e:
+                    lines.append(f"{prefix}: ✗ adapter missing ({e})")
+                    continue
+                validate = getattr(adapter, "validate_cfg", None)
+                if callable(validate):
+                    try:
+                        errs = validate(src.get("collect") or {}) or []
+                    except Exception as e:
+                        errs = [f"validate_cfg crashed: {e}"]
+                    if errs:
+                        lines.append(f"{prefix}: ✗ config invalid: "
+                                     + "; ".join(str(x) for x in errs))
+                        continue
+                adapter_state = dict(state.get(sid, {}).get("adapter_state", {}))
+                try:
+                    signals, new_state = adapter.collect(
+                        src.get("collect") or {}, adapter_state)
+                except Exception as e:
+                    lines.append(f"{prefix}: ✗ collect crashed: {e}")
+                    continue
+                err = (new_state or {}).get("error_type")
+                if err:
+                    lines.append(f"{prefix}: ✗ error_type={err}")
+                    continue
+                lines.append(f"{prefix}: ✓ {len(signals or [])} signal(s)")
+                for sig in (signals or [])[:3]:
+                    lines.append(f"    - {sig.get('title', '')[:100]}")
+        finally:
+            os.environ.pop("PERCEPTION_DRY_RUN", None)
+        if source_id and not lines:
+            return f"source '{source_id}' not found in sources.yaml"
+        return "\n".join(lines)
+
+
 if __name__ == "__main__":
+    import argparse
+    import sys
+    parser = argparse.ArgumentParser(
+        description="perception runtime: collect pass, or --dry-run to "
+                    "validate/trial sources without persisting anything")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--source", help="dry-run a single source id")
+    args = parser.parse_args()
     jarvis_dir = os.environ.get("JARVIS_DIR", ".")
     memory_dir = os.environ.get("MEMORY_DIR", str(Path(jarvis_dir) / "memory"))
-    import sys
     sys.path.insert(0, jarvis_dir)
-    print(PerceptionRuntime(jarvis_dir, memory_dir).run_collect())
+    rt = PerceptionRuntime(jarvis_dir, memory_dir)
+    if args.dry_run or args.source:
+        print(rt.dry_run(args.source))
+    else:
+        print(rt.run_collect())
