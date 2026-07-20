@@ -385,3 +385,33 @@ def test_pre_timeout_does_not_advance_last_success(tmp_path, monkeypatch):
     state = runner.load_state()
     assert state["t"]["last_status"] == "pre_timeout"
     assert state["t"].get("last_success", 0) == 0   # stays stale → STARVED-detectable
+
+
+# ── REQ-109: self-diagnostic content-aware dedup ─────────────────────────
+
+def test_diag_should_alert_content_aware():
+    import importlib.util
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "self_diagnostic_post_req109", root / "tasks" / "self_diagnostic_post.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    W = ["⚠️ a 挂了", "⚠️ b 超时"]
+    now = 1_000_000.0
+    h4, h5, h25 = 4 * 3600, 5 * 3600, 25 * 3600
+
+    # no warnings → never
+    assert not mod.should_alert([], {}, now=now)
+    # empty stamp (never alerted) → alert
+    assert mod.should_alert(W, {}, now=now)
+    # inside 4h hard floor → suppressed even with new content
+    assert not mod.should_alert(W, {"ts": now - h4 + 60, "lines": []}, now=now)
+    # past floor, same content → suppressed (this was the 8h relay ping-pong)
+    assert not mod.should_alert(W, {"ts": now - h5, "lines": W}, now=now)
+    # past floor, NEW line → alert
+    assert mod.should_alert(W + ["⚠️ c 新问题"], {"ts": now - h5, "lines": W},
+                            now=now)
+    # unchanged content, >24h → one daily reminder
+    assert mod.should_alert(W, {"ts": now - h25, "lines": W}, now=now)

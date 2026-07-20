@@ -64,6 +64,9 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
 # longer debugging prose can still discuss the phrase.
 NOOP_REPLY_NEEDLES: tuple[str, ...] = (
     "no response requested",
+    # Bare CLI failure of a helper call (e.g. the haiku tool-narrator) — six
+    # "🔧 Execution error" messages reached Pascal in the week of 7/13.
+    "execution error",
 )
 
 # Checked ONLY for proactive (heartbeat) messages, where these phrases in the
@@ -137,6 +140,40 @@ def sanitize_for_user(text: str, fallback: str = "") -> str:
     if looks_like_error(text):
         return fallback
     return text
+
+
+import re as _re
+
+# Prompt-framing headers the model echoes back at the top of a task slice.
+# These reached Pascal's cards verbatim through 7/20 ("=== TASK: checkin ===",
+# "[CHECKIN]", "[2026-07-19 09:16] checkin") — fix the CLASS at the shared
+# boundary, not one task at a time (the 7/16 humanlaya lesson: per-task
+# patches let the family keep breeding).
+_FRAMING_LINE_RE = _re.compile(
+    r"^\s*(?:"
+    r"===\s*TASK[^=\n]*==="            # === TASK: checkin ===
+    r"|\[[A-Z][A-Z_ -]{1,24}\]"        # [CHECKIN], [DAILY PLAN]
+    # [ts] taskname — the tail class is ASCII-only ON PURPOSE: task names are
+    # ASCII identifiers, while CJK prose has no spaces, so a \S tail would
+    # match "[ts] 起床锻炼" timeline lines and eat legitimate card content
+    # (red-team 7/20 finding #1).
+    r"|\[20\d\d-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?\]\s*[A-Za-z0-9_./-]{0,40}"
+    r")\s*$")
+
+
+def strip_task_framing(text: str) -> str:
+    """Drop leading prompt-framing header lines from a model reply.
+
+    Only strips from the TOP (headers are echoes of the prompt's own task
+    framing); a bracketed token in the middle of real prose is content and
+    stays. Never returns None; strips at most a few leading lines.
+    """
+    lines = (text or "").splitlines()
+    i = 0
+    while i < len(lines) and (not lines[i].strip()
+                              or _FRAMING_LINE_RE.match(lines[i])):
+        i += 1
+    return "\n".join(lines[i:]).strip()
 
 
 def extract_json(raw: str) -> str:

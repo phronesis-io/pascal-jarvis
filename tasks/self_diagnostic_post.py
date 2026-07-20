@@ -49,12 +49,39 @@ def _user_id() -> str:
         return ""
 
 
-def _recently_alerted() -> bool:
+REMIND_INTERVAL_S = 24 * 3600
+
+
+def _read_stamp() -> dict:
     try:
-        stamp = json.loads(STAMP.read_text())
-        return time.time() - stamp.get("ts", 0) < DEDUP_WINDOW_S
+        return json.loads(STAMP.read_text()) or {}
     except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def should_alert(warnings: list[str], stamp: dict, now: float | None = None) -> bool:
+    """Alert on NEW content, not on window lapse (REQ-109).
+
+    The old time-only window produced an 8h relay ping-pong: the daemon's
+    re-send wrote the shared stamp, this post then suppressed on the fresh
+    stamp, the daemon's window lapsed first and it "rescued" again — Pascal
+    got the same persisting warning every 8 hours, each blaming a "broken"
+    primary path. Rules: 4h hard floor stays; past it, send only if a warning
+    line is not already in the stamped set; an unchanged set re-alerts at
+    most once per 24h as a reminder.
+    """
+    if not warnings:
         return False
+    now = time.time() if now is None else now
+    age = now - float(stamp.get("ts", 0) or 0)
+    if age < DEDUP_WINDOW_S:
+        return False
+    # Compare exactly what the stamp stores (first 20 lines): with >20
+    # warnings a full-set comparison is永远 non-empty and re-alerts every 4h
+    # forever (red-team 7/20 finding #7).
+    if set(warnings[:20]) - set(stamp.get("lines") or []):
+        return True
+    return age >= REMIND_INTERVAL_S
 
 
 def _mark_alerted(lines: list[str]) -> None:
@@ -130,11 +157,11 @@ def main():
             pre_output = cache.read_text(encoding="utf-8", errors="replace")
 
     warnings = extract_warnings(pre_output)
-    if not warnings:
-        return
-    if _recently_alerted():
-        print(f"[self_diagnostic_post] {len(warnings)} warning(s) suppressed "
-              "(4h dedup window)", file=sys.stderr)
+    stamp = _read_stamp()
+    if not should_alert(warnings, stamp):
+        if warnings:
+            print(f"[self_diagnostic_post] {len(warnings)} warning(s) "
+                  "suppressed (no new content)", file=sys.stderr)
         return
 
     uid = _user_id()
@@ -143,10 +170,12 @@ def main():
               file=sys.stderr)
         return
 
-    text = ("🩺 自诊断发现 " + str(len(warnings)) + " 个问题：\n"
+    unchanged = not (set(warnings[:20]) - set(stamp.get("lines") or []))
+    text = ("🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
+            + ("（昨天说过的还没好）" if unchanged else "") + "：\n"
             + "\n".join(warnings[:12])
             + ("\n…（其余略）" if len(warnings) > 12 else "")
-            + "\n（4 小时内同类告警只发一次）")
+            + "\n（同样的问题一天最多提醒一次）")
     if _send(text, uid):
         _mark_alerted(warnings)
         print(f"[self_diagnostic_post] alerted {len(warnings)} warning(s)",

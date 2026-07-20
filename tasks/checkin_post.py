@@ -18,7 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.safety import looks_like_error, parse_json_response
+from core.safety import (looks_like_error, parse_json_response,
+                         strip_task_framing)
 from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
 
@@ -165,6 +166,12 @@ def main() -> int:
         message = parsed["response"].strip()
         if not message:
             return 0
+
+    # Echoed prompt framing ("[CHECKIN]", "=== TASK: checkin ===",
+    # "[2026-07-19 09:16] checkin") reached cards verbatim through 7/20.
+    message = strip_task_framing(message)
+    if not message:
+        return 0
 
     # Read existing entries
     entries = read_jsonl(LOG_FILE)

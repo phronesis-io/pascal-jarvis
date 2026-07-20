@@ -1684,3 +1684,55 @@ def test_cli_create_missing_args(intent_db):
     rc, _, err = _run_cli(intent_db, ["create", "x"])
     assert rc == 2
     assert "usage" in err
+
+
+# ===========================================================================
+# REQ-107 — standing cron intent suppresses per-instance calendar prep
+# (7/19-7/20: 晨间康复 cron anchor + matching recurring event = two
+#  near-identical cards 30 minutes apart, every morning)
+# ===========================================================================
+
+def test_standing_cron_suppresses_matching_prep(intent_db):
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    mod.create_intent(
+        name="晨间康复 anchor", trigger_type="cron",
+        trigger_config={"expression": "45 8 * * *"},
+        prompt="晨间康复提醒", action_type="notify", source="conversation",
+    )
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    # Real live title: mixed-width parens defeat the details split, so the
+    # long tail stays in the title — the guard must still match the anchor.
+    md = _cal_md(day, [("08:45-09:15",
+                        "晨间康复  (顺序：刷牙 → 下单外卖 → 练 → 吃（练习填满外卖等待窗）。")])
+    created = mod.generate_calendar_intents(md)
+    preps = [i for i in created
+             if (mod.get_intent(i) or {}).get("name", "").startswith("Prep:")]
+    assert preps == []
+
+
+def test_standing_cron_short_name_needs_exact_match(intent_db):
+    """A 2-char cron intent ("周会") must not swallow preps for longer titles
+    that merely contain it; unrelated events keep their prep."""
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    mod.create_intent(
+        name="周会", trigger_type="cron",
+        trigger_config={"expression": "0 10 * * *"},
+        prompt="周会提醒", action_type="notify", source="conversation",
+    )
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    created = mod.generate_calendar_intents(
+        _cal_md(day, [("15:00-16:00", "季度周会评审大会")]))
+    assert any((mod.get_intent(i) or {}).get("name", "").startswith("Prep:")
+               for i in created), "containment of a short name must NOT suppress"
+
+    created2 = mod.generate_calendar_intents(
+        _cal_md(day, [("17:00-18:00", "周会")]))
+    preps2 = [i for i in created2
+              if (mod.get_intent(i) or {}).get("name", "").startswith("Prep:")]
+    assert preps2 == [], "exact match must suppress"

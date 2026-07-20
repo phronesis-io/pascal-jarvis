@@ -232,7 +232,40 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
 
     tripped, evaluated_clean = _eval_rules(
         cfg.get("rules") or [], metrics, prev_metrics, now, history, today)
+    # Alert once per (metric, day); re-alert intraday only if the value got
+    # WORSE. The inbox path already dedups via event_id, but history got a
+    # record on EVERY 2h pass while a rule stayed tripped — and metrics-digest
+    # is forbidden from merging records, so a persisting condition became a
+    # fresh 🚨 card every cycle (20+ "一手源挂了" cards in the week of 7/13,
+    # 10 on 7/19 alone, for a condition the evening investigation concluded
+    # was upstream jitter). Level-triggered pages are for machines; Pascal
+    # gets edge-triggered ones.
+    raw_alerted = state.get("alerted_today")
+    alerted = dict(raw_alerted) if isinstance(raw_alerted, dict) else {}
+    if alerted.get("date") != today or not isinstance(
+            alerted.get("metrics"), dict):
+        # collect() must never raise (adapter contract) — malformed persisted
+        # state resets rather than KeyError-ing the source into a permanent
+        # crash (red-team 7/20 finding #6).
+        alerted = {"date": today, "metrics": {}}
+    # Compare against the state as of loop START: two rules on one metric
+    # (warning >=10, critical >=100) must BOTH alert on the pass that trips
+    # them — comparing against a mid-loop write silently dropped the
+    # escalation tier (red-team 7/20 finding #5).
+    prev_alerted = dict(alerted["metrics"])
+    fresh_hits = []
     for hit in tripped:
+        prev_actual = prev_alerted.get(hit["metric"])
+        if prev_actual is not None:
+            worse = (hit["actual"] > prev_actual if hit["op"] in (">", ">=")
+                     else hit["actual"] < prev_actual if hit["op"] in ("<", "<=")
+                     else False)
+            if not worse:
+                continue
+        alerted["metrics"][hit["metric"]] = hit["actual"]
+        fresh_hits.append(hit)
+    new_state_alerted = alerted
+    for hit in fresh_hits:
         title = (f"🚨 {name} 异常: {hit['metric']} {hit['op']} "
                  f"{hit['threshold_desc']} (当前 {_fmt(hit['actual'])})")
         signals.append({
@@ -251,6 +284,7 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
             "metric": hit["metric"], "rule": hit["rule"], "actual": hit["actual"],
             "threshold": hit["threshold"], "digest_hint": digest_hint,
         })
+    new_state["alerted_today"] = new_state_alerted
 
     snapshot_due = (now.hour >= snapshot_hour
                     and state.get("last_snapshot_date") != today)

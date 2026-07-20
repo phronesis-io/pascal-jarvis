@@ -1078,20 +1078,28 @@ def _check_diag_staleness():
         if pre_mtime - stamp_ts < DIAG_ALERT_WINDOW:
             return
         try:
-            from tasks.self_diagnostic_post import extract_warnings
+            from tasks.self_diagnostic_post import extract_warnings, should_alert
         except Exception:
             return  # tasks/ tree unreadable — leg A above still stands
         warnings = extract_warnings(
             DIAG_PRE_FILE.read_text(encoding="utf-8", errors="replace"))
-        if not warnings:
+        # Content-aware (REQ-109): re-send only for warnings the stamped set
+        # has never carried, or as a 24h reminder. The old window-only check
+        # ping-ponged with the post's dedup — the same persisting warning
+        # reached Pascal every 8h, each time claiming the primary path broke.
+        try:
+            stamp = json.loads(DIAG_ALERT_STAMP.read_text()) or {}
+        except (OSError, ValueError, TypeError):
+            stamp = {}
+        if not should_alert(warnings, stamp):
             return
-        log("WARN", f"self-diagnostic warnings undelivered "
-            f"({len(warnings)}) — re-sending via daemon channel")
-        notify_lark("🩺 自诊断发现 " + str(len(warnings)) + " 个问题（它自己的"
-                    "告警没发出去，这条由守护进程代发）：\n"
+        log("WARN", f"self-diagnostic warnings unsent by post "
+            f"({len(warnings)}) — sending via daemon channel")
+        notify_lark("🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
+                    "（这条由守护进程代发）：\n"
                     + "\n".join(warnings[:12])
                     + ("\n…（其余略）" if len(warnings) > 12 else "")
-                    + "\n（4 小时内同类告警只发一次）")
+                    + "\n（同样的问题一天最多提醒一次）")
         try:
             DIAG_ALERT_STAMP.write_text(json.dumps(
                 {"ts": now, "lines": warnings[:20]}, ensure_ascii=False))

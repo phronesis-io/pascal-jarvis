@@ -830,6 +830,12 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         title = SOURCE_TITLE.get(single_source, single_source or "一件事")
+        # Echoed prompt framing ("=== TASK: x ===", "[CHECKIN]", "[ts] task")
+        # is never card content — same class fix as checkin_post (REQ-104).
+        from core.safety import strip_task_framing
+        text = strip_task_framing(text)
+        if not text:
+            return
         # Buttons follow the card: an OPTIONS line authored by the task wins;
         # otherwise fall back to what this source is usually asking for, and
         # only then to「已阅」.

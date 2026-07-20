@@ -1612,6 +1612,64 @@ def generate_calendar_intents(calendar_md: str,
     # both slip through before the DB sees the first.
     existing_tags, tag_to_row = _load_cal_index(db)
 
+    # Standing cron intents already ARE the reminder for their activity: a
+    # calendar event of the same activity must not mint a per-instance prep on
+    # top (7/19-7/20: the 08:45 晨间康复 cron anchor Pascal asked for plus the
+    # matching recurring calendar event = two near-identical cards 30 minutes
+    # apart, every single morning). Normalized once per sync, matched below.
+    def _activity_norm(name: str) -> str:
+        # Cut parenthetical tails (half- OR full-width — the live 晨间康复
+        # event title keeps its "(顺序：…" tail because mixed-width parens
+        # defeat the pass-1 details split) and trailing punctuation, then
+        # drop whitespace. What remains is the bare activity name.
+        name = re.sub(r"[（(].*$", "", str(name or ""))
+        return re.sub(r"[\s。．.,，:：]+", "", name).lower()
+
+    def _cron_fires_daily(it: dict) -> bool:
+        # Only an every-day cron can claim to "already cover" a calendar
+        # instance on an arbitrary date. A Monday-only cron must not swallow a
+        # Wednesday event's prep (red-team 7/20 finding #3): require the
+        # day-of-month, month and day-of-week fields to all be '*'.
+        try:
+            expr = str((json.loads(it.get("trigger_config") or "{}")
+                        or {}).get("expression", ""))
+            fields = expr.split()
+            return len(fields) == 5 and fields[2] == fields[3] == fields[4] == "*"
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+
+    try:
+        standing_cron_names = [
+            _activity_norm(it.get("name"))
+            for it in list_intents(status="pending", limit=500)
+            if it.get("trigger_type") == "cron" and _cron_fires_daily(it)
+        ]
+    except Exception:
+        # Guard is best-effort: a failed query degrades to no-suppression
+        # (worst case a duplicate prep), never to skipping the whole calendar
+        # bridge (red-team 7/20 finding #10).
+        standing_cron_names = []
+
+    def _covered_by_standing_cron(event_title: str) -> str | None:
+        """Name of a pending cron intent covering this activity, else None.
+
+        Containment either way so "晨间康复" covers "晨间康复 anchor", but a
+        containment match needs ≥4 chars on the shorter side — short generic
+        titles ("周会") only suppress on exact equality.
+        """
+        norm = _activity_norm(event_title)
+        if not norm:
+            return None
+        for cand in standing_cron_names:
+            if not cand:
+                continue
+            if norm == cand:
+                return cand
+            shorter = min(len(norm), len(cand))
+            if shorter >= 4 and (norm in cand or cand in norm):
+                return cand
+        return None
+
     # ── Pass 2: per-event prep + closure ──
     for current_date in sorted(by_date):
         for ev in by_date[current_date]:
@@ -1638,6 +1696,15 @@ def generate_calendar_intents(calendar_md: str,
             elif hours_until > 2:
                 prep_dt = event_dt - PREP_LEAD
                 prep_prompt = f"{title} 在 {start_time} 开始（还有 30 分钟）。快速回顾：这个会/活动的目的是什么？有什么需要提前准备的？"
+
+            # A standing cron intent for the same activity already reminds him
+            # — skip the per-instance prep entirely (see standing_cron_names).
+            covering = _covered_by_standing_cron(title) if prep_dt else None
+            if covering:
+                print(f"[calendar-intents] skip prep for {title!r} @ "
+                      f"{current_date}: standing cron intent {covering!r} "
+                      "already covers it", file=sys.stderr)
+                prep_dt = None
 
             # REQ-68.2: a prep whose computed fire time is AT/AFTER the event
             # start is useless (the 18:00 prep that fired AFTER the 17:30 dinner

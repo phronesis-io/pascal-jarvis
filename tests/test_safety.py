@@ -250,3 +250,47 @@ def test_summarize_respects_max_lines_arg():
 
 def test_summarize_strips_surrounding_whitespace():
     assert summarize("\n\n  hello  \n\n") == "hello"
+
+
+# ── strip_task_framing (REQ-104) ─────────────────────────────────────────
+
+def test_strip_task_framing_removes_headers():
+    from core.safety import strip_task_framing
+    assert strip_task_framing(
+        "=== TASK: checkin ===\n今天不错。") == "今天不错。"
+    assert strip_task_framing(
+        "[CHECKIN]\n\n昨晚你聊到很晚。") == "昨晚你聊到很晚。"
+    assert strip_task_framing(
+        "[2026-07-19 09:16] checkin\n\n正文在这。") == "正文在这。"
+    # stacked headers all go
+    assert strip_task_framing(
+        "=== TASK: checkin ===\n[CHECKIN]\n正文。") == "正文。"
+
+
+def test_strip_task_framing_keeps_content():
+    from core.safety import strip_task_framing
+    # bracketed tokens mid-prose are content
+    s = "他说 [CHECKIN] 这个词其实是内部黑话。"
+    assert strip_task_framing(s) == s
+    # a Chinese/lowercase bracket line is not framing
+    s2 = "[今天的重点]\n锻炼。"
+    assert strip_task_framing(s2) == s2
+    # all-framing input degrades to empty, caller suppresses the card
+    assert strip_task_framing("[CHECKIN]") == ""
+    assert strip_task_framing("") == ""
+
+
+def test_strip_task_framing_keeps_cjk_timeline_lines():
+    """Red-team 7/20 #1: '[ts] 中文' timeline lines are CONTENT (checkin
+    evidence quotes them); only ASCII task tokens after a timestamp are
+    framing."""
+    from core.safety import strip_task_framing
+    s = "[2026-07-19 03:00] cron失败\n详情：任务连续三次超时。"
+    assert strip_task_framing(s) == s
+    timeline = ("[2026-07-19 07:30] 起床锻炼\n"
+                "[2026-07-19 10:00] 产品评审会\n"
+                "[2026-07-19 14:00] 试讲")
+    assert strip_task_framing(timeline) == timeline
+    # ASCII task token after ts is still framing
+    assert strip_task_framing(
+        "[2026-07-19 09:16] checkin\n\n正文。") == "正文。"

@@ -85,12 +85,48 @@ def test_rule_trips_with_stable_event_id(tmp_path):
     today = datetime.now().strftime("%Y-%m-%d")
     assert anomalies[0]["event_id"] == f"anomaly:a:{today}"
     assert "🚨" in anomalies[0]["title"]
-    # re-collect same day: same stable id (runtime seen-store dedups delivery)
+    # re-collect same day, value unchanged: NOTHING new — neither a signal
+    # nor a history record. History used to log every evaluation, and the
+    # digest cards each record, so a persisting condition paged every 2h
+    # (REQ-106, the 20-cards-in-a-week "一手源挂了" spam).
     signals2, _ = metrics_probe.collect(cfg, state)
-    again = [s for s in signals2 if s["event_id"].startswith("anomaly:")]
-    assert again and again[0]["event_id"] == anomalies[0]["event_id"]
+    assert not [s for s in signals2 if s["event_id"].startswith("anomaly:")]
     kinds = [r["kind"] for r in _records(tmp_path)]
-    assert kinds.count("anomaly") == 2  # history logs each evaluation
+    assert kinds.count("anomaly") == 1
+
+
+def test_anomaly_realerts_only_on_worsening(tmp_path):
+    """REQ-106: same day re-trip is silent unless the value moved further in
+    the rule's bad direction; a NEW day alerts again from scratch."""
+    mfile = tmp_path / "m.json"
+
+    def emit(v):
+        mfile.write_text(json.dumps({"metrics": {"broken": v}}))
+
+    cfg = _cfg(tmp_path, command=f"cat {mfile}",
+               rules=[{"metric": "broken", "op": ">=", "value": 1}])
+    emit(1)
+    signals, state = metrics_probe.collect(cfg, {})
+    assert [s for s in signals if s["event_id"].startswith("anomaly:")]
+    # still 1 → silent; improved to lower-but-tripped is also silent
+    emit(1)
+    signals, state = metrics_probe.collect(cfg, state)
+    assert not [s for s in signals if s["event_id"].startswith("anomaly:")]
+    # worsened 1 → 3: re-alert (and history records it)
+    emit(3)
+    signals, state = metrics_probe.collect(cfg, state)
+    assert [s for s in signals if s["event_id"].startswith("anomaly:")]
+    # back down to 2 (better than 3, still tripped): silent
+    emit(2)
+    signals, state = metrics_probe.collect(cfg, state)
+    assert not [s for s in signals if s["event_id"].startswith("anomaly:")]
+    anomaly_actuals = [r["actual"] for r in _records(tmp_path)
+                       if r["kind"] == "anomaly"]
+    assert anomaly_actuals == [1, 3]
+    # next day: alerted_today resets and the same value alerts again
+    state["alerted_today"]["date"] = "2000-01-01"
+    signals, state = metrics_probe.collect(cfg, state)
+    assert [s for s in signals if s["event_id"].startswith("anomaly:")]
 
 
 def test_rule_pct_of_prev(tmp_path):
@@ -312,3 +348,24 @@ def test_dry_run_env_skips_history(tmp_path, monkeypatch):
     signals, _ = metrics_probe.collect(_cfg(tmp_path), {})
     assert signals  # snapshot still emitted for inspection
     assert _records(tmp_path) == []  # but nothing persisted
+
+
+def test_multi_rule_escalation_both_alert_first_pass(tmp_path):
+    """Red-team 7/20 #5: warning + critical rules on ONE metric must both
+    alert on the pass that trips them."""
+    mfile = tmp_path / "m.json"
+    mfile.write_text(json.dumps({"metrics": {"errs": 500}}))
+    cfg = _cfg(tmp_path, command=f"cat {mfile}",
+               rules=[{"metric": "errs", "op": ">=", "value": 10},
+                      {"metric": "errs", "op": ">=", "value": 100}])
+    signals, state = metrics_probe.collect(cfg, {})
+    anomalies = [s for s in signals if s["event_id"].startswith("anomaly:")]
+    assert len(anomalies) == 2
+
+
+def test_malformed_alerted_state_never_raises(tmp_path):
+    """Red-team 7/20 #6: collect() must not raise on corrupt alerted_today."""
+    for bad in ({"date": "2026-07-20"}, "garbage", {"metrics": "x"}, 42):
+        cfg = _cfg(tmp_path, rules=[{"metric": "a", "op": "<=", "value": 5}])
+        signals, state = metrics_probe.collect(cfg, {"alerted_today": bad})
+        assert isinstance(state.get("alerted_today"), dict)

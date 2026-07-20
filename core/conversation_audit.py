@@ -171,6 +171,13 @@ def connect(path: Path) -> sqlite3.Connection:
             ON audit_issues(run_id, severity, issue_type);
         """
     )
+    # Closure workflow (REQ-105, approved 2026-07-14): resolved findings carry
+    # a resolution note. Migration guard for pre-existing DBs.
+    try:
+        conn.execute(
+            "ALTER TABLE audit_issues ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 
@@ -341,14 +348,32 @@ def ingest_sessions(conn: sqlite3.Connection, run_id: int, session_dirs: Iterabl
 def _add_issue(conn: sqlite3.Connection, run_id: int, severity: str,
                issue_type: str, title: str, evidence: str,
                recommendation: str, status: str = "open") -> None:
+    evidence = evidence[:2000]
+    resolution = ""
+    if status == "open":
+        # Closure carry-forward (REQ-105): a finding someone already
+        # adjudicated must not reopen just because the daily run re-derives
+        # the same evidence inside its 24h window. Exact (type, evidence)
+        # match — same message re-derived produces the same evidence string.
+        prior = conn.execute(
+            """
+            SELECT status, resolution FROM audit_issues
+            WHERE issue_type=? AND evidence=? AND status='resolved'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (issue_type, evidence),
+        ).fetchone()
+        if prior:
+            status, resolution = "resolved", prior["resolution"]
     conn.execute(
         """
         INSERT INTO audit_issues
-        (run_id, severity, issue_type, title, evidence, recommendation, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (run_id, severity, issue_type, title, evidence, recommendation, status,
+         resolution)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (run_id, severity, issue_type, title, evidence[:2000],
-         recommendation, status),
+        (run_id, severity, issue_type, title, evidence,
+         recommendation, status, resolution),
     )
 
 
@@ -606,6 +631,158 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     return after_count - start_count
 
 
+# ── Card leak sentinel (REQ-104) ─────────────────────────────────────────
+# Template/JSON/prompt-framing residue reaching Pascal's cards is a recurring
+# family (HEARTBEAT_OK 7/15 "这卡片非常蠢", raw {"response":...} ×4, a card
+# whose whole body was "send", "=== TASK: checkin ===", "[2026-07-19 09:16]
+# checkin" headers, raw "OPTIONS:" lines when the button parser missed).
+# Every incident was patched per-task; this scans what was actually put on
+# cards so the NEXT escape shows up as an open P0 by itself.
+_CARD_LEAK_SIGNATURES: list[tuple[str, re.Pattern]] = [
+    ("sentinel_token", re.compile(r"HEARTBEAT_OK")),
+    ("raw_json_envelope", re.compile(r'^\s*\{"(?:response|tasks)"', re.M)),
+    # ASCII-only tail — same rationale as safety._FRAMING_LINE_RE: a \S tail
+    # would flag every card quoting a "[ts] 中文" timeline line as a leak.
+    ("task_framing", re.compile(
+        r"^\s*(?:===\s*TASK[^=\n]*===|\[[A-Z][A-Z_ -]{1,24}\]"
+        r"|\[20\d\d-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?\]\s*[A-Za-z0-9_./-]{0,40})\s*$",
+        re.M)),
+    ("bare_send", re.compile(r"\A\s*send\s*\Z")),
+    ("raw_options_line", re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：]", re.M)),
+]
+
+
+def derive_card_leak_issues(conn: sqlite3.Connection, run_id: int,
+                            jarvis_dir: Path, since: datetime) -> int:
+    ledger = jarvis_dir / "memorials.jsonl"
+    found = 0
+    try:
+        lines = ledger.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if rec.get("ev") != "create":
+            continue
+        raw_ts = str(rec.get("ts", ""))
+        ts = _parse_ts(raw_ts if raw_ts.count(":") >= 2 else raw_ts + ":00")
+        if ts is None or ts < since:
+            continue
+        body = str(rec.get("body", ""))
+        for kind, pat in _CARD_LEAK_SIGNATURES:
+            m = pat.search(body)
+            if not m:
+                continue
+            _add_issue(
+                conn, run_id, "P0", "card_template_leak",
+                f"Internal residue ({kind}) reached a user-facing card",
+                f"{rec.get('ts')} memorial={rec.get('id')} "
+                f"source={rec.get('source')} match={m.group(0)[:80]!r} "
+                f"body_head={_excerpt(str(rec.get('body', '')), 160)}",
+                "Fix the emitting task's output handling (strip_task_framing / "
+                "envelope unwrap / OPTIONS extraction) — never ship the card "
+                "path with residue.",
+            )
+            found += 1
+            break  # one issue per card is enough
+    return found
+
+
+# ── Closure workflow (REQ-105, approved 2026-07-14) ──────────────────────
+
+def open_findings(db_path: Path, days: int = 7) -> list[dict]:
+    """Open issues across all runs of the last `days`, deduped by
+    (issue_type, evidence) keeping the newest row. This is the mandatory
+    read at the start of a self-improve round."""
+    conn = connect(db_path)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT i.id, i.run_id, r.started_at, i.severity, i.issue_type,
+               i.title, i.evidence, i.recommendation
+        FROM audit_issues i JOIN audit_runs r ON r.id = i.run_id
+        WHERE i.status='open' AND r.started_at >= ?
+        ORDER BY i.id DESC
+        """,
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    seen, out = set(), []
+    for row in rows:  # newest first
+        key = (row["issue_type"], row["evidence"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(row))
+    out.sort(key=lambda r: ({"P0": 0, "P1": 1}.get(r["severity"], 2), -r["id"]))
+    return out
+
+
+def resolve_findings(db_path: Path, note: str, issue_id: int | None = None,
+                     issue_type: str = "", days: int = 30) -> int:
+    """Mark open findings resolved. Targets one --id, or every open row of
+    --type from the last `days`. The note says WHY (fixed-in-commit, false
+    positive, working-as-designed) — a bare resolve is refused."""
+    if not note.strip():
+        raise ValueError("resolution note is required")
+    conn = connect(db_path)
+    if issue_id is not None:
+        # Resolve every open row carrying the same (type, evidence), not just
+        # this id: the daily runner's 25h window derives the same evidence in
+        # two consecutive runs, and open_findings shows only the newest id —
+        # resolving that one alone made the older twin resurface immediately
+        # (red-team 7/20 finding #2).
+        row = conn.execute(
+            "SELECT issue_type, evidence FROM audit_issues WHERE id=?",
+            (issue_id,)).fetchone()
+        if row is None:
+            conn.close()
+            return 0
+        cur = conn.execute(
+            "UPDATE audit_issues SET status='resolved', resolution=? "
+            "WHERE status='open' AND issue_type=? AND evidence=?",
+            (note, row["issue_type"], row["evidence"]))
+    elif issue_type:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cur = conn.execute(
+            """
+            UPDATE audit_issues SET status='resolved', resolution=?
+            WHERE status='open' AND issue_type=? AND run_id IN
+              (SELECT id FROM audit_runs WHERE started_at >= ?)
+            """,
+            (note, issue_type, cutoff))
+    else:
+        conn.close()
+        raise ValueError("need --id or --type")
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def render_open_findings(db_path: Path, days: int = 7) -> str:
+    rows = open_findings(db_path, days=days)
+    if not rows:
+        return f"# Open audit findings (last {days}d)\n\n- none 🎉\n"
+    lines = [f"# Open audit findings (last {days}d) — {len(rows)}", ""]
+    for r in rows:
+        lines += [
+            f"## [{r['id']}] {r['severity']} `{r['issue_type']}` — {r['title']}",
+            f"- Run {r['run_id']} @ {r['started_at']}",
+            f"- Evidence: {r['evidence']}",
+            f"- Recommendation: {r['recommendation']}",
+            "",
+        ]
+    lines += [
+        "Resolve with: python3 -m core.conversation_audit resolve "
+        "--id N --note '...' (or --type TYPE)",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def run_audit(paths: AuditPaths, hours: int = 24) -> int:
     since_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
     conn = connect(paths.db_path)
@@ -618,6 +795,7 @@ def run_audit(paths: AuditPaths, hours: int = 24) -> int:
     log_events = ingest_logs(conn, run_id, paths.log_paths, since_dt)
     session_messages = ingest_sessions(conn, run_id, paths.session_dirs, since_dt)
     issues = derive_issues(conn, run_id)
+    issues += derive_card_leak_issues(conn, run_id, paths.jarvis_dir, since_dt)
     conn.execute(
         """
         UPDATE audit_runs
@@ -679,6 +857,37 @@ def render_report(db_path: Path, run_id: int) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import sys as _sys
+    argv = list(_sys.argv[1:] if argv is None else argv)
+
+    # Subcommands (REQ-105). Bare/flag-only invocation stays the daily run —
+    # scripts/run_conversation_audit.sh depends on that.
+    if argv and argv[0] == "open-findings":
+        parser = argparse.ArgumentParser(prog="conversation_audit open-findings")
+        parser.add_argument("--days", type=int, default=7)
+        parser.add_argument("--db", default="")
+        args = parser.parse_args(argv[1:])
+        db = Path(args.db) if args.db else default_paths().db_path
+        print(render_open_findings(db, days=args.days), end="")
+        return 0
+    if argv and argv[0] == "resolve":
+        parser = argparse.ArgumentParser(prog="conversation_audit resolve")
+        parser.add_argument("--id", type=int, default=None)
+        parser.add_argument("--type", dest="issue_type", default="")
+        parser.add_argument("--days", type=int, default=30)
+        parser.add_argument("--note", required=True)
+        parser.add_argument("--db", default="")
+        args = parser.parse_args(argv[1:])
+        db = Path(args.db) if args.db else default_paths().db_path
+        try:
+            n = resolve_findings(db, args.note, issue_id=args.id,
+                                 issue_type=args.issue_type, days=args.days)
+        except ValueError as e:
+            print(f"error: {e}", file=_sys.stderr)
+            return 2
+        print(f"resolved {n} finding(s)")
+        return 0
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--db", default="")

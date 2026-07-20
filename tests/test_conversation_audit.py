@@ -242,3 +242,164 @@ def test_timestamped_shell_errors_still_flag_restart_regressions(tmp_path):
     report = audit.render_report(paths.db_path, run_id)
 
     assert "restart_syntax_regression" in report
+
+
+# ===========================================================================
+# REQ-104 — card leak sentinel: internal residue on delivered cards becomes
+# an open P0 by itself (HEARTBEAT_OK / raw JSON / task framing / bare send /
+# raw OPTIONS line)
+# ===========================================================================
+
+def _ledger_line(ts, body, title="卡", source="checkin", mid="mem_1"):
+    return json.dumps({"ev": "create", "id": mid, "ts": ts, "title": title,
+                       "body": body, "source": source, "options": [],
+                       "context": "", "epoch": 1}, ensure_ascii=False)
+
+
+def _paths(tmp_path):
+    return audit.AuditPaths(jarvis_dir=tmp_path, log_paths=[],
+                            session_dirs=[], db_path=tmp_path / "audit.db")
+
+
+def test_card_leak_sentinel_flags_residue(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    old = (now_local() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text("\n".join([
+        _ledger_line(ts, "分析完毕，没什么可说的。HEARTBEAT_OK", mid="m1"),
+        _ledger_line(ts, '{"response": "今天不错", "action": "notify"}', mid="m2"),
+        _ledger_line(ts, "[CHECKIN]\n\n昨晚你聊到很晚。", mid="m3"),
+        _ledger_line(ts, "send", mid="m4"),
+        _ledger_line(ts, "试讲顺利吗？\n\nOPTIONS: 聊聊 | 知道了", mid="m5"),
+        _ledger_line(ts, "这是一张干净的卡片，正文完全正常。", mid="m6"),
+        _ledger_line(old, "HEARTBEAT_OK", mid="m7"),  # outside window
+    ]) + "\n", encoding="utf-8")
+    run_id = audit.run_audit(_paths(tmp_path), hours=24)
+    conn = audit.connect(tmp_path / "audit.db")
+    rows = conn.execute(
+        "SELECT evidence FROM audit_issues WHERE run_id=? AND "
+        "issue_type='card_template_leak'", (run_id,)).fetchall()
+    conn.close()
+    got = " ".join(r["evidence"] for r in rows)
+    assert len(rows) == 5
+    for mid in ("m1", "m2", "m3", "m4", "m5"):
+        assert f"memorial={mid}" in got
+    assert "m6" not in got and "m7" not in got
+
+
+def test_card_leak_ignores_non_create_events(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(json.dumps(
+        {"ev": "decide", "id": "m1", "ts": ts, "label": "HEARTBEAT_OK"}) + "\n")
+    run_id = audit.run_audit(_paths(tmp_path), hours=24)
+    conn = audit.connect(tmp_path / "audit.db")
+    n = conn.execute("SELECT COUNT(*) FROM audit_issues WHERE run_id=? AND "
+                     "issue_type='card_template_leak'", (run_id,)).fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+# ===========================================================================
+# REQ-105 — closure workflow: open-findings view, resolve, and carry-forward
+# ===========================================================================
+
+def test_resolve_and_carry_forward(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(
+        _ledger_line(ts, "HEARTBEAT_OK", mid="m1") + "\n")
+    paths = _paths(tmp_path)
+    audit.run_audit(paths, hours=24)
+
+    findings = audit.open_findings(paths.db_path, days=7)
+    assert len(findings) == 1
+    fid = findings[0]["id"]
+
+    # resolve requires a note
+    try:
+        audit.resolve_findings(paths.db_path, "  ", issue_id=fid)
+        assert False, "empty note must be refused"
+    except ValueError:
+        pass
+    n = audit.resolve_findings(paths.db_path, "fixed in commit abc123",
+                               issue_id=fid)
+    assert n == 1
+    assert audit.open_findings(paths.db_path, days=7) == []
+
+    # a second run re-derives the same evidence → carried forward as resolved
+    audit.run_audit(paths, hours=24)
+    assert audit.open_findings(paths.db_path, days=7) == []
+    conn = audit.connect(paths.db_path)
+    statuses = [r["status"] for r in conn.execute(
+        "SELECT status FROM audit_issues WHERE issue_type='card_template_leak'"
+    ).fetchall()]
+    conn.close()
+    assert statuses.count("resolved") == 2
+
+
+def test_resolve_by_type_and_open_findings_dedup(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(
+        _ledger_line(ts, "HEARTBEAT_OK", mid="m1") + "\n")
+    paths = _paths(tmp_path)
+    audit.run_audit(paths, hours=24)
+    audit.run_audit(paths, hours=24)  # same evidence twice, two runs
+
+    findings = audit.open_findings(paths.db_path, days=7)
+    assert len(findings) == 1  # deduped by (type, evidence)
+
+    n = audit.resolve_findings(paths.db_path, "false positive — test",
+                               issue_type="card_template_leak")
+    assert n == 2  # both open rows closed
+    assert audit.open_findings(paths.db_path, days=7) == []
+
+
+def test_cli_open_findings_and_resolve(tmp_path, monkeypatch, capsys):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(
+        _ledger_line(ts, "HEARTBEAT_OK", mid="m1") + "\n")
+    paths = _paths(tmp_path)
+    audit.run_audit(paths, hours=24)
+
+    rc = audit.main(["open-findings", "--db", str(paths.db_path)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "card_template_leak" in out
+
+    rc = audit.main(["resolve", "--type", "card_template_leak",
+                     "--note", "wad", "--db", str(paths.db_path)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "resolved 1" in out
+
+    rc = audit.main(["open-findings", "--db", str(paths.db_path)])
+    out = capsys.readouterr().out
+    assert "none 🎉" in out
+
+
+def test_card_leak_task_framing_ignores_cjk_timeline(tmp_path):
+    """Red-team 7/20 #4: a card quoting '[ts] 中文' timeline lines is not a
+    leak."""
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(_ledger_line(
+        ts, "昨天的节奏：\n[2026-07-19 07:30] 起床锻炼\n[2026-07-19 14:00] 试讲",
+        mid="m1") + "\n", encoding="utf-8")
+    run_id = audit.run_audit(_paths(tmp_path), hours=24)
+    conn = audit.connect(tmp_path / "audit.db")
+    n = conn.execute("SELECT COUNT(*) FROM audit_issues WHERE run_id=? AND "
+                     "issue_type='card_template_leak'", (run_id,)).fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+def test_resolve_by_id_closes_twin_rows(tmp_path):
+    """Red-team 7/20 #2: the daily runner's 25h overlap derives the same
+    evidence into two open rows; resolve --id must close both or the older
+    twin resurfaces in open-findings immediately."""
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    (tmp_path / "memorials.jsonl").write_text(
+        _ledger_line(ts, "HEARTBEAT_OK", mid="m1") + "\n")
+    paths = _paths(tmp_path)
+    audit.run_audit(paths, hours=25)
+    audit.run_audit(paths, hours=25)
+    findings = audit.open_findings(paths.db_path, days=7)
+    assert len(findings) == 1
+    n = audit.resolve_findings(paths.db_path, "fixed", issue_id=findings[0]["id"])
+    assert n == 2
+    assert audit.open_findings(paths.db_path, days=7) == []

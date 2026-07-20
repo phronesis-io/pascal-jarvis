@@ -999,29 +999,34 @@ for d in descs[offset:]:
          if [ -n "$_formatted" ]; then
            # REQ-18 (user-designed 5/29): narrate progress with a fast cheap
            # model instead of dumping raw tool names — "它搜了什么网站、有没有
-           # 真的去看，还是在幻觉，对用户是非常重要的信息". Throttled to ≥60s
-           # between narrations; raw list is the fallback on any failure.
+           # 真的去看，还是在幻觉，对用户是非常重要的信息".
+           # REQ-110 (7/20): the ≥60s throttle now gates EVERY send and the
+           # raw English list is never a fallback — 220 🔧 messages reached
+           # Pascal in the week of 7/13 (39 in one hour), most of them raw
+           # fragments that bypassed the throttle on its else-branch, plus
+           # six bare "Execution error" narrator failures. Narration is
+           # haiku-or-nothing; throttled batches accumulate (_last_tool_count
+           # advances only when a narration attempt is dispatched — the fork
+           # cannot write parent vars, so a failed attempt drops its batch
+           # rather than retrying it forever).
            _now_s=$(date +%s)
            if [ $((_now_s - ${_last_narrate:-0})) -ge 60 ]; then
              _last_narrate=$_now_s
+             _last_tool_count="$_new_count"
+             _formatted_capped=$(echo "$_formatted" | head -8)
              # Narrate in a BACKGROUND fork: an inline call (even with a real
              # timeout) blocks this poll loop, delaying the 120s promotion
              # check and the 6000s watchdog by up to 12s per narration.
              ( _n=$(with_timeout 12 claude -p \
                  "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
-$_formatted" \
+$_formatted_capped" \
                  --model haiku --no-session-persistence --disable-slash-commands \
                  --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
                if [ -n "$_n" ] && [ "${#_n}" -lt 200 ] && ! looks_like_error "$_n"; then
                  lark_reply_text "$message_id" "🔧 $_n" >/dev/null 2>&1
-               else
-                 lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1
                fi ) >/dev/null 2>&1 &
-           else
-             lark_reply_text "$message_id" "🔧 $_formatted" >/dev/null 2>&1 || true
            fi
          fi
-         _last_tool_count="$_new_count"
        fi
        # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
        # background job. Release the conversation instead of blocking it —
@@ -1304,6 +1309,11 @@ except Exception:
       _model_footer="（备用通道）"
     elif [ "$_answer_provider" = "GPT fallback" ]; then
       _model_footer="（GPT 兜底）"
+    elif [ -n "$_answer_model" ] && [ "$_answer_model" != "$MAIN_MODEL" ]; then
+      # REQ-111: within-provider degrade (REQ-77 opus→sonnet→haiku) was the
+      # one silent switch left — 7/14-16 he could not tell which replies came
+      # from a degraded model. Same rule as above: silence = primary+opus.
+      _model_footer="（临时 ${_answer_model} 代答）"
     fi
   fi
 
