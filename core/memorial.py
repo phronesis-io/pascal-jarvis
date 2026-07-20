@@ -21,11 +21,19 @@ is appended to the ledger so dedup does not turn a failed first attempt into
 six hours of silence. Successful direct sends are mirrored into
 heartbeat_outbox.jsonl so the main session knows the card went out.
 
+Buttons follow the card, not the emitter. In priority order a memorial's
+options come from: (1) an ``OPTIONS: a | b | c`` line the card author wrote at
+the end of the body — these become suggested-reply buttons whose label IS the
+sentence Pascal would have typed; (2) ``SOURCE_DEFAULT_PRESET`` for sources
+that inherently ask for a decision or a follow-up; (3)「已阅／标为重点」.
+
 CLI (any emitter can send a memorial in one line):
     python3 -m core.memorial send --source mail --title "..." --body "..." \
         --preset fyi
     python3 -m core.memorial send --source x --title t --body b \
         --option '准=intent_close:id=xxx,outcome=done' --option '缓'
+    python3 -m core.memorial send --source x --title t --body b \
+        --options '加钱|限流到月底|让它自然停'
     python3 -m core.memorial list [--pending]
 """
 
@@ -34,6 +42,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -100,6 +109,38 @@ PRESETS: dict[str, list[dict]] = {
         {"key": "stop", "label": "这次跳过", "action": None},
     ],
 }
+
+# A tap on a REPLY option means "Pascal said this sentence". The label is the
+# suggested reply itself, so it is carried into the next conversation turn
+# first-person (see _queue_decision_context) instead of being filed away as a
+# generic 批红 rating. FYI keys are the only taps that stay purely analytic.
+_FYI_KEYS = {"read", "watch"}
+
+# Prose cards whose source is inherently a decision/follow-up ask should not
+# fall back to「已阅／标为重点」. Only consulted when the emitter did not author
+# its own options (see _extract_inline_options).
+SOURCE_DEFAULT_PRESET = {
+    "intention-check": "followup",
+    "intentions": "followup",
+    "intent": "followup",
+    "watchlater-remind": "followup",
+    "task-triage": "followup",
+    "selfmon": "decision",
+    "eigenflux-publish": "decision",
+}
+
+# LLM-authored buttons: a heartbeat task ends its card body with a line like
+#     OPTIONS: 加钱 | 限流到月底 | 让它自然停
+# and those become the buttons. This is the only way buttons can genuinely
+# track content — the model writing the card is the one that knows what it is
+# asking. Accepts the Chinese label and full-width separators/colon so a task
+# author does not have to think about ASCII.
+_OPTIONS_LINE_RE = re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：]\s*(.+?)\s*$", re.I)
+_OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
+MAX_INLINE_OPTIONS = 4
+# Lark truncates long button captions on a phone; clip rather than reject, so
+# a verbose OPTIONS line degrades to a short button instead of losing the card.
+MAX_OPTION_LABEL_CHARS = 14
 
 # Header reads 「📜 {source emoji} {title}」; unknown sources just get 📜.
 SOURCE_EMOJI = {
@@ -353,9 +394,21 @@ def _hhmm(ts: str) -> str:
     return ts[-5:] if len(ts) >= 5 else ts
 
 
+def _decided_is_reply(state: dict) -> bool:
+    opt = next((o for o in state.get("options", [])
+                if o.get("key") == state.get("decided_opt")), None)
+    return bool(opt and opt.get("reply"))
+
+
 def _decided_card(state: dict) -> dict:
     """Replacement after 批红: durable proof plus a conversation escape hatch."""
-    status = f"✅ 已批：{state['decided_label']} · {_hhmm(state['decided_ts'])}"
+    if _decided_is_reply(state):
+        # A suggested reply reads back as something Pascal said, not as an
+        # approval stamp on someone else's proposal.
+        status = (f"🗣 你回了：{state['decided_label']} · "
+                  f"{_hhmm(state['decided_ts'])}")
+    else:
+        status = f"✅ 已批：{state['decided_label']} · {_hhmm(state['decided_ts'])}"
     if state.get("action_result"):
         status += f"\n{state['action_result']}"
     return json.loads(_render_card(state, status_line=status, include_options=False,
@@ -507,6 +560,34 @@ def _send_opener_async(text: str, chat_id: str) -> None:
 # ── option normalization ────────────────────────────────────────────────
 
 
+def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
+    """Split a trailing ``OPTIONS: a | b | c`` line off LLM-authored prose.
+
+    Returns ``(body_without_the_line, options)`` — or ``(text, None)`` when the
+    card did not author its own buttons. Only a TRAILING line counts: an
+    'OPTIONS:' in the middle of the copy is prose, not a button declaration.
+    """
+    lines = str(text or "").splitlines()
+    for idx in range(len(lines) - 1, -1, -1):
+        if not lines[idx].strip():
+            continue
+        match = _OPTIONS_LINE_RE.match(lines[idx])
+        if not match:
+            return text, None
+        labels: list[str] = []
+        for part in _OPTIONS_SPLIT_RE.split(match.group(1)):
+            part = part.strip().strip("「」\"'")
+            if part and part not in labels:
+                labels.append(part[:MAX_OPTION_LABEL_CHARS])
+        if not labels:
+            return text, None
+        body = "\n".join(lines[:idx]).rstrip()
+        return body, [{"key": f"r{i}", "label": label, "action": None,
+                       "reply": True}
+                      for i, label in enumerate(labels[:MAX_INLINE_OPTIONS], 1)]
+    return text, None
+
+
 def _normalize_options(options: list[dict] | None, preset: str | None) -> list[dict]:
     if options is not None:
         normalized = []
@@ -521,8 +602,10 @@ def _normalize_options(options: list[dict] | None, preset: str | None) -> list[d
             if key in seen:
                 raise ValueError(f"duplicate option key: {key}")
             seen.add(key)
-            normalized.append({"key": key, "label": label,
-                               "action": o.get("action") or None})
+            item = {"key": key, "label": label, "action": o.get("action") or None}
+            if o.get("reply"):
+                item["reply"] = True
+            normalized.append(item)
         return normalized
     name = preset or "fyi"  # a memorial with no options makes no sense — fyi is the safe floor
     if name not in PRESETS:
@@ -616,9 +699,16 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     non-urgent sends during quiet hours (23:30-10:00) go to the night queue
     instead of buzzing the phone — urgent=True bypasses the night gate.
     """
+    source, title, body = str(source), str(title), str(body)
+    # An OPTIONS line in the body wins over any preset: the emitter that wrote
+    # that line is stating what this specific card asks. Callers that pass
+    # explicit options have already decided, so their body is left alone.
+    if options is None:
+        body, inline_options = _extract_inline_options(body)
+        if inline_options:
+            options, preset = inline_options, None
     opts = _normalize_options(options, preset)
     native_buttons = _normalize_extra_buttons(extra_buttons)
-    source, title, body = str(source), str(title), str(body)
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id))
@@ -703,9 +793,10 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # don't bury it under generic FYI buttons. URL-only cards are read-only,
     # so the common FYI choices remain useful.
     options = [] if has_native_action else None
+    fallback_preset = SOURCE_DEFAULT_PRESET.get(source or "heartbeat", "fyi")
     mid, _ = create(
         source=source or "heartbeat", title=title, body=body,
-        options=options, preset=None if has_native_action else "fyi",
+        options=options, preset=None if has_native_action else fallback_preset,
         context=context, send=False, extra_buttons=native_buttons,
     )
     if suppress_accepted:
@@ -739,7 +830,14 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         title = SOURCE_TITLE.get(single_source, single_source or "一件事")
-        mid, _ = create(single_source, title, text, preset="fyi", send=False)
+        # Buttons follow the card: an OPTIONS line authored by the task wins;
+        # otherwise fall back to what this source is usually asking for, and
+        # only then to「已阅」.
+        body, inline_options = _extract_inline_options(text)
+        preset = (None if inline_options
+                  else SOURCE_DEFAULT_PRESET.get(single_source, "fyi"))
+        mid, _ = create(single_source, title, body, options=inline_options,
+                        preset=preset, send=False)
         state = get_memorial(mid) or {}
         if state.get("delivery_status") in {
                 "delivered", "queued", "retry_queued"}:
@@ -833,11 +931,13 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
-    _FYI_KEYS = {"read", "watch"}
-    if opt_key not in _FYI_KEYS:
-        _queue_decision_context(st, opt.get("label", ""), action_result)
+    if opt.get("reply") or opt_key not in _FYI_KEYS:
+        _queue_decision_context(st, opt.get("label", ""), action_result,
+                                is_reply=bool(opt.get("reply")))
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
+    elif opt.get("reply"):
+        toast = {"type": "success", "content": "收到——下条消息我接着这个说"}
     else:
         toast = {"type": "success", "content": f"已批：{opt.get('label', '')} ✓"}
     return {"toast": toast, "card": {"type": "raw", "data": _decided_card(st)}}
@@ -880,12 +980,17 @@ def _bounded_chat_context(st: dict) -> str:
     return "\n".join(fixed[:3] + variable + fixed[3:])[:CHAT_CONTEXT_MAX_CHARS]
 
 
-def _queue_decision_context(st: dict, label: str, action_result: str = "") -> None:
+def _queue_decision_context(st: dict, label: str, action_result: str = "",
+                            is_reply: bool = False) -> None:
     """Carry a card tap into the next conversation turn.
 
     A record-only 批红 used to disappear into analytics: the assistant could
     ask again because the conversational session never learned the choice.
     The existing pending-merge bridge is the durable per-conversation handoff.
+
+    ``is_reply`` marks a suggested-reply button, whose label IS the sentence
+    Pascal would have typed — it is handed over first-person so the next turn
+    acts on it rather than merely filing a preference.
     """
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if not conv_key:
@@ -893,10 +998,17 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "") -> No
     job_id = f"memorial-decision:{st['id']}"
     if _injection_queued(conv_key, job_id):
         return
-    lines = [
-        f"[奏折批示] Pascal 对「{st['title']}」选择了「{label}」。",
-        "把它视为已经确认的偏好或决定，不要原样再问一次。",
-    ]
+    if is_reply:
+        lines = [
+            f"[奏折回复] 关于「{st['title']}」，Pascal 点了推荐回复：「{label}」。",
+            "当作他刚亲口说了这句话——直接照它行动或接话，不要复述卡片、"
+            "不要再问一遍他的意思。",
+        ]
+    else:
+        lines = [
+            f"[奏折批示] Pascal 对「{st['title']}」选择了「{label}」。",
+            "把它视为已经确认的偏好或决定，不要原样再问一次。",
+        ]
     if action_result:
         lines.append(f"动作结果: {action_result[:400]}")
     _append_line(_pending_merge_path(), {
@@ -1009,6 +1121,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--preset", choices=sorted(PRESETS))
     sp.add_argument("--option", action="append", default=[],
                     metavar="'标签[=动作类型:k=v,k=v]'")
+    sp.add_argument("--options", default="",
+                    metavar="'加钱|限流|让它停'",
+                    help="推荐回复按钮（点了等于他说了这句话）")
     sp.add_argument("--context", default="")
     sp.add_argument("--chat-id", dest="chat_id", default="")
     sp.add_argument("--urgent", action="store_true",
@@ -1023,6 +1138,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             options = ([_parse_option_spec(s, i)
                         for i, s in enumerate(args.option, 1)] or None)
+            if args.options:
+                # Reuse the same parser the OPTIONS body line uses, so the CLI
+                # and an LLM-authored card produce identical buttons.
+                _, reply_options = _extract_inline_options(
+                    f"OPTIONS: {args.options}")
+                if not reply_options:
+                    raise ValueError(f"--options 没解析出按钮: {args.options!r}")
+                options = (options or []) + reply_options
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
                                context=args.context, chat_id=args.chat_id,

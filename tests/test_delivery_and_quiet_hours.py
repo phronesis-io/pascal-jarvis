@@ -28,8 +28,9 @@ from core.heartbeat_loop import (
 def test_quiet_hours_boundaries():
     assert _in_quiet_hours(23 * 60 + 30)      # 23:30 — starts
     assert _in_quiet_hours(0)                 # midnight
-    assert _in_quiet_hours(9 * 60 + 59)       # 09:59 — still quiet (9h replies ~6%)
-    assert not _in_quiet_hours(10 * 60)       # 10:00 — opens (golden window)
+    assert _in_quiet_hours(9 * 60 + 29)       # 09:29 — still quiet
+    assert not _in_quiet_hours(9 * 60 + 30)   # 09:30 — opens (2026-07-18)
+    assert not _in_quiet_hours(10 * 60)       # 10:00 — golden window
     assert not _in_quiet_hours(13 * 60)       # 13:00 — golden window
     assert not _in_quiet_hours(23 * 60 + 29)  # 23:29 — still open
 

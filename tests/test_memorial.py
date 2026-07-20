@@ -625,3 +625,87 @@ def test_display_body_never_cuts_through_a_markdown_link():
     # every link opener that survived the clip must still have its closer
     core_text = out.split("…完整背景可点")[0]
     assert core_text.count("](") == core_text.count(")") or "](" not in core_text
+
+
+# ── content-driven buttons (OPTIONS line + suggested replies) ────────────
+
+
+def test_inline_options_become_buttons_and_leave_the_body(env):
+    """A task-authored `OPTIONS:` line is the card's buttons, not its copy."""
+    mid, _ = memorial.create(
+        "intention-check", "NewsAPI 额度",
+        "额度这周到底。\nOPTIONS: 加钱 | 限流到月底 | 让它自然停")
+
+    st = memorial.get_memorial(mid)
+    assert [o["label"] for o in st["options"]] == ["加钱", "限流到月底", "让它自然停"]
+    assert all(o["reply"] for o in st["options"])
+    assert "OPTIONS" not in st["body"] and st["body"] == "额度这周到底。"
+
+    card = json.loads(env.cards[0][0])
+    assert [a["text"]["content"] for a in _actions(card)] == [
+        "加钱", "限流到月底", "让它自然停", "💬 聊聊这个"]
+
+
+def test_inline_options_accept_chinese_label_and_fullwidth_separators(env):
+    mid, _ = memorial.create("mail", "t", "正文\n选项：通过｜拒绝／先问清楚")
+    assert [o["label"] for o in memorial.get_memorial(mid)["options"]] == [
+        "通过", "拒绝", "先问清楚"]
+
+
+def test_options_line_only_counts_when_trailing(env):
+    """An OPTIONS mention mid-body is prose — it must not steal the buttons."""
+    mid, _ = memorial.create("mail", "t", "OPTIONS: 这是正文里的一句\n后面还有话",
+                             preset="fyi")
+    st = memorial.get_memorial(mid)
+    assert [o["key"] for o in st["options"]] == ["read", "watch"]
+    assert "这是正文里的一句" in st["body"]
+
+
+def test_inline_options_are_capped_and_clipped(env):
+    labels = " | ".join(["选项" + str(i) for i in range(1, 8)])
+    long_label = "这是一个非常非常冗长以至于手机上根本显示不下的按钮文案"
+    mid, _ = memorial.create("mail", "t", f"正文\nOPTIONS: {long_label} | {labels}")
+    opts = memorial.get_memorial(mid)["options"]
+    assert len(opts) == memorial.MAX_INLINE_OPTIONS
+    assert len(opts[0]["label"]) == memorial.MAX_OPTION_LABEL_CHARS
+
+
+def test_reply_tap_is_injected_first_person_and_reads_back_as_speech(env):
+    mid, _ = memorial.create("intention-check", "NewsAPI 额度",
+                             "正文\nOPTIONS: 加钱 | 限流")
+    payload = memorial.decide(mid, "r1")
+
+    assert payload["toast"]["type"] == "success"
+    body = payload["card"]["data"]["elements"][0]["text"]["content"]
+    assert "🗣 你回了：加钱" in body and "已批" not in body
+
+    decision = next(json.loads(line) for line in
+                    (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()
+                    if "memorial-decision" in line)
+    assert "点了推荐回复：「加钱」" in decision["summary"]
+    assert "当作他刚亲口说了这句话" in decision["summary"]
+
+
+def test_prose_cards_use_the_sources_natural_preset(env):
+    """A follow-up source must not fall back to「已阅」."""
+    memorial.memorialize_output("这条 intent 到期了", source="intention-check")
+    st = memorial.list_memorials()[-1]
+    assert [o["key"] for o in st["options"]] == ["done", "later", "stop"]
+
+
+def test_prose_cards_pick_up_an_inline_options_line(env):
+    memorial.memorialize_output("额度到底了\nOPTIONS: 加钱 | 限流",
+                                source="intention-check")
+    st = memorial.list_memorials()[-1]
+    assert [o["label"] for o in st["options"]] == ["加钱", "限流"]
+    assert "OPTIONS" not in st["body"]
+
+
+def test_cli_options_flag_builds_reply_buttons(env, capsys):
+    rc = memorial.main(["send", "--source", "mail", "--title", "t",
+                        "--body", "b", "--options", "加钱|限流"])
+    assert rc == 0
+    mid = capsys.readouterr().out.strip().splitlines()[0]
+    opts = memorial.get_memorial(mid)["options"]
+    assert [o["label"] for o in opts] == ["加钱", "限流"]
+    assert all(o["reply"] for o in opts)

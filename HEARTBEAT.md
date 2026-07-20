@@ -48,6 +48,16 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
 （`标签=动作类型:参数` 执行动作，纯 `标签` 只记录）。批示落在 `memorials.jsonl`，
 `python3 -m core.memorial list --pending` 查未批事项。卡片正文说人话：无 SLA/HTTP 码/内部黑话。
 
+**按钮要跟着这张卡的内容走 —— 默认写 OPTIONS 行。** 你是写这张卡的人，只有你知道
+它在问什么；不写就只能退回泛泛的「已阅」。在正文**最后一行**写：
+
+    OPTIONS: 加钱 | 限流到月底 | 让它自然停
+
+规则：① 每个标签就是**Pascal 会打的那句回复本身**（第一人称口气、≤14 字），不是
+「选项A/同意」这种标签；② 2-4 个，覆盖真实分支（含「不做」那支）；③ 只有最后一行
+算按钮声明，正文中间提到 OPTIONS 不生效；④ 点了 = 他亲口说了这句，下一轮对话直接
+照它行动，不会再问一遍。**这张卡确实没什么可回的（纯周知）才省略 OPTIONS。**
+
 ## EigenFlux
 
 ### eigenflux-feed-triage
@@ -562,6 +572,18 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     a bare status word ("sent", "done", "ok") as a notify response.
     For calendar-prep intents: check the user's memory for relevant context about the event,
     then write a concise prep reminder (what to prepare, what to remember, relevant context).
+
+    NEVER INFER AN UNKNOWN ENTITY FROM ITS NAME. If the event names a company, product,
+    person or org that is NOT in memory, you know NOTHING about it. Do not guess its
+    domain from the name's morphemes ("humanlaya" → humanoid robotics: wrong, it is an
+    LLM eval data lab) — that is the single highest-frequency hallucination in prep cards,
+    and it is worse than useless because Pascal walks into the room primed with a false
+    premise. Exactly two legal moves: (a) WebSearch it in THIS run and prep from what you
+    actually read, or (b) say plainly "我不知道 X 是什么/没查到" and prep only on what IS
+    known (time, recording requirement, calendar collisions, his own threads). Prefer (a);
+    (b) beats a confident guess every time. This is the same rule as content-recommend's
+    NEVER FABRICATE CURRENT EVENTS — unverified specifics about the outside world never
+    ship, in any task.
 
     INPUT/DECISION/CLOSURE (the three pieces): if an intent carries INPUT, surface it as
     prep material; if it carries DECISION, put the yes/no or A/B judgment to Pascal; if it

@@ -308,7 +308,9 @@ def _note_delivery(jarvis_dir: Path, ok: bool, user_id: str = "",
 #   (they're at the phone — a natural breakpoint), flush early
 
 QUIET_START_MIN = 23 * 60 + 30   # 23:30
-QUIET_END_MIN = 10 * 60          # 10:00 (was 09:30; 9h replies were still ~6%)
+QUIET_END_MIN = 9 * 60 + 30      # 09:30 (back from 10:00 — Pascal 2026-07-18:
+                                 # the 10:00 wall was delaying morning anchors
+                                 # he asked for himself)
 URGENT_SOURCES = {"intention-check", "calendar-sync", "checkin"}
 # General-interest content per Iqbal & Bailey: tolerates coarse batching with
 # the least frustration cost. These are also the highest-volume noise sources.
