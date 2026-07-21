@@ -15,6 +15,16 @@ fi
 echo "Daily plan for $(date '+%Y-%m-%d %A')"
 echo ""
 
+# ── 0. Weather (REQ-113) ──
+# Empty output when geo.amap_key isn't configured — the block simply
+# disappears (no-op on fresh installs). 2>/dev/null: fetch failures are silent.
+weather_line=$(cd "$JARVIS_DIR" && python3 -m core.weather context 2>/dev/null || true)
+if [ -n "$weather_line" ]; then
+  echo "=== WEATHER (for outdoor-activity planning) ==="
+  echo "$weather_line"
+  echo ""
+fi
+
 # ── 1. Today's calendar ──
 calendar_file="$MEMORY_DIR/hot/calendar_today.md"
 if [ -f "$calendar_file" ]; then

@@ -15,6 +15,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 |---|---|---|
 | Daily Rhythm | daily-plan, activity-log, daily-reflect | reflect yes; daily-plan+activity-log silent |
 | Check-in | checkin | yes |
+| Lifelog | morning-anchor, exercise-week | yes (morning: one short line ~8:30; exercise: one Sunday-evening card) |
 | Calendar & Tasks | calendar-sync, weekly-review | calendar silent, weekly yes |
 | Intentions | intention-check | yes (when intent fires) |
 | Memory Pipeline | memory-hourly → daily → weekly, memory-consolidate, memory-tidy | silent |
@@ -307,68 +308,61 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
 - pre: tasks/checkin_pre.sh
 - post: tasks/checkin_post.py
 - prompt: |
-    [CHECKIN — 身心健康 + 人生意义]
-    The pre-script detected a good moment to reach out. Two alternating modes by hour:
+    [CHECKIN — 有锚点才联系]
+    (7/21 重写：用户四次点名"乱联系"。旧的按小时奇偶切换 connection/wellbeing
+    模式已废除——那套产出的是重复的玄学体感文，7 天 18 发零正向互动。)
 
-    MODE = "connection" (even hours):
-    Help Pascal discover unexpected connections between things he cares about.
-    - Read his memory: interests, projects, recent conversations, philosophy reading, investments, music, sports
-    - Find a NON-OBVIOUS link between two domains he hasn't explicitly connected
+    RELEVANCE GATE — a checkin may ONLY ship if it anchors to one of:
+    (a) Something Pascal said or did in the last 24h that has a CONCRETE
+        follow-up (an open question he deferred, a thing he said he'd do,
+        a result he was waiting for). Quote/reference the anchor explicitly.
+    (b) A standing request he made (e.g. 健身/康复打卡类提醒 — he explicitly
+        asked for practical accountability cards on 7/18).
+    If neither exists in the pre-script context: HEARTBEAT_OK. That is the
+    EXPECTED outcome most of the time. Silence is the default, not failure.
 
-    VERIFICATION REQUIREMENT (mandatory before outputting ANY connection):
-    A connection is only valid if it shares a CONCRETE MECHANISM or STRUCTURAL PRINCIPLE,
-    not just surface-level metaphor or "X sounds like Y".
+    EVERY card must contain either NEW INFORMATION or an ANSWERABLE ASK.
+    BANNED outright:
+    - Pure observations about his inner state ("那股劲松了吗" / "台上那种绷"
+      / any poetic body-state musing). Zero of these ever landed.
+    - Asserting his location or activity from the calendar. The calendar is
+      UNVERIFIED intent — at most say "日历上是X", never "你现在在X".
+      (7/17 incident: told him he was at 世博展览馆 when he wasn't.)
+    - Re-touching a theme used in the last 5 checkins BY MEANING, not by
+      string match. If in doubt whether it's the same theme, it is.
 
-    Before sending, you MUST:
-    1. State the connection hypothesis internally
-    2. Use WebSearch or relevant research to verify the relationship is real:
-       - Is there published work, a known theorem, or empirical evidence linking these?
-       - Can you articulate a specific causal chain or structural isomorphism?
-       - Would an expert in BOTH fields agree this is a real relationship?
-    3. Construct a concrete logical chain: A → B → C (not just "A resembles C")
-    4. Apply the EXPERT TEST: if someone deeply knowledgeable in both domains heard this,
-       would they say "yes, that's a real connection" or "that's a stretch"?
-
-    If verification fails or you cannot find concrete evidence, reply HEARTBEAT_OK.
-    Quality over quantity — silence is better than a forced/牵强 connection.
-
-    GOOD connections (verified, structural):
-      • "哲学课讲的'有限性'和 multi-agent 里的 bounded rationality 其实是同一个数学约束 —— Simon 1955 年证明的" (specific shared mechanism)
-      • "围棋的 influence function 和 PageRank 用的是同一类 eigenvector centrality" (same math)
-    BAD connections (surface metaphor, DO NOT SEND):
-      • "围棋讲究布局，创业也要布局" (vague analogy, no mechanism)
-      • "音乐有节奏，写代码也有节奏" (metaphor masquerading as insight)
-      • "投资要耐心，修行也要耐心" (truism, not a connection)
-
-    - Present as a question or observation, not a lecture
-    - This is NOT teaching facts. It's "hey, I noticed X and Y share the same underlying structure..."
-    - The connection MUST survive a "why?" challenge with a concrete answer
-
-    MODE = "wellbeing" (odd hours):
-    Create space for expression using MI (Motivational Interviewing) techniques.
-    - Read calendar context: just finished meeting? long day? evening?
-    - Use: open-ended questions, reflections, affirmations, somatic awareness prompts
-    - Reference SPECIFIC things from memory (shows genuine knowing)
-    - Good examples:
-      • Noticing patterns: "最近几天你聊的都是X方向，好像有什么在酝酿？"
-      • Gentle somatic: "刚开完会，身体有没有哪里紧着？"
-      • Meaning reflection: "上周你说的那个想法，现在回看还是那样觉得吗？"
-      • Affirming effort: "这周你做了X、Y、Z，不管结果怎样，投入本身就有价值"
-    - NEVER give unsolicited advice
-    - NEVER be preachy about health/habits/productivity
-
-    HARD RULES (both modes):
+    HARD RULES:
     1. Under 60 words. Chinese. No emoji unless genuinely meaningful.
     2. No response obligation — don't end every message with "你觉得呢？"
-    3. NEVER mansplain or lecture.
-    4. NEVER be preachy about health/habits/productivity.
-    5. BANNED: "你好吗" / "最近怎么样" / any status-check question / unsolicited advice /
-       forced connections / generic wellness tips.
-    6. Use memory as EVIDENCE of knowing him — cite specific details, not vague references.
-    7. Read recent check-ins: NEVER repeat the same topic, structure, or opening pattern.
-    8. Read calendar context naturally — don't force references.
-    9. If you cannot find something genuine and specific to this person, reply HEARTBEAT_OK.
+    3. NEVER preachy about health/habits/productivity; a standing-request
+       reminder states the thing once, no motivational padding.
+    4. BANNED: "你好吗" / "最近怎么样" / any status-check question /
+       unsolicited advice / generic wellness tips.
+    5. If you cannot point at the concrete anchor (a) or (b), HEARTBEAT_OK.
        A generic message is worse than silence.
+
+### morning-anchor
+- interval: 30m
+- pre: tasks/morning_anchor_pre.sh
+- post: tasks/morning_anchor_post.py
+- prompt: |
+    [MORNING ANCHOR — 晨间锚点]
+    The pre-script opened the once-a-day morning anchor window (~8:30).
+    DATA lists today's anchor items (per-user config or neutral defaults)
+    and calendar context.
+
+    Write EXACTLY ONE short line (Chinese, under 40 characters) that names
+    the anchor items as today's small morning ritual. Examples of tone:
+    「早。今天的锚点：一道死活题 + 康复 circuit，各 10 分钟。」
+
+    HARD RULES:
+    1. ONE line only. No greeting padding, no second sentence, no question.
+    2. Zero nagging: no "记得/别忘了/一定要", no guilt, no health lecture.
+    3. If the calendar already shows a matching morning routine event,
+       still one line — acknowledge it instead of repeating it
+       (e.g.「日历里已经排了晨间康复——加一道死活题正好」).
+    4. This message gets NO follow-up if ignored. Write it accordingly.
+    Reply HEARTBEAT_OK only if DATA has no anchor items at all.
 
 ## Content Curation
 
@@ -1091,3 +1085,24 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     JSON MUST be valid: inside string values never use bare ASCII double
     quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
     Or HEARTBEAT_OK if truly nothing to review.
+
+### exercise-week
+- interval: 1h
+- pre: tasks/exercise_week_pre.sh
+- post: tasks/exercise_week_post.py
+- prompt: |
+    [EXERCISE WEEK — 本周运动小结]
+    The pre-script fired the Sunday-evening weekly exercise card (once per
+    week). DATA is the aggregated last-7-days summary: sessions vs goal,
+    breakdown by activity, sources (calendar events + manual entries).
+
+    Write ONE short card body (Chinese, under 60 words):
+    - Line 1: 本周运动 N 次（目标 X-Y 次）— numbers straight from DATA.
+    - Line 2: breakdown by activity, e.g.「游泳×2、康复×1」.
+    - Optionally ONE neutral observation grounded in DATA (e.g. 比上周多一次).
+
+    HARD RULES:
+    1. ONE card, ONE matter — this card is ONLY about this week's exercise.
+    2. Pure data recap: no medical advice, no lecturing, no "加油/要坚持".
+    3. Never invent sessions or activities not present in DATA.
+    Reply HEARTBEAT_OK if DATA is empty.

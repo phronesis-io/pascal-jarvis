@@ -50,6 +50,7 @@ import time
 from pathlib import Path
 
 from core.card import build_card, extract_card_text
+from core.card_split import split_matters
 from core.jsonl import read_jsonl
 from core.timeutil import now_local_str
 
@@ -427,35 +428,49 @@ def _chatting_card(state: dict, ts: str) -> dict:
 # ── sending (clone of heartbeat_loop's production lark-cli path) ────────
 
 
-def _send(args: list[str]) -> bool:
+def _send(args: list[str]) -> str:
+    """Send via lark-cli. Returns the Lark message_id on success ("sent" if
+    the id can't be parsed — still truthy), "" on failure. Callers that only
+    care about success/failure keep working: the return is bool-compatible."""
     for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
         if delay:
             time.sleep(delay)
         try:
             r = subprocess.run(["lark-cli", "im", "+messages-send", *args,
-                                "--as", "bot"],
+                                "--as", "bot", "--json"],
                                capture_output=True, text=True, timeout=15)
             if r.returncode == 0:
-                return True
+                try:
+                    data = json.loads(r.stdout).get("data") or {}
+                    mid = (data.get("message_id")
+                           or (data.get("message") or {}).get("message_id") or "")
+                    if not mid:
+                        msgs = data.get("messages") or []
+                        mid = (msgs[0].get("message_id") if msgs else "") or ""
+                except Exception:
+                    mid = ""
+                return str(mid) or "sent"
         except subprocess.TimeoutExpired:
             print(f"memorial send attempt {attempt} timed out", file=sys.stderr)
         except Exception as e:
             print(f"memorial send attempt {attempt} failed: {e}", file=sys.stderr)
-    return False
+    return ""
 
 
-def _send_card(card_json_str: str, chat_id: str = "") -> bool:
+def _send_card(card_json_str: str, chat_id: str = "") -> str:
+    """Returns the sent card's Lark message_id ("sent" if unparsed, "" on
+    failure) — REQ-118 needs the id for thread → memorial reverse lookup."""
     if chat_id:
         target = ["--chat-id", chat_id]
     else:
         uid = _resolve_user_id()
         if not uid:
-            return False
+            return ""
         target = ["--user-id", uid]
     return _send([*target, "--msg-type", "interactive", "--content", card_json_str])
 
 
-def _send_text(text: str, chat_id: str = "") -> bool:
+def _send_text(text: str, chat_id: str = "") -> str:
     if not text:
         return False
     if chat_id:
@@ -668,6 +683,14 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     _record_delivery(mid, "delivered" if sent else "failed",
                      source=state.get("source", "memorial"))
     if sent:
+        if sent != "sent":
+            # REQ-118 奏折专属对话: remember the delivered card's Lark
+            # message_id so a reply in its thread routes to a per-card session.
+            try:
+                from core.memorial_thread import record_sent
+                record_sent(mid, sent)
+            except Exception as e:
+                print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
         readable = extract_card_text(cj) or f"📜 {state['title']}"
         _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
     else:
@@ -676,7 +699,9 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
         # stranding a pending ledger row that nobody automatically revisits.
         _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
         _record_delivery(mid, "retry_queued")
-    return sent
+    # Public contract stays bool (create() returns this to emitters/tests);
+    # the message_id is consumed above for the REQ-118 thread ledger only.
+    return bool(sent)
 
 
 def create(source: str, title: str, body: str, options: list[dict] | None = None,
@@ -762,6 +787,10 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     Task-native actions/links are preserved. Cards that already offer a real
     action keep those choices and gain「聊聊这个」; read-only/link-only cards
     also gain the common「已阅／标为重点」批红 pair.
+
+    Returns one card JSON per line: a button-free body that mechanically
+    merged several matters is split (一张卡一件事, REQ-117), so the result
+    may be several newline-joined single-line card JSONs.
     """
     card = json.loads(legacy_card_json)
     if _card_memorial_id(card):
@@ -794,17 +823,29 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # so the common FYI choices remain useful.
     options = [] if has_native_action else None
     fallback_preset = SOURCE_DEFAULT_PRESET.get(source or "heartbeat", "fyi")
-    mid, _ = create(
-        source=source or "heartbeat", title=title, body=body,
-        options=options, preset=None if has_native_action else fallback_preset,
-        context=context, send=False, extra_buttons=native_buttons,
-    )
-    if suppress_accepted:
-        state = get_memorial(mid) or {}
-        if state.get("delivery_status") in {
-                "delivered", "queued", "retry_queued"}:
-            return ""
-    return card_json(mid)
+    # 一张卡一件事 (REQ-117): a button-free legacy card that mechanically
+    # merged several matters (the 7/21 日程变动 card carried three 改期 lines)
+    # becomes one memorial per matter. Cards with native buttons are never
+    # split — their buttons bind to the card as a whole and replicating a
+    # callback across cards would multiply its action.
+    matters = [body] if native_buttons else split_matters(body)
+    if len(matters) > 1:
+        print(f"memorial split: adopted {source or 'heartbeat'} card → "
+              f"{len(matters)} cards (一张卡一件事)", file=sys.stderr)
+    outputs: list[str] = []
+    for matter in matters:
+        mid, _ = create(
+            source=source or "heartbeat", title=title, body=matter,
+            options=options, preset=None if has_native_action else fallback_preset,
+            context=context, send=False, extra_buttons=native_buttons,
+        )
+        if suppress_accepted:
+            state = get_memorial(mid) or {}
+            if state.get("delivery_status") in {
+                    "delivered", "queued", "retry_queued"}:
+                continue
+        outputs.append(card_json(mid))
+    return "\n".join(outputs)
 
 
 def memorialize_output(output: str, source: str = "heartbeat") -> str:
@@ -842,13 +883,23 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         body, inline_options = _extract_inline_options(text)
         preset = (None if inline_options
                   else SOURCE_DEFAULT_PRESET.get(single_source, "fyi"))
-        mid, _ = create(single_source, title, body, options=inline_options,
-                        preset=preset, send=False)
-        state = get_memorial(mid) or {}
-        if state.get("delivery_status") in {
-                "delivered", "queued", "retry_queued"}:
-            return
-        rendered.append(card_json(mid))
+        # 一张卡一件事 (REQ-117): the prompt contract is the first line of
+        # defense; this is the mechanical backstop for bodies that merged
+        # several matters anyway. A card whose author wrote its own OPTIONS
+        # line designed ONE interactive ask — never split that.
+        chunks = ([body] if inline_options
+                  else split_matters(body))
+        if len(chunks) > 1:
+            print(f"memorial split: {single_source} prose body → "
+                  f"{len(chunks)} cards (一张卡一件事)", file=sys.stderr)
+        for chunk in chunks:
+            mid, _ = create(single_source, title, chunk,
+                            options=inline_options, preset=preset, send=False)
+            state = get_memorial(mid) or {}
+            if state.get("delivery_status") in {
+                    "delivered", "queued", "retry_queued"}:
+                continue
+            rendered.append(card_json(mid))
 
     for raw_line in str(output).splitlines():
         line = raw_line.strip()

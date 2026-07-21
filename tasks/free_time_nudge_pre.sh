@@ -190,6 +190,15 @@ echo "Free time detected: $free_block"
 echo "Current time: $(date '+%H:%M')"
 echo ""
 
+# Weather context (REQ-113) — so suggestions can respect rain (游泳/篮球 vs
+# indoor). Empty output when geo.amap_key isn't configured → block vanishes.
+weather_line=$(cd "$JARVIS_DIR" && python3 -m core.weather context 2>/dev/null || true)
+if [ -n "$weather_line" ]; then
+  echo "=== WEATHER (adjust outdoor suggestions accordingly) ==="
+  echo "$weather_line"
+  echo ""
+fi
+
 if [ -n "$pending" ]; then
   echo "=== SAVED FOR LATER ==="
   echo "$pending"

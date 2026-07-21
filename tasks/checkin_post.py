@@ -21,6 +21,7 @@ from core.card import build_card
 from core.safety import (looks_like_error, parse_json_response,
                          strip_task_framing)
 from core.jsonl import read_jsonl, write_jsonl
+from core.lifelog import diet_append, split_diet_line
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
@@ -173,11 +174,41 @@ def main() -> int:
     if not message:
         return 0
 
+    # THEMES contract (7/21 乱联系根修 RC2): the prompt asks the model to end
+    # with "THEMES: 概念1, 概念2" — 2-4 meaning-level tags used for dedup by
+    # meaning. Stripped FIRST: it is the last line, so stripping DIET first
+    # would miss a "…\nDIET:…\nTHEMES:…" tail and leak the DIET line onto
+    # the card (red-team 7/21 finding 3).
+    themes = ""
+    m = re.search(r"\n\s*THEMES[:：]\s*(.+?)\s*$", message)
+    if m:
+        themes = m.group(1).strip()
+        message = message[:m.start()].rstrip()
+        if not message:
+            return 0
+
+    # REQ-114 diet capture: the checkin prompt may end with an OPTIONAL
+    # structured line — "DIET: 午|牛肉面、青菜" — emitted ONLY when the user
+    # explicitly said what they ate (contract in checkin_pre.sh). It is
+    # stripped from the card (never user-facing) and appended to the
+    # gitignored data/diet_log.jsonl. Deliberately no keyword fallback here:
+    # this message is assistant-authored, so regexing its prose for food
+    # would log hallucinated meals. Logging must never break a checkin.
+    message, diet_entry = split_diet_line(message)
+    if diet_entry:
+        try:
+            diet_entry["source"] = "checkin"
+            diet_append(diet_entry)
+        except Exception as e:
+            print(f"[checkin] diet log failed: {e}", file=sys.stderr)
+    if not message:
+        return 0
+
     # Read existing entries
     entries = read_jsonl(LOG_FILE)
 
-    # Extract topics from new message
-    topics = extract_topics(message)
+    # Meaning-level tags when the model provided them; regex fallback otherwise
+    topics = themes or extract_topics(message)
 
     # Mechanical dedup gate
     if is_duplicate(topics, entries):

@@ -21,11 +21,15 @@ now_ts=$(date '+%H:%M')
 day=$(date '+%A')
 date_ymd=$(date '+%Y-%m-%d')
 
-# Rate limit: max 6 checkins per day (prevents spam on free days)
+# Rate limit: max 2 checkins per day (7/21 乱联系诊断 — at observed quality,
+# 2/day is generous; the relevance gate in the prompt should HEARTBEAT_OK
+# most rounds anyway)
 log_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/system/checkin_log.jsonl"
 if [ -f "$log_file" ]; then
-  today_count=$(grep "\"$date_ymd\"" "$log_file" 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$today_count" -ge 6 ]; then
+  # ts values are "YYYY-MM-DD HH:MM" — a closing quote right after the date
+  # never matches, which made the old cap a no-op (red-team 7/21 finding 5)
+  today_count=$(grep -c "\"ts\": \"$date_ymd" "$log_file" 2>/dev/null || true)
+  if [ "$today_count" -ge 2 ]; then
     exit 0
   fi
 fi
@@ -43,12 +47,9 @@ else
   phase="late-evening"
 fi
 
-# Two core modes — alternate by even/odd hour
-if (( hour % 2 == 0 )); then
-  mode="connection"
-else
-  mode="wellbeing"
-fi
+# (7/21) hour-parity mode selection removed — the 2h cadence pinned it to
+# wellbeing mode 88% of the time, producing the repetitive body-state cards
+# Pascal complained about 4 times. The prompt now uses a relevance gate.
 
 # ── Calendar context: transition detection + next-event lookahead ──
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -191,10 +192,47 @@ if [ -f "$content_mix_file" ]; then
   content_mix=$(head -80 "$content_mix_file" 2>/dev/null || true)
 fi
 
+# ── Weather context (REQ-113) ──
+# Empty when geo.amap_key isn't configured (core.weather context prints
+# nothing, exit 0) — the heredoc line below then stays blank, a no-op.
+weather_context=""
+_wline=$(cd "$JARVIS_DIR" && python3 -m core.weather context 2>/dev/null || true)
+if [ -n "$_wline" ]; then
+  weather_context="Weather (use for outdoor-activity suggestions like 游泳/篮球): $_wline"
+fi
+
+# ── Relevance-gate inputs (7/21 乱联系根修) ──
+# (a) what he actually said/did in the last 24h — the only legit hook for a
+# checkin that isn't a standing request. Source: timeline/hourly_log.md
+# (memory-hourly's digest of REAL interactions). The conversation_audit_*
+# files were rejected here (red-team 7/21 finding 4): they are internal
+# audit PRD reports, not what Pascal said, and the 1h file is stale.
+recent_conversation=""
+_hourly_log="${MEMORY_DIR:-$HOME/.jarvis/memory}/timeline/hourly_log.md"
+if [ -f "$_hourly_log" ]; then
+  recent_conversation=$(tail -80 "$_hourly_log" 2>/dev/null)
+fi
+[ -z "$(echo "$recent_conversation" | tr -d '[:space:]')" ] && \
+  recent_conversation="(无最近对话记录——锚点(a)不可用，只剩 standing requests 或 HEARTBEAT_OK)"
+
+# (b) standing requests he explicitly made (per-user, gitignored)
+standing_requests=""
+if [ -f "$JARVIS_DIR/data/standing_requests_personal.txt" ]; then
+  standing_requests=$(cat "$JARVIS_DIR/data/standing_requests_personal.txt" 2>/dev/null)
+fi
+[ -z "$standing_requests" ] && standing_requests="(none on file)"
+
 cat <<EOF
 Current time: $now_ts ($day, $date_ymd) — $phase
-Suggested mode this round: $mode
 $therapy_prep
+$weather_context
+
+His last-24h conversation digest (anchor source (a) — a checkin must quote a
+concrete follow-up from here, or match a standing request below, or HEARTBEAT_OK):
+$recent_conversation
+
+Standing requests he explicitly made (anchor source (b)):
+$standing_requests
 
 Calendar context:
 $transition_context
@@ -213,4 +251,23 @@ $content_mix
 
 Past check-ins (MUST avoid repeating topics, openers, or structure):
 $recent_checkins
+
+Optional structured output — DIET line (REQ-114):
+If (and ONLY if) the user EXPLICITLY stated in today's conversation/memory
+what they ate (their own words, not your inference), append ONE final line:
+DIET: 餐次|食物1、食物2[|备注]
+餐次 must be one of 早/午/晚/加餐. Example: DIET: 午|牛肉面、青菜
+This line is stripped before the card is sent — it never reaches the user.
+No clear first-person food mention today = do NOT emit the line. Never invent items.
+EOF
+
+cat <<'EOF'
+
+Mandatory structured output — THEMES line (7/21 含义级去重):
+If you send a checkin (not HEARTBEAT_OK), the LAST line must be:
+THEMES: 概念1, 概念2[, 概念3, 概念4]
+2-4 meaning-level concept tags for what this checkin is ABOUT (e.g.
+"康复打卡, 前锯肌" or "增长数据跟进"). Used to block repeats by meaning —
+be honest and general; if the true theme matches a past checkin's theme,
+don't send at all. The line is stripped before the card reaches the user.
 EOF

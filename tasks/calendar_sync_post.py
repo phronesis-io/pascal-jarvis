@@ -7,6 +7,8 @@ Design principle: SILENT by default.
 - Only notify the user when there's a STRUCTURAL change worth their attention:
   new events added, events cancelled, or time conflicts detected.
 - When notifying, use ONE natural sentence — not a table.
+- One card per change (一张卡一件事, REQ-117): N events changed → N cards,
+  never one merged card.
 
 UX first principle: the user's calendar is always available in memory for
 the main conversation to reference. The heartbeat's job is NOT to repeat
@@ -146,6 +148,25 @@ def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
     return lines
 
 
+def change_card_bodies(lines: list[str]) -> list[str]:
+    """One card body per change — 一张卡一件事 (Pascal's 7/10 decree, REQ-117).
+
+    On 7/21 three 改期 lines went out merged into ONE card; Pascal explicitly
+    prefers three cards for three shifted meetings over one merged card. Each
+    改期/新增/取消 line is already one matter (a moved event's remove+add pair
+    was collapsed into a single 改期 line upstream), so: one line = one card.
+    The …另有 N 项 overflow counter is not a matter of its own — it rides on
+    the last card instead of buzzing the phone with a context-free stub.
+    """
+    matters = [ln for ln in lines if not ln.startswith("…另有")]
+    overflow = [ln for ln in lines if ln.startswith("…另有")]
+    if not matters:
+        return ["\n".join(lines)] if lines else []
+    if overflow:
+        matters[-1] = matters[-1] + "\n" + "\n".join(overflow)
+    return matters
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
@@ -225,9 +246,14 @@ def main() -> int:
         print(f"[calendar-sync] Cosmetic change only (title rewording), silent", file=sys.stderr)
         return 0
 
-    msg = "\n".join(lines)
-    print(build_card("📅 日程变动", msg, source="calendar-sync"))
-    print(f"[calendar-sync] Notified: {msg!r}", file=sys.stderr)
+    # One card per change (一张卡一件事, REQ-117) — never merge several
+    # events' changes into one card. Each build_card line is adopted into
+    # its own memorial downstream (core.memorial.memorialize_output).
+    bodies = change_card_bodies(lines)
+    for body in bodies:
+        print(build_card("📅 日程变动", body, source="calendar-sync"))
+    print(f"[calendar-sync] Notified {len(bodies)} card(s): "
+          f"{'; '.join(lines)!r}", file=sys.stderr)
 
     return 0
 

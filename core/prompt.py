@@ -215,6 +215,17 @@ def build_system_prompt(
     counter = get_session_counter(tracker_path, conv_key)
     recent_turns = build_recent_turns(session_dir, session_id, counter, conv_key, 20)
     compact = read_compact(jarvis_dir, conv_key)
+
+    # 奏折专属对话 (REQ-118): conv_key "memorial:<id>" is a per-card session —
+    # pin the card's content at the top so the whole session stays on that
+    # one matter.
+    memorial_section = ""
+    if conv_key.startswith("memorial:"):
+        try:
+            from core.memorial_thread import context_block
+            memorial_section = context_block(conv_key.split(":", 1)[1])
+        except Exception:
+            memorial_section = ""
     session_compact = ""
     if compact:
         session_compact = (
@@ -257,6 +268,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {RULES_DOC}
 
 {ef_section}
+
+{memorial_section}
 
 {memory}
 

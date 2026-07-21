@@ -1887,6 +1887,7 @@ except:
       sender_id=$(echo "$line" | jq -r '.sender_id // .event.sender.sender_id.open_id // empty' 2>/dev/null)
       msg_type=$(echo "$line" | jq -r '.msg_type // .event.message.message_type // empty' 2>/dev/null)
       _parent_id=$(echo "$line" | jq -r '.parent_id // .event.message.parent_id // .event.message.upper_message_id // empty' 2>/dev/null)
+      _root_id=$(echo "$line" | jq -r '.root_id // .event.message.root_id // empty' 2>/dev/null)
 
       # Log every received event for debugging (even if we skip it)
       if [ -n "$message_id" ]; then
@@ -2243,6 +2244,27 @@ print(content)
         conv_key="$sender_id"
       else
         conv_key="$chat_id"
+      fi
+
+      # ── 奏折专属对话 (REQ-118): a reply whose thread root (or parent)
+      # is a delivered memorial card gets its own conv_key — and therefore
+      # its own session — scoped to that one matter. p2p ONLY: in a group
+      # the reply is publicly visible while the per-card session carries the
+      # owner's private memory, and prompt.py would take the group path
+      # where the memorial context is never injected (red-team 7/21).
+      if { [ -n "$_root_id" ] && [ "$_root_id" != "null" ]; } || \
+         { [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; }; then
+        if [ "$chat_type" = "p2p" ]; then
+          _mem_route=$(JV_ROOT="$_root_id" JV_PARENT="$_parent_id" \
+            JARVIS_DIR="$JARVIS_DIR" python3 -m core.memorial_thread route \
+            2>>"$LOG_FILE")
+          if [ -n "$_mem_route" ]; then
+            _mem_id="${_mem_route%%	*}"
+            _mem_title="${_mem_route#*	}"
+            conv_key="memorial:${_mem_id}"
+            log_info "Memorial thread routed: mid=$_mem_id title=${_mem_title:0:40}"
+          fi
+        fi
       fi
 
       # Handle special commands (these run inline, NOT dispatched to background)

@@ -28,11 +28,14 @@ def env(tmp_path, monkeypatch):
 
     def fake_send_card(card_json_str, chat_id=""):
         rec.cards.append((card_json_str, chat_id))
-        return rec.send_ok
+        # str contract since REQ-118: message_id on success, "" on failure.
+        # Returning bool True here once leaked "True" ids into the
+        # PRODUCTION ledger via record_sent (red-team 7/21 finding 1).
+        return "om_test_fixture" if rec.send_ok else ""
 
     def fake_send_text(text, chat_id=""):
         rec.texts.append((text, chat_id))
-        return rec.send_ok
+        return "om_test_fixture" if rec.send_ok else ""
 
     monkeypatch.setattr(memorial, "_send_card", fake_send_card)
     monkeypatch.setattr(memorial, "_send_text", fake_send_text)
@@ -70,7 +73,8 @@ def test_create_writes_ledger_sends_card_and_mirrors_outbox(env):
     assert mid.startswith("mem_")
     assert sent is True
     events = _ledger_events(env.dir)
-    assert [e["ev"] for e in events] == ["create", "delivery"]
+    # "sent" = REQ-118 thread-lookup event (delivered card's Lark message_id)
+    assert [e["ev"] for e in events] == ["create", "delivery", "sent"]
     ev = events[0]
     assert ev["ev"] == "create" and ev["id"] == mid
     assert ev["source"] == "mail" and ev["title"] == "测试标题"
@@ -278,8 +282,9 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert len(entry["summary"]) <= 1500
 
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
+    # ("sent" = REQ-118 thread-lookup event appended after delivery)
     assert [e["ev"] for e in _ledger_events(env.dir)] == [
-        "create", "delivery", "chat"
+        "create", "delivery", "sent", "chat"
     ]
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
@@ -535,7 +540,9 @@ def test_send_timeout_retries_and_never_claims_delivery(monkeypatch):
     monkeypatch.setattr(memorial.subprocess, "run", timeout)
     monkeypatch.setattr(memorial.time, "sleep", lambda _seconds: None)
 
-    assert memorial._send(["--user-id", "ou_test", "--markdown", "x"]) is False
+    # _send returns "" on failure since REQ-118 (message_id on success) —
+    # falsy is the delivery-claim contract, not the bool type.
+    assert not memorial._send(["--user-id", "ou_test", "--markdown", "x"])
     assert len(calls) == 3
 
 

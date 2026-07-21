@@ -36,6 +36,20 @@ from core.sched_events import emit as sched_emit
 from core.timeutil import now_local_str
 
 
+def _record_sent_lark_id(memorial_id: str, ids_before: int) -> None:
+    """REQ-118 奏折专属对话: link the just-sent card's Lark message_id to its
+    memorial so a thread reply routes to a per-card session. Only records
+    when _LAST_SENT_IDS grew during THIS send — a stale tail id would map
+    card B's thread to card A's memorial (red-team 7/21 finding)."""
+    if not memorial_id or len(_LAST_SENT_IDS) <= ids_before:
+        return
+    try:
+        from core.memorial_thread import record_sent
+        record_sent(memorial_id, _LAST_SENT_IDS[-1])
+    except Exception:
+        pass
+
+
 def _lark_send_card(card_json: str, user_id: str, log_file: str,
                     *, assume_delivered_on_timeout: bool = True) -> bool:
     """Send a Lark interactive card, with retries. Returns True on success.
@@ -183,12 +197,14 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
         if line.startswith("CARD:"):
             card_json = line[5:]
             memorial_id = _memorial_id_from_card(card_json)
+            _ids_before = len(_LAST_SENT_IDS)
             if _lark_send_card(
                     card_json, user_id, "",
                     assume_delivered_on_timeout=not bool(memorial_id)):
                 results.append(True)
                 if memorial_id:
                     _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
+                    _record_sent_lark_id(memorial_id, _ids_before)
             else:
                 if memorial_id:
                     # A text fallback destroys every 批红/Chat action. Keep
@@ -213,11 +229,13 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
         elif line.startswith('{"config":'):
             # Legacy card format
             memorial_id = _memorial_id_from_card(line)
+            _ids_before = len(_LAST_SENT_IDS)
             delivered = _lark_send_card(
                 line, user_id, "",
                 assume_delivered_on_timeout=not bool(memorial_id))
             if delivered and memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
+                _record_sent_lark_id(memorial_id, _ids_before)
             elif not delivered and memorial_id:
                 _append_memorial_queue_entry(
                     jarvis_dir, memorial_id, line,
@@ -811,12 +829,14 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
     attempted_failure: dict | None = None
 
     for index, entry in enumerate(selected):
+        _ids_before = len(_LAST_SENT_IDS)
         if _lark_send_card(entry["card_json"], user_id, "",
                            assume_delivered_on_timeout=False):
             delivered.append(entry)
             _write_outbox("CARD:" + entry["card_json"], jarvis_dir)
             mid = str(entry.get("memorial_id", ""))
             _record_memorial_delivery(jarvis_dir, mid, "delivered")
+            _record_sent_lark_id(mid, _ids_before)
             continue
 
         attempted_failure = entry

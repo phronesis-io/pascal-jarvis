@@ -136,3 +136,4 @@ alerts_deadletter.jsonl
 # Virtualenvs (setup instructions suggest an in-repo .venv)
 .venv/
 venv/
+memorials.jsonl.bak-*

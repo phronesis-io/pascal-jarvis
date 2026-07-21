@@ -142,6 +142,36 @@ phronesis:
   chat_id: ""          # oc_xxx — the group chat to monitor
   user_open_id: ""     # ou_xxx — whose mentions matter (defaults to lark.user_id)
 
+# ── Geo & Weather (高德地图 Amap) ──────────────────────────────────
+# Optional. Powers `python3 -m core.geo` (geocoding / POI / routing) and
+# `python3 -m core.weather` (weather context injected into daily-plan /
+# check-in / free-time prompts). Leave amap_key empty to disable everything —
+# all geo/weather features silently no-op without a key.
+# Get a free Web 服务 key at https://lbs.amap.com (控制台 → 应用管理).
+
+geo:
+  # ⚙ Amap Web 服务 API key. Env var AMAP_KEY overrides this.
+  amap_key: ""
+  # Fallback adcode for weather when no anchor below has one.
+  # 310000 = 上海; find yours at https://lbs.amap.com/api/webservice/download
+  default_adcode: "310000"
+  # Named places ("anchors") for distance/routing questions. Runtime updates
+  # (python3 -m core.geo anchor-set) go to data/geo_anchors.json (gitignored),
+  # which OVERRIDES same-named entries here — this file is never rewritten.
+  anchors: {}
+  # anchors:
+  #   home:
+  #     address: "示例市示例区示例路1号"
+  #     lat: 31.000000
+  #     lng: 121.000000
+  #     adcode: "310000"
+  #   office:
+  #     address: "示例市示例区示例大道100号"
+  #     lat: 31.100000
+  #     lng: 121.100000
+  #     adcode: "310000"
+
+
 # Optional: personal-website auto-updater (tasks/personal_site_pre.sh).
 # Point at a LOCAL CLONE of your site repo (absolute path, ~ ok).
 # Leave empty to disable the task and its health checks entirely.
