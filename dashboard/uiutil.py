@@ -1,13 +1,17 @@
-"""Shared UI helpers for dashboard pages."""
+"""Shared UI helpers for dashboard pages.
+
+Single source of truth for the 御前 visual system and for the
+machine-vocabulary → 人话 maps. Pages must not print raw scheduler /
+intent enum keys; they go through the label helpers here.
+"""
 
 from __future__ import annotations
 
 import inspect
 import re
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 from nicegui import ui
-
 
 _NAV = [
     ("今日", "/"),
@@ -21,7 +25,116 @@ _NAV = [
 
 _GENERIC_MEMORIAL_TITLES = {
     "", "EigenFlux", "eigenflux", "heartbeat", "pgc-improvement", "一件事",
+    "Intent", "intent", "EigenFlux 消息", "EigenFlux 分析", "repos-sync",
+    "跨 Session 动态", "变动",
 }
+
+# 来源键 → 用户可读标签。奏折卡、首页预览、互动表共用一份。
+SOURCE_LABELS = {
+    "eigenflux-feed-triage": "EigenFlux",
+    "eigenflux": "EigenFlux",
+    "eigenflux-friends": "EigenFlux",
+    "eigenflux-publish": "EigenFlux",
+    "mail": "邮件",
+    "mail-triage": "邮件",
+    "selfmon": "自诊断",
+    "intention-check": "意图",
+    "intentions": "意图",
+    "intent": "意图",
+    "cross-session-sync": "跨 Session",
+    "daily-reflect": "复盘",
+    "weekly-review": "周回顾",
+    "calendar-sync": "日程",
+    "checkin": "关怀",
+    "metrics-digest": "指标日报",
+    "phronesis-monitor": "Phronesis",
+    "repos-sync": "仓库",
+    "heartbeat": "心跳",
+    "pgc-improvement": "PGC",
+    "release": "发版",
+}
+
+
+def source_label(source: str, fallback: str = "奏折") -> str:
+    raw = str(source or "").strip()
+    if not raw:
+        return fallback
+    return SOURCE_LABELS.get(raw, raw.replace("-", " "))
+
+
+# 调度器"跳过"里属于正常节律的原因——不该被任何面板当成失败标红。
+ROUTINE_SKIP_REASONS = {
+    "empty_pre", "not_due", "throttled", "interval_not_elapsed",
+    "silent_output", "no_output", "duplicate", "queued_quiet_hours",
+    "queued_daytime_batch", "batch_deferred",
+}
+
+_SKIP_REASON_LABELS = {
+    "empty_pre": "没有新内容",
+    "not_due": "还没到时间",
+    "throttled": "触发太密，已限速",
+    "interval_not_elapsed": "间隔未到",
+    "silent_output": "没有产出",
+    "no_output": "没有产出",
+    "duplicate": "重复，已合并",
+    "queued_quiet_hours": "夜间免打扰，已排队",
+    "queued_daytime_batch": "合并进白天批次",
+    "batch_deferred": "合并进批处理",
+    "shared_call_backoff": "上游繁忙，稍后再试",
+    "no_envelope_acked": "上一条还没送达确认",
+    "pre_nonzero": "前置检查未通过",
+    "pre_error": "前置检查出错",
+    "overlap_lock": "上一轮还没跑完",
+    "circuit_open": "连续出错，熔断暂停中",
+}
+
+_FINISH_STATUS_LABELS = {
+    "ok": "正常",
+    "idle": "无事可做",
+    "silent": "静默",
+    "failed": "失败",
+    "timeout": "超时",
+    "parse_failed": "输出没解析出来",
+    "crashed": "崩溃",
+    "skipped": "跳过",
+    "killed": "重启时停掉（正常）",
+}
+
+# task_finish 里不算异常的收场——重启被停(killed)是部署节奏，不是故障。
+ROUTINE_FINISH_STATUSES = {"ok", "idle", "silent", "killed"}
+
+# 判定"真失败"的权威口径，与 core/selfmon.CRASH_STATUSES 一致。
+CRASH_FINISH_STATUSES = {"failed", "parse_failed", "timeout"}
+
+_INTENT_EVENT_LABELS = {
+    "intent_create": "新意图",
+    "intent_fired": "意图触发",
+    "intent_trigger": "意图触发",
+    "intent_executed": "意图已执行",
+    "intent_execute": "意图已执行",
+    "intent_retry": "意图重试",
+    "intent_close": "意图闭环",
+    "intent_closure": "意图闭环",
+    "intent_closure_reask": "追问是否办结",
+    "intent_closure_touch": "闭环跟进",
+    "intent_expire": "意图过期",
+    "intent_expired": "意图过期",
+    "intent_occurrence_skipped": "本次跳过",
+}
+
+
+def skip_reason_label(reason: str) -> str:
+    reason = str(reason or "").strip()
+    return _SKIP_REASON_LABELS.get(reason, f"未按计划运行（{reason}）" if reason else "未按计划运行")
+
+
+def finish_status_label(status: str) -> str:
+    status = str(status or "").strip()
+    return _FINISH_STATUS_LABELS.get(status, status)
+
+
+def intent_event_label(event: str) -> str:
+    return _INTENT_EVENT_LABELS.get(str(event or ""), str(event or ""))
 
 
 def memorial_display_title(state: dict) -> str:
@@ -33,7 +146,7 @@ def memorial_display_title(state: dict) -> str:
     first = next((line.strip() for line in body.splitlines() if line.strip()), "一件事")
     first = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", first)
     first = re.sub(r"[*_`#]+", "", first)
-    first = re.sub(r"^[\s📡📬🩺🎯🧠🫀🌿📅💡⏰📺📊🪞🧭📋🌙]+", "", first)
+    first = re.sub(r"^[\s📡📬🩺🎯🧠🫀🌿📅💡⏰📺📊🪞🧭📋🌙⏳🗞️🚨✅⚠️❗️🔧🎙️]+", "", first)
     first = first.split("。", 1)[0].split("！", 1)[0].strip(" ·|-：:")
     return first if len(first) <= 30 else first[:30].rstrip() + "…"
 
@@ -41,6 +154,12 @@ def memorial_display_title(state: dict) -> str:
 def memorial_option_label(label: str) -> str:
     """Correct legacy promise-heavy copy without rewriting the audit ledger."""
     return {"重要，持续盯": "标为重点"}.get(str(label), str(label))
+
+
+def memorial_is_pending(state: dict) -> bool:
+    """待批的统一口径：home 的计数和 /memorials 的待批列表必须一致。"""
+    return (state.get("status") == "pending"
+            and state.get("delivery_status") not in {"failed", "expired"})
 
 
 def memorial_attention_rank(state: dict) -> tuple[int, float]:
@@ -65,10 +184,20 @@ def memorial_attention_rank(state: dict) -> tuple[int, float]:
 
 
 def add_dashboard_head() -> None:
-    """Load the shared visual system for user-facing dashboard pages."""
+    """Load the shared visual system for user-facing dashboard pages.
+
+    ui.colors rebinds Quasar's brand palette to the 御前 tokens — without it
+    every q-btn falls back to Quasar blue (its own !important wins the
+    same-specificity fight against style.css).
+    """
+    ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
+              positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
         '<link rel="stylesheet" href="/static/style.css">'
-        '<meta name="theme-color" content="#f5f7f8">'
+        '<meta name="theme-color" content="#f5f7f8" '
+        'media="(prefers-color-scheme: light)">'
+        '<meta name="theme-color" content="#10181d" '
+        'media="(prefers-color-scheme: dark)">'
     )
 
 
@@ -84,9 +213,20 @@ def dashboard_header(active: str, title: str, subtitle: str = "") -> None:
         with ui.element("nav").classes("jarvis-nav"):
             for label, href in _NAV:
                 classes = "jarvis-nav-link"
-                if href == active:
+                if href == active or (href == "/settings" and active in {
+                        "/settings", "/usage", "/engagement", "/thinking",
+                        "/agent-calendar"}):
                     classes += " is-active"
                 ui.link(label, href).classes(classes)
+
+
+@contextmanager
+def jarvis_page(active: str, title: str, subtitle: str = ""):
+    """Standard page scaffold: head + page column + masthead, then content."""
+    add_dashboard_head()
+    with ui.column().classes("jarvis-page") as column:
+        dashboard_header(active, title, subtitle)
+        yield column
 
 
 class _ClientBoundTimer(ui.timer):
@@ -132,6 +272,5 @@ def guarded_refresh_timer(interval: float, refresh) -> ui.timer:
                     timer.cancel()
             else:
                 raise
-
     timer = _ClientBoundTimer(interval, _tick)
     return timer

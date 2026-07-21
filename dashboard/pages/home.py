@@ -1,7 +1,7 @@
 """Jarvis home — decisions first, machinery second.
 
 The previous page put thirty routine ``empty_pre`` skips ahead of the things
-Pascal could actually act on.  Home is now the ten-second view: pending
+the user could actually act on.  Home is now the ten-second view: pending
 memorials, a small outcome strip, then only meaningful activity. Operational
 telemetry remains available, but lives in a collapsed system drawer.
 """
@@ -13,63 +13,54 @@ from pathlib import Path
 
 from nicegui import ui
 
-from core.jsonl import read_jsonl
-
 from ..db import engagement_stats
-from ..telemetry import read_jsonl_tail, read_sched_events
-from ..uiutil import (add_dashboard_head, dashboard_header,
-                      guarded_refresh_timer, memorial_attention_rank,
-                      memorial_display_title)
+from ..telemetry import (memorial_states, parse_ts_epoch, read_jsonl_tail,
+                         read_sched_events)
+from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
+                      add_dashboard_head, dashboard_header,
+                      finish_status_label, guarded_refresh_timer,
+                      intent_event_label, memorial_attention_rank,
+                      memorial_display_title, memorial_is_pending,
+                      skip_reason_label, source_label)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
-_ROUTINE_SKIP_REASONS = {
-    "empty_pre", "not_due", "throttled", "interval_not_elapsed",
-    "silent_output", "no_output", "duplicate", "queued_quiet_hours",
-    "queued_daytime_batch",
-}
+# compute_selfmon re-reads MBs of logs; once a minute is plenty for a drawer.
+_SELFMON_TTL = 60.0
+_selfmon_cache = {"at": 0.0, "data": {"ok": False}}
 
 
 def _selfmon_headline(jarvis_dir: Path) -> dict:
+    now = time.monotonic()
+    if now - _selfmon_cache["at"] < _SELFMON_TTL:
+        return _selfmon_cache["data"]
     try:
         from core.selfmon import compute_selfmon
         m = compute_selfmon(jarvis_dir, window_hours=24)
         overdue = m["closure_overdue"]
-        return {
+        data = {
             "noise_cards": m["noise_card_count"]["total_sent"],
             "low_engagement": len(m["noise_card_count"]["low_engagement_sources"]),
             "refires": m["same_intent_refires"]["offender_count"],
             "closure_overdue": (overdue["overdue_count"]
-                                if overdue.get("db_available") else "n/a"),
+                                if overdue.get("db_available") else "—"),
             "crashes": m["model_crash_or_skip"]["total"],
             "silent": m["silent_failures"]["total"],
             "ok": True,
         }
     except Exception:  # noqa: BLE001 — the home surface must always render
-        return {"ok": False}
+        data = {"ok": False}
+    _selfmon_cache.update(at=now, data=data)
+    return data
 
 
-def _memorial_states(jarvis_dir: str | Path) -> list[dict]:
-    """Fold the local memorial ledger without relying on module globals."""
-    from core.memorial import _fold
-    return list(_fold(read_jsonl(Path(jarvis_dir) / "memorials.jsonl")).values())
-
-
-def pending_memorials(jarvis_dir: str | Path, limit: int | None = None) -> list[dict]:
-    states = [s for s in _memorial_states(jarvis_dir)
-              if s.get("status") == "pending"
-              and s.get("delivery_status") not in {"failed", "expired"}]
-    states.sort(key=memorial_attention_rank, reverse=True)
-    return states[:limit] if limit is not None else states
-
-
-def _parse_epoch(ts: str) -> float | None:
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-        try:
-            return time.mktime(time.strptime(ts, fmt))
-        except (ValueError, TypeError):
-            continue
-    return None
+def pending_memorials(jarvis_dir: str | Path, limit: int | None = None,
+                      states: list[dict] | None = None) -> list[dict]:
+    if states is None:
+        states = memorial_states(jarvis_dir)
+    pending = [s for s in states if memorial_is_pending(s)]
+    pending.sort(key=memorial_attention_rank, reverse=True)
+    return pending[:limit] if limit is not None else pending
 
 
 def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
@@ -77,10 +68,21 @@ def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
     jd = Path(jarvis_dir)
     feed: list[dict] = []
 
-    for e in read_sched_events(jd)[-500:]:
+    events = read_sched_events(jd)[-500:]
+    # 触发+已执行成对出现时只留"已执行"——同一件事不占两行。只有当同名
+    # 意图在触发"之后"确实执行了才折叠：卡住没执行的触发必须留在面上。
+    executed_at: dict[str, list[float]] = {}
+    for e in events:
+        if str(e.get("event", "")) in {"intent_executed", "intent_execute"}:
+            ep = parse_ts_epoch(str(e.get("ts", "")))
+            if ep is not None:
+                name = str(e.get("name", "") or e.get("task", ""))
+                executed_at.setdefault(name, []).append(ep)
+
+    for e in events:
         ev = str(e.get("event", ""))
         ts = str(e.get("ts", ""))
-        epoch = _parse_epoch(ts)
+        epoch = parse_ts_epoch(ts)
         if epoch is None:
             continue
         task = str(e.get("task", "") or "")
@@ -89,27 +91,25 @@ def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
                          "message": f"{task} 超时，系统会继续重试"})
         elif ev == "task_finish":
             status = str(e.get("status", "ok"))
-            if status not in {"ok", "idle", "silent"}:
+            if status not in ROUTINE_FINISH_STATUSES:
                 feed.append({"ts": ts, "epoch": epoch, "source": "异常",
-                             "message": f"{task} 结束状态：{status}"})
+                             "message": f"{task}：{finish_status_label(status)}"})
         elif ev == "task_skip":
             reason = str(e.get("reason", ""))
-            if reason and reason not in _ROUTINE_SKIP_REASONS:
+            if reason and reason not in ROUTINE_SKIP_REASONS:
                 feed.append({"ts": ts, "epoch": epoch, "source": "留意",
-                             "message": f"{task} 未运行：{reason}"})
+                             "message": f"{task}：{skip_reason_label(reason)}"})
         elif ev.startswith("intent_"):
             name = str(e.get("name", "") or task)
-            labels = {
-                "intent_create": "新意图", "intent_trigger": "意图触发",
-                "intent_execute": "意图已执行", "intent_close": "意图闭环",
-                "intent_expire": "意图过期",
-            }
+            if (ev in {"intent_fired", "intent_trigger"}
+                    and any(x >= epoch for x in executed_at.get(name, ()))):
+                continue
             feed.append({"ts": ts, "epoch": epoch, "source": "意图",
-                         "message": f"{labels.get(ev, ev)} · {name}"})
+                         "message": f"{intent_event_label(ev)} · {name}"})
 
     for o in read_jsonl_tail(jd / "heartbeat_outbox.jsonl")[-50:]:
         ts = str(o.get("ts", ""))
-        epoch = _parse_epoch(ts)
+        epoch = parse_ts_epoch(ts)
         if epoch is None:
             continue
         text = str(o.get("text", "")).replace("\n", " ").strip()
@@ -133,7 +133,7 @@ def derive_status(jarvis_dir: str | Path,
     now_ts = now_ts if now_ts is not None else time.time()
     newest = 0.0
     for e in read_sched_events(jarvis_dir)[-50:]:
-        epoch = _parse_epoch(str(e.get("ts", "")))
+        epoch = parse_ts_epoch(str(e.get("ts", "")))
         if epoch is not None and epoch > newest:
             newest = epoch
     if not newest:
@@ -173,7 +173,8 @@ def _metric(label: str, value, alert: bool = False) -> None:
 def _memorial_preview(state: dict) -> None:
     with ui.card().classes("memorial-card"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
-            ui.label(state.get("source", "奏折")).classes("memorial-source")
+            ui.label(source_label(state.get("source", ""))).classes(
+                "memorial-source")
             ui.label(state.get("ts", "")).classes("memorial-time")
         ui.label(memorial_display_title(state)).classes("memorial-title")
         ui.markdown(_compact(state.get("body", ""))).classes("memorial-body")
@@ -186,13 +187,20 @@ def _memorial_preview(state: dict) -> None:
 def home_page():
     add_dashboard_head()
     with ui.column().classes("jarvis-page"):
-        status, _ = derive_status(JARVIS_DIR)
-        dashboard_header("/", "今日御前", f"Jarvis {status} · 这里只放需要你知道或决定的事")
+        dashboard_header("/", "今日御前", "这里只放需要你知道或决定的事")
 
         @ui.refreshable
         def live_content():
-            pending = pending_memorials(JARVIS_DIR)
-            states = _memorial_states(JARVIS_DIR)
+            # Liveness must live INSIDE the refreshable: computed once at
+            # page build it would keep saying 在岗 forever on an open tab —
+            # lying exactly in the failure case it exists to catch.
+            status, tone = derive_status(JARVIS_DIR)
+            with ui.element("span").classes("status-pill"):
+                ui.element("span").classes(f"status-dot is-{tone}")
+                ui.label(f"Jarvis {status}")
+
+            states = memorial_states(JARVIS_DIR)
+            pending = pending_memorials(JARVIS_DIR, states=states)
             stats = engagement_stats(7)
             sm = _selfmon_headline(JARVIS_DIR)
             marked = sum(s.get("decided_opt") == "watch" for s in states)
@@ -208,7 +216,7 @@ def home_page():
                 _metric("需关注信号", issues, alert=issues not in (0, "—"))
 
             with ui.column().classes("w-full gap-3"):
-                ui.label("DECISIONS").classes("section-kicker")
+                ui.label("壹 · 决策").classes("section-kicker")
                 with ui.row().classes("w-full items-end justify-between gap-4"):
                     with ui.column().classes("gap-1"):
                         ui.label("御前待批").classes("section-title")
@@ -220,11 +228,11 @@ def home_page():
                         for state in pending[:4]:
                             _memorial_preview(state)
                 else:
-                    ui.label("没有待批事项。Jarvis 会继续在后台看着，有事再来。\n").classes(
+                    ui.label("没有待批事项。Jarvis 会继续在后台看着，有事再来。").classes(
                         "empty-guidance")
 
             with ui.column().classes("w-full gap-3"):
-                ui.label("CHANGES").classes("section-kicker")
+                ui.label("贰 · 变化").classes("section-kicker")
                 ui.label("真正发生的变化").classes("section-title")
                 feed = build_activity_feed(JARVIS_DIR)
                 if feed:
@@ -249,7 +257,7 @@ def home_page():
                         _metric("噪声卡片", sm["noise_cards"])
                         _metric("重复触发", sm["refires"], alert=bool(sm["refires"]))
                         _metric("闭环逾期", sm["closure_overdue"],
-                                alert=sm["closure_overdue"] not in (0, "n/a"))
+                                alert=sm["closure_overdue"] not in (0, "—"))
                         _metric("静默失败", sm["silent"], alert=bool(sm["silent"]))
 
         live_content()

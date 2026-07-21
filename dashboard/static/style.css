@@ -214,6 +214,44 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .q-card { border-radius: var(--radius); }
 .q-notification { font-family: "PingFang SC", -apple-system, sans-serif; }
 
+/* Quasar ships its own !important colors at equal specificity and later load
+   order; win the fight explicitly instead of hoping. */
+.q-btn.memorial-primary { background: var(--ink) !important; color: var(--paper-raised) !important; }
+.q-btn.memorial-secondary { color: var(--ink) !important; border-color: var(--mist) !important; }
+.q-btn.memorial-chat { color: var(--focus) !important; }
+
+/* Filter chips (memorials 来源/状态过滤等). */
+.filter-chip {
+    min-height: 30px;
+    padding: 4px 12px;
+    border-radius: 999px !important;
+    font-size: 12px;
+    letter-spacing: 0;
+}
+
+/* Data tables on machinery pages — one look, phone-safe. */
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.jarvis-table { width: 100%; background: var(--paper-raised); border: 1px solid var(--mist); border-radius: var(--radius); box-shadow: none !important; }
+.jarvis-table .q-table__top, .jarvis-table thead tr { background: var(--mist-soft); }
+.jarvis-table th { color: var(--ink-soft); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.jarvis-table td { color: var(--ink); font-size: 13px; }
+
+/* Status pill for liveness (home). */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 12px;
+    border: 1px solid var(--mist);
+    border-radius: 999px;
+    color: var(--ink-soft);
+    font-size: 12px;
+}
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa9ae; }
+.status-dot.is-green { background: var(--jade); }
+.status-dot.is-amber { background: var(--gold); }
+.status-dot.is-red { background: var(--cinnabar); }
+
 @media (max-width: 760px) {
     body { background: var(--paper); }
     .jarvis-page { width: min(100% - 24px, 1120px); padding-top: 18px; }
@@ -227,4 +265,37 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 @media (prefers-reduced-motion: no-preference) {
     .memorial-card { transition: transform .16s ease, border-color .16s ease; }
     .memorial-card:hover { transform: translateY(-2px); border-color: #b9c8cc !important; }
+}
+
+/* 暗色：同一套 token 换值，Lark webview / 系统深色下不再刺眼。 */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --paper: #10181d;
+        --paper-raised: #17232a;
+        --ink: #e6edef;
+        --ink-soft: #9db0b7;
+        --mist: #293b44;
+        --mist-soft: #1c2930;
+        --jade: #4aa78f;
+        --cinnabar: #d0685a;
+        --gold: #c09a5c;
+        --focus: #58a6c4;
+        --shadow: none;
+    }
+    body { background: var(--paper); }
+    .jarvis-nav-link.is-active { background: var(--ink); color: var(--paper) !important; }
+    .q-btn.memorial-primary { background: var(--ink) !important; color: var(--paper) !important; }
+    .metric-cell { background: var(--paper-raised); }
+    .empty-guidance { border-color: #3a4d56; }
+    .memorial-time, .activity-time { color: #7e929a; }
+    .memorial-card:hover { border-color: #3a4d56 !important; }
+    /* Quasar 默认白卡和 Tailwind 固定灰字在暗色画布上会翻车，统一回 token。 */
+    .q-card { background: var(--paper-raised); color: var(--ink); }
+    .q-field__native, .q-field__label, .q-select__dropdown-icon { color: var(--ink); }
+    .text-gray-400, .text-gray-500, .text-gray-600, .text-gray-700 {
+        color: var(--ink-soft) !important;
+    }
+    .jarvis-table, .jarvis-table .q-table__top, .jarvis-table thead tr {
+        background: var(--paper-raised);
+    }
 }

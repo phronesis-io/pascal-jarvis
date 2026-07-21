@@ -1,8 +1,8 @@
-"""Task Health board — sched_events.jsonl 驱动的真实运行视图 (REQ-44).
+"""任务健康板 — sched_events.jsonl 驱动的真实运行视图 (REQ-44).
 
 The old page was a fake Gantt: bar widths invented from interval×5%, data
 from synthetic heartbeat_state watermarks. This board renders REALITY:
-per task the last actual run (max task_finish ts), failure rate, p50/max
+per task the last actual run (max task_finish ts), failure rate, typical/max
 duration, every skip reason with counts, and the circuit-breaker state —
 plus a red-flag banner for tasks that are silently dead (interval < 6h yet
 ZERO events of any kind within 3×interval, the repos-sync failure class).
@@ -15,14 +15,13 @@ Data layer: dashboard.telemetry incremental tail-reader — each ui.timer(15)
 refresh reads only the bytes appended since the last one.
 """
 
-import json
 import time
-from datetime import datetime
 from pathlib import Path
 
 from nicegui import ui
 
-from ..uiutil import guarded_refresh_timer
+from ..uiutil import (CRASH_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
+                      guarded_refresh_timer, jarvis_page, skip_reason_label)
 
 from ..telemetry import read_sched_events, read_json
 
@@ -32,7 +31,7 @@ JARVIS_DIR = Path(__file__).parent.parent.parent
 _TASK_EVENTS = ("task_spawn", "task_finish", "task_skip", "task_timeout")
 
 # 红旗判定: interval < 6h 的任务，3×interval 内零事件（spawn/skip/finish/timeout
-# 都算活）→ 静默死亡
+# 都算活）→ 静默失联
 DEAD_MAX_INTERVAL_S = 6 * 3600
 DEAD_FACTOR = 3
 
@@ -99,7 +98,9 @@ def aggregate_task_health(events: list[dict], window_s: float = 86400,
                 s["last_finish"] = str(e.get("ts", ""))
             if in_window:
                 s["finishes"] += 1
-                if str(e.get("status", "ok")) != "ok":
+                # 只有真失败才算失败：idle(跑了没事做)/silent/killed(重启被停)
+                # 都是正常收场，算进去会把 idle 多的任务渲染成"失败率 100%"。
+                if str(e.get("status", "ok")) in CRASH_FINISH_STATUSES:
                     s["failures"] += 1
                 try:
                     s["_durations"].append(float(e.get("duration_s", 0) or 0))
@@ -169,13 +170,13 @@ def _load_heartbeat_tasks(jarvis_dir: Path | None = None) -> list[dict]:
 def _format_interval(seconds) -> str:
     seconds = int(seconds or 0)
     if seconds < 60:
-        return f"{seconds}s"
+        return f"{seconds} 秒"
     elif seconds < 3600:
-        return f"{seconds // 60}m"
+        return f"{seconds // 60} 分钟"
     elif seconds < 86400:
-        return f"{seconds // 3600}h"
+        return f"{seconds // 3600} 小时"
     else:
-        return f"{seconds // 86400}d"
+        return f"{seconds // 86400} 天"
 
 
 def _circuit_info(state: dict, task: str, now_ts: float) -> tuple[int, float]:
@@ -186,25 +187,18 @@ def _circuit_info(state: dict, task: str, now_ts: float) -> tuple[int, float]:
     return failures, max(disabled_until - now_ts, 0)
 
 
+def _metric(label: str, value, alert: bool = False) -> None:
+    with ui.element("div").classes("metric-cell"):
+        cls = "metric-value" + (" is-alert" if alert else "")
+        ui.label(str(value)).classes(cls)
+        ui.label(label).classes("metric-label")
+
+
 @ui.page("/agent-calendar")
 def task_health_page():
     """Task Health board (keeps the legacy /agent-calendar route)."""
-    ui.add_head_html("""
-    <style>
-        .summary-card { background: #f9fafb; border-radius: 12px; padding: 1rem; }
-        .health-row { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.6rem 0.9rem; }
-        .health-row:hover { border-color: #3b82f6; }
-        .dead-banner { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px;
-                       padding: 0.75rem 1rem; }
-    </style>
-    """)
-
-    with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.link("← Home", "/").classes("text-gray-500 text-sm")
-            ui.label("Task Health").classes("text-2xl font-bold")
-        ui.label("真实运行视图——直接读 sched_events.jsonl，不是水印推算").classes(
-            "text-xs text-gray-500")
+    with jarvis_page("/agent-calendar", "任务健康",
+                     "后台每个定时任务真实跑没跑、跑得顺不顺；红色才需要关心。"):
 
         @ui.refreshable
         def board():
@@ -214,17 +208,17 @@ def task_health_page():
             state = read_json(JARVIS_DIR / "heartbeat_state.json", ttl=10, default={}) or {}
             health = aggregate_task_health(events, window_s=86400, now_ts=now_ts)
 
-            # ── 红旗头条: 静默死亡 ──
+            # ── 红旗头条: 静默失联 ──
             dead = detect_silently_dead(hb_tasks, events, now_ts=now_ts)
             if dead:
-                with ui.element("div").classes("dead-banner w-full"):
-                    ui.label("⚠ silently dead").classes("font-bold text-red-600")
+                with ui.card().classes("w-full p-3"):
+                    ui.label("静默失联（该跑没跑）").classes("font-bold text-red-600")
                     for d in dead:
-                        silent = (_format_interval(d["silent_for_s"]) + " 无任何事件"
-                                  ) if d["silent_for_s"] is not None else "从未有事件"
+                        silent = (_format_interval(d["silent_for_s"]) + "没有任何动静"
+                                  ) if d["silent_for_s"] is not None else "从来没有过运行记录"
                         ui.label(
-                            f"{d['name']} — interval {_format_interval(d['interval'])}，{silent}"
-                            f"（阈值 {DEAD_FACTOR}×interval）"
+                            f"{d['name']} — 本该每 {_format_interval(d['interval'])}跑一次，"
+                            f"已经{silent}"
                         ).classes("text-sm text-red-700")
 
             # ── 概览 ──
@@ -232,25 +226,14 @@ def task_health_page():
                 1 for t in state
                 if _circuit_info(state, t, now_ts)[1] > 0)
             failing = sum(1 for h in health.values() if h["failure_rate"] > 0)
-            with ui.row().classes("w-full gap-4"):
-                with ui.card().classes("summary-card flex-1"):
-                    ui.label(str(len(health))).classes("text-2xl font-bold")
-                    ui.label("tasks with events").classes("text-xs text-gray-500")
-                with ui.card().classes("summary-card flex-1"):
-                    color = "text-red-600" if dead else "text-green-600"
-                    ui.label(str(len(dead))).classes(f"text-2xl font-bold {color}")
-                    ui.label("silently dead").classes("text-xs text-gray-500")
-                with ui.card().classes("summary-card flex-1"):
-                    color = "text-amber-600" if failing else "text-gray-600"
-                    ui.label(str(failing)).classes(f"text-2xl font-bold {color}")
-                    ui.label("failing in 24h").classes("text-xs text-gray-500")
-                with ui.card().classes("summary-card flex-1"):
-                    color = "text-red-600" if circuits_open else "text-gray-600"
-                    ui.label(str(circuits_open)).classes(f"text-2xl font-bold {color}")
-                    ui.label("circuit open").classes("text-xs text-gray-500")
+            with ui.element("div").classes("metric-strip"):
+                _metric("有运行记录的任务", len(health))
+                _metric("静默失联", len(dead), alert=bool(dead))
+                _metric("24 小时内出过错", failing, alert=bool(failing))
+                _metric("熔断暂停", circuits_open, alert=bool(circuits_open))
 
             # ── 每任务一行 ──
-            ui.label("Per task (24h window)").classes("text-lg font-semibold mt-2")
+            ui.label("逐个任务 · 最近 24 小时").classes("section-title mt-2")
             ordered = sorted(
                 health.items(),
                 key=lambda kv: kv[1]["last_finish_ts"] or 0,
@@ -258,51 +241,50 @@ def task_health_page():
             )
             dead_names = {d["name"] for d in dead}
             for task, h in ordered:
-                with ui.element("div").classes("health-row w-full"):
+                with ui.card().classes("w-full p-3"):
                     with ui.row().classes("w-full items-center justify-between"):
                         with ui.column().classes("gap-0 flex-1"):
                             with ui.row().classes("items-center gap-2"):
                                 ui.label(task).classes("font-medium text-sm")
                                 if task in dead_names:
-                                    ui.badge("⚠ silently dead", color="red").classes("text-xs")
+                                    ui.badge("静默失联", color="red").classes("text-xs")
                                 failures, disabled_for = _circuit_info(state, task, now_ts)
                                 if disabled_for > 0:
                                     ui.badge(
-                                        f"熔断中 · 还剩 {_format_interval(disabled_for)}",
+                                        f"熔断暂停 · 还剩 {_format_interval(disabled_for)}",
                                         color="red").classes("text-xs")
                                 elif failures > 0:
                                     ui.badge(
-                                        f"连败 {failures}", color="amber").classes("text-xs")
-                            last = h["last_finish"] or "never"
+                                        f"连续失败 {failures} 次", color="amber").classes("text-xs")
+                            last = h["last_finish"] or "还没跑完过一次"
                             ago = ""
                             if h["last_finish_ts"]:
-                                ago = f"（{_format_interval(now_ts - h['last_finish_ts'])} 前）"
-                            ui.label(f"last run: {last} {ago}").classes("text-xs text-gray-500")
+                                ago = f"（{_format_interval(now_ts - h['last_finish_ts'])}前）"
+                            ui.label(f"上次跑完: {last} {ago}").classes("text-xs text-gray-500")
                             if h["skip_reasons"]:
                                 reasons = " · ".join(
-                                    f"{n}× {r}" for r, n in sorted(
+                                    f"{skip_reason_label(r)} {n} 次" for r, n in sorted(
                                         h["skip_reasons"].items(),
                                         key=lambda kv: -kv[1]))
-                                ui.label(f"skips: {reasons}").classes("text-xs text-amber-600")
+                                # 正常节律的跳过（没新内容/夜间排队…）不配黄色。
+                                tone = ("text-amber-600" if any(
+                                    r not in ROUTINE_SKIP_REASONS
+                                    for r in h["skip_reasons"]) else "text-gray-500")
+                                ui.label(f"没跑的原因: {reasons}").classes(f"text-xs {tone}")
                         with ui.column().classes("items-end gap-0"):
                             rate = h["failure_rate"]
                             rate_cls = ("text-red-600" if rate > 0.3
                                         else "text-amber-600" if rate > 0 else "text-green-600")
-                            ui.label(f"fail {rate * 100:.0f}%").classes(f"text-sm font-medium {rate_cls}")
+                            ui.label(f"失败率 {rate * 100:.0f}%").classes(
+                                f"text-sm font-medium {rate_cls}")
                             ui.label(
-                                f"runs {h['finishes']} · p50 {h['p50_s']:.1f}s · max {h['max_s']:.1f}s"
+                                f"跑了 {h['finishes']} 次 · 一般耗时 {h['p50_s']:.1f}s"
+                                f" · 最长 {h['max_s']:.1f}s"
                             ).classes("text-xs text-gray-400")
 
             if not health:
-                ui.label("sched_events.jsonl 里没有任务事件。").classes(
-                    "text-gray-400 text-sm italic")
+                ui.label("还没有任务运行记录。系统刚启动或记录被清空时会这样；"
+                         "过几分钟再来看。").classes("empty-guidance")
 
         board()
         guarded_refresh_timer(15, board.refresh)
-
-        # Navigation
-        ui.separator()
-        with ui.row().classes("gap-4"):
-            ui.link("Home", "/").classes("text-blue-600")
-            ui.link("Tasks", "/tasks").classes("text-blue-600")
-            ui.link("Thinking", "/thinking").classes("text-purple-600")

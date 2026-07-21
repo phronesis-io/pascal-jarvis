@@ -37,6 +37,7 @@ def reset_cache() -> None:
     """Drop all caches (tests / forced reload)."""
     _tail_cache.clear()
     _json_cache.clear()
+    _memorial_fold_cache.clear()
 
 
 def read_jsonl_tail(path: str | Path) -> list[dict]:
@@ -121,3 +122,41 @@ def read_sched_events(jarvis_dir: str | Path) -> list[dict]:
         events.extend(read_jsonl_tail(rotated))
     events.extend(read_jsonl_tail(base))
     return events
+
+
+# path-str → {"gen": tuple, "states": list[dict]}
+_memorial_fold_cache: dict[str, dict] = {}
+
+
+def memorial_states(jarvis_dir: str | Path) -> list[dict]:
+    """Folded memorial ledger, incremental read + fold-once-per-generation.
+
+    home and memorials both poll this on short timers; before this cache each
+    tick re-read and re-folded the full 350KB+ ledger twice, synchronously on
+    the event loop. The tail reader makes reads O(new bytes); the fold is
+    memoised on (inode, byte offset) — NOT on event count, which pins at
+    MAX_CACHED_EVENTS once truncation kicks in and would freeze the fold
+    forever. The offset grows monotonically with every append.
+    """
+    from core.memorial import _fold
+
+    path = Path(jarvis_dir) / "memorials.jsonl"
+    events = read_jsonl_tail(path)
+    key = str(path)
+    tail = _tail_cache.get(key)
+    gen = (tail.get("ino"), tail["offset"]) if tail else ("missing", 0)
+    entry = _memorial_fold_cache.get(key)
+    if entry is None or entry["gen"] != gen:
+        entry = {"gen": gen, "states": list(_fold(events).values())}
+        _memorial_fold_cache[key] = entry
+    return list(entry["states"])
+
+
+def parse_ts_epoch(ts: str) -> float | None:
+    """'YYYY-mm-dd HH:MM[:SS]' (local time) → epoch seconds, else None."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return time.mktime(time.strptime(str(ts), fmt))
+        except (ValueError, TypeError):
+            continue
+    return None

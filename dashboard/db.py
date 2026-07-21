@@ -13,7 +13,25 @@ from pathlib import Path
 
 from core.timeutil import now_local_str
 
-DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
+_DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
+# Kept as a module attribute for test monkeypatching compat (tests patch
+# dashboard.db.DB_PATH). Runtime code must go through _db_path().
+DB_PATH = _DEFAULT_DB_PATH
+
+
+def _db_path() -> Path:
+    """Resolve the DB path at call time, honoring JARVIS_DIR.
+
+    Import-time constants pin the prod path even when JARVIS_DIR is set
+    later (7/21 red-team family: tests polluted the production ledger).
+    A monkeypatched DB_PATH still wins so existing tests keep working.
+    """
+    if DB_PATH != _DEFAULT_DB_PATH:
+        return Path(DB_PATH)
+    jarvis_dir = os.environ.get("JARVIS_DIR")
+    if jarvis_dir:
+        return Path(jarvis_dir) / "data" / "jarvis.db"
+    return _DEFAULT_DB_PATH
 
 MIGRATIONS = [
     # v1: Core tables
@@ -131,8 +149,9 @@ def get_db() -> sqlite3.Connection:
     """Get or create the singleton DB connection."""
     global _connection
     if _connection is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _connection = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        path = _db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _connection = sqlite3.connect(str(path), check_same_thread=False)
         _connection.row_factory = sqlite3.Row
         _connection.execute("PRAGMA journal_mode=WAL")
         _connection.execute("PRAGMA synchronous=NORMAL")
@@ -220,14 +239,31 @@ def bookmark_list(status: str | None = None, limit: int = 50,
 
 
 def bookmark_search(query: str, limit: int = 20) -> list[dict]:
-    """Full-text search bookmarks."""
+    """Full-text search bookmarks.
+
+    FTS5 MATCH treats +, ", ( etc. as query operators and raises
+    OperationalError on user input like 'c++'; fall back to a plain
+    LIKE substring search instead of 500ing.
+    """
     db = get_db()
-    rows = db.execute(
-        """SELECT b.* FROM bookmarks b
-           JOIN bookmarks_fts f ON b.id = f.rowid
-           WHERE bookmarks_fts MATCH ? ORDER BY rank LIMIT ?""",
-        (query, limit),
-    ).fetchall()
+    try:
+        rows = db.execute(
+            """SELECT b.* FROM bookmarks b
+               JOIN bookmarks_fts f ON b.id = f.rowid
+               WHERE bookmarks_fts MATCH ? ORDER BY rank LIMIT ?""",
+            (query, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        like = "%" + (query.replace("\\", r"\\")
+                      .replace("%", r"\%").replace("_", r"\_")) + "%"
+        rows = db.execute(
+            r"""SELECT * FROM bookmarks
+                WHERE title LIKE ? ESCAPE '\'
+                   OR summary LIKE ? ESCAPE '\'
+                   OR tags LIKE ? ESCAPE '\'
+                ORDER BY created_at DESC LIMIT ?""",
+            (like, like, like, limit),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -293,7 +329,15 @@ def task_register(task_id: str, name: str, trigger_type: str,
                   action_config: dict | None = None,
                   conditions: list | None = None,
                   category: str = "user", priority: int = 5) -> None:
-    """Register or update a dynamic task."""
+    """Register or update a dynamic task.
+
+    Raises ValueError on a malformed trigger — a poison row would otherwise
+    be evaluated (and skipped, loudly) on every due-check forever.
+    """
+    from .scheduler import validate_trigger  # deferred: scheduler imports db
+    err = validate_trigger(trigger_type, trigger_config)
+    if err:
+        raise ValueError(err)
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
     with transaction() as db:
         db.execute(
@@ -381,6 +425,11 @@ def engagement_record(event_type: str, source: str = "",
         )
 
 
+# engagement_stats cache: home polls every 15s, the jsonl rarely changes.
+# Keyed on (path, days) → (mtime_ns, size, result).
+_engagement_stats_cache: dict[tuple[str, int], tuple[int, int, dict]] = {}
+
+
 def engagement_stats(days: int = 7) -> dict:
     """Get engagement statistics for the last N days.
 
@@ -389,6 +438,10 @@ def engagement_stats(days: int = 7) -> dict:
     a dashboard HTTP endpoint nobody calls (3 rows, all from 2026-05-21), so
     stats computed from it showed a frozen snapshot while the jsonl kept
     growing. The table and its API stay for compatibility; stats don't use it.
+
+    Per-source engaged counts are capped at the sent count (historical rows
+    double-credited replies, showing >100% rates on home) — same cap as
+    pages/engagement.py.
     """
     import time as _time
     from collections import defaultdict
@@ -397,6 +450,17 @@ def engagement_stats(days: int = 7) -> dict:
                                      Path(__file__).resolve().parent.parent))
     log_path = Path(jarvis_dir) / "engagement_log.jsonl"
     cutoff = _time.time() - days * 86400
+
+    cache_key = (str(log_path), days)
+    try:
+        st = log_path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    if stamp is not None:
+        cached = _engagement_stats_cache.get(cache_key)
+        if cached and cached[:2] == stamp:
+            return cached[2]
 
     total = engaged = 0
     by_source: dict[str, dict] = defaultdict(lambda: {"total": 0, "engaged_count": 0})
@@ -424,11 +488,16 @@ def engagement_stats(days: int = 7) -> dict:
             total += 1
             by_source[source]["total"] += 1
         elif etype == "response" and e.get("reaction") in ("engaged", "late_reply"):
-            engaged += 1
             by_source[source]["engaged_count"] += 1
-    return {
+    for v in by_source.values():
+        v["engaged_count"] = min(v["engaged_count"], v["total"])
+    engaged = sum(v["engaged_count"] for v in by_source.values())
+    result = {
         "total": total,
         "engaged": engaged,
         "rate": round(engaged / total * 100, 1) if total else 0,
         "by_source": [{"source": s, **v} for s, v in sorted(by_source.items())],
     }
+    if stamp is not None:
+        _engagement_stats_cache[cache_key] = (*stamp, result)
+    return result

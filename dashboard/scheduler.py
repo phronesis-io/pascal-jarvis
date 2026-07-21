@@ -22,6 +22,7 @@ Action types:
 """
 
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta
@@ -29,11 +30,85 @@ from pathlib import Path
 
 from core.timeutil import now_local, now_local_str
 
-from .db import get_db, task_list, task_update
+from .db import task_list, transaction
+
+logger = logging.getLogger(__name__)
+
+# Task ids already warned about, so a poison row logs once, not every ~10s.
+_warned_task_ids: set[str] = set()
+
+
+def _coerce(dt: datetime) -> datetime:
+    """Make `dt` comparable to now_local() regardless of tz-awareness.
+
+    Stored timestamps (last_run_at, date-trigger datetime) are local-time
+    strings written WITHOUT an offset, so datetime.fromisoformat() returns a
+    *naive* datetime — while now_local() is tz-aware. Comparing the two raises
+    TypeError, which killed the entire due-check. Mirrors core/intentions.py.
+    """
+    ref = now_local()
+    if ref.tzinfo is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=ref.tzinfo)
+    if ref.tzinfo is None and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
+def validate_trigger(trigger_type: str, trigger_config) -> str | None:
+    """Validate a trigger at registration time. Returns error message or None.
+
+    Keeps malformed rows (bad JSON, bad cron, unparseable datetime) out of
+    the table so they can't poison get_due_tasks().
+    """
+    if isinstance(trigger_config, str):
+        try:
+            trigger_config = json.loads(trigger_config)
+        except (json.JSONDecodeError, ValueError):
+            return "trigger_config is not valid JSON"
+    if not isinstance(trigger_config, dict):
+        return "trigger_config must be a JSON object"
+
+    if trigger_type == "cron":
+        expr = trigger_config.get("expression", "")
+        parts = str(expr).strip().split()
+        if len(parts) != 5:
+            return f"cron expression must have 5 fields, got {len(parts)}: {expr!r}"
+        bounds = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+        for field, (lo, hi) in zip(parts, bounds):
+            try:
+                values = _parse_cron_field(field, lo, hi)
+            except ValueError:
+                return f"malformed cron field {field!r} in {expr!r}"
+            if not values:
+                return f"cron field {field!r} matches nothing in {expr!r}"
+    elif trigger_type == "interval":
+        seconds = trigger_config.get("seconds", 600)
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            return f"interval seconds must be a positive number, got {seconds!r}"
+    elif trigger_type == "date":
+        target = trigger_config.get("datetime", "")
+        try:
+            datetime.fromisoformat(target)
+        except (TypeError, ValueError):
+            return f"date trigger needs an ISO datetime, got {target!r}"
+    else:
+        return f"unknown trigger_type {trigger_type!r}"
+    return None
 
 
 def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
-    """Parse a single cron field into a set of valid values."""
+    """Parse a single cron field into a set of valid values.
+
+    Out-of-range values raise ValueError instead of parsing into a set that
+    can never match — "60 * * * *" used to register fine and then silently
+    never fire, the exact silent-no-op class validate_trigger exists to stop.
+    """
+    def _bounded(raw: str) -> int:
+        v = int(raw)
+        if not min_val <= v <= max_val:
+            raise ValueError(f"cron value {v} outside {min_val}-{max_val}")
+        return v
+
     values = set()
     for part in field_str.split(","):
         if part == "*":
@@ -41,13 +116,15 @@ def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
         elif "/" in part:
             base, step = part.split("/")
             step = int(step)
-            start = min_val if base == "*" else int(base)
+            if step <= 0:
+                raise ValueError(f"cron step must be positive, got {step}")
+            start = min_val if base == "*" else _bounded(base)
             values.update(range(start, max_val + 1, step))
         elif "-" in part:
             lo, hi = part.split("-")
-            values.update(range(int(lo), int(hi) + 1))
+            values.update(range(_bounded(lo), _bounded(hi) + 1))
         else:
-            values.add(int(part))
+            values.add(_bounded(part))
     return values
 
 
@@ -130,7 +207,7 @@ def check_conditions(conditions: list[dict], task: dict) -> bool:
             window = cond.get("window", "today")
             last_run = task.get("last_run_at")
             if last_run:
-                last_dt = datetime.fromisoformat(last_run)
+                last_dt = _coerce(datetime.fromisoformat(last_run))
                 if window == "today" and last_dt.date() == now.date():
                     return False
                 elif window.endswith("h"):
@@ -162,57 +239,85 @@ def check_conditions(conditions: list[dict], task: dict) -> bool:
     return True
 
 
+def _task_is_due(task: dict, now: datetime, now_ts: int) -> bool:
+    """Trigger + condition check for a single task.
+
+    Cron semantics: due only when the expression matches the CURRENT minute
+    and last_run_at is not already within that minute (the heartbeat polls
+    every ~10s; without the guard a task fired up to 6× in its minute).
+    Missed minutes are dropped by design — no catch-up.
+    """
+    trigger_type = task["trigger_type"]
+    trigger_config = json.loads(task["trigger_config"]) if isinstance(task["trigger_config"], str) else task["trigger_config"]
+    conditions = json.loads(task["conditions"]) if isinstance(task["conditions"], str) else (task["conditions"] or [])
+
+    triggered = False
+
+    if trigger_type == "cron":
+        expr = trigger_config.get("expression", "")
+        triggered = cron_matches(expr, now)
+        if triggered and task.get("last_run_at"):
+            last_dt = _coerce(datetime.fromisoformat(task["last_run_at"]))
+            if last_dt.replace(second=0, microsecond=0) == now.replace(second=0, microsecond=0):
+                triggered = False  # already fired this minute
+
+    elif trigger_type == "interval":
+        seconds = trigger_config.get("seconds", 600)
+        last_run = task.get("last_run_at")
+        if last_run:
+            last_ts = datetime.fromisoformat(last_run).timestamp()
+            triggered = (now_ts - last_ts) >= seconds
+        else:
+            triggered = True  # Never run → run now
+
+    elif trigger_type == "date":
+        target = trigger_config.get("datetime", "")
+        if target:
+            target_dt = _coerce(datetime.fromisoformat(target))
+            triggered = now >= target_dt
+            # One-shot: never re-fire
+            if triggered and task.get("last_run_at"):
+                return False  # Already ran
+
+    return triggered and check_conditions(conditions, task)
+
+
 def get_due_tasks() -> list[dict]:
-    """Get all tasks that should run now."""
+    """Get all tasks that should run now.
+
+    Each task is evaluated in isolation: one malformed row (bad JSON,
+    bad cron, unparseable timestamp) is logged once and skipped instead
+    of killing the whole due-check.
+    """
     tasks = task_list(enabled_only=True)
     now = now_local()
     now_ts = int(time.time())
     due = []
 
     for task in tasks:
-        trigger_type = task["trigger_type"]
-        trigger_config = json.loads(task["trigger_config"]) if isinstance(task["trigger_config"], str) else task["trigger_config"]
-        conditions = json.loads(task["conditions"]) if isinstance(task["conditions"], str) else (task["conditions"] or [])
-
-        # Check trigger
-        triggered = False
-
-        if trigger_type == "cron":
-            expr = trigger_config.get("expression", "")
-            triggered = cron_matches(expr, now)
-
-        elif trigger_type == "interval":
-            seconds = trigger_config.get("seconds", 600)
-            last_run = task.get("last_run_at")
-            if last_run:
-                last_ts = datetime.fromisoformat(last_run).timestamp()
-                triggered = (now_ts - last_ts) >= seconds
-            else:
-                triggered = True  # Never run → run now
-
-        elif trigger_type == "date":
-            target = trigger_config.get("datetime", "")
-            if target:
-                target_dt = datetime.fromisoformat(target)
-                triggered = now >= target_dt
-                # One-shot: disable after trigger
-                if triggered and task.get("last_run_at"):
-                    continue  # Already ran
-
-        # Check conditions
-        if triggered and check_conditions(conditions, task):
-            due.append(task)
+        try:
+            if _task_is_due(task, now, now_ts):
+                due.append(task)
+        except Exception as e:
+            if task["id"] not in _warned_task_ids:
+                _warned_task_ids.add(task["id"])
+                logger.warning("skipping malformed scheduled task %s: %s",
+                               task["id"], e)
 
     return due
 
 
 def mark_executed(task_id: str, result: str = "") -> None:
-    """Mark a task as executed."""
+    """Mark a task as executed (atomic — no read-then-write lost updates)."""
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
-    db = get_db()
-    row = db.execute("SELECT run_count FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
-    count = (row[0] or 0) + 1 if row else 1
-    task_update(task_id, last_run_at=now, run_count=count, last_result=result)
+    with transaction() as db:
+        db.execute(
+            """UPDATE scheduled_tasks
+               SET run_count = COALESCE(run_count, 0) + 1,
+                   last_run_at = ?, last_result = ?
+               WHERE id = ?""",
+            (now, result, task_id),
+        )
 
 
 def register_alarm(name: str, dt: datetime, action_config: dict) -> str:

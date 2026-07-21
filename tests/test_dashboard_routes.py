@@ -129,7 +129,8 @@ class TestParseTriggerWhen:
 
     def test_cron_and_interval_unchanged(self):
         from dashboard.pages.intentions import _parse_trigger_when
-        assert "cron" in _parse_trigger_when(
+        # 说人话前缀 + 原始表达式必须保留（创建表单之外唯一露 cron 的地方）
+        assert "0 9 * * *" in _parse_trigger_when(
             {"trigger_type": "cron", "trigger_config": '{"expression": "0 9 * * *"}'})
         assert "每" in _parse_trigger_when(
             {"trigger_type": "interval", "trigger_config": '{"seconds": 600}'})
@@ -918,3 +919,84 @@ class TestRoutes:
         row = db_module.get_db().execute(
             "SELECT COUNT(*) FROM engagement_events").fetchone()
         assert row[0] == 1
+
+    # ── write-route hardening: no auth on :3457, so a foreign webpage could
+    # blind-POST via a CORS "simple request" (text/plain, no preflight) and
+    # e.g. inject attacker text into Lark through a notify task. ──
+
+    def test_write_rejects_non_json_content_type(self, client):
+        r = client.post("/api/log", content='{"source": "evil", "message": "x"}',
+                        headers={"Content-Type": "text/plain"})
+        assert r.status_code == 415
+        r = client.post("/api/tasks",
+                        content="id=x&name=y",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 415
+        assert db_module.log_list(source="evil") == []
+
+    def test_write_rejects_foreign_origin(self, client):
+        r = client.post("/api/log",
+                        json={"source": "evil", "message": "x"},
+                        headers={"Origin": "https://evil.example.com"})
+        assert r.status_code == 403
+        # DELETE has no Content-Type but must still honor the Origin check
+        r = client.delete("/api/bookmarks/1",
+                          headers={"Origin": "https://evil.example.com"})
+        assert r.status_code == 403
+        assert db_module.log_list(source="evil") == []
+
+    def test_write_allows_local_origin_and_no_origin(self, client):
+        # browser on the dashboard itself
+        r = client.post("/api/log", json={"source": "ok1", "message": "x"},
+                        headers={"Origin": "http://127.0.0.1:3457"})
+        assert r.status_code == 200
+        r = client.post("/api/log", json={"source": "ok2", "message": "x"},
+                        headers={"Origin": "http://localhost:3457"})
+        assert r.status_code == 200
+        # curl / bot.sh: no Origin at all (the json= above already covers it,
+        # but pin the DELETE shape: no body, no Content-Type)
+        bm = db_module.bookmark_add("t", "https://del.example")
+        r = client.delete(f"/api/bookmarks/{bm}")
+        assert r.status_code == 200
+
+    # ── registration-time validation: poison triggers and executor-less
+    # action types must never reach the table. ──
+
+    def test_api_task_register_rejects_bad_cron(self, client):
+        r = client.post("/api/tasks", json={
+            "id": "bad1", "name": "bad", "trigger_type": "cron",
+            "trigger_config": {"expression": "a b c d e"}})
+        assert r.status_code == 400
+        assert "cron" in r.json()["detail"]
+        assert db_module.task_list() == []
+
+    def test_api_task_register_rejects_bad_json_config(self, client):
+        r = client.post("/api/tasks", json={
+            "id": "bad2", "name": "bad", "trigger_type": "interval",
+            "trigger_config": "not a dict"})
+        assert r.status_code == 400
+        assert db_module.task_list() == []
+
+    def test_api_task_register_rejects_prompt_action(self, client):
+        r = client.post("/api/tasks", json={
+            "id": "bad3", "name": "bad", "trigger_type": "interval",
+            "trigger_config": {"seconds": 60}, "action_type": "prompt"})
+        assert r.status_code == 400
+        assert "executor" in r.json()["detail"]
+        r = client.post("/api/tasks/recurring", json={
+            "name": "bad", "cron": "0 9 * * *", "action_type": "script"})
+        assert r.status_code == 400
+        assert db_module.task_list() == []
+
+    def test_api_alarm_rejects_bad_datetime(self, client):
+        r = client.post("/api/tasks/alarm", json={
+            "name": "bad", "datetime": "tomorrow-ish", "message": "x"})
+        assert r.status_code == 400
+        assert db_module.task_list() == []
+
+    def test_api_health_reports_real_db_state(self, client):
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["db"] == "connected"

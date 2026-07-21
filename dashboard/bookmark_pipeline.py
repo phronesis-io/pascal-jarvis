@@ -66,11 +66,14 @@ def get_resurface_candidates(count: int = 5) -> list[dict]:
 
     # 2. Spaced repetition — items not surfaced in a while
     # Interval grows: 1d, 3d, 7d, 14d, 30d based on surfaced_count
+    # last_surfaced_at is a local-naive string (now_local_str), while a bare
+    # julianday('now') is UTC — that skew made every interval silently 8h
+    # long. Compare both sides in local time.
     spaced_items = db.execute(
         """SELECT * FROM bookmarks
            WHERE status IN ('triaged', 'reading')
              AND last_surfaced_at IS NOT NULL
-             AND julianday('now') - julianday(last_surfaced_at) >
+             AND julianday(datetime('now', 'localtime')) - julianday(last_surfaced_at) >
                  CASE surfaced_count
                    WHEN 1 THEN 1
                    WHEN 2 THEN 3

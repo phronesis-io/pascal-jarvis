@@ -13,6 +13,7 @@ Usage from bot.sh (via Python):
 """
 
 import json
+import logging
 import sys
 import time
 from datetime import datetime
@@ -23,6 +24,12 @@ sys.path.insert(0, str(ROOT))
 
 from dashboard.db import get_db, task_update
 from dashboard.scheduler import get_due_tasks, mark_executed
+
+logger = logging.getLogger(__name__)
+
+# Task ids already warned about (legacy non-notify rows, bad action_config)
+# so each poison row logs once per process, not every heartbeat tick.
+_warned_task_ids: set[str] = set()
 
 
 def check_dynamic_tasks() -> str:
@@ -47,21 +54,39 @@ def check_dynamic_tasks() -> str:
 
     actions = []
     for task in due:
-        action_config = task.get("action_config", "{}")
-        if isinstance(action_config, str):
-            action_config = json.loads(action_config)
+        try:
+            action_type = task.get("action_type", "prompt")
+            if action_type != "notify":
+                # Legacy prompt/script rows: no executor exists, so marking
+                # them executed would be a lie. Leave untouched, warn once.
+                if task["id"] not in _warned_task_ids:
+                    _warned_task_ids.add(task["id"])
+                    logger.warning(
+                        "task %s has action_type %r but no executor exists; "
+                        "skipping (not marked executed)", task["id"], action_type)
+                continue
 
-        actions.append({
-            "id": task["id"],
-            "name": task["name"],
-            "action_type": task.get("action_type", "prompt"),
-            "action_config": action_config,
-            "category": task.get("category", "user"),
-            "priority": task.get("priority", 5),
-        })
+            action_config = task.get("action_config", "{}")
+            if isinstance(action_config, str):
+                action_config = json.loads(action_config)
 
-        # Mark as executed
-        mark_executed(task["id"])
+            actions.append({
+                "id": task["id"],
+                "name": task["name"],
+                "action_type": action_type,
+                "action_config": action_config,
+                "category": task.get("category", "user"),
+                "priority": task.get("priority", 5),
+            })
+
+            # Mark as executed
+            mark_executed(task["id"])
+        except Exception as e:
+            # One bad row (e.g. malformed action_config JSON) must not kill
+            # the remaining due tasks.
+            if task["id"] not in _warned_task_ids:
+                _warned_task_ids.add(task["id"])
+                logger.warning("skipping malformed due task %s: %s", task["id"], e)
 
     if not actions:
         return ""
@@ -90,6 +115,10 @@ def register_from_action(action_params: str) -> str:
     action_type = parts.get("action", "notify")
     message = parts.get("message", name)
 
+    if action_type != "notify":
+        return (f"Cannot register '{name}': action type '{action_type}' has no "
+                f"executor (it would never actually run); only 'notify' is supported")
+
     # Parse trigger config
     if trigger_type == "cron":
         trigger_config = {"expression": config_str}
@@ -116,16 +145,19 @@ def register_from_action(action_params: str) -> str:
     task_id = f"agent_{uuid.uuid4().hex[:8]}"
 
     from dashboard.db import task_register
-    task_register(
-        task_id=task_id,
-        name=name,
-        trigger_type=trigger_type,
-        trigger_config=trigger_config,
-        action_type=action_type,
-        action_config={"message": message},
-        conditions=conditions,
-        category="agent",
-    )
+    try:
+        task_register(
+            task_id=task_id,
+            name=name,
+            trigger_type=trigger_type,
+            trigger_config=trigger_config,
+            action_type=action_type,
+            action_config={"message": message},
+            conditions=conditions,
+            category="agent",
+        )
+    except ValueError as e:
+        return f"Cannot register '{name}': {e}"
 
     return f"Task '{name}' registered (id: {task_id}, trigger: {trigger_type})"
 

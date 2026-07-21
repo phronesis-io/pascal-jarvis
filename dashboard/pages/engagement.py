@@ -15,7 +15,7 @@ from pathlib import Path
 
 from nicegui import ui
 
-from ..uiutil import guarded_refresh_timer
+from ..uiutil import guarded_refresh_timer, jarvis_page, source_label
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -172,69 +172,72 @@ def _fmt_gap(seconds: int | None) -> str:
     if seconds is None:
         return "-"
     if seconds < 60:
-        return f"{seconds}s"
+        return f"{seconds} 秒"
     if seconds < 3600:
-        return f"{seconds // 60}m"
-    return f"{seconds / 3600:.1f}h"
+        return f"{seconds // 60} 分钟"
+    return f"{seconds / 3600:.1f} 小时"
+
+
+def _metric(label: str, value) -> None:
+    # metric-cell 提供视觉；flex-1 让 5 个格子排成一排（metric-strip 固定 4 列）。
+    with ui.element("div").classes("metric-cell flex-1 min-w-[110px]"):
+        ui.label(str(value)).classes("metric-value")
+        ui.label(label).classes("metric-label")
 
 
 @ui.page("/engagement")
 def engagement_page():
-    with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.link("← Home", "/").classes("text-gray-500 text-sm")
-            ui.label("Engagement").classes("text-2xl font-bold")
-
-        ui.label(
-            "真实互动漏斗：sent / read / replied / ignored，直接读取 engagement_log.jsonl。"
-        ).classes("text-sm text-gray-600")
+    with jarvis_page("/engagement", "互动",
+                     "Jarvis 最近 7 天主动发的消息：你看了没、回了没，哪些来源在打扰你。"):
 
         @ui.refreshable
         def content():
             report = source_engagement_report(JARVIS_DIR, days=7)
             totals = report["totals"]
-            with ui.row().classes("w-full gap-3"):
-                for label, value in (
-                    ("sent", totals["sent"]),
-                    ("read", totals["read"]),
-                    ("replied", totals["replied"]),
-                    ("ignored", totals["ignored"]),
-                    ("reply rate", f"{totals['reply_rate']}%"),
-                ):
-                    with ui.card().classes("flex-1 p-3"):
-                        ui.label(str(value)).classes("text-xl font-bold")
-                        ui.label(label).classes("text-xs text-gray-500")
+            with ui.row().classes("w-full gap-3 flex-wrap"):
+                _metric("已发", totals["sent"])
+                _metric("已读", totals["read"])
+                _metric("已回", totals["replied"])
+                _metric("没理", totals["ignored"])
+                _metric("回复率", f"{totals['reply_rate']}%")
 
             if not report["sources"]:
-                ui.label("No engagement data in the last 7 days.").classes(
-                    "text-gray-400 text-sm italic")
+                ui.label("最近 7 天没有互动记录。Jarvis 发消息、你有回应之后，"
+                         "这里就有数了。").classes("empty-guidance")
                 return
 
             columns = [
-                {"name": "source", "label": "Source", "field": "source", "align": "left"},
-                {"name": "sent", "label": "Sent", "field": "sent", "align": "right"},
-                {"name": "read", "label": "Read", "field": "read", "align": "right"},
-                {"name": "replied", "label": "Replied", "field": "replied", "align": "right"},
-                {"name": "ignored", "label": "Ignored", "field": "ignored", "align": "right"},
-                {"name": "reply_rate", "label": "Reply %", "field": "reply_rate", "align": "right"},
-                {"name": "read_rate", "label": "Read %", "field": "read_rate", "align": "right"},
-                {"name": "median_gap", "label": "Median reply", "field": "median_gap", "align": "right"},
+                {"name": "source", "label": "来源", "field": "source", "align": "left"},
+                {"name": "sent", "label": "已发", "field": "sent", "align": "right"},
+                {"name": "read", "label": "已读", "field": "read", "align": "right"},
+                {"name": "replied", "label": "已回", "field": "replied", "align": "right"},
+                {"name": "ignored", "label": "没理", "field": "ignored", "align": "right"},
+                {"name": "reply_rate", "label": "回复率 %", "field": "reply_rate", "align": "right"},
+                {"name": "read_rate", "label": "已读率 %", "field": "read_rate", "align": "right"},
+                {"name": "median_gap", "label": "多久回一半", "field": "median_gap", "align": "right"},
             ]
             rows = [
-                {**row, "median_gap": _fmt_gap(row["median_gap_s"])}
+                {**row, "source": source_label(row["source"]),
+                 "median_gap": _fmt_gap(row["median_gap_s"])}
                 for row in report["sources"]
             ]
-            ui.table(columns=columns, rows=rows, row_key="source").classes("w-full")
+            with ui.element("div").classes("table-scroll"):
+                ui.table(columns=columns, rows=rows, row_key="source").classes(
+                    "jarvis-table")
 
             noisy = [r for r in report["sources"] if r["sent"] >= 3 and r["reply_rate"] < 20]
             if noisy:
-                ui.label("Low-reply sources").classes("text-lg font-semibold mt-2")
-                for row in noisy:
-                    with ui.card().classes("w-full p-3"):
-                        ui.label(
-                            f"{row['source']}: {row['sent']} sent, "
-                            f"{row['reply_rate']}% replied, {row['ignored']} ignored"
-                        ).classes("text-sm")
+                with ui.column().classes("w-full gap-2 mt-2"):
+                    ui.label("留意").classes("section-kicker")
+                    ui.label("少有回音的来源").classes("section-title")
+                    ui.label("发得不少、你基本不回——考虑让它们少发点。").classes(
+                        "section-note")
+                    for row in noisy:
+                        with ui.card().classes("w-full p-3"):
+                            ui.label(
+                                f"{source_label(row['source'])}：发了 {row['sent']} 条，"
+                                f"回复率 {row['reply_rate']}%，{row['ignored']} 条没理"
+                            ).classes("text-sm")
 
         content()
         guarded_refresh_timer(30, content.refresh)

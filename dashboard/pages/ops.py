@@ -1,4 +1,4 @@
-"""Ops board — logs, scheduler events, and invisible queues (REQ-55).
+"""运行板 — logs, scheduler events, and invisible queues (REQ-55).
 
 This page is deliberately read-only. Admin (:3456) owns destructive controls;
 dashboard (:3457) gives a human-friendly live view of failure signatures and
@@ -8,13 +8,14 @@ queue depth when Jarvis feels "quiet" or "stuck".
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime
 from pathlib import Path
 
 from nicegui import ui
 
-from ..uiutil import guarded_refresh_timer
+from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
+                      finish_status_label, guarded_refresh_timer,
+                      intent_event_label, jarvis_page, skip_reason_label)
 
 from ..telemetry import read_json, read_sched_events
 
@@ -29,6 +30,40 @@ LOG_FAILURE_SIGNATURES = (
     "Claude failed",
     "Claude CLI not found",
 )
+
+# 事件键 → 人话（intent_* 走 uiutil.intent_event_label）
+_TASK_EVENT_LABELS = {
+    "task_spawn": "任务启动",
+    "task_finish": "任务跑完",
+    "task_skip": "任务跳过",
+    "task_timeout": "任务超时",
+    "sleep_gap": "机器睡了一觉",
+    "batch_flush": "批处理下发",
+    "circuit_tripped": "熔断触发",
+    "shared_call_backoff": "上游繁忙退避",
+}
+
+
+def _event_label(event: str) -> str:
+    event = str(event or "")
+    if event in _TASK_EVENT_LABELS:
+        return _TASK_EVENT_LABELS[event]
+    return intent_event_label(event)
+
+
+def _event_detail(e: dict) -> str:
+    """一行人话说明这条事件的结果/原因。"""
+    event = str(e.get("event", ""))
+    if event == "task_finish":
+        return finish_status_label(str(e.get("status", "") or "ok"))
+    if event == "task_skip":
+        return skip_reason_label(str(e.get("reason", "")))
+    if event == "task_timeout":
+        return "超时被掐掉"
+    if event == "batch_flush":
+        return f"下发 {e.get('count', '')} 条".strip()
+    detail = e.get("status") or e.get("reason") or ""
+    return str(detail)
 
 
 def tail_log(path: Path, lines: int = 120, grep: str = "") -> dict:
@@ -144,10 +179,14 @@ def ops_snapshot(jarvis_dir: Path | None = None, event_limit: int = 80) -> dict:
         event = e.get("event")
         if event == "task_timeout":
             failed_events.append(e)
-        elif event == "task_finish" and e.get("status") not in ("", "ok", None):
+        elif (event == "task_finish"
+                and str(e.get("status") or "ok") not in ROUTINE_FINISH_STATUSES):
             failed_events.append(e)
-        elif event == "task_skip" and e.get("reason") != "empty_pre":
-            failed_events.append(e)
+        elif event == "task_skip":
+            # 正常节律的跳过（没新内容/还没到点/夜间排队…）不是故障 —
+            # 把它们计成红色数字曾让这页天天喊狼来了。
+            if str(e.get("reason", "")) not in ROUTINE_SKIP_REASONS:
+                failed_events.append(e)
     queues = queue_overview(jd)
     return {
         "logs": {"jarvis": jarvis_log, "daemon": daemon_log},
@@ -162,103 +201,131 @@ def _fmt_age(minutes: int | None) -> str:
     if minutes is None:
         return "?"
     if abs(minutes) < 60:
-        return f"{minutes}m"
-    return f"{minutes / 60:.1f}h"
+        return f"{minutes} 分钟"
+    return f"{minutes / 60:.1f} 小时"
 
 
 @ui.page("/ops")
 def ops_page():
-    with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-4"):
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.link("← Home", "/").classes("text-gray-500 text-sm")
-            ui.label("Ops").classes("text-2xl font-bold")
-
-        ui.label("只读运维视图：日志故障签名、sched_events 尾巴、队列和投递状态。").classes(
-            "text-sm text-gray-600")
+    with jarvis_page("/ops", "运行", "机器后台的原样记录；红色才需要动手。"):
 
         @ui.refreshable
         def content():
             snap = ops_snapshot(JARVIS_DIR)
             queues = snap["queues"]
             delivery = queues["delivery_state"]
+            metrics = (
+                ("异常日志", snap["flagged_count"], True),
+                ("异常事件", len(snap["failed_events"]), True),
+                ("夜间队列", len(queues["night_queue"]), False),
+                ("意图违约", len(queues["breach_queue"]), True),
+                ("送达失败", delivery.get("consec_fails", 0), True),
+            )
             with ui.row().classes("w-full gap-3"):
-                metrics = (
-                    ("flagged logs", snap["flagged_count"]),
-                    ("failed events", len(snap["failed_events"])),
-                    ("night queue", len(queues["night_queue"])),
-                    ("breaches", len(queues["breach_queue"])),
-                    ("delivery fails", delivery.get("consec_fails", 0)),
-                )
-                for label, value in metrics:
-                    alert = label != "night queue" and value not in (0, "0", None)
-                    with ui.card().classes("flex-1 p-3"):
+                for label, value, alertable in metrics:
+                    alert = alertable and value not in (0, "0", None)
+                    with ui.element("div").classes("metric-cell flex-1"):
                         ui.label(str(value)).classes(
-                            "text-xl font-bold" + (" text-red-600" if alert else ""))
-                        ui.label(label).classes("text-xs text-gray-500")
+                            "metric-value" + (" is-alert" if alert else ""))
+                        ui.label(label).classes("metric-label")
 
-            ui.label("Recent scheduler events").classes("text-lg font-semibold mt-2")
+            ui.label("壹 · 调度").classes("section-kicker mt-2")
+            ui.label("最近的调度事件").classes("section-title")
             event_rows = list(reversed(snap["events"][-40:]))
             if event_rows:
                 columns = [
-                    {"name": "ts", "label": "Time", "field": "ts", "align": "left"},
-                    {"name": "event", "label": "Event", "field": "event", "align": "left"},
-                    {"name": "task", "label": "Task", "field": "task", "align": "left"},
-                    {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
+                    {"name": "ts", "label": "时间", "field": "ts", "align": "left"},
+                    {"name": "event", "label": "发生了什么", "field": "event",
+                     "align": "left"},
+                    {"name": "task", "label": "任务", "field": "task", "align": "left"},
+                    {"name": "detail", "label": "结果 / 原因", "field": "detail",
+                     "align": "left"},
+                    # 原始键留给排错用，弱化显示，不当主标签。
+                    {"name": "raw", "label": "原始记录", "field": "raw",
+                     "align": "left", "classes": "text-grey-6",
+                     "headerClasses": "text-grey-6"},
                 ]
                 rows = []
                 for i, e in enumerate(event_rows):
+                    raw_detail = e.get("status") or e.get("reason") or ""
+                    # 意图事件的 task 字段是内部 id（int_…）——人话列显示
+                    # 意图名，原始 id 归"原始记录"列。
+                    task_label = str(e.get("task", "") or "")
+                    if task_label.startswith("int_"):
+                        raw_detail = f"{task_label} {raw_detail}".strip()
+                        task_label = str(e.get("name", "") or "意图任务")
                     rows.append({
                         "_id": f"{e.get('ts', '')}-{i}",
                         "ts": e.get("ts", ""),
-                        "event": e.get("event", ""),
-                        "task": e.get("task", ""),
-                        "detail": e.get("status") or e.get("reason") or e.get("count") or "",
+                        "event": _event_label(e.get("event", "")),
+                        "task": task_label,
+                        "detail": _event_detail(e),
+                        "raw": " ".join(str(x) for x in
+                                        (e.get("event", ""), raw_detail) if x),
                     })
-                ui.table(columns=columns, rows=rows, row_key="_id").classes("w-full")
+                with ui.element("div").classes("table-scroll"):
+                    ui.table(columns=columns, rows=rows, row_key="_id").classes(
+                        "jarvis-table")
             else:
-                ui.label("No sched_events yet.").classes("text-gray-400 text-sm italic")
+                ui.label("还没有调度记录。").classes("empty-guidance")
 
-            ui.label("Queues").classes("text-lg font-semibold mt-2")
+            ui.label("贰 · 队列").classes("section-kicker mt-2")
+            ui.label("排着队的事").classes("section-title")
             with ui.row().classes("w-full gap-3"):
                 with ui.card().classes("flex-1 p-3"):
-                    ui.label("Night queue").classes("font-semibold text-sm")
+                    ui.label("夜间队列").classes("font-semibold text-sm")
+                    ui.label("夜里攒着、白天再送的消息").classes("text-xs text-gray-400")
                     for item in queues["night_queue"][:5]:
                         ui.label(
-                            f"{item.get('ts', '')} · age {_fmt_age(item.get('age_minutes'))} · "
+                            f"{item.get('ts', '')} · 等了 {_fmt_age(item.get('age_minutes'))} · "
                             f"{item.get('text', '')}"
                         ).classes("text-xs text-gray-600")
                     if not queues["night_queue"]:
-                        ui.label("empty").classes("text-xs text-gray-400")
+                        ui.label("空").classes("text-xs text-gray-400")
                 with ui.card().classes("flex-1 p-3"):
-                    ui.label("Running jobs").classes("font-semibold text-sm")
+                    ui.label("正在跑的后台工作").classes("font-semibold text-sm")
                     for job in queues["jobs"]["running"][:5]:
                         ui.label(
-                            f"{job['id']} · pid {job.get('pid')} · age {_fmt_age(job.get('age_minutes'))} · "
+                            f"{job['id']} · 跑了 {_fmt_age(job.get('age_minutes'))} · "
                             f"{job.get('description', '')}"
                         ).classes("text-xs text-gray-600")
                     if not queues["jobs"]["running"]:
-                        ui.label("none").classes("text-xs text-gray-400")
+                        ui.label("没有").classes("text-xs text-gray-400")
                 with ui.card().classes("flex-1 p-3"):
-                    ui.label("Intent breaches").classes("font-semibold text-sm")
+                    ui.label("意图违约").classes("font-semibold text-sm")
+                    ui.label("说好要办、到点没办成的").classes("text-xs text-gray-400")
                     for item in queues["breach_queue"][:5]:
                         ui.label(str(item)[:160]).classes("text-xs text-gray-600")
                     if not queues["breach_queue"]:
-                        ui.label("empty").classes("text-xs text-gray-400")
+                        ui.label("空").classes("text-xs text-gray-400")
 
-            ui.label("Flagged log lines").classes("text-lg font-semibold mt-2")
+            # 读不到日志必须明说——静默显示 0 就是在把故障涂成正常。
+            unreadable = [name for name, log in snap["logs"].items()
+                          if log.get("missing") or log.get("error")]
+            if unreadable:
+                ui.label("读不到日志文件：" + "、".join(unreadable)
+                         + "。上面的「异常日志」计数不完整。").classes(
+                    "empty-guidance")
+
+            # 工程师抽屉：原始日志行只在需要排错时展开看。
             flagged = []
             for name, log in snap["logs"].items():
                 for row in log["lines"]:
                     if row["flagged"]:
                         flagged.append({"file": name, "text": row["text"]})
-            if flagged:
-                for row in flagged[-20:]:
-                    with ui.card().classes("w-full p-2"):
-                        ui.badge(row["file"], color="red").classes("text-xs")
-                        ui.label(row["text"]).classes("text-xs font-mono text-red-700")
-            else:
-                ui.label("No flagged failure signatures in the current log tails.").classes(
-                    "text-gray-400 text-sm italic")
+            drawer_title = ("原始日志底稿" +
+                            (f"（{len(flagged)} 行异常）" if flagged else ""))
+            with ui.expansion(drawer_title, icon="receipt_long").classes(
+                    "system-drawer w-full"):
+                if flagged:
+                    for row in flagged[-20:]:
+                        with ui.card().classes("w-full p-2"):
+                            ui.badge(row["file"], color="red").classes("text-xs")
+                            ui.label(row["text"]).classes(
+                                "text-xs font-mono text-red-700")
+                else:
+                    ui.label("最近的日志里没有故障签名。").classes(
+                        "text-gray-400 text-sm italic")
 
         content()
         guarded_refresh_timer(15, content.refresh)
