@@ -63,12 +63,32 @@ MAX_MEMORY_CHARS = 200000
 # tests/test_memory.py keeps future cap edits honest against these budgets.
 HOT_BUDGET = 30000        # identity + rules + structured facts (never dropped)
 TIMELINE_BUDGET = 15000   # freshest cross-day continuity — always survives
-SYSTEM_BUDGET = 56000     # todos, open_threads, digest, perception buffers
+# 2026-07-21 记忆瘦身 PRD R6: 56k was exactly the measured working set (56.6k
+# assembled) — the tier lived one paragraph from the knife and shaved the tail
+# of inbox_private_mail every cycle. 60k restores breathing room.
+SYSTEM_BUDGET = 60000     # todos, open_threads, digest, perception buffers
 # warm budget = MAX_MEMORY_CHARS - (HOT + TIMELINE + SYSTEM) reserves.
 WARM_BUDGET = MAX_MEMORY_CHARS - HOT_BUDGET - TIMELINE_BUDGET - SYSTEM_BUDGET
 
 # Days after which an unmodified warm/*.md is demoted to warm/archive/ (REQ-73).
 WARM_STALE_DAYS = 21
+
+# 2026-07-21 记忆瘦身 PRD R3/R5: standing behavioral guidance is timeless —
+# feedback_*/user_* files are rarely edited, so BY mtime they always look
+# stalest and were the first casualties of both the newest-first drop order
+# and any mtime-based demotion, while fat fresh prep docs survived whole.
+# These prefixes are (a) loaded first in _collect_warm regardless of mtime,
+# (b) never demoted by demote_stale_warm.
+PROTECTED_WARM_PREFIXES = ("feedback_", "user_")
+
+# 2026-07-21 记忆瘦身 PRD R4: per-file cap for warm sections (chars,
+# head-keep — knowledge docs front-load their summary/index; contrast the
+# tail-keep inbox buffers). Without this a single 22k-char roadmap ate 19%
+# of the squeezed warm room while 19 small guidance files were dropped.
+# 11000 (not 12000): measured against the live corpus, 12k left the total
+# assembled payload ~1.5k over the global cap — a permanent sliver of
+# truncation and an hourly warn. 11k puts steady state under with headroom.
+WARM_FILE_CAP = 11000
 
 # Structured-facts file (REQ-71). Lives in hot/ so it rides the hot reserve.
 STRUCTURED_FACTS_NAME = "structured_facts.md"
@@ -223,15 +243,19 @@ def _collect_hot(memory_dir: Path) -> list[str]:
 
 def _collect_warm(memory_dir: Path) -> list[str]:
     """Warm tier: full knowledge base. Skips warm/archive/ (demoted stale
-    files, REQ-73). Newest-first ordering so when warm is over budget the
-    freshest knowledge is kept and stale prep docs fall off first."""
+    files, REQ-73).
+
+    Ordering (2026-07-21 记忆瘦身 PRD R3): protected guidance band first
+    (PROTECTED_WARM_PREFIXES — timeless behavioral rules whose mtime never
+    reflects importance), then the rest newest-first so stale prep docs fall
+    off first when over budget. Every section is capped at WARM_FILE_CAP
+    (head-keep, R4) so one fat doc can't starve the band below it."""
     parts: list[str] = []
     warm_dir = memory_dir / "warm"
     if not warm_dir.is_dir():
         return parts
     # Only top-level *.md — archive/ subdir is deliberately skipped.
     files = [f for f in warm_dir.glob("*.md") if f.is_file()]
-    # Newest mtime first → stale docs are the ones dropped when over budget.
     # Guard stat() (red-team fix): a file vanishing between glob and sort
     # (demote_stale_warm rename / external move) raised FileNotFoundError out
     # of load_tiered_memory, aborting the whole prompt build.
@@ -240,9 +264,15 @@ def _collect_warm(memory_dir: Path) -> list[str]:
             return f.stat().st_mtime
         except OSError:
             return 0.0
-    files.sort(key=_mtime, reverse=True)
-    for f in files:
-        _append_file(parts, f, f"Knowledge: {f.stem}")
+    protected = sorted((f for f in files
+                        if f.name.startswith(PROTECTED_WARM_PREFIXES)),
+                       key=lambda f: f.name)
+    rest = sorted((f for f in files
+                   if not f.name.startswith(PROTECTED_WARM_PREFIXES)),
+                  key=_mtime, reverse=True)
+    for f in protected + rest:
+        _append_file(parts, f, f"Knowledge: {f.stem}",
+                     cap=WARM_FILE_CAP, keep="head")
     return parts
 
 
@@ -436,31 +466,49 @@ def load_group_context(memory_dir) -> str:
     return _GROUP_CONTEXT_FALLBACK
 
 
-def _append_file(parts: list[str], path: Path, title: str, cap: int | None = None):
+def _append_file(parts: list[str], path: Path, title: str, cap: int | None = None,
+                 keep: str = "tail"):
     """Read a file and append as a titled section.
 
     For calendar_today.md: if the synced date doesn't match today,
     prepend a visible warning so Claude knows the data is stale.
 
-    cap: optional per-file char cap (tail-keep — inbox buffers append newest
-    at the bottom). See _SYSTEM_FILE_CAPS for why this exists.
+    cap: optional per-file char cap. keep="tail" (default) suits append-only
+    buffers whose newest entries sit at the bottom (inbox files, see
+    _SYSTEM_FILE_CAPS); keep="head" suits curated knowledge docs that
+    front-load their summary (warm tier, WARM_FILE_CAP).
     """
     try:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             return
         if cap is not None and len(content) > cap:
-            tail = content[-cap:]
-            # Snap forward to the next entry boundary so the injected view
-            # never opens mid-entry (capped files are `### `-delimited
-            # perception buffers; raw slice when no boundary is found).
-            snap = tail.find("\n### ")
-            if snap != -1:
-                tail = tail[snap + 1:]
-            content = (
-                f"[capped — oldest {len(content) - len(tail)} chars omitted; "
-                f"full file on disk: {path.name}]\n" + tail
-            )
+            if keep == "head":
+                head = content[:cap]
+                # Snap back to the last line boundary so the kept view never
+                # ends mid-sentence — but only when the boundary is NEAR the
+                # cap. A short first line followed by one unbroken 12k blob
+                # would otherwise collapse the whole section to 4 chars
+                # (red-team finding: snap needs a floor; raw slice instead).
+                snap = head.rfind("\n")
+                if snap >= cap - 200:
+                    head = head[:snap]
+                content = head + (
+                    f"\n[capped — newest/rest {len(content) - len(head)} chars "
+                    f"omitted; full file on disk: {path.name}]"
+                )
+            else:
+                tail = content[-cap:]
+                # Snap forward to the next entry boundary so the injected view
+                # never opens mid-entry (capped files are `### `-delimited
+                # perception buffers; raw slice when no boundary is found).
+                snap = tail.find("\n### ")
+                if snap != -1:
+                    tail = tail[snap + 1:]
+                content = (
+                    f"[capped — oldest {len(content) - len(tail)} chars omitted; "
+                    f"full file on disk: {path.name}]\n" + tail
+                )
         # Stale calendar detection
         if path.name == "calendar_today.md":
             m = re.search(r"synced (\d{4}-\d{2}-\d{2})", content)
@@ -492,6 +540,35 @@ def _timeline_title(name: str) -> str:
 # ── REQ-73: warm staleness demotion ──────────────────────────────────────
 
 
+# 记忆瘦身 PRD R5（红队修正版）：mtime 判据的豁免面。
+# — 前缀：feedback_/user_（永恒准则，见 PROTECTED_WARM_PREFIXES）
+# — frontmatter type：文件自我声明的保护类。user/feedback 与前缀同义；
+#   question/project 归 thinking-review 任务做"还活着吗"的人工裁决
+#   （HEARTBEAT.md thinking-review），机器 demote 不得抢跑。
+# — 具名：memory-consolidate 的 prompt 硬编码 warm/projects.md 为 UPDATE
+#   目标；归档它会让每日项目事实静默落空（红队 finding 3）。
+_DEMOTION_EXEMPT_TYPES = re.compile(
+    r"^type:\s*(?:user|feedback|question|project)\s*$",
+    re.MULTILINE | re.IGNORECASE)
+_DEMOTION_EXEMPT_NAMES = {"projects.md"}
+
+
+def _warm_demotion_exempt(f: Path) -> bool:
+    if f.name in _DEMOTION_EXEMPT_NAMES:
+        return True
+    if f.name.startswith(PROTECTED_WARM_PREFIXES):
+        return True
+    try:
+        head = f.read_text(encoding="utf-8")[:2000]
+    except OSError:
+        return True  # unreadable — never archive what we can't inspect
+    if not head.startswith("---"):
+        return False
+    fm_end = head.find("\n---", 3)
+    frontmatter = head[:fm_end] if fm_end != -1 else head
+    return bool(_DEMOTION_EXEMPT_TYPES.search(frontmatter))
+
+
 def demote_stale_warm(memory_dir: str | Path, stale_days: int = WARM_STALE_DAYS) -> list[str]:
     """Move warm/*.md files unmodified for >= stale_days into warm/archive/.
 
@@ -521,6 +598,8 @@ def demote_stale_warm(memory_dir: str | Path, stale_days: int = WARM_STALE_DAYS)
             continue
         # Guard load-bearing / index files from demotion.
         if f.name.startswith(".") or f.name == "_index.md":
+            continue
+        if _warm_demotion_exempt(f):
             continue
         if f.stat().st_mtime >= cutoff:
             continue  # fresh enough — keep loaded

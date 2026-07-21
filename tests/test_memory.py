@@ -18,6 +18,18 @@ from core.memory import (
 )
 
 
+def _fill_warm_over_budget(tmp_path):
+    """Push the GLOBAL payload over MAX via many under-cap warm files.
+
+    The old single huge.md trick stopped working when WARM_FILE_CAP landed
+    (记忆瘦身 PRD R4) — one file now caps at 12k, so the squeeze these tests
+    exercise never engaged. Volume through file COUNT instead."""
+    warm = tmp_path / "warm"
+    warm.mkdir(exist_ok=True)
+    for i in range(40):
+        (warm / f"bulk_{i:02d}.md").write_text(f"W_{i:02d} " + "W" * 10800)
+
+
 def test_empty_dir(tmp_path):
     assert load_tiered_memory(tmp_path) == ""
 
@@ -159,7 +171,7 @@ def test_huge_warm_does_not_starve_timeline(tmp_path):
     _make_full_tree(tmp_path)
     # warm far larger than the entire budget — would, under the old end-of-load
     # truncation, eat everything and drop timeline entirely.
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     (tmp_path / "timeline" / "longterm_digest.md").write_text(
         "DIGEST_CONTINUITY_MARKER cross-day digest text"
     )
@@ -179,7 +191,7 @@ def test_huge_warm_does_not_starve_timeline(tmp_path):
 def test_huge_warm_does_not_starve_structured_facts(tmp_path):
     """Hot reserve (incl. structured facts) is never dropped by a huge warm."""
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     set_fact(tmp_path, "pascal_departure", "2026-06-24")
     output = load_tiered_memory(tmp_path)
     assert "pascal_departure: 2026-06-24" in output
@@ -190,7 +202,7 @@ def test_truncation_emits_warning(tmp_path, capsys):
     """Truncation must be observable: a stderr warning naming the tier and
     chars dropped (REQ-73 #2)."""
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     load_tiered_memory(tmp_path)
     err = capsys.readouterr().err
     assert "warm tier truncated" in err
@@ -219,7 +231,7 @@ def test_digest_prioritized_within_timeline(tmp_path):
     headroom is borrowed, never thrown away)."""
     _make_full_tree(tmp_path)
     # Push the GLOBAL payload over MAX so per-tier budgeting engages.
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS))
+    _fill_warm_over_budget(tmp_path)
     (tmp_path / "timeline" / "longterm_digest.md").write_text(
         "DIGEST_KEEP " + ("d" * 2000)
     )
@@ -258,7 +270,7 @@ def test_todos_hard_cut_keeps_tail(tmp_path):
     exact confusion tail-keep was built to remove (2026-07-08 red-team fix)."""
     _make_full_tree(tmp_path)
     # Force the over-budget branch so tier budgeting engages.
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     (tmp_path / "system" / "todos.md").write_text(
         "APRIL_HEAD_MARKER oldest entry\n"
         + ("x" * (SYSTEM_BUDGET * 2))
@@ -282,7 +294,7 @@ def test_todos_tail_snaps_to_entry_boundary(tmp_path):
     """The kept tail opens on a '<!-- auto-update' entry boundary when one is
     in range, never mid-entry (2026-07-08 red-team fix)."""
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     (tmp_path / "system" / "todos.md").write_text(
         "APRIL_HEAD_MARKER oldest entry\n"
         + ("x" * (SYSTEM_BUDGET * 2))
@@ -302,7 +314,7 @@ def test_curated_system_files_still_keep_head(tmp_path):
     """Tail-keep is per-file (todos.md only): curated files like open_threads
     are not append-ordered, so they keep their head when cut."""
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     (tmp_path / "system" / "open_threads.md").write_text(
         "HEAD_THREAD_MARKER\n" + ("y" * (SYSTEM_BUDGET * 2)) + "\nTAIL_NOISE_MARKER"
     )
@@ -340,7 +352,7 @@ def test_truncation_leveled_warn_rate_limited_per_tier(tmp_path, capsys):
     import core.memory as memory_mod
     memory_mod._TRUNCATION_WARNED_AT.clear()
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     load_tiered_memory(tmp_path)
     load_tiered_memory(tmp_path)
     err = capsys.readouterr().err
@@ -363,7 +375,7 @@ def test_truncation_warn_names_partially_cut_section(tmp_path, capsys):
     import core.memory as memory_mod
     memory_mod._TRUNCATION_WARNED_AT.clear()
     _make_full_tree(tmp_path)
-    (tmp_path / "warm" / "huge.md").write_text("W" * (MAX_MEMORY_CHARS * 2))
+    _fill_warm_over_budget(tmp_path)
     load_tiered_memory(tmp_path)
     err = capsys.readouterr().err
     assert "(partial)" in err
@@ -523,3 +535,112 @@ def test_system_budget_covers_named_caps():
     uncapped_working_set_allowance = 20000
     assert (TODOS_MAX_CHARS + sum(m._SYSTEM_FILE_CAPS.values())
             + uncapped_working_set_allowance) <= m.SYSTEM_BUDGET
+
+
+# ── 2026-07-21 记忆瘦身 PRD: protected band / warm cap / demote exemption ──
+
+
+def _make_over_budget_warm(tmp_path):
+    """Warm dir whose assembled size forces the global squeeze."""
+    import os
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    # Timeless guidance, mtime ancient (the old first casualty).
+    guidance = warm / "feedback_steelman.md"
+    guidance.write_text("GUIDANCE_MARKER steelman every critique")
+    user_pref = warm / "user_identity.md"
+    user_pref.write_text("USER_PREF_MARKER pronouns and names")
+    ancient = time.time() - 300 * 86400
+    os.utime(guidance, (ancient, ancient))
+    os.utime(user_pref, (ancient, ancient))
+    # Fat fresh docs that alone exceed MAX_MEMORY_CHARS.
+    for i in range(30):
+        f = warm / f"project_fat_{i:02d}.md"
+        f.write_text(f"FAT_{i:02d} " + "x" * 11000)
+    return warm
+
+
+def test_warm_protected_band_survives_squeeze(tmp_path):
+    out = load_tiered_memory(tmp_path)
+    # sanity: empty dir baseline
+    warm = _make_over_budget_warm(tmp_path)
+    out = load_tiered_memory(tmp_path)
+    assert len(out) <= MAX_MEMORY_CHARS + 100
+    # Old-but-timeless guidance is present; by pure mtime it would be first out.
+    assert "GUIDANCE_MARKER" in out
+    assert "USER_PREF_MARKER" in out
+    # The squeeze dropped fat docs instead (at least one fell off the end).
+    assert "[warm memory truncated" in out or out.count("FAT_") < 30
+    assert warm.exists()
+
+
+def test_warm_per_file_cap_head_keep(tmp_path):
+    from core.memory import WARM_FILE_CAP
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    big = warm / "project_roadmap.md"
+    big.write_text("HEAD_SUMMARY first\n" + ("line of detail\n" * 3000)
+                   + "TAIL_APPENDIX last")
+    out = load_tiered_memory(tmp_path)
+    # Head kept (knowledge docs front-load their summary), tail capped away.
+    assert "HEAD_SUMMARY" in out
+    assert "TAIL_APPENDIX" not in out
+    assert "full file on disk: project_roadmap.md" in out
+    section = out.split("## Knowledge: project_roadmap", 1)[1]
+    assert len(section) <= WARM_FILE_CAP + 200
+
+
+def test_demote_skips_protected_guidance(tmp_path):
+    import os
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    old = time.time() - (WARM_STALE_DAYS + 10) * 86400
+    guidance = warm / "feedback_code_review.md"
+    guidance.write_text("timeless rule")
+    prep = warm / "trip_prep_2026.md"
+    prep.write_text("stale prep doc")
+    for f in (guidance, prep):
+        os.utime(f, (old, old))
+    demoted = demote_stale_warm(tmp_path)
+    assert "trip_prep_2026.md" in demoted
+    assert "feedback_code_review.md" not in demoted
+    assert guidance.exists()
+    assert not prep.exists()
+
+
+def test_demote_exempts_frontmatter_types_and_named_targets(tmp_path):
+    """红队修正：前缀之外，frontmatter 自我声明 type: user/feedback/
+    question/project 的文件与 consolidate 硬编码目标 projects.md 一律豁免。"""
+    import os
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    old = time.time() - (WARM_STALE_DAYS + 10) * 86400
+    typed_user = warm / "healing_coords.md"
+    typed_user.write_text("---\ntype: user\n---\ncoordinates")
+    typed_project = warm / "morning_routine.md"
+    typed_project.write_text("---\ntype: project\nstatus: in_progress\n---\nroutine")
+    named = warm / "projects.md"
+    named.write_text("个人项目总表")
+    plain_prep = warm / "conference_prep.md"
+    plain_prep.write_text("one-off prep notes")
+    for f in (typed_user, typed_project, named, plain_prep):
+        os.utime(f, (old, old))
+
+    demoted = demote_stale_warm(tmp_path)
+
+    assert demoted == ["conference_prep.md"]
+    assert typed_user.exists() and typed_project.exists() and named.exists()
+
+
+def test_warm_head_keep_floor_on_unbroken_blob(tmp_path):
+    """短首行+单段 12k 长文不能坍缩成 4 个字符（snap 需要下限）。"""
+    from core.memory import WARM_FILE_CAP
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    blob = warm / "pasted_blob.md"
+    blob.write_text("HEAD\n" + "字" * (WARM_FILE_CAP + 5000))
+    out = load_tiered_memory(tmp_path)
+    section = out.split("## Knowledge: pasted_blob", 1)[1]
+    # 保留量接近 cap，而不是只剩首行。
+    assert len(section) > WARM_FILE_CAP - 500
+    assert "full file on disk: pasted_blob.md" in out

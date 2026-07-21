@@ -95,10 +95,82 @@ def _sync_warm_auto_to_heartbeat():
             src_content = src.read_text(encoding="utf-8")
 
         dst.write_text(src_content, encoding="utf-8")
+        _copy_mtime(src, dst)
         synced.append(src.name)
 
     if synced:
         print(f"[memory-tidy] synced auto→heartbeat warm/: {', '.join(synced)}", file=sys.stderr)
+
+
+def _copy_mtime(src: Path, dst: Path) -> None:
+    """Replica keeps the SOURCE mtime (记忆瘦身 PRD R2). write_text stamps
+    sync time, which made every replica look freshly edited — the loader's
+    newest-first ordering and demote's staleness test both keyed off a lie
+    (timeless feedback_* files read as the stalest, fat prep docs as fresh).
+    """
+    try:
+        st = src.stat()
+        os.utime(dst, (st.st_atime, st.st_mtime))
+    except OSError:
+        pass
+
+
+def _mirror_warm_deletions():
+    """Mirror DELIBERATE auto-side archival to the replica (记忆瘦身 PRD R1).
+
+    红队修正：'absent from auto warm/' is NOT deletion evidence — 8 replica-
+    only files turned out to be LIVE profile docs written directly by
+    heartbeat sessions whose canon never existed in auto warm/ (health,
+    energy, portfolio…); archiving them would have evicted the owner's
+    profile from every prompt. Only a copy in auto warm/archive/ proves the
+    auto side deliberately demoted/retired the file — that's the gate.
+    Replica-only files with no such evidence are left alone. Move (never
+    delete) into the replica's warm/archive/.
+    """
+    auto_warm = AUTO_MEMORY / "warm"
+    hb_warm = HEARTBEAT_MEMORY / "warm"
+    if not auto_warm.is_dir() or not hb_warm.is_dir():
+        return
+    auto_names = {f.name for f in auto_warm.glob("*.md") if f.is_file()}
+    auto_archive = auto_warm / "archive"
+    archived_stems = ({f.name.split(".")[0] for f in auto_archive.glob("*.md")}
+                      if auto_archive.is_dir() else set())
+    archived = []
+    archive_dir = hb_warm / "archive"
+    for f in hb_warm.glob("*.md"):
+        if not f.is_file() or f.name == "_index.md" or f.name in auto_names:
+            continue
+        if f.stem.split(".")[0] not in archived_stems:
+            continue  # no deletion evidence — replica-owned or unknown, keep
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dst = archive_dir / f.name
+        if dst.exists():
+            n = 1
+            while (archive_dir / f"{f.stem}.{n}{f.suffix}").exists():
+                n += 1
+            dst = archive_dir / f"{f.stem}.{n}{f.suffix}"
+        f.rename(dst)
+        archived.append(f.name)
+    if archived:
+        print(f"[memory-tidy] mirrored auto archival — replica warm/ → "
+              f"archive/: {', '.join(archived)}", file=sys.stderr)
+
+
+def _demote_stale_auto_warm():
+    """Wire demote_stale_warm into the maintenance path (记忆瘦身 PRD R5).
+
+    The function existed since REQ-73 but nothing in production ever called
+    it — warm grew unbounded until the assembled payload blew the global cap
+    and truncation ran every heartbeat. Runs on the AUTO side (true mtimes;
+    the replica's are sync artifacts) — the replica copy is then archived by
+    _mirror_warm_deletions in the same run. feedback_*/user_* are exempt
+    inside demote_stale_warm itself.
+    """
+    from core.memory import demote_stale_warm
+    demoted = demote_stale_warm(AUTO_MEMORY)
+    if demoted:
+        print(f"[memory-tidy] demoted stale auto warm/ → archive/: "
+              f"{', '.join(demoted)}", file=sys.stderr)
 
 
 def _sync_root_feedback_auto_to_heartbeat():
@@ -135,6 +207,7 @@ def _sync_root_feedback_auto_to_heartbeat():
                       f"heartbeat→auto manually.", file=sys.stderr)
                 continue
         dst.write_text(content, encoding="utf-8")
+        _copy_mtime(src, dst)
         synced.append(src.name)
     if synced:
         print(f"[memory-tidy] synced auto→heartbeat root feedback: {', '.join(synced)}",
@@ -165,6 +238,7 @@ def _sync_open_threads_auto_to_heartbeat():
             return
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(src_content, encoding="utf-8")
+    _copy_mtime(src, dst)
     print("[memory-tidy] synced auto→heartbeat: open_threads.md", file=sys.stderr)
 
 
@@ -335,9 +409,15 @@ def _warn_tiers_over_budget():
             sizes[f.name] = n
         return sizes
 
+    from core.memory import WARM_FILE_CAP
+    warm_sizes = {name: min(n, WARM_FILE_CAP)
+                  for name, n in _tier_sizes(MEMORY_DIR / "warm").items()}
     tiers = {
         "hot": (_tier_sizes(MEMORY_DIR / "hot"), HOT_BUDGET),
-        "warm": (_tier_sizes(MEMORY_DIR / "warm"), WARM_BUDGET),
+        # warm sizes are load-capped (R4) — sizing them uncapped would count
+        # ~40k phantom chars and cry tier_over_budget while the loader isn't
+        # actually truncating anything.
+        "warm": (warm_sizes, WARM_BUDGET),
         "system": (_tier_sizes(MEMORY_DIR / "system", caps=_SYSTEM_FILE_CAPS),
                    SYSTEM_BUDGET),
         "timeline": (_tier_sizes(MEMORY_DIR / "timeline", skip=_TIMELINE_SKIP),
@@ -365,11 +445,25 @@ def main() -> int:
     except Exception as e:
         print(f"[memory-tidy] archive check failed: {e}", file=sys.stderr)
 
+    # 记忆瘦身 PRD R5: demote stale prep docs on the auto side (true mtimes)
+    # BEFORE the sync/mirror pass so the replica archives in the same run.
+    try:
+        _demote_stale_auto_warm()
+    except Exception as e:
+        print(f"[memory-tidy] stale-warm demotion failed: {e}", file=sys.stderr)
+
     # One-way sync: auto → heartbeat for warm/ files
     try:
         _sync_warm_auto_to_heartbeat()
     except Exception as e:
         print(f"[memory-tidy] warm sync failed: {e}", file=sys.stderr)
+
+    # 记忆瘦身 PRD R1: replica-only warm files (auto deleted/demoted them)
+    # stop riding every prompt — moved to the replica's warm/archive/.
+    try:
+        _mirror_warm_deletions()
+    except Exception as e:
+        print(f"[memory-tidy] mirror-deletions failed: {e}", file=sys.stderr)
 
     # One-way sync: auto → heartbeat for open_threads.md (named system/ exception)
     try:

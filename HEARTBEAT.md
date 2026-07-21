@@ -635,8 +635,9 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     [MEMORY TIDY]
     Review the memory health report below. Your job:
     1. Check tier sizes against the REAL loader budgets (core/memory.py): hot/ 30000,
-       system/ 56000, timeline/ 15000 chars; warm/ gets the remainder of the 200000
-       global cap (~99000). If a tier is over, suggest what to trim/archive
+       system/ 60000, timeline/ 15000 chars; warm/ gets the remainder of the 200000
+       global cap (~95000, and each warm file is load-capped at 12000). If a tier
+       is over, suggest what to trim/archive
     2. Check for duplicate entries in timeline files
     3. Regenerate _index.md with accurate one-line descriptions for each warm/ file
     4. Flag any stale system/ entries (e.g. open_threads items older than 2 weeks)
