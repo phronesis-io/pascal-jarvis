@@ -155,59 +155,51 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
 - post: tasks/eigenflux_publish_post.py
 - prompt: |
     [EIGENFLUX RECURRING PUBLISH]
-    DEFAULT IS SILENCE. Publishing almost nothing is the correct, expected outcome.
-    Most cycles → {"should_publish":false}. Do NOT hunt for something to say.
+    Your job: draft a valuable broadcast candidate for Pascal to review. He will
+    see a confirmation card and decide whether to send it — you are the ghostwriter,
+    he is the editor. Try to produce something every cycle; Pascal filtering out a
+    mediocre draft costs nothing, but silence means he never gets to choose.
 
-    ONLY publish a genuine SUPPLY or DEMAND that is concretely tied to Pascal /
-    EigenFlux's REAL current situation (read his memory: projects, team needs,
-    EigenFlux roadmap, what he's hiring for, what capability we can offer):
-    - SUPPLY: a real capability/resource WE can actually provide to other agents
-      right now (e.g. EigenFlux network access, a dataset/tool we own, expertise
-      we'll actually deliver on).
-    - DEMAND: a specific collaboration / hire / expertise / data source WE are
-      actually looking for right now.
+    Read Pascal's memory carefully. Draw from his REAL current work, opinions,
+    and experiences. The DATA section shows recent material (commits, memory
+    highlights, feed items) — use it as inspiration, not as copy to relay.
 
-    HARD BAN — do NOT broadcast "info": no relaying papers, news, benchmarks,
-    findings, or "interesting things we read" (that arXiv 'Economy of Minds'
-    broadcast was exactly this mistake). Reading something interesting is NEVER
-    a reason to broadcast. Inbound info belongs in feed-triage, not outbound.
+    Three broadcast types (pick the best fit):
+    - "supply": a capability or resource WE can actually deliver right now
+    - "demand": a specific collaboration, expertise, or data source WE need
+    - "insight": an original observation, methodology, or design principle
+      derived from Pascal's actual work. Must be GENERALIZED — useful to other
+      agents/builders, not just our stack. First-person perspective is fine.
 
-    Quality bar for a supply/demand (ALL must be met):
-    1. RELEVANT TO PASCAL — it maps to a real, current need or offering in his
-       memory. If you can't point to the specific project/need, don't publish.
-    2. SPECIFIC — concrete ask/offer with names, numbers, scope. Never vague.
-    3. ACTIONABLE — another agent can respond with a concrete supply/demand match.
-    4. CONCISE — 2-4 sentences, dense. No filler, no self-promotion, no thought-leadership.
+    STILL BANNED:
+    - Pure news/paper relay ("arXiv published X" without an original take)
+    - Internal ops war stories with our specific numbers/dashboards/stack
+    - Vague thought-leadership fluff ("AI agents are the future")
+    - Private info, credentials, business metrics
 
-    DEDUP rule: The DATA section lists RECENT BROADCASTS. Do NOT publish anything that overlaps
-    with a topic already broadcast in the last 7 days. One topic = one broadcast, period.
-    If the same insight was already shared — return should_publish: false.
+    Quality bar (ALL must be met):
+    1. GROUNDED — traceable to something real in Pascal's memory or recent work.
+       No fabricated expertise or speculative positioning.
+    2. DECISION-RELEVANT — another agent/builder could change a concrete decision
+       after reading this. Pure entertainment or trivia fails this test.
+    3. SPECIFIC — names, numbers, scope, or a concrete pattern. Never vague.
+    4. CONCISE — 2-4 sentences, dense. No filler.
 
-    Hard rules: NO private info/credentials, factual only, silence > noise.
+    For "insight" type specifically:
+    - Abstract the lesson from the specific incident. "We hit an FD limit" is ops;
+      "persistent agent harnesses need process isolation because X" is an insight.
+    - Pascal's perspective on agent collaboration, network design, harness
+      engineering, content curation, and AI product craft are all fair game.
+    - If you learned something from recent feed items, the broadcast should be
+      your REACTION/TAKE, not a summary of what you read.
 
-    THE decision-relevance test (the one that matters most — apply it before anything else):
-    A broadcast must be able to change ANOTHER agent's decision. If the insight only
-    makes sense to someone running OUR exact stack, it has zero value to the network.
-
-    HARD BAN — internal-ops war stories. Do NOT broadcast post-mortems of our own
-    incidents, dashboards, metrics, or bugs (e.g. "our notes field got overwritten and
-    the attribution query read empty", "our crawler hit an FD limit", "our publish rate
-    was actually 68% not 0%"). These read as interesting engineering anecdotes but no
-    external agent is in our situation, so information value = zero — AND they leak
-    internal operational detail. The ONLY exception: when the lesson abstracts into a
-    GENERIC, decision-changing principle for how ANY agent network should be architected,
-    publish the abstract principle WITHOUT our internal numbers, dashboards, or stack.
-    When unsure whether something is "our ops" vs "a network principle" → don't publish.
-
-    Type selection (only these two — "info" is banned):
-    - "supply": offering a capability or resource WE can actually deliver
-    - "demand": seeking specific collaboration, hire, data, or expertise WE actually need
+    DEDUP rule: The DATA section lists RECENT BROADCASTS. Do NOT publish anything
+    that overlaps with a topic already broadcast in the last 7 days.
 
     CRITICAL: URL FORMAT RULE
     When your content references any URL (papers, articles, sources, links):
     - NEVER write bare URLs or paper IDs ("arXiv 2606.02859", "https://example.com")
     - ALWAYS use markdown clickable format: [description](full_url)
-    - Example: [Economy of Minds (arXiv 2606.02859)](https://arxiv.org/abs/2606.02859)
     - Every URL in content must be clickable — if you can't make it clickable, don't mention it.
 
     ALWAYS also return source_url as a SEPARATE top-level field: the canonical
@@ -216,8 +208,8 @@ presets：`decision`（同意/暂不处理/不采纳）、`fyi`（已阅/标为�
     user can open the source even if you forgot to embed it in content. Use an
     empty string only if the broadcast genuinely has no source.
 
-    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"supply|demand","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
-    If nothing meets the bar (the usual case), return {"should_publish":false}
+    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"supply|demand|insight","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    If you genuinely cannot find anything grounded and decision-relevant (rare), return {"should_publish":false}
 
 ### eigenflux-profile
 - interval: 24h

@@ -1,8 +1,7 @@
-"""Tests for tasks/eigenflux_publish_post.py — supply/demand-only gate + link.
+"""Tests for tasks/eigenflux_publish_post.py — type gate + confirmation card.
 
-Pascal's directive: stop over-publishing. Only supply/demand broadcasts tied to
-his real situation; "info" relays (papers/news) are banned. The confirmation
-card must render the source as a tappable link.
+Only supply/demand/insight broadcasts are allowed; "info" relays (papers/news)
+are still banned. All broadcasts go through a confirmation card before publishing.
 """
 
 import subprocess
@@ -52,6 +51,12 @@ def test_demand_broadcast_carded(tmp_path):
 def test_source_url_rendered_as_clickable_link(tmp_path):
     out = _run(_mk("supply", "https://www.eigenflux.ai"), tmp_path)
     assert "[https://www.eigenflux.ai](https://www.eigenflux.ai)" in out
+
+
+def test_insight_broadcast_carded(tmp_path):
+    out = _run(_mk("insight"), tmp_path)
+    assert "广播待确认" in out
+    assert "insight" in out
 
 
 def test_should_publish_false_no_card(tmp_path):
