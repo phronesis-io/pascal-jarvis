@@ -287,6 +287,16 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
         --focus: #58a6c4;
         --shadow: none;
     }
+    /* Quasar 品牌类（text-primary/bg-primary）自带 !important，普通选择器
+       覆盖打不赢；且 ui.colors 把品牌色写成 body 的内联 style，:root 上的
+       定义会被子树重定义。唯一稳赢的位置：body 上的作者 !important。
+       深玉色做按钮底配白字、做文字色在暗底上都可读。 */
+    body {
+        --q-primary: #4aa78f !important;
+        --q-negative: #d0685a !important;
+        --q-positive: #4aa78f !important;
+        --q-warning: #c09a5c !important;
+    }
     body { background: var(--paper); }
     .jarvis-nav-link.is-active { background: var(--ink); color: var(--paper) !important; }
     .q-btn.memorial-primary { background: var(--ink) !important; color: var(--paper) !important; }
