@@ -66,6 +66,31 @@ def _event_detail(e: dict) -> str:
     return str(detail)
 
 
+# 结构化日志里 info 级的 "Script X stderr:" 是脚本例行诊断的转录（跳过说明、
+# 静默更新……），不是故障——曾经一天 40+ 条被当异常标红，红色数字随之失效。
+_HARD_SIGNATURES = tuple(s for s in LOG_FAILURE_SIGNATURES if s != "stderr:")
+
+
+def _line_flagged(line: str) -> bool:
+    """红=动手：error/critical 必红；warn 命中硬签名才红；info 只认硬签名。"""
+    # '"expected": true' = emitter-marked by-design event (elected probe,
+    # warm squeeze) — never painted red (REQ-96).
+    if '"expected": true' in line:
+        return False
+    try:
+        e = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        # 非结构化行（bot.sh/lark 等）沿用签名匹配，含 stderr:。
+        return any(sig in line for sig in LOG_FAILURE_SIGNATURES)
+    if not isinstance(e, dict) or "level" not in e:
+        return any(sig in line for sig in LOG_FAILURE_SIGNATURES)
+    level = str(e.get("level", "")).lower()
+    if level in {"error", "critical", "fatal"}:
+        return True
+    msg = str(e.get("msg", ""))
+    return any(sig in msg for sig in _HARD_SIGNATURES)
+
+
 def tail_log(path: Path, lines: int = 120, grep: str = "") -> dict:
     """Bounded tail-reader for plain-text logs with failure flagging."""
     lines = max(1, min(int(lines), 1000))
@@ -86,11 +111,7 @@ def tail_log(path: Path, lines: int = 120, grep: str = "") -> dict:
         all_lines = [line for line in all_lines if grep in line]
     out = []
     for line in all_lines[-lines:]:
-        # '"expected": true' = emitter-marked by-design event (elected probe,
-        # warm squeeze) — never painted red (REQ-96).
-        flagged = (any(sig in line for sig in LOG_FAILURE_SIGNATURES)
-                   and '"expected": true' not in line)
-        out.append({"text": line, "flagged": flagged})
+        out.append({"text": line, "flagged": _line_flagged(line)})
     return {
         "path": str(path),
         "lines": out,

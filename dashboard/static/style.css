@@ -127,6 +127,11 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .metric-value.is-alert { color: var(--cinnabar); }
 .metric-label { margin-top: 12px; color: var(--ink-soft); font-size: 12px; }
 
+/* 可点的指标格：是门，不是牌匾。 */
+a.metric-cell { display: block; text-decoration: none; color: inherit; }
+a.metric-cell, .metric-cell.is-clickable { cursor: pointer; }
+a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
+
 .memorial-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; width: 100%; }
 .memorial-card {
     position: relative;

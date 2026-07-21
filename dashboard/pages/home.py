@@ -21,7 +21,7 @@ from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
                       finish_status_label, guarded_refresh_timer,
                       intent_event_label, memorial_attention_rank,
                       memorial_display_title, memorial_is_pending,
-                      skip_reason_label, source_label)
+                      memorial_option_label, skip_reason_label, source_label)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -38,15 +38,26 @@ def _selfmon_headline(jarvis_dir: Path) -> dict:
         from core.selfmon import compute_selfmon
         m = compute_selfmon(jarvis_dir, window_hours=24)
         overdue = m["closure_overdue"]
+        refires = m["same_intent_refires"]
+        low_sources = m["noise_card_count"]["low_engagement_sources"]
         data = {
             "noise_cards": m["noise_card_count"]["total_sent"],
-            "low_engagement": len(m["noise_card_count"]["low_engagement_sources"]),
-            "refires": m["same_intent_refires"]["offender_count"],
+            "low_engagement": len(low_sources),
+            "refires": refires["offender_count"],
             "closure_overdue": (overdue["overdue_count"]
                                 if overdue.get("db_available") else "—"),
             "crashes": m["model_crash_or_skip"]["total"],
             "silent": m["silent_failures"]["total"],
             "ok": True,
+            # 点名——"需关注信号 6"这种哑数字没法行动，名单才可以。
+            "refire_names": [
+                f"{o.get('name', iid)} ×{o.get('max_in_window', '?')}"
+                f"/{o.get('window_min', '?')}分钟"
+                for iid, o in list(dict(refires.get("offenders", {})).items())[:3]],
+            "low_source_names": [source_label(s) for s in low_sources[:5]],
+            "overdue_names": [
+                str(o.get("name", o) if isinstance(o, dict) else o)
+                for o in list(overdue.get("overdue", []))[:3]],
         }
     except Exception:  # noqa: BLE001 — the home surface must always render
         data = {"ok": False}
@@ -163,14 +174,39 @@ def _compact(text: str, limit: int = 190) -> str:
     return one if len(one) <= limit else one[:limit].rstrip() + "…"
 
 
-def _metric(label: str, value, alert: bool = False) -> None:
-    with ui.element("div").classes("metric-cell"):
+def _metric(label: str, value, alert: bool = False,
+            href: str | None = None, on_click=None) -> None:
+    """数字都是门：能点的指标才带得动决策，死数字只制造疑问。"""
+    cell = ui.element("a" if href else "div").classes("metric-cell")
+    if href:
+        cell.props(f'href="{href}"')
+    if on_click is not None:
+        cell.classes("is-clickable")
+        cell.on("click", on_click)
+    with cell:
         cls = "metric-value" + (" is-alert" if alert else "")
         ui.label(str(value)).classes(cls)
         ui.label(label).classes("metric-label")
 
 
-def _memorial_preview(state: dict) -> None:
+def _memorial_preview(state: dict, refresh) -> None:
+    """首页预览卡直接可批——十秒视图不该为一次点击跳一页。"""
+    from core import memorial
+
+    def decide(mid: str, key: str):
+        payload = memorial.decide(mid, key)
+        toast = payload.get("toast", {})
+        ui.notify(toast.get("content", "已记录"),
+                  type="positive" if toast.get("type") == "success" else "info")
+        refresh()
+
+    def chat(mid: str):
+        payload = memorial.chat(mid)
+        toast = payload.get("toast", {})
+        ui.notify(toast.get("content", "已切到对话"),
+                  type="positive" if toast.get("type") == "success" else "info")
+        refresh()
+
     with ui.card().classes("memorial-card"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
             ui.label(source_label(state.get("source", ""))).classes(
@@ -179,8 +215,18 @@ def _memorial_preview(state: dict) -> None:
         ui.label(memorial_display_title(state)).classes("memorial-title")
         ui.markdown(_compact(state.get("body", ""))).classes("memorial-body")
         with ui.row().classes("memorial-actions"):
-            ui.link("去批示 →", "/memorials").classes(
-                "jarvis-nav-link is-active")
+            for index, option in enumerate(state.get("options", [])[:3]):
+                ui.button(
+                    memorial_option_label(option.get("label", "选择")),
+                    on_click=lambda mid=state["id"], key=option.get("key", ""):
+                        decide(mid, key),
+                ).props("unelevated no-caps" if index == 0
+                        else "outline no-caps").classes(
+                    "memorial-primary" if index == 0 else "memorial-secondary")
+            ui.button("聊聊这个",
+                      on_click=lambda mid=state["id"]: chat(mid)).props(
+                "flat no-caps").classes("memorial-chat")
+            ui.link("全文 →", "/memorials").classes("jarvis-nav-link")
 
 
 @ui.page("/")
@@ -209,11 +255,23 @@ def home_page():
                          if isinstance(sm.get("closure_overdue"), int) else 0)
                       + (sm.get("low_engagement", 0) or 0)) if sm.get("ok") else "—"
 
+            drawer_ref: dict = {}
+
+            def open_drawer():
+                exp = drawer_ref.get("el")
+                if exp is not None:
+                    exp.value = True
+                    ui.run_javascript(
+                        f'document.getElementById("c{exp.id}")'
+                        '?.scrollIntoView({behavior: "smooth"})')
+
             with ui.element("div").classes("metric-strip"):
-                _metric("待批奏折", len(pending), alert=bool(pending))
-                _metric("已标重点", marked)
-                _metric("7 日互动率", f"{stats['rate']}%")
-                _metric("需关注信号", issues, alert=issues not in (0, "—"))
+                _metric("待批奏折", len(pending), alert=bool(pending),
+                        href="/memorials")
+                _metric("已标重点", marked, href="/memorials")
+                _metric("7 日互动率", f"{stats['rate']}%", href="/engagement")
+                _metric("需关注信号", issues, alert=issues not in (0, "—"),
+                        on_click=open_drawer)
 
             with ui.column().classes("w-full gap-3"):
                 ui.label("壹 · 决策").classes("section-kicker")
@@ -226,7 +284,7 @@ def home_page():
                 if pending:
                     with ui.element("div").classes("memorial-grid"):
                         for state in pending[:4]:
-                            _memorial_preview(state)
+                            _memorial_preview(state, live_content.refresh)
                 else:
                     ui.label("没有待批事项。Jarvis 会继续在后台看着，有事再来。").classes(
                         "empty-guidance")
@@ -249,7 +307,8 @@ def home_page():
                         "empty-guidance")
 
             with ui.expansion("系统底稿 · 24 小时", icon="monitor_heart").classes(
-                    "system-drawer w-full"):
+                    "system-drawer w-full") as drawer:
+                drawer_ref["el"] = drawer
                 if not sm.get("ok"):
                     ui.label("暂时读不到自监控数据。").classes("section-note")
                 else:
@@ -259,6 +318,17 @@ def home_page():
                         _metric("闭环逾期", sm["closure_overdue"],
                                 alert=sm["closure_overdue"] not in (0, "—"))
                         _metric("静默失败", sm["silent"], alert=bool(sm["silent"]))
+                    # 名单在此：光有数字只会引出"这 6 是什么"的追问。
+                    callouts = []
+                    if sm.get("refire_names"):
+                        callouts.append("重复触发：" + "、".join(sm["refire_names"]))
+                    if sm.get("overdue_names"):
+                        callouts.append("闭环逾期：" + "、".join(sm["overdue_names"]))
+                    if sm.get("low_source_names"):
+                        callouts.append("这些来源发了卡但你很少理："
+                                        + "、".join(sm["low_source_names"]))
+                    for line in callouts:
+                        ui.label(line).classes("section-note")
 
         live_content()
         guarded_refresh_timer(15, live_content.refresh)

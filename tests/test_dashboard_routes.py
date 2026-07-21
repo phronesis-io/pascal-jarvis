@@ -667,6 +667,37 @@ class TestOpsBoard:
         assert any("timed out" in row for row in flagged)
         assert any("Claude CLI not found" in row for row in flagged)
 
+    def test_tail_log_info_stderr_transcript_not_flagged(self, tmp_path):
+        """info 级的 'Script X stderr:' 转录是例行诊断——曾一天 40+ 条误报标红。"""
+        import json as _json
+        from dashboard.pages.ops import tail_log
+
+        log = tmp_path / "jarvis.log"
+        rows = [
+            # 例行：脚本往 stderr 打的跳过说明，info 级 → 不红
+            {"ts": "t", "level": "info", "component": "heartbeat",
+             "msg": "Script tasks/intentions_pre.sh stderr: [calendar-intents] skip prep"},
+            # 慢性 warn 无硬签名 → 不红（红=动手）
+            {"ts": "t", "level": "warn", "msg": "tier_truncated"},
+            # error 级必红
+            {"ts": "t", "level": "error", "msg": "boom"},
+            # info 级命中硬签名照红
+            {"ts": "t", "level": "info", "msg": "subprocess exited with code 1"},
+        ]
+        text = "\n".join(_json.dumps(r) for r in rows)
+        # 非结构化行沿用签名匹配（bot.sh 风格）
+        text += "\n[ts] worker stderr: Traceback most recent\n"
+        log.write_text(text + "\n", encoding="utf-8")
+
+        result = tail_log(log, lines=20)
+        flagged = [row["text"] for row in result["lines"] if row["flagged"]]
+        assert result["flagged_count"] == 3
+        assert not any("intentions_pre" in row for row in flagged)
+        assert not any("tier_truncated" in row for row in flagged)
+        assert any('"error"' in row for row in flagged)
+        assert any("exited with code 1" in row for row in flagged)
+        assert any("Traceback" in row for row in flagged)
+
     def test_tail_log_missing_file(self, tmp_path):
         from dashboard.pages.ops import tail_log
 
