@@ -391,6 +391,15 @@ def distance_from_anchor(anchor_name: str, address_or_latlng,
 
 # ── CLI ─────────────────────────────────────────────────────────────
 
+def _looks_numeric(token: str) -> bool:
+    """True for a bare latitude ("31.2") — the coords CLI form."""
+    try:
+        float(str(token))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_place(token: str) -> tuple[float, float] | dict:
     """CLI helper: anchor name | 'lat,lng' | free-text address → (lat, lng)
     or an {"error": ...} dict."""
@@ -435,6 +444,14 @@ def main(argv: list[str]) -> int:
             if len(args) < 2:
                 print(USAGE); return 2
             return _print(regeo(args[0], args[1]))
+        if cmd == "around" and args and not _looks_numeric(args[0]):
+            # anchor-name / address form: around 家 咖啡 [radius]
+            o = _resolve_place(args[0])
+            if isinstance(o, dict):
+                return _print(o)
+            kw = args[1] if len(args) > 1 else ""
+            radius = int(args[2]) if len(args) > 2 else 1000
+            return _print(around_poi(o[0], o[1], kw, radius))
         if cmd == "around":
             if len(args) < 2:
                 print(USAGE); return 2
