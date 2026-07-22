@@ -15,6 +15,7 @@ from nicegui import ui
 
 _NAV = [
     ("今日", "/"),
+    ("事项", "/matters"),
     ("奏折", "/memorials"),
     ("意图", "/intentions"),
     ("任务", "/tasks"),
@@ -193,11 +194,20 @@ def add_dashboard_head() -> None:
     ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
-        '<link rel="stylesheet" href="/static/style.css">'
+        '<link rel="stylesheet" href="/static/style.css?v=20260722-matter2">'
+        '<link rel="manifest" href="/static/manifest.webmanifest">'
+        '<link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">'
+        '<link rel="apple-touch-icon" href="/static/app-icon-192.png">'
+        '<meta name="apple-mobile-web-app-capable" content="yes">'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="default">'
+        '<meta name="apple-mobile-web-app-title" content="Jarvis">'
         '<meta name="theme-color" content="#f5f7f8" '
         'media="(prefers-color-scheme: light)">'
         '<meta name="theme-color" content="#10181d" '
         'media="(prefers-color-scheme: dark)">'
+        '<script>if ("serviceWorker" in navigator) {'
+        'window.addEventListener("load", () => '
+        'navigator.serviceWorker.register("/sw.js", {scope: "/"}));}</script>'
     )
 
 
@@ -218,6 +228,18 @@ def dashboard_header(active: str, title: str, subtitle: str = "") -> None:
                         "/agent-calendar"}):
                     classes += " is-active"
                 ui.link(label, href).classes(classes)
+        with ui.element("nav").classes("mobile-dock"):
+            for label, href, icon in (
+                    ("今日", "/", "home"),
+                    ("事项", "/matters", "workspaces"),
+                    ("奏折", "/memorials", "description"),
+                    ("更多", "/settings", "more_horiz")):
+                selected = (href == active or (href == "/settings" and active not in {
+                    "/", "/matters", "/memorials"}))
+                with ui.link(target=href).classes(
+                        "mobile-dock-link" + (" is-active" if selected else "")):
+                    ui.icon(icon, size="21px")
+                    ui.label(label)
 
 
 @contextmanager

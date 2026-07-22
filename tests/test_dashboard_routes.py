@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -907,6 +907,12 @@ class TestRoutes:
         after = db.execute("SELECT COALESCE(SUM(surfaced_count),0), COUNT(*) FROM bookmarks").fetchone()
         assert tuple(after) == tuple(before)
 
+    def test_matter_detail_page_renders(self, client):
+        from core.matters import create_matter
+        matter = create_matter("详情页", next_action="继续测试")
+        r = client.get(f"/matters/{matter['id']}")
+        assert r.status_code == 200
+
     # ── the 9 write endpoints: bare `request` made FastAPI treat the body
     # as a query param → universal 422. Each must now parse a JSON body. ──
 
@@ -950,6 +956,61 @@ class TestRoutes:
         row = db_module.get_db().execute(
             "SELECT COUNT(*) FROM engagement_events").fetchone()
         assert row[0] == 1
+
+    def test_api_matter_lifecycle_and_links(self, client):
+        created = client.post("/api/matters", json={
+            "title": "API 事项", "next_action": "接入会话", "priority": 8,
+        })
+        assert created.status_code == 200
+        matter_id = created.json()["id"]
+
+        updated = client.patch(f"/api/matters/{matter_id}", json={
+            "status": "waiting", "summary": "等待外部结果",
+        })
+        assert updated.status_code == 200
+        assert updated.json()["status"] == "waiting"
+
+        linked = client.post(f"/api/matters/{matter_id}/links", json={
+            "entity_type": "session", "provider": "codex",
+            "entity_id": "api-session", "title": "测试会话",
+        })
+        assert linked.status_code == 200
+        loaded = client.get(f"/api/matters/{matter_id}")
+        assert loaded.status_code == 200
+        assert loaded.json()["links"][0]["entity_id"] == "api-session"
+
+        removed = client.delete(
+            f"/api/matters/{matter_id}/links/{linked.json()['id']}")
+        assert removed.status_code == 200
+        assert client.get(f"/api/matters/{matter_id}").json()["links"] == []
+
+    def test_api_matter_validation_and_conflict(self, client):
+        assert client.post("/api/matters", json={"title": ""}).status_code == 400
+        first = client.post("/api/matters", json={"title": "甲"}).json()
+        second = client.post("/api/matters", json={"title": "乙"}).json()
+        payload = {"entity_type": "session", "provider": "claude",
+                   "entity_id": "one-session"}
+        assert client.post(f"/api/matters/{first['id']}/links", json=payload).status_code == 200
+        conflict = client.post(f"/api/matters/{second['id']}/links", json=payload)
+        assert conflict.status_code == 409
+        assert client.get("/api/matters?status=not-real").status_code == 400
+
+    def test_api_work_sessions(self, client, monkeypatch):
+        import core.work_sessions as work_sessions
+        monkeypatch.setattr(work_sessions, "discover_sessions", lambda **kwargs: [{
+            "provider": kwargs.get("provider") or "codex", "session_id": "s1",
+        }])
+        response = client.get("/api/work-sessions?provider=codex&limit=3")
+        assert response.status_code == 200
+        assert response.json()["items"][0]["session_id"] == "s1"
+
+    def test_pwa_assets_are_served(self, client):
+        manifest = client.get("/static/manifest.webmanifest")
+        assert manifest.status_code == 200
+        assert manifest.json()["start_url"] == "/matters"
+        worker = client.get("/sw.js")
+        assert worker.status_code == 200
+        assert worker.headers["service-worker-allowed"] == "/"
 
     # ── write-route hardening: no auth on :3457, so a foreign webpage could
     # blind-POST via a CORS "simple request" (text/plain, no preflight) and

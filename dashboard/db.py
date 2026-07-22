@@ -140,6 +140,53 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_task_exec_task ON task_executions(task_id);
     CREATE INDEX IF NOT EXISTS idx_task_exec_started ON task_executions(started_at);
     """,
+    # v4: Matter workspace — durable identity above channels and sessions
+    """
+    CREATE TABLE IF NOT EXISTS matters (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        next_action TEXT NOT NULL DEFAULT '',
+        outcome TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'project',
+        status TEXT NOT NULL DEFAULT 'active',
+        priority INTEGER NOT NULL DEFAULT 5,
+        source TEXT NOT NULL DEFAULT 'manual',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS matter_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        entity_type TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT '',
+        entity_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider, entity_type, entity_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS matter_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'system',
+        summary TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_matters_status_updated
+        ON matters(status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_matter_links_matter
+        ON matter_links(matter_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_matter_events_matter
+        ON matter_events(matter_id, id DESC);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

@@ -35,7 +35,7 @@ def main():
         host="127.0.0.1",
         port=3457,
         title="Jarvis",
-        favicon="🤖",
+        favicon=str(ROOT / "dashboard" / "static" / "app-icon.svg"),
         show=False,  # Don't auto-open browser
         reload=False,  # No hot reload in production
     )

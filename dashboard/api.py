@@ -242,6 +242,102 @@ def register_api_routes():
         """Get engagement statistics."""
         return engagement_stats(days)
 
+    # ── Matters and work sessions ─────────────────────────────────────
+
+    @app.get("/api/matters")
+    async def api_matter_list(status: str = "", limit: int = 100):
+        """List durable work matters, optionally filtered by status."""
+        from core.matters import list_matters
+        try:
+            items = list_matters(status=status or None, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"items": items}
+
+    @app.post("/api/matters", dependencies=_WRITE)
+    async def api_matter_create(request: Request):
+        """Create a matter. Body: {title, summary?, next_action?, ...}."""
+        from core.matters import create_matter
+        data = await request.json()
+        try:
+            matter = create_matter(
+                title=data.get("title", ""),
+                summary=data.get("summary", ""),
+                next_action=data.get("next_action", ""),
+                kind=data.get("kind", "project"),
+                status=data.get("status", "active"),
+                priority=data.get("priority", 5),
+                source=data.get("source", "api"),
+                actor=data.get("actor", "api"),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return matter
+
+    @app.get("/api/matters/{matter_id}")
+    async def api_matter_get(matter_id: str):
+        """Return a matter with its linked entities and event trail."""
+        from core.matters import get_matter
+        matter = get_matter(matter_id)
+        if matter is None:
+            raise HTTPException(404, "matter not found")
+        return matter
+
+    @app.patch("/api/matters/{matter_id}", dependencies=_WRITE)
+    async def api_matter_update(matter_id: str, request: Request):
+        """Update a matter's state, summary, next action, or outcome."""
+        from core.matters import update_matter
+        data = await request.json()
+        actor = data.pop("actor", "api")
+        try:
+            return update_matter(matter_id, actor=actor, **data)
+        except KeyError as exc:
+            raise HTTPException(404, "matter not found") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/matters/{matter_id}/links", dependencies=_WRITE)
+    async def api_matter_link(matter_id: str, request: Request):
+        """Attach a provider entity such as a Claude or Codex session."""
+        from core.matters import link_entity
+        data = await request.json()
+        try:
+            return link_entity(
+                matter_id=matter_id,
+                entity_type=data.get("entity_type", ""),
+                entity_id=data.get("entity_id", ""),
+                provider=data.get("provider", ""),
+                title=data.get("title", ""),
+                metadata=data.get("metadata"),
+                actor=data.get("actor", "api"),
+                move=bool(data.get("move", False)),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "matter not found") from exc
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 409 if "already linked" in detail else 400
+            raise HTTPException(status_code, detail) from exc
+
+    @app.delete("/api/matters/{matter_id}/links/{link_id}", dependencies=_WRITE)
+    async def api_matter_unlink(matter_id: str, link_id: int):
+        """Detach one linked entity without deleting its provider-native data."""
+        from core.matters import unlink_entity
+        if not unlink_entity(matter_id, link_id, actor="api"):
+            raise HTTPException(404, "matter link not found")
+        return {"status": "ok"}
+
+    @app.get("/api/work-sessions")
+    async def api_work_sessions(provider: str = "", days: int = 30,
+                                limit: int = 30):
+        """Discover recent Claude Code and Codex sessions by metadata only."""
+        from core.work_sessions import discover_sessions
+        try:
+            items = discover_sessions(provider=provider, days=days, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"items": items}
+
     # ── Health ───────────────────────────────────────────────────────
 
     @app.get("/api/health")

@@ -10,6 +10,7 @@ emits were dropped by design — so it was deleted (REQ-46).
 
 from pathlib import Path
 
+from fastapi.responses import FileResponse
 from nicegui import app
 
 JARVIS_DIR = Path(__file__).parent.parent
@@ -22,12 +23,20 @@ def create_app():
     # Serve static files
     app.add_static_files("/static", str(STATIC_DIR))
 
+    @app.get("/sw.js", include_in_schema=False)
+    async def service_worker():
+        return FileResponse(
+            STATIC_DIR / "sw.js",
+            media_type="application/javascript",
+            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+        )
+
     # Import pages (they register routes via decorators). thinking and
     # agent_calendar were previously never imported — their routes 404'd in
     # production while the home page linked to them (REQ-43).
     from .pages import (  # noqa: F401
         home, tasks, bookmarks, settings, intentions, thinking, agent_calendar,
-        engagement, ops, usage, memorials,
+        engagement, ops, usage, memorials, matters,
     )
 
     # Register REST API for bot.sh integration
