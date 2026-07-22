@@ -168,6 +168,7 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         mid, _ = memorial.create(
             source="eigenflux", title=title, body=msg, preset="fyi",
             context=json.dumps(metadata or {}, ensure_ascii=False)[:1500],
+            matter_id=str((metadata or {}).get("matter_id", "")),
         )
         state = memorial.get_memorial(mid) or {}
         delivery = state.get("delivery_status", "")
@@ -487,8 +488,26 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     body = f"{msg}\n\n💡 {analysis}"
                 m = re.search(r"\*\*(.+?)\*\*", msg)
                 title = f"{m.group(1)} 来信" if m else "EigenFlux 消息"
+                metadata = extract_metadata(line)
+                # Attach network traffic to an existing Matter when explicit
+                # metadata, conversation binding, or a strong lexical match is
+                # available. Never auto-create Matters from ambient feed data.
+                try:
+                    from core.matter_router import ingest_signal
+                    routed = ingest_signal({
+                        "source_id": "eigenflux",
+                        "source_type": "cli_stream",
+                        "event_id": ids[0] if ids else new_cursor,
+                        "title": title,
+                        "summary": analysis,
+                        "body": body,
+                        "metadata": metadata,
+                    })
+                    metadata = {**metadata, **routed}
+                except Exception as e:
+                    log("ef-stream", f"Matter routing skipped: {e}", level="warn")
                 seen, accepted, _ = _deliver_memorial_and_mark(
-                    body, ids, extract_metadata(line), user_id,
+                    body, ids, metadata, user_id,
                     seen, seen_file, jd, title=title)
                 if not accepted:
                     continue

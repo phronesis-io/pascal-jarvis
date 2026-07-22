@@ -413,6 +413,23 @@ class PerceptionRuntime:
                               "event_id": sig["event_id"], "action": "buffer",
                               "sensitivity": sig["sensitivity"]},
                              keep_last=5000)
+                # Index matching signals in an existing Matter. The inbox
+                # remains the delivery surface; ambient signals never create
+                # new Matters on their own.
+                try:
+                    from core.matter_router import ingest_signal
+                    routed = ingest_signal(sig, create_decision_memorial=False)
+                    if routed.get("matter_id"):
+                        append_jsonl(
+                            self.delivery_file,
+                            {"ts": now_local_str(), "source_id": sig["source_id"],
+                             "event_id": sig["event_id"], "action": "matter_link",
+                             "matter_id": routed["matter_id"],
+                             "route": routed["route"]},
+                            keep_last=5000,
+                        )
+                except Exception as e:
+                    notes.append(f"{sid}: matter route failed ({e})")
 
             src_state["adapter_state"] = new_adapter_state or {}
             src_state["last_run_ts"] = int(now)

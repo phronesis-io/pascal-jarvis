@@ -48,6 +48,29 @@ def record_sent(memorial_id: str, lark_message_id: str) -> None:
         "lark_message_id": str(lark_message_id),
         "ts": now_local_str(),
     })
+    try:
+        from core.memorial import get_memorial
+        state = get_memorial(memorial_id) or {}
+        if state.get("matter_id"):
+            from core.matter_bridge import record_channel_message
+            record_channel_message(
+                state["matter_id"], "lark", lark_message_id,
+                destination_id=state.get("chat_id", ""), role="memorial",
+                metadata={"memorial_id": memorial_id},
+            )
+    except Exception:
+        pass
+
+
+def sent_message_ids(memorial_id: str) -> list[str]:
+    """All Lark messages used to deliver this memorial, newest first."""
+    ids = []
+    for event in reversed(read_jsonl(_ledger_path())):
+        if event.get("ev") == "sent" and event.get("id") == memorial_id:
+            message_id = str(event.get("lark_message_id", ""))
+            if message_id and message_id not in ids:
+                ids.append(message_id)
+    return ids
 
 
 def find_by_lark_mid(lark_mid: str) -> str:

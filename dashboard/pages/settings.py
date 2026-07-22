@@ -1,4 +1,4 @@
-"""更多 — 次级面板入口 + 真实生效配置的只读视图。
+"""更多 — 次级面板入口、真实配置与安全手机接入。
 
 The previous incarnation was a placebo settings page: it wrote 7 keys into
 kv_store (0 rows ever written in production, zero consumers anywhere in the
@@ -86,9 +86,9 @@ def _section(kicker: str, title: str, note: str = "") -> None:
 
 @ui.page("/settings")
 def settings_page():
-    """次级面板入口 + 只读配置真相。"""
+    """次级面板入口、只读配置真相和设备安全动作。"""
     with jarvis_page("/settings", "更多",
-                     "次级面板的入口，以及当前真实生效的配置——这一页改不了任何东西。"):
+                     "次级面板、真实生效的配置，以及已授权的手机设备。"):
 
         # ── 次级面板入口 ──
         with ui.column().classes("w-full gap-3"):
@@ -185,7 +185,126 @@ def settings_page():
 
         # ── 数据操作（真实动作，保留） ──
         with ui.column().classes("w-full gap-3"):
-            _section("叁 · 数据", "数据搬家")
+            _section("叁 · 手机", "手机访问")
+            pair_state = {"result": None}
+
+            with ui.dialog() as pair_dialog, ui.card().classes(
+                    "matter-dialog matter-dialog-small"):
+                ui.label("连接一台手机").classes("matter-dialog-title")
+
+                @ui.refreshable
+                def pair_content():
+                    result = pair_state["result"] or {}
+                    if not result:
+                        return
+                    ui.label(result.get("code", "")).classes("mobile-pair-code")
+                    if result.get("pair_url"):
+                        ui.link("在手机打开配对链接", result["pair_url"],
+                                new_tab=True).classes("matter-artifact-link")
+                        base = result["pair_url"].split("/pair/", 1)[0]
+                        ui.link("下载手机信任证书", f"{base}/mobile-ca.cer",
+                                new_tab=True).classes("matter-artifact-link")
+                    ui.label(f"有效至 {result.get('expires_at', '')}").classes("section-note")
+
+                pair_content()
+                ui.button("关闭", on_click=pair_dialog.close).props(
+                    "flat no-caps").classes("memorial-secondary")
+
+            def create_mobile_pair():
+                from core.config import Config
+                from core.mobile_access import create_pair_code
+                result = create_pair_code("Pascal 的手机", 15)
+                try:
+                    gateway = json.loads(
+                        (Config().jarvis_dir / "mobile_access.json").read_text(
+                            encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, ValueError):
+                    gateway = {}
+                base = str(gateway.get("url") or "").rstrip("/")
+                result["pair_url"] = f"{base}/pair/{result['code']}" if base else ""
+                pair_state["result"] = result
+                pair_content.refresh()
+                pair_dialog.open()
+
+            async def enable_notifications():
+                script = r"""
+                return await (async () => {
+                  if (!('serviceWorker' in navigator) || !('PushManager' in window))
+                    return 'unsupported';
+                  const permission = await Notification.requestPermission();
+                  if (permission !== 'granted') return permission;
+                  const keyData = await fetch('/api/mobile/vapid-public-key').then(r => r.json());
+                  const pad = '='.repeat((4 - keyData.public_key.length % 4) % 4);
+                  const raw = atob((keyData.public_key + pad).replace(/-/g, '+').replace(/_/g, '/'));
+                  const key = Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+                  const reg = await navigator.serviceWorker.ready;
+                  let sub = await reg.pushManager.getSubscription();
+                  if (!sub) sub = await reg.pushManager.subscribe({userVisibleOnly: true,
+                    applicationServerKey: key});
+                  const response = await fetch('/api/mobile/push-subscriptions', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({subscription: sub.toJSON()}),
+                  });
+                  return response.ok ? 'ok' : 'failed';
+                })();
+                """
+                try:
+                    result = await ui.run_javascript(script, timeout=30)
+                except Exception:
+                    result = "failed"
+                if result == "ok":
+                    ui.notify("手机通知已开启", type="positive")
+                elif result == "denied":
+                    ui.notify("浏览器已拒绝通知，请在系统设置中重新允许", type="warning")
+                else:
+                    ui.notify("当前浏览器暂时不能开启 Push 通知", type="warning")
+
+            @ui.refreshable
+            def mobile_panel():
+                from core.mobile_access import list_devices
+                try:
+                    gateway = json.loads((JARVIS_DIR / "mobile_access.json").read_text(
+                        encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, ValueError):
+                    gateway = {}
+                with ui.element("section").classes("mobile-access-band"):
+                    with ui.row().classes("w-full items-center justify-between gap-3"):
+                        with ui.column().classes("gap-1"):
+                            ui.label("安全入口").classes("font-medium")
+                            ui.label(gateway.get("url") or "网关尚未运行").classes(
+                                "section-note")
+                        with ui.row().classes("gap-2"):
+                            ui.button(icon="add_link", on_click=create_mobile_pair).props(
+                                'outline round aria-label="连接新设备"').tooltip("连接新设备")
+                            ui.button(icon="notifications_active",
+                                      on_click=enable_notifications).props(
+                                'outline round aria-label="开启手机通知"').tooltip("开启手机通知")
+                    devices = list_devices()
+                    if devices:
+                        for device in devices:
+                            with ui.row().classes("mobile-device-row"):
+                                ui.icon("smartphone", size="18px")
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(device["label"]).classes("font-medium")
+                                    ui.label(f"最近访问 {device.get('last_seen_at') or '尚未访问'}").classes(
+                                        "section-note")
+
+                                def revoke(device_id=device["id"]):
+                                    from core.mobile_access import revoke_device
+                                    revoke_device(device_id)
+                                    mobile_panel.refresh()
+
+                                ui.button(icon="link_off", on_click=revoke).props(
+                                    "flat round dense").tooltip("撤销设备")
+                    else:
+                        ui.label("还没有已连接的手机。").classes("section-note")
+
+            mobile_panel()
+            ui.timer(10, mobile_panel.refresh)
+
+        # ── 数据操作（真实动作，保留） ──
+        with ui.column().classes("w-full gap-3"):
+            _section("肆 · 数据", "数据搬家")
 
             async def migrate_watchlater():
                 from ..bookmark_pipeline import migrate_from_jsonl

@@ -187,6 +187,89 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_matter_events_matter
         ON matter_events(matter_id, id DESC);
     """,
+    # v5: Cross-channel Matter bindings and authenticated mobile access
+    """
+    CREATE TABLE IF NOT EXISTS matter_bindings (
+        conv_key TEXT PRIMARY KEY,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL DEFAULT 'lark',
+        destination_id TEXT NOT NULL DEFAULT '',
+        chat_type TEXT NOT NULL DEFAULT 'p2p',
+        thread_root_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS matter_channel_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        channel TEXT NOT NULL,
+        destination_id TEXT NOT NULL DEFAULT '',
+        message_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'update',
+        state TEXT NOT NULL DEFAULT 'active',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(channel, message_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mobile_devices (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT,
+        revoked_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS mobile_pair_codes (
+        code_hash TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        consumed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS mobile_access_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        device_id TEXT NOT NULL DEFAULT '',
+        remote_addr TEXT NOT NULL DEFAULT '',
+        method TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL DEFAULT '',
+        status INTEGER NOT NULL DEFAULT 0,
+        metadata TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS matter_push_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT NOT NULL DEFAULT '',
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_matter_bindings_matter
+        ON matter_bindings(matter_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_matter_channel_messages_matter
+        ON matter_channel_messages(matter_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mobile_access_timestamp
+        ON mobile_access_audit(timestamp DESC);
+    """,
+    # v6: Last actually-used provider/model per conversation
+    """
+    CREATE TABLE IF NOT EXISTS conversation_runtime (
+        conv_key TEXT PRIMARY KEY,
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

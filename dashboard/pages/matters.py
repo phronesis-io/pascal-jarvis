@@ -7,6 +7,7 @@ from datetime import datetime
 from nicegui import run, ui
 
 from core.matters import (
+    MatterConflict,
     create_matter,
     get_matter,
     link_entity,
@@ -14,6 +15,7 @@ from core.matters import (
     unlink_entity,
     update_matter,
 )
+from core.matter_bridge import bindings_for_matter, lark_deep_link
 from core.work_sessions import discover_sessions
 
 from ..uiutil import add_dashboard_head, dashboard_header
@@ -293,6 +295,7 @@ def matter_detail_page(matter_id: str):
 
         sessions_state = {"items": [], "loading": False, "error": ""}
         move_state = {"session": None}
+        close_state = {"status": "done", "items": []}
 
         def attach_session(session: dict, move: bool = False):
             try:
@@ -397,9 +400,40 @@ def matter_detail_page(matter_id: str):
                 sessions_state["loading"] = False
                 session_choices.refresh()
 
+        def force_close():
+            update_matter(matter_id, status=close_state["status"], actor="user",
+                          force=True)
+            close_dialog.close()
+            detail.refresh()
+            ui.notify(f"已设为{STATUS_LABELS[close_state['status']]}", type="positive")
+
+        with ui.dialog() as close_dialog, ui.card().classes(
+                "matter-dialog matter-dialog-small"):
+            ui.label("还有事项没有闭环").classes("matter-dialog-title")
+
+            @ui.refreshable
+            def close_warning():
+                ui.label("完成后这些记录仍会保留，但 Jarvis 不再把它们当作当前推进线。").classes(
+                    "section-note")
+                for item in close_state["items"][:8]:
+                    ui.label(f"{item.get('title', item.get('entity_id', ''))} · "
+                             f"{item.get('status', '')}").classes("matter-warning-item")
+
+            close_warning()
+            with ui.row().classes("matter-dialog-actions"):
+                ui.button("仍然结束", icon="check", on_click=force_close).props(
+                    "unelevated no-caps").classes("memorial-primary")
+                ui.button("继续处理", on_click=close_dialog.close).props(
+                    "flat no-caps").classes("memorial-secondary")
+
         def change_status(status: str):
             try:
                 update_matter(matter_id, status=status, actor="user")
+            except MatterConflict as exc:
+                close_state.update(status=status, items=exc.open_items)
+                close_warning.refresh()
+                close_dialog.open()
+                return
             except (KeyError, ValueError) as exc:
                 ui.notify(str(exc), type="warning")
                 return
@@ -431,6 +465,19 @@ def matter_detail_page(matter_id: str):
                     if matter.get("summary"):
                         ui.label(matter["summary"]).classes("matter-detail-summary")
                 with ui.row().classes("matter-detail-actions"):
+                    bindings = bindings_for_matter(matter_id)
+                    lark_url = next((lark_deep_link(item) for item in bindings
+                                     if lark_deep_link(item)), "")
+                    if lark_url:
+                        with ui.link(target=lark_url, new_tab=False).classes(
+                                "matter-action-link"):
+                            ui.icon("chat_bubble_outline", size="18px")
+                            ui.label("在飞书继续")
+                    with ui.link(
+                            target=f"/api/matters/{matter_id}/context?format=markdown",
+                            new_tab=True).classes("matter-action-link"):
+                        ui.icon("download", size="18px")
+                        ui.label("交接包")
                     ui.button("归入会话", icon="add_link", on_click=open_session_dialog).props(
                         "outline no-caps").classes("memorial-secondary")
                     ui.button("整理", icon="edit", on_click=edit_dialog.open).props(
@@ -489,6 +536,18 @@ def matter_detail_page(matter_id: str):
                                                     detach_link(link["id"]),
                                             ).props("flat round dense").classes(
                                                 "matter-unlink").tooltip("从事项中移除")
+                                    if node["kind"] == "link":
+                                        link = node["link"]
+                                        target = ""
+                                        if link.get("provider") == "url":
+                                            target = link.get("entity_id", "")
+                                        elif (link.get("provider") == "file"
+                                              and link.get("entity_type") == "artifact"):
+                                            target = (f"/api/matters/{matter_id}/artifacts/"
+                                                      f"{link['id']}")
+                                        if target:
+                                            ui.link("打开产物", target, new_tab=True).classes(
+                                                "matter-artifact-link")
                                     metadata = node.get("detail", {})
                                     if node["kind"] == "link" and metadata:
                                         context = " · ".join(filter(None, [

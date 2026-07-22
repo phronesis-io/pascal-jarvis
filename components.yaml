@@ -81,6 +81,13 @@ components:
     critical: false
     requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
 
+  - name: mobile-gateway
+    check: launchctl
+    label: com.pascal.jarvis.mobile-gateway
+    critical: false
+    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.mobile-gateway.plist
+    note: authenticated TLS gateway to dashboard :3457 only; :3456 is never proxied
+
   - name: daemon-launchd
     check: launchctl
     label: com.pascal.jarvis.daemon

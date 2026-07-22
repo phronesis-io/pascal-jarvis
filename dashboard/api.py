@@ -286,13 +286,17 @@ def register_api_routes():
     @app.patch("/api/matters/{matter_id}", dependencies=_WRITE)
     async def api_matter_update(matter_id: str, request: Request):
         """Update a matter's state, summary, next action, or outcome."""
-        from core.matters import update_matter
+        from core.matters import MatterConflict, update_matter
         data = await request.json()
         actor = data.pop("actor", "api")
         try:
-            return update_matter(matter_id, actor=actor, **data)
+            force = bool(data.pop("force", False))
+            return update_matter(matter_id, actor=actor, force=force, **data)
         except KeyError as exc:
             raise HTTPException(404, "matter not found") from exc
+        except MatterConflict as exc:
+            raise HTTPException(409, {"message": str(exc),
+                                      "open_items": exc.open_items}) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -327,6 +331,22 @@ def register_api_routes():
             raise HTTPException(404, "matter link not found")
         return {"status": "ok"}
 
+    @app.get("/api/matters/{matter_id}/artifacts/{link_id}")
+    async def api_matter_artifact(matter_id: str, link_id: int):
+        """Download only a file explicitly linked to this Matter."""
+        from fastapi.responses import FileResponse
+        row = get_db().execute(
+            "SELECT entity_id, title FROM matter_links WHERE id=? AND matter_id=? "
+            "AND entity_type='artifact' AND provider='file'",
+            (link_id, matter_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "artifact not found")
+        path = Path(row["entity_id"]).expanduser()
+        if not path.is_file():
+            raise HTTPException(404, "artifact file is unavailable")
+        return FileResponse(path, filename=path.name)
+
     @app.get("/api/work-sessions")
     async def api_work_sessions(provider: str = "", days: int = 30,
                                 limit: int = 30):
@@ -337,6 +357,88 @@ def register_api_routes():
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"items": items}
+
+    @app.get("/api/matters/{matter_id}/context")
+    async def api_matter_context(matter_id: str, format: str = "json"):
+        """Return the bounded handoff bundle, never raw transcripts or memory."""
+        from fastapi.responses import PlainTextResponse
+        from core.matter_context import build_context_bundle, render_context_markdown
+        try:
+            bundle = build_context_bundle(matter_id)
+        except KeyError as exc:
+            raise HTTPException(404, "matter not found") from exc
+        if format == "markdown":
+            return PlainTextResponse(render_context_markdown(bundle))
+        return bundle
+
+    @app.get("/api/matters/{matter_id}/bindings")
+    async def api_matter_bindings(matter_id: str):
+        from core.matter_bridge import bindings_for_matter, lark_deep_link
+        items = bindings_for_matter(matter_id)
+        for item in items:
+            item["deep_link"] = lark_deep_link(item)
+        return {"items": items}
+
+    # ── Authenticated mobile gateway / Web Push ──────────────────────
+
+    @app.get("/api/mobile/status")
+    async def api_mobile_status():
+        from core.config import Config
+        from core.mobile_access import list_devices, recent_access
+        status_path = Config().jarvis_dir / "mobile_access.json"
+        try:
+            gateway = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            gateway = {"url": "", "tls": False}
+        return {"gateway": gateway, "devices": list_devices(),
+                "recent_access": recent_access(20)}
+
+    @app.post("/api/mobile/pair", dependencies=_WRITE)
+    async def api_mobile_pair(request: Request):
+        from core.config import Config
+        from core.mobile_access import create_pair_code
+        data = await request.json()
+        try:
+            result = create_pair_code(data.get("label", "手机"), data.get("ttl", 15))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "ttl must be an integer from 1 to 60") from exc
+        try:
+            gateway = json.loads(
+                (Config().jarvis_dir / "mobile_access.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            gateway = {}
+        base = str(gateway.get("url") or "").rstrip("/")
+        result["pair_url"] = f"{base}/pair/{result['code']}" if base else ""
+        return result
+
+    @app.delete("/api/mobile/devices/{device_id}", dependencies=_WRITE)
+    async def api_mobile_revoke(device_id: str):
+        from core.mobile_access import revoke_device
+        if not revoke_device(device_id):
+            raise HTTPException(404, "device not found or already revoked")
+        return {"status": "revoked"}
+
+    @app.get("/api/mobile/vapid-public-key")
+    async def api_mobile_vapid_key():
+        from core.mobile_access import vapid_public_key
+        return {"public_key": vapid_public_key()}
+
+    @app.post("/api/mobile/push-subscriptions", dependencies=_WRITE)
+    async def api_mobile_push_subscribe(request: Request):
+        from core.mobile_access import register_push
+        data = await request.json()
+        device_id = request.headers.get("X-Jarvis-Device", "local")
+        try:
+            subscription_id = register_push(device_id, data.get("subscription") or data)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"status": "subscribed", "id": subscription_id}
+
+    @app.post("/api/mobile/push-test", dependencies=_WRITE)
+    async def api_mobile_push_test(request: Request):
+        from core.mobile_access import send_push
+        data = await request.json()
+        return send_push("Jarvis 已连接", data.get("body", "手机通知通道工作正常。"))
 
     # ── Health ───────────────────────────────────────────────────────
 

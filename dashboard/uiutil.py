@@ -194,7 +194,7 @@ def add_dashboard_head() -> None:
     ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
-        '<link rel="stylesheet" href="/static/style.css?v=20260722-matter2">'
+        '<link rel="stylesheet" href="/static/style.css?v=20260722-matter3">'
         '<link rel="manifest" href="/static/manifest.webmanifest">'
         '<link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">'
         '<link rel="apple-touch-icon" href="/static/app-icon-192.png">'

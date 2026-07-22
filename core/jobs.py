@@ -87,12 +87,19 @@ class JobManager:
             return {}
 
     def create_job(self, conv_key: str, description: str,
-                   message_id: str = "") -> str:
+                   message_id: str = "", matter_id: str = "") -> str:
         """Create a new job entry. Returns job_id."""
         job_id = f"j-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         job_dir = self.jobs_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        if not matter_id and os.environ.get("JARVIS_DIR"):
+            try:
+                from core.matter_bridge import get_binding
+                binding = get_binding(conv_key)
+                matter_id = str((binding or {}).get("matter_id", ""))
+            except Exception:
+                matter_id = ""
         entry = {
             "conv_key": conv_key,
             "description": description[:200],
@@ -103,6 +110,7 @@ class JobManager:
             "finished_at": None,
             "output_file": str(job_dir / "output.md"),
             "message_id": message_id,
+            "matter_id": matter_id,
         }
 
         with _locked(self.registry_path):
@@ -110,6 +118,16 @@ class JobManager:
             registry[job_id] = entry
             _atomic_write_json(self.registry_path, registry)
 
+        if matter_id:
+            try:
+                from core.matters import add_event, link_entity
+                link_entity(matter_id, "job", job_id, provider="jarvis",
+                            title=description[:200], metadata={"status": "running"},
+                            actor="job")
+                add_event(matter_id, "job_started", description[:600], actor="job",
+                          payload={"job_id": job_id})
+            except Exception:
+                pass
         return job_id
 
     def update_job(self, job_id: str, **kwargs) -> None:
@@ -145,6 +163,38 @@ class JobManager:
             job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
             job["pid"] = None
             _atomic_write_json(self.registry_path, registry)
+        self._reconcile_matter(job_id, job, status)
+
+    def _reconcile_matter(self, job_id: str, job: dict, status: str) -> None:
+        """Best-effort projection of a terminal Job into its Matter index."""
+        matter_id = str(job.get("matter_id") or "")
+        if matter_id:
+            try:
+                from core.matters import add_event, link_entity
+                output = ""
+                try:
+                    output = Path(job.get("output_file", "")).read_text(
+                        encoding="utf-8", errors="ignore")[:1200]
+                except OSError:
+                    pass
+                link_entity(matter_id, "job", job_id, provider="jarvis",
+                            title=job.get("description", job_id),
+                            metadata={"status": status,
+                                      "output_file": job.get("output_file", "")},
+                            actor="job")
+                add_event(matter_id, "job_finished",
+                          output or f"后台任务 {status}", actor="job",
+                          payload={"job_id": job_id, "status": status})
+                if output and job.get("output_file"):
+                    link_entity(matter_id, "artifact", job["output_file"],
+                                provider="file", title=f"{job_id} 输出",
+                                metadata={"job_id": job_id}, actor="job")
+                from core.mobile_access import send_push
+                push_title = "后台任务已结束" if status == "completed" else f"后台任务：{status}"
+                send_push(push_title, output[:240] or job.get("description", ""),
+                          url=f"/matters/{matter_id}", matter_id=matter_id)
+            except Exception:
+                pass
 
     def cancel_job(self, job_id: str) -> bool:
         """Cancel a running job by killing its process."""
@@ -214,6 +264,7 @@ class JobManager:
             job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
             job["pid"] = None
             _atomic_write_json(self.registry_path, registry)
+        self._reconcile_matter(job_id, job, "cancelled")
         return True
 
     def list_jobs(self, conv_key: str | None = None,
@@ -266,6 +317,7 @@ class JobManager:
         than grace_seconds are skipped (the PID may not be registered yet).
         """
         lost = []
+        lost_jobs = []
         now = time.time()
         with _locked(self.registry_path):
             registry = self._read_registry()
@@ -300,8 +352,11 @@ class JobManager:
                     job["finished_at"] = now_local_str("%Y-%m-%d %H:%M:%S")
                     job["pid"] = None
                     lost.append(job_id)
+                    lost_jobs.append((job_id, dict(job)))
             if lost:
                 _atomic_write_json(self.registry_path, registry)
+        for job_id, job in lost_jobs:
+            self._reconcile_matter(job_id, job, "lost")
         return lost
 
     def cleanup_old_jobs(self, max_age_days: int = 7) -> int:
@@ -377,7 +432,8 @@ if __name__ == "__main__":
         conv_key = os.environ.get("JV_CONV_KEY", "")
         desc = os.environ.get("JV_DESC", "")
         msg_id = os.environ.get("JV_MSG_ID", "")
-        print(jm.create_job(conv_key, desc, msg_id))
+        print(jm.create_job(conv_key, desc, msg_id,
+                            os.environ.get("JV_MATTER_ID", "")))
 
     elif cmd == "set-pid":
         job_id = sys.argv[2]

@@ -202,6 +202,20 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .matter-detail-summary { max-width: 780px; color: var(--ink-soft); font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
 .matter-detail-actions { flex: 0 0 auto; gap: 8px; }
 .matter-detail-actions .q-btn { min-height: 36px; border-radius: 8px !important; }
+.matter-action-link {
+    display: inline-flex;
+    gap: 7px;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--mist);
+    border-radius: 8px;
+    color: var(--ink) !important;
+    font-size: 13px;
+    text-decoration: none !important;
+}
+.matter-artifact-link { color: var(--focus) !important; font-size: 12px; }
+.matter-warning-item { padding: 7px 0; border-bottom: 1px solid var(--mist-soft); font-size: 13px; }
 .matter-next-band {
     width: 100%;
     padding: 18px 20px;
@@ -269,6 +283,11 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .session-picker-copy { min-width: 0; gap: 3px; }
 .session-picker-title { overflow: hidden; font-size: 13px; font-weight: 650; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .session-picker-meta { overflow: hidden; color: var(--ink-soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+.mobile-access-band { width: 100%; padding: 18px; border: 1px solid var(--mist); border-radius: 8px; }
+.mobile-device-row { width: 100%; align-items: center; gap: 10px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--mist-soft); }
+.mobile-device-row > .q-btn { margin-left: auto; }
+.mobile-pair-code { font-family: "SFMono-Regular", monospace; font-size: 22px; font-weight: 700; overflow-wrap: anywhere; }
 
 .section-kicker {
     color: var(--cinnabar);
@@ -477,6 +496,7 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     .matter-detail-copy { width: 100%; flex: 0 1 auto; }
     .matter-detail-actions { width: 100%; }
     .matter-detail-actions .q-btn { flex: 1 1 0; }
+    .matter-action-link { flex: 1 1 0; justify-content: center; }
     .matter-next-band { padding: 16px; }
     .matter-status-actions { overflow-x: auto; flex-wrap: nowrap; }
     .matter-status-button { flex: 0 0 auto; }

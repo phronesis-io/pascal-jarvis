@@ -1,10 +1,31 @@
 # PRD: Jarvis Matter Workspace and Mobile Home
 
 - Date: 2026-07-22
-- Status: Approved for phased implementation
+- Status: Implemented for personal production use
 - Owner: Pascal
 - Product principle: one Jarvis, many entrances; entrances are replaceable,
   state is not allowed to fork.
+
+## 0. Delivery record
+
+Implemented on 2026-07-22:
+
+- Phase 1: Matter schema, API, dashboard, recent-session discovery, and PWA.
+- Phase 2: bounded handoff bundles, Matter-aware Claude/Codex launcher,
+  completion summaries, session links, and artifact links.
+- Phase 3: Lark conversation binding and commands, actual-model reporting,
+  web-to-Lark memorial card synchronization, Intent/Job/Memorial
+  reconciliation, and deterministic EigenFlux/perception routing.
+- Phase 4A: authenticated mobile gateway on `:3458`, one-time pairing,
+  revocable device credentials, TLS with an installable local CA, access
+  audit, and Web Push.
+
+The installed personal gateway binds only the machine's current private LAN
+address and proxies only `127.0.0.1:3457`. A stable internet relay is not
+silently enabled: it needs an explicitly owned relay account/domain and a
+separate operational decision. Anonymous quick tunnels are rejected because
+their address changes after restart and they create an unnecessary public
+attack surface. This does not affect phone use on the same trusted network.
 
 ## 1. Executive decision
 
@@ -353,7 +374,7 @@ is why the migration is links-first and prospective.
 
 ## 13. Delivery phases
 
-### Phase 1: usable home
+### Phase 1: usable home (complete)
 
 - Matter tables and core API.
 - Recent Claude/Codex discovery.
@@ -362,26 +383,72 @@ is why the migration is links-first and prospective.
 - PWA shell and mobile navigation.
 - Dogfood this redesign as the first Matter.
 
-### Phase 2: automatic handoff
+### Phase 2: automatic handoff (complete)
 
 - Matter-aware Claude/Codex launchers/hooks.
 - Context bundle generation.
 - Session completion summaries and artifact discovery.
 - Lark conversation and memorial linkage.
 
-### Phase 3: channel convergence
+### Phase 3: channel convergence (complete)
 
 - Neutral delivery adapters.
 - Information/conversation/decision routing.
 - Web-to-Lark card state synchronization.
 - Matter-aware EigenFlux ingestion.
 
-### Phase 4: secure remote product
+### Phase 4A: secure personal mobile access (complete)
+
+- Private-LAN TLS gateway bound to the detected private address.
+- One-time pairing codes and hashed device credentials.
+- Device revocation, access audit, trusted local CA, and Web Push.
+- `:3456` remains unreachable through the gateway.
+
+### Phase 4B: stable internet relay (requires owned external service)
 
 - Outbound relay, device auth, Web Push, revocation, and remote audit.
 - Optional native shell only after PWA usage proves a native capability gap.
 
-## 14. Acceptance criteria for Phase 1
+## 14. Operations
+
+Daily use:
+
+```bash
+# List or create Matters
+python3 -m core.matters list --status active,waiting,blocked
+python3 -m core.matters create "Matter title" --next-action "Concrete next move"
+
+# Continue a Matter in an executor
+./scripts/jarvis-matter context mat_xxx
+./scripts/jarvis-matter launch mat_xxx codex
+./scripts/jarvis-matter launch mat_xxx claude
+
+# Pair or revoke a phone from the CLI (also available under /settings)
+python3 -m core.mobile_access pair --label "My phone"
+python3 -m core.mobile_access devices
+python3 -m core.mobile_access revoke dev_xxx
+```
+
+Lark commands:
+
+```text
+/matter new <name>
+/matter use <matter_id>
+/matter current
+/matter list
+/matter done <outcome>
+/matter handoff codex|claude
+/matter clear
+/model
+```
+
+The phone pairing screen links the public `jarvis-mobile-ca.cer` certificate.
+The CA private key, gateway key, VAPID private key, pair codes, device tokens,
+and runtime status all stay under ignored local data paths. Only token hashes
+are stored in SQLite. Installing and trusting the public CA on the phone makes
+the PWA and Push APIs a trusted secure context.
+
+## 15. Acceptance criteria
 
 1. A Matter can be created, edited, closed, reopened, and listed through both
    Python and HTTP APIs.
@@ -390,11 +457,19 @@ is why the migration is links-first and prospective.
 4. `/matters` renders on desktop and a 390px mobile viewport without overflow.
 5. A Matter detail page shows links and events in chronological order.
 6. The site publishes a valid manifest and service worker.
-7. No remote bind or authentication regression is introduced.
+7. `:3457` remains loopback-only; dashboard content on `:3458` requires an
+   active paired device (only pairing and the public CA are unauthenticated).
 8. Existing dashboard, memorial, intent, job, and full test suites remain green.
 9. Existing uncommitted user work is not modified or included in the change.
+10. Lark `/model` reports the provider and model used by the last successful
+    delivered reply.
+11. A web memorial decision updates every known delivered Lark card copy.
+12. A Matter cannot close over a live Intent, Memorial, or Job without an
+    explicit audited override.
+13. The mobile gateway presents a CA-signed certificate, rejects foreign
+    origins, supports device revocation, and has no route to `:3456`.
 
-## 15. Metrics
+## 16. Metrics
 
 - time to find and resume an active Matter;
 - percentage of new Claude/Codex sessions linked to a Matter;
@@ -403,7 +478,7 @@ is why the migration is links-first and prospective.
 - number of times Pascal must explain prior context after changing runtime;
 - PWA weekly opens versus Lark-only use.
 
-## 16. Non-goals
+## 17. Non-goals
 
 - Migrating or embedding every historical transcript.
 - Replacing Lark immediately.
@@ -412,7 +487,7 @@ is why the migration is links-first and prospective.
 - Copying full Lark Docs into SQLite.
 - Letting a model silently merge or split Matters without an auditable event.
 
-## 17. Key product decisions
+## 18. Key product decisions
 
 - Matter, not Session, is the continuity primitive.
 - `:3457`, not Lark, is the canonical visual home.

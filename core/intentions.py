@@ -108,6 +108,51 @@ def _emit_intent(event: str, intent_id: str, **fields) -> None:
     except Exception:
         pass
 
+
+def _matter_for_intent(intent_id: str) -> dict | None:
+    try:
+        from core.matters import find_by_entity
+        return find_by_entity("intent", intent_id, provider="jarvis")
+    except Exception:
+        return None
+
+
+def _matter_intent_event(intent_id: str, event_type: str, summary: str,
+                         status: str = "", payload: dict | None = None) -> None:
+    """Best-effort Matter reconciliation; Intent writes remain authoritative."""
+    try:
+        matter = _matter_for_intent(intent_id)
+        if not matter:
+            return
+        from core.matters import add_event, link_entity
+        intent = get_intent(intent_id) or {}
+        metadata = {"status": status or intent.get("status", ""),
+                    "closure_status": intent.get("closure_status", "")}
+        link_entity(matter["id"], "intent", intent_id, provider="jarvis",
+                    title=intent.get("name", intent_id), metadata=metadata,
+                    actor="intent")
+        add_event(matter["id"], event_type, summary, actor="intent",
+                  payload={"intent_id": intent_id, **(payload or {})})
+    except Exception as e:
+        print(f"[intentions] Matter reconciliation failed for {intent_id}: {e}",
+              file=sys.stderr)
+
+
+def _link_new_intent(intent_id: str, name: str, context: dict | None,
+                     matter_id: str = "") -> None:
+    try:
+        from core.matter_router import matter_id_from_context
+        resolved = matter_id or matter_id_from_context(context)
+        if not resolved:
+            return
+        from core.matters import add_event, link_entity
+        link_entity(resolved, "intent", intent_id, provider="jarvis", title=name,
+                    metadata={"status": "pending"}, actor="intent")
+        add_event(resolved, "intent_created", name, actor="intent",
+                  payload={"intent_id": intent_id})
+    except Exception as e:
+        print(f"[intentions] Matter link failed for {intent_id}: {e}", file=sys.stderr)
+
 # ---------------------------------------------------------------------------
 # Closure model — Input/Decision/Output + a category-driven closure policy.
 #
@@ -352,6 +397,7 @@ def create_intent(
     closure_touches: int = 0,
     closure_followup_id: str | None = None,
     parent_intent_id: str | None = None,
+    matter_id: str = "",
     _db=None,
 ) -> str:
     """Create a new intent. Returns intent ID.
@@ -427,6 +473,7 @@ def create_intent(
     )
     if _db is None:
         db.commit()
+        _link_new_intent(iid, name, context, matter_id)
     return iid
 
 
@@ -509,6 +556,8 @@ def cancel_intent(intent_id: str, reason: str = "") -> bool:
                 ("parent cancelled", fu_id),
             )
     db.commit()
+    _matter_intent_event(intent_id, "intent_cancelled",
+                         reason or "意图已取消", status="cancelled")
     return True
 
 
@@ -977,6 +1026,10 @@ def mark_executed(intent_id: str, result: str = ""):
     db.commit()
     _emit_intent("intent_executed", intent_id,
                  kind=intent["trigger_type"], name=intent.get("name", ""))
+    _matter_intent_event(intent_id, "intent_executed",
+                         intent.get("name", intent_id),
+                         status="pending" if intent["trigger_type"] == "cron" else "executed",
+                         payload={"result": str(result)[:1000]})
 
     # Closure axis: spawn the follow-up for a closure-bearing one-shot moment.
     try:
@@ -1110,6 +1163,12 @@ def _spawn_closure_followup(parent: dict) -> str | None:
         (fu_id, pid),
     )
     db.commit()
+    # A follow-up created inside the parent's transaction inherits its Matter
+    # only after that transaction commits.
+    matter = _matter_for_intent(pid)
+    if matter:
+        _link_new_intent(fu_id, f"闭环: {parent['name']}",
+                         {"matter_id": matter["id"]}, matter["id"])
     return fu_id
 
 
@@ -1163,6 +1222,10 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "",
     except Exception as e:
         print(f"[intentions] clear_breaches on closure failed: {e}", file=sys.stderr)
     _emit_intent("intent_closure", parent_id, outcome=outcome, via=via)
+    _matter_intent_event(parent_id, "intent_closed",
+                         str(result).strip() or f"闭环结果：{outcome}",
+                         status=p.get("status", ""),
+                         payload={"outcome": outcome, "via": via})
     return True
 
 

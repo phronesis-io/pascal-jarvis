@@ -295,6 +295,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "extra_buttons": e.get("extra_buttons") or [],
                 "context": str(e.get("context", "")),
                 "chat_id": str(e.get("chat_id", "")),
+                "matter_id": str(e.get("matter_id", "")),
                 "status": "pending",
                 "decided_opt": "",
                 "decided_label": "",
@@ -689,7 +690,8 @@ def _normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
 
 def _find_recent_duplicate(source: str, title: str, body: str,
                            options: list[dict], extra_buttons: list[dict],
-                           context: str, chat_id: str) -> dict | None:
+                           context: str, chat_id: str,
+                           matter_id: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
     dedup window — the signature of an emitter stuck in a retry loop."""
     now = time.time()
@@ -701,6 +703,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                 and st.get("extra_buttons", []) == extra_buttons
                 and st.get("context", "") == context
                 and st.get("chat_id", "") == chat_id
+                and st.get("matter_id", "") == matter_id
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
             return st
     return None
@@ -855,7 +858,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            preset: str | None = None, context: str = "",
            chat_id: str = "", send: bool = True,
            urgent: bool = False,
-           extra_buttons: list[dict] | None = None) -> tuple[str, bool]:
+           extra_buttons: list[dict] | None = None,
+           matter_id: str = "") -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and send the card.
 
     Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
@@ -883,8 +887,16 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     opts = _normalize_options(options, preset)
     native_buttons = _normalize_extra_buttons(extra_buttons)
 
+    if not matter_id:
+        try:
+            from core.matter_router import matter_id_from_context
+            matter_id = matter_id_from_context(context)
+        except Exception:
+            matter_id = ""
+
     dup = _find_recent_duplicate(
-        source, title, body, opts, native_buttons, str(context), str(chat_id))
+        source, title, body, opts, native_buttons, str(context), str(chat_id),
+        str(matter_id))
     if dup is not None:
         print(f"memorial dedup: identical pending {dup['id']} within "
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
@@ -901,7 +913,22 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
           "extra_buttons": native_buttons, "context": str(context)}
     if chat_id:
         ev["chat_id"] = str(chat_id)
+    if matter_id:
+        ev["matter_id"] = str(matter_id)
     _append_line(_ledger_path(), ev)
+
+    if matter_id:
+        # The append-only ledger is already durable. Linking is best-effort so
+        # a temporary dashboard lock can never suppress a user-facing card.
+        try:
+            from core.matters import add_event, link_entity
+            link_entity(matter_id, "memorial", mid, provider="jarvis", title=title,
+                        metadata={"source": source, "status": "pending"},
+                        actor="memorial")
+            add_event(matter_id, "memorial_created", title, actor=source,
+                      payload={"memorial_id": mid})
+        except Exception as e:
+            print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
 
     state = _fold([ev])[mid]
     cj = _render_card(state)
@@ -1151,6 +1178,34 @@ def _execute_action(action: dict) -> str:
     return handler(raw) or ""
 
 
+def _sync_lark_card(memorial_id: str, card: dict) -> None:
+    """Best-effort update of every delivered Lark copy after a web decision."""
+    try:
+        from core.memorial_thread import sent_message_ids
+        message_ids = sent_message_ids(memorial_id)
+    except Exception:
+        return
+    if not message_ids:
+        return
+    data = json.dumps(
+        {"content": json.dumps(card, ensure_ascii=False)}, ensure_ascii=False)
+    for message_id in message_ids:
+        try:
+            result = subprocess.run(
+                ["lark-cli", "api", "PATCH",
+                 f"/open-apis/im/v1/messages/{message_id}",
+                 "--data", data, "--as", "bot"],
+                capture_output=True, text=True, timeout=12,
+            )
+            if result.returncode != 0:
+                print(f"memorial {memorial_id}: Lark card sync failed for "
+                      f"{message_id}: {(result.stderr or result.stdout)[:180]}",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"memorial {memorial_id}: Lark card sync failed: {e}",
+                  file=sys.stderr)
+
+
 def decide(memorial_id: str, opt_key: str) -> dict:
     """批红 one option. Returns the card-callback response payload.
 
@@ -1194,6 +1249,22 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
+    if st.get("matter_id"):
+        try:
+            from core.matters import add_event, link_entity
+            link_entity(
+                st["matter_id"], "memorial", memorial_id, provider="jarvis",
+                title=st.get("title", ""),
+                metadata={"source": st.get("source", ""), "status": "decided",
+                          "decision": opt.get("label", "")}, actor="memorial",
+            )
+            add_event(st["matter_id"], "memorial_decided",
+                      opt.get("label", ""), actor="user",
+                      payload={"memorial_id": memorial_id, "option": opt_key,
+                               "action_result": action_result})
+        except Exception as e:
+            print(f"memorial {memorial_id}: matter decision link failed: {e}",
+                  file=sys.stderr)
     if opt.get("reply") or opt_key not in _FYI_KEYS:
         _queue_decision_context(st, opt.get("label", ""), action_result,
                                 is_reply=bool(opt.get("reply")))
@@ -1203,7 +1274,9 @@ def decide(memorial_id: str, opt_key: str) -> dict:
         toast = {"type": "success", "content": "收到——下条消息我接着这个说"}
     else:
         toast = {"type": "success", "content": f"已批：{opt.get('label', '')} ✓"}
-    return {"toast": toast, "card": {"type": "raw", "data": _decided_card(st)}}
+    decided_card = _decided_card(st)
+    _sync_lark_card(memorial_id, decided_card)
+    return {"toast": toast, "card": {"type": "raw", "data": decided_card}}
 
 
 def _status_line(st: dict) -> str:

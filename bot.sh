@@ -547,7 +547,7 @@ print(ap.process(os.environ['JV_REPLY'], execute=False))
   # Delegate to core/actions.py for all non-process-control actions.
   # This handles: feed_search, watchlater, heartbeat, calendar_*, task_*,
   # praxis_*, intent_*, schedule_task. Returns cleaned reply with results.
-  reply=$(JV_REPLY="$reply" JV_LOG_FILE="$LOG_FILE" python3 -c "
+  reply=$(JV_REPLY="$reply" JV_LOG_FILE="$LOG_FILE" JV_CONV_KEY="$conv_key" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.actions import ActionProcessor
 ap = ActionProcessor(os.environ['JARVIS_DIR'], os.environ['MEMORY_DIR'],
@@ -736,6 +736,15 @@ print(build_system_prompt(
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
     chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
 ))
+if os.environ.get('JV_CHAT_TYPE', 'p2p') == 'p2p':
+    try:
+        from core.matter_bridge import context_for_conversation
+        matter_context = context_for_conversation(os.environ.get('JV_KEY', ''))
+        if matter_context:
+            print('\n\n=== CURRENT MATTER (authoritative cross-entry context) ===')
+            print(matter_context)
+    except Exception:
+        pass
 " 2>>"$LOG_FILE")
 
   if [ -z "$sys_prompt" ]; then
@@ -1380,6 +1389,15 @@ ${_model_footer}"
     # delay the reply path (same pattern as the journal_capture hook).
     ( JV_REPLY="$reply" JARVIS_DIR="$JARVIS_DIR" MEMORY_DIR="$MEMORY_DIR" \
       python3 "$JARVIS_DIR/tasks/write_claim_audit.py" >>"$LOG_FILE" 2>&1 & )
+    # Keep the Matter timeline on the same successful-delivery boundary as
+    # the user-visible reply. A failed Lark send is not recorded as delivered.
+    ( JV_CONV_KEY="$conv_key" JV_REPLY="$reply" JV_MSG_ID="$message_id" \
+      JV_MODEL="${_answer_model:-$MAIN_MODEL}" JARVIS_DIR="$JARVIS_DIR" \
+      python3 -m core.matter_bridge --conv-key "$conv_key" \
+        --record-role assistant --content "$reply" --message-id "$message_id" \
+        --model "${_answer_model:-$MAIN_MODEL}" \
+        --provider "${_answer_provider:-Claude primary}" \
+        --session-id "$session_id" >>"$LOG_FILE" 2>&1 & )
   fi
 }
 
@@ -2279,6 +2297,20 @@ print(content)
         _inline_cmd_ok=0
       fi
 
+      # Explicit Matter commands are deterministic and do not spend a model
+      # turn. Ordinary conversation remains untouched.
+      if [ "$_inline_cmd_ok" -eq 1 ]; then
+        _matter_cmd=$(python3 -m core.matter_bridge \
+          --content "$content" --conv-key "$conv_key" \
+          --destination-id "${chat_id:-$sender_id}" --chat-type "$chat_type" \
+          2>>"$LOG_FILE" || echo '{"handled":false}')
+        if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
+          _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
+          lark_reply_text "$message_id" "$_matter_reply" >/dev/null 2>&1 || true
+          continue
+        fi
+      fi
+
       # "发" — confirm pending EigenFlux broadcast; "不发" — cancel it
       if [ "$_inline_cmd_ok" -eq 1 ] && { [ "$content" = "发" ] || [ "$content" = "不发" ]; }; then
         _pending_dir="$JARVIS_DIR/eigenflux/pending_publish"
@@ -2358,6 +2390,23 @@ except Exception:
       session_result=$(get_session_id "$conv_key" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
       rotated=$(echo "$session_result" | grep ROTATED || true)
+
+      # A bound Lark conversation and its provider session are two pointers to
+      # the same Matter. Also record the incoming turn after dedup succeeds.
+      ( JV_CONV_KEY="$conv_key" JV_SESSION_ID="$session_id" JV_CONTENT="$content" \
+        JV_MSG_ID="$message_id" JARVIS_DIR="$JARVIS_DIR" python3 -c "
+import os, sys
+sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.matter_bridge import get_binding, record_turn
+from core.matters import link_entity
+b = get_binding(os.environ['JV_CONV_KEY'])
+if b:
+    link_entity(b['matter_id'], 'session', os.environ['JV_SESSION_ID'],
+                provider='claude', title='Jarvis 飞书会话',
+                metadata={'conv_key': os.environ['JV_CONV_KEY']}, actor='lark')
+    record_turn(os.environ['JV_CONV_KEY'], 'user', os.environ['JV_CONTENT'],
+                os.environ.get('JV_MSG_ID', ''))
+" >>"$LOG_FILE" 2>&1 & )
 
       if [ -n "$rotated" ]; then
         log_info "Session rotated for $conv_key → $session_id"

@@ -1,6 +1,6 @@
-const CACHE_NAME = 'jarvis-shell-v4';
+const CACHE_NAME = 'jarvis-shell-v5';
 const SHELL = [
-  '/static/style.css?v=20260722-matter2',
+  '/static/style.css?v=20260722-matter3',
   '/static/manifest.webmanifest',
   '/static/app-icon.svg',
   '/static/app-icon-192.png',
@@ -43,4 +43,26 @@ self.addEventListener('fetch', event => {
       }).catch(() => caches.match(request)),
     );
   }
+});
+
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (_) { data = {}; }
+  event.waitUntil(self.registration.showNotification(data.title || 'Jarvis', {
+    body: data.body || '有一条新的事项动态',
+    icon: '/static/app-icon-192.png',
+    badge: '/static/app-icon-192.png',
+    data: {url: data.url || '/matters'},
+    tag: data.matter_id || 'jarvis-update',
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = event.notification.data?.url || '/matters';
+  event.waitUntil(clients.matchAll({type: 'window', includeUncontrolled: true})
+    .then(windows => {
+      const existing = windows.find(client => new URL(client.url).pathname === target);
+      return existing ? existing.focus() : clients.openWindow(target);
+    }));
 });

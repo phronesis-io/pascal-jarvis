@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from core.timeutil import now_local_str
@@ -38,6 +39,17 @@ FIELD_LABELS = {
     "source": "来源",
     "closed_at": "完成时间",
 }
+
+
+@dataclass
+class MatterConflict(ValueError):
+    """A requested state transition would strand live follow-up work."""
+
+    message: str
+    open_items: list[dict]
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def _db():
@@ -197,7 +209,63 @@ def list_matters(status: str | None = None, limit: int = 100) -> list[dict]:
     return [_matter_row(r) for r in rows]
 
 
-def update_matter(matter_id: str, actor: str = "user", **fields) -> dict:
+def open_followups(matter_id: str) -> list[dict]:
+    """Return linked Intents, Memorials and Jobs that still require action."""
+    matter = get_matter(matter_id, include_events=False)
+    if matter is None:
+        raise KeyError(f"matter not found: {matter_id}")
+    followups: list[dict] = []
+    for link in matter.get("links", []):
+        entity_type = link.get("entity_type", "")
+        entity_id = link.get("entity_id", "")
+        if entity_type == "intent":
+            try:
+                from core.intentions import get_intent
+                intent = get_intent(entity_id)
+            except Exception:
+                intent = None
+            if intent and (intent.get("status") in {"pending", "triggered"}
+                           or intent.get("closure_status") == "awaiting"):
+                followups.append({
+                    "entity_type": "intent", "entity_id": entity_id,
+                    "title": intent.get("name") or link.get("title") or entity_id,
+                    "status": intent.get("status", ""),
+                    "closure_status": intent.get("closure_status", ""),
+                })
+        elif entity_type == "memorial":
+            try:
+                from core.memorial import get_memorial
+                memorial = get_memorial(entity_id)
+            except Exception:
+                memorial = None
+            if memorial and memorial.get("status") == "pending":
+                followups.append({
+                    "entity_type": "memorial", "entity_id": entity_id,
+                    "title": memorial.get("title") or link.get("title") or entity_id,
+                    "status": "pending",
+                })
+        elif entity_type == "job":
+            metadata = link.get("metadata") or {}
+            status = str(metadata.get("status", ""))
+            try:
+                from core.jobs import JobManager
+                from core.config import Config
+                cfg = Config()
+                job = JobManager(cfg.jarvis_dir / "jobs").get_job(entity_id)
+            except Exception:
+                job = None
+            status = str((job or {}).get("status") or status)
+            if status == "running":
+                followups.append({
+                    "entity_type": "job", "entity_id": entity_id,
+                    "title": (job or {}).get("description") or link.get("title") or entity_id,
+                    "status": status,
+                })
+    return followups
+
+
+def update_matter(matter_id: str, actor: str = "user", force: bool = False,
+                  **fields) -> dict:
     current = get_matter(matter_id, include_links=False, include_events=False)
     if current is None:
         raise KeyError(f"matter not found: {matter_id}")
@@ -215,6 +283,14 @@ def update_matter(matter_id: str, actor: str = "user", **fields) -> dict:
         updates["kind"] = _validate_kind(updates["kind"])
     if "status" in updates:
         updates["status"] = _validate_status(updates["status"])
+        if (updates["status"] in {"done", "archived"}
+                and current.get("status") not in {"done", "archived"}):
+            outstanding = open_followups(matter_id)
+            if outstanding and not force:
+                raise MatterConflict(
+                    f"还有 {len(outstanding)} 项未闭环，确认后才能结束事项",
+                    outstanding,
+                )
         updates["closed_at"] = (_now() if updates["status"] in {"done", "archived"}
                                 else None)
     if "priority" in updates:
@@ -233,6 +309,12 @@ def update_matter(matter_id: str, actor: str = "user", **fields) -> dict:
                    [*updates.values(), matter_id])
         readable = "、".join(FIELD_LABELS.get(field, field) for field in changes)
         _event(db, matter_id, "matter_updated", f"更新了{readable}", actor, changes)
+        if force and updates.get("status") in {"done", "archived"}:
+            outstanding = open_followups(matter_id)
+            if outstanding:
+                _event(db, matter_id, "matter_closed_with_followups",
+                       f"确认保留 {len(outstanding)} 项未闭环内容", actor,
+                       {"items": outstanding})
         db.commit()
     except Exception:
         db.rollback()

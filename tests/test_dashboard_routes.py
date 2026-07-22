@@ -995,6 +995,55 @@ class TestRoutes:
         assert conflict.status_code == 409
         assert client.get("/api/matters?status=not-real").status_code == 400
 
+    def test_api_matter_context_binding_artifact_and_close_guard(self, client, tmp_path):
+        from core import intentions
+        from core.matter_bridge import bind_conversation
+
+        matter = client.post("/api/matters", json={"title": "连续工作"}).json()
+        matter_id = matter["id"]
+        bind_conversation("api-owner", matter_id, destination_id="api-owner")
+        bindings = client.get(f"/api/matters/{matter_id}/bindings")
+        assert bindings.status_code == 200
+        assert "openId=api-owner" in bindings.json()["items"][0]["deep_link"]
+
+        context = client.get(f"/api/matters/{matter_id}/context?format=markdown")
+        assert context.status_code == 200 and matter_id in context.text
+
+        artifact = tmp_path / "result.txt"
+        artifact.write_text("done", encoding="utf-8")
+        link = client.post(f"/api/matters/{matter_id}/links", json={
+            "entity_type": "artifact", "provider": "file",
+            "entity_id": str(artifact), "title": "result.txt",
+        }).json()
+        downloaded = client.get(f"/api/matters/{matter_id}/artifacts/{link['id']}")
+        assert downloaded.status_code == 200 and downloaded.text == "done"
+
+        intentions.create_intent(
+            name="等待确认", trigger_type="date",
+            trigger_config={"datetime": "2027-01-01T08:00:00+08:00"},
+            matter_id=matter_id,
+        )
+        blocked = client.patch(f"/api/matters/{matter_id}", json={"status": "done"})
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"]["open_items"][0]["title"] == "等待确认"
+        forced = client.patch(f"/api/matters/{matter_id}", json={
+            "status": "done", "force": True,
+        })
+        assert forced.status_code == 200 and forced.json()["status"] == "done"
+
+    def test_api_mobile_pairing_and_revocation(self, client):
+        assert client.post("/api/mobile/pair", json={"ttl": "bad"}).status_code == 400
+        paired = client.post("/api/mobile/pair", json={"label": "test phone", "ttl": 5})
+        assert paired.status_code == 200
+        from core.mobile_access import consume_pair_code
+        device = consume_pair_code(paired.json()["code"])
+        assert device is not None
+        status = client.get("/api/mobile/status")
+        assert status.status_code == 200
+        assert status.json()["devices"][0]["label"] == "test phone"
+        revoked = client.delete(f"/api/mobile/devices/{device['device_id']}")
+        assert revoked.status_code == 200
+
     def test_api_work_sessions(self, client, monkeypatch):
         import core.work_sessions as work_sessions
         monkeypatch.setattr(work_sessions, "discover_sessions", lambda **kwargs: [{

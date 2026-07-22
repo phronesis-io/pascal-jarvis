@@ -475,6 +475,7 @@ class ActionProcessor:
                 source="agent", action_type=p.get("action", "notify"),
                 category=category, input_ctx=p.get("input", ""),
                 decision=p.get("decision", ""), closure_question=p.get("close", ""),
+                context={"conv_key": os.environ.get("JV_CONV_KEY", "")},
             )
             return f'✅ Intent "{name}" created (id: {iid}, cat: {category})'
         except Exception as e:
