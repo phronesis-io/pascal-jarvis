@@ -17,6 +17,31 @@ def _twin_dirs(tmp_path, monkeypatch):
     return auto, hb
 
 
+def test_verify_index_drops_dead_entries_and_appends_omitted(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "alive.md").write_text("x")
+    (warm / "omitted.md").write_text("y")
+    llm_index = ("# Warm Memory Index\n"
+                 "## 分区\n"
+                 "- alive.md — 还在的文件\n"
+                 "- ghost.md — 已归档但 LLM 还记得\n")
+    out = tidy._verify_index(llm_index, warm)
+    assert "alive.md" in out
+    assert "ghost.md" not in out          # dead entry dropped
+    assert "omitted.md" in out            # existing file auto-appended
+    assert "未分类" in out
+
+
+def test_verify_index_clean_input_passes_through(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "a.md").write_text("x")
+    idx = "# Index\n- a.md — 唯一文件\n"
+    out = tidy._verify_index(idx, warm)
+    assert "a.md" in out and "未分类" not in out
+
+
 def test_sync_preserves_source_mtime(tmp_path, monkeypatch):
     auto, hb = _twin_dirs(tmp_path, monkeypatch)
     src = auto / "warm" / "feedback_x.md"

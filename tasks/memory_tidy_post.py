@@ -496,6 +496,46 @@ def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
         return 0
+    return _process(raw)
+
+
+def _verify_index(index_content: str, warm_dir) -> str:
+    """Mechanically ground the LLM-regenerated _index.md against warm/.
+
+    7/22 audit: the 7/21 regeneration listed 2 archived files as live and
+    omitted 12 existing ones — an index the LLM writes from memory drifts
+    from the directory it describes, and index-guided readers (§4 memory
+    scan) inherit the drift. Two mechanical passes: ① drop entry lines whose
+    file no longer exists in warm/ (archived/deleted), ② append a
+    "未分类（自动补录）" section for live files the LLM omitted.
+    """
+    import re as _re
+    from pathlib import Path as _P
+    warm_dir = _P(warm_dir)
+    live = {f.name for f in warm_dir.glob("*.md")} - {"_index.md"}
+    kept_lines, mentioned = [], set()
+    for line in index_content.splitlines():
+        names = _re.findall(r"([A-Za-z0-9_\-.]+\.md)", line)
+        entry_names = [n for n in names if n != "_index.md"]
+        if (line.lstrip().startswith("-") and entry_names
+                and not any(n in live for n in entry_names)):
+            print(f"[memory-tidy] index entry dropped (file gone): "
+                  f"{entry_names[0]}", file=sys.stderr)
+            continue
+        mentioned.update(entry_names)
+        kept_lines.append(line)
+    missing = sorted(live - mentioned)
+    if missing:
+        kept_lines.append("")
+        kept_lines.append("## 未分类（自动补录：上次再生成漏掉的现存文件）")
+        for name in missing:
+            kept_lines.append(f"- {name}")
+        print(f"[memory-tidy] index: appended {len(missing)} omitted files",
+              file=sys.stderr)
+    return "\n".join(kept_lines) + "\n"
+
+
+def _process(raw: str) -> int:
     if looks_like_error(raw):
         print("[memory-tidy] skipping — output looks like error", file=sys.stderr)
         return 0
@@ -510,6 +550,7 @@ def main() -> int:
     # Update index if provided
     index_content = data.get("index_update", "")
     if index_content and len(index_content) > 50:
+        index_content = _verify_index(index_content, INDEX_FILE.parent)
         INDEX_FILE.write_text(index_content)
         print(f"[memory-tidy] Updated _index.md", file=sys.stderr)
 

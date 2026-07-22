@@ -57,10 +57,27 @@ fi
 # ── 4. Runtime state + config ────────────────────────────────────────────
 mkdir -p "$BACKUP_DIR/state"
 for f in heartbeat_state.json active_sessions.json interval_overrides.json \
+         interval_overrides_meta.json \
          engagement_log.jsonl sched_events.jsonl heartbeat_outbox.jsonl \
          memorials.jsonl memorial_queue.jsonl \
          calendar_event_mapping.json perception_state.json; do
   [ -f "$REPO_DIR/$f" ] && cp "$REPO_DIR/$f" "$BACKUP_DIR/state/" 2>/dev/null
+done
+# Nested state the flat list above can't reach (7/22 restore drill gaps):
+# eigenflux cooldown/dedup state, intent-card ledger, provider gate, and
+# metrics probe histories. Subdirs mirror the repo layout so a restore is
+# a straight copy-back.
+mkdir -p "$BACKUP_DIR/state/eigenflux" "$BACKUP_DIR/state/data/metrics"
+for f in "$REPO_DIR"/eigenflux/*.json; do
+  [ -f "$f" ] && cp "$f" "$BACKUP_DIR/state/eigenflux/" 2>/dev/null
+done
+for f in "$REPO_DIR"/data/.intent_card_ledger.jsonl \
+         "$REPO_DIR"/data/provider_state.json \
+         "$REPO_DIR"/data/metrics/*.jsonl; do
+  case "$f" in
+    */metrics/*) [ -f "$f" ] && cp "$f" "$BACKUP_DIR/state/data/metrics/" 2>/dev/null ;;
+    *)           [ -f "$f" ] && cp "$f" "$BACKUP_DIR/state/data/" 2>/dev/null ;;
+  esac
 done
 # Monthly ledger archives (memorials.YYYY-MM.jsonl, produced by
 # core.memorial.rotate_ledger) — without this, rotated 批红 history exists
