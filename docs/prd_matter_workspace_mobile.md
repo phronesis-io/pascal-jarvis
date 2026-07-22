@@ -20,8 +20,23 @@ Implemented on 2026-07-22:
   revocable device credentials, TLS with an installable local CA, access
   audit, and Web Push.
 
+2026-07-22 evening hardening round:
+
+- The PWA manifest fetch defaults to credentials-omit and 401'd at the
+  gateway; the manifest link now carries `crossorigin="use-credentials"`.
+- The local CA is name-constrained (critical X.509 Name Constraints:
+  localhost + RFC1918 + CGNAT). A leaked CA key can no longer mint
+  certificates for arbitrary public sites. Pre-existing unconstrained CAs are
+  rotated with a `.unconstrained.bak` backup; paired phones re-install the
+  new `.cer` once.
+- Phase 4B path chosen: Tailscale (userspace tailscaled, no root, outbound
+  only, zero public attack surface) instead of a self-built relay. The
+  gateway additionally binds loopback so `tailscale serve` can front it with
+  a real `ts.net` certificate — off-LAN phone access needs no local CA trust.
+
 The installed personal gateway binds only the machine's current private LAN
-address and proxies only `127.0.0.1:3457`. A stable internet relay is not
+address (plus loopback for the tailnet path) and proxies only
+`127.0.0.1:3457`. A stable internet relay is not
 silently enabled: it needs an explicitly owned relay account/domain and a
 separate operational decision. Anonymous quick tunnels are rejected because
 their address changes after restart and they create an unnecessary public

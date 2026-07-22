@@ -72,6 +72,32 @@ def detect_lan_ip() -> str:
     return value if _usable_lan_ip(value) else "127.0.0.1"
 
 
+def _ca_name_constraints():
+    """Name constraints keeping the trusted local CA scoped to private space.
+
+    The phone installs this CA as a trusted root. Without constraints a stolen
+    CA key could mint certificates for ANY site; with them the blast radius is
+    loopback + RFC1918 + CGNAT (Tailscale) space, which iOS/Safari enforce.
+    """
+    from cryptography import x509
+    permitted = [x509.DNSName("localhost")]
+    for net in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+                "192.168.0.0/16", "100.64.0.0/10"):
+        permitted.append(x509.IPAddress(ipaddress.ip_network(net)))
+    return x509.NameConstraints(permitted_subtrees=permitted,
+                                excluded_subtrees=None)
+
+
+def _ca_is_constrained(ca_cert_path: Path) -> bool:
+    from cryptography import x509
+    try:
+        ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
+        ca_cert.extensions.get_extension_for_class(x509.NameConstraints)
+        return True
+    except (OSError, ValueError, x509.ExtensionNotFound):
+        return False
+
+
 def ensure_certificate(host: str, directory: Path) -> tuple[Path, Path, Path]:
     cert_path, key_path = directory / "gateway-cert.pem", directory / "gateway-key.pem"
     ca_cert_path, ca_key_path = directory / "jarvis-mobile-ca.pem", directory / "jarvis-mobile-ca-key.pem"
@@ -82,7 +108,8 @@ def ensure_certificate(host: str, directory: Path) -> tuple[Path, Path, Path]:
     except OSError:
         host_matches = False
     if (cert_path.exists() and key_path.exists() and ca_cert_path.exists()
-            and ca_key_path.exists() and ca_download_path.exists() and host_matches):
+            and ca_key_path.exists() and ca_download_path.exists() and host_matches
+            and _ca_is_constrained(ca_cert_path)):
         return cert_path, key_path, ca_download_path
     from datetime import datetime, timedelta, timezone
     from cryptography import x509
@@ -91,6 +118,13 @@ def ensure_certificate(host: str, directory: Path) -> tuple[Path, Path, Path]:
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
     directory.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
+    if (ca_cert_path.exists() and ca_key_path.exists()
+            and not _ca_is_constrained(ca_cert_path)):
+        # Rotate an unconstrained legacy CA: keep a backup, then re-issue with
+        # name constraints. Paired phones must re-install the new .cer once.
+        for path in (ca_cert_path, ca_key_path, ca_download_path):
+            if path.exists():
+                path.rename(path.with_suffix(path.suffix + ".unconstrained.bak"))
     if ca_cert_path.exists() and ca_key_path.exists():
         ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
         ca_key = serialization.load_pem_private_key(ca_key_path.read_bytes(), password=None)
@@ -110,6 +144,7 @@ def ensure_certificate(host: str, directory: Path) -> tuple[Path, Path, Path]:
                 digital_signature=True, content_commitment=False, key_encipherment=False,
                 data_encipherment=False, key_agreement=False, key_cert_sign=True,
                 crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(_ca_name_constraints(), critical=True)
             .sign(ca_key, hashes.SHA256())
         )
         ca_key_path.write_bytes(ca_key.private_bytes(
@@ -337,7 +372,10 @@ def main(argv: list[str] | None = None) -> int:
                                        "trust_required": bool(ssl_context),
                                        "pid": os.getpid(), "tls": bool(ssl_context)},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
-    web.run_app(create_gateway_app(), host=host, port=args.port,
+    # Also bind loopback: tailscale serve proxies from the local node, so the
+    # tailnet path (phone off the home network) reaches us via 127.0.0.1.
+    hosts = [host] if host == "127.0.0.1" else [host, "127.0.0.1"]
+    web.run_app(create_gateway_app(), host=hosts, port=args.port,
                 ssl_context=ssl_context, print=None, access_log=None)
     return 0
 

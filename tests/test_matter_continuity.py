@@ -267,6 +267,54 @@ def test_mobile_certificate_chain_is_reusable_and_rotates_leaf_for_host(tmp_path
     assert "192.168.1.9" in [str(value) for value in san.get_values_for_type(x509.IPAddress)]
 
 
+def test_mobile_ca_is_name_constrained_to_private_space(tmp_path):
+    from cryptography import x509
+    from dashboard.mobile_gateway import ensure_certificate
+
+    _, _, ca_download = ensure_certificate("192.168.1.8", tmp_path)
+    ca = x509.load_der_x509_certificate(ca_download.read_bytes())
+    constraints = ca.extensions.get_extension_for_class(x509.NameConstraints)
+    assert constraints.critical is True
+    permitted = constraints.value.permitted_subtrees
+    nets = [str(v.value) for v in permitted if isinstance(v, x509.IPAddress)]
+    assert "192.168.0.0/16" in nets
+    assert "100.64.0.0/10" in nets  # Tailscale CGNAT space
+    assert "localhost" in [v.value for v in permitted if isinstance(v, x509.DNSName)]
+
+
+def test_mobile_unconstrained_legacy_ca_is_rotated_with_backup(tmp_path):
+    from cryptography import x509
+    from dashboard import mobile_gateway
+    from dashboard.mobile_gateway import ensure_certificate
+
+    # Forge a legacy (unconstrained) CA by generating one with constraints
+    # stripped, mimicking the pre-rotation deployment.
+    real_constraints = mobile_gateway._ca_name_constraints
+    mobile_gateway._ca_name_constraints = lambda: (_ for _ in ()).throw(AssertionError)
+    try:
+        import cryptography.x509 as x509mod
+        original_add = x509mod.CertificateBuilder.add_extension
+
+        def skip_constraints(self, ext, critical):
+            if isinstance(ext, x509mod.NameConstraints):
+                return self
+            return original_add(self, ext, critical=critical)
+
+        x509mod.CertificateBuilder.add_extension = skip_constraints
+        mobile_gateway._ca_name_constraints = real_constraints
+        ensure_certificate("192.168.1.8", tmp_path)
+    finally:
+        x509mod.CertificateBuilder.add_extension = original_add
+        mobile_gateway._ca_name_constraints = real_constraints
+    assert not mobile_gateway._ca_is_constrained(tmp_path / "jarvis-mobile-ca.pem")
+
+    _, _, ca_download = ensure_certificate("192.168.1.8", tmp_path)
+    assert mobile_gateway._ca_is_constrained(tmp_path / "jarvis-mobile-ca.pem")
+    assert (tmp_path / "jarvis-mobile-ca.pem.unconstrained.bak").exists()
+    ca = x509.load_der_x509_certificate(ca_download.read_bytes())
+    ca.extensions.get_extension_for_class(x509.NameConstraints)
+
+
 def test_mobile_lan_detection_ignores_tunnel_benchmark_address(monkeypatch):
     from dashboard import mobile_gateway
 

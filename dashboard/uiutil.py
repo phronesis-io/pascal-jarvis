@@ -195,7 +195,11 @@ def add_dashboard_head() -> None:
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
         '<link rel="stylesheet" href="/static/style.css?v=20260722-matter3">'
-        '<link rel="manifest" href="/static/manifest.webmanifest">'
+        # use-credentials: the browser's manifest fetch defaults to
+        # credentials-omit, so behind the authenticated mobile gateway it 401s
+        # and the PWA never gets its manifest.
+        '<link rel="manifest" href="/static/manifest.webmanifest" '
+        'crossorigin="use-credentials">'
         '<link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">'
         '<link rel="apple-touch-icon" href="/static/app-icon-192.png">'
         '<meta name="apple-mobile-web-app-capable" content="yes">'
