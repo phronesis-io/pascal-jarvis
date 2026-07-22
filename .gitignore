@@ -137,3 +137,4 @@ alerts_deadletter.jsonl
 .venv/
 venv/
 memorials.jsonl.bak-*
+.memorials_rotated.json

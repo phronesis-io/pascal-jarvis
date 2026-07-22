@@ -28,6 +28,7 @@ from pathlib import Path
 
 MAX_RECORDS = 12          # bound the prompt; older overflow re-emits next cycle
 ABSENCE_GRACE_HOURS = 2   # alert only this long after snapshot_hour
+REALERT_AFTER_H = 24      # ongoing anomaly reminder cadence (edge-triggered)
 
 
 def _metrics_dir(jarvis_dir: Path) -> Path:
@@ -67,6 +68,61 @@ def collect_new_records(jarvis_dir: Path) -> tuple[list[dict], str | None]:
     records = records[:MAX_RECORDS]
     pending_ts = max((r["ts"] for r in records), default=None)
     return records, pending_ts
+
+
+def filter_anomalies(jarvis_dir: Path, records: list[dict]) -> list[dict]:
+    """Edge-trigger anomaly cards: first trip / value change / recovery only.
+
+    Probes re-emit a still-true anomaly every poll cycle (level-triggered),
+    which turned one ongoing FTC 503 outage into 8 identical 🚨 cards on
+    7/19 alone. Track active anomalies in .anomaly_state.json keyed by
+    name:metric; while the value is unchanged, repeats are suppressed except
+    a once-per-REALERT_AFTER_H "still broken" reminder. A recovery record
+    always passes and clears the key. Watermark advancement is unaffected —
+    the caller computes pending_ts before this filter."""
+    mdir = _metrics_dir(jarvis_dir)
+    state_path = mdir / ".anomaly_state.json"
+    state = _load_json(state_path, {}) or {}
+    kept, changed = [], False
+    for rec in records:
+        kind = rec.get("kind")
+        if kind not in ("anomaly", "recovery"):
+            kept.append(rec)
+            continue
+        key = f"{rec.get('name', '')}:{rec.get('metric', '')}"
+        if kind == "recovery":
+            if state.pop(key, None) is not None:
+                changed = True
+            kept.append(rec)
+            continue
+        prev = state.get(key)
+        ts = str(rec.get("ts", ""))
+        # ts == alerted_ts means this is the SAME record that wrote the
+        # state — a retry after a failed Claude render (post didn't promote
+        # the watermark, so it re-collected). Always pass it: suppressing
+        # here would let the direct-advance branch below skip a first alert
+        # that never reached the user (red-team P1, 7/22).
+        if (prev and prev.get("actual") == rec.get("actual")
+                and ts != prev.get("alerted_ts")):
+            try:
+                prev_dt = datetime.fromisoformat(str(prev.get("alerted_ts")))
+                cur_dt = datetime.fromisoformat(ts)
+                still_fresh = (cur_dt - prev_dt).total_seconds() < REALERT_AFTER_H * 3600
+            except (ValueError, TypeError):
+                still_fresh = False  # unparsable state: err toward alerting
+            if still_fresh:
+                continue
+        state[key] = {"actual": rec.get("actual"), "alerted_ts": ts}
+        changed = True
+        kept.append(rec)
+    if changed:
+        try:
+            mdir.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, ensure_ascii=False),
+                                  encoding="utf-8")
+        except OSError:
+            pass
+    return kept
 
 
 def _probe_sources(jarvis_dir: Path) -> list[dict]:
@@ -149,8 +205,22 @@ def main(jarvis_dir: str | Path | None = None,
     jarvis_dir = Path(jarvis_dir or os.environ.get("JARVIS_DIR", "."))
     now = now or datetime.now().astimezone()
     records, pending_ts = collect_new_records(jarvis_dir)
+    records = filter_anomalies(jarvis_dir, records)
     absences = detect_absences(jarvis_dir, now)
     if not records and not absences:
+        # Everything collected was a suppressed repeat → the task is skipped
+        # and the post-hook never promotes the pending watermark. Promote it
+        # HERE, directly: otherwise the suppressed records re-collect forever
+        # and (at MAX_RECORDS) crowd new snapshots out of the window. Safe —
+        # nothing in this batch needed Claude to render.
+        if pending_ts:
+            mdir = _metrics_dir(jarvis_dir)
+            mdir.mkdir(parents=True, exist_ok=True)
+            (mdir / ".digest_watermark.json").write_text(
+                json.dumps({"ts": pending_ts}), encoding="utf-8")
+            # A stale pending from an earlier failed render would otherwise
+            # be promoted later and rewind the watermark we just advanced.
+            (mdir / ".digest_pending.json").unlink(missing_ok=True)
         return ""
     if pending_ts:
         mdir = _metrics_dir(jarvis_dir)

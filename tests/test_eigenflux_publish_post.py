@@ -62,3 +62,68 @@ def test_insight_broadcast_carded(tmp_path):
 def test_should_publish_false_no_card(tmp_path):
     out = _run('{"should_publish":false}', tmp_path)
     assert out.strip() == ""
+
+
+# ── Backlog gate (7/22): unanswered pending broadcast blocks new drafts ──
+
+def _seed_pending(tmp_path, name: str, age_seconds: int = 0):
+    import os, time
+    pending = tmp_path / "eigenflux" / "pending_publish"
+    pending.mkdir(parents=True, exist_ok=True)
+    f = pending / name
+    f.write_text('{"id":"x","content":"old","notes":{}}')
+    if age_seconds:
+        old = time.time() - age_seconds
+        os.utime(f, (old, old))
+    return f
+
+
+def test_active_pending_blocks_new_draft(tmp_path):
+    _seed_pending(tmp_path, "1000_1.json", age_seconds=3600)
+    out = _run(_mk("insight"), tmp_path)
+    assert out.strip() == ""
+    # and no second pending file was written
+    files = list((tmp_path / "eigenflux" / "pending_publish").glob("*.json"))
+    assert len(files) == 1
+
+
+def test_stale_pending_does_not_block(tmp_path):
+    _seed_pending(tmp_path, "1000_1.json", age_seconds=49 * 3600)
+    out = _run(_mk("insight"), tmp_path)
+    assert "广播待确认" in out
+
+
+PRE_SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "eigenflux_publish_pre.sh"
+
+
+def _run_pre(tmp_path) -> subprocess.CompletedProcess:
+    import shutil, os
+    # a fake `eigenflux` binary so the pre-hook doesn't exit at the CLI check
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "eigenflux"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    env = {"JARVIS_DIR": str(tmp_path),
+           "PATH": f"{bindir}:/usr/bin:/bin",
+           "HOME": str(tmp_path)}
+    return subprocess.run(["bash", str(PRE_SCRIPT)],
+                          capture_output=True, text=True, env=env)
+
+
+def test_pre_hook_blocks_on_active_pending(tmp_path):
+    _seed_pending(tmp_path, "1000_1.json", age_seconds=3600)
+    r = _run_pre(tmp_path)
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""  # empty pre → task skipped as healthy idle
+    assert "awaiting user approval" in r.stderr
+
+
+def test_pre_hook_expires_stale_pending_and_proceeds(tmp_path):
+    f = _seed_pending(tmp_path, "1000_1.json", age_seconds=49 * 3600)
+    r = _run_pre(tmp_path)
+    assert r.returncode == 0
+    assert not f.exists()
+    expired = tmp_path / "eigenflux" / "pending_publish" / "expired" / "1000_1.json"
+    assert expired.exists()
+    assert "Ready to publish" in r.stdout

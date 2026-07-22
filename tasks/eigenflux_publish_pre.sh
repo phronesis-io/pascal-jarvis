@@ -8,6 +8,42 @@ command -v eigenflux >/dev/null 2>&1 || exit 0
 settings_file="$JARVIS_DIR/eigenflux/user_settings.json"
 now=$(date +%s)
 
+# Pending-approval backlog gate. Every broadcast waits for the user's 批红,
+# so last_publish_epoch (only stamped on a REAL publish) never advances while
+# cards sit unanswered — the cooldown below can't see that backlog and this
+# task happily drafted a new broadcast every hour overnight (17 cards in 17h
+# on 7/21-22). Rule: while any pending broadcast younger than 48h awaits a
+# decision, don't draft another; pendings older than 48h are moved aside to
+# expired/ (their card's 发/取消 buttons degrade to "已经处理过了").
+PENDING_DIR="$JARVIS_DIR/eigenflux/pending_publish"
+if [ -d "$PENDING_DIR" ]; then
+  active_pending=$(PENDING_DIR="$PENDING_DIR" NOW="$now" python3 - <<'PYEOF' 2>/dev/null || echo "0"
+import os, time
+from pathlib import Path
+pending = Path(os.environ["PENDING_DIR"])
+now = int(os.environ["NOW"])
+MAX_AGE = 48 * 3600
+expired_dir = pending / "expired"
+active = 0
+for f in sorted(pending.glob("*.json")):
+    age = now - int(f.stat().st_mtime)
+    if age > MAX_AGE:
+        expired_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            f.rename(expired_dir / f.name)
+        except OSError:
+            pass
+    else:
+        active += 1
+print(active)
+PYEOF
+)
+  if [ "${active_pending:-0}" -ge 1 ]; then
+    echo "[eigenflux-publish] ${active_pending} broadcast(s) still awaiting user approval — not drafting another" >&2
+    exit 0
+  fi
+fi
+
 # Check cooldown from local state
 last_pub=0
 if [ -f "$JARVIS_DIR/eigenflux/publish_state.json" ]; then
@@ -110,3 +146,4 @@ if lines:
         print(l)
 " 2>/dev/null)
 [ -n "$commits" ] && echo "$commits"
+exit 0

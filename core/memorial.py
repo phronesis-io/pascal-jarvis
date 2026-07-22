@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from core.card import build_card, extract_card_text
@@ -138,6 +139,14 @@ SOURCE_DEFAULT_PRESET = {
 # author does not have to think about ASCII.
 _OPTIONS_LINE_RE = re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：]\s*(.+?)\s*$", re.I)
 _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
+
+# LLM-authored card title, same contract shape as OPTIONS: the FIRST line of
+# the body may read「TITLE: 一句话说清这件事」. Without it, cards from prose
+# fell back to the per-source generic label — 48 cards headed literally
+# 「Intent」in 11 days, burying e.g. the weekly 首席科学家发声 candidates
+# under a header nobody opens.
+_TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
+MAX_TITLE_CHARS = 40
 MAX_INLINE_OPTIONS = 4
 # Lark truncates long button captions on a phone; clip rather than reject, so
 # a verbose OPTIONS line degrades to a short button instead of losing the card.
@@ -704,6 +713,112 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     return bool(sent)
 
 
+ROTATE_AFTER_DAYS = 45
+
+
+def rotate_ledger(now: float | None = None) -> int:
+    """Archive event groups of cards older than ROTATE_AFTER_DAYS.
+
+    The ledger is append-only with no retirement, ~80 lines/day — a year in,
+    every get_memorial() folds ~30k lines. Move each card's COMPLETE event
+    group (state folds from the full group, so it must travel together) into
+    memorials.YYYY-MM.jsonl next to the ledger, bucketed by creation month.
+    A 45-day-old un-批 card is dead weight: a late button tap degrades to
+    「这张卡对应的事项找不到了」, which decide() already handles.
+
+    Returns the number of archived cards. Concurrent O_APPEND writers
+    (sidecar decide events, heartbeat deliveries) are mitigated — not fully
+    closed — by a size re-check right before the swap; the stat→replace
+    window remains a microsecond-scale TOCTOU, accepted for a once-a-month
+    housekeeping pass. On interference we simply skip; next month retries.
+    Archive appends happen only AFTER a successful swap and are deduped
+    against lines already in the month file, so an aborted earlier attempt
+    cannot double-archive a group.
+    """
+    now = now or time.time()
+    path = _ledger_path()
+    try:
+        size_before = path.stat().st_size
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    cutoff = now - ROTATE_AFTER_DAYS * 86400
+    groups: dict[str, list[int]] = {}
+    anchors: dict[str, dict] = {}
+    for i, line in enumerate(lines):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        mid = str(ev.get("id", ""))
+        groups.setdefault(mid, []).append(i)
+        if ev.get("ev") == "create" and mid not in anchors:
+            anchors[mid] = ev
+    archive_idx: set[int] = set()
+    buckets: dict[str, list[str]] = {}
+    archived_cards = 0
+    for mid, idxs in groups.items():
+        anchor = anchors.get(mid)
+        if not anchor:
+            continue  # orphan events (no create here): leave in place
+        epoch = anchor.get("epoch")
+        if not isinstance(epoch, (int, float)) or epoch >= cutoff:
+            continue
+        month = datetime.fromtimestamp(epoch).strftime("%Y-%m")
+        buckets.setdefault(month, []).extend(lines[i] for i in idxs)
+        archive_idx.update(idxs)
+        archived_cards += 1
+    if not archive_idx:
+        return 0
+    retained = [ln for i, ln in enumerate(lines) if i not in archive_idx]
+    try:
+        # Verify → swap → then archive. Archiving before an aborted swap
+        # leaves duplicate groups behind; a crash between swap and append
+        # is recoverable from the nightly backup, whereas silent
+        # duplication would poison the archive forever.
+        if path.stat().st_size != size_before:
+            return 0  # someone appended mid-rotation; retry next month
+        tmp = path.with_suffix(".jsonl.rotating")
+        tmp.write_text("\n".join(retained) + ("\n" if retained else ""),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        return 0
+    for month, month_lines in sorted(buckets.items()):
+        dest = path.parent / f"memorials.{month}.jsonl"
+        try:
+            existing = set(dest.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            existing = set()
+        fresh = [ln for ln in month_lines if ln not in existing]
+        if not fresh:
+            continue
+        with open(dest, "a", encoding="utf-8") as f:
+            f.write("\n".join(fresh) + "\n")
+    return archived_cards
+
+
+def _maybe_rotate() -> None:
+    """Once per calendar month, on the first create() of the month."""
+    marker = _ledger_path().parent / ".memorials_rotated.json"
+    month = datetime.now().strftime("%Y-%m")
+    try:
+        if (json.loads(marker.read_text(encoding="utf-8")) or {}).get("month") == month:
+            return
+    except (OSError, ValueError):
+        pass
+    try:
+        marker.write_text(json.dumps({"month": month}), encoding="utf-8")
+    except OSError:
+        return
+    try:
+        n = rotate_ledger()
+        if n:
+            print(f"memorial ledger rotated: {n} cards archived", file=sys.stderr)
+    except Exception as e:  # housekeeping must never block a card
+        print(f"memorial ledger rotation failed: {e}", file=sys.stderr)
+
+
 def create(source: str, title: str, body: str, options: list[dict] | None = None,
            preset: str | None = None, context: str = "",
            chat_id: str = "", send: bool = True,
@@ -724,6 +839,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     non-urgent sends during quiet hours (23:30-10:00) go to the night queue
     instead of buzzing the phone — urgent=True bypasses the night gate.
     """
+    _maybe_rotate()
     source, title, body = str(source), str(title), str(body)
     # An OPTIONS line in the body wins over any preset: the emitter that wrote
     # that line is stating what this specific card asks. Callers that pass
@@ -848,6 +964,58 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     return "\n".join(outputs)
 
 
+def _extract_title_line(text: str) -> tuple[str, str]:
+    """Pop an explicit TITLE:/标题： first line; returns (title, rest).
+
+    A TITLE-only output stays a card (title doubles as body); an over-long
+    title is clipped for the header but the full line is kept as the body's
+    first line — degrade, never drop words.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return "", text
+    m = _TITLE_LINE_RE.match(lines[0])
+    if not m:
+        return "", text
+    full = m.group(1)
+    rest = "\n".join(lines[1:]).strip()
+    if len(full) > MAX_TITLE_CHARS:
+        rest = (full + "\n" + rest).strip()
+    if not rest:
+        rest = full
+    return full[:MAX_TITLE_CHARS], rest
+
+
+def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
+    """Derive a content title for one card; returns (title, body).
+
+    A short first line over more content reads as this card's own headline —
+    promote it to the header (and drop it from the body when it was written
+    as a markdown heading, to avoid saying it twice). Anything else keeps the
+    per-source generic label.
+    """
+    lines = chunk.splitlines()
+    stripped = [ln.strip() for ln in lines if ln.strip()]
+    if len(stripped) >= 2:
+        first = stripped[0]
+        # Bold markers are pure markup — remove them everywhere (asymmetric
+        # cases like「**紧急**：磁盘满」must not leave stray asterisks in the
+        # header). 【】/《》 are content, not markup: keep them intact.
+        clean = first.replace("**", "").lstrip("#").strip()
+        if 4 <= len(clean) <= MAX_TITLE_CHARS:
+            # Drop the line from the body only when it was a PURE heading
+            # (fully wrapped markup) — a prose first line stays in the body.
+            pure_heading = (first.startswith("#")
+                            or (first.startswith("**") and first.endswith("**")))
+            if pure_heading:
+                idx = next(i for i, ln in enumerate(lines) if ln.strip())
+                body = "\n".join(lines[idx + 1:]).strip()
+                if body:
+                    return clean, body
+            return clean, chunk
+    return SOURCE_TITLE.get(source, source or "一件事"), chunk
+
+
 def memorialize_output(output: str, source: str = "heartbeat") -> str:
     """Convert proactive heartbeat output to one memorial card per event.
 
@@ -870,11 +1038,13 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             return
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-        title = SOURCE_TITLE.get(single_source, single_source or "一件事")
         # Echoed prompt framing ("=== TASK: x ===", "[CHECKIN]", "[ts] task")
         # is never card content — same class fix as checkin_post (REQ-104).
         from core.safety import strip_task_framing
         text = strip_task_framing(text)
+        if not text:
+            return
+        explicit_title, text = _extract_title_line(text)
         if not text:
             return
         # Buttons follow the card: an OPTIONS line authored by the task wins;
@@ -893,7 +1063,11 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             print(f"memorial split: {single_source} prose body → "
                   f"{len(chunks)} cards (一张卡一件事)", file=sys.stderr)
         for chunk in chunks:
-            mid, _ = create(single_source, title, chunk,
+            if explicit_title and len(chunks) == 1:
+                chunk_title, chunk_body = explicit_title, chunk
+            else:
+                chunk_title, chunk_body = _title_for_chunk(chunk, single_source)
+            mid, _ = create(single_source, chunk_title, chunk_body,
                             options=inline_options, preset=preset, send=False)
             state = get_memorial(mid) or {}
             if state.get("delivery_status") in {

@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -209,9 +210,40 @@ class ActionProcessor:
             if result.returncode != 0:
                 return f"广播失败，内容仍保留待重试：{(result.stderr or '').strip()[:160]}"
             path.unlink(missing_ok=True)
+            self._stamp_publish_state(content, data.get("notes") or {})
             return "✅ 已广播"
         except Exception as e:
             return f"广播失败，内容仍保留待重试：{e}"
+
+    def _stamp_publish_state(self, content: str, notes: dict) -> None:
+        """Record a successful publish in publish_state.json.
+
+        Nothing has stamped this file since the confirmation flow replaced
+        direct publishing (last stamp 5/29) — so the 2h drafting cooldown in
+        eigenflux_publish_pre.sh always passed and the "recent topics, do NOT
+        repeat" list went stale. Best-effort: a stamp failure never fails the
+        publish itself.
+        """
+        state_file = self.jarvis_dir / "eigenflux" / "publish_state.json"
+        if not isinstance(notes, dict):
+            notes = {}
+        try:
+            state = {}
+            if state_file.exists():
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            now = int(time.time())
+            state["last_publish_epoch"] = now
+            recent = state.get("recent", [])
+            recent.append({
+                "epoch": now,
+                "summary": str((notes or {}).get("summary", ""))[:160],
+                "content_preview": content[:120],
+            })
+            state["recent"] = recent[-30:]
+            from core.safety import atomic_write
+            atomic_write(state_file, json.dumps(state, ensure_ascii=False))
+        except Exception as e:
+            print(f"[actions] publish_state stamp failed: {e}", file=sys.stderr)
 
     def _do_eigenflux_cancel_publish(self, raw: str) -> str:
         """Cancel one specifically selected pending broadcast."""

@@ -47,6 +47,18 @@ def main() -> int:
     # Save pending broadcast for user confirmation (don't publish directly)
     pending_dir = JARVIS_DIR / "eigenflux" / "pending_publish"
     pending_dir.mkdir(parents=True, exist_ok=True)
+
+    # Backlog gate, second layer (pre.sh is the first): while another
+    # broadcast younger than 48h still awaits the user's 发/取消, drop this
+    # draft instead of stacking one more card on the unanswered pile.
+    now_epoch = time.time()
+    backlog = [f for f in pending_dir.glob("*.json")
+               if now_epoch - f.stat().st_mtime <= 48 * 3600]
+    if backlog:
+        print(f"[eigenflux-publish] {len(backlog)} broadcast(s) already awaiting "
+              f"approval — dropping new draft: {content[:80]}", file=sys.stderr)
+        return 0
+
     pending_id = f"{int(time.time())}_{os.getpid()}"
     pending_file = pending_dir / f"{pending_id}.json"
 

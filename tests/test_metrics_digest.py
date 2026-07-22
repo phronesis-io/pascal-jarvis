@@ -155,6 +155,114 @@ def test_post_prose_plus_trailing_sentinel_promotes(tmp_path):
 # ── absence alerts (PRD-1: silence must not look like health) ────────
 
 
+# ── anomaly edge-triggering (7/22: 8 identical 🚨 cards for one outage) ──
+
+
+def _anom(ts, actual=1, metric="a"):
+    return {"ts": ts, "date": ts[:10], "kind": "anomaly", "name": "demo",
+            "metric": metric, "rule": {"metric": metric, "op": ">=", "value": 1},
+            "actual": actual, "threshold": 1, "digest_hint": ""}
+
+
+def _promote(tmp_path):
+    """Simulate the post-hook's watermark promotion after a good reply."""
+    import os
+    mdir = tmp_path / "data" / "metrics"
+    os.replace(mdir / ".digest_pending.json", mdir / ".digest_watermark.json")
+
+
+def test_repeated_same_value_anomaly_suppressed(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout
+    _promote(tmp_path)
+    # two hours later the probe re-emits the identical still-true anomaly
+    _write_records(tmp_path, [_anom("2026-07-19T06:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert r.stdout.strip() == ""
+
+
+def test_value_change_realerts(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00", actual=1)])
+    _run_pre(tmp_path)
+    _promote(tmp_path)
+    _write_records(tmp_path, [_anom("2026-07-19T06:00:00+08:00", actual=2)])
+    r = _run_pre(tmp_path)
+    assert '"actual": 2' in r.stdout
+
+
+def test_ongoing_anomaly_reminds_after_24h(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00")])
+    _run_pre(tmp_path)
+    _promote(tmp_path)
+    _write_records(tmp_path, [_anom("2026-07-20T05:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout
+
+
+def test_recovery_clears_state_so_next_trip_alerts(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00")])
+    _run_pre(tmp_path)
+    _promote(tmp_path)
+    rec = {"ts": "2026-07-19T08:00:00+08:00", "date": "2026-07-19",
+           "kind": "recovery", "name": "demo", "metric": "a", "actual": 0,
+           "digest_hint": ""}
+    _write_records(tmp_path, [rec])
+    r = _run_pre(tmp_path)
+    assert '"kind": "recovery"' in r.stdout
+    _promote(tmp_path)
+    _write_records(tmp_path, [_anom("2026-07-19T10:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout
+
+
+def test_failed_render_retry_reemits_anomaly_not_suppressed(tmp_path):
+    """Red-team P1 (7/22): pre wrote suppression state, Claude render failed
+    (post never promoted), the retry cycle re-collected the SAME record —
+    it must re-emit, not be suppressed by its own cycle-1 state, and the
+    watermark must NOT be direct-advanced past a never-delivered alert."""
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout
+    # no _promote(): simulating a failed/unparsable Claude reply
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout  # retry re-emits
+    wm = tmp_path / "data" / "metrics" / ".digest_watermark.json"
+    assert not wm.exists()  # nothing direct-advanced past the lost alert
+    # after an eventually-successful render, later repeats suppress as usual
+    _promote(tmp_path)
+    _write_records(tmp_path, [_anom("2026-07-19T06:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert r.stdout.strip() == ""
+
+
+def test_mixed_batch_retry_keeps_anomaly(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00"),
+                              dict(SNAP, ts="2026-07-19T05:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout and '"kind": "snapshot"' in r.stdout
+    # render failed → retry: BOTH records must re-emit
+    r = _run_pre(tmp_path)
+    assert '"kind": "anomaly"' in r.stdout and '"kind": "snapshot"' in r.stdout
+
+
+def test_all_suppressed_batch_advances_watermark_directly(tmp_path):
+    _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00")])
+    _run_pre(tmp_path)
+    _promote(tmp_path)
+    _write_records(tmp_path, [_anom("2026-07-19T06:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert r.stdout.strip() == ""
+    wm = json.loads((tmp_path / "data" / "metrics"
+                     / ".digest_watermark.json").read_text())
+    assert wm["ts"] == "2026-07-19T06:00:00+08:00"
+    # a later snapshot is NOT crowded out by the suppressed backlog
+    _write_records(tmp_path, [dict(SNAP, ts="2026-07-19T10:00:00+08:00")])
+    r = _run_pre(tmp_path)
+    assert '"kind": "snapshot"' in r.stdout
+    assert '"kind": "anomaly"' not in r.stdout
+
+
 def _write_sources_yaml(tmp_path, snapshot_hour=9, name="demo"):
     (tmp_path / "sources.yaml").write_text(f"""
 perception:

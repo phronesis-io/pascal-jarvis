@@ -62,6 +62,12 @@ for f in heartbeat_state.json active_sessions.json interval_overrides.json \
          calendar_event_mapping.json perception_state.json; do
   [ -f "$REPO_DIR/$f" ] && cp "$REPO_DIR/$f" "$BACKUP_DIR/state/" 2>/dev/null
 done
+# Monthly ledger archives (memorials.YYYY-MM.jsonl, produced by
+# core.memorial.rotate_ledger) — without this, rotated 批红 history exists
+# only as a single working copy and ages out of the 30-day backup window.
+for f in "$REPO_DIR"/memorials.[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl; do
+  [ -f "$f" ] && cp "$f" "$BACKUP_DIR/state/" 2>/dev/null
+done
 if [ -f "$REPO_DIR/jarvis.yaml" ]; then
   cp "$REPO_DIR/jarvis.yaml" "$BACKUP_DIR/state/jarvis.yaml" && \
     chmod 600 "$BACKUP_DIR/state/jarvis.yaml"

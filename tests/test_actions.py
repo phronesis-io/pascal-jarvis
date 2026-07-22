@@ -118,6 +118,22 @@ def test_eigenflux_publish_action_sends_selected_pending(monkeypatch, tmp_path):
     assert not pending.exists()
 
 
+def test_eigenflux_publish_stamps_publish_state(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _pending_broadcast(tmp_path)
+
+    class Result:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    monkeypatch.setattr("core.actions.subprocess.run", lambda *a, **kw: Result())
+    ap._do_eigenflux_publish("id=123_456")
+    state = json.loads((tmp_path / "eigenflux" / "publish_state.json").read_text())
+    assert state["last_publish_epoch"] > 0
+    assert state["recent"][-1]["content_preview"].startswith("need collaborators")
+
+
 def test_eigenflux_publish_failure_keeps_pending(monkeypatch, tmp_path):
     ap = _make_processor(tmp_path)
     pending = _pending_broadcast(tmp_path)

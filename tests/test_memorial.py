@@ -404,6 +404,82 @@ def test_memorialize_output_makes_one_card_per_prose_event(env):
     assert all(c["header"]["title"]["content"].startswith("📜 🧠") for c in cards)
 
 
+def test_explicit_title_line_becomes_card_header(env):
+    output = "TITLE: 发声候选已备好，挑一个\n三个候选：A、B、C，各配 open problem。"
+    rendered = memorial.memorialize_output(output, "intention-check")
+    card = json.loads(rendered)
+    assert card["header"]["title"]["content"] == "📜 🎯 发声候选已备好，挑一个"
+    body = card["elements"][0]["text"]["content"]
+    assert "TITLE" not in body and body.startswith("三个候选")
+
+
+def test_short_first_line_promoted_to_title(env):
+    output = "**周会冲突提醒**\n周四 9:00 的周会和心理咨询撞了，需要挪一个。"
+    rendered = memorial.memorialize_output(output, "intention-check")
+    card = json.loads(rendered)
+    assert card["header"]["title"]["content"] == "📜 🎯 周会冲突提醒"
+    # markdown heading was dropped from the body — no double-say
+    assert "周会冲突提醒" not in card["elements"][0]["text"]["content"]
+
+
+def test_title_only_output_still_makes_a_card(env):
+    out = memorial.memorialize_output("TITLE: 今晚 EF 增长破千，值得看一眼",
+                                      "intention-check")
+    card = json.loads(out)
+    assert card["header"]["title"]["content"] == "📜 🎯 今晚 EF 增长破千，值得看一眼"
+    assert card["elements"][0]["text"]["content"] == "今晚 EF 增长破千，值得看一眼"
+
+
+def test_overlong_explicit_title_clipped_but_body_keeps_full_line(env):
+    long_title = "这是一个远超四十个字符上限的超长标题" * 3
+    out = memorial.memorialize_output(f"TITLE: {long_title}\n正文在此",
+                                      "intention-check")
+    card = json.loads(out)
+    assert card["header"]["title"]["content"] == f"📜 🎯 {long_title[:40]}"
+    body = card["elements"][0]["text"]["content"]
+    assert long_title in body and "正文在此" in body
+
+
+def test_asymmetric_markup_first_line_keeps_clean_title_and_body(env):
+    out = memorial.memorialize_output("【提醒】周四 9:00 周会和咨询撞了\n需要挪一个。",
+                                      "intention-check")
+    card = json.loads(out)
+    assert card["header"]["title"]["content"] == "📜 🎯 【提醒】周四 9:00 周会和咨询撞了"
+    # prose first line (not pure markup) stays in the body
+    assert "【提醒】" in card["elements"][0]["text"]["content"]
+    out = memorial.memorialize_output("**紧急**：磁盘只剩 3G\n清理一下下载目录。",
+                                      "heartbeat")
+    card = json.loads(out)
+    assert card["header"]["title"]["content"] == "📜 🫀 紧急：磁盘只剩 3G"
+    assert "**" not in card["header"]["title"]["content"]
+
+
+def test_rotate_abort_then_retry_does_not_duplicate_archive(env, monkeypatch):
+    import time as _t
+    now = _t.time()
+    _seed_ledger_card(env, "mem_old_dup", int(now - 60 * 86400))
+    # first attempt: swap blows up AFTER verification → nothing archived
+    real_replace = memorial.os.replace
+    monkeypatch.setattr(memorial.os, "replace",
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")))
+    assert memorial.rotate_ledger(now=now) == 0
+    month = _t.strftime("%Y-%m", _t.localtime(now - 60 * 86400))
+    assert not (env.dir / f"memorials.{month}.jsonl").exists()
+    # retry succeeds; archive has exactly one copy of the group
+    monkeypatch.setattr(memorial.os, "replace", real_replace)
+    assert memorial.rotate_ledger(now=now) == 1
+    archived = (env.dir / f"memorials.{month}.jsonl").read_text().splitlines()
+    assert len([l for l in archived if '"ev": "create"' in l]) == 1
+
+
+def test_prose_without_headline_keeps_generic_source_title(env):
+    output = ("这是一段没有标题、首行也很长很长很长很长很长很长很长很长很长很长"
+              "很长很长很长的正文\n第二行内容")
+    rendered = memorial.memorialize_output(output, "intention-check")
+    card = json.loads(rendered)
+    assert card["header"]["title"]["content"] == "📜 🎯 Intent"
+
+
 def test_memorialize_output_does_not_double_wrap_memorial(env):
     mid, _ = memorial.create("mail", "邮件", "正文", preset="fyi", send=False)
     card = memorial.card_json(mid)
@@ -691,6 +767,56 @@ def test_reply_tap_is_injected_first_person_and_reads_back_as_speech(env):
                     if "memorial-decision" in line)
     assert "点了推荐回复：「加钱」" in decision["summary"]
     assert "当作他刚亲口说了这句话" in decision["summary"]
+
+
+def _seed_ledger_card(env, mid, epoch, decided=False):
+    import time as _t
+    ts = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(epoch))
+    events = [{"ev": "create", "id": mid, "ts": ts, "epoch": epoch,
+               "source": "checkin", "title": "t", "body": "b",
+               "options": [], "extra_buttons": [], "context": ""},
+              {"ev": "delivery", "id": mid, "status": "delivered", "ts": ts}]
+    if decided:
+        events.append({"ev": "decide", "id": mid, "ts": ts,
+                       "opt": "read", "label": "已阅"})
+    with open(env.dir / "memorials.jsonl", "a", encoding="utf-8") as f:
+        for ev in events:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+def test_rotate_archives_old_groups_keeps_recent(env):
+    import time as _t
+    now = _t.time()
+    _seed_ledger_card(env, "mem_old_1", int(now - 60 * 86400), decided=True)
+    _seed_ledger_card(env, "mem_new_1", int(now - 2 * 86400))
+    n = memorial.rotate_ledger(now=now)
+    assert n == 1
+    assert memorial.get_memorial("mem_old_1") is None
+    st = memorial.get_memorial("mem_new_1")
+    assert st is not None and st["title"] == "t"
+    # the archived group is complete (create+delivery+decide) in a month file
+    import time as _t2
+    month = _t2.strftime("%Y-%m", _t2.localtime(now - 60 * 86400))
+    archived = (env.dir / f"memorials.{month}.jsonl").read_text().splitlines()
+    assert [json.loads(l)["ev"] for l in archived] == ["create", "delivery", "decide"]
+
+
+def test_rotate_noop_when_nothing_old(env):
+    import time as _t
+    _seed_ledger_card(env, "mem_new_2", int(_t.time() - 86400))
+    assert memorial.rotate_ledger() == 0
+    assert memorial.get_memorial("mem_new_2") is not None
+
+
+def test_maybe_rotate_runs_once_per_month(env):
+    import time as _t
+    _seed_ledger_card(env, "mem_old_2", int(_t.time() - 60 * 86400))
+    memorial._maybe_rotate()
+    assert memorial.get_memorial("mem_old_2") is None
+    # second old card in the same month: marker suppresses another pass
+    _seed_ledger_card(env, "mem_old_3", int(_t.time() - 60 * 86400))
+    memorial._maybe_rotate()
+    assert memorial.get_memorial("mem_old_3") is not None
 
 
 def test_prose_cards_use_the_sources_natural_preset(env):
