@@ -739,7 +739,9 @@ def _record_memorial_delivery(jarvis_dir: Path, memorial_id: str,
     if not memorial_id:
         return
     try:
-        with open(jarvis_dir / "memorials.jsonl", "a", encoding="utf-8") as f:
+        from core.memorial import ledger_lock
+        ledger = jarvis_dir / "memorials.jsonl"
+        with ledger_lock(ledger), open(ledger, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ev": "delivery", "id": memorial_id,
                                 "status": status, "ts": now_local_str()},
                                ensure_ascii=False) + "\n")

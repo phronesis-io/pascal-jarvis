@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -255,14 +256,16 @@ A private message just arrived on EigenFlux:
 
 {friends_ctx}
 
-The raw message was already forwarded to the user. Your job:
+Your note will ride on the SAME card as the raw message (原文+💡 一张卡). Your job:
 1. Check memory: is this sender someone we know? What's our relationship?
 2. If the message requires a response, suggest what to reply (brief, concrete) —
    use the prior turns above so the reply fits the conversation
 3. If there's context the user needs (e.g. this relates to a current project), provide it
 
 If the message is routine/no action needed, reply HEARTBEAT_OK.
-Otherwise reply with a brief Chinese note (≤60 words) for the user."""
+Otherwise reply with a brief Chinese note (≤60 words) for the user.
+若你给出了建议回复，在最后单独一行写按钮声明（每个标签=用户会打的那句话，≤14字）：
+OPTIONS: 就按建议回复 | 先不回"""
 
     try:
         # Spend-limit gate (probe=False: this aux caller never clear()s, so it
@@ -465,28 +468,30 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     log("ef-stream", "Skipping already-delivered message (dedup)")
                     continue
 
-                seen, accepted, visible_now = _deliver_memorial_and_mark(
-                    msg, ids, extract_metadata(line), user_id,
-                    seen, seen_file, jd, title="EigenFlux 消息")
-                if not accepted:
-                    # Skip the background analysis too — its 💡 note rides
-                    # the same broken channel, about a message never seen.
-                    continue
-                if not visible_now:
-                    # The card is durable but deferred; analysis can wait for
-                    # the next stream event instead of racing ahead of it.
-                    continue
-
-                # Background analysis (skip if shutting down)
+                # ONE card per incoming message (7/22: the old raw-card-then-
+                # analysis-card pair doubled every conversation into 2 pushes
+                # — 12 cards in 32min during one chat). Analysis runs FIRST;
+                # the single combined card carries 原文+💡. No-loss contract
+                # is preserved because `seen` is only marked after the card
+                # is accepted — a crash mid-analysis just re-delivers the
+                # event on reconnect. Analysis failure degrades to a raw card.
+                analysis = ""
                 details = extract_detail(line)
                 if details and not stop.is_set():
                     detail_str = "\n".join(json.dumps(d, ensure_ascii=False) for d in details)
                     conv_id = details[0].get("conv_id", "")
-                    analysis = _run_analysis(detail_str, conv_id, jarvis_dir, log_file, procs)
-                    if analysis and "HEARTBEAT_OK" not in analysis:
-                        _send_memorial_notice(
-                            "EigenFlux 分析", f"💡 {analysis}", user_id)
-                        log("ef-stream", "Follow-up analysis sent")
+                    analysis = _run_analysis(detail_str, conv_id, jarvis_dir,
+                                             log_file, procs) or ""
+                body = msg
+                if analysis and "HEARTBEAT_OK" not in analysis:
+                    body = f"{msg}\n\n💡 {analysis}"
+                m = re.search(r"\*\*(.+?)\*\*", msg)
+                title = f"{m.group(1)} 来信" if m else "EigenFlux 消息"
+                seen, accepted, _ = _deliver_memorial_and_mark(
+                    body, ids, extract_metadata(line), user_id,
+                    seen, seen_file, jd, title=title)
+                if not accepted:
+                    continue
 
                 # Reset backoff on successful message
                 backoff = 1

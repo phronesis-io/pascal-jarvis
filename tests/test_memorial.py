@@ -801,6 +801,28 @@ def test_rotate_archives_old_groups_keeps_recent(env):
     assert [json.loads(l)["ev"] for l in archived] == ["create", "delivery", "decide"]
 
 
+def test_ledger_appends_and_rotation_share_one_flock(env):
+    import fcntl, time as _t
+    _seed_ledger_card(env, "mem_lock_1", int(_t.time() - 60 * 86400))
+    ledger = env.dir / "memorials.jsonl"
+    # while an external writer holds the lock, rotate_ledger must WAIT for
+    # it (not race) — prove mutual exclusion via a non-blocking probe
+    with memorial.ledger_lock(ledger):
+        probe = open(ledger.parent / (ledger.name + ".lock"), "a")
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked_out = False
+        except BlockingIOError:
+            locked_out = True
+        finally:
+            probe.close()
+        assert locked_out
+    # lock released: both an append and a rotation proceed normally
+    memorial._append_line(ledger, {"ev": "delivery", "id": "mem_lock_1",
+                                   "status": "delivered", "ts": "x"})
+    assert memorial.rotate_ledger() == 1
+
+
 def test_rotate_noop_when_nothing_old(env):
     import time as _t
     _seed_ledger_card(env, "mem_new_2", int(_t.time() - 86400))

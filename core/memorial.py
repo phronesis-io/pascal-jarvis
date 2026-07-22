@@ -39,6 +39,7 @@ CLI (any emitter can send a memorial in one line):
 
 from __future__ import annotations
 
+import fcntl
 import itertools
 import json
 import os
@@ -47,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -216,13 +218,40 @@ def _outbox_path() -> Path:
     return JARVIS_DIR / "heartbeat_outbox.jsonl"
 
 
+@contextmanager
+def ledger_lock(ledger: Path):
+    """Exclusive cross-process lock for memorials.jsonl writers.
+
+    O_APPEND alone keeps concurrent appends intact, but rotate_ledger's
+    read→rewrite→replace must exclude appenders entirely — the size
+    re-check left a stat→replace TOCTOU window that could drop a decide
+    event landing on the old inode (red-team #4, 7/22). Every ledger
+    writer (here, heartbeat_loop delivery events, sidecar decide events
+    via this module) takes this lock; appends hold it for microseconds.
+    """
+    lock_path = ledger.parent / (ledger.name + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def _append_line(path: Path, entry: dict) -> None:
-    """O_APPEND one compact JSON line — atomic for small writes, no lock
-    needed across the sidecar / CLI / heartbeat writers (same idiom as
-    engagement_log / heartbeat_outbox appends)."""
+    """O_APPEND one compact JSON line — atomic for small writes across the
+    sidecar / CLI / heartbeat writers (same idiom as engagement_log /
+    heartbeat_outbox appends). Ledger writes additionally take ledger_lock
+    so a monthly rotation can never replace the file out from under them."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    if path.name == "memorials.jsonl":
+        with ledger_lock(path):
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        return
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.write(line)
 
 
 def _new_id() -> str:
@@ -726,17 +755,20 @@ def rotate_ledger(now: float | None = None) -> int:
     A 45-day-old un-批 card is dead weight: a late button tap degrades to
     「这张卡对应的事项找不到了」, which decide() already handles.
 
-    Returns the number of archived cards. Concurrent O_APPEND writers
-    (sidecar decide events, heartbeat deliveries) are mitigated — not fully
-    closed — by a size re-check right before the swap; the stat→replace
-    window remains a microsecond-scale TOCTOU, accepted for a once-a-month
-    housekeeping pass. On interference we simply skip; next month retries.
-    Archive appends happen only AFTER a successful swap and are deduped
-    against lines already in the month file, so an aborted earlier attempt
-    cannot double-archive a group.
+    Returns the number of archived cards. The whole read→rewrite→replace
+    runs under ledger_lock, so concurrent writers (sidecar decide events,
+    heartbeat deliveries — all of whom take the same lock) can never land
+    an append on the old inode mid-swap. Archive appends happen only AFTER
+    a successful swap and are deduped against lines already in the month
+    file, so an aborted earlier attempt cannot double-archive a group.
     """
     now = now or time.time()
     path = _ledger_path()
+    with ledger_lock(path):
+        return _rotate_ledger_locked(path, now)
+
+
+def _rotate_ledger_locked(path: Path, now: float) -> int:
     try:
         size_before = path.stat().st_size
         lines = path.read_text(encoding="utf-8").splitlines()

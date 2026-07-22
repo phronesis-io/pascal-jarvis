@@ -815,6 +815,14 @@ class HeartbeatRunner:
 Current time: {now_ts}
 You have access to the user's memory below. Use it to personalize your responses.
 
+## 主动输出＝奏折卡片（自由文本 user_message 通用；任务指定了 JSON 格式的按任务格式）
+- 一次只说一件事；确有多件独立事，用单独一行 "---" 分隔，会各成一卡。
+- 每件事第一行写 `TITLE: 一句话说清这件事`（≤40字）。这是他扫一眼决定
+  点不点开的唯一依据，不写就退回「Intent」这类按来源起的泛标题。
+- 最后一行写 `OPTIONS: 回复1 | 回复2`（2-4 个，每个=他会打的那句回复本身，
+  第一人称≤14字，覆盖真实分支含「不做」；纯周知才省略）。
+- 正文说人话：无 SLA/HTTP 码/内部黑话。
+
 ## Acting
 - For heavy or parallelizable work, you may spawn subagents with the Task/Agent
   tool — they block and return results to you, so you can fan out, wait, and
