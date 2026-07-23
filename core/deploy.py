@@ -63,7 +63,9 @@ def _git(root: Path, *args: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
+    # Porcelain status uses a meaningful leading space for worktree-only
+    # changes. Preserve it so callers can parse the fixed-width XY prefix.
+    return result.stdout.rstrip() if result.returncode == 0 else ""
 
 
 def git_head(root: str | Path | None = None) -> str:

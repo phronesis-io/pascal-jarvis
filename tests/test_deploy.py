@@ -1,8 +1,14 @@
 import os
+import subprocess
 import time
 
 from core.delivery import DeliveryPipeline
-from core.deploy import register_runtime, smoke_delivery, verify_runtime
+from core.deploy import (
+    _dirty_runtime_paths,
+    register_runtime,
+    smoke_delivery,
+    verify_runtime,
+)
 
 
 def _heartbeat(path):
@@ -78,3 +84,26 @@ def test_deploy_smoke_reaches_acted_within_budget(tmp_path):
     row = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "jarvis.db").get(result["delivery_id"])
     assert row["state"] == "acted"
+
+
+def test_dirty_runtime_paths_preserves_worktree_only_filename(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "jarvis-test@example.com"],
+        cwd=tmp_path, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Jarvis Test"],
+        cwd=tmp_path, check=True,
+    )
+    core = tmp_path / "core"
+    core.mkdir()
+    source = core / "worker.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "core/worker.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert _dirty_runtime_paths(tmp_path) == ["core/worker.py"]
