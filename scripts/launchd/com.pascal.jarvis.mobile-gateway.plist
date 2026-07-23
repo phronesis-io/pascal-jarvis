@@ -22,6 +22,10 @@
         <string>__HOME__/.local/state/tailscaled/tailscaled.sock</string>
         <key>JARVIS_TAILSCALE_AUTO_SERVE</key>
         <string>1</string>
+        <key>JARVIS_TAILSCALE_MODE</key>
+        <string>funnel</string>
+        <key>JARVIS_TRUST_PROXY_HEADERS</key>
+        <string>1</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>

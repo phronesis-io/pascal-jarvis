@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import ipaddress
 import json
 import os
@@ -15,8 +16,9 @@ import re
 import socket
 import ssl
 import subprocess
+import time
+from collections import defaultdict, deque
 from pathlib import Path
-from urllib.parse import quote
 
 from aiohttp import ClientSession, WSMsgType, web
 
@@ -30,6 +32,9 @@ HOP_HEADERS = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "cookie",
     "authorization", "content-length",
 }
+PAIR_FAILURE_LIMIT = 60
+PAIR_FAILURE_WINDOW_SECONDS = 10 * 60
+_PAIR_FAILURES: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _usable_lan_ip(value: str) -> bool:
@@ -182,11 +187,16 @@ def ensure_certificate(host: str, directory: Path) -> tuple[Path, Path, Path]:
 
 
 def _remote(request: web.Request) -> str:
-    if os.environ.get("JARVIS_TRUST_PROXY_HEADERS") == "1":
+    peer = request.remote or ""
+    try:
+        peer_is_loopback = ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        peer_is_loopback = False
+    if os.environ.get("JARVIS_TRUST_PROXY_HEADERS") == "1" and peer_is_loopback:
         forwarded = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
         if forwarded:
             return forwarded
-    return request.remote or ""
+    return peer
 
 
 def _token(request: web.Request) -> str:
@@ -203,37 +213,103 @@ def _same_origin(request: web.Request) -> bool:
     return origin.split("://", 1)[-1].rstrip("/") == request.host
 
 
-def _login_page(message: str = "") -> web.Response:
-    error = f'<p class="error">{message}</p>' if message else ""
-    html = f"""<!doctype html><html lang="zh-CN"><meta name="viewport"
+def _security_headers(request: web.Request, response: web.StreamResponse) -> None:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    secure = request.headers.get("X-Forwarded-Proto") == "https" or request.secure
+    if secure:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+
+@web.middleware
+async def security_headers_middleware(
+        request: web.Request, handler) -> web.StreamResponse:
+    try:
+        response = await handler(request)
+    except web.HTTPException as response:
+        _security_headers(request, response)
+        raise
+    _security_headers(request, response)
+    return response
+
+
+def _pair_attempt_allowed(remote: str, now: float | None = None) -> bool:
+    timestamp = time.monotonic() if now is None else now
+    attempts = _PAIR_FAILURES[remote or "unknown"]
+    cutoff = timestamp - PAIR_FAILURE_WINDOW_SECONDS
+    while attempts and attempts[0] < cutoff:
+        attempts.popleft()
+    return len(attempts) < PAIR_FAILURE_LIMIT
+
+
+def _record_pair_failure(remote: str, now: float | None = None) -> None:
+    timestamp = time.monotonic() if now is None else now
+    _PAIR_FAILURES[remote or "unknown"].append(timestamp)
+
+
+def _clear_pair_failures(remote: str) -> None:
+    _PAIR_FAILURES.pop(remote or "unknown", None)
+
+
+def _login_page(message: str = "", status: int = 401) -> web.Response:
+    error = f'<p class="error">{html.escape(message)}</p>' if message else ""
+    page = f"""<!doctype html><html lang="zh-CN"><meta name="viewport"
 content="width=device-width,initial-scale=1"><title>Jarvis 设备配对</title>
 <style>body{{margin:0;background:#10181d;color:#e6edef;font:16px -apple-system,sans-serif}}
 main{{max-width:420px;margin:15vh auto;padding:28px}}h1{{font:700 30px Songti SC,serif}}
 input,button{{box-sizing:border-box;width:100%;min-height:48px;margin-top:12px;border-radius:7px}}
 input{{padding:0 14px;border:1px solid #41545d;background:#17232a;color:#fff}}
 button{{border:0;background:#4aa78f;color:#07110e;font-weight:700}}.error{{color:#e98273}}</style>
-<main><h1>Jarvis 设备配对</h1>{error}<form onsubmit="location.href='/pair/'+
-encodeURIComponent(document.querySelector('input').value.trim());return false">
-<input autocomplete="one-time-code" aria-label="配对码" placeholder="输入一次性配对码" required>
+<main><h1>Jarvis 设备配对</h1>{error}<form method="post" action="/pair">
+<input name="code" autocomplete="one-time-code" aria-label="配对码"
+placeholder="输入一次性配对码" maxlength="256" required>
 <button>连接这台设备</button></form>
 <p><a href="/mobile-ca.cer">下载手机信任证书</a></p></main></html>"""
-    return web.Response(text=html, content_type="text/html", status=401,
-                        headers={"Cache-Control": "no-store"})
+    return web.Response(
+        text=page, content_type="text/html", status=status,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+            ),
+        },
+    )
 
 
-async def pair(request: web.Request) -> web.Response:
-    result = consume_pair_code(request.match_info.get("code", ""))
+async def _complete_pair(request: web.Request, code: str) -> web.Response:
+    remote = _remote(request)
+    if not _pair_attempt_allowed(remote):
+        audit_access("", remote, request.method, "/pair/[redacted]", 429,
+                     {"event": "pair_rate_limited"})
+        return _login_page("尝试次数过多，请十分钟后重试", status=429)
+    result = consume_pair_code(str(code).strip()[:256])
     if not result:
-        audit_access("", _remote(request), request.method, "/pair/[redacted]", 401,
+        _record_pair_failure(remote)
+        audit_access("", remote, request.method, "/pair/[redacted]", 401,
                      {"event": "pair_failed"})
         return _login_page("配对码无效或已过期")
+    _clear_pair_failures(remote)
     response = web.HTTPFound("/")
     secure = request.headers.get("X-Forwarded-Proto") == "https" or request.secure
     response.set_cookie(COOKIE, result["token"], httponly=True, secure=secure,
                         samesite="Strict", max_age=60 * 60 * 24 * 90, path="/")
-    audit_access(result["device_id"], _remote(request), request.method,
+    audit_access(result["device_id"], remote, request.method,
                  "/pair/[redacted]", 302, {"event": "paired"})
     raise response
+
+
+async def pair_link(request: web.Request) -> web.Response:
+    return await _complete_pair(request, request.match_info.get("code", ""))
+
+
+async def pair_form(request: web.Request) -> web.Response:
+    data = await request.post()
+    return await _complete_pair(request, str(data.get("code", "")))
 
 
 async def mobile_ca(_request: web.Request) -> web.Response:
@@ -338,9 +414,13 @@ async def _cleanup(app: web.Application) -> None:
 
 
 def create_gateway_app() -> web.Application:
-    app = web.Application(client_max_size=25 * 1024 * 1024)
+    app = web.Application(
+        client_max_size=25 * 1024 * 1024,
+        middlewares=[security_headers_middleware],
+    )
     app.router.add_get("/mobile-ca.cer", mobile_ca)
-    app.router.add_get("/pair/{code}", pair)
+    app.router.add_post("/pair", pair_form)
+    app.router.add_get("/pair/{code}", pair_link, allow_head=False)
     app.router.add_route("*", "/{tail:.*}", proxy)
     app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)
@@ -366,11 +446,12 @@ def main(argv: list[str] | None = None) -> int:
     from core.config import Config
     status_path = Config().jarvis_dir / "mobile_access.json"
     url = f"{scheme}://{host}:{args.port}"
-    from core.tailnet import ensure_mobile_serve, tailnet_status
+    from core.tailnet import ensure_mobile_access, tailnet_status
+    tailnet_mode = os.environ.get("JARVIS_TAILSCALE_MODE", "serve")
     tailnet = (
-        ensure_mobile_serve(args.port)
+        ensure_mobile_access(args.port, mode=tailnet_mode)
         if os.environ.get("JARVIS_TAILSCALE_AUTO_SERVE", "0") == "1"
-        else tailnet_status(args.port)
+        else tailnet_status(args.port, mode=tailnet_mode)
     )
     status_path.write_text(json.dumps({"host": host, "port": args.port,
                                        "url": url,

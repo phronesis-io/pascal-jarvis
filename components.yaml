@@ -91,9 +91,10 @@ components:
   - name: mobile-tailnet
     check: tailnet
     port: 3458
+    mode: funnel
     critical: false
     requires_cmd: tailscale
-    note: private Tailscale Serve path to the authenticated mobile gateway; never Funnel
+    note: public HTTPS ingress to authenticated :3458 only; Tailscale remains a private maintenance fallback
 
   - name: daemon-launchd
     check: launchctl

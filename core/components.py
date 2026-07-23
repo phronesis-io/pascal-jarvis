@@ -240,10 +240,11 @@ def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
 def _check_tailnet(comp: dict, root: Path) -> tuple[bool, str]:
     try:
         from core.tailnet import tailnet_status
-        status = tailnet_status(int(comp.get("port", 3458)))
+        status = tailnet_status(
+            int(comp.get("port", 3458)), mode=comp.get("mode"))
     except Exception as e:
         return False, f"tailnet check failed: {e}"
-    return bool(status.get("served")), str(status.get("detail") or "not served")
+    return bool(status.get("ready")), str(status.get("detail") or "not served")
 
 
 _CHECKS = {

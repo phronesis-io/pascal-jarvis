@@ -1,4 +1,4 @@
-"""Tailscale Serve status and idempotent mobile-gateway configuration."""
+"""Tailscale Serve/Funnel status and mobile-gateway configuration."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from pathlib import Path
 
 DEFAULT_SOCKET = Path.home() / ".local/state/tailscaled/tailscaled.sock"
 DEFAULT_BINARY = Path("/opt/homebrew/bin/tailscale")
-ENABLE_URL_RE = re.compile(r"https://login\.tailscale\.com/f/serve\?[^\s]+")
+ENABLE_URL_RE = re.compile(
+    r"https://login\.tailscale\.com/f/(?:serve|funnel)\?[^\s]+")
 
 
 def _command() -> list[str]:
@@ -50,13 +51,28 @@ def _contains_target(value, target: str) -> bool:
     return False
 
 
-def tailnet_status(port: int = 3458) -> dict:
-    """Return a stable, display-safe summary of the local tailnet path."""
+def _access_mode(mode: str | None = None) -> str:
+    value = str(mode or os.environ.get("JARVIS_TAILSCALE_MODE", "serve")).lower()
+    return "funnel" if value == "funnel" else "serve"
+
+
+def _funnel_enabled(config: dict, dns_name: str) -> bool:
+    allowed = config.get("AllowFunnel") if isinstance(config, dict) else {}
+    if not isinstance(allowed, dict):
+        return False
+    host_port = f"{dns_name}:443"
+    return bool(allowed.get(host_port) or allowed.get(dns_name))
+
+
+def tailnet_status(port: int = 3458, mode: str | None = None) -> dict:
+    """Return a stable, display-safe summary of the mobile HTTPS path."""
+    desired_mode = _access_mode(mode)
     target = f"https+insecure://localhost:{int(port)}"
     command = _command()
     if not command:
         return {
-            "available": False, "online": False, "served": False,
+            "available": False, "online": False, "served": False, "ready": False,
+            "mode": desired_mode, "funnel": False,
             "target": target, "url": "", "detail": "Tailscale 未安装",
         }
     try:
@@ -64,7 +80,8 @@ def tailnet_status(port: int = 3458) -> dict:
         data = json.loads(result.stdout or "{}") if result.returncode == 0 else {}
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
         return {
-            "available": True, "online": False, "served": False,
+            "available": True, "online": False, "served": False, "ready": False,
+            "mode": desired_mode, "funnel": False,
             "target": target, "url": "", "detail": f"Tailscale 状态不可用：{exc}",
         }
 
@@ -84,7 +101,13 @@ def tailnet_status(port: int = 3458) -> dict:
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
             serve_config = {}
     is_served = _contains_target(serve_config, target)
-    if is_served:
+    is_funnel = is_served and _funnel_enabled(serve_config, dns_name)
+    ready = is_served and (desired_mode == "serve" or is_funnel)
+    if is_funnel:
+        detail = "公网 HTTPS 入口已就绪（需要 Jarvis 设备认证）"
+    elif is_served and desired_mode == "funnel":
+        detail = "Tailnet 私网入口已就绪，公网入口尚未启用"
+    elif is_served:
         detail = "Tailnet 入口已就绪"
     elif online:
         detail = "Tailscale 已连接，Serve 尚未启用"
@@ -94,6 +117,9 @@ def tailnet_status(port: int = 3458) -> dict:
         "available": True,
         "online": online,
         "served": is_served,
+        "ready": ready,
+        "mode": desired_mode,
+        "funnel": is_funnel,
         "backend_state": backend_state,
         "dns_name": dns_name,
         "ip": ip,
@@ -103,18 +129,17 @@ def tailnet_status(port: int = 3458) -> dict:
     }
 
 
-def ensure_mobile_serve(port: int = 3458, timeout: float = 8) -> dict:
-    """Ensure this node serves the authenticated mobile gateway on its tailnet.
-
-    The command is deliberately ``serve``, never ``funnel``: the resulting URL
-    is reachable only by devices authenticated to the same tailnet.
-    """
-    status = tailnet_status(port)
-    if not status.get("available") or not status.get("online") or status.get("served"):
+def ensure_mobile_access(
+        port: int = 3458, mode: str | None = None, timeout: float = 8) -> dict:
+    """Ensure the authenticated gateway uses the requested Tailscale mode."""
+    desired_mode = _access_mode(mode)
+    status = tailnet_status(port, mode=desired_mode)
+    if (not status.get("available") or not status.get("online")
+            or status.get("ready")):
         return status
     try:
         result = _run(
-            ["serve", "--bg", "--yes", status["target"]], timeout=timeout,
+            [desired_mode, "--bg", "--yes", status["target"]], timeout=timeout,
         )
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
     except subprocess.TimeoutExpired as exc:
@@ -135,9 +160,22 @@ def ensure_mobile_serve(port: int = 3458, timeout: float = 8) -> dict:
             **status,
             "enable_required": True,
             "enable_url": enable.group(0),
-            "detail": "需要在 Tailscale 管理页启用 Serve",
+            "detail": f"需要在 Tailscale 管理页启用 {desired_mode.title()}",
         }
     if result is not None and result.returncode != 0:
         message = (output.strip().splitlines() or ["未知错误"])[-1]
-        return {**status, "detail": f"Serve 配置失败：{message[:240]}"}
-    return tailnet_status(port)
+        return {
+            **status,
+            "detail": f"{desired_mode.title()} 配置失败：{message[:240]}",
+        }
+    return tailnet_status(port, mode=desired_mode)
+
+
+def ensure_mobile_serve(port: int = 3458, timeout: float = 8) -> dict:
+    """Backward-compatible private Serve helper."""
+    return ensure_mobile_access(port, mode="serve", timeout=timeout)
+
+
+def ensure_mobile_funnel(port: int = 3458, timeout: float = 8) -> dict:
+    """Expose only the authenticated mobile gateway through public HTTPS."""
+    return ensure_mobile_access(port, mode="funnel", timeout=timeout)

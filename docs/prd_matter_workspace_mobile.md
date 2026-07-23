@@ -29,10 +29,10 @@ Implemented on 2026-07-22:
   certificates for arbitrary public sites. Pre-existing unconstrained CAs are
   rotated with a `.unconstrained.bak` backup; paired phones re-install the
   new `.cer` once.
-- Phase 4B path chosen: Tailscale (userspace tailscaled, no root, outbound
-  only, zero public attack surface) instead of a self-built relay. The
-  gateway additionally binds loopback so `tailscale serve` can front it with
-  a real `ts.net` certificate — off-LAN phone access needs no local CA trust.
+- Phase 4B initially used private Tailscale Serve. Real-device testing found
+  that iOS permits only one active VPN, so Tailscale displaced the owner's
+  existing proxy VPN. Tailscale login itself also depended on that proxy,
+  creating a circular and attention-expensive daily flow.
 
 2026-07-23 convergence round:
 
@@ -43,17 +43,28 @@ Implemented on 2026-07-22:
 - Matter detail exposes the same bounded handoff path for Claude Code and
   Codex. The UI, Lark `/matter handoff`, and CLI all produce the canonical
   `scripts/jarvis-matter launch` command.
-- The mobile gateway discovers the userspace Tailscale socket, configures
-  private `tailscale serve` idempotently, reports its health, and presents LAN
-  and tailnet pairing routes separately. Funnel is never enabled by Jarvis.
+- The mobile gateway discovers the userspace Tailscale socket and can
+  distinguish private Serve from public Funnel instead of reporting either
+  one as generic health.
+
+2026-07-23 real-device correction:
+
+- The daily phone route now uses Tailscale Funnel to expose only the
+  authenticated `:3458` gateway over public HTTPS. The phone does not need the
+  Tailscale app connected, so the owner's normal proxy VPN remains untouched.
+- Tailscale remains installed as a private maintenance and recovery path, not
+  a daily product dependency.
+- Public hardening adds one-time POST pairing, a bounded pairing-failure
+  window, no-referrer and anti-framing headers, HSTS on HTTPS, a restrictive
+  pairing-page CSP, and proxy-header trust only when the direct peer is
+  loopback.
 
 The installed personal gateway binds only the machine's current private LAN
 address (plus loopback for the tailnet path) and proxies only
-`127.0.0.1:3457`. A stable internet relay is not
-silently enabled: it needs an explicitly owned relay account/domain and a
-separate operational decision. Anonymous quick tunnels are rejected because
-their address changes after restart and they create an unnecessary public
-attack surface. This does not affect phone use on the same trusted network.
+`127.0.0.1:3457`. Funnel never exposes `:3456` or `:3457` directly, and every
+dashboard request still requires a revocable Jarvis device credential.
+Anonymous quick tunnels remain rejected because their address changes after
+restart and they bypass the owned Tailscale ingress policy.
 
 ## 1. Executive decision
 
@@ -457,12 +468,14 @@ is why the migration is links-first and prospective.
 - Device revocation, access audit, trusted local CA, and Web Push.
 - `:3456` remains unreachable through the gateway.
 
-### Phase 4B: private off-LAN access (complete)
+### Phase 4B: VPN-free daily mobile access (complete)
 
-- Tailscale Serve fronts only the authenticated `:3458` gateway on the private
-  tailnet; it never exposes Funnel or `:3456`.
-- The launchd gateway can repair Serve configuration after restart and the
-  component manifest reports tailnet-path health.
+- Tailscale Funnel fronts only the authenticated `:3458` gateway over public
+  HTTPS; it never exposes `:3456` or `:3457` directly.
+- The launchd gateway can repair Funnel configuration after restart, and the
+  component manifest fails health if only private Serve is active.
+- Private Tailscale access remains a maintenance fallback. It is not required
+  for normal phone use and must not displace the phone's existing VPN.
 - Optional native shell only after PWA usage proves a native capability gap.
 
 ## 14. Operations
@@ -504,9 +517,10 @@ and runtime status all stay under ignored local data paths. Only token hashes
 are stored in SQLite. Installing and trusting the public CA on the phone makes
 the PWA and Push APIs a trusted secure context.
 
-The LAN and tailnet hostnames have separate cookie scopes. Pair on the route
-the phone will actually use: LAN pairing needs the local CA; tailnet pairing
-uses the `ts.net` certificate and needs only the Tailscale app/account.
+The LAN IP and public `ts.net` hostname have separate cookie scopes. Pair on
+the public `ts.net` route for daily use; it has a publicly trusted certificate
+and does not require the Tailscale phone app. LAN pairing remains an emergency
+fallback and needs the local CA.
 
 ## 15. Acceptance criteria
 
@@ -533,6 +547,10 @@ uses the `ts.net` certificate and needs only the Tailscale app/account.
 15. A normal decision created outside a Lark conversation is durable on the
     phone without sending a Lark card; urgent and calendar decisions still
     reach Lark.
+16. With Tailscale disconnected on the phone, the public `ts.net` route reaches
+    the pairing boundary while the phone's existing VPN remains active.
+17. Public mode is healthy only when `AllowFunnel` is active for the exact
+    authenticated `:3458` route; private Serve alone cannot satisfy the check.
 
 ## 16. Metrics
 

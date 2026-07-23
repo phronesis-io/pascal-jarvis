@@ -377,7 +377,51 @@ def test_tailnet_status_detects_the_mobile_serve_target(monkeypatch):
     monkeypatch.setattr(tailnet, "_run", fake_run)
     status = tailnet.tailnet_status()
     assert status["served"] is True
+    assert status["ready"] is True
+    assert status["funnel"] is False
     assert status["url"] == "https://jarvis.test.ts.net"
+
+
+def test_tailnet_status_requires_allow_funnel_for_public_mode(monkeypatch):
+    from core import tailnet
+
+    serve_config = {
+        "Web": {
+            "jarvis.test.ts.net:443": {
+                "Handlers": {
+                    "/": {"Proxy": "https+insecure://localhost:3458"}
+                }
+            }
+        }
+    }
+
+    def fake_run(args, timeout=8):
+        if args == ["status", "--json"]:
+            payload = {
+                "BackendState": "Running",
+                "Self": {
+                    "Online": True,
+                    "DNSName": "jarvis.test.ts.net.",
+                    "TailscaleIPs": ["100.64.0.8"],
+                },
+            }
+        else:
+            payload = serve_config
+        return types.SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(tailnet, "_command", lambda: ["tailscale"])
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+    private = tailnet.tailnet_status(mode="funnel")
+    assert private["served"] is True
+    assert private["ready"] is False
+    assert private["funnel"] is False
+
+    serve_config["AllowFunnel"] = {"jarvis.test.ts.net:443": True}
+    public = tailnet.tailnet_status(mode="funnel")
+    assert public["ready"] is True
+    assert public["funnel"] is True
+    assert "公网 HTTPS" in public["detail"]
 
 
 def test_tailnet_serve_reports_the_admin_enable_url(monkeypatch):
@@ -411,12 +455,55 @@ def test_tailnet_serve_reports_the_admin_enable_url(monkeypatch):
         "serve", "--bg", "--yes", "https+insecure://localhost:3458"]
 
 
+def test_tailnet_funnel_reports_enable_url_and_uses_funnel_command(monkeypatch):
+    from core import tailnet
+
+    calls = []
+
+    def fake_run(args, timeout=8):
+        calls.append(args)
+        if args == ["status", "--json"]:
+            payload = {
+                "BackendState": "Running",
+                "Self": {"Online": True, "DNSName": "jarvis.test.ts.net."},
+            }
+            return types.SimpleNamespace(
+                returncode=0, stdout=json.dumps(payload), stderr="")
+        if args == ["serve", "status", "--json"]:
+            payload = {
+                "Web": {
+                    "jarvis.test.ts.net:443": {
+                        "Handlers": {
+                            "/": {"Proxy": "https+insecure://localhost:3458"}
+                        }
+                    }
+                }
+            }
+            return types.SimpleNamespace(
+                returncode=0, stdout=json.dumps(payload), stderr="")
+        return types.SimpleNamespace(
+            returncode=1, stdout="",
+            stderr=("Funnel is not enabled.\n"
+                    "https://login.tailscale.com/f/funnel?node=test"),
+        )
+
+    monkeypatch.setattr(tailnet, "_command", lambda: ["tailscale"])
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+    status = tailnet.ensure_mobile_funnel()
+    assert status["enable_required"] is True
+    assert status["enable_url"].endswith("node=test")
+    assert calls[-1] == [
+        "funnel", "--bg", "--yes", "https+insecure://localhost:3458"]
+
+
 def test_mobile_audit_does_not_trust_spoofed_forwarded_address(monkeypatch):
     from dashboard import mobile_gateway
     request = types.SimpleNamespace(
         headers={"X-Forwarded-For": "203.0.113.9"}, remote="192.168.13.20")
     assert mobile_gateway._remote(request) == "192.168.13.20"
     monkeypatch.setenv("JARVIS_TRUST_PROXY_HEADERS", "1")
+    assert mobile_gateway._remote(request) == "192.168.13.20"
+    request.remote = "127.0.0.1"
     assert mobile_gateway._remote(request) == "203.0.113.9"
 
 
@@ -464,6 +551,9 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
         try:
             denied = await client.get("/matters")
             assert denied.status == 401
+            assert denied.headers["X-Frame-Options"] == "DENY"
+            assert denied.headers["Referrer-Policy"] == "no-referrer"
+            assert "form-action 'self'" in denied.headers["Content-Security-Policy"]
             pair = create_pair_code("test phone")
             paired = await client.get(f"/pair/{pair['code']}", allow_redirects=False)
             assert paired.status == 302
@@ -478,6 +568,36 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
         finally:
             await client.close()
             await backend_server.close()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_pair_form_and_failure_limit(monkeypatch):
+    from dashboard import mobile_gateway
+
+    async def scenario():
+        mobile_gateway._PAIR_FAILURES.clear()
+        monkeypatch.setattr(mobile_gateway, "PAIR_FAILURE_LIMIT", 2)
+        client = TestClient(TestServer(mobile_gateway.create_gateway_app()),
+                            cookie_jar=CookieJar(unsafe=True))
+        await client.start_server()
+        try:
+            first = await client.post("/pair", data={"code": "invalid"})
+            second = await client.post("/pair", data={"code": "invalid"})
+            limited = await client.post("/pair", data={"code": "invalid"})
+            assert first.status == 401
+            assert second.status == 401
+            assert limited.status == 429
+            assert limited.headers["Cache-Control"] == "no-store"
+
+            mobile_gateway._PAIR_FAILURES.clear()
+            pair = create_pair_code("form phone")
+            paired = await client.post(
+                "/pair", data={"code": pair["code"]}, allow_redirects=False)
+            assert paired.status == 302
+        finally:
+            mobile_gateway._PAIR_FAILURES.clear()
+            await client.close()
 
     asyncio.run(scenario())
 
