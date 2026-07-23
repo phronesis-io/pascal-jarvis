@@ -141,15 +141,31 @@ def intent_event_label(event: str) -> str:
 def memorial_display_title(state: dict) -> str:
     """Turn legacy transport titles into a useful one-line subject."""
     title = str(state.get("title", "") or "").strip()
+    title = re.sub(r"^(?:TITLE|标题)\s*[:：]\s*", "", title,
+                   flags=re.I).strip()
     if title not in _GENERIC_MEMORIAL_TITLES:
         return title
     body = str(state.get("body", "") or "").strip()
     first = next((line.strip() for line in body.splitlines() if line.strip()), "一件事")
+    first = re.sub(r"^(?:TITLE|标题)\s*[:：]\s*", "", first,
+                   flags=re.I).strip()
     first = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", first)
     first = re.sub(r"[*_`#]+", "", first)
     first = re.sub(r"^[\s📡📬🩺🎯🧠🫀🌿📅💡⏰📺📊🪞🧭📋🌙⏳🗞️🚨✅⚠️❗️🔧🎙️]+", "", first)
     first = first.split("。", 1)[0].split("！", 1)[0].strip(" ·|-：:")
     return first if len(first) <= 30 else first[:30].rstrip() + "…"
+
+
+def memorial_display_body(state: dict) -> str:
+    """Hide legacy TITLE framing duplicated into the persisted body."""
+    body = str(state.get("body", "") or "").strip()
+    raw_title = str(state.get("title", "") or "").strip()
+    if raw_title and re.match(r"^(?:TITLE|标题)\s*[:：]", raw_title, re.I):
+        if body.startswith(raw_title):
+            return body[len(raw_title):].lstrip(" \n:：")
+    body = re.sub(r"^(?:TITLE|标题)\s*[:：]\s*[^\n]+\n?", "",
+                  body, count=1, flags=re.I).lstrip()
+    return body
 
 
 def memorial_option_label(label: str) -> str:
@@ -158,9 +174,18 @@ def memorial_option_label(label: str) -> str:
 
 
 def memorial_is_pending(state: dict) -> bool:
-    """待批的统一口径：home 的计数和 /memorials 的待批列表必须一致。"""
+    """Only explicit choices belong in the user's pending-decision queue."""
+    from core.memorial import requires_decision
     return (state.get("status") == "pending"
-            and state.get("delivery_status") not in {"failed", "expired"})
+            and state.get("delivery_status") not in {"failed", "expired"}
+            and requires_decision(state))
+
+
+def memorial_is_notice(state: dict) -> bool:
+    """Unread FYI-class history: visible on the web, never counted as 待批."""
+    from core.memorial import requires_decision
+    return (state.get("status") == "pending"
+            and not requires_decision(state))
 
 
 def memorial_attention_rank(state: dict) -> tuple[int, float]:

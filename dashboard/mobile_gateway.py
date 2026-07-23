@@ -366,11 +366,18 @@ def main(argv: list[str] | None = None) -> int:
     from core.config import Config
     status_path = Config().jarvis_dir / "mobile_access.json"
     url = f"{scheme}://{host}:{args.port}"
+    from core.tailnet import ensure_mobile_serve, tailnet_status
+    tailnet = (
+        ensure_mobile_serve(args.port)
+        if os.environ.get("JARVIS_TAILSCALE_AUTO_SERVE", "0") == "1"
+        else tailnet_status(args.port)
+    )
     status_path.write_text(json.dumps({"host": host, "port": args.port,
                                        "url": url,
                                        "ca_url": f"{url}/mobile-ca.cer",
                                        "trust_required": bool(ssl_context),
-                                       "pid": os.getpid(), "tls": bool(ssl_context)},
+                                       "pid": os.getpid(), "tls": bool(ssl_context),
+                                       "tailnet": tailnet},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
     # Also bind loopback: tailscale serve proxies from the local node, so the
     # tailnet path (phone off the home network) reaches us via 127.0.0.1.

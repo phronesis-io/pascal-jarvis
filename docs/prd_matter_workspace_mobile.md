@@ -34,6 +34,19 @@ Implemented on 2026-07-22:
   gateway additionally binds loopback so `tailscale serve` can front it with
   a real `ts.net` certificate — off-LAN phone access needs no local CA trust.
 
+2026-07-23 convergence round:
+
+- Attention is now routed by meaning: explicit choices are pending memorials,
+  urgent non-choice alerts may still reach Lark, and routine FYI output stays
+  in the web `知会` stream. Legacy FYI cards remain readable but no longer
+  inflate the pending-decision count.
+- Matter detail exposes the same bounded handoff path for Claude Code and
+  Codex. The UI, Lark `/matter handoff`, and CLI all produce the canonical
+  `scripts/jarvis-matter launch` command.
+- The mobile gateway discovers the userspace Tailscale socket, configures
+  private `tailscale serve` idempotently, reports its health, and presents LAN
+  and tailnet pairing routes separately. Funnel is never enabled by Jarvis.
+
 The installed personal gateway binds only the machine's current private LAN
 address (plus loopback for the tailnet path) and proxies only
 `127.0.0.1:3457`. A stable internet relay is not
@@ -48,7 +61,8 @@ Jarvis will have one first-party home and several replaceable entrances:
 
 - `:3457` is the first-party home for overview, decisions, matters, artifacts,
   and execution state.
-- Lark is the real-time attention and conversation channel.
+- Lark is the real-time conversation channel plus sparse decisions and alerts.
+  Routine informational output belongs to the web notice stream.
 - Claude Code and Codex are execution runtimes. Their sessions are ephemeral
   workers, not projects or long-term memory.
 - EigenFlux is an external agent signal and communication source.
@@ -411,6 +425,8 @@ is why the migration is links-first and prospective.
 - Information/conversation/decision routing.
 - Web-to-Lark card state synchronization.
 - Matter-aware EigenFlux ingestion.
+- Decision/alert/notice attention routing: decisions and sparse alerts may
+  reach Lark; routine notices remain web-first.
 
 ### Phase 4A: secure personal mobile access (complete)
 
@@ -419,9 +435,12 @@ is why the migration is links-first and prospective.
 - Device revocation, access audit, trusted local CA, and Web Push.
 - `:3456` remains unreachable through the gateway.
 
-### Phase 4B: stable internet relay (requires owned external service)
+### Phase 4B: private off-LAN access (complete)
 
-- Outbound relay, device auth, Web Push, revocation, and remote audit.
+- Tailscale Serve fronts only the authenticated `:3458` gateway on the private
+  tailnet; it never exposes Funnel or `:3456`.
+- The launchd gateway can repair Serve configuration after restart and the
+  component manifest reports tailnet-path health.
 - Optional native shell only after PWA usage proves a native capability gap.
 
 ## 14. Operations
@@ -462,6 +481,10 @@ The CA private key, gateway key, VAPID private key, pair codes, device tokens,
 and runtime status all stay under ignored local data paths. Only token hashes
 are stored in SQLite. Installing and trusting the public CA on the phone makes
 the PWA and Push APIs a trusted secure context.
+
+The LAN and tailnet hostnames have separate cookie scopes. Pair on the route
+the phone will actually use: LAN pairing needs the local CA; tailnet pairing
+uses the `ts.net` certificate and needs only the Tailscale app/account.
 
 ## 15. Acceptance criteria
 

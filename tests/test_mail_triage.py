@@ -147,13 +147,14 @@ PENDING = [
 ]
 
 
-def test_post_emits_card_and_records_all_triaged(tmp_path):
+def test_post_records_nonurgent_notice_and_all_triaged(tmp_path):
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"},
                    {"event_id": "b2", "decision": "silent"}],
         "user_message": "📬 来自 X 的邮件", "urgent": False})
     out = _run_post(reply, tmp_path, pending=PENDING)
-    assert "📬" in out and "来自 X" in out
+    assert out.strip() == ""
+    assert "来自 X" in (tmp_path / "memorials.jsonl").read_text()
     rows = [json.loads(x) for x in
             (tmp_path / "mail" / "triaged.jsonl").read_text().splitlines() if x]
     assert {r["event_id"] for r in rows} == {"a1", "b2"}
@@ -173,20 +174,22 @@ def test_post_silent_when_no_message(tmp_path):
     assert {r["event_id"] for r in rows} == {"a1", "b2"}
 
 
-def test_post_quiet_hours_emits_intact_card_for_central_queue(tmp_path):
+def test_post_quiet_hours_keeps_nonurgent_mail_as_web_notice(tmp_path):
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"}],
         "user_message": "📬 夜间来信", "urgent": False})
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
-    assert "夜间来信" in out  # heartbeat_loop will hold the intact card
+    assert out.strip() == ""
+    ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
+    assert "夜间来信" in ledger and '"attention": "notice"' in ledger
     # still recorded as triaged (won't be re-read)
     rows = (tmp_path / "mail" / "triaged.jsonl").read_text()
     assert "a1" in rows
     assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
 
 
-def test_post_emits_one_memorial_per_pushed_email(tmp_path):
+def test_post_keeps_one_web_notice_per_nonurgent_pushed_email(tmp_path):
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"},
                    {"event_id": "b2", "decision": "push"}],
@@ -197,10 +200,12 @@ def test_post_emits_one_memorial_per_pushed_email(tmp_path):
         "urgent": False,
     })
     out = _run_post(reply, tmp_path, pending=PENDING)
-    cards = [json.loads(line) for line in out.splitlines() if line.strip()]
-    assert len(cards) == 2
-    assert [c["header"]["title"]["content"] for c in cards] == [
-        "📜 📬 安全提醒", "📜 📬 合作来信"]
+    assert out.strip() == ""
+    rows = [json.loads(line) for line in
+            (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    creates = [row for row in rows if row.get("ev") == "create"]
+    assert [row["title"] for row in creates] == ["安全提醒", "合作来信"]
+    assert all(row["attention"] == "notice" for row in creates)
     assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
 
 

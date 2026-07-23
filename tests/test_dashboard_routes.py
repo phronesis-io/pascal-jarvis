@@ -834,6 +834,21 @@ class TestDecisionSurface:
         assert memorial_display_title(states[0]) == "OpenAI 发布新的语音模型"
         assert memorial_option_label("重要，持续盯") == "标为重点"
 
+    def test_legacy_title_framing_is_hidden_without_mutating_the_ledger(self):
+        from dashboard.uiutil import memorial_display_body, memorial_display_title
+        state = {
+            "title": "TITLE: 明天14:00 WAIC复盘",
+            "body": "TITLE: 明天14:00 WAIC复盘 明天有一场会议。",
+        }
+        assert memorial_display_title(state) == "明天14:00 WAIC复盘"
+        assert memorial_display_body(state) == "明天有一场会议。"
+        generic = {
+            "title": "Intent",
+            "body": "TITLE: 10点心理咨询可带三个近况\n\n带一个真实样本。",
+        }
+        assert memorial_display_title(generic) == "10点心理咨询可带三个近况"
+        assert memorial_display_body(generic) == "带一个真实样本。"
+
     def test_personal_memorials_rank_ahead_of_newer_ambient_feed(self):
         from dashboard.uiutil import memorial_attention_rank
         rows = [
@@ -844,6 +859,22 @@ class TestDecisionSurface:
         rows.sort(key=memorial_attention_rank, reverse=True)
         assert [r["source"] for r in rows] == [
             "mail", "daily-reflect", "eigenflux-feed-triage"]
+
+    def test_only_explicit_choices_count_as_pending_decisions(self):
+        from dashboard.uiutil import memorial_is_notice, memorial_is_pending
+        base = {"status": "pending", "delivery_status": "delivered",
+                "extra_buttons": []}
+        notice = {**base, "options": [
+            {"key": "read", "label": "已阅"},
+            {"key": "watch", "label": "标为重点"},
+        ]}
+        decision = {**base, "options": [
+            {"key": "approve", "label": "同意"},
+        ]}
+        assert memorial_is_pending(notice) is False
+        assert memorial_is_notice(notice) is True
+        assert memorial_is_pending(decision) is True
+        assert memorial_is_notice(decision) is False
 
     def test_corrupt_epoch_does_not_blank_the_decision_surface(self):
         from dashboard.uiutil import memorial_attention_rank

@@ -25,7 +25,7 @@ from core.matter_bridge import (
     record_turn,
 )
 from core.matter_context import build_context_bundle, render_context_markdown
-from core.matter_executor import record_completion
+from core.matter_executor import prepare_handoff, record_completion
 from core.matter_router import classify_signal, ingest_signal
 from core.matters import (
     MatterConflict,
@@ -191,6 +191,25 @@ def test_executor_records_real_model_summary_and_artifact(tmp_path):
     assert any(link["title"] == "result.md" for link in loaded["links"])
 
 
+def test_prepare_handoff_uses_the_same_launcher_for_both_entry_points(
+        tmp_path, monkeypatch):
+    context_path = tmp_path / "context.md"
+    context_path.write_text("bounded context", encoding="utf-8")
+    monkeypatch.setattr(
+        "core.matter_executor.write_context_bundle",
+        lambda _matter_id: context_path,
+    )
+    matter = create_matter("统一执行入口")
+    handoff = prepare_handoff(matter["id"], "codex", actor="test")
+    assert handoff["command"] == (
+        f"./scripts/jarvis-matter launch {matter['id']} codex")
+    assert Path(handoff["context_path"]).exists()
+    events = get_matter(matter["id"])["events"]
+    event = next(item for item in events
+                 if item["event_type"] == "handoff_prepared")
+    assert event["payload"]["provider"] == "codex"
+
+
 def test_router_classifies_and_attaches_only_to_existing_matter():
     matter = create_matter("EigenFlux 路由")
     signal = {"source_id": "eigenflux", "source_type": "cli_stream",
@@ -326,6 +345,70 @@ def test_mobile_lan_detection_ignores_tunnel_benchmark_address(monkeypatch):
     monkeypatch.setattr(mobile_gateway.subprocess, "run", fake_run)
     assert mobile_gateway.detect_lan_ip() == "192.168.13.108"
     assert mobile_gateway._usable_lan_ip("198.18.0.1") is False
+
+
+def test_tailnet_status_detects_the_mobile_serve_target(monkeypatch):
+    from core import tailnet
+
+    def fake_run(args, timeout=8):
+        if args == ["status", "--json"]:
+            payload = {
+                "BackendState": "Running",
+                "Self": {
+                    "Online": True,
+                    "DNSName": "jarvis.test.ts.net.",
+                    "TailscaleIPs": ["100.64.0.8"],
+                },
+            }
+        else:
+            payload = {
+                "Web": {
+                    "jarvis.test.ts.net:443": {
+                        "Handlers": {
+                            "/": {"Proxy": "https+insecure://localhost:3458"}
+                        }
+                    }
+                }
+            }
+        return types.SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(tailnet, "_command", lambda: ["tailscale"])
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+    status = tailnet.tailnet_status()
+    assert status["served"] is True
+    assert status["url"] == "https://jarvis.test.ts.net"
+
+
+def test_tailnet_serve_reports_the_admin_enable_url(monkeypatch):
+    from core import tailnet
+
+    calls = []
+
+    def fake_run(args, timeout=8):
+        calls.append(args)
+        if args == ["status", "--json"]:
+            payload = {
+                "BackendState": "Running",
+                "Self": {"Online": True, "DNSName": "jarvis.test.ts.net."},
+            }
+            return types.SimpleNamespace(
+                returncode=0, stdout=json.dumps(payload), stderr="")
+        if args == ["serve", "status", "--json"]:
+            return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        return types.SimpleNamespace(
+            returncode=1, stdout="",
+            stderr=("Serve is not enabled.\n"
+                    "https://login.tailscale.com/f/serve?node=test"),
+        )
+
+    monkeypatch.setattr(tailnet, "_command", lambda: ["tailscale"])
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+    status = tailnet.ensure_mobile_serve()
+    assert status["enable_required"] is True
+    assert status["enable_url"].endswith("node=test")
+    assert calls[-1] == [
+        "serve", "--bg", "--yes", "https+insecure://localhost:3458"]
 
 
 def test_mobile_audit_does_not_trust_spoofed_forwarded_address(monkeypatch):

@@ -385,11 +385,13 @@ def register_api_routes():
     async def api_mobile_status():
         from core.config import Config
         from core.mobile_access import list_devices, recent_access
+        from core.tailnet import tailnet_status
         status_path = Config().jarvis_dir / "mobile_access.json"
         try:
             gateway = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
             gateway = {"url": "", "tls": False}
+        gateway["tailnet"] = tailnet_status(int(gateway.get("port") or 3458))
         return {"gateway": gateway, "devices": list_devices(),
                 "recent_access": recent_access(20)}
 
@@ -407,8 +409,15 @@ def register_api_routes():
                 (Config().jarvis_dir / "mobile_access.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
             gateway = {}
-        base = str(gateway.get("url") or "").rstrip("/")
-        result["pair_url"] = f"{base}/pair/{result['code']}" if base else ""
+        lan_base = str(gateway.get("url") or "").rstrip("/")
+        tailnet = gateway.get("tailnet") or {}
+        tailnet_base = (str(tailnet.get("url") or "").rstrip("/")
+                        if tailnet.get("served") else "")
+        result["lan_pair_url"] = (
+            f"{lan_base}/pair/{result['code']}" if lan_base else "")
+        result["tailnet_pair_url"] = (
+            f"{tailnet_base}/pair/{result['code']}" if tailnet_base else "")
+        result["pair_url"] = result["tailnet_pair_url"] or result["lan_pair_url"]
         return result
 
     @app.delete("/api/mobile/devices/{device_id}", dependencies=_WRITE)

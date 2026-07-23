@@ -18,6 +18,10 @@
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>PYTHONPATH</key>
         <string>__JARVIS_DIR__</string>
+        <key>TAILSCALE_SOCKET</key>
+        <string>__HOME__/.local/state/tailscaled/tailscaled.sock</string>
+        <key>JARVIS_TAILSCALE_AUTO_SERVE</key>
+        <string>1</string>
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from nicegui import run, ui
@@ -296,6 +297,7 @@ def matter_detail_page(matter_id: str):
         sessions_state = {"items": [], "loading": False, "error": ""}
         move_state = {"session": None}
         close_state = {"status": "done", "items": []}
+        handoff_state = {"provider": "codex", "command": ""}
 
         def attach_session(session: dict, move: bool = False):
             try:
@@ -387,6 +389,21 @@ def matter_detail_page(matter_id: str):
 
             session_choices()
 
+        with ui.dialog() as handoff_dialog, ui.card().classes(
+                "matter-dialog matter-dialog-small"):
+            ui.label("执行交接").classes("matter-dialog-title")
+
+            @ui.refreshable
+            def handoff_dialog_body():
+                provider = handoff_state["provider"]
+                ui.label(PROVIDER_LABELS.get(provider, provider)).classes(
+                    "section-kicker")
+                ui.code(handoff_state["command"]).classes("matter-handoff-command")
+
+            handoff_dialog_body()
+            ui.button("关闭", on_click=handoff_dialog.close).props(
+                "flat no-caps").classes("memorial-secondary")
+
         async def open_session_dialog():
             sessions_state.update(items=[], loading=True, error="")
             session_dialog.open()
@@ -399,6 +416,48 @@ def matter_detail_page(matter_id: str):
             finally:
                 sessions_state["loading"] = False
                 session_choices.refresh()
+
+        async def copy_handoff(provider: str):
+            from core.matter_executor import prepare_handoff
+            try:
+                handoff = prepare_handoff(matter_id, provider, actor="dashboard")
+            except (KeyError, ValueError) as exc:
+                ui.notify(str(exc), type="warning")
+                return
+            handoff_state.update(provider=provider, command=handoff["command"])
+            script = f"""
+            return await (async () => {{
+              const text = {json.dumps(handoff["command"])};
+              try {{
+                if (navigator.clipboard) {{
+                  await navigator.clipboard.writeText(text);
+                  return 'ok';
+                }}
+              }} catch (_) {{}}
+              const area = document.createElement('textarea');
+              area.value = text;
+              area.style.position = 'fixed';
+              area.style.opacity = '0';
+              document.body.appendChild(area);
+              area.select();
+              const copied = document.execCommand('copy');
+              area.remove();
+              return copied ? 'ok' : 'failed';
+            }})();
+            """
+            try:
+                copied = await ui.run_javascript(script, timeout=10)
+            except Exception:
+                copied = "failed"
+            if copied == "ok":
+                ui.notify(
+                    f"{PROVIDER_LABELS[provider]} 启动命令已复制",
+                    type="positive",
+                )
+            else:
+                handoff_dialog_body.refresh()
+                handoff_dialog.open()
+            detail.refresh()
 
         def force_close():
             update_matter(matter_id, status=close_state["status"], actor="user",
@@ -487,6 +546,18 @@ def matter_detail_page(matter_id: str):
                 ui.label("接下来只做这一步").classes("matter-next-kicker")
                 ui.label(matter.get("next_action") or "还没有明确下一步").classes(
                     "matter-next-action")
+
+            with ui.element("section").classes("matter-executor-band"):
+                ui.label("执行入口").classes("section-kicker")
+                with ui.row().classes("matter-executor-actions"):
+                    ui.button(
+                        "交给 Codex", icon="code",
+                        on_click=lambda: copy_handoff("codex"),
+                    ).props("unelevated no-caps").classes("memorial-primary")
+                    ui.button(
+                        "交给 Claude Code", icon="terminal",
+                        on_click=lambda: copy_handoff("claude"),
+                    ).props("outline no-caps").classes("memorial-secondary")
 
             with ui.row().classes("matter-status-actions"):
                 for status, label, icon in (

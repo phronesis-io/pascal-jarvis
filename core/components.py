@@ -237,12 +237,22 @@ def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
         return False, f"launchctl error: {e}"
 
 
+def _check_tailnet(comp: dict, root: Path) -> tuple[bool, str]:
+    try:
+        from core.tailnet import tailnet_status
+        status = tailnet_status(int(comp.get("port", 3458)))
+    except Exception as e:
+        return False, f"tailnet check failed: {e}"
+    return bool(status.get("served")), str(status.get("detail") or "not served")
+
+
 _CHECKS = {
     "pid": _check_pid,
     "pgrep": _check_pgrep,
     "http": _check_http,
     "file_age": _check_file_age,
     "launchctl": _check_launchctl,
+    "tailnet": _check_tailnet,
 }
 
 

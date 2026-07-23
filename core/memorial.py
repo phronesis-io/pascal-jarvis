@@ -119,6 +119,20 @@ PRESETS: dict[str, list[dict]] = {
 # first-person (see _queue_decision_context) instead of being filed away as a
 # generic 批红 rating. FYI keys are the only taps that stay purely analytic.
 _FYI_KEYS = {"read", "watch"}
+ATTENTION_DECISION = "decision"
+ATTENTION_NOTICE = "notice"
+ATTENTION_ALERT = "alert"
+
+# These are synchronization/ambient-signal producers, not user-facing owners
+# of a decision. Their output stays web-first even when an LLM helpfully invents
+# reply options; a real decision should be promoted by a dedicated source.
+WEB_FIRST_SOURCES = {
+    "cross-session-sync",
+    "eigenflux-feed-triage",
+}
+ALERT_SOURCES = {
+    "calendar-sync",
+}
 
 # Prose cards whose source is inherently a decision/follow-up ask should not
 # fall back to「已阅／标为重点」. Only consulted when the emitter did not author
@@ -132,6 +146,56 @@ SOURCE_DEFAULT_PRESET = {
     "selfmon": "decision",
     "eigenflux-publish": "decision",
 }
+
+
+def _infer_attention(options: list[dict], extra_buttons: list[dict]) -> str:
+    """Infer whether a legacy card asks for a decision or merely informs."""
+    if any(str(option.get("key", "")) not in _FYI_KEYS for option in options):
+        return ATTENTION_DECISION
+    if any(isinstance(button.get("value"), dict) for button in extra_buttons):
+        return ATTENTION_DECISION
+    return ATTENTION_NOTICE
+
+
+def _default_attention(source: str, options: list[dict],
+                       extra_buttons: list[dict]) -> str:
+    if str(source or "") in WEB_FIRST_SOURCES:
+        return ATTENTION_NOTICE
+    inferred = _infer_attention(options, extra_buttons)
+    if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
+        return ATTENTION_ALERT
+    return inferred
+
+
+def requires_decision(state: dict) -> bool:
+    """Semantic attention class, backward compatible with old ledger rows."""
+    attention = str(state.get("attention", "") or "")
+    if attention:
+        return attention == ATTENTION_DECISION
+    return _default_attention(
+        str(state.get("source", "")),
+        list(state.get("options") or []),
+        list(state.get("extra_buttons") or []),
+    ) == ATTENTION_DECISION
+
+
+def should_push_to_lark(state: dict) -> bool:
+    """Lark receives decisions and sparse alerts, not routine FYI notices."""
+    attention = str(state.get("attention", "") or "")
+    if attention:
+        return attention in {ATTENTION_DECISION, ATTENTION_ALERT}
+    return requires_decision(state)
+
+
+_ALERT_RE = re.compile(
+    r"(?:\b(?:urgent|critical)\b|紧急|严重|告警|只剩\s*\d|"
+    r"服务(?:中断|不可用)|数据丢失|安全风险)",
+    re.I,
+)
+
+
+def _looks_like_alert(text: str) -> bool:
+    return bool(_ALERT_RE.search(str(text or "")))
 
 # LLM-authored buttons: a heartbeat task ends its card body with a line like
 #     OPTIONS: 加钱 | 限流到月底 | 让它自然停
@@ -284,6 +348,8 @@ def _fold(events: list[dict]) -> dict[str, dict]:
             continue
         ev = e.get("ev", "")
         if ev == "create":
+            options = e.get("options") or []
+            extra_buttons = e.get("extra_buttons") or []
             states[mid] = {
                 "id": mid,
                 "ts": e.get("ts", ""),
@@ -291,8 +357,13 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "source": str(e.get("source", "")),
                 "title": str(e.get("title", "")),
                 "body": str(e.get("body", "")),
-                "options": e.get("options") or [],
-                "extra_buttons": e.get("extra_buttons") or [],
+                "options": options,
+                "extra_buttons": extra_buttons,
+                "attention": str(
+                    e.get("attention") or
+                    _default_attention(str(e.get("source", "")),
+                                       options, extra_buttons)
+                ),
                 "context": str(e.get("context", "")),
                 "dedup_key": str(e.get("dedup_key", "")),
                 "chat_id": str(e.get("chat_id", "")),
@@ -708,7 +779,8 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                            options: list[dict], extra_buttons: list[dict],
                            context: str, chat_id: str,
                            matter_id: str = "",
-                           dedup_key: str = "") -> dict | None:
+                           dedup_key: str = "",
+                           attention: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
     dedup window, or the same explicit external identity."""
     now = time.time()
@@ -725,6 +797,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                 and st.get("context", "") == context
                 and st.get("chat_id", "") == chat_id
                 and st.get("matter_id", "") == matter_id
+                and str(st.get("attention", "")) == attention
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
             return st
     return None
@@ -881,7 +954,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            urgent: bool = False,
            extra_buttons: list[dict] | None = None,
            matter_id: str = "",
-           dedup_key: str = "") -> tuple[str, bool]:
+           dedup_key: str = "",
+           attention: str = "") -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and send the card.
 
     Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
@@ -909,6 +983,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
             options, preset = inline_options, None
     opts = _normalize_options(options, preset)
     native_buttons = _normalize_extra_buttons(extra_buttons)
+    attention = str(
+        attention or _default_attention(source, opts, native_buttons)
+    )
+    if attention not in {ATTENTION_DECISION, ATTENTION_NOTICE, ATTENTION_ALERT}:
+        raise ValueError("attention must be decision, notice, or alert")
 
     if not matter_id:
         try:
@@ -919,7 +998,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id),
-        str(matter_id), str(dedup_key))
+        str(matter_id), str(dedup_key), attention)
     if dup is not None:
         print(f"memorial dedup: identical pending {dup['id']} within "
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
@@ -933,7 +1012,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     ts = now_local_str()
     ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
           "source": source, "title": title, "body": body, "options": opts,
-          "extra_buttons": native_buttons, "context": str(context)}
+          "extra_buttons": native_buttons, "context": str(context),
+          "attention": attention}
     if dedup_key:
         ev["dedup_key"] = str(dedup_key)
     if chat_id:
@@ -981,7 +1061,8 @@ def _clean_adopted_title(header: str, source: str) -> str:
 
 
 def adopt_card(source: str, legacy_card_json: str, context: str = "",
-               suppress_accepted: bool = False) -> str:
+               suppress_accepted: bool = False,
+               route_notices_to_web: bool = False) -> str:
     """Adopt an existing Lark card into the memorial interaction surface.
 
     Task-native actions/links are preserved. Cards that already offer a real
@@ -1038,9 +1119,14 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
             source=source or "heartbeat", title=title, body=matter,
             options=options, preset=None if has_native_action else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
+            attention=(ATTENTION_ALERT if _looks_like_alert(f"{title}\n{matter}")
+                       and not has_native_action and fallback_preset == "fyi"
+                       else ""),
         )
+        state = get_memorial(mid) or {}
+        if route_notices_to_web and not should_push_to_lark(state):
+            continue
         if suppress_accepted:
-            state = get_memorial(mid) or {}
             if state.get("delivery_status") in {
                     "delivered", "queued", "retry_queued"}:
                 continue
@@ -1103,9 +1189,10 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
 def memorialize_output(output: str, source: str = "heartbeat") -> str:
     """Convert proactive heartbeat output to one memorial card per event.
 
-    Existing memorial cards pass through. Legacy cards are adopted while
-    preserving their native actions; prose chunks separated by ``---`` become
-    compact FYI memorials. Raw internal JSON remains blocked.
+    Existing decision cards pass through. Legacy cards are adopted while
+    preserving their native actions. Prose without explicit choices is stored
+    as a web notice instead of being pushed into Lark as another pending card.
+    Raw internal JSON remains blocked.
     """
     source_names = [s.strip() for s in str(source).split(",") if s.strip()]
     single_source = source_names[0] if len(source_names) == 1 else "heartbeat"
@@ -1152,8 +1239,14 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             else:
                 chunk_title, chunk_body = _title_for_chunk(chunk, single_source)
             mid, _ = create(single_source, chunk_title, chunk_body,
-                            options=inline_options, preset=preset, send=False)
+                            options=inline_options, preset=preset, send=False,
+                            attention=(ATTENTION_ALERT
+                                       if _looks_like_alert(chunk_body)
+                                       and not inline_options and preset == "fyi"
+                                       else ""))
             state = get_memorial(mid) or {}
+            if not should_push_to_lark(state):
+                continue
             if state.get("delivery_status") in {
                     "delivered", "queued", "retry_queued"}:
                 continue
@@ -1171,9 +1264,15 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             card = None
         if isinstance(card, dict) and "config" in card and "elements" in card:
             flush_prose()
-            adopted = (card_raw if _card_memorial_id(card)
-                       else adopt_card(single_source, card_raw,
-                                       suppress_accepted=True))
+            existing_id = _card_memorial_id(card)
+            if existing_id:
+                state = get_memorial(existing_id) or {}
+                adopted = card_raw if should_push_to_lark(state) else ""
+            else:
+                adopted = adopt_card(
+                    single_source, card_raw, suppress_accepted=True,
+                    route_notices_to_web=True,
+                )
             if adopted:
                 rendered.append(adopted)
         elif line:

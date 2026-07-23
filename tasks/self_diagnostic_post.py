@@ -97,7 +97,7 @@ def _send(text: str, user_id: str) -> bool:
         from core import memorial
         mid, _ = memorial.create(
             source="selfmon", title="自诊断发现问题", body=text,
-            preset="fyi", urgent=True)
+            preset="fyi", urgent=True, attention="alert")
         state = memorial.get_memorial(mid) or {}
         if state.get("delivery_status") in {
                 "delivered", "queued", "retry_queued"}:

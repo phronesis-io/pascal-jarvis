@@ -7,7 +7,6 @@ import json
 import re
 from urllib.parse import quote
 
-from core.matter_context import write_context_bundle
 from core.matters import (
     MatterConflict,
     add_event,
@@ -262,11 +261,12 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
         return {"handled": True, "reply": f"事项「{matter['title']}」已完成。"}
     if command == "handoff":
         provider = arg.lower() if arg.lower() in {"claude", "codex"} else "codex"
-        path = write_context_bundle(matter["id"])
-        command_line = f"python3 -m core.matter_executor launch {matter['id']} {provider}"
-        add_event(matter["id"], "handoff_prepared", f"准备交接给 {provider}",
-                  actor="lark", payload={"context_path": str(path)})
-        return {"handled": True, "reply": f"交接包已准备：{path}\n在仓库运行：{command_line}"}
+        from core.matter_executor import prepare_handoff
+        handoff = prepare_handoff(matter["id"], provider, actor="lark")
+        return {"handled": True, "reply": (
+            f"交接包已准备：{handoff['context_path']}\n"
+            f"在仓库运行：{handoff['command']}"
+        )}
     return {"handled": True, "reply": "支持：new / use / current / list / done / handoff / clear"}
 
 

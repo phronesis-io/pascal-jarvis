@@ -96,14 +96,10 @@ def main() -> int:
         surface_items.append({"title": "邮件", "body": msg, "event_id": ""})
     if not surface_items:
         return 0
-    # Push mail now goes out as a memorial (奏折) card — fyi buttons
-    # (已阅 / 标为重点) plus「💬 聊聊这个」. Silent triage, dedup and the
-    # quiet-hours gate above are untouched; only the push CARRIER changed.
-    # This post-hook owns no delivery channel: create the ledger entry without
-    # sending, then print the card for heartbeat_loop's reliable CARD route.
-    # Keeping one sender avoids double-delivery and makes retry/dead-letter /
-    # outbox accounting uniform. If memorial itself blows up, fall back to the
-    # legacy plain card so mail is never lost.
+    # Non-urgent pushed mail is still worth keeping, but it belongs in the web
+    # notice stream instead of becoming another Lark decision. Urgent mail is a
+    # sparse alert: it uses heartbeat_loop's reliable CARD route and bypasses
+    # quiet hours without inflating the pending-decision count.
     try:
         from core import memorial
         if urgent:
@@ -119,16 +115,19 @@ def main() -> int:
             mem_id, _ = memorial.create(
                 source="mail", title=item["title"], body=item["body"],
                 preset="fyi", send=False,
+                attention=("alert" if urgent else "notice"),
                 context=(f"mail event_id={item['event_id']}"
                          if item["event_id"] else ""),
             )
-            print(memorial.card_json(mem_id))
+            if urgent:
+                print(memorial.card_json(mem_id))
     except Exception as e:
-        print(f"[mail-triage] memorial failed, using plain card: {e}",
+        print(f"[mail-triage] memorial failed: {e}",
               file=sys.stderr)
-        for item in surface_items:
-            print(build_card(header=f"📬 {item['title']}", body=item["body"],
-                             source="mail-triage"))
+        if urgent:
+            for item in surface_items:
+                print(build_card(header=f"📬 {item['title']}", body=item["body"],
+                                 source="mail-triage"))
     return 0
 
 

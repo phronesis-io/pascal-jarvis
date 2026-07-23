@@ -177,13 +177,14 @@ def test_prose_multi_matter_body_splits_into_cards(env, capsys):
     assert len([s for s in memorial.list_memorials()]) == 3
 
 
-def test_prose_single_matter_multi_paragraph_not_split(env):
+def test_prose_single_matter_multi_paragraph_stays_one_web_notice(env):
     body = "一件事的第一段。\n\n同一件事的第二段，补充细节。"
     rendered = memorial.memorialize_output(body, "cross-session-sync")
-    cards = [json.loads(line) for line in rendered.splitlines()]
-    assert len(cards) == 1  # multiple paragraphs of ONE matter stay together
-    content = cards[0]["elements"][0]["text"]["content"]
-    assert "第一段" in content and "第二段" in content
+    assert rendered == ""
+    states = memorial.list_memorials()
+    assert len(states) == 1
+    assert "第一段" in states[0]["body"] and "第二段" in states[0]["body"]
+    assert states[0]["attention"] == "notice"
 
 
 def test_prose_with_authored_options_line_never_splits(env):
@@ -197,8 +198,10 @@ def test_prose_with_authored_options_line_never_splits(env):
     assert [o["label"] for o in st["options"]] == ["都接受", "帮我推掉B"]
 
 
-def test_explicit_separator_events_still_one_card_each(env):
-    """The existing --- contract is untouched by the split guard."""
+def test_explicit_separator_events_still_one_notice_each(env):
+    """The existing --- event boundary remains even for web-first sources."""
     rendered = memorial.memorialize_output("第一件进展\n---\n第二件进展",
                                            "cross-session-sync")
-    assert len(rendered.splitlines()) == 2
+    assert rendered == ""
+    assert [state["body"] for state in memorial.list_memorials()] == [
+        "第一件进展", "第二件进展"]

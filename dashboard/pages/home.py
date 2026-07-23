@@ -20,7 +20,9 @@ from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
                       add_dashboard_head, dashboard_header,
                       finish_status_label, guarded_refresh_timer,
                       intent_event_label, memorial_attention_rank,
-                      memorial_display_title, memorial_is_pending,
+                      memorial_display_body, memorial_display_title,
+                      memorial_is_notice,
+                      memorial_is_pending,
                       memorial_option_label, skip_reason_label, source_label)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
@@ -135,6 +137,23 @@ def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
             feed.append({"ts": ts, "epoch": epoch, "source": "送达",
                          "message": text})
 
+    for state in memorial_states(jd):
+        if not memorial_is_notice(state):
+            continue
+        try:
+            epoch = float(state.get("epoch", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not epoch:
+            continue
+        feed.append({
+            "ts": state.get("ts", ""),
+            "epoch": epoch,
+            "source": source_label(state.get("source", "")),
+            "message": _compact(
+                state.get("body") or memorial_display_title(state), 100),
+        })
+
     feed.sort(key=lambda x: x["epoch"], reverse=True)
     return feed[:limit]
 
@@ -213,7 +232,7 @@ def _memorial_preview(state: dict, refresh) -> None:
                 "memorial-source")
             ui.label(state.get("ts", "")).classes("memorial-time")
         ui.label(memorial_display_title(state)).classes("memorial-title")
-        ui.markdown(_compact(state.get("body", ""))).classes("memorial-body")
+        ui.markdown(_compact(memorial_display_body(state))).classes("memorial-body")
         with ui.row().classes("memorial-actions"):
             for index, option in enumerate(state.get("options", [])[:3]):
                 ui.button(

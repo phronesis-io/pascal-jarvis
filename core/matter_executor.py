@@ -16,6 +16,30 @@ from core.matters import add_event, get_matter, link_entity
 from core.work_sessions import discover_sessions, extract_text
 
 
+def prepare_handoff(matter_id: str, provider: str,
+                    actor: str = "executor") -> dict:
+    """Write a bounded context bundle and return the canonical launch command."""
+    provider = str(provider).lower()
+    if provider not in {"claude", "codex"}:
+        raise ValueError("provider must be claude or codex")
+    matter = get_matter(matter_id, include_links=False, include_events=False)
+    if matter is None:
+        raise KeyError(f"matter not found: {matter_id}")
+    context_path = write_context_bundle(matter_id)
+    command = f"./scripts/jarvis-matter launch {matter_id} {provider}"
+    add_event(
+        matter_id, "handoff_prepared", f"准备交接给 {provider}", actor=actor,
+        payload={"provider": provider, "context_path": str(context_path),
+                 "command": command},
+    )
+    return {
+        "matter_id": matter_id,
+        "provider": provider,
+        "context_path": str(context_path),
+        "command": command,
+    }
+
+
 def _git_files(workspace: Path) -> set[str]:
     if not (workspace / ".git").exists():
         return set()

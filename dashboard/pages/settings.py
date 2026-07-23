@@ -198,12 +198,16 @@ def settings_page():
                     if not result:
                         return
                     ui.label(result.get("code", "")).classes("mobile-pair-code")
-                    if result.get("pair_url"):
-                        ui.link("在手机打开配对链接", result["pair_url"],
+                    if result.get("tailnet_pair_url"):
+                        ui.link("外出访问配对", result["tailnet_pair_url"],
                                 new_tab=True).classes("matter-artifact-link")
-                        base = result["pair_url"].split("/pair/", 1)[0]
-                        ui.link("下载手机信任证书", f"{base}/mobile-ca.cer",
+                    if result.get("lan_pair_url"):
+                        ui.link("同一 Wi-Fi 配对", result["lan_pair_url"],
                                 new_tab=True).classes("matter-artifact-link")
+                        base = result["lan_pair_url"].split("/pair/", 1)[0]
+                        ui.link("局域网信任证书", f"{base}/mobile-ca.cer",
+                                new_tab=True).classes("matter-artifact-link")
+                    ui.label("任选一个入口完成配对；配对码只能使用一次。").classes("section-note")
                     ui.label(f"有效至 {result.get('expires_at', '')}").classes("section-note")
 
                 pair_content()
@@ -220,8 +224,16 @@ def settings_page():
                             encoding="utf-8"))
                 except (OSError, json.JSONDecodeError, ValueError):
                     gateway = {}
-                base = str(gateway.get("url") or "").rstrip("/")
-                result["pair_url"] = f"{base}/pair/{result['code']}" if base else ""
+                lan_base = str(gateway.get("url") or "").rstrip("/")
+                tailnet = gateway.get("tailnet") or {}
+                tailnet_base = (str(tailnet.get("url") or "").rstrip("/")
+                                if tailnet.get("served") else "")
+                result["lan_pair_url"] = (
+                    f"{lan_base}/pair/{result['code']}" if lan_base else "")
+                result["tailnet_pair_url"] = (
+                    f"{tailnet_base}/pair/{result['code']}" if tailnet_base else "")
+                result["pair_url"] = (
+                    result["tailnet_pair_url"] or result["lan_pair_url"])
                 pair_state["result"] = result
                 pair_content.refresh()
                 pair_dialog.open()
@@ -262,17 +274,39 @@ def settings_page():
             @ui.refreshable
             def mobile_panel():
                 from core.mobile_access import list_devices
+                from core.tailnet import tailnet_status
                 try:
                     gateway = json.loads((JARVIS_DIR / "mobile_access.json").read_text(
                         encoding="utf-8"))
                 except (OSError, json.JSONDecodeError, ValueError):
                     gateway = {}
+                live_tailnet = tailnet_status(int(gateway.get("port") or 3458))
+                saved_tailnet = gateway.get("tailnet") or {}
+                if saved_tailnet.get("enable_url") and not live_tailnet.get("served"):
+                    live_tailnet["enable_url"] = saved_tailnet["enable_url"]
+                    live_tailnet["enable_required"] = True
                 with ui.element("section").classes("mobile-access-band"):
                     with ui.row().classes("w-full items-center justify-between gap-3"):
                         with ui.column().classes("gap-1"):
-                            ui.label("安全入口").classes("font-medium")
-                            ui.label(gateway.get("url") or "网关尚未运行").classes(
-                                "section-note")
+                            ui.label("手机入口").classes("font-medium")
+                            with ui.element("div").classes("mobile-access-route"):
+                                ui.icon("wifi", size="17px")
+                                ui.label("同一 Wi-Fi").classes("mobile-route-label")
+                                ui.label(gateway.get("url") or "网关尚未运行").classes(
+                                    "section-note")
+                            with ui.element("div").classes("mobile-access-route"):
+                                ui.icon("public", size="17px")
+                                ui.label("外出访问").classes("mobile-route-label")
+                                if live_tailnet.get("served") and live_tailnet.get("url"):
+                                    ui.link(live_tailnet["url"], live_tailnet["url"],
+                                            new_tab=True).classes("matter-artifact-link")
+                                else:
+                                    ui.label(live_tailnet.get("detail") or "尚未配置").classes(
+                                        "section-note")
+                            if live_tailnet.get("enable_url"):
+                                ui.link("启用 Tailscale Serve",
+                                        live_tailnet["enable_url"], new_tab=True).classes(
+                                    "matter-artifact-link")
                         with ui.row().classes("gap-2"):
                             ui.button(icon="add_link", on_click=create_mobile_pair).props(
                                 'outline round aria-label="连接新设备"').tooltip("连接新设备")

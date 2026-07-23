@@ -107,6 +107,8 @@ def test_create_defaults_to_fyi_preset(env):
     mid, _ = memorial.create("selfmon", "t", "b")
     st = memorial.get_memorial(mid)
     assert [o["label"] for o in st["options"]] == ["已阅", "标为重点"]
+    assert st["attention"] == "notice"
+    assert memorial.requires_decision(st) is False
 
 
 def test_card_compacts_long_body_but_ledger_keeps_full_context(env):
@@ -418,14 +420,36 @@ def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
     assert actions[0]["value"]["action"] == "intent_close"
 
 
-def test_memorialize_output_makes_one_card_per_prose_event(env):
+def test_memorialize_output_routes_plain_prose_to_web_not_lark(env):
     output = "跨 Session 有一件进展\n---\n另一件独立进展"
     rendered = memorial.memorialize_output(output, "cross-session-sync")
-    cards = [json.loads(line) for line in rendered.splitlines()]
-    assert len(cards) == 2
-    bodies = [c["elements"][0]["text"]["content"] for c in cards]
-    assert bodies == ["跨 Session 有一件进展", "另一件独立进展"]
-    assert all(c["header"]["title"]["content"].startswith("📜 🧠") for c in cards)
+    assert rendered == ""
+    states = memorial.list_memorials()
+    assert [state["body"] for state in states] == [
+        "跨 Session 有一件进展", "另一件独立进展"]
+    assert all(state["attention"] == "notice" for state in states)
+
+
+def test_memorialize_output_keeps_explicit_choices_in_lark(env):
+    rendered = memorial.memorialize_output(
+        "要采用哪条路径？\nOPTIONS: 路径 A | 路径 B",
+        "heartbeat",
+    )
+    card = json.loads(rendered)
+    assert [action["text"]["content"] for action in _actions(card)] == [
+        "路径 A", "路径 B", "💬 聊聊这个"]
+    assert memorial.list_memorials()[-1]["attention"] == "decision"
+
+
+def test_cross_session_options_stay_web_first(env):
+    rendered = memorial.memorialize_output(
+        "另一个执行会话有个建议\nOPTIONS: 去核实 | 先不管",
+        "cross-session-sync",
+    )
+    assert rendered == ""
+    state = memorial.list_memorials()[-1]
+    assert state["attention"] == "notice"
+    assert memorial.requires_decision(state) is False
 
 
 def test_explicit_title_line_becomes_card_header(env):
@@ -507,15 +531,17 @@ def test_prose_without_headline_keeps_generic_source_title(env):
 def test_memorialize_output_does_not_double_wrap_memorial(env):
     mid, _ = memorial.create("mail", "邮件", "正文", preset="fyi", send=False)
     card = memorial.card_json(mid)
-    assert memorial.memorialize_output(card, "mail-triage") == card
+    assert memorial.memorialize_output(card, "mail-triage") == ""
+    assert memorial.get_memorial(mid)["attention"] == "notice"
     assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
 
 
 def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
     legacy = build_card("📡 EigenFlux", "同一条动态")
     first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")
-    mid = _actions(json.loads(first))[-1]["value"]["id"]
-    memorial._record_delivery(mid, "delivered")
+    assert first == ""
+    mid = memorial.list_memorials()[-1]["id"]
+    assert memorial.get_memorial(mid)["attention"] == "notice"
     assert memorial.memorialize_output(legacy, "eigenflux-feed-triage") == ""
 
 
@@ -664,10 +690,7 @@ def test_send_timeout_retries_and_never_claims_delivery(monkeypatch):
 # ── mail triage integration (post script carrier swap) ──────────────────
 
 
-def test_mail_post_emits_memorial_card(tmp_path, monkeypatch, capsys):
-    """mail_triage_post push path now goes through memorial.create; the
-    quiet-hours / triaged bookkeeping is exercised by test_mail_triage.py —
-    here we only pin the carrier swap at the module level."""
+def test_mail_post_routes_nonurgent_output_to_web(tmp_path, monkeypatch, capsys):
     import importlib.util
     root = Path(__file__).parent.parent
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -683,11 +706,10 @@ def test_mail_post_emits_memorial_card(tmp_path, monkeypatch, capsys):
     spec.loader.exec_module(post)
     assert post.main() == 0
 
-    card = json.loads(capsys.readouterr().out)
-    assert card["header"]["title"]["content"] == "📜 📬 邮件"
-    assert "来自 X 的邮件" in card["elements"][0]["text"]["content"]
-    labels = [a["text"]["content"] for a in _actions(card)]
-    assert labels == ["已阅", "标为重点", "💬 聊聊这个"]
+    assert capsys.readouterr().out == ""
+    state = memorial.list_memorials()[-1]
+    assert state["body"] == "📬 来自 X 的邮件"
+    assert state["attention"] == "notice"
 
 
 # ── engagement accounting (v1.2 follow-up: memorial ↔ engagement_log) ────
