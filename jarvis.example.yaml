@@ -69,6 +69,16 @@ claude:
   backup_enabled: true
   backup_auth_token: ""
   backup_base_url: ""
+  # Model ID for the backup provider. Leave empty to inherit main_model.
+  # Use a pinned ID (e.g. "claude-opus-4-6") if the relay doesn't support
+  # the latest model alias.
+  backup_model: ""
+  # Optional SECOND Claude relay. Same semantics as the primary backup, tried
+  # after backup1 fails (e.g. a different billing account / provider).
+  backup2_enabled: false
+  backup2_auth_token: ""
+  backup2_base_url: ""
+  backup2_model: ""
 
 
 # ── OpenAI fallback settings ───────────────────────────────────────

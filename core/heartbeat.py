@@ -772,7 +772,7 @@ class HeartbeatRunner:
             model = (
                 os.environ.get("OPENAI_FALLBACK_MODEL")
                 or os.environ.get("OPENAI_MODEL")
-                or "gpt-5.2"
+                or "gpt-5.5"
             )
             base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
             timeout = int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))
@@ -809,7 +809,40 @@ class HeartbeatRunner:
         that fan out subagents pass a longer budget; None uses self.claude_timeout.
         """
         call_timeout = timeout or self.claude_timeout
-        memory = load_tiered_memory(self.memory_dir)
+
+        self._call_timed_out = False
+        self._last_call_error = ""
+        self._call_context_overflow = False
+        attempted: set[str] = set()
+        model = self.model
+        use_backup = False
+        backup_tried = False
+        _backup2_active = False
+        # Sticky provider gate (2026-07-07 spend-limit incident): when the
+        # primary account is known-exhausted, start on the backup provider
+        # instead of re-probing primary every cycle (2 doomed subprocess
+        # spawns per call, 114 wasted error lines in one evening). 'probe'
+        # means this call was elected to try primary once and report back.
+        gate_state = "primary"
+        try:
+            from core.model_fallback import gate as _provider_gate
+            gate_state = _provider_gate(self.jarvis_dir)
+        except Exception:
+            gate_state = "primary"
+        if (gate_state == "backup"
+                and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
+                and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
+                and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
+            use_backup = True
+            backup_tried = True
+            model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
+
+        # Provider-aware memory budget: backup relay has a smaller context
+        # window than the primary 1M channel.
+        mem_budget = None
+        if use_backup:
+            mem_budget = int(os.environ.get("BACKUP_MAX_MEMORY_CHARS", "40000"))
+        memory = load_tiered_memory(self.memory_dir, max_chars=mem_budget)
         now_ts = now_local_str("%Y-%m-%d %H:%M %A")
         system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
 Current time: {now_ts}
@@ -833,31 +866,6 @@ You have access to the user's memory below. Use it to personalize your responses
     python3 -m core.actions do <type> key=val ...   (e.g. do intent_close id=<parent> outcome=done result=<一句>)
 
 {memory}"""
-
-        self._call_timed_out = False
-        self._last_call_error = ""
-        self._call_context_overflow = False
-        attempted: set[str] = set()
-        model = self.model
-        use_backup = False
-        backup_tried = False
-        # Sticky provider gate (2026-07-07 spend-limit incident): when the
-        # primary account is known-exhausted, start on the backup provider
-        # instead of re-probing primary every cycle (2 doomed subprocess
-        # spawns per call, 114 wasted error lines in one evening). 'probe'
-        # means this call was elected to try primary once and report back.
-        gate_state = "primary"
-        try:
-            from core.model_fallback import gate as _provider_gate
-            gate_state = _provider_gate(self.jarvis_dir)
-        except Exception:
-            gate_state = "primary"
-        if (gate_state == "backup"
-                and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
-                and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
-                and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
-            use_backup = True
-            backup_tried = True
         try:
             while True:
                 cmd = [
@@ -875,10 +883,16 @@ You have access to the user's memory below. Use it to personalize your responses
                 env = None
                 if use_backup:
                     env = os.environ.copy()
-                    env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
-                        "CLAUDE_BACKUP_AUTH_TOKEN", "")
-                    env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                        "CLAUDE_BACKUP_BASE_URL", "")
+                    if _backup2_active:
+                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
+                            "CLAUDE_BACKUP2_AUTH_TOKEN", "")
+                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
+                            "CLAUDE_BACKUP2_BASE_URL", "")
+                    else:
+                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
+                            "CLAUDE_BACKUP_AUTH_TOKEN", "")
+                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
+                            "CLAUDE_BACKUP_BASE_URL", "")
                 self._log(
                     f"Calling Claude heartbeat provider={provider} model={model or '(default)'}"
                 )
@@ -983,8 +997,18 @@ You have access to the user's memory below. Use it to personalize your responses
                         and (model_problem or gate_state != "primary")):
                     backup_tried = True
                     use_backup = True
-                    model = self.model
+                    model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
                     self._log("Retrying Claude heartbeat with backup provider")
+                    continue
+                if (not use_backup and backup_tried
+                        and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
+                        and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
+                        and os.environ.get("CLAUDE_BACKUP2_BASE_URL")
+                        and (model_problem or gate_state != "primary")):
+                    use_backup = True
+                    _backup2_active = True
+                    model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model
+                    self._log("Retrying Claude heartbeat with backup2 provider")
                     continue
                 # `or use_backup`: an auth/network error from the backup relay
                 # matches no model-error signature (kept tight after the

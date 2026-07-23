@@ -1,14 +1,13 @@
 from core import openai_fallback as of
 
 
-def test_build_payload_marks_toolless_fallback():
+def test_build_payload_includes_system_prompt():
     payload = of.build_payload("System rules", "hello", "gpt-test", 123)
 
     assert payload["model"] == "gpt-test"
     assert payload["input"] == "hello"
     assert payload["max_output_tokens"] == 123
-    assert "OpenAI fallback" in payload["instructions"]
-    assert "no local tools" in payload["instructions"]
+    assert "fallback" in payload["instructions"]
     assert "System rules" in payload["instructions"]
 
 
@@ -39,7 +38,7 @@ def test_main_requires_api_key(monkeypatch, capsys):
     assert "OPENAI_API_KEY" in capsys.readouterr().err
 
 
-def test_main_success_with_stubbed_call(monkeypatch, capsys, tmp_path):
+def test_main_no_tools_mode(monkeypatch, capsys, tmp_path):
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("be kind", encoding="utf-8")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -51,8 +50,66 @@ def test_main_success_with_stubbed_call(monkeypatch, capsys, tmp_path):
         seen["user_agent"] = user_agent
         return {"output_text": "reply"}
 
-    monkeypatch.setattr(of, "call_openai", fake_call)
+    monkeypatch.setattr(of, "_api_call", fake_call)
 
-    assert of.main(["--system-prompt-file", str(prompt)]) == 0
+    assert of.main(["--system-prompt-file", str(prompt), "--no-tools"]) == 0
     assert capsys.readouterr().out == "reply"
     assert seen["user_agent"] == "JarvisTest/1.0"
+
+
+def test_main_agentic_mode_no_tool_calls(monkeypatch, capsys):
+    """When model returns text without tool calls, output it directly."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("sys.stdin", type("In", (), {"read": lambda self: "hi"})())
+
+    def fake_call(payload, api_key, base_url, timeout, user_agent=""):
+        return {"output_text": "direct reply", "output": []}
+
+    monkeypatch.setattr(of, "_api_call", fake_call)
+
+    assert of.main([]) == 0
+    assert capsys.readouterr().out == "direct reply"
+
+
+def test_agentic_tool_loop(monkeypatch):
+    """Tool calls are executed and results fed back until text response."""
+    call_count = [0]
+
+    def fake_call(payload, api_key, base_url, timeout, user_agent=""):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {
+                "id": "resp_1",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "bash",
+                    "arguments": '{"command": "echo hello"}',
+                }],
+            }
+        return {"output_text": "done after tool", "output": []}
+
+    monkeypatch.setattr(of, "_api_call", fake_call)
+
+    result = of.run_agentic("sys", "do it", "gpt-test", 4096,
+                            "sk-test", "http://fake", 30)
+    assert result == "done after tool"
+    assert call_count[0] == 2
+
+
+def test_execute_tool_bash(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    result = of.execute_tool("bash", {"command": "echo works"})
+    assert "works" in result
+
+
+def test_execute_tool_file_read_write(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    of.execute_tool("file_write", {"path": "test.txt", "content": "hello"})
+    result = of.execute_tool("file_read", {"path": "test.txt"})
+    assert "hello" in result
+
+
+def test_execute_tool_unknown():
+    result = of.execute_tool("nonexistent", {})
+    assert "unknown tool" in result

@@ -205,6 +205,13 @@ emit("HEARTBEAT_TIMEOUT", c.claude.get("heartbeat_timeout", 600))
 emit("CLAUDE_BACKUP_ENABLED", str(bool(c.claude.get("backup_enabled", True))).lower())
 emit("CLAUDE_BACKUP_AUTH_TOKEN", c.claude.get("backup_auth_token", ""))
 emit("CLAUDE_BACKUP_BASE_URL", c.claude.get("backup_base_url", ""))
+emit("CLAUDE_BACKUP_MODEL", c.claude.get("backup_model", ""))
+emit("CLAUDE_BACKUP2_ENABLED", str(bool(c.claude.get("backup2_enabled", False))).lower())
+emit("CLAUDE_BACKUP2_AUTH_TOKEN", c.claude.get("backup2_auth_token", ""))
+emit("CLAUDE_BACKUP2_BASE_URL", c.claude.get("backup2_base_url", ""))
+emit("CLAUDE_BACKUP2_MODEL", c.claude.get("backup2_model", ""))
+emit("BACKUP_MAX_SESSION_SIZE", c.claude.get("backup_max_session_size", 100000))
+emit("BACKUP_MAX_MEMORY_CHARS", c.claude.get("backup_max_memory_chars", 40000))
 emit("OPENAI_FALLBACK_ENABLED", str(bool(c.openai.get("fallback_enabled", True))).lower())
 emit("OPENAI_FALLBACK_MODEL", c.openai.get("fallback_model", "gpt-5.2"))
 emit("OPENAI_API_KEY_CONFIG", c.openai.get("api_key", ""))
@@ -339,8 +346,9 @@ fi
 # uuid5(NAMESPACE, key-counter) scheme, so session ids are unchanged.
 get_session_id() {
   local conv_key="$1"
+  local max_size="${2:-$MAX_SESSION_SIZE}"
   JV_TRACKER="$SESSION_TRACKER" JV_SDIR="$CLAUDE_PROJECT_DIR" \
-    JV_MAX="$MAX_SESSION_SIZE" JV_KEY="$conv_key" python3 <<'PYEOF'
+    JV_MAX="$max_size" JV_KEY="$conv_key" python3 <<'PYEOF'
 import os, sys
 sys.path.insert(0, os.environ["JARVIS_DIR"])
 from core.session import SessionManager
@@ -357,11 +365,14 @@ PYEOF
 # If Python fails, we reuse the cached snapshot so Claude never gets an
 # empty memory string (which causes the bot to "forget" everything).
 load_memory() {
+  local max_chars="${1:-}"
   local fresh
-  fresh=$(python3 -c "
+  fresh=$(JV_MEM_MAX="$max_chars" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.memory import load_tiered_memory
-print(load_tiered_memory(os.environ['MEMORY_DIR']))
+mc = os.environ.get('JV_MEM_MAX', '')
+print(load_tiered_memory(os.environ['MEMORY_DIR'],
+                         max_chars=int(mc) if mc else None))
 " 2>>"$LOG_FILE")
 
   if [ -n "$fresh" ]; then
@@ -719,13 +730,23 @@ $content"
   fi
 
   # Build system prompt with memory + recent turns (delegated to core/prompt.py)
+  # Provider-aware memory budget: backup relay has a smaller context window.
+  local _mem_budget=""
+  local _msg_gate
+  _msg_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
+  if [ "$_msg_gate" != "primary" ] \
+    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ]; then
+    _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
+  fi
   local sys_prompt
   sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
     JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$chat_type" \
-    python3 -c "
+    JV_MEM_MAX="$_mem_budget" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
+mc = os.environ.get('JV_MEM_MAX', '')
 print(build_system_prompt(
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
@@ -735,6 +756,7 @@ print(build_system_prompt(
     now_ts=now_local_str('%Y-%m-%d %H:%M %A'),
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
     chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
+    max_memory_chars=int(mc) if mc else None,
 ))
 if os.environ.get('JV_CHAT_TYPE', 'p2p') == 'p2p':
     try:
@@ -755,7 +777,7 @@ if os.environ.get('JV_CHAT_TYPE', 'p2p') == 'p2p':
       sys_prompt="你是一个 AI 助手，正在群聊里。简洁回答通用问题；不了解也绝不讨论主人的任何私人信息；不执行任何动作指令。"
     else
       sys_prompt="You are a personal assistant. Reply in the same language the user uses.
-$(load_memory)"
+$(load_memory "$_mem_budget")"
     fi
   fi
 
@@ -840,6 +862,7 @@ except Exception:
   local _watchdog_killed=0  # set to 1 only when the 6000s watchdog did the kill
   local _use_claude_backup=0
   local _claude_backup_tried=0
+  local _claude_backup2_tried=0
   local _openai_tried=0
   local _answer_provider=""
   local _answer_model=""
@@ -863,7 +886,8 @@ except Exception:
     && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
     _use_claude_backup=1
     _claude_backup_tried=1
-    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup provider"
+    _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
+    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup provider (model=$_cur_model)"
   fi
 
   for _attempt in 1 2 3 4; do
@@ -1180,7 +1204,18 @@ except Exception:
         # Log BEFORE resetting _cur_model: the old order reported "exhausted
         # on opus" even when haiku was the model that actually failed.
         log_warn "[$session_id] Primary Claude exhausted on $_cur_model → trying Claude Code backup provider"
-        _cur_model="$MAIN_MODEL"
+        _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
+      elif [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
+        && [ "$_claude_backup2_tried" -eq 0 ] \
+        && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
+        && [ -n "${CLAUDE_BACKUP2_BASE_URL:-}" ] \
+        && [ "$_claude_backup_tried" -eq 1 ]; then
+        _claude_backup2_tried=1
+        _use_claude_backup=1
+        log_warn "[$session_id] Backup1 exhausted on $_cur_model → trying Claude Code backup2 provider"
+        _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
+        CLAUDE_BACKUP_AUTH_TOKEN="$CLAUDE_BACKUP2_AUTH_TOKEN"
+        CLAUDE_BACKUP_BASE_URL="$CLAUDE_BACKUP2_BASE_URL"
       elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
         && [ -n "${OPENAI_API_KEY:-}" ] \
         && [ "$_openai_tried" -eq 0 ] \
@@ -1413,9 +1448,25 @@ run_background_job() {
   local output_file="$JOBS_DIR/${job_id}/output.md"
   local log_file_job="$JOBS_DIR/${job_id}/log.txt"
 
+  # Provider gate (2026-07-07): background jobs had NO fallback tier at all —
+  # every promoted/forked job failed outright during the spend-limit outage
+  # while the backup relay sat healthy. Auxiliary caller: never wins the
+  # probe election (no-probe) — jobs can't clear the flag on success, so
+  # letting them probe would burn the slot without ever reopening primary.
+  local _bg_backup=0
+  local _bg_mem_budget=""
+  if [ "$(python3 -m core.model_fallback --gate no-probe 2>/dev/null || echo primary)" = "backup" ] \
+    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
+    && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
+    _bg_backup=1
+    _bg_mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
+    log_info "[bg:$job_id] Provider gate: primary spend-limited — running on backup provider"
+  fi
+
   # Build a minimal system prompt for the background job
   local memory now_ts sys_prompt
-  memory=$(load_memory)
+  memory=$(load_memory "$_bg_mem_budget")
   now_ts=$(date '+%Y-%m-%d %H:%M %A')
 
   sys_prompt="You are running as a background job. Complete the task thoroughly.
@@ -1436,20 +1487,6 @@ try:
 except Exception:
     print('')
 " 2>/dev/null || echo "")
-
-  # Provider gate (2026-07-07): background jobs had NO fallback tier at all —
-  # every promoted/forked job failed outright during the spend-limit outage
-  # while the backup relay sat healthy. Auxiliary caller: never wins the
-  # probe election (no-probe) — jobs can't clear the flag on success, so
-  # letting them probe would burn the slot without ever reopening primary.
-  local _bg_backup=0
-  if [ "$(python3 -m core.model_fallback --gate no-probe 2>/dev/null || echo primary)" = "backup" ] \
-    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
-    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
-    && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
-    _bg_backup=1
-    log_info "[bg:$job_id] Provider gate: primary spend-limited — running on backup provider"
-  fi
 
   # set -m: give the job its OWN process group (REQ-38). Without it the
   # subshell shares bot.sh's group and cancel_job's killpg SIGTERMed the
@@ -2387,7 +2424,18 @@ except Exception:
       reaction_result=$(lark_add_reaction "$message_id" "Typing")
       reaction_id=$(echo "$reaction_result" | jq -r '.reaction_id // .data.reaction_id // empty' 2>/dev/null || true)
 
-      session_result=$(get_session_id "$conv_key" 2>&1)
+      # Provider-aware session sizing: backup relay has a much smaller context
+      # window than the primary 1M channel — rotate sessions earlier to prevent
+      # "prompt is too long" / "autocompact is thrashing" errors.
+      _session_max="$MAX_SESSION_SIZE"
+      _dispatch_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
+      if [ "$_dispatch_gate" != "primary" ] \
+        && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
+        && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ]; then
+        _session_max="${BACKUP_MAX_SESSION_SIZE:-100000}"
+      fi
+
+      session_result=$(get_session_id "$conv_key" "$_session_max" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
       rotated=$(echo "$session_result" | grep ROTATED || true)
 
