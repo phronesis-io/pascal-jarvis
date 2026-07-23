@@ -186,7 +186,9 @@ Entrances
    relevant artifacts, and next action.
 6. On completion, the Codex session, final summary, commits, and files are
    linked back to the Matter.
-7. Jarvis sends one Lark memorial only when a decision or review is required.
+7. Jarvis creates one memorial only when a decision or review is required.
+   Batchable decisions wait on the phone desk; only immediate decisions
+   interrupt Lark.
 
 ### Journey B: resume from the phone
 
@@ -230,6 +232,25 @@ Entrances
 | Codex | one execution session | long-term project identity |
 | EigenFlux | external messages/signals | user-facing state |
 | `:3456` | local admin and operational control | everyday product UX |
+
+### 7.1 Human-centered attention routing
+
+The product exists to help Pascal spend more time on work and relationships
+that create value, not to maximize notification handling. A memorial therefore
+stores both its semantic attention class and its preferred approval surface.
+The same ledger backs every surface, so approving once closes it everywhere.
+
+| Situation | Preferred surface | Product behavior |
+|---|---|---|
+| Ordinary project, research, publishing, friend, or planning decision | Phone | `手机集中批`; no Lark interruption |
+| Urgent decision, active Lark-conversation ask, Lark-native callback | Lark | `飞书即时批`; also remains visible on the phone |
+| Calendar decision with a closing time window | Lark | `飞书即时批` |
+| Urgent non-choice alert | Lark notification | Clearly says `无需批`; not counted as a pending decision |
+| Routine information, sync result, ambient signal | Web notice | `知会 · 无需批`; no Lark push |
+
+New ordinary decisions default to the phone. Historical pending decisions that
+were already delivered to Lark remain labeled as Lark decisions so their
+existing cards do not become misleading or orphaned.
 
 ## 8. Functional requirements
 
@@ -425,8 +446,9 @@ is why the migration is links-first and prospective.
 - Information/conversation/decision routing.
 - Web-to-Lark card state synchronization.
 - Matter-aware EigenFlux ingestion.
-- Decision/alert/notice attention routing: decisions and sparse alerts may
-  reach Lark; routine notices remain web-first.
+- Decision/alert/notice attention routing plus a persisted review surface:
+  ordinary decisions are phone-first, immediate decisions and sparse alerts
+  may reach Lark, and routine notices remain web-first.
 
 ### Phase 4A: secure personal mobile access (complete)
 
@@ -506,6 +528,11 @@ uses the `ts.net` certificate and needs only the Tailscale app/account.
     explicit audited override.
 13. The mobile gateway presents a CA-signed certificate, rejects foreign
     origins, supports device revocation, and has no route to `:3456`.
+14. Every pending memorial is labeled `手机集中批` or `飞书即时批`; notices and
+    alerts say `无需批`.
+15. A normal decision created outside a Lark conversation is durable on the
+    phone without sending a Lark card; urgent and calendar decisions still
+    reach Lark.
 
 ## 16. Metrics
 
@@ -531,6 +558,8 @@ uses the `ts.net` certificate and needs only the Tailscale app/account.
 - `:3457`, not Lark, is the canonical visual home.
 - Lark remains the preferred immediate conversation channel during the first
   three phases.
+- The phone is the default deliberate decision desk; Lark is the exception for
+  time-sensitive attention, not a duplicate inbox.
 - Remote access is a security feature, not a port-forwarding setting.
 - History is linked and searched on demand; it is not bulk-ingested.
 - Better models may replace classifiers and summarizers, but they do not

@@ -1,11 +1,12 @@
 """Memorial (奏折) cards — the unified "ask Pascal" surface.
 
 Every proactive output that needs Pascal's eyes (mail triage, decisions,
-follow-ups, heartbeat asks…) becomes ONE Lark card that states one thing in
-plain words, with 2-3 approval buttons plus a「💬 聊聊这个」button — like
-Claude Code's AskUserQuestion. Tapping an option = 批红: it is recorded (and
-optionally executes an action through ActionProcessor), and the card is
-replaced in place with the approved state. Tapping「聊聊这个」injects the
+follow-ups, heartbeat asks…) becomes one durable memorial.  The ledger records
+where Pascal should act: ordinary, batchable decisions go to the phone desk;
+only urgent, conversation-bound, or Lark-native decisions interrupt Lark.
+Alerts may reach Lark but are explicitly not approvals, and routine notices
+stay in the web feed. Tapping an option = 批红: it is recorded (and optionally
+executes an action through ActionProcessor). Tapping「聊聊这个」injects the
 memorial's full context into the p2p conversation via bot.sh's existing
 pending-merge channel, so Pascal's NEXT message lands with the topic loaded.
 
@@ -123,6 +124,18 @@ ATTENTION_DECISION = "decision"
 ATTENTION_NOTICE = "notice"
 ATTENTION_ALERT = "alert"
 
+REVIEW_LARK = "lark"
+REVIEW_PHONE = "phone"
+REVIEW_NONE = "none"
+REVIEW_SURFACES = {REVIEW_LARK, REVIEW_PHONE, REVIEW_NONE}
+
+# Successful handoff means either an interrupting Lark delivery or a durable
+# placement on the phone/web desk. Callers that ingest external events use this
+# contract to mark upstream input seen without falling back to another channel.
+ACCEPTED_DELIVERY_STATUSES = {
+    "delivered", "queued", "retry_queued", "phone_ready", "web_only",
+}
+
 # These are synchronization/ambient-signal producers, not user-facing owners
 # of a decision. Their output stays web-first even when an LLM helpfully invents
 # reply options; a real decision should be promoted by a dedicated source.
@@ -131,6 +144,11 @@ WEB_FIRST_SOURCES = {
     "eigenflux-feed-triage",
 }
 ALERT_SOURCES = {
+    "calendar-sync",
+}
+# Calendar choices expire with the clock; unlike ordinary planning decisions,
+# delaying them can create a real conflict. They retain the immediate lane.
+LARK_REVIEW_SOURCES = {
     "calendar-sync",
 }
 
@@ -179,12 +197,57 @@ def requires_decision(state: dict) -> bool:
     ) == ATTENTION_DECISION
 
 
+def _infer_review_surface(source: str, attention: str,
+                          extra_buttons: list[dict],
+                          *, urgent: bool = False,
+                          chat_id: str = "") -> str:
+    """Choose where a human decision should happen.
+
+    Phone is the humane default for real decisions: it supports deliberate,
+    batched review without turning every ask into an interruption. Lark is
+    reserved for decisions whose delay matters, asks already scoped to a live
+    conversation, and legacy callbacks the web surface cannot execute.
+    """
+    if attention != ATTENTION_DECISION:
+        return REVIEW_NONE
+    has_lark_native_action = any(
+        isinstance(button.get("value"), dict) for button in extra_buttons
+    )
+    if (urgent or str(chat_id or "").strip() or has_lark_native_action
+            or str(source or "") in LARK_REVIEW_SOURCES):
+        return REVIEW_LARK
+    return REVIEW_PHONE
+
+
+def review_surface(state: dict) -> str:
+    """Preferred approval surface, with a truthful fallback for old rows."""
+    explicit = str(state.get("review_surface", "") or "")
+    if explicit in REVIEW_SURFACES:
+        return explicit
+    if not requires_decision(state):
+        return REVIEW_NONE
+    # Before this field existed, a delivered/queued decision was a Lark card.
+    if str(state.get("delivery_status", "")) in {
+            "delivered", "queued", "retry_queued"}:
+        return REVIEW_LARK
+    return _infer_review_surface(
+        str(state.get("source", "")),
+        ATTENTION_DECISION,
+        list(state.get("extra_buttons") or []),
+        chat_id=str(state.get("chat_id", "")),
+    )
+
+
+def delivery_accepted(state: dict) -> bool:
+    return str(state.get("delivery_status", "")) in ACCEPTED_DELIVERY_STATUSES
+
+
 def should_push_to_lark(state: dict) -> bool:
-    """Lark receives decisions and sparse alerts, not routine FYI notices."""
+    """Lark receives sparse alerts and only Lark-routed decisions."""
     attention = str(state.get("attention", "") or "")
-    if attention:
-        return attention in {ATTENTION_DECISION, ATTENTION_ALERT}
-    return requires_decision(state)
+    if attention == ATTENTION_ALERT:
+        return True
+    return requires_decision(state) and review_surface(state) == REVIEW_LARK
 
 
 _ALERT_RE = re.compile(
@@ -364,6 +427,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                     _default_attention(str(e.get("source", "")),
                                        options, extra_buttons)
                 ),
+                "review_surface": str(e.get("review_surface", "")),
                 "context": str(e.get("context", "")),
                 "dedup_key": str(e.get("dedup_key", "")),
                 "chat_id": str(e.get("chat_id", "")),
@@ -495,6 +559,12 @@ def _render_card(state: dict, *, body: str | None = None,
                  status_line: str = "", include_options: bool = True,
                  include_chat: bool = True) -> str:
     content = _display_body(state["body"] if body is None else body)
+    if not status_line and state.get("status") == "pending":
+        if (requires_decision(state)
+                and review_surface(state) == REVIEW_LARK):
+            status_line = "⚡ 请在飞书即时批"
+        elif str(state.get("attention", "")) == ATTENTION_ALERT:
+            status_line = "⚡ 即时提醒 · 无需批"
     if status_line:
         content += "\n\n" + status_line
     return build_card(
@@ -780,7 +850,8 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                            context: str, chat_id: str,
                            matter_id: str = "",
                            dedup_key: str = "",
-                           attention: str = "") -> dict | None:
+                           attention: str = "",
+                           review_at: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
     dedup window, or the same explicit external identity."""
     now = time.time()
@@ -798,6 +869,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                 and st.get("chat_id", "") == chat_id
                 and st.get("matter_id", "") == matter_id
                 and str(st.get("attention", "")) == attention
+                and review_surface(st) == review_at
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
             return st
     return None
@@ -955,16 +1027,17 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            extra_buttons: list[dict] | None = None,
            matter_id: str = "",
            dedup_key: str = "",
-           attention: str = "") -> tuple[str, bool]:
-    """Create a memorial, append it to the ledger, and send the card.
+           attention: str = "",
+           review_at: str = "") -> tuple[str, bool]:
+    """Create a memorial, append it to the ledger, and route it.
 
-    Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
-    so a failed send still leaves a queryable record (list --pending) and the
-    caller can re-deliver via card_json().
+    Returns ``(memorial_id, accepted)``. Accepted means the memorial is either
+    visible on its durable phone/web surface or accepted by the Lark delivery
+    path. The ledger write happens before either route.
 
-    send=False skips delivery entirely (no direct send, no outbox mirror) —
-    for emitters that own a delivery channel with its own retries/dedup/night
-    gate, e.g. a heartbeat post-script printing card_json() to the CARD pipe.
+    send=False skips outbound delivery (no direct send, no outbox mirror) for
+    emitters that own a transport. Phone/web-routed rows are still marked ready
+    because the ledger itself is their durable surface.
 
     Direct sends respect the delivery layer's gates: an identical pending
     memorial within 6h is not re-created, and an explicit ``dedup_key`` stays
@@ -986,8 +1059,25 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     attention = str(
         attention or _default_attention(source, opts, native_buttons)
     )
+    if urgent and attention == ATTENTION_NOTICE:
+        attention = ATTENTION_ALERT
     if attention not in {ATTENTION_DECISION, ATTENTION_NOTICE, ATTENTION_ALERT}:
         raise ValueError("attention must be decision, notice, or alert")
+    inferred_review_at = _infer_review_surface(
+        source, attention, native_buttons, urgent=urgent, chat_id=chat_id)
+    # Hard time/conversation/native-action constraints cannot be downgraded by
+    # a caller accidentally passing phone. Ordinary decisions may explicitly
+    # opt into Lark when a trusted emitter has stronger context.
+    review_at = str(
+        REVIEW_LARK if inferred_review_at == REVIEW_LARK
+        else (review_at or inferred_review_at)
+    )
+    if review_at not in REVIEW_SURFACES:
+        raise ValueError("review_at must be lark, phone, or none")
+    if attention == ATTENTION_DECISION and review_at == REVIEW_NONE:
+        raise ValueError("decisions must be reviewed on lark or phone")
+    if attention != ATTENTION_DECISION and review_at != REVIEW_NONE:
+        raise ValueError("only decisions can have a review surface")
 
     if not matter_id:
         try:
@@ -998,22 +1088,35 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id),
-        str(matter_id), str(dedup_key), attention)
+        str(matter_id), str(dedup_key), attention, review_at)
     if dup is not None:
         print(f"memorial dedup: identical pending {dup['id']} within "
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
         if not send:
+            if (not should_push_to_lark(dup)
+                    and not delivery_accepted(dup)):
+                _record_delivery(
+                    dup["id"],
+                    "phone_ready" if requires_decision(dup) else "web_only",
+                )
+                return dup["id"], True
             return dup["id"], False
-        if dup.get("delivery_status") in {"delivered", "queued", "retry_queued"}:
+        if delivery_accepted(dup):
             return dup["id"], True
-        return dup["id"], _deliver_existing(dup, urgent=urgent)
+        if should_push_to_lark(dup):
+            return dup["id"], _deliver_existing(dup, urgent=urgent)
+        _record_delivery(
+            dup["id"],
+            "phone_ready" if requires_decision(dup) else "web_only",
+        )
+        return dup["id"], True
 
     mid = _new_id()
     ts = now_local_str()
     ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context),
-          "attention": attention}
+          "attention": attention, "review_surface": review_at}
     if dedup_key:
         ev["dedup_key"] = str(dedup_key)
     if chat_id:
@@ -1028,18 +1131,28 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         try:
             from core.matters import add_event, link_entity
             link_entity(matter_id, "memorial", mid, provider="jarvis", title=title,
-                        metadata={"source": source, "status": "pending"},
+                        metadata={"source": source, "status": "pending",
+                                  "review_surface": review_at},
                         actor="memorial")
-            add_event(matter_id, "memorial_created", title, actor=source,
-                      payload={"memorial_id": mid})
+            add_event(
+                matter_id, "memorial_created", title, actor=source,
+                payload={"memorial_id": mid, "review_surface": review_at})
         except Exception as e:
             print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
 
     state = _fold([ev])[mid]
     cj = _render_card(state)
     if not send:
+        if not should_push_to_lark(state):
+            _record_delivery(
+                mid, "phone_ready" if requires_decision(state) else "web_only")
+            return mid, True
         return mid, False
-    return mid, _deliver_existing(state, urgent=urgent)
+    if should_push_to_lark(state):
+        return mid, _deliver_existing(state, urgent=urgent)
+    _record_delivery(
+        mid, "phone_ready" if requires_decision(state) else "web_only")
+    return mid, True
 
 
 def _card_memorial_id(card: dict) -> str:
@@ -1127,8 +1240,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         if route_notices_to_web and not should_push_to_lark(state):
             continue
         if suppress_accepted:
-            if state.get("delivery_status") in {
-                    "delivered", "queued", "retry_queued"}:
+            if delivery_accepted(state):
                 continue
         outputs.append(card_json(mid))
     return "\n".join(outputs)
@@ -1247,8 +1359,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             state = get_memorial(mid) or {}
             if not should_push_to_lark(state):
                 continue
-            if state.get("delivery_status") in {
-                    "delivered", "queued", "retry_queued"}:
+            if delivery_accepted(state):
                 continue
             rendered.append(card_json(mid))
 
@@ -1408,7 +1519,9 @@ def decide(memorial_id: str, opt_key: str) -> dict:
                 st["matter_id"], "memorial", memorial_id, provider="jarvis",
                 title=st.get("title", ""),
                 metadata={"source": st.get("source", ""), "status": "decided",
-                          "decision": opt.get("label", "")}, actor="memorial",
+                          "decision": opt.get("label", ""),
+                          "review_surface": review_surface(st)},
+                actor="memorial",
             )
             add_event(st["matter_id"], "memorial_decided",
                       opt.get("label", ""), actor="user",
@@ -1616,6 +1729,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--chat-id", dest="chat_id", default="")
     sp.add_argument("--urgent", action="store_true",
                     help="bypass quiet hours (only for genuinely urgent asks)")
+    sp.add_argument("--review-at", choices=(REVIEW_PHONE, REVIEW_LARK),
+                    default="", help="preferred approval surface")
 
     lp = sub.add_parser("list", help="print folded ledger states (JSON lines)")
     lp.add_argument("--pending", action="store_true")
@@ -1637,7 +1752,7 @@ def main(argv: list[str] | None = None) -> int:
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
                                context=args.context, chat_id=args.chat_id,
-                               urgent=args.urgent)
+                               urgent=args.urgent, review_at=args.review_at)
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2

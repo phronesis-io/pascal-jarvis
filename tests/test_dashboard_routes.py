@@ -861,7 +861,9 @@ class TestDecisionSurface:
             "mail", "daily-reflect", "eigenflux-feed-triage"]
 
     def test_only_explicit_choices_count_as_pending_decisions(self):
-        from dashboard.uiutil import memorial_is_notice, memorial_is_pending
+        from dashboard.uiutil import (memorial_is_notice, memorial_is_pending,
+                                      memorial_surface_label,
+                                      memorial_visible_options)
         base = {"status": "pending", "delivery_status": "delivered",
                 "extra_buttons": []}
         notice = {**base, "options": [
@@ -875,6 +877,26 @@ class TestDecisionSurface:
         assert memorial_is_notice(notice) is True
         assert memorial_is_pending(decision) is True
         assert memorial_is_notice(decision) is False
+        assert memorial_surface_label({
+            **decision, "review_surface": "phone"
+        }) == "手机集中批"
+        assert memorial_surface_label({
+            **decision, "review_surface": "lark"
+        }) == "飞书即时批"
+        assert memorial_surface_label({
+            **notice, "attention": "alert"
+        }) == "飞书提醒 · 无需批"
+        invented_notice = {
+            **notice,
+            "attention": "notice",
+            "options": [
+                {"key": "r1", "label": "继续调研"},
+                {"key": "r2", "label": "先别动"},
+            ],
+        }
+        assert memorial_visible_options(invented_notice) == []
+        assert [option["key"] for option in memorial_visible_options(notice)] == [
+            "read", "watch"]
 
     def test_corrupt_epoch_does_not_blank_the_decision_surface(self):
         from dashboard.uiutil import memorial_attention_rank

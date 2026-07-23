@@ -173,7 +173,7 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         )
         state = memorial.get_memorial(mid) or {}
         delivery = state.get("delivery_status", "")
-        accepted = delivery in {"delivered", "queued", "retry_queued"}
+        accepted = memorial.delivery_accepted(state)
         if not accepted:
             _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
             return seen, False, False
@@ -199,8 +199,7 @@ def _send_memorial_notice(title: str, body: str, user_id: str,
             urgent=urgent,
         )
         state = memorial.get_memorial(mid) or {}
-        return state.get("delivery_status") in {
-            "delivered", "queued", "retry_queued"}
+        return memorial.delivery_accepted(state)
     except Exception as e:
         log("ef-stream", f"Memorial notice failed ({e}); using legacy sender",
             level="warn")

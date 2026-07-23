@@ -14,7 +14,9 @@ from ..uiutil import (add_dashboard_head, dashboard_header,
                       memorial_display_body, memorial_display_title,
                       memorial_is_notice,
                       memorial_is_pending,
-                      memorial_option_label, source_label)
+                      memorial_option_label, memorial_review_surface,
+                      memorial_surface_label, memorial_visible_options,
+                      source_label)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -32,7 +34,7 @@ def _compact(text: str, limit: int = 520) -> str:
 @ui.page("/memorials")
 def memorials_page():
     add_dashboard_head()
-    mode = {"value": "pending"}
+    mode = {"value": "phone"}
     source_filter = {"value": None}  # None = 全部来源（按 source_label 分组）
     visible_limit = {"value": 8}
 
@@ -44,6 +46,12 @@ def memorials_page():
             states = memorial_states(JARVIS_DIR)
             pending = [s for s in states if memorial_is_pending(s)]
             pending.sort(key=memorial_attention_rank, reverse=True)
+            phone_pending = [
+                s for s in pending if memorial_review_surface(s) == "phone"
+            ]
+            lark_pending = [
+                s for s in pending if memorial_review_surface(s) == "lark"
+            ]
             notices = [s for s in states if memorial_is_notice(s)]
             notices.sort(key=lambda s: (s.get("epoch", 0), s.get("ts", "")),
                          reverse=True)
@@ -60,7 +68,8 @@ def memorials_page():
                 board.refresh()
 
             with ui.row().classes("w-full items-center gap-2"):
-                for value, text, count in (("pending", "待批", len(pending)),
+                for value, text, count in (("phone", "手机批", len(phone_pending)),
+                                           ("lark", "飞书批", len(lark_pending)),
                                            ("notice", "知会", len(notices)),
                                            ("decided", "已批", len(decided)),
                                            ("all", "全部", len(states))):
@@ -71,7 +80,8 @@ def memorials_page():
                         "filter-chip " + ("memorial-primary" if active
                                           else "memorial-secondary"))
 
-            selected = ({"pending": pending, "notice": notices,
+            selected = ({"phone": phone_pending, "lark": lark_pending,
+                         "notice": notices,
                          "decided": decided}.get(
                 mode["value"], states))
 
@@ -105,7 +115,8 @@ def memorials_page():
             shown = selected[:visible_limit["value"]]
             if not shown:
                 message = {
-                    "pending": "没有待批事项。需要明确选择时，奏折会同时到飞书和这里。",
+                    "phone": "没有需要集中批阅的事项。普通决策会安静地等在这里。",
+                    "lark": "没有需要即时批阅的事项。只有紧急或对话内决策才会到飞书。",
                     "notice": "暂时没有新的知会。",
                 }.get(mode["value"], "这里还没有记录。")
                 ui.label(message).classes("empty-guidance")
@@ -131,8 +142,11 @@ def memorials_page():
                     classes = "memorial-card" + (" is-decided" if decided_state else "")
                     with ui.card().classes(classes):
                         with ui.row().classes("w-full items-center justify-between gap-3"):
-                            ui.label(source_label(state.get("source", ""))).classes(
-                                "memorial-source")
+                            with ui.row().classes("items-center gap-2"):
+                                ui.label(source_label(state.get("source", ""))).classes(
+                                    "memorial-source")
+                                ui.label(memorial_surface_label(state)).classes(
+                                    "memorial-surface")
                             ui.label(state.get("ts", "")).classes("memorial-time")
                         ui.label(memorial_display_title(state)).classes("memorial-title")
                         ui.markdown(_compact(memorial_display_body(state))).classes(
@@ -144,7 +158,8 @@ def memorials_page():
                                 "section-note")
                         with ui.row().classes("memorial-actions"):
                             if not decided_state:
-                                for index, option in enumerate(state.get("options", [])):
+                                for index, option in enumerate(
+                                        memorial_visible_options(state)):
                                     ui.button(
                                         memorial_option_label(option.get("label", "选择")),
                                         on_click=lambda mid=state["id"], key=option.get("key", ""):

@@ -23,7 +23,8 @@ from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
                       memorial_display_body, memorial_display_title,
                       memorial_is_notice,
                       memorial_is_pending,
-                      memorial_option_label, skip_reason_label, source_label)
+                      memorial_option_label, memorial_review_surface,
+                      memorial_surface_label, skip_reason_label, source_label)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -68,10 +69,15 @@ def _selfmon_headline(jarvis_dir: Path) -> dict:
 
 
 def pending_memorials(jarvis_dir: str | Path, limit: int | None = None,
-                      states: list[dict] | None = None) -> list[dict]:
+                      states: list[dict] | None = None,
+                      review_at: str = "") -> list[dict]:
     if states is None:
         states = memorial_states(jarvis_dir)
     pending = [s for s in states if memorial_is_pending(s)]
+    if review_at:
+        pending = [
+            s for s in pending if memorial_review_surface(s) == review_at
+        ]
     pending.sort(key=memorial_attention_rank, reverse=True)
     return pending[:limit] if limit is not None else pending
 
@@ -228,8 +234,11 @@ def _memorial_preview(state: dict, refresh) -> None:
 
     with ui.card().classes("memorial-card"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
-            ui.label(source_label(state.get("source", ""))).classes(
-                "memorial-source")
+            with ui.row().classes("items-center gap-2"):
+                ui.label(source_label(state.get("source", ""))).classes(
+                    "memorial-source")
+                ui.label(memorial_surface_label(state)).classes(
+                    "memorial-surface")
             ui.label(state.get("ts", "")).classes("memorial-time")
         ui.label(memorial_display_title(state)).classes("memorial-title")
         ui.markdown(_compact(memorial_display_body(state))).classes("memorial-body")
@@ -266,9 +275,16 @@ def home_page():
 
             states = memorial_states(JARVIS_DIR)
             pending = pending_memorials(JARVIS_DIR, states=states)
+            phone_pending = [
+                state for state in pending
+                if memorial_review_surface(state) == "phone"
+            ]
+            lark_pending = [
+                state for state in pending
+                if memorial_review_surface(state) == "lark"
+            ]
             stats = engagement_stats(7)
             sm = _selfmon_headline(JARVIS_DIR)
-            marked = sum(s.get("decided_opt") == "watch" for s in states)
             issues = ((sm.get("refires", 0) or 0)
                       + (sm.get("closure_overdue", 0)
                          if isinstance(sm.get("closure_overdue"), int) else 0)
@@ -285,9 +301,10 @@ def home_page():
                         '?.scrollIntoView({behavior: "smooth"})')
 
             with ui.element("div").classes("metric-strip"):
-                _metric("待批奏折", len(pending), alert=bool(pending),
+                _metric("手机待批", len(phone_pending), alert=bool(phone_pending),
                         href="/memorials")
-                _metric("已标重点", marked, href="/memorials")
+                _metric("飞书待批", len(lark_pending), alert=bool(lark_pending),
+                        href="/memorials")
                 _metric("7 日互动率", f"{stats['rate']}%", href="/engagement")
                 _metric("需关注信号", issues, alert=issues not in (0, "—"),
                         on_click=open_drawer)
@@ -296,17 +313,23 @@ def home_page():
                 ui.label("壹 · 决策").classes("section-kicker")
                 with ui.row().classes("w-full items-end justify-between gap-4"):
                     with ui.column().classes("gap-1"):
-                        ui.label("御前待批").classes("section-title")
-                        ui.label("一张卡只说一件事；批示，或带进对话。").classes("section-note")
-                    ui.link(f"查看全部 {len(pending)} →", "/memorials").classes(
+                        ui.label("手机集中批").classes("section-title")
+                        ui.label("把可等待的判断放在一起，留出完整时间做真正重要的事。").classes(
+                            "section-note")
+                    ui.link(f"查看全部 {len(phone_pending)} →", "/memorials").classes(
                         "jarvis-nav-link")
-                if pending:
+                if phone_pending:
                     with ui.element("div").classes("memorial-grid"):
-                        for state in pending[:4]:
+                        for state in phone_pending[:4]:
                             _memorial_preview(state, live_content.refresh)
                 else:
-                    ui.label("没有待批事项。Jarvis 会继续在后台看着，有事再来。").classes(
+                    ui.label("没有需要集中批阅的事项。Jarvis 会继续在后台看着。").classes(
                         "empty-guidance")
+                if lark_pending:
+                    ui.label(
+                        f"另有 {len(lark_pending)} 张即时奏折已送到飞书；"
+                        "它们也保留在「飞书批」中，任一处批示都会同步。"
+                    ).classes("section-note")
 
             with ui.column().classes("w-full gap-3"):
                 ui.label("贰 · 变化").classes("section-kicker")

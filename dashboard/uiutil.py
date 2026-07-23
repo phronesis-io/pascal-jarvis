@@ -173,6 +173,38 @@ def memorial_option_label(label: str) -> str:
     return {"重要，持续盯": "标为重点"}.get(str(label), str(label))
 
 
+def memorial_review_surface(state: dict) -> str:
+    from core.memorial import review_surface
+    return review_surface(state)
+
+
+def memorial_surface_label(state: dict) -> str:
+    """Say where attention belongs, without making notices look like approvals."""
+    if state.get("status") == "decided":
+        return "已批"
+    from core.memorial import ATTENTION_ALERT, REVIEW_LARK
+    if not memorial_is_pending(state):
+        if str(state.get("attention", "")) == ATTENTION_ALERT:
+            return "飞书提醒 · 无需批"
+        return "知会 · 无需批"
+    if memorial_review_surface(state) == REVIEW_LARK:
+        return "飞书即时批"
+    return "手机集中批"
+
+
+def memorial_visible_options(state: dict) -> list[dict]:
+    """Do not let model-invented notice replies masquerade as approvals."""
+    options = list(state.get("options") or [])
+    if memorial_is_pending(state):
+        return options
+    if memorial_is_notice(state):
+        return [
+            option for option in options
+            if str(option.get("key", "")) in {"read", "watch"}
+        ]
+    return []
+
+
 def memorial_is_pending(state: dict) -> bool:
     """Only explicit choices belong in the user's pending-decision queue."""
     from core.memorial import requires_decision

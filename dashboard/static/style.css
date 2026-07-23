@@ -383,6 +383,16 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     letter-spacing: .08em;
     text-transform: uppercase;
 }
+.memorial-surface {
+    padding: 3px 6px;
+    border: 1px solid var(--mist);
+    border-radius: 6px;
+    color: var(--ink-soft);
+    background: var(--mist-soft);
+    font-size: 10px;
+    font-weight: 650;
+    line-height: 1.2;
+}
 .memorial-title {
     color: var(--ink);
     font-family: "Songti SC", "STSong", serif;
