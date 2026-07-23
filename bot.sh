@@ -251,7 +251,9 @@ if command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}" ]; then
     | jq -r '.bot.open_id // empty' 2>/dev/null || true)
 fi
 export BOT_OPEN_ID
-export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL
+export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
+export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_AUTH_TOKEN CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
+export BACKUP_MAX_SESSION_SIZE BACKUP_MAX_MEMORY_CHARS
 export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
   export OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
@@ -1245,6 +1247,10 @@ except Exception:
         fi
         _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
         log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
+        # Primary is already known-dead, backup has failed twice, and the final
+        # GPT route just failed. More loop iterations only repeat the same relay
+        # 403 and delay an honest failure report.
+        break
       fi
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -1301,7 +1307,7 @@ except Exception:
   fi
 
   if [ -z "$reply" ]; then
-    log_warn "[$session_id] Final empty/error answer from Claude (${#answer} chars after ${_attempt:-?} attempts)"
+    log_warn "[$session_id] Final empty/error answer from model chain (${#answer} chars after ${_attempt:-?} attempts)"
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
@@ -1334,8 +1340,17 @@ except Exception:
         log_warn "[$session_id] Empty after $_attempt attempts — staying silent (user opted out of the retry nag)"
       fi
     else
-      lark_reply_text "$message_id" \
-        "Claude 的回复被安全过滤器拦截了（可能包含错误信息）。请换个方式重试。" >/dev/null
+      # looks_like_error suppresses provider/auth/CLI failures; it is not a
+      # content-safety classifier. Calling this a "安全过滤器" sent Pascal
+      # debugging the wrong subsystem while the real fault was an exhausted
+      # provider chain.
+      if [ "${_openai_tried:-0}" -eq 1 ]; then
+        lark_reply_text "$message_id" \
+          "主模型、Claude 备用通道和 GPT 兜底都未能完成这次请求。本次操作没有执行成功，具体故障已记录。" >/dev/null
+      else
+        lark_reply_text "$message_id" \
+          "模型通道返回了错误信息，本次操作没有执行成功，具体故障已记录。" >/dev/null
+      fi
     fi
     return
   fi
@@ -2470,7 +2485,7 @@ runner.run_cycle(force=True, only_task='memory-hourly', lock_wait=120)
 
         # Generate session compact synchronously — must complete before handle_message
         # reads it, otherwise the new session may see a partial/missing compact.
-        JV_DIR="$JARVIS_DIR" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_KEY="$conv_key" \
+        if JV_DIR="$JARVIS_DIR" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_KEY="$conv_key" \
           JV_WORK="$WORK_DIR" python3 -c "
 import sys, os, json
 sys.path.insert(0, os.environ['JV_DIR'])
@@ -2479,10 +2494,15 @@ tracker = json.load(open(os.path.join(os.environ['JV_DIR'], 'active_sessions.jso
 counter = tracker.get(os.environ['JV_KEY'], {}).get('counter', 0)
 old_sid = get_old_session_id(os.environ['JV_KEY'], counter)
 if old_sid:
-    generate_compact(os.environ['JV_DIR'], os.environ['JV_SDIR'],
-                     old_sid, os.environ['JV_KEY'], os.environ['JV_WORK'])
-" 2>>"$LOG_FILE" >/dev/null || log_warn "Session compact failed for $conv_key"
-        log_info "Session compact completed for $conv_key"
+    compact = generate_compact(os.environ['JV_DIR'], os.environ['JV_SDIR'],
+                               old_sid, os.environ['JV_KEY'], os.environ['JV_WORK'])
+    if not compact:
+        raise SystemExit(1)
+" 2>>"$LOG_FILE" >/dev/null; then
+          log_info "Session compact completed for $conv_key"
+        else
+          log_warn "Session compact failed for $conv_key"
+        fi
       fi
 
       # Sanitize content for log (replace newlines/control chars to prevent log injection)

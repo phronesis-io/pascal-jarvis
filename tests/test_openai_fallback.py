@@ -74,8 +74,10 @@ def test_main_agentic_mode_no_tool_calls(monkeypatch, capsys):
 def test_agentic_tool_loop(monkeypatch):
     """Tool calls are executed and results fed back until text response."""
     call_count = [0]
+    payloads = []
 
     def fake_call(payload, api_key, base_url, timeout, user_agent=""):
+        payloads.append(payload)
         call_count[0] += 1
         if call_count[0] == 1:
             return {
@@ -95,12 +97,31 @@ def test_agentic_tool_loop(monkeypatch):
                             "sk-test", "http://fake", 30)
     assert result == "done after tool"
     assert call_count[0] == 2
+    continuation = payloads[1]
+    assert "previous_response_id" not in continuation
+    assert continuation["input"][0] == {"role": "user", "content": "do it"}
+    assert continuation["input"][1]["type"] == "function_call"
+    assert continuation["input"][2] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "hello\n",
+    }
 
 
 def test_execute_tool_bash(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     result = of.execute_tool("bash", {"command": "echo works"})
     assert "works" in result
+
+
+def test_execute_tool_bash_exposes_nonzero_exit(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+
+    result = of.execute_tool(
+        "bash", {"command": "printf 'usage text'; exit 2"})
+
+    assert "usage text" in result
+    assert "(exit 2)" in result
 
 
 def test_execute_tool_file_read_write(monkeypatch, tmp_path):

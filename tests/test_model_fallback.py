@@ -224,6 +224,27 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "Model: ${_answer_provider}" not in bot
     assert "（备用通道）" in bot
     assert "（GPT 兜底）" in bot
+
+
+def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
+    from pathlib import Path
+    import re
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+
+    for name in (
+        "CLAUDE_BACKUP_MODEL",
+        "CLAUDE_BACKUP2_ENABLED",
+        "CLAUDE_BACKUP2_AUTH_TOKEN",
+        "CLAUDE_BACKUP2_BASE_URL",
+        "CLAUDE_BACKUP2_MODEL",
+        "BACKUP_MAX_SESSION_SIZE",
+        "BACKUP_MAX_MEMORY_CHARS",
+    ):
+        assert re.search(rf"^export [^\n]*\b{name}\b", bot, re.MULTILINE)
+    assert "回复被安全过滤器拦截" not in bot
+    assert "本次操作没有执行成功" in bot
+    assert 'log_warn "Session compact failed' in bot
+    assert 'log_info "Session compact completed' in bot
     assert '"Claude primary"' in bot
     assert '"Claude backup"' in bot
     assert '"GPT fallback"' in bot

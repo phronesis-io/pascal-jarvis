@@ -92,10 +92,73 @@ def read_compact(jarvis_dir: str | Path, conv_key: str) -> str:
     return ""
 
 
+def _backup_attempt(label: str, prefix: str) -> tuple[str, str, dict] | None:
+    enabled = os.environ.get(f"{prefix}_ENABLED", "false") == "true"
+    token = os.environ.get(f"{prefix}_AUTH_TOKEN", "")
+    base_url = os.environ.get(f"{prefix}_BASE_URL", "")
+    if not (enabled and token and base_url):
+        return None
+    env = os.environ.copy()
+    env["ANTHROPIC_AUTH_TOKEN"] = token
+    env["ANTHROPIC_BASE_URL"] = base_url
+    model = os.environ.get(f"{prefix}_MODEL", "") or "opus"
+    return label, model, env
+
+
+def _claude_attempts(jarvis_dir: Path) -> list[tuple[str, str, dict | None]]:
+    """Build the compact provider ladder without probing a known-dead primary."""
+    try:
+        from core.model_fallback import gate as provider_gate
+        selected = provider_gate(jarvis_dir, probe=False)
+    except Exception:
+        selected = "primary"
+
+    backup1 = _backup_attempt("backup1", "CLAUDE_BACKUP")
+    backup2 = _backup_attempt("backup2", "CLAUDE_BACKUP2")
+    attempts: list[tuple[str, str, dict | None]] = []
+    if selected == "primary":
+        attempts.append(("primary", "opus", None))
+    if backup1:
+        attempts.append(backup1)
+    if backup2:
+        attempts.append(backup2)
+    # Preserve a usable path for standalone callers whose gate says backup but
+    # whose credentials were not exported into the process.
+    if not attempts:
+        attempts.append(("primary", "opus", None))
+    return attempts
+
+
+def _openai_compact(prompt: str) -> str:
+    if os.environ.get("OPENAI_FALLBACK_ENABLED", "true") != "true":
+        return ""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return ""
+    try:
+        from core.openai_fallback import build_payload, call_openai, extract_text
+        model = os.environ.get("OPENAI_FALLBACK_MODEL", "gpt-5.2")
+        max_tokens = int(os.environ.get(
+            "OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", "4096"))
+        payload = build_payload("", prompt, model, max_tokens)
+        response = call_openai(
+            payload,
+            api_key,
+            os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120")),
+            os.environ.get("OPENAI_USER_AGENT", ""),
+        )
+        return extract_text(response).strip()
+    except Exception as exc:
+        print(f"[compact] OpenAI fallback failed: {str(exc)[:300]}",
+              file=sys.stderr)
+        return ""
+
+
 def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
                      old_session_id: str, conv_key: str,
                      work_dir: str | Path | None = None) -> str:
-    """Generate a compact summary of an old session using Claude opus.
+    """Generate a compact summary using the configured provider fallback chain.
 
     Runs synchronously. Returns the compact text, also saves to disk.
     """
@@ -110,60 +173,53 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
 
     prompt = COMPACT_PROMPT + content
 
-    # Provider gate (2026-07-09 red-team [9]): compaction was the one claude
-    # caller the failover architecture forgot. During the monthly-spend-limit
-    # outage its ungated call hits the dead primary — and the CLI prints the
-    # spend-limit error on STDOUT with rc=1. Auxiliary caller: never wins the
-    # probe election (probe=False), just follows the flag to the backup env —
-    # same pattern as the heartbeat idle-noise judge.
-    env = None
-    try:
-        from core.model_fallback import gate as _provider_gate
-        if (_provider_gate(jarvis_dir, probe=False) == "backup"
-                and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
-                and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
-                and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
-            env = os.environ.copy()
-            env["ANTHROPIC_AUTH_TOKEN"] = os.environ["CLAUDE_BACKUP_AUTH_TOKEN"]
-            env["ANTHROPIC_BASE_URL"] = os.environ["CLAUDE_BACKUP_BASE_URL"]
-    except Exception:
-        env = None
+    compact_text = ""
+    for label, model, env in _claude_attempts(jarvis_dir):
+        try:
+            result = subprocess.run(
+                [resolve_claude_bin(), "-p", "--model", model,
+                 "--dangerously-skip-permissions"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=work_dir or jarvis_dir,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"[compact] Claude {label} timed out (60s)", file=sys.stderr)
+            continue
+        except FileNotFoundError:
+            print("[compact] Claude CLI not found", file=sys.stderr)
+            break
+        except OSError as exc:
+            print(f"[compact] OS error calling Claude {label}: {exc}",
+                  file=sys.stderr)
+            continue
 
-    # Call Claude via CLI (opus — Pascal 2026-06-07: 全部用最好的模型，不计 token)
-    try:
-        result = subprocess.run(
-            [resolve_claude_bin(), "-p", "--model", "opus",
-             "--dangerously-skip-permissions"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=work_dir or jarvis_dir,
-            env=env,
-        )
         if result.returncode != 0:
             # NEVER treat rc!=0 stdout as content: the CLI prints spend-limit /
             # model errors on STDOUT, and saving one would inject the error
-            # line into the next session's prompt as its "previous summary"
-            # (2026-07-09 red-team [9]). Empty compact degrades gracefully.
-            print(f"[compact] Claude exited with code {result.returncode}", file=sys.stderr)
+            # line into the next session's prompt as its "previous summary".
+            print(f"[compact] Claude {label} exited with code "
+                  f"{result.returncode}", file=sys.stderr)
             if result.stderr.strip():
-                print(f"[compact] stderr: {result.stderr.strip()[:200]}", file=sys.stderr)
-            if result.stdout.strip():
-                print(f"[compact] stdout (discarded): {result.stdout.strip()[:200]}",
+                print(f"[compact] stderr: {result.stderr.strip()[:200]}",
                       file=sys.stderr)
-            return ""
-        compact_text = result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        print("[compact] Claude call timed out (60s)", file=sys.stderr)
-        return ""
-    except FileNotFoundError:
-        print("[compact] Claude CLI not found", file=sys.stderr)
-        return ""
-    except OSError as e:
-        print(f"[compact] OS error calling Claude: {e}", file=sys.stderr)
-        return ""
+            if result.stdout.strip():
+                print(f"[compact] stdout (discarded): "
+                      f"{result.stdout.strip()[:200]}", file=sys.stderr)
+            continue
 
+        compact_text = result.stdout.strip()
+        if len(compact_text) >= 50:
+            break
+        print(f"[compact] Claude {label} returned too little text",
+              file=sys.stderr)
+        compact_text = ""
+
+    if not compact_text or len(compact_text) < 50:
+        compact_text = _openai_compact(prompt)
     if not compact_text or len(compact_text) < 50:
         return ""
 

@@ -128,7 +128,10 @@ def _exec_bash(args: dict) -> str:
             timeout=BASH_TIMEOUT, cwd=cwd,
         )
         out = r.stdout + r.stderr
-        return out[:50000] or f"(exit {r.returncode}, no output)"
+        if r.returncode:
+            suffix = f"\n(exit {r.returncode})"
+            return (out[:50000 - len(suffix)] + suffix) if out else suffix.lstrip()
+        return out[:50000] or "(exit 0, no output)"
     except subprocess.TimeoutExpired:
         return f"error: command timed out ({BASH_TIMEOUT}s)"
     except Exception as e:
@@ -242,10 +245,17 @@ def run_agentic(system_prompt: str, user_input: str, model: str,
     if system_prompt.strip():
         instructions = f"{instructions}\n\n{system_prompt}"
 
+    # Keep the continuation self-contained. Some OpenAI-compatible HTTP relays
+    # reject previous_response_id (micuapi supports it only on Responses
+    # WebSocket v2), while the Responses API also supports stateless function
+    # calling by replaying the input items, function call, and tool output.
+    input_items: list[dict[str, Any]] = [
+        {"role": "user", "content": user_input},
+    ]
     payload: dict[str, Any] = {
         "model": model,
         "instructions": instructions,
-        "input": user_input,
+        "input": input_items,
         "tools": TOOLS,
         "max_output_tokens": max_output_tokens,
     }
@@ -271,13 +281,17 @@ def run_agentic(system_prompt: str, user_input: str, model: str,
                 "output": result[:30000],
             })
 
+        input_items.extend(
+            item for item in (response.get("output", []) or [])
+            if isinstance(item, dict)
+        )
+        input_items.extend(tool_results)
         payload = {
             "model": model,
             "instructions": instructions,
-            "input": tool_results,
+            "input": input_items,
             "tools": TOOLS,
             "max_output_tokens": max_output_tokens,
-            "previous_response_id": response.get("id"),
         }
 
     return extract_text(response) or "(max tool rounds reached)"

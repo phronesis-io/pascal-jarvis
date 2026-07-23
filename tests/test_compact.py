@@ -73,8 +73,10 @@ def _run_generate(tmp_path, returncode, stdout, capture=None):
 
     def fake_run(cmd, **kwargs):
         if capture is not None:
-            capture["cmd"] = cmd
-            capture["env"] = kwargs.get("env")
+            capture.setdefault("calls", []).append({
+                "cmd": cmd,
+                "env": kwargs.get("env"),
+            })
         return subprocess.CompletedProcess(cmd, returncode,
                                            stdout=stdout, stderr="")
 
@@ -119,9 +121,10 @@ def test_generate_compact_backup_gate_injects_env(tmp_path, monkeypatch):
                         capture=captured)
 
     assert out.startswith("## 摘要")
-    assert captured["env"] is not None
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "bk-token"
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://backup.example"
+    call = captured["calls"][0]
+    assert call["env"] is not None
+    assert call["env"]["ANTHROPIC_AUTH_TOKEN"] == "bk-token"
+    assert call["env"]["ANTHROPIC_BASE_URL"] == "https://backup.example"
 
 
 def test_generate_compact_primary_gate_ambient_env(tmp_path, monkeypatch):
@@ -134,7 +137,7 @@ def test_generate_compact_primary_gate_ambient_env(tmp_path, monkeypatch):
                   stdout=_OK_SUMMARY,
                   capture=captured)
 
-    assert captured["env"] is None
+    assert captured["calls"][0]["env"] is None
 
 
 def test_generate_compact_backup_gate_without_creds_stays_ambient(tmp_path, monkeypatch):
@@ -149,4 +152,37 @@ def test_generate_compact_backup_gate_without_creds_stays_ambient(tmp_path, monk
                   stdout=_OK_SUMMARY,
                   capture=captured)
 
-    assert captured["env"] is None
+    assert captured["calls"][0]["env"] is None
+
+
+def test_generate_compact_backup_uses_configured_model(tmp_path, monkeypatch):
+    import core.model_fallback as mf
+    monkeypatch.setattr(mf, "gate", lambda *a, **k: "backup")
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "bk-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "claude-opus-4-6")
+    captured = {}
+
+    _run_generate(tmp_path, returncode=0, stdout=_OK_SUMMARY,
+                  capture=captured)
+
+    assert "claude-opus-4-6" in captured["calls"][0]["cmd"]
+
+
+def test_generate_compact_falls_back_to_openai(tmp_path, monkeypatch):
+    import core.model_fallback as mf
+    import core.openai_fallback as of
+    monkeypatch.setattr(mf, "gate", lambda *a, **k: "primary")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setattr(
+        of, "call_openai",
+        lambda *a, **k: {"output_text": _OK_SUMMARY},
+    )
+
+    out = _run_generate(
+        tmp_path, returncode=1, stdout=_SPEND_LIMIT_LINE)
+
+    assert out == _OK_SUMMARY
+    assert get_compact_path(tmp_path, "user123").read_text() == _OK_SUMMARY

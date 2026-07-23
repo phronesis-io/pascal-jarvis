@@ -84,8 +84,10 @@ claude:
 # ── OpenAI fallback settings ───────────────────────────────────────
 # Used only when the main Claude Code conversation path fails with a model /
 # account limit and the Claude opus→sonnet→haiku chain is exhausted.
-# Requires OPENAI_API_KEY in the bot environment. This fallback is text-only:
-# it cannot use Claude Code tools, shell commands, or local file editing.
+# Requires OPENAI_API_KEY in the bot environment. Main-chat fallback is
+# agentic: GPT can use the constrained bash/file_read/file_write tool loop.
+# Heartbeat fallback remains text-only because heartbeat tasks have their own
+# execution and post-processing lifecycle.
 
 openai:
   fallback_enabled: true
