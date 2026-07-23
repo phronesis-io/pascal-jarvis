@@ -12,6 +12,7 @@ from core.ef_stream import (
     is_duplicate_event,
     load_seen,
     parse_cursor,
+    relation_event_kind,
     remember_seen,
     save_seen,
 )
@@ -124,6 +125,16 @@ def test_friend_accepted_event():
     out = format_relation_event(ev)
     assert "已通过" in out and "好友" in out
     assert format_message(ev) == ""                             # not a PM
+
+
+def test_relation_event_kind_assigns_single_lifecycle_owner():
+    request = _friend_request_event([{"request_id": "1", "from_name": "Ada"}])
+    accepted = json.dumps(
+        {"type": "friend_accepted", "data": {"friend_uid": "111"}})
+
+    assert relation_event_kind(request) == "friend_request"
+    assert relation_event_kind(accepted) == "friend_accepted"
+    assert relation_event_kind(_event([])) == ""
 
 
 def test_non_relation_event_returns_empty():

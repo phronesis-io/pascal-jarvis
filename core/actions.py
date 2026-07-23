@@ -253,6 +253,15 @@ class ActionProcessor:
         path.unlink(missing_ok=True)
         return "已取消广播"
 
+    def _do_eigenflux_friend(self, raw: str) -> str:
+        """Accept/reject one card-bound request through the verified CLI path."""
+        from core.eigenflux_friends import execute_friend_action
+
+        result, failed = execute_friend_action(parse_params(raw))
+        if failed:
+            raise RuntimeError(result)
+        return result
+
     # ── Heartbeat ──
 
     def _do_heartbeat(self, raw: str) -> str:

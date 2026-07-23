@@ -247,7 +247,10 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
          and sends the fixed chief-scientist welcome; do not claim success in
          `user_message`.
        - If absent/inactive, or the request is suspicious: leave `actions`
-         empty and ask Pascal to decide, with concise identity/risk context.
+         empty and put the raw server identifiers plus concise risk context in
+         `reviews`. The post-hook creates a request_id-bound card whose buttons
+         execute the real accept/reject operation. Do not put decision options
+         in prose and do not ask through `user_message`.
     4. ALWAYS notify Pascal of the actual result — friend requests are
        time-sensitive social events. The post-hook writes action outcomes from
        CLI return codes, so `user_message` is only for requests needing review.
@@ -263,7 +266,17 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
           "remark": "<short useful nickname>"
         }
       ],
-      "user_message": "<empty for auto-accepted requests; Chinese review request for anything suspicious>"
+      "reviews": [
+        {
+          "request_id": "<server request_id>",
+          "from_uid": "<server from_uid>",
+          "from_name": "<server from_name>",
+          "greeting": "<verbatim server greeting>",
+          "remark": "<short useful nickname>",
+          "risk_reason": "<why Pascal must decide>"
+        }
+      ],
+      "user_message": ""
     }
 
     If no pending requests: HEARTBEAT_OK

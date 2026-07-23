@@ -44,6 +44,7 @@ from core.ef_stream import (
     is_duplicate_event,
     load_seen,
     parse_cursor,
+    relation_event_kind,
     remember_seen,
     save_seen,
 )
@@ -450,6 +451,15 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 rel = format_relation_event(line)
                 if rel:
                     rel_ids = extract_relation_ids(line)
+                    if relation_event_kind(line) == "friend_request":
+                        # The 10-minute eigenflux-friends task owns request
+                        # review and execution. Sending here as well created a
+                        # second, non-actionable card for the same request.
+                        seen = remember_seen(seen, rel_ids)
+                        save_seen(seen_file, seen)
+                        log("ef-stream", "Friend request observed; lifecycle "
+                            "delegated to eigenflux-friends")
+                        continue
                     if rel_ids and is_duplicate_event(rel_ids, set(seen)):
                         log("ef-stream", "Skipping already-delivered friend event (dedup)")
                     else:

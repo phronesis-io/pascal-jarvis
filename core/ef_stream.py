@@ -215,3 +215,21 @@ def extract_relation_ids(event_json) -> list[str]:
         if uid:
             ids.append(f"accepted:{uid}")
     return ids
+
+
+def relation_event_kind(event_json) -> str:
+    """Return ``friend_request``, ``friend_accepted``, or ``""``."""
+    try:
+        event = json.loads(event_json) if isinstance(event_json, str) else event_json
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(event, dict):
+        return ""
+    data = event.get("data") or {}
+    if not isinstance(data, dict):
+        return ""
+    if data.get("friend_requests"):
+        return "friend_request"
+    if event.get("type") == "friend_accepted" or data.get("friend_uid"):
+        return "friend_accepted"
+    return ""

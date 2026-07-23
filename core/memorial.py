@@ -294,6 +294,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "options": e.get("options") or [],
                 "extra_buttons": e.get("extra_buttons") or [],
                 "context": str(e.get("context", "")),
+                "dedup_key": str(e.get("dedup_key", "")),
                 "chat_id": str(e.get("chat_id", "")),
                 "matter_id": str(e.get("matter_id", "")),
                 "status": "pending",
@@ -301,6 +302,8 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "decided_label": "",
                 "decided_ts": "",
                 "action_result": "",
+                "resolved_label": "",
+                "resolved_ts": "",
                 "chat_ts": "",
                 "chat_epoch": 0,
                 "delivery_status": "not_sent",
@@ -321,6 +324,19 @@ def _fold(events: list[dict]) -> dict[str, dict]:
             st = states.get(mid)
             if st is not None:
                 st["action_result"] = str(e.get("result", ""))
+        elif ev == "resolve":
+            # External source truth can become terminal after (or without) a
+            # card tap. Resolution overrides an earlier reply-only decision
+            # so every delivered copy converges to the real state.
+            st = states.get(mid)
+            if st is not None:
+                st["status"] = "decided"
+                st["decided_opt"] = "__external__"
+                st["decided_label"] = str(e.get("label", "已处理"))
+                st["decided_ts"] = str(e.get("ts", ""))
+                st["action_result"] = str(e.get("result", ""))
+                st["resolved_label"] = str(e.get("label", "已处理"))
+                st["resolved_ts"] = str(e.get("ts", ""))
         elif ev == "chat":
             st = states.get(mid)
             if st is not None:
@@ -691,11 +707,16 @@ def _normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
 def _find_recent_duplicate(source: str, title: str, body: str,
                            options: list[dict], extra_buttons: list[dict],
                            context: str, chat_id: str,
-                           matter_id: str = "") -> dict | None:
+                           matter_id: str = "",
+                           dedup_key: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
-    dedup window — the signature of an emitter stuck in a retry loop."""
+    dedup window, or the same explicit external identity."""
     now = time.time()
     for st in _fold(read_jsonl(_ledger_path())).values():
+        if (dedup_key and st["status"] == "pending"
+                and st["source"] == source
+                and st.get("dedup_key", "") == dedup_key):
+            return st
         if (st["status"] == "pending"
                 and st["source"] == source and st["title"] == title
                 and st["body"] == body
@@ -859,7 +880,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            chat_id: str = "", send: bool = True,
            urgent: bool = False,
            extra_buttons: list[dict] | None = None,
-           matter_id: str = "") -> tuple[str, bool]:
+           matter_id: str = "",
+           dedup_key: str = "") -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and send the card.
 
     Returns (memorial_id, sent_ok). The ledger write happens BEFORE the send,
@@ -871,9 +893,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     gate, e.g. a heartbeat post-script printing card_json() to the CARD pipe.
 
     Direct sends respect the delivery layer's gates: an identical pending
-    memorial within 6h is not re-created (returns the existing id), and
-    non-urgent sends during quiet hours (23:30-10:00) go to the night queue
-    instead of buzzing the phone — urgent=True bypasses the night gate.
+    memorial within 6h is not re-created, and an explicit ``dedup_key`` stays
+    unique for as long as that memorial is pending. Non-urgent sends during
+    quiet hours (23:30-10:00) go to the night queue instead of buzzing the
+    phone; urgent=True bypasses the night gate.
     """
     _maybe_rotate()
     source, title, body = str(source), str(title), str(body)
@@ -896,7 +919,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id),
-        str(matter_id))
+        str(matter_id), str(dedup_key))
     if dup is not None:
         print(f"memorial dedup: identical pending {dup['id']} within "
               f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
@@ -911,6 +934,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context)}
+    if dedup_key:
+        ev["dedup_key"] = str(dedup_key)
     if chat_id:
         ev["chat_id"] = str(chat_id)
     if matter_id:
@@ -1204,6 +1229,34 @@ def _sync_lark_card(memorial_id: str, card: dict) -> None:
         except Exception as e:
             print(f"memorial {memorial_id}: Lark card sync failed: {e}",
                   file=sys.stderr)
+
+
+def resolve(memorial_id: str, label: str,
+            action_result: str = "") -> bool:
+    """Converge a memorial to an externally confirmed terminal state.
+
+    Unlike ``decide``, this never runs a button action or injects a synthetic
+    user reply. It is for state already completed in the source system.
+    """
+    st = get_memorial(memorial_id)
+    if st is None:
+        return False
+    label = str(label or "已处理").strip()
+    action_result = str(action_result or "").strip()
+    if (st.get("resolved_label") == label
+            and st.get("action_result", "") == action_result):
+        return False
+    _append_line(_ledger_path(), {
+        "ev": "resolve",
+        "id": memorial_id,
+        "ts": now_local_str(),
+        "label": label,
+        "result": action_result,
+    })
+    resolved = get_memorial(memorial_id)
+    if resolved is not None:
+        _sync_lark_card(memorial_id, _decided_card(resolved))
+    return True
 
 
 def decide(memorial_id: str, opt_key: str) -> dict:

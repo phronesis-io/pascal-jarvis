@@ -256,6 +256,30 @@ def test_decide_action_failure_still_records_with_info_toast(env, monkeypatch):
     assert memorial.get_memorial(mid)["status"] == "decided"
 
 
+def test_resolve_overrides_old_reply_and_syncs_external_truth(env, monkeypatch):
+    synced = []
+    monkeypatch.setattr(
+        memorial, "_sync_lark_card",
+        lambda memorial_id, card: synced.append((memorial_id, card)))
+    mid, _ = memorial.create(
+        "eigenflux-friends", "好友申请", "某 Agent 请求加好友",
+        options=[{"key": "accept", "label": "通过", "action": None}])
+    memorial.decide(mid, "accept")
+
+    assert memorial.resolve(
+        mid, "已通过（服务端确认）", "EigenFlux 好友关系已生效") is True
+
+    state = memorial.get_memorial(mid)
+    assert state["decided_opt"] == "__external__"
+    assert state["resolved_label"] == "已通过（服务端确认）"
+    assert state["action_result"] == "EigenFlux 好友关系已生效"
+    content = synced[-1][1]["elements"][0]["text"]["content"]
+    assert "已通过（服务端确认）" in content
+    assert "EigenFlux 好友关系已生效" in content
+    assert memorial.resolve(
+        mid, "已通过（服务端确认）", "EigenFlux 好友关系已生效") is False
+
+
 # ── chat ─────────────────────────────────────────────────────────────────
 
 
@@ -502,6 +526,21 @@ def test_duplicate_delivered_memorial_is_not_resent(env):
     assert sent is True and resent is True
     assert second == first
     assert len(env.cards) == 1
+
+
+def test_explicit_dedup_key_ignores_reworded_pending_card(env):
+    first, _ = memorial.create(
+        "eigenflux-friends", "好友申请", "第一次风险说明",
+        preset="decision", dedup_key="eigenflux-friend:123")
+    second, _ = memorial.create(
+        "eigenflux-friends", "好友申请", "模型换了一种风险说明",
+        preset="decision", dedup_key="eigenflux-friend:123")
+
+    assert second == first
+    assert len(env.cards) == 1
+    creates = [e for e in _ledger_events(env.dir) if e["ev"] == "create"]
+    assert len(creates) == 1
+    assert creates[0]["dedup_key"] == "eigenflux-friend:123"
 
 
 def test_same_body_different_native_action_is_not_deduped(env):
