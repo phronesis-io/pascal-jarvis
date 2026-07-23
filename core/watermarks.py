@@ -161,8 +161,12 @@ def channel_watermark_report(jarvis_dir: str | Path,
                 f"  ⚠️ {name}: last real success {_fmt_age(now - last_success)} ago "
                 f"(expected every {_fmt_age(interval)}) — STARVED")
 
-    delivery = _load(jd / ".delivery_state.json")
+    from core.state_projection import delivery_overview
+    delivery = delivery_overview(jd)
+    if delivery is None:
+        delivery = _load(jd / ".delivery_state.json")
     consec_fails = delivery.get("consec_fails", 0)
+    delivery_queue_depth = int(delivery.get("queued", 0) or 0)
 
     night_queue = jd / "night_queue.jsonl"
     try:
@@ -182,6 +186,9 @@ def channel_watermark_report(jarvis_dir: str | Path,
             f" — normal): {', '.join(pending_first)}")
     if consec_fails > 0:
         lines.append(f"  ⚠️ Lark delivery: {consec_fails} consecutive send failures")
+    if delivery_queue_depth:
+        lines.append(
+            f"  ⚠️ Unified delivery: {delivery_queue_depth} queued item(s)")
     if queue_line:
         lines.append(queue_line)
     if len(lines) == 1:

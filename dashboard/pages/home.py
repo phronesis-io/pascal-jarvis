@@ -227,10 +227,11 @@ def _memorial_preview(state: dict, refresh) -> None:
 
     def chat(mid: str):
         payload = memorial.chat(mid)
-        toast = payload.get("toast", {})
-        ui.notify(toast.get("content", "已切到对话"),
-                  type="positive" if toast.get("type") == "success" else "info")
-        refresh()
+        deep_link = str(payload.get("deep_link", "") or "")
+        if deep_link:
+            ui.navigate.to(deep_link)
+        else:
+            ui.notify("飞书入口暂不可用", type="warning")
 
     with ui.card().classes("memorial-card"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
@@ -251,10 +252,10 @@ def _memorial_preview(state: dict, refresh) -> None:
                 ).props("unelevated no-caps" if index == 0
                         else "outline no-caps").classes(
                     "memorial-primary" if index == 0 else "memorial-secondary")
-            ui.button("聊聊这个",
+            ui.button("去飞书聊", icon="forum",
                       on_click=lambda mid=state["id"]: chat(mid)).props(
                 "flat no-caps").classes("memorial-chat")
-            ui.link("全文 →", "/memorials").classes("jarvis-nav-link")
+            ui.link("全文 →", "/items").classes("jarvis-nav-link")
 
 
 @ui.page("/")
@@ -302,9 +303,9 @@ def home_page():
 
             with ui.element("div").classes("metric-strip"):
                 _metric("手机待批", len(phone_pending), alert=bool(phone_pending),
-                        href="/memorials")
+                        href="/items")
                 _metric("飞书待批", len(lark_pending), alert=bool(lark_pending),
-                        href="/memorials")
+                        href="/items")
                 _metric("7 日互动率", f"{stats['rate']}%", href="/engagement")
                 _metric("需关注信号", issues, alert=issues not in (0, "—"),
                         on_click=open_drawer)
@@ -316,7 +317,7 @@ def home_page():
                         ui.label("手机集中批").classes("section-title")
                         ui.label("把可等待的判断放在一起，留出完整时间做真正重要的事。").classes(
                             "section-note")
-                    ui.link(f"查看全部 {len(phone_pending)} →", "/memorials").classes(
+                    ui.link(f"查看全部 {len(phone_pending)} →", "/items").classes(
                         "jarvis-nav-link")
                 if phone_pending:
                     with ui.element("div").classes("memorial-grid"):

@@ -15,9 +15,7 @@ from nicegui import ui
 
 _NAV = [
     ("今日", "/"),
-    ("事项", "/matters"),
-    ("奏折", "/memorials"),
-    ("意图", "/intentions"),
+    ("事项", "/items"),
     ("任务", "/tasks"),
     ("收藏", "/bookmarks"),
     ("运行", "/ops"),
@@ -251,7 +249,7 @@ def add_dashboard_head() -> None:
     ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
-        '<link rel="stylesheet" href="/static/style.css?v=20260722-matter3">'
+        '<link rel="stylesheet" href="/static/style.css?v=20260723-items1">'
         # use-credentials: the browser's manifest fetch defaults to
         # credentials-omit, so behind the authenticated mobile gateway it 401s
         # and the PWA never gets its manifest.
@@ -292,11 +290,10 @@ def dashboard_header(active: str, title: str, subtitle: str = "") -> None:
         with ui.element("nav").classes("mobile-dock"):
             for label, href, icon in (
                     ("今日", "/", "home"),
-                    ("事项", "/matters", "workspaces"),
-                    ("奏折", "/memorials", "description"),
+                    ("事项", "/items", "inbox"),
                     ("更多", "/settings", "more_horiz")):
                 selected = (href == active or (href == "/settings" and active not in {
-                    "/", "/matters", "/memorials"}))
+                    "/", "/items"}))
                 with ui.link(target=href).classes(
                         "mobile-dock-link" + (" is-active" if selected else "")):
                     ui.icon(icon, size="21px")

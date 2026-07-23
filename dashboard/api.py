@@ -9,6 +9,7 @@ Or standalone for headless mode: python3 -m dashboard.api
 """
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -452,6 +453,72 @@ def register_api_routes():
         from core.mobile_access import send_push
         data = await request.json()
         return send_push("Jarvis 已连接", data.get("body", "手机通知通道工作正常。"))
+
+    # ── Memorial-first Items and delivery state ─────────────────────
+
+    @app.get("/api/items")
+    async def api_item_list(mode: str = "pending", topic_id: str = "",
+                            time_window: str = "all", surface: str = "",
+                            limit: int = 100):
+        from core.config import Config
+        from core.intent_lifecycle import list_intents
+        from core.matters import list_matters
+        from dashboard.pages.items import enrich_items, filter_items
+        from dashboard.telemetry import memorial_states
+
+        root = Path(os.environ.get("JARVIS_DIR") or Config().jarvis_dir)
+        matters = list_matters(limit=300)
+        intents = list_intents(limit=500)
+        rows = get_db().execute(
+            "SELECT entity_id,matter_id FROM matter_links "
+            "WHERE entity_type='intent' AND provider='jarvis'"
+        ).fetchall()
+        intent_topics = {
+            str(row["entity_id"]): str(row["matter_id"]) for row in rows
+        }
+        items = filter_items(
+            enrich_items(
+                memorial_states(root), matters=matters, intents=intents,
+                intent_topics=intent_topics,
+            ),
+            mode=mode, topic_id=topic_id, time_window=time_window,
+            surface=surface,
+        )
+        return {"items": items[:max(1, min(int(limit), 500))]}
+
+    @app.post("/api/items/{memorial_id}/decide", dependencies=_WRITE)
+    async def api_item_decide(memorial_id: str, request: Request):
+        from core.memorial import decide
+        data = await request.json()
+        return decide(memorial_id, str(data.get("option", "")))
+
+    @app.post("/api/items/{memorial_id}/chat", dependencies=_WRITE)
+    async def api_item_chat(memorial_id: str, request: Request):
+        from core.memorial import chat
+        await request.json()
+        return chat(memorial_id)
+
+    @app.get("/api/deliveries")
+    async def api_delivery_list(state: str = "", limit: int = 100):
+        from core.delivery import DeliveryPipeline
+        return {"items": DeliveryPipeline().list(state=state, limit=limit)}
+
+    @app.post("/api/deliveries/{delivery_id}/confirm", dependencies=_WRITE)
+    async def api_delivery_confirm(delivery_id: str, request: Request):
+        from core.delivery import DeliveryPipeline
+        data = await request.json()
+        try:
+            result = DeliveryPipeline().confirm(
+                delivery_id, str(data.get("state", "read")))
+        except KeyError as exc:
+            raise HTTPException(404, "delivery not found") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "delivery_id": result.delivery_id,
+            "state": result.state,
+            "channel": result.channel,
+        }
 
     # ── Health ───────────────────────────────────────────────────────
 

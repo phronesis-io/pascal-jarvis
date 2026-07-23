@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Source-controlled pre-commit checks. Install with scripts/install_git_hooks.sh.
+
+set -e
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+cd "$REPO_DIR"
+
+echo "Running pre-commit checks..."
+
+if ! bash -n bot.sh 2>/dev/null; then
+  echo "bot.sh has syntax errors"
+  exit 1
+fi
+
+if command -v shellcheck >/dev/null 2>&1; then
+  if ! shellcheck -s bash -S error -e SC1090,SC1091 bot.sh 2>/dev/null; then
+    echo "ShellCheck found errors in bot.sh"
+    exit 1
+  fi
+fi
+
+if ! python3 -c "from core.heartbeat import HeartbeatRunner" 2>/dev/null; then
+  echo "core.heartbeat import failed"
+  exit 1
+fi
+
+if ! python3 -m pytest \
+    tests/test_heartbeat_regressions.py tests/test_daemon_regressions.py \
+    tests/test_circuit_breaker.py tests/test_actions.py \
+    -x -q 2>/dev/null; then
+  echo "Regression tests failed"
+  exit 1
+fi
+
+if git diff --cached --name-only | rg -q \
+    '^(core/.*\.py|dashboard/.*\.py|admin\.py|daemon\.py|bot\.sh)$'; then
+  echo "Reminder: runtime code changed; restart and run core.deploy verify."
+fi
+
+echo "Pre-commit checks passed"

@@ -282,6 +282,8 @@ def _intent_meta_tag(intent: dict) -> None:
 @ui.page("/intentions")
 def intentions_page():
     """意图漏斗 + 时间线。"""
+    ui.navigate.to("/items")
+    return
     mod = _get_intentions_module()
 
     with jarvis_page("/intentions", "意图",

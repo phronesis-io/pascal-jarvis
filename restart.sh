@@ -250,6 +250,21 @@ settle_bot() {
   if python3 -m core.components --critical > "$report" 2>&1; then
     green "  Bot settled; critical components healthy."
     rm -f "$report"
+    if python3 -m core.deploy smoke --timeout 3 >/dev/null; then
+      green "  Unified delivery smoke passed."
+    else
+      red "  Unified delivery smoke failed."
+      return 1
+    fi
+    if python3 -m core.deploy verify \
+        --require bot --require heartbeat-loop >/dev/null; then
+      green "  Runtime versions match the deployed commit."
+    else
+      red "  Runtime version verification failed."
+      python3 -m core.deploy verify \
+        --require bot --require heartbeat-loop || true
+      return 1
+    fi
   else
     red "  Bot failed post-start settle check:"
     cat "$report"

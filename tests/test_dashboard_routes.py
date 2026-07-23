@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/items", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -78,9 +78,10 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import (home, memorials, tasks, settings,
+    from dashboard.pages import (home, items, memorials, tasks, settings,
                                  agent_calendar, engagement, ops)
-    for mod in (home, memorials, tasks, settings, agent_calendar, engagement, ops):
+    for mod in (home, items, memorials, tasks, settings,
+                agent_calendar, engagement, ops):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -1097,6 +1098,52 @@ class TestRoutes:
         revoked = client.delete(f"/api/mobile/devices/{device['device_id']}")
         assert revoked.status_code == 200
 
+    def test_api_items_decision_and_delivery_confirmation(
+            self, client, jarvis_tmp, monkeypatch):
+        from core import memorial
+        from core.delivery import DeliveryEnvelope, DeliveryPipeline
+
+        monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
+        memorial_id, accepted = memorial.create(
+            "test-items-api",
+            "选择下一步",
+            "请在手机上集中处理。",
+            preset="decision",
+            review_at="phone",
+        )
+        assert accepted is True
+
+        listed = client.get("/api/items?mode=pending&time_window=all")
+        assert listed.status_code == 200
+        assert [row["id"] for row in listed.json()["items"]] == [memorial_id]
+
+        decided = client.post(
+            f"/api/items/{memorial_id}/decide",
+            json={"option": "approve"},
+        )
+        assert decided.status_code == 200
+        assert memorial.get_memorial(memorial_id)["status"] == "decided"
+
+        pipeline = DeliveryPipeline(jarvis_tmp)
+        sent = pipeline.deliver(DeliveryEnvelope(
+            source="api-test",
+            kind="web",
+            payload={"text": "delivery state"},
+            requested_channel="web",
+            metadata={"bypass_throttle": True, "bypass_dedup": True},
+        ))
+        deliveries = client.get("/api/deliveries?state=delivered")
+        assert deliveries.status_code == 200
+        assert sent.delivery_id in {
+            row["id"] for row in deliveries.json()["items"]
+        }
+        confirmed = client.post(
+            f"/api/deliveries/{sent.delivery_id}/confirm",
+            json={"state": "read"},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["state"] == "read"
+
     def test_api_work_sessions(self, client, monkeypatch):
         import core.work_sessions as work_sessions
         monkeypatch.setattr(work_sessions, "discover_sessions", lambda **kwargs: [{
@@ -1109,7 +1156,7 @@ class TestRoutes:
     def test_pwa_assets_are_served(self, client):
         manifest = client.get("/static/manifest.webmanifest")
         assert manifest.status_code == 200
-        assert manifest.json()["start_url"] == "/matters"
+        assert manifest.json()["start_url"] == "/items"
         worker = client.get("/sw.js")
         assert worker.status_code == 200
         assert worker.headers["service-worker-allowed"] == "/"

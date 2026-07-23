@@ -473,6 +473,10 @@ class HeartbeatRunner:
         # tripped the roster-wide 300s hold twice on 7/8 while the hourly
         # 小时报 batch kept overflowing, freezing innocent tasks for hours.
         self._call_context_overflow = False
+        # Delivery envelopes record the provider/model that actually produced
+        # their content.  Updated only after a successful model response.
+        self.last_provider = ""
+        self.last_model = ""
 
     def _log(self, msg: str, **kwargs):
         """Structured log with cycle_id for correlation."""
@@ -796,6 +800,8 @@ class HeartbeatRunner:
             self._log(f"Calling OpenAI heartbeat fallback model={model}")
             text = extract_text(call_openai(payload, api_key, base_url, timeout, user_agent))
             if text:
+                self.last_provider = "GPT fallback"
+                self.last_model = model
                 self._log(f"OpenAI heartbeat fallback succeeded ({len(text)} chars)")
             return text.strip()
         except Exception as e:
@@ -842,7 +848,16 @@ class HeartbeatRunner:
         mem_budget = None
         if use_backup:
             mem_budget = int(os.environ.get("BACKUP_MAX_MEMORY_CHARS", "40000"))
-        memory = load_tiered_memory(self.memory_dir, max_chars=mem_budget)
+        try:
+            memory = load_tiered_memory(
+                self.memory_dir, max_chars=mem_budget)
+        except TypeError as exc:
+            # Keep HeartbeatRunner compatible with an older memory module and
+            # with lightweight test/plugin adapters that still expose the
+            # historical one-argument callable.
+            if "max_chars" not in str(exc):
+                raise
+            memory = load_tiered_memory(self.memory_dir)
         now_ts = now_local_str("%Y-%m-%d %H:%M %A")
         system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
 Current time: {now_ts}
@@ -902,6 +917,11 @@ You have access to the user's memory below. Use it to personalize your responses
                 result = _run_isolated(
                     cmd, timeout=call_timeout, cwd=str(self.work_dir), env=env)
                 if result.returncode == 0:
+                    self.last_provider = (
+                        "Claude backup2" if _backup2_active
+                        else ("Claude backup" if use_backup else "Claude primary")
+                    )
+                    self.last_model = model or self.model
                     if gate_state != "primary" and not use_backup:
                         # Primary answered while the outage flag was set (we
                         # were the elected prober, or backup env is missing)

@@ -220,7 +220,7 @@ def open_followups(matter_id: str) -> list[dict]:
         entity_id = link.get("entity_id", "")
         if entity_type == "intent":
             try:
-                from core.intentions import get_intent
+                from core.intent_lifecycle import get_intent
                 intent = get_intent(entity_id)
             except Exception:
                 intent = None

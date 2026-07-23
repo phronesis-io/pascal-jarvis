@@ -51,7 +51,8 @@ def _record_sent_lark_id(memorial_id: str, ids_before: int) -> None:
 
 
 def _lark_send_card(card_json: str, user_id: str, log_file: str,
-                    *, assume_delivered_on_timeout: bool = True) -> bool:
+                    *, assume_delivered_on_timeout: bool = True,
+                    retries: bool = True) -> bool:
     """Send a Lark interactive card, with retries. Returns True on success.
 
     A normal one-off send keeps the historical timeout tradeoff (avoid a
@@ -61,7 +62,8 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str,
     """
     if not user_id:
         return False
-    for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
+    delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
+    for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
         try:
@@ -121,7 +123,8 @@ def _extract_message_id(stdout: str) -> str:
 
 
 def _lark_send_text(text: str, user_id: str, *,
-                    assume_delivered_on_timeout: bool = True) -> bool:
+                    assume_delivered_on_timeout: bool = True,
+                    retries: bool = True) -> bool:
     """Send plain text to Lark, with retries on transient failure.
 
     assume_delivered_on_timeout: the single-message default (True) trades a
@@ -134,7 +137,8 @@ def _lark_send_text(text: str, user_id: str, *,
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
-    for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
+    delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
+    for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
         try:
@@ -166,11 +170,20 @@ def _lark_send_text(text: str, user_id: str, *,
     return False
 
 
-def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
-    """Route heartbeat output to Lark: cards via card API, text via markdown.
+_LAST_ROUTE_ALL_DELIVERED = True
 
-    Returns True if every part was delivered (used by the delivery ledger).
+
+def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
+                  respect_quiet: bool = False,
+                  provider: str = "", model: str = "") -> bool:
+    """Convert heartbeat parts to envelopes and call the one delivery entry.
+
+    ``respect_quiet`` is enabled by the resident loop.  The default is kept
+    awake for direct compatibility callers and focused tests; quiet-hours
+    policy still lives in core.delivery.
     """
+    global _LAST_ROUTE_ALL_DELIVERED
+    _LAST_ROUTE_ALL_DELIVERED = True
     # Idle-sentinel gate (belt-and-braces below the card builders): if
     # HEARTBEAT_OK appears ANYWHERE in the output — prose, card JSON,
     # anything — the model decided this cycle stays silent and everything
@@ -186,8 +199,46 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
             level="warn")
         return True  # silence is the intended outcome, not a delivery failure
 
+    from core.delivery import (DeliveryEnvelope, TransportResult,
+                               deliver as deliver_envelope)
+
     remaining_text_parts = []
-    results = []
+    results: list[bool] = []
+    source = _peek_source(jarvis_dir) or "heartbeat"
+
+    def transport(envelope, channel):
+        ids_before = len(_LAST_SENT_IDS)
+        if channel == "web":
+            return TransportResult(True)
+        if envelope.kind == "card":
+            ok = _lark_send_card(
+                str(envelope.payload.get("card_json") or ""),
+                user_id, "", assume_delivered_on_timeout=False,
+                retries=False,
+            )
+        else:
+            ok = _lark_send_text(
+                str(envelope.payload.get("text") or ""),
+                user_id, assume_delivered_on_timeout=False,
+                retries=False,
+            )
+        message_id = (
+            str(_LAST_SENT_IDS[-1])
+            if ok and len(_LAST_SENT_IDS) > ids_before else ""
+        )
+        return TransportResult(bool(ok), message_id,
+                               "" if ok else "lark transport failed")
+
+    def submit(envelope: DeliveryEnvelope):
+        global _LAST_ROUTE_ALL_DELIVERED
+        result = deliver_envelope(
+            envelope, root=jarvis_dir, transport=transport)
+        delivered_now = (
+            result.state == "delivered" and result.reason != "duplicate"
+        )
+        if not delivered_now:
+            _LAST_ROUTE_ALL_DELIVERED = False
+        return result
 
     for line in output.split("\n"):
         line = line.strip()
@@ -198,50 +249,77 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
             card_json = line[5:]
             memorial_id = _memorial_id_from_card(card_json)
             _ids_before = len(_LAST_SENT_IDS)
-            if _lark_send_card(
-                    card_json, user_id, "",
-                    assume_delivered_on_timeout=not bool(memorial_id)):
+            result = submit(DeliveryEnvelope(
+                source=source,
+                kind="card",
+                payload={"card_json": card_json,
+                         "text": extract_card_text(card_json)},
+                attention="decision" if memorial_id else "notice",
+                requested_channel="lark",
+                urgent=not respect_quiet,
+                memorial_id=memorial_id,
+                dedup_key=f"memorial:{memorial_id}" if memorial_id else "",
+                provider=provider,
+                model=model,
+                metadata={
+                    "review_surface": "lark",
+                    "bypass_quiet": not respect_quiet,
+                    "bypass_dedup": not respect_quiet,
+                    "bypass_throttle": not respect_quiet,
+                    "retry_existing": True,
+                },
+            ))
+            if result.state == "delivered":
                 results.append(True)
                 if memorial_id:
                     _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
                     _record_sent_lark_id(memorial_id, _ids_before)
+            elif result.state == "suppressed":
+                results.append(True)
+            elif result.reason == "quiet_hours":
+                if memorial_id:
+                    _record_memorial_delivery(jarvis_dir, memorial_id, "queued")
+                results.append(True)
             else:
                 if memorial_id:
-                    # A text fallback destroys every 批红/Chat action. Keep
-                    # the exact card for the durable retry queue instead.
-                    _append_memorial_queue_entry(
-                        jarvis_dir, memorial_id, card_json,
-                        _peek_source(jarvis_dir) or "memorial")
                     _record_memorial_delivery(
                         jarvis_dir, memorial_id, "retry_queued")
-                    results.append(False)
+                    results.append(bool(respect_quiet))
                 else:
-                    # Ordinary legacy cards retain the historical readable
-                    # text fallback; only memorials have a strict card-only
-                    # interaction contract.
-                    text = extract_card_text(card_json)
-                    if text:
-                        results.append(_lark_send_text(text, user_id))
-                    else:
-                        log("heartbeat", "Card send + text extraction both failed", level="warn")
-                        results.append(False)
+                    results.append(bool(respect_quiet))
 
         elif line.startswith('{"config":'):
-            # Legacy card format
             memorial_id = _memorial_id_from_card(line)
             _ids_before = len(_LAST_SENT_IDS)
-            delivered = _lark_send_card(
-                line, user_id, "",
-                assume_delivered_on_timeout=not bool(memorial_id))
+            result = submit(DeliveryEnvelope(
+                source=source,
+                kind="card",
+                payload={"card_json": line, "text": extract_card_text(line)},
+                attention="decision" if memorial_id else "notice",
+                requested_channel="lark",
+                urgent=not respect_quiet,
+                memorial_id=memorial_id,
+                dedup_key=f"memorial:{memorial_id}" if memorial_id else "",
+                provider=provider,
+                model=model,
+                metadata={"review_surface": "lark",
+                          "bypass_quiet": not respect_quiet,
+                          "bypass_dedup": not respect_quiet,
+                          "bypass_throttle": not respect_quiet,
+                          "retry_existing": True},
+            ))
+            delivered = result.state == "delivered"
             if delivered and memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
                 _record_sent_lark_id(memorial_id, _ids_before)
-            elif not delivered and memorial_id:
-                _append_memorial_queue_entry(
-                    jarvis_dir, memorial_id, line,
-                    _peek_source(jarvis_dir) or "memorial")
+            elif result.reason == "quiet_hours" and memorial_id:
+                _record_memorial_delivery(jarvis_dir, memorial_id, "queued")
+            elif result.state not in {"suppressed"} and memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "retry_queued")
-            results.append(delivered)
+            results.append(
+                delivered or result.state == "suppressed"
+                or result.reason == "quiet_hours"
+                or (respect_quiet and result.state == "queued"))
 
         else:
             # Block raw JSON from reaching user
@@ -254,7 +332,29 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path) -> bool:
             remaining_text_parts.append(line)
 
     if remaining_text_parts:
-        results.append(_lark_send_text("\n".join(remaining_text_parts), user_id))
+        text = "\n".join(remaining_text_parts)
+        result = submit(DeliveryEnvelope(
+            source=source,
+            kind="text",
+            payload={"text": text},
+            attention="alert" if _is_urgent(source) else "notice",
+            # Heartbeat prose reaching this point was selected for proactive
+            # delivery. Web-only prose was already retained by memorialize.
+            requested_channel="lark",
+            urgent=not respect_quiet or _is_urgent(source),
+            throttle_key=str(source) if source.startswith("self-diagnostic")
+            else "",
+            provider=provider,
+            model=model,
+            metadata={"bypass_quiet": not respect_quiet,
+                      "bypass_dedup": not respect_quiet,
+                      "bypass_throttle": not respect_quiet,
+                      "retry_existing": True},
+        ))
+        results.append(
+            result.state in {"delivered", "suppressed"}
+            or result.reason == "quiet_hours"
+            or (respect_quiet and result.state == "queued"))
 
     return all(results) if results else True
 
@@ -1450,6 +1550,15 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         # which + ~/.local/bin fallback (severs the launchd-PATH dependency).
         claude_bin=os.environ.get("CLAUDE_BIN", ""),
     )
+    try:
+        from core.deploy import register_runtime
+        register_runtime(
+            "heartbeat-loop",
+            heartbeat_file=jd / "HEARTBEAT.md",
+            metadata={"check_interval": check_interval, "model": model},
+        )
+    except Exception as exc:
+        log("heartbeat", f"Runtime registration failed: {exc}", level="warn")
 
     log("heartbeat", f"Starting ({check_interval}s cycle)")
 
@@ -1555,7 +1664,15 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             log("heartbeat", f"Cycle exception: {e}", level="error")
             output = ""
 
-        # Batch flush: a window opened, or the user is at the phone
+        # SQLite is the authoritative queue.  Legacy JSONL queues are drained
+        # alongside it until every pre-unification row has aged out.
+        try:
+            from core.delivery import flush_due as flush_delivery_due
+            flush_delivery_due(jd)
+        except Exception as e:
+            log("heartbeat", f"delivery queue flush failed: {e}", level="warn")
+
+        # Compatibility flush for pre-unification night_queue/memorial_queue.
         if _should_flush(jd):
             _flush_night_queue(jd, user_id)
 
@@ -1569,13 +1686,6 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 sched_emit(jd, "task_skip", task=",".join(sorted(cycle_sources)),
                            reason="silent_output")
                 _clear_delivery_sidecars(jd)
-            elif _is_duplicate_send(output, jd):
-                log("heartbeat", "Suppressed duplicate send (identical message "
-                    f"within {DEDUP_WINDOW_SECONDS // 3600}h)", level="warn")
-                sched_emit(jd, "task_skip",
-                           task=",".join(sorted(cycle_sources)) or "heartbeat",
-                           reason="duplicate_send")
-                _clear_delivery_sidecars(jd)
             else:
                 # Product surface invariant: every proactive event is one
                 # memorial card with useful choices +「聊聊这个」. Existing
@@ -1584,34 +1694,44 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     from core.memorial import memorialize_output
                     memorialized = memorialize_output(
                         output, _peek_source(jd) or "heartbeat")
-                    if memorialized:
-                        output = memorialized
+                    # Empty is meaningful: the content was durably placed on
+                    # the web/phone Items surface and must not fall through as
+                    # the original prose to Lark.
+                    output = memorialized
                 except Exception as e:
                     # Delivery remains fail-open during migration: a broken
                     # adapter must not suppress the underlying alert/event.
                     log("heartbeat", f"memorialize output failed: {e}",
                         level="warn")
 
-                if _should_queue(jd):
-                    _queue_for_morning(output, jd)
+                delivered = _route_output(
+                    output, user_id, jd, respect_quiet=True,
+                    provider=getattr(runner, "last_provider", ""),
+                    model=getattr(runner, "last_model", ""),
+                )
+                _note_delivery(jd, delivered, user_id)
+                if delivered and _LAST_ROUTE_ALL_DELIVERED:
+                    _write_outbox(output, jd)
+                    _record_engagement(jd)
+                    _shadow_audit_claims(output, jd)
+                    print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
+                          file=sys.stderr)
+                elif delivered:
+                    # Accepted means queued, deduplicated, or intentionally
+                    # suppressed.  The delivery ledger now owns the truth;
+                    # writing a "sent" outbox row here would be a false ACK.
+                    _clear_delivery_sidecars(jd)
+                    _LAST_SENT_IDS.clear()
+                    log("heartbeat", "Delivery accepted without immediate send "
+                        "(queued/deduped/suppressed)")
                 else:
-                    delivered = _route_output(output, user_id, jd)
-                    _note_delivery(jd, delivered, user_id)
-                    if delivered:
-                        _write_outbox(output, jd)
-                        _record_engagement(jd)
-                        _shadow_audit_claims(output, jd)
-                        print(f"[{now_local_str('%Y-%m-%d %H:%M:%S')}] [INFO] [heartbeat] Beat sent",
-                              file=sys.stderr)
-                    else:
-                        # Do NOT write outbox/engagement on failure: an outbox
-                        # entry would make the dedup window suppress the retry
-                        # (REQ-04 cancelling REQ-11), and a "sent" record would
-                        # poison engagement stats with messages never delivered.
-                        _clear_delivery_sidecars(jd)
-                        _LAST_SENT_IDS.clear()  # drop ids from partial successes
-                        log("heartbeat", "Delivery failed — output not recorded as sent",
-                            level="warn")
+                    # Do NOT write outbox/engagement on failure: the durable
+                    # envelope will retry, and a false "sent" event would
+                    # poison engagement metrics.
+                    _clear_delivery_sidecars(jd)
+                    _LAST_SENT_IDS.clear()
+                    log("heartbeat", "Delivery failed — output not recorded as sent",
+                        level="warn")
         elif output:
             log("heartbeat", "Suppressed error-like output", level="warn")
             _clear_delivery_sidecars(jd)

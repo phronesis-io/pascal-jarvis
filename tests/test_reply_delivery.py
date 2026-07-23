@@ -83,13 +83,16 @@ def _deadletter_rows(tmp_path):
 
 
 def test_reply_path_uses_reliable_sender():
-    """The raw single-shot call must be gone from the reply path."""
+    """The live reply path terminates at the shared Python pipeline."""
     assert 'if ! lark_reply "$message_id" "$reply"' not in BOT_SH
-    assert 'lark_reply_reliable "$message_id" "$reply"' in BOT_SH
+    assert 'delivery_reply_reliable "$message_id" "$reply"' in BOT_SH
+    assert "python3 -m core.delivery send" in _extract_fn(
+        "delivery_reply_reliable")
+    assert '_answer_provider="Claude backup2"' in BOT_SH
 
 
 def test_send_to_lark_uses_reliable_sender():
-    assert "lark_send_reliable" in _extract_fn("send_to_lark")
+    assert "delivery_send_reliable" in _extract_fn("send_to_lark")
 
 
 def test_backoff_mirrors_heartbeat_send_retry_delays():

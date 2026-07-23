@@ -170,7 +170,7 @@ def _intent_close_payload(value: dict) -> dict:
     outcome = str(value.get("outcome", "done")).strip() or "done"
     result_text = str(value.get("result", "")).strip()
     try:
-        from core.intentions import record_closure
+        from core.intent_closure import record_closure
         ok = record_closure(intent_id, outcome=outcome,
                             result=result_text, via="button")
     except Exception as e:

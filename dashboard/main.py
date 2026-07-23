@@ -25,6 +25,8 @@ def main():
     """Start the dashboard server."""
     # Initialize DB on startup
     get_db()
+    from core.deploy import register_runtime
+    register_runtime("dashboard")
 
     # Create app (registers pages)
     create_app()

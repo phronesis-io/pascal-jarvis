@@ -20,11 +20,13 @@ JARVIS_DIR="$JARVIS_DIR" MEMORY_DIR="$MEMORY_DIR" python3 - <<'PYTHON'
 import os, sys, json
 sys.path.insert(0, os.environ['JARVIS_DIR'])
 
-from core.intentions import (
-    get_due_intents, mark_triggered, generate_calendar_intents,
-    lifecycle_sweep, snapshot_active_intents, write_inflight, peek_breaches,
-    generate_closure_reask_intents,
+from core.intent_lifecycle import (
+    lifecycle_sweep, mark_triggered, snapshot_active_intents,
 )
+from core.intent_scheduler import (
+    generate_calendar_intents, get_due_intents, peek_breaches, write_inflight,
+)
+from core.intent_closure import generate_closure_reask_intents
 from pathlib import Path
 
 # 0. Lifecycle sweep: retry stuck intents (bounded), expire exhausted ones

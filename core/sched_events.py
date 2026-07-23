@@ -39,7 +39,9 @@ import argparse
 import fcntl
 import json
 import os
+import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from core.timeutil import now_local_str
@@ -51,6 +53,91 @@ GENERATIONS = 7  # .1 … .7 — the replay/audit window depends on history dept
                  # days of trail and multi-day failure-rate audits were
                  # impossible)
 TS_FMT = "%Y-%m-%d %H:%M:%S"  # second precision — replay needs ordering
+
+
+def _sqlite_emit(jarvis_dir: Path, entry: dict) -> None:
+    """Project one event into the cross-process WAL state store."""
+    path = jarvis_dir / "data" / "jarvis.db"
+    # The dashboard/intent store creates the canonical DB.  Do not invent a
+    # partial database in fresh-install/test roots: other consumers interpret
+    # "jarvis.db exists" as proof their own schema is available.
+    if not path.exists():
+        return
+    with sqlite3.connect(str(path), timeout=3) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=3000")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event TEXT NOT NULL,
+                task TEXT NOT NULL DEFAULT '',
+                run_id TEXT NOT NULL DEFAULT '',
+                timestamp TEXT NOT NULL,
+                created_epoch REAL NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        payload = {
+            key: value for key, value in entry.items()
+            if key not in {"ts", "event", "task", "run_id"}
+        }
+        db.execute(
+            "INSERT INTO schedule_events "
+            "(event,task,run_id,timestamp,created_epoch,payload) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                entry["event"], entry.get("task", ""),
+                entry.get("run_id", ""), entry["ts"], time.time(),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+
+
+def _sqlite_query(jarvis_dir: Path, since: str, until: str,
+                  task: str, event: str) -> list[dict]:
+    path = jarvis_dir / "data" / "jarvis.db"
+    if not path.exists():
+        return []
+    try:
+        with sqlite3.connect(str(path), timeout=3) as db:
+            db.row_factory = sqlite3.Row
+            have = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='schedule_events'").fetchone()
+            if not have:
+                return []
+            clauses, params = [], []
+            if since:
+                clauses.append("timestamp>=?")
+                params.append(since)
+            if until:
+                clauses.append("substr(timestamp,1,?)<=?")
+                params.extend((len(until), until))
+            if event:
+                clauses.append("event=?")
+                params.append(event)
+            query_sql = "SELECT * FROM schedule_events"
+            if clauses:
+                query_sql += " WHERE " + " AND ".join(clauses)
+            query_sql += " ORDER BY id"
+            rows = db.execute(query_sql, params).fetchall()
+    except (OSError, sqlite3.Error):
+        return []
+    result = []
+    for row in rows:
+        if task:
+            names = {item.strip() for item in str(row["task"]).split(",")}
+            if task not in names:
+                continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = {}
+        result.append({
+            "ts": row["timestamp"], "event": row["event"],
+            "task": row["task"], "run_id": row["run_id"], **payload,
+        })
+    return result
 
 
 def _rotate_if_oversized(path: Path) -> None:
@@ -97,6 +184,7 @@ def emit(jarvis_dir, event: str, task: str = "", run_id: str = "", **fields) -> 
         entry.update(fields)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _sqlite_emit(Path(jarvis_dir), entry)
     except Exception as e:  # noqa: BLE001 — by contract, swallow everything
         try:
             print(f"[warn] sched_events: failed to write {event!r}: {e}",
@@ -115,8 +203,13 @@ def query(jarvis_dir, since: str = "", until: str = "",
     whole 10:30 minute. `task` matches the task field exactly, or as one
     member of a comma-separated multi-source task value.
     """
+    sqlite_rows = _sqlite_query(Path(jarvis_dir), since, until, task, event)
     base = Path(jarvis_dir) / SCHED_EVENT_FILE
-    out: list[dict] = []
+    out: list[dict] = list(sqlite_rows)
+    seen = {
+        json.dumps(row, ensure_ascii=False, sort_keys=True)
+        for row in sqlite_rows
+    }
     for path in (base.with_name(base.name + ".1"), base):
         if not path.exists():
             continue
@@ -139,7 +232,11 @@ def query(jarvis_dir, since: str = "", until: str = "",
                 names = {s.strip() for s in str(e.get("task", "")).split(",")}
                 if task not in names:
                     continue
-            out.append(e)
+            identity = json.dumps(e, ensure_ascii=False, sort_keys=True)
+            if identity not in seen:
+                out.append(e)
+                seen.add(identity)
+    out.sort(key=lambda row: str(row.get("ts", "")))
     return out
 
 

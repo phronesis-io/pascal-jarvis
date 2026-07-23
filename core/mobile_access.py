@@ -259,7 +259,7 @@ def unregister_push(endpoint: str, device_id: str = "") -> bool:
     return bool(changed)
 
 
-def send_push(title: str, body: str, url: str = "/matters",
+def send_push(title: str, body: str, url: str = "/items",
               matter_id: str = "") -> dict:
     rows = _db().execute(
         "SELECT * FROM matter_push_subscriptions WHERE enabled = 1"

@@ -582,6 +582,12 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             paired = await client.post(
                 "/pair", data={"code": pair["code"]}, allow_redirects=False)
             assert paired.status == 302
+            onboarding = [
+                item for item in memorial.list_memorials()
+                if item["source"] == "mobile-onboarding"
+            ]
+            assert len(onboarding) == 1
+            assert onboarding[0]["delivery_status"] == "web_only"
             allowed = await client.get("/matters")
             assert allowed.status == 200
             payload = await allowed.json()

@@ -35,8 +35,8 @@ def create_app():
     # agent_calendar were previously never imported — their routes 404'd in
     # production while the home page linked to them (REQ-43).
     from .pages import (  # noqa: F401
-        home, tasks, bookmarks, settings, intentions, thinking, agent_calendar,
-        engagement, ops, usage, memorials, matters,
+        home, items, tasks, bookmarks, settings, intentions, thinking,
+        agent_calendar, engagement, ops, usage, memorials, matters,
     )
 
     # Register REST API for bot.sh integration

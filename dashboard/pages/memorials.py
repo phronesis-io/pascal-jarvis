@@ -33,6 +33,8 @@ def _compact(text: str, limit: int = 520) -> str:
 
 @ui.page("/memorials")
 def memorials_page():
+    ui.navigate.to("/items")
+    return
     add_dashboard_head()
     mode = {"value": "phone"}
     source_filter = {"value": None}  # None = 全部来源（按 source_label 分组）

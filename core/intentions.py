@@ -35,7 +35,8 @@ ROOT = Path(__file__).parent.parent
 
 # Sidecar state files (repo-root data/, all writers use atomic tmp+rename)
 INFLIGHT_FILE = ROOT / "data" / ".intention_inflight.json"
-BREACH_QUEUE = ROOT / "data" / ".intent_breach_queue.jsonl"
+_DEFAULT_BREACH_QUEUE = ROOT / "data" / ".intent_breach_queue.jsonl"
+BREACH_QUEUE = _DEFAULT_BREACH_QUEUE
 
 
 @contextmanager
@@ -820,7 +821,6 @@ def _queue_breach(intent: dict, now: datetime) -> None:
     by the rewrite's os.replace. Never raises.
     """
     try:
-        BREACH_QUEUE.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "id": intent["id"], "name": intent.get("name", ""),
             "prompt": intent.get("prompt", ""), "purpose": intent.get("purpose", ""),
@@ -828,6 +828,10 @@ def _queue_breach(intent: dict, now: datetime) -> None:
             "attempt": intent.get("attempt") or 0,
             "ts": now.strftime("%Y-%m-%dT%H:%M:%S"), "notify_attempts": 0,
         }
+        if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+            _store_breach_sqlite(entry)
+            return
+        BREACH_QUEUE.parent.mkdir(parents=True, exist_ok=True)
         with breach_queue_lock(BREACH_QUEUE):
             with open(BREACH_QUEUE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -2207,6 +2211,69 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
 BREACH_MAX_SHOWS = 1
 
 
+def _ensure_breach_table(db) -> None:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS intent_breaches (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL DEFAULT '{}',
+            notify_attempts INTEGER NOT NULL DEFAULT 0,
+            created_epoch REAL NOT NULL,
+            retired_epoch REAL
+        )
+    """)
+
+
+def _store_breach_sqlite(entry: dict) -> None:
+    """Upsert one commitment breach without a process-local file lock."""
+    import time
+    db = _get_db()
+    _ensure_breach_table(db)
+    iid = str(entry.get("id", "")).strip()
+    if not iid:
+        return
+    db.execute(
+        "INSERT INTO intent_breaches "
+        "(id,payload,notify_attempts,created_epoch,retired_epoch) "
+        "VALUES (?,?,?,?,NULL) "
+        "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,"
+        "retired_epoch=NULL",
+        (
+            iid, json.dumps(entry, ensure_ascii=False),
+            int(entry.get("notify_attempts", 0) or 0), time.time(),
+        ),
+    )
+    db.commit()
+
+
+def store_breach_entry(entry: dict) -> None:
+    """Public SQLite writer for deterministic breach producers."""
+    _store_breach_sqlite(dict(entry or {}))
+
+
+def _import_legacy_breaches() -> None:
+    """One-way import for writers not yet upgraded from the JSONL adapter."""
+    if BREACH_QUEUE != _DEFAULT_BREACH_QUEUE or not BREACH_QUEUE.exists():
+        return
+    try:
+        with breach_queue_lock(BREACH_QUEUE):
+            lines = BREACH_QUEUE.read_text(encoding="utf-8").splitlines()
+            entries = []
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(row, dict) and row.get("id"):
+                    entries.append(row)
+            for entry in entries:
+                _store_breach_sqlite(entry)
+            # Preserve the inode for any old process that still has it open.
+            with open(BREACH_QUEUE, "w", encoding="utf-8"):
+                pass
+    except OSError as e:
+        print(f"[intentions] legacy breach import failed: {e}", file=sys.stderr)
+
+
 def peek_breaches(max_notify_attempts: int = BREACH_MAX_SHOWS) -> list[dict]:
     """Return breach entries still owed a notification — WITHOUT mutating.
 
@@ -2219,6 +2286,30 @@ def peek_breaches(max_notify_attempts: int = BREACH_MAX_SHOWS) -> list[dict]:
     is the only writer, called only when a card actually went out. Shown at
     most BREACH_MAX_SHOWS times (1) — a breach apology must never nag.
     """
+    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+        _import_legacy_breaches()
+        try:
+            db = _get_db()
+            _ensure_breach_table(db)
+            rows = db.execute(
+                "SELECT payload,notify_attempts FROM intent_breaches "
+                "WHERE retired_epoch IS NULL AND notify_attempts<? "
+                "ORDER BY created_epoch",
+                (max_notify_attempts,),
+            ).fetchall()
+            entries = []
+            for row in rows:
+                try:
+                    entry = json.loads(row[0] or "{}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                entry["notify_attempts"] = int(row[1] or 0)
+                entries.append(entry)
+            return entries
+        except Exception as e:
+            print(f"[intentions] breach sqlite peek failed: {e}",
+                  file=sys.stderr)
+            return []
     if not BREACH_QUEUE.exists():
         return []
     entries = []
@@ -2247,7 +2338,30 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
     clear_breaches() wipe (which deleted reconcile's just-queued breach) is
     gone. Atomic tmp+rename. Never raises.
     """
-    if not BREACH_QUEUE.exists() or not ids:
+    if not ids:
+        return
+    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+        try:
+            import time
+            db = _get_db()
+            _ensure_breach_table(db)
+            placeholders = ",".join("?" for _ in ids)
+            db.execute(
+                f"UPDATE intent_breaches SET notify_attempts=notify_attempts+1 "
+                f"WHERE id IN ({placeholders}) AND retired_epoch IS NULL",
+                tuple(ids),
+            )
+            db.execute(
+                "UPDATE intent_breaches SET retired_epoch=? "
+                "WHERE retired_epoch IS NULL AND notify_attempts>=?",
+                (time.time(), max_notify_attempts),
+            )
+            db.commit()
+        except Exception as e:
+            print(f"[intentions] breach sqlite mark-shown failed: {e}",
+                  file=sys.stderr)
+        return
+    if not BREACH_QUEUE.exists():
         return
     shown = set(ids)
     keep = []
@@ -2286,7 +2400,25 @@ def clear_breaches(ids: list[str] | None = None) -> None:
     """Remove breach entries by id once their card went out. ids=None is a
     no-op now (the old blanket wipe deleted reconcile's freshly-queued
     breaches — use mark_breaches_shown with explicit ids instead)."""
-    if not BREACH_QUEUE.exists() or not ids:
+    if not ids:
+        return
+    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+        try:
+            import time
+            db = _get_db()
+            _ensure_breach_table(db)
+            placeholders = ",".join("?" for _ in ids)
+            db.execute(
+                f"UPDATE intent_breaches SET retired_epoch=? "
+                f"WHERE id IN ({placeholders}) AND retired_epoch IS NULL",
+                (time.time(), *ids),
+            )
+            db.commit()
+        except Exception as e:
+            print(f"[intentions] breach sqlite clear failed: {e}",
+                  file=sys.stderr)
+        return
+    if not BREACH_QUEUE.exists():
         return
     try:
         drop = set(ids)

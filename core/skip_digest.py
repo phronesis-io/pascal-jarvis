@@ -6,8 +6,8 @@ Evidence (6/30 + 7/1): 8 cron occurrences were retired by
 bill reminder and a Tushare token reminder vanished without a
 trace until Pascal noticed himself.
 
-This module is the consumer. It scans sched_events.jsonl for skip-class
-events in the last 24h and rides the existing intent breach queue (the
+This module is the consumer. It scans sched_events for skip-class events in
+the last 24h and writes the shared SQLite intent breach state (the
 intention-check apology card, BREACH_MAX_SHOWS=1 anti-nag), split by the
 skipped intent's `category` (behavioral_rules §5 — the existing taxonomy):
 
@@ -311,6 +311,7 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
             return len(backfill) + len(aggregate)
 
         queue = _breach_queue(jarvis_dir)
+        sqlite_mode = jarvis_dir.resolve() == ROOT.resolve()
 
         # 1. 硬约束 backfill — BEFORE the consumed-state save. An append
         #    failure aborts the whole scan (nothing consumed → full retry).
@@ -318,17 +319,25 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
         #    concurrent rewrite can neither destroy the append nor stale the
         #    dedupe read.
         if backfill:
-            queue.parent.mkdir(parents=True, exist_ok=True)
             n_appended = 0
-            with breach_queue_lock(queue):
-                already = _queued_ids(queue)
-                with open(queue, "a", encoding="utf-8") as f:
-                    for e, row in backfill:
-                        entry = _backfill_entry(e, row, now_dt, now_ts)
-                        if entry["id"] in already:
-                            continue   # redo of a crashed scan — already queued
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                        n_appended += 1
+            if sqlite_mode:
+                from core.intent_scheduler import store_breach_entry
+                for e, row in backfill:
+                    store_breach_entry(_backfill_entry(
+                        e, row, now_dt, now_ts))
+                    n_appended += 1
+            else:
+                queue.parent.mkdir(parents=True, exist_ok=True)
+                with breach_queue_lock(queue):
+                    already = _queued_ids(queue)
+                    with open(queue, "a", encoding="utf-8") as f:
+                        for e, row in backfill:
+                            entry = _backfill_entry(e, row, now_dt, now_ts)
+                            if entry["id"] in already:
+                                continue
+                            f.write(json.dumps(
+                                entry, ensure_ascii=False) + "\n")
+                            n_appended += 1
             print(f"[skip-digest] queued {n_appended} per-item backfill(s) "
                   f"({len(backfill) - n_appended} already queued)",
                   file=sys.stderr)
@@ -346,11 +355,15 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
 
         # 3. Aggregate digest — AFTER the save (宁丢勿重, batch-1 behavior).
         if aggregate:
-            queue.parent.mkdir(parents=True, exist_ok=True)
-            with breach_queue_lock(queue):
-                with open(queue, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(_digest_entry(aggregate, now_ts),
-                                       ensure_ascii=False) + "\n")
+            entry = _digest_entry(aggregate, now_ts)
+            if sqlite_mode:
+                from core.intent_scheduler import store_breach_entry
+                store_breach_entry(entry)
+            else:
+                queue.parent.mkdir(parents=True, exist_ok=True)
+                with breach_queue_lock(queue):
+                    with open(queue, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             print(f"[skip-digest] queued digest of {len(aggregate)} skipped item(s)",
                   file=sys.stderr)
         return len(backfill) + len(aggregate)

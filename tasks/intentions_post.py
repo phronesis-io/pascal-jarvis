@@ -30,10 +30,11 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.intentions import (
-    mark_executed, mark_failed, get_intent, record_closure,
+from core.intent_lifecycle import mark_executed, mark_failed, get_intent
+from core.intent_closure import record_closure, note_closure_touch
+from core.intent_scheduler import (
     read_inflight, read_inflight_breaches, reconcile_inflight,
-    mark_breaches_shown, validate_envelope, note_closure_touch,
+    mark_breaches_shown, validate_envelope,
 )
 from core.card import build_card
 from core.safety import parse_json_response

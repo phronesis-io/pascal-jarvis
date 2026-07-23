@@ -108,6 +108,23 @@ def test_scan_gate_defers_within_interval(tmp_path):
     assert sd.queue_digest(jd, force=True) == 1   # force bypasses the gate
 
 
+def test_canonical_root_writes_breach_to_sqlite_boundary(
+        tmp_path, monkeypatch):
+    import core.intent_scheduler as scheduler
+
+    captured = []
+    monkeypatch.setattr(sd, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        scheduler, "store_breach_entry",
+        lambda entry: captured.append(entry),
+    )
+    _emit_skip(tmp_path, "int_sql", "SQLite breach")
+
+    assert sd.queue_digest(tmp_path, force=True) == 1
+    assert captured[0]["id"].startswith("skipdigest_")
+    assert not (tmp_path / "data" / ".intent_breach_queue.jsonl").exists()
+
+
 def test_consumed_written_before_breach_append(tmp_path, monkeypatch):
     """Crash between state write and queue append must lose, not duplicate."""
     jd = tmp_path

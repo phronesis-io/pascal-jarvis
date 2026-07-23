@@ -159,7 +159,10 @@ def queue_overview(jarvis_dir: Path | None = None) -> dict:
             "text": str(row.get("text", ""))[:180],
         })
 
-    breach = _read_jsonl(jd / "data" / ".intent_breach_queue.jsonl")
+    from core.state_projection import breach_overview, delivery_overview
+    breach = breach_overview(jd)
+    if breach is None:
+        breach = _read_jsonl(jd / "data" / ".intent_breach_queue.jsonl")
 
     jobs = {"counts": {}, "running": []}
     registry = read_json(jd / "jobs" / "registry.json", ttl=0, default={}) or {}
@@ -178,7 +181,10 @@ def queue_overview(jarvis_dir: Path | None = None) -> dict:
                     "pid": info.get("pid"),
                 })
 
-    delivery = read_json(jd / ".delivery_state.json", ttl=0, default={}) or {}
+    delivery = delivery_overview(jd)
+    if delivery is None:
+        delivery = read_json(
+            jd / ".delivery_state.json", ttl=0, default={}) or {}
     if not isinstance(delivery, dict):
         delivery = {}
 

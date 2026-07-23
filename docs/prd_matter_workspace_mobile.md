@@ -36,6 +36,11 @@ Implemented on 2026-07-22:
 
 2026-07-23 convergence round:
 
+- `/items` replaced Matters, Intentions, and Memorials as competing top-level
+  inboxes. Memorial is the visible Item, Matter is an optional topic and
+  drill-down, and Intent is shown only as a timed-reminder attribute.
+- All outbound surfaces now use `core.delivery` and one SQLite delivery state;
+  see `docs/prd_unified_delivery_items.md`.
 - Attention is now routed by meaning: explicit choices are pending memorials,
   urgent non-choice alerts may still reach Lark, and routine FYI output stays
   in the web `知会` stream. Legacy FYI cards remain readable but no longer
@@ -81,8 +86,8 @@ restart and they bypass the owned Tailscale ingress policy.
 
 Jarvis will have one first-party home and several replaceable entrances:
 
-- `:3457` is the first-party home for overview, decisions, matters, artifacts,
-  and execution state.
+- `:3457/items` is the first-party home for notices and decisions. Matter
+  detail provides topic context, artifacts, and execution state.
 - Lark is the real-time conversation channel plus sparse decisions and alerts.
   Routine informational output belongs to the web notice stream.
 - Claude Code and Codex are execution runtimes. Their sessions are ephemeral
@@ -92,9 +97,10 @@ Jarvis will have one first-party home and several replaceable entrances:
 - `:3456` remains an internal admin/API surface and is never part of the
   everyday user journey.
 
-The durable product object is a **Matter**: one recognizable thing Pascal is
-thinking about, deciding, or doing. A Matter survives model changes, channel
-changes, session rotation, restarts, and deployment.
+The durable internal work identity is a **Matter**. The only user-facing inbox
+object is a Memorial-backed **Item**. A Matter survives model changes, channel
+changes, session rotation, restarts, and deployment without competing with the
+Item inbox.
 
 ## 2. Problem
 

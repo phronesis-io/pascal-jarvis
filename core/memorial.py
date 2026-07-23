@@ -624,11 +624,17 @@ def _chatting_card(state: dict, ts: str) -> dict:
 # ── sending (clone of heartbeat_loop's production lark-cli path) ────────
 
 
-def _send(args: list[str]) -> str:
+def _send(args: list[str], *, retries: bool = True) -> str:
     """Send via lark-cli. Returns the Lark message_id on success ("sent" if
     the id can't be parsed — still truthy), "" on failure. Callers that only
-    care about success/failure keep working: the return is bool-compatible."""
-    for attempt, delay in enumerate((0,) + SEND_RETRY_DELAYS):
+    care about success/failure keep working: the return is bool-compatible.
+
+    ``retries=False`` is used by core.delivery, which owns the one canonical
+    retry schedule.  The default remains for compatibility callers that invoke
+    this low-level helper directly.
+    """
+    delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
+    for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
         try:
@@ -663,7 +669,10 @@ def _send_card(card_json_str: str, chat_id: str = "") -> str:
         if not uid:
             return ""
         target = ["--user-id", uid]
-    return _send([*target, "--msg-type", "interactive", "--content", card_json_str])
+    return _send(
+        [*target, "--msg-type", "interactive", "--content", card_json_str],
+        retries=False,
+    )
 
 
 def _send_text(text: str, chat_id: str = "") -> str:
@@ -676,7 +685,7 @@ def _send_text(text: str, chat_id: str = "") -> str:
         if not uid:
             return False
         target = ["--user-id", uid]
-    return _send([*target, "--markdown", text])
+    return _send([*target, "--markdown", text], retries=False)
 
 
 def _write_outbox(text: str) -> None:
@@ -738,8 +747,20 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
     recreates the exact long/truncated interaction this surface replaces.
     ``heartbeat_loop._flush_memorial_queue`` sends these entries one by one.
     """
+    # Compatibility audit only: SQLite delivery_envelopes is authoritative.
+    # Avoid minting duplicate shadow rows when a caller re-submits the same
+    # already-queued memorial.
+    queue_path = JARVIS_DIR / MEMORIAL_QUEUE_FILE
+    try:
+        if queue_path.exists() and any(
+                json.loads(line).get("memorial_id") == mid
+                for line in queue_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()):
+            return
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
     readable = extract_card_text(card_json_str) or f"📜 {title}"
-    _append_line(JARVIS_DIR / MEMORIAL_QUEUE_FILE,
+    _append_line(queue_path,
                  {"ts": now_local_str(), "epoch": int(time.time()),
                   "text": readable, "source": source or "memorial",
                   "memorial_id": mid, "card_json": card_json_str})
@@ -755,7 +776,32 @@ _opener_thread: threading.Thread | None = None
 
 def _deliver_opener(text: str, chat_id: str) -> None:
     try:
-        if _send_text(text, chat_id):
+        from core.delivery import (DeliveryEnvelope, TransportResult,
+                                   deliver as deliver_envelope)
+
+        def transport(envelope, channel):
+            if channel == "web":
+                return TransportResult(True)
+            sent = _send_text(str(envelope.payload.get("text") or ""), chat_id)
+            message_id = "" if sent is True else str(sent or "")
+            return TransportResult(bool(sent), message_id)
+
+        result = deliver_envelope(
+            DeliveryEnvelope(
+                source="memorial-chat",
+                kind="text",
+                payload={"text": text},
+                attention="reply",
+                requested_channel="lark",
+                conversation_bound=True,
+                chat_id=chat_id,
+                metadata={"bypass_throttle": True,
+                          "dedup_text": f"{chat_id}\0{text}"},
+            ),
+            root=JARVIS_DIR,
+            transport=transport,
+        )
+        if result.state == "delivered":
             _write_outbox(text)
     except Exception as e:
         print(f"memorial opener send failed: {e}", file=sys.stderr)
@@ -876,39 +922,100 @@ def _find_recent_duplicate(source: str, title: str, body: str,
 
 
 def _deliver_existing(state: dict, urgent: bool = False) -> bool:
-    """Deliver an already-ledgered memorial and record the outcome."""
+    """Hand an already-ledgered memorial to the unified delivery pipeline."""
+    from core.delivery import (DeliveryEnvelope, TransportResult,
+                               deliver as deliver_envelope)
+
     mid = state["id"]
     cj = _render_card(state)
-    if not urgent and _quiet_hours_now():
-        _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
-        _record_delivery(mid, "queued")
-        print(f"memorial {mid}: quiet hours — queued as an intact morning card",
-              file=sys.stderr)
-        return True
+    review_at = review_surface(state)
+    push_lark = should_push_to_lark(state)
+    force_queue = (
+        push_lark and not urgent and _quiet_hours_now()
+    )
 
-    sent = _send_card(cj, state.get("chat_id", ""))
-    _record_delivery(mid, "delivered" if sent else "failed",
-                     source=state.get("source", "memorial"))
-    if sent:
-        if sent != "sent":
+    def transport(envelope, channel):
+        if channel == "web":
+            return TransportResult(True)
+        sent = _send_card(
+            str(envelope.payload.get("card_json") or ""),
+            state.get("chat_id", ""),
+        )
+        # Old tests and third-party adapters may still return bool.  Never
+        # persist the literal "True" as a Lark message id.
+        message_id = "" if sent is True else str(sent or "")
+        return TransportResult(bool(sent), message_id)
+
+    readable = extract_card_text(cj) or f"📜 {state['title']}"
+    result = deliver_envelope(
+        DeliveryEnvelope(
+            source=state.get("source", "memorial"),
+            kind="card",
+            payload={"card_json": cj, "text": readable},
+            attention=str(state.get("attention") or ATTENTION_NOTICE),
+            requested_channel=REVIEW_LARK if push_lark else review_at,
+            urgent=urgent,
+            conversation_bound=bool(state.get("chat_id")),
+            chat_id=state.get("chat_id", ""),
+            memorial_id=mid,
+            matter_id=state.get("matter_id", ""),
+            dedup_key=str(state.get("dedup_key") or f"memorial:{mid}"),
+            throttle_key=str(state.get("throttle_key") or ""),
+            metadata={
+                "review_surface": review_at,
+                "dedup_text": json.dumps({
+                    "title": state.get("title", ""),
+                    "body": state.get("body", ""),
+                    "options": state.get("options", []),
+                }, ensure_ascii=False, sort_keys=True),
+                "force_queue": force_queue,
+                # Memorial owns the review-surface-specific quiet-hours
+                # decision above. Avoid a second wall-clock check in the
+                # generic pipeline disagreeing with that decision.
+                "bypass_quiet": not force_queue,
+                "retry_existing": True,
+            },
+        ),
+        root=JARVIS_DIR,
+        transport=transport,
+    )
+
+    if not push_lark:
+        status = "phone_ready" if requires_decision(state) else "web_only"
+        _record_delivery(mid, status)
+        return result.accepted
+
+    if result.state == "delivered":
+        _record_delivery(
+            mid, "delivered", source=state.get("source", "memorial"))
+        if result.message_id:
             # REQ-118 奏折专属对话: remember the delivered card's Lark
             # message_id so a reply in its thread routes to a per-card session.
             try:
                 from core.memorial_thread import record_sent
-                record_sent(mid, sent)
+                record_sent(mid, result.message_id)
             except Exception as e:
                 print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
-        readable = extract_card_text(cj) or f"📜 {state['title']}"
         _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
-    else:
-        # A direct CLI emitter has no outer retry loop.  Keep the exact card
-        # for heartbeat_loop to retry at the next delivery window instead of
-        # stranding a pending ledger row that nobody automatically revisits.
-        _queue_for_morning(mid, cj, state["title"], state.get("source", ""))
+        return True
+
+    if result.state == "suppressed":
+        _record_delivery(mid, "suppressed")
+        return True
+
+    if result.state == "attempting":
         _record_delivery(mid, "retry_queued")
-    # Public contract stays bool (create() returns this to emitters/tests);
-    # the message_id is consumed above for the REQ-118 thread ledger only.
-    return bool(sent)
+        return True
+
+    if force_queue and result.reason == "quiet_hours":
+        _record_delivery(mid, "queued")
+        print(f"memorial {mid}: quiet hours — queued in delivery state",
+              file=sys.stderr)
+        return True
+
+    _record_delivery(mid, "failed")
+    _record_delivery(mid, "retry_queued")
+    return False
 
 
 ROTATE_AFTER_DAYS = 45
@@ -1095,21 +1202,13 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         if not send:
             if (not should_push_to_lark(dup)
                     and not delivery_accepted(dup)):
-                _record_delivery(
-                    dup["id"],
-                    "phone_ready" if requires_decision(dup) else "web_only",
-                )
-                return dup["id"], True
+                return dup["id"], _deliver_existing(dup, urgent=urgent)
             return dup["id"], False
         if delivery_accepted(dup):
             return dup["id"], True
         if should_push_to_lark(dup):
             return dup["id"], _deliver_existing(dup, urgent=urgent)
-        _record_delivery(
-            dup["id"],
-            "phone_ready" if requires_decision(dup) else "web_only",
-        )
-        return dup["id"], True
+        return dup["id"], _deliver_existing(dup, urgent=urgent)
 
     mid = _new_id()
     ts = now_local_str()
@@ -1144,15 +1243,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     cj = _render_card(state)
     if not send:
         if not should_push_to_lark(state):
-            _record_delivery(
-                mid, "phone_ready" if requires_decision(state) else "web_only")
-            return mid, True
+            return mid, _deliver_existing(state, urgent=urgent)
         return mid, False
     if should_push_to_lark(state):
         return mid, _deliver_existing(state, urgent=urgent)
-    _record_delivery(
-        mid, "phone_ready" if requires_decision(state) else "web_only")
-    return mid, True
+    return mid, _deliver_existing(state, urgent=urgent)
 
 
 def _card_memorial_id(card: dict) -> str:
@@ -1493,6 +1588,12 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     ts = now_local_str()
     _append_line(_ledger_path(), {"ev": "decide", "id": memorial_id, "ts": ts,
                                   "opt": opt_key, "label": opt.get("label", "")})
+    try:
+        from core.delivery import DeliveryPipeline
+        DeliveryPipeline(JARVIS_DIR).confirm_entity(
+            memorial_id=memorial_id, state="acted")
+    except Exception as e:
+        print(f"memorial delivery confirm failed: {e}", file=sys.stderr)
     # 批红 = engagement：same "feedback" shape the legacy card buttons write,
     # so engagement-analyze sees which sources Pascal actually acts on.
     _record_engagement({"source": st.get("source", "memorial"),
@@ -1618,6 +1719,26 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "",
     })
 
 
+def conversation_deep_link(state: dict) -> str:
+    """Best Lark destination for continuing one memorial conversation."""
+    matter_id = str(state.get("matter_id", "") or "")
+    if matter_id:
+        try:
+            from core.matter_bridge import bindings_for_matter, lark_deep_link
+            bindings = bindings_for_matter(matter_id)
+            if bindings:
+                return lark_deep_link(bindings[0])
+        except Exception:
+            pass
+    chat_id = str(state.get("chat_id", "") or "")
+    if chat_id:
+        return f"https://applink.feishu.cn/client/chat/open?openChatId={chat_id}"
+    user_id = _resolve_user_id()
+    if user_id:
+        return f"https://applink.feishu.cn/client/chat/open?openId={user_id}"
+    return ""
+
+
 def chat(memorial_id: str) -> dict:
     """「聊聊这个」: inject the memorial's full context into bot.sh's
     pending-merge channel (so Pascal's next message arrives with the topic
@@ -1640,6 +1761,7 @@ def chat(memorial_id: str) -> dict:
     if st.get("chat_epoch") and time.time() - st["chat_epoch"] < CHAT_RETAP_THROTTLE_S:
         print(f"memorial chat re-tap throttled: id={memorial_id}", file=sys.stderr)
         return {"toast": {"type": "info", "content": "已在聊了——直接回消息就行"},
+                "deep_link": conversation_deep_link(st),
                 "card": {"type": "raw",
                          "data": _chatting_card(st, st["chat_ts"] or ts)}}
 
@@ -1673,7 +1795,8 @@ def chat(memorial_id: str) -> dict:
               "直接说你想追问什么，或告诉我你的倾向。")
     _send_opener_async(opener, st.get("chat_id", ""))
 
-    return {"toast": {"type": "success", "content": "开聊——直接回消息就行"},
+    return {"toast": {"type": "success", "content": "已带上背景，正在打开飞书"},
+            "deep_link": conversation_deep_link(st),
             "card": {"type": "raw", "data": _chatting_card(st, ts)}}
 
 

@@ -188,70 +188,48 @@ def log(level: str, msg: str):
         pass
 
 
-def notify_lark(msg: str):
-    """Send a notification to Pascal — Lark first, local banner fallback.
+def notify_lark(msg: str) -> bool:
+    """Submit a Guardian alert to the unified delivery state machine.
 
-    REQ-58: every alert path used to flow through the same lark-cli + app
-    credentials as the system being alerted about — a Lark/auth outage took
-    down both the system AND every alarm about it ('如果你看到这条说明链路已
-    部分恢复'). On Lark failure: macOS banner (Pascal is usually at this Mac)
-    + a dead-letter line flushed on the next successful send.
+    The daemon remains model-independent and keeps the macOS banner as its
+    truly out-of-band fallback. Retry, dedup, throttle, and queueing are no
+    longer reimplemented here.
     """
     if not USER_ID:
         log("WARN", "No USER_ID configured, cannot notify Lark")
-        return
-    ok = False
+        return False
     try:
-        r = subprocess.run(
-            ["lark-cli", "im", "+messages-send",
-             "--user-id", USER_ID,
-             "--markdown", f"🛡️ **Guardian Daemon**\n\n{msg}",
-             "--as", "bot"],
-            capture_output=True, text=True, timeout=15,
+        import hashlib
+        from core.delivery import DeliveryEnvelope, deliver
+
+        metric = hashlib.sha256(
+            " ".join(str(msg).split()).encode("utf-8")).hexdigest()[:20]
+        result = deliver(
+            DeliveryEnvelope(
+                source="guardian-daemon",
+                kind="text",
+                payload={"text": f"🛡️ **Guardian Daemon**\n\n{msg}"},
+                attention="alert",
+                requested_channel="lark",
+                urgent=True,
+                throttle_key=f"guardian:{metric}",
+                metadata={
+                    "metric_daily_cap": 1,
+                    # A failed alert remains queued. A dead letter about that
+                    # dead letter would recurse forever during a Lark outage.
+                    "suppress_dead_letter": True,
+                },
+            ),
+            root=JARVIS_DIR,
         )
-        ok = r.returncode == 0
+        if result.state in {"delivered", "read", "acted"}:
+            return True
+        log("ERROR", "Guardian alert not delivery-confirmed "
+            f"(state={result.state}, reason={result.reason})")
     except Exception as e:
         log("ERROR", f"Lark notify failed: {e}")
 
-    dead_letter = JARVIS_DIR / "alerts_deadletter.jsonl"
-    if ok:
-        # Flush ALL dead letters from earlier outages, and only delete the
-        # file if the re-send actually succeeded (red-team fix: the old code
-        # took only the last 10 — silently dropping older alerts — and
-        # unlinked unconditionally, losing everything if the flush itself
-        # failed).
-        if dead_letter.exists():
-            try:
-                lines = [l for l in dead_letter.read_text().splitlines() if l.strip()]
-                pending = []
-                for l in lines:
-                    try:
-                        pending.append(json.loads(l).get("msg", ""))
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                if pending:
-                    # Chunk so a huge backlog can't exceed message limits;
-                    # only unlink if every chunk sent.
-                    all_sent = True
-                    for i in range(0, len(pending), 10):
-                        chunk = pending[i:i + 10]
-                        r2 = subprocess.run(
-                            ["lark-cli", "im", "+messages-send", "--user-id", USER_ID,
-                             "--markdown", "🛡️ **Guardian Daemon**（补发告警 — 当时 Lark 链路不通）\n\n"
-                             + "\n---\n".join(chunk), "--as", "bot"],
-                            capture_output=True, text=True, timeout=15)
-                        if r2.returncode != 0:
-                            all_sent = False
-                            break
-                    if all_sent:
-                        dead_letter.unlink(missing_ok=True)
-                else:
-                    dead_letter.unlink(missing_ok=True)  # only unparseable junk
-            except Exception:
-                pass  # leave the file for the next successful notify
-        return
-
-    # Lark failed → local banner + dead letter
+    # Lark failed or remains queued: local notification is independent.
     try:
         safe = msg.replace('"', "'")[:200]
         subprocess.run(
@@ -260,12 +238,7 @@ def notify_lark(msg: str):
             capture_output=True, timeout=5)
     except Exception:
         pass
-    try:
-        with open(dead_letter, "a") as f:
-            f.write(json.dumps({"ts": _daemon_now().strftime("%Y-%m-%d %H:%M:%S"),
-                                 "msg": msg}, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    return False
 
 
 def _find_last_heartbeat() -> float | None:
@@ -645,7 +618,8 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
                     f"{'；'.join(reasons)}。（守护进程只告警不代管）")
 
 
-DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
+_DEFAULT_DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
+DEADLETTER_FILE = _DEFAULT_DEADLETTER_FILE
 
 _DEADLETTER_KIND_LABELS = {
     "delivery_failures": "消息发送连续失败",
@@ -670,6 +644,33 @@ def consume_delivery_deadletters():
     failure (REQ-58) and flushes on its next successful send. Never raises.
     """
     try:
+        # SQLite is authoritative for all new envelopes. Mark rows notified
+        # only after the Guardian delivery is confirmed; an outage leaves
+        # them pending for the next pass.
+        try:
+            from core.delivery import DeliveryPipeline
+            pipeline = DeliveryPipeline(JARVIS_DIR)
+            sql_rows = (
+                pipeline.pending_dead_letters(100)
+                if DEADLETTER_FILE == _DEFAULT_DEADLETTER_FILE else []
+            )
+            if sql_rows:
+                detail_lines = [
+                    f"- {row.get('source', 'unknown')} / "
+                    f"{row.get('kind', 'message')}："
+                    f"{str(row.get('detail', ''))[:100]}"
+                    for row in sql_rows
+                ]
+                delivered = notify_lark(
+                    "⚠️ 有消息暂未送达，已保留在统一投递队列：\n"
+                    + "\n".join(detail_lines)
+                )
+                if delivered is not False:
+                    pipeline.mark_dead_letters_notified(
+                        [int(row["id"]) for row in sql_rows])
+        except Exception as e:
+            log("ERROR", f"sqlite deadletter consume failed: {e}")
+
         if not DEADLETTER_FILE.exists() or DEADLETTER_FILE.stat().st_size == 0:
             return
         import fcntl
@@ -1449,6 +1450,11 @@ def main():
     global running
 
     acquire_singleton()
+    try:
+        from core.deploy import register_runtime
+        register_runtime("daemon")
+    except Exception as exc:
+        log("WARN", f"Runtime registration failed: {exc}")
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

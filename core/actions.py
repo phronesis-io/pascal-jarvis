@@ -475,7 +475,7 @@ class ActionProcessor:
                     or _auto_category(p.get("tags", ""), name, p.get("prompt", "")))
 
         try:
-            from core.intentions import create_intent
+            from core.intent_lifecycle import create_intent
             iid = create_intent(
                 name=name, trigger_type=trigger_type, trigger_config=trigger_config,
                 prompt=p.get("prompt", name), purpose=p.get("purpose", ""),
@@ -516,7 +516,7 @@ class ActionProcessor:
                 result = "|".join(segs[i:]).split("=", 1)[1].replace("|", " ").strip()
                 break
         try:
-            from core.intentions import record_closure
+            from core.intent_closure import record_closure
             ok = record_closure(iid, outcome=outcome, result=result, via=via)
             return "Closure recorded" if ok else "Intent not found or already closed"
         except Exception:
@@ -525,7 +525,7 @@ class ActionProcessor:
     def _do_intent_cancel(self, raw: str) -> str:
         p = parse_params(raw)
         try:
-            from core.intentions import cancel_intent
+            from core.intent_lifecycle import cancel_intent
             ok = cancel_intent(p.get("id", ""), p.get("reason", ""))
             return "Intent cancelled" if ok else "Intent not found or already done"
         except Exception:
@@ -533,7 +533,7 @@ class ActionProcessor:
 
     def _do_intent_list(self, raw: str) -> str:
         try:
-            from core.intentions import list_intents
+            from core.intent_lifecycle import list_intents
             intents = list_intents(status="pending", limit=20)
             if not intents:
                 return "📋 Active Intents:\nNo active intents"

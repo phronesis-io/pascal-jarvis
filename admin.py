@@ -902,7 +902,10 @@ def queues_overview() -> dict:
         "text": str(e.get("text", ""))[:200],
     } for e in _read_jsonl(ROOT / "night_queue.jsonl")]
 
-    breach = _read_jsonl(ROOT / "data" / ".intent_breach_queue.jsonl")
+    from core.state_projection import breach_overview, delivery_overview
+    breach = breach_overview(ROOT)
+    if breach is None:
+        breach = _read_jsonl(ROOT / "data" / ".intent_breach_queue.jsonl")
 
     jobs: dict = {"running": [], "counts": {}}
     reg_path = ROOT / "jobs" / "registry.json"
@@ -923,13 +926,15 @@ def queues_overview() -> dict:
         except (json.JSONDecodeError, OSError) as e:
             jobs["error"] = str(e)
 
-    delivery: dict = {}
+    delivery = delivery_overview(ROOT)
     ds_path = ROOT / ".delivery_state.json"
-    if ds_path.exists():
+    if delivery is None and ds_path.exists():
         try:
             delivery = json.loads(ds_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             delivery = {"error": str(e)}
+    if delivery is None:
+        delivery = {}
 
     return {"night_queue": night, "breach_queue": breach,
             "jobs": jobs, "delivery_state": delivery}
@@ -1863,6 +1868,11 @@ def main():
         print("  ⚠ WARNING: admin bound to non-localhost with no token — set admin.token in jarvis.yaml")
     # Materialize the POST token at startup (creates .admin_token, 0600).
     _get_post_token()
+    try:
+        from core.deploy import register_runtime
+        register_runtime("admin")
+    except Exception as exc:
+        print(f"  runtime registration failed: {exc}")
     # Threading (REQ-48③): the single-threaded HTTPServer let one slow request
     # (e.g. an eigenflux subprocess) freeze the console AND Lark /view/ links.
     server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)

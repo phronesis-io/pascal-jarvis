@@ -128,6 +128,8 @@ def _matter_card(matter: dict) -> None:
 
 @ui.page("/matters")
 def matters_page():
+    ui.navigate.to("/items")
+    return
     add_dashboard_head()
     mode = {"value": "open"}
 
@@ -258,7 +260,7 @@ def matter_detail_page(matter_id: str):
         dashboard_header("/matters", "事项", "所有入口共享一份当前共识、一条下一步和一条工作线。")
         if initial is None:
             ui.label("这个事项不存在，或已经被删除。").classes("empty-guidance")
-            ui.link("返回事项", "/matters").classes("jarvis-nav-link is-active")
+            ui.link("返回事项", "/items").classes("jarvis-nav-link is-active")
             return
 
         with ui.dialog() as edit_dialog, ui.card().classes("matter-dialog"):

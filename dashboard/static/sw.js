@@ -52,14 +52,14 @@ self.addEventListener('push', event => {
     body: data.body || '有一条新的事项动态',
     icon: '/static/app-icon-192.png',
     badge: '/static/app-icon-192.png',
-    data: {url: data.url || '/matters'},
+    data: {url: data.url || '/items'},
     tag: data.matter_id || 'jarvis-update',
   }));
 });
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const target = event.notification.data?.url || '/matters';
+  const target = event.notification.data?.url || '/items';
   event.waitUntil(clients.matchAll({type: 'window', includeUncontrolled: true})
     .then(windows => {
       const existing = windows.find(client => new URL(client.url).pathname === target);

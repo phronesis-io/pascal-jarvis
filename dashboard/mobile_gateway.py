@@ -16,6 +16,7 @@ import re
 import socket
 import ssl
 import subprocess
+import sys
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -322,6 +323,17 @@ async def _complete_pair(request: web.Request, code: str) -> web.Response:
                      {"event": "pair_failed"})
         return _login_page("配对码无效或已过期")
     _clear_pair_failures(remote)
+    try:
+        from core import memorial
+        memorial.create(
+            "mobile-onboarding",
+            "手机入口已连接",
+            "这台设备已经可以安全查看和处理 Jarvis 事项。",
+            preset="fyi",
+            dedup_key=f"mobile-onboarding:{result['device_id']}",
+        )
+    except Exception as exc:
+        print(f"mobile onboarding card failed: {exc}", file=sys.stderr)
     response = web.HTTPFound("/")
     secure = request.headers.get("X-Forwarded-Proto") == "https" or request.secure
     response.set_cookie(COOKIE, result["token"], httponly=True, secure=secure,
@@ -499,6 +511,8 @@ def main(argv: list[str] | None = None) -> int:
                                        "pid": os.getpid(), "tls": bool(ssl_context),
                                        "tailnet": tailnet},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
+    from core.deploy import register_runtime
+    register_runtime("mobile-gateway")
     # Also bind loopback: tailscale serve proxies from the local node, so the
     # tailnet path (phone off the home network) reaches us via 127.0.0.1.
     hosts = [host] if host == "127.0.0.1" else [host, "127.0.0.1"]

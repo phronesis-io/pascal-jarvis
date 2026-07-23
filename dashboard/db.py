@@ -270,6 +270,108 @@ MIGRATIONS = [
         updated_at TEXT NOT NULL
     );
     """,
+    # v7: Unified delivery/state plane.  JSONL remains an append-only audit
+    # export, but cross-process decisions live in SQLite WAL.
+    """
+    CREATE TABLE IF NOT EXISTS delivery_envelopes (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        attention TEXT NOT NULL DEFAULT 'notice',
+        requested_channel TEXT NOT NULL DEFAULT 'auto',
+        route_channel TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT 'queued',
+        content_hash TEXT NOT NULL,
+        dedup_key TEXT NOT NULL DEFAULT '',
+        throttle_key TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        memorial_id TEXT NOT NULL DEFAULT '',
+        matter_id TEXT NOT NULL DEFAULT '',
+        reply_to TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        updated_epoch REAL NOT NULL,
+        next_attempt_epoch REAL,
+        delivered_epoch REAL,
+        read_epoch REAL,
+        acted_epoch REAL,
+        message_id TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        delivery_id TEXT NOT NULL REFERENCES delivery_envelopes(id)
+            ON DELETE CASCADE,
+        attempt INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        started_epoch REAL NOT NULL,
+        finished_epoch REAL,
+        status TEXT NOT NULL DEFAULT 'attempting',
+        error TEXT NOT NULL DEFAULT '',
+        message_id TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        delivery_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_dead_letters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        delivery_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        notified_epoch REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS intent_breaches (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL DEFAULT '{}',
+        notify_attempts INTEGER NOT NULL DEFAULT 0,
+        created_epoch REAL NOT NULL,
+        retired_epoch REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS schedule_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event TEXT NOT NULL,
+        task TEXT NOT NULL DEFAULT '',
+        run_id TEXT NOT NULL DEFAULT '',
+        timestamp TEXT NOT NULL,
+        created_epoch REAL NOT NULL,
+        payload TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS runtime_versions (
+        component TEXT PRIMARY KEY,
+        pid INTEGER NOT NULL,
+        git_head TEXT NOT NULL DEFAULT '',
+        code_mtime REAL NOT NULL DEFAULT 0,
+        started_epoch REAL NOT NULL,
+        heartbeat_sha256 TEXT NOT NULL DEFAULT '',
+        metadata TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delivery_dedup
+        ON delivery_envelopes(content_hash, created_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_delivery_queue
+        ON delivery_envelopes(state, next_attempt_epoch);
+    CREATE INDEX IF NOT EXISTS idx_delivery_source_day
+        ON delivery_envelopes(source, created_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_delivery_deadletter_pending
+        ON delivery_dead_letters(notified_epoch, created_epoch);
+    CREATE INDEX IF NOT EXISTS idx_schedule_events_created
+        ON schedule_events(created_epoch DESC);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

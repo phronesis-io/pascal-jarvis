@@ -111,10 +111,12 @@ def test_route_output_failed_memorial_keeps_card_not_text_fallback(tmp_path):
         assert not _route_output("CARD:" + card, "user123", tmp_path)
 
     mock_text.assert_not_called()
-    queued = json.loads(
-        (tmp_path / "memorial_queue.jsonl").read_text().strip())
-    assert queued["memorial_id"] == "mem_failed"
-    assert queued["card_json"] == card
+    from core.delivery import DeliveryPipeline
+    queued = DeliveryPipeline(tmp_path).list(state="queued")
+    assert queued[0]["memorial_id"] == "mem_failed"
+    assert json.loads(
+        json.loads(queued[0]["payload"])["card_json"]) == json.loads(card)
+    assert not (tmp_path / "memorial_queue.jsonl").exists()
     events = [json.loads(line) for line in
               (tmp_path / "memorials.jsonl").read_text().splitlines()]
     assert events[-1]["status"] == "retry_queued"

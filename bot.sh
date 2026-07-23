@@ -66,6 +66,8 @@ if [ -f "$PIDFILE" ]; then
   rm -f "$PIDFILE"
 fi
 echo "$$ $_BOOT_TS" > "$PIDFILE"
+python3 -m core.deploy register bot --pid "$$" >/dev/null 2>&1 \
+  || echo "WARN: failed to register bot runtime version" >&2
 
 # ── Process conflict detection ──────────────────────────────────────
 # Detect competing eigenflux stream processes from openclaw-gateway or
@@ -462,11 +464,47 @@ lark_send_reliable() {
   return 1
 }
 
-# Thin wrapper around lark_send_reliable, with a local log line.
+# Unified pipeline adapters.  The old wrappers above remain callable for
+# extracted compatibility tests, but production replies no longer enter their
+# private retry/dead-letter path.
+delivery_reply_reliable() {
+  local message_id="$1" content="$2" _json _state _reason
+  _json=$(printf '%s' "$content" | python3 -m core.delivery send \
+    --source bot-reply --reply-to "$message_id" --stdin \
+    --provider "${JARVIS_DELIVERY_PROVIDER:-}" \
+    --model "${JARVIS_DELIVERY_MODEL:-}" 2>>"$LOG_FILE") || return 1
+  _state=$(JV_DELIVERY_JSON="$_json" python3 -c \
+    'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("state",""))' \
+    2>>"$LOG_FILE") || return 1
+  _reason=$(JV_DELIVERY_JSON="$_json" python3 -c \
+    'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("reason",""))' \
+    2>>"$LOG_FILE") || true
+  if [ "$_state" = "delivered" ] || { [ "$_state" = "read" ] || [ "$_state" = "acted" ]; }; then
+    return 0
+  fi
+  if [ "$_reason" = "duplicate" ] && [ "$_state" = "delivered" ]; then
+    return 0
+  fi
+  log_warn "reply accepted by delivery pipeline but not yet confirmed (state=$_state reason=$_reason)"
+  return 1
+}
+
+delivery_send_reliable() {
+  local content="$1" _json _state
+  _json=$(printf '%s' "$content" | python3 -m core.delivery send \
+    --source bot-notice --attention alert --channel lark --stdin \
+    2>>"$LOG_FILE") || return 1
+  _state=$(JV_DELIVERY_JSON="$_json" python3 -c \
+    'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("state",""))' \
+    2>>"$LOG_FILE") || return 1
+  [ "$_state" = "delivered" ]
+}
+
+# Thin wrapper around the unified delivery sender, with a local log line.
 send_to_lark() {
   local content="$1"
   [ -z "$content" ] && return
-  if ! lark_send_reliable "$content"; then
+  if ! delivery_send_reliable "$content"; then
     log_warn "Failed to send message to Lark"
   fi
 }
@@ -1255,7 +1293,9 @@ except Exception:
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
     else
-      if [ "$_use_claude_backup" -eq 1 ]; then
+      if [ "$_claude_backup2_tried" -eq 1 ]; then
+        _answer_provider="Claude backup2"
+      elif [ "$_use_claude_backup" -eq 1 ]; then
         _answer_provider="Claude backup"
       else
         _answer_provider="Claude primary"
@@ -1366,6 +1406,8 @@ except Exception:
   if [ "$is_group" -ne 1 ]; then
     if [ "$_answer_provider" = "Claude backup" ]; then
       _model_footer="（备用通道）"
+    elif [ "$_answer_provider" = "Claude backup2" ]; then
+      _model_footer="（备用通道 2）"
     elif [ "$_answer_provider" = "GPT fallback" ]; then
       _model_footer="（GPT 兜底）"
     elif [ -n "$_answer_model" ] && [ "$_answer_model" != "$MAIN_MODEL" ]; then
@@ -1429,8 +1471,10 @@ ${_model_footer}"
 
   # Remove the "working on it" reaction and send the real reply
   [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
-  if ! lark_reply_reliable "$message_id" "$reply"; then
-    log_err "[$session_id] Failed to send reply to Lark after retries — dead-lettered for daemon follow-up"
+  if ! JARVIS_DELIVERY_PROVIDER="${_answer_provider:-}" \
+       JARVIS_DELIVERY_MODEL="${_answer_model:-$MAIN_MODEL}" \
+       delivery_reply_reliable "$message_id" "$reply"; then
+    log_err "[$session_id] Reply not yet delivery-confirmed — retained in the durable queue"
   else
     # Write-claim audit (REQ-88, SHADOW): if the reply claims "已记录/已写入",
     # reconcile against actual write-surface mtimes and append the verdict to
@@ -1814,6 +1858,9 @@ run_lark_listener_once() {
             --argjson ids "${_read_ids:-[]}" --argjson epoch "$(date +%s)" \
             '{ts:$ts,type:"read",message_ids:$ids,epoch:$epoch}' \
             >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
+          printf '%s' "${_read_ids:-[]}" \
+            | python3 -m core.delivery confirm-read --stdin \
+              >/dev/null 2>>"$LOG_FILE" || true
           continue ;;
         im.message.reaction.created_v1)
           # Ignore the bot's own reactions (e.g. the "Typing" indicator)
@@ -2062,7 +2109,8 @@ from core.reply_closure import classify_reply, short_result
 outcome = classify_reply(reply)
 closed = []
 if outcome and len(roots) == 1:
-    from core.intentions import record_closure, get_intent
+    from core.intent_closure import record_closure
+    from core.intent_lifecycle import get_intent
     try:
         # Only close a root that is actually AWAITING (red-team fix: a stale
         # ledger could name a 'none' root, and record_closure would fabricate
