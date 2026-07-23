@@ -315,7 +315,9 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .mobile-route-label { color: var(--ink); font-size: 12px; font-weight: 650; }
 .mobile-device-row { width: 100%; align-items: center; gap: 10px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--mist-soft); }
 .mobile-device-row > .q-btn { margin-left: auto; }
-.mobile-pair-code { font-family: "SFMono-Regular", monospace; font-size: 22px; font-weight: 700; overflow-wrap: anywhere; }
+.mobile-pair-code { font-family: "SFMono-Regular", monospace; font-size: 20px; font-weight: 700; letter-spacing: 0; overflow-wrap: anywhere; }
+.mobile-pair-qr { width: 196px; max-width: 100%; aspect-ratio: 1; align-self: center; }
+.mobile-pair-qr .q-img { border-radius: 4px; }
 
 .section-kicker {
     color: var(--cinnabar);

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import types
@@ -256,7 +257,10 @@ def test_context_bundle_enforces_limit_and_filters_untrusted_metadata():
 
 def test_mobile_pair_code_is_one_time_and_device_is_revocable():
     pair = create_pair_code("iPhone", ttl_minutes=15)
-    device = consume_pair_code(pair["code"])
+    assert re.fullmatch(r"[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){2}",
+                        pair["code"])
+    human_input = pair["code"].lower().replace("-", " ")
+    device = consume_pair_code(human_input)
     assert device and validate_device_token(device["token"])["label"] == "iPhone"
     assert consume_pair_code(pair["code"]) is None
     assert len(list_devices()) == 1
@@ -345,6 +349,13 @@ def test_mobile_lan_detection_ignores_tunnel_benchmark_address(monkeypatch):
     monkeypatch.setattr(mobile_gateway.subprocess, "run", fake_run)
     assert mobile_gateway.detect_lan_ip() == "192.168.13.108"
     assert mobile_gateway._usable_lan_ip("198.18.0.1") is False
+
+
+def test_mobile_pair_qr_encodes_a_local_png():
+    from dashboard.pages.settings import _pair_qr_data_url
+
+    value = _pair_qr_data_url("https://jarvis.example.test/pair/ABCD-EFGH-JKLM")
+    assert value.startswith("data:image/png;base64,iVBOR")
 
 
 def test_tailnet_status_detects_the_mobile_serve_target(monkeypatch):
@@ -554,6 +565,10 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             assert denied.headers["X-Frame-Options"] == "DENY"
             assert denied.headers["Referrer-Policy"] == "no-referrer"
             assert "form-action 'self'" in denied.headers["Content-Security-Policy"]
+            audit_count = len(recent_access(100))
+            probe = await client.get("/.env")
+            assert probe.status == 404
+            assert len(recent_access(100)) == audit_count
             pair = create_pair_code("test phone")
             preview = await client.get(
                 f"/pair/{pair['code']}", allow_redirects=False)

@@ -62,6 +62,13 @@ Implemented on 2026-07-22:
   consumes the one-time code. Only the owner's explicit POST confirmation can
   register a device, preventing chat previews and security scanners from
   stealing the first use.
+- New-device setup is QR-first from the settings page, with a grouped,
+  case-insensitive 12-character code as the fallback. Public Funnel readiness,
+  not the presence of a private Serve route, controls whether the public pair
+  URL is offered.
+- Obvious public secret-file probes receive an unaudited `404`; they neither
+  reach the dashboard nor displace real device activity from the mobile access
+  review.
 
 The installed personal gateway binds only the machine's current private LAN
 address (plus loopback for the tailnet path) and proxies only

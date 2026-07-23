@@ -14,6 +14,9 @@ from pathlib import Path
 
 from core.timeutil import now_local, now_local_str
 
+PAIR_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+PAIR_CODE_LENGTH = 12
+
 
 def _db():
     from dashboard.db import get_db
@@ -28,9 +31,28 @@ def _hash(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+def _normalize_pair_code(value: str) -> str:
+    return "".join(
+        char for char in str(value).strip().upper()
+        if char in PAIR_CODE_ALPHABET
+    )
+
+
+def _pair_code_hashes(value: str) -> list[str]:
+    """Accept legacy exact codes and human-friendly normalized codes."""
+    raw = str(value).strip()[:256]
+    candidates = [_hash(raw)]
+    normalized = _normalize_pair_code(raw)
+    if normalized and normalized != raw:
+        candidates.append(_hash(normalized))
+    return list(dict.fromkeys(candidates))
+
+
 def create_pair_code(label: str = "手机", ttl_minutes: int = 15) -> dict:
     label = str(label or "手机").strip()[:80]
-    code = secrets.token_urlsafe(12)
+    compact = "".join(
+        secrets.choice(PAIR_CODE_ALPHABET) for _ in range(PAIR_CODE_LENGTH))
+    code = "-".join(compact[index:index + 4] for index in range(0, len(compact), 4))
     now = now_local()
     expires = now + timedelta(minutes=max(1, min(int(ttl_minutes), 60)))
     db = _db()
@@ -39,7 +61,7 @@ def create_pair_code(label: str = "手机", ttl_minutes: int = 15) -> dict:
     db.execute(
         "INSERT INTO mobile_pair_codes (code_hash, label, expires_at, created_at) "
         "VALUES (?, ?, ?, ?)",
-        (_hash(code), label, expires.strftime("%Y-%m-%dT%H:%M:%S"),
+        (_hash(compact), label, expires.strftime("%Y-%m-%dT%H:%M:%S"),
          now.strftime("%Y-%m-%dT%H:%M:%S")),
     )
     db.commit()
@@ -50,10 +72,12 @@ def create_pair_code(label: str = "手机", ttl_minutes: int = 15) -> dict:
 def consume_pair_code(code: str) -> dict | None:
     now = _now()
     db = _db()
+    hashes = _pair_code_hashes(code)
+    placeholders = ",".join("?" for _ in hashes)
     row = db.execute(
-        "SELECT * FROM mobile_pair_codes WHERE code_hash = ? "
+        f"SELECT * FROM mobile_pair_codes WHERE code_hash IN ({placeholders}) "
         "AND consumed_at IS NULL AND expires_at >= ?",
-        (_hash(code), now),
+        (*hashes, now),
     ).fetchone()
     if not row:
         return None
@@ -64,7 +88,7 @@ def consume_pair_code(code: str) -> dict | None:
         db.execute("BEGIN IMMEDIATE")
         changed = db.execute(
             "UPDATE mobile_pair_codes SET consumed_at = ? WHERE code_hash = ? "
-            "AND consumed_at IS NULL", (now, _hash(code)),
+            "AND consumed_at IS NULL", (now, row["code_hash"]),
         ).rowcount
         if changed != 1:
             db.rollback()

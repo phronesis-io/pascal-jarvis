@@ -35,6 +35,10 @@ HOP_HEADERS = {
 PAIR_FAILURE_LIMIT = 60
 PAIR_FAILURE_WINDOW_SECONDS = 10 * 60
 _PAIR_FAILURES: dict[str, deque[float]] = defaultdict(deque)
+PUBLIC_PROBE_NAMES = {
+    ".dev.vars", ".env", ".git", ".aws", "config.json", "secrets.json",
+    "wp-config.php", "wp-config.php.bak",
+}
 
 
 def _usable_lan_ip(value: str) -> bool:
@@ -213,6 +217,16 @@ def _same_origin(request: web.Request) -> bool:
     return origin.split("://", 1)[-1].rstrip("/") == request.host
 
 
+def _looks_like_public_probe(path: str) -> bool:
+    parts = [part.lower() for part in str(path).split("/") if part]
+    return any(
+        part in PUBLIC_PROBE_NAMES
+        or part.startswith(".env.")
+        or part.startswith("wp-config.php")
+        for part in parts
+    )
+
+
 def _security_headers(request: web.Request, response: web.StreamResponse) -> None:
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -269,7 +283,8 @@ def _login_page(
         heading = "Jarvis 设备配对"
         field = (
             '<input name="code" autocomplete="one-time-code" aria-label="配对码" '
-            'placeholder="输入一次性配对码" maxlength="256" required>'
+            'placeholder="XXXX-XXXX-XXXX" maxlength="32" autocapitalize="characters" '
+            'spellcheck="false" required>'
         )
         button = "连接这台设备"
     page = f"""<!doctype html><html lang="zh-CN"><meta name="viewport"
@@ -380,6 +395,11 @@ async def _proxy_websocket(request: web.Request, device: dict) -> web.StreamResp
 
 
 async def proxy(request: web.Request) -> web.StreamResponse:
+    if _looks_like_public_probe(request.path):
+        return web.Response(
+            text="Not found", status=404,
+            headers={"Cache-Control": "no-store"},
+        )
     if not _same_origin(request):
         audit_access("", _remote(request), request.method, request.path, 403,
                      {"event": "origin_rejected"})

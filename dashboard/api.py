@@ -391,7 +391,11 @@ def register_api_routes():
             gateway = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
             gateway = {"url": "", "tls": False}
-        gateway["tailnet"] = tailnet_status(int(gateway.get("port") or 3458))
+        saved_tailnet = gateway.get("tailnet") or {}
+        gateway["tailnet"] = tailnet_status(
+            int(gateway.get("port") or 3458),
+            mode=saved_tailnet.get("mode") or "funnel",
+        )
         return {"gateway": gateway, "devices": list_devices(),
                 "recent_access": recent_access(20)}
 
@@ -412,7 +416,7 @@ def register_api_routes():
         lan_base = str(gateway.get("url") or "").rstrip("/")
         tailnet = gateway.get("tailnet") or {}
         tailnet_base = (str(tailnet.get("url") or "").rstrip("/")
-                        if tailnet.get("served") else "")
+                        if tailnet.get("ready") else "")
         result["lan_pair_url"] = (
             f"{lan_base}/pair/{result['code']}" if lan_base else "")
         result["tailnet_pair_url"] = (
