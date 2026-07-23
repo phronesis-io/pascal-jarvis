@@ -58,6 +58,10 @@ Implemented on 2026-07-22:
   window, no-referrer and anti-framing headers, HSTS on HTTPS, a restrictive
   pairing-page CSP, and proxy-header trust only when the direct peer is
   loopback.
+- Pair links are preview-safe: GET renders a confirmation page and never
+  consumes the one-time code. Only the owner's explicit POST confirmation can
+  register a device, preventing chat previews and security scanners from
+  stealing the first use.
 
 The installed personal gateway binds only the machine's current private LAN
 address (plus loopback for the tailnet path) and proxies only

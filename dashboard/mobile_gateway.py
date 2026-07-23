@@ -255,8 +255,23 @@ def _clear_pair_failures(remote: str) -> None:
     _PAIR_FAILURES.pop(remote or "unknown", None)
 
 
-def _login_page(message: str = "", status: int = 401) -> web.Response:
+def _login_page(
+        message: str = "", status: int = 401, pair_code: str = "") -> web.Response:
     error = f'<p class="error">{html.escape(message)}</p>' if message else ""
+    if pair_code:
+        heading = "确认连接 Jarvis"
+        field = (
+            f'<input type="hidden" name="code" '
+            f'value="{html.escape(pair_code, quote=True)}">'
+        )
+        button = "确认连接这台设备"
+    else:
+        heading = "Jarvis 设备配对"
+        field = (
+            '<input name="code" autocomplete="one-time-code" aria-label="配对码" '
+            'placeholder="输入一次性配对码" maxlength="256" required>'
+        )
+        button = "连接这台设备"
     page = f"""<!doctype html><html lang="zh-CN"><meta name="viewport"
 content="width=device-width,initial-scale=1"><title>Jarvis 设备配对</title>
 <style>body{{margin:0;background:#10181d;color:#e6edef;font:16px -apple-system,sans-serif}}
@@ -264,10 +279,8 @@ main{{max-width:420px;margin:15vh auto;padding:28px}}h1{{font:700 30px Songti SC
 input,button{{box-sizing:border-box;width:100%;min-height:48px;margin-top:12px;border-radius:7px}}
 input{{padding:0 14px;border:1px solid #41545d;background:#17232a;color:#fff}}
 button{{border:0;background:#4aa78f;color:#07110e;font-weight:700}}.error{{color:#e98273}}</style>
-<main><h1>Jarvis 设备配对</h1>{error}<form method="post" action="/pair">
-<input name="code" autocomplete="one-time-code" aria-label="配对码"
-placeholder="输入一次性配对码" maxlength="256" required>
-<button>连接这台设备</button></form>
+<main><h1>{heading}</h1>{error}<form method="post" action="/pair">
+{field}<button>{button}</button></form>
 <p><a href="/mobile-ca.cer">下载手机信任证书</a></p></main></html>"""
     return web.Response(
         text=page, content_type="text/html", status=status,
@@ -304,7 +317,13 @@ async def _complete_pair(request: web.Request, code: str) -> web.Response:
 
 
 async def pair_link(request: web.Request) -> web.Response:
-    return await _complete_pair(request, request.match_info.get("code", ""))
+    code = str(request.match_info.get("code", "")).strip()[:256]
+    if not code:
+        return _login_page()
+    # Link previews and security scanners routinely prefetch GET URLs. A GET
+    # therefore never consumes a one-time code; only the explicit POST below
+    # can pair the device.
+    return _login_page(status=200, pair_code=code)
 
 
 async def pair_form(request: web.Request) -> web.Response:

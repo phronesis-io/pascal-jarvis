@@ -555,7 +555,17 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             assert denied.headers["Referrer-Policy"] == "no-referrer"
             assert "form-action 'self'" in denied.headers["Content-Security-Policy"]
             pair = create_pair_code("test phone")
-            paired = await client.get(f"/pair/{pair['code']}", allow_redirects=False)
+            preview = await client.get(
+                f"/pair/{pair['code']}", allow_redirects=False)
+            assert preview.status == 200
+            assert "确认连接这台设备" in await preview.text()
+            # Repeated GETs simulate message previews and must not consume the
+            # one-time code before the owner explicitly confirms.
+            second_preview = await client.get(
+                f"/pair/{pair['code']}", allow_redirects=False)
+            assert second_preview.status == 200
+            paired = await client.post(
+                "/pair", data={"code": pair["code"]}, allow_redirects=False)
             assert paired.status == 302
             allowed = await client.get("/matters")
             assert allowed.status == 200
