@@ -177,6 +177,17 @@ closed before release:
 | 75 | Failed Delegations remained active but invisible to Pascal | Failure creates one state-bound retry/cancel Item; compact mutation results are rehydrated before stale-card convergence; reconciler/API regressions |
 | 76 | Two explicit uncertain sends without message IDs collapsed into one Delegation | Connector projection uses the action idempotency key as its stable source reference, preserving separately requested repeats; message regression |
 
+The ninth independent review inspected provider security, release authority,
+runtime verification, and recovery visibility. Its four findings were closed
+before release:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 77 | Provider canaries trusted a prompt instruction instead of enforcing read-only execution | Claude canaries use `dontAsk`, an empty tool set, an empty strict MCP config, and no session persistence; command-contract regression |
+| 78 | Strict branch protection with zero required checks passed the release gate vacuously | The release gate rejects an empty protected-check set before reading check runs; fail-closed protection regression |
+| 79 | Optional unhealthy services blocked otherwise valid deployment evidence | Runtime Delegation verification reads critical components only, matching the L3 deployment contract; critical-component regression |
+| 80 | Failed Delegations were omitted from the unified attention query | `needs_attention` includes failed recovery decisions alongside user confirmation and clarification states; attention-query regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -217,7 +228,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2050 passed` for this candidate);
+- full local test result (`2052 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

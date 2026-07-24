@@ -60,6 +60,13 @@ def test_claude_probe_keeps_credentials_out_of_argv_and_state(tmp_path):
     assert result["actual_model"] == "relay-real"
     assert "backup-secret-token" not in " ".join(seen["cmd"])
     assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "backup-secret-token"
+    assert seen["cmd"][seen["cmd"].index("--permission-mode") + 1] == "dontAsk"
+    assert seen["cmd"][seen["cmd"].index("--tools") + 1] == ""
+    assert (
+        seen["cmd"][seen["cmd"].index("--mcp-config") + 1]
+        == '{"mcpServers":{}}'
+    )
+    assert "--strict-mcp-config" in seen["cmd"]
     assert "token" not in json.dumps(result).lower()
 
 

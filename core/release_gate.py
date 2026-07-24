@@ -210,6 +210,10 @@ class ReleaseGate:
             for value in checks_policy.get("contexts", [])
             if value and str(value) not in configured_names
         )
+        if not required_checks:
+            raise ReleaseGateError(
+                "main branch protection defines no required checks"
+            )
         successful_checks = {
             (
                 str(run.get("name") or ""),

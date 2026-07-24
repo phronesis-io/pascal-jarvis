@@ -925,6 +925,37 @@ def test_metrics_expose_user_and_reliability_states(tmp_path):
     assert metrics["duplicate_external_mutations"] == 0
 
 
+def test_attention_query_includes_failed_recovery_decisions(tmp_path):
+    store = _store(tmp_path)
+    failed, _ = _delegation(store)
+    needs_user, _ = _delegation(
+        store,
+        source_ref="msg-2",
+        risk_tier=3,
+        authorized=False,
+        operation="public_publish",
+    )
+    step = _step(store, failed)
+    store.claim_step(
+        failed["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        failed["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=False,
+        error_code="transport_failed",
+    )
+
+    attention = store.list(needs_attention=True)
+
+    assert [item["id"] for item in attention] == [
+        needs_user["id"],
+        failed["id"],
+    ]
+
+
 def test_metrics_detect_wrong_target_and_duplicate_external_receipts(tmp_path):
     store = _store(tmp_path)
     delegation, _ = _delegation(store)

@@ -153,6 +153,25 @@ def test_release_gate_rejects_weak_branch_protection(monkeypatch):
         _gate(monkeypatch, responses).verify()
 
 
+def test_release_gate_rejects_protection_without_required_checks(monkeypatch):
+    key = (
+        "gh", "api",
+        "repos/phronesis-io/pascal-jarvis/branches/main/protection",
+    )
+    responses = _responses()
+    responses[key] = {
+        **responses[key],
+        "required_status_checks": {
+            "strict": True,
+            "contexts": [],
+            "checks": [],
+        },
+    }
+
+    with pytest.raises(ReleaseGateError, match="no required checks"):
+        _gate(monkeypatch, responses).verify()
+
+
 def test_release_gate_rejects_failed_required_check(monkeypatch):
     key = (
         "gh", "api",

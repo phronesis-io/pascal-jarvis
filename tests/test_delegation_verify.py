@@ -235,6 +235,7 @@ def test_runtime_deploy_accepts_resident_descendant(
     release_sha = "a" * 40
     resident_sha = "b" * 40
     calls = []
+    component_calls = []
 
     monkeypatch.setattr(
         "core.deploy.verify_runtime",
@@ -244,10 +245,11 @@ def test_runtime_deploy_accepts_resident_descendant(
             "issues": [],
         },
     )
-    monkeypatch.setattr(
-        "core.components.check_components",
-        lambda **_kwargs: [{"name": "bot", "ok": True}],
-    )
+    def check_components(**kwargs):
+        component_calls.append(kwargs)
+        return [{"name": "bot", "ok": True}]
+
+    monkeypatch.setattr("core.components.check_components", check_components)
 
     def runner(command, **_kwargs):
         calls.append(command)
@@ -279,6 +281,7 @@ def test_runtime_deploy_accepts_resident_descendant(
     ]
     assert f'"release_sha":"{release_sha}"' in result.observed_summary
     assert f'"git_head":"{resident_sha}"' in result.observed_summary
+    assert component_calls == [{"critical_only": True, "root": tmp_path}]
 
 
 def test_verify_step_records_evidence_and_completes(tmp_path):

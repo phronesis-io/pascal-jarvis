@@ -1844,7 +1844,9 @@ class DelegationStore:
             clauses.append("matter_id=?")
             values.append(_safe_ref(matter_id, "matter_id"))
         if needs_attention:
-            clauses.append("status IN ('needs_user','needs_clarification')")
+            clauses.append(
+                "status IN ('needs_user','needs_clarification','failed')"
+            )
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 500)))
         with closing(self._connect()) as db:

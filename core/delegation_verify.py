@@ -259,7 +259,7 @@ class VerifierRegistry:
         runtime = verify_runtime(
             root=self.root, db_path=self.db_path, required=required
         )
-        component_rows = check_components(root=self.root)
+        component_rows = check_components(critical_only=True, root=self.root)
         unhealthy = [
             str(row.get("name") or row.get("component") or "")
             for row in component_rows
