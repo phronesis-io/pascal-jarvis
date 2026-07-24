@@ -197,6 +197,7 @@ def build_system_prompt(
     now_ts: str,
     tracker_path: str,
     chat_type: str = "p2p",
+    max_memory_chars: int | None = None,
 ) -> str:
     """Build the full system prompt for handle_message.
 
@@ -211,7 +212,7 @@ def build_system_prompt(
         return _build_group_prompt(
             jarvis_dir, memory_dir, session_dir, session_id, conv_key,
             now_ts, tracker_path)
-    memory = load_tiered_memory(memory_dir)
+    memory = load_tiered_memory(memory_dir, max_chars=max_memory_chars)
     counter = get_session_counter(tracker_path, conv_key)
     recent_turns = build_recent_turns(session_dir, session_id, counter, conv_key, 20)
     compact = read_compact(jarvis_dir, conv_key)

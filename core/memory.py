@@ -145,7 +145,8 @@ _STRUCTURED_FACTS_TEMPLATE = """# Structured Facts (load-bearing)
 """
 
 
-def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound") -> str:
+def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
+                       max_chars: int | None = None) -> str:
     """Load all memory into a single string for system prompt injection.
 
     With 1M context, everything is loaded — but each tier is truncated WITHIN
@@ -158,10 +159,27 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound") -> str:
     inbox_secret_*.md perception buffers are skipped so ingested private
     content (mail, DMs) can never ride into an outward-facing context.
     (Perception PRD §3.4/§6 — sensitivity model steps 1-2.)
+
+    max_chars: override the global memory budget. Used when the backup LLM
+    relay has a smaller context window than the primary (1M) channel.
+    Sub-tier budgets scale proportionally.
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
         return ""
+
+    if max_chars is not None and int(max_chars) <= 0:
+        raise ValueError("max_chars must be positive")
+    budget = int(max_chars) if max_chars is not None else MAX_MEMORY_CHARS
+    if budget < MAX_MEMORY_CHARS:
+        ratio = max_chars / MAX_MEMORY_CHARS
+        hot_budget = int(HOT_BUDGET * ratio)
+        system_budget = int(SYSTEM_BUDGET * ratio)
+        timeline_budget = int(TIMELINE_BUDGET * ratio)
+    else:
+        hot_budget = HOT_BUDGET
+        system_budget = SYSTEM_BUDGET
+        timeline_budget = TIMELINE_BUDGET
 
     # Build each tier's sections independently (priority-ordered within tier).
     hot_parts = _collect_hot(memory_dir)
@@ -184,26 +202,28 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound") -> str:
     # total was UNDER MAX_MEMORY_CHARS, with 15KB of headroom unused. Per-tier
     # reserves are FLOORS for the over-budget case, never caps that throw away
     # headroom).
-    if total <= MAX_MEMORY_CHARS:
+    if total <= budget:
         blocks = [full[t] for t in ("hot", "warm", "system", "timeline") if full[t]]
         return sep.join(blocks)
 
     # OVER BUDGET — apply per-tier reserves. hot + system + timeline get their
     # reserves (load-bearing); warm absorbs the squeeze with the remainder. If
     # a reserved tier is under its reserve, the slack flows to warm.
-    hot_text = _join_within_budget(hot_parts, HOT_BUDGET, "hot")
-    system_text = _join_within_budget(system_parts, SYSTEM_BUDGET, "system")
-    timeline_text = _join_within_budget(timeline_parts, TIMELINE_BUDGET, "timeline")
+    hot_text = _join_within_budget(hot_parts, hot_budget, "hot")
+    system_text = _join_within_budget(system_parts, system_budget, "system")
+    timeline_text = _join_within_budget(timeline_parts, timeline_budget, "timeline")
     used = len(hot_text) + len(system_text) + len(timeline_text)
-    warm_room = max(0, MAX_MEMORY_CHARS - used - 3 * len(sep))
+    warm_room = max(0, budget - used - 3 * len(sep))
     warm_text = _join_within_budget(warm_parts, warm_room, "warm")
 
     blocks = [b for b in (hot_text, warm_text, system_text, timeline_text) if b]
     result = sep.join(blocks)
 
     # Final hard safety net (should never fire now).
-    if len(result) > MAX_MEMORY_CHARS:
-        result = result[:MAX_MEMORY_CHARS] + "\n\n[memory truncated — over budget]"
+    if len(result) > budget:
+        marker = "\n\n[memory truncated - over budget]"
+        keep = max(0, budget - len(marker))
+        result = result[:keep] + marker[:budget - keep]
     return result
 
 

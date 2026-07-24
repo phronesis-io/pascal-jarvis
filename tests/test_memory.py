@@ -574,6 +574,26 @@ def test_warm_protected_band_survives_squeeze(tmp_path):
     assert warm.exists()
 
 
+def test_custom_memory_budget_is_a_hard_cap_and_preserves_tiers(tmp_path):
+    hot = tmp_path / "hot"
+    system = tmp_path / "system"
+    timeline = tmp_path / "timeline"
+    hot.mkdir()
+    system.mkdir()
+    timeline.mkdir()
+    (hot / "structured_facts.md").write_text("HOT_BUDGET_MARKER")
+    (system / "open_threads.md").write_text("SYSTEM_BUDGET_MARKER")
+    (timeline / "daily_log.md").write_text("TIMELINE_BUDGET_MARKER")
+    _make_over_budget_warm(tmp_path)
+
+    output = load_tiered_memory(tmp_path, max_chars=10_000)
+
+    assert len(output) <= 10_000
+    assert "HOT_BUDGET_MARKER" in output
+    assert "SYSTEM_BUDGET_MARKER" in output
+    assert "TIMELINE_BUDGET_MARKER" in output
+
+
 def test_warm_per_file_cap_head_keep(tmp_path):
     from core.memory import WARM_FILE_CAP
     warm = tmp_path / "warm"

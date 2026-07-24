@@ -48,6 +48,8 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "credit balance",
     "Connection error",
     "Failed to authenticate",
+    "Prompt is too long",
+    "autocompact is thrashing",
 )
 
 # Patterns checked anywhere in first 300 chars (substring match)

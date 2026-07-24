@@ -233,7 +233,7 @@ def _fake_cli(monkeypatch, stderr="", stdout="", returncode=1, raise_exc=None):
                                stderr=stderr)
 
     monkeypatch.setattr(hb_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(hb_mod, "load_tiered_memory", lambda d: "")
+    monkeypatch.setattr(hb_mod, "load_tiered_memory", lambda d, **kw: "")
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "false")
     monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "false")
 
