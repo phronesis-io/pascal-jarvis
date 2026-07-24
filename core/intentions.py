@@ -313,6 +313,7 @@ _NEW_COLS = [
     ("next_fire_at",        "TEXT"),                        # cron catch-up watermark
     ("closed_at",           "TEXT"),                        # closure-axis terminal timestamp
     ("cancel_source",       "TEXT NOT NULL DEFAULT ''"),
+    ("cancel_sources",      "TEXT NOT NULL DEFAULT '[]'"),
     ("cancel_previous_status", "TEXT NOT NULL DEFAULT ''"),
     ("cancel_previous_error",  "TEXT NOT NULL DEFAULT ''"),
     ("cancel_previous_closure_status", "TEXT NOT NULL DEFAULT ''"),
@@ -518,6 +519,41 @@ def get_intent(intent_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _cancel_sources(row) -> list[str]:
+    try:
+        decoded = json.loads(str(row["cancel_sources"] or "[]"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        decoded = []
+    sources = [
+        str(value)
+        for value in decoded
+        if str(value or "").strip()
+    ] if isinstance(decoded, list) else []
+    legacy_source = str(row["cancel_source"] or "")
+    if legacy_source and legacy_source not in sources:
+        sources.insert(0, legacy_source)
+    return sources
+
+
+def _legacy_cancelled_status(row) -> str | None:
+    """Choose a non-repeating legacy state only when current facts support it."""
+    if row["executed_at"]:
+        return "executed"
+    trigger_type = str(row["trigger_type"] or "")
+    if trigger_type == "date":
+        try:
+            config = json.loads(str(row["trigger_config"] or "{}"))
+            target = _coerce(
+                datetime.fromisoformat(str(config.get("datetime") or ""))
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return "pending" if target > now_local() else "expired"
+    if trigger_type in {"cron", "interval", "event"}:
+        return "pending"
+    return None
+
+
 def cancel_intent(
     intent_id: str,
     reason: str = "",
@@ -547,8 +583,7 @@ def cancel_intent(
     if started_transaction:
         db.execute("BEGIN IMMEDIATE")
     row = db.execute(
-        "SELECT status,last_error,closure_status,closure_followup_id,"
-        "cancel_source "
+        "SELECT * "
         "FROM intentions WHERE id = ?",
         (intent_id,),
     ).fetchone()
@@ -557,9 +592,48 @@ def cancel_intent(
             db.rollback()
         return False
     if row["status"] == "cancelled":
-        if not source and str(row["cancel_source"] or ""):
+        sources = _cancel_sources(row)
+        if source and sources:
+            if source not in sources:
+                sources.append(source)
+                db.execute(
+                    "UPDATE intentions SET cancel_sources=? WHERE id=?",
+                    (
+                        json.dumps(sources, ensure_ascii=False),
+                        intent_id,
+                    ),
+                )
+                followup_id = str(row["closure_followup_id"] or "")
+                if followup_id:
+                    followup = db.execute(
+                        "SELECT * FROM intentions WHERE id=?",
+                        (followup_id,),
+                    ).fetchone()
+                    if (
+                        followup is not None
+                        and str(followup["status"]) == "cancelled"
+                    ):
+                        followup_sources = _cancel_sources(followup)
+                        if followup_sources and source not in followup_sources:
+                            followup_sources.append(source)
+                            db.execute(
+                                "UPDATE intentions SET cancel_sources=? "
+                                "WHERE id=?",
+                                (
+                                    json.dumps(
+                                        followup_sources,
+                                        ensure_ascii=False,
+                                    ),
+                                    followup_id,
+                                ),
+                            )
+                db.commit()
+            elif started_transaction:
+                db.rollback()
+        elif not source and sources:
             db.execute(
                 "UPDATE intentions SET last_error=?,cancel_source='',"
+                "cancel_sources='[]',"
                 "cancel_previous_status='',cancel_previous_error='',"
                 "cancel_previous_closure_status='' WHERE id=?",
                 (
@@ -573,11 +647,13 @@ def cancel_intent(
         return True
     db.execute(
         "UPDATE intentions SET status='cancelled',last_error=?,"
-        "cancel_source=?,cancel_previous_status=?,cancel_previous_error=?,"
+        "cancel_source=?,cancel_sources=?,cancel_previous_status=?,"
+        "cancel_previous_error=?,"
         "cancel_previous_closure_status=? WHERE id=?",
         (
             reason or f"cancelled (was {row['status']})",
             str(source or ""),
+            json.dumps([source] if source else [], ensure_ascii=False),
             str(row["status"]),
             str(row["last_error"] or ""),
             str(row["closure_status"] or ""),
@@ -591,11 +667,20 @@ def cancel_intent(
         if fu_id:
             db.execute(
                 "UPDATE intentions SET status='cancelled',last_error=?,"
-                "cancel_source=?,cancel_previous_status=status,"
+                "cancel_source=?,cancel_sources=?,"
+                "cancel_previous_status=status,"
                 "cancel_previous_error=COALESCE(last_error,''),"
                 "cancel_previous_closure_status=closure_status "
                 "WHERE id = ? AND status = 'pending'",
-                ("parent cancelled", str(source or ""), fu_id),
+                (
+                    "parent cancelled",
+                    str(source or ""),
+                    json.dumps(
+                        [source] if source else [],
+                        ensure_ascii=False,
+                    ),
+                    fu_id,
+                ),
             )
     db.commit()
     _matter_intent_event(intent_id, "intent_cancelled",
@@ -623,32 +708,80 @@ def restore_cancelled_intent(
         if started_transaction:
             db.rollback()
         return False
-    owned = bool(source and str(row["cancel_source"] or "") == source)
+    sources = _cancel_sources(row)
+    owned = bool(source and source in sources)
     legacy_owned = bool(
         legacy_reason
-        and not str(row["cancel_source"] or "")
+        and not sources
         and str(row["last_error"] or "") == legacy_reason
     )
     if not (owned or legacy_owned):
         if started_transaction:
             db.rollback()
         return False
+    followup_id = str(row["closure_followup_id"] or "")
+    followup_releasable = False
+    if owned:
+        remaining_sources = [
+            owner for owner in sources if owner != source
+        ]
+        db.execute(
+            "UPDATE intentions SET cancel_source=?,cancel_sources=? "
+            "WHERE id=?",
+            (
+                remaining_sources[0] if remaining_sources else "",
+                json.dumps(remaining_sources, ensure_ascii=False),
+                intent_id,
+            ),
+        )
+        if followup_id:
+            followup = db.execute(
+                "SELECT * FROM intentions WHERE id=?",
+                (followup_id,),
+            ).fetchone()
+            if followup is not None and str(followup["status"]) == "cancelled":
+                current_followup_sources = _cancel_sources(followup)
+                followup_releasable = source in current_followup_sources
+                followup_sources = [
+                    owner
+                    for owner in current_followup_sources
+                    if owner != source
+                ]
+                db.execute(
+                    "UPDATE intentions SET cancel_source=?,cancel_sources=? "
+                    "WHERE id=?",
+                    (
+                        followup_sources[0] if followup_sources else "",
+                        json.dumps(followup_sources, ensure_ascii=False),
+                        followup_id,
+                    ),
+                )
+        if remaining_sources:
+            db.commit()
+            return False
     previous_status = str(row["cancel_previous_status"] or "")
     if previous_status not in {
         "pending", "triggered", "executed", "expired"
     }:
-        previous_status = (
-            "executed"
-            if row["executed_at"]
-            else ("triggered" if row["triggered_at"] else "pending")
+        previous_status = _legacy_cancelled_status(row) or ""
+    if not previous_status:
+        db.execute(
+            "UPDATE intentions SET last_error=?,cancel_source='',"
+            "cancel_sources='[]' WHERE id=?",
+            (
+                "legacy terminal projection withdrawn; "
+                "previous Intent state requires review",
+                intent_id,
+            ),
         )
+        db.commit()
+        return False
     previous_error = (
         str(row["cancel_previous_error"] or "") if owned else ""
     )
     previous_closure = str(
         row["cancel_previous_closure_status"] or ""
     )
-    followup_id = str(row["closure_followup_id"] or "")
     if not previous_closure:
         previous_closure = str(row["closure_status"] or "")
         if followup_id:
@@ -673,7 +806,7 @@ def restore_cancelled_intent(
                 previous_closure = "awaiting"
     db.execute(
         "UPDATE intentions SET status=?,last_error=?,closure_status=?,"
-        "cancel_source='',cancel_previous_status='',"
+        "cancel_source='',cancel_sources='[]',cancel_previous_status='',"
         "cancel_previous_error='',cancel_previous_closure_status='' "
         "WHERE id=? AND status='cancelled'",
         (
@@ -690,8 +823,7 @@ def restore_cancelled_intent(
         ).fetchone()
         if followup is not None and str(followup["status"]) == "cancelled":
             followup_owned = bool(
-                source
-                and str(followup["cancel_source"] or "") == source
+                followup_releasable and not _cancel_sources(followup)
             )
             followup_legacy = bool(
                 legacy_owned
@@ -708,7 +840,8 @@ def restore_cancelled_intent(
                     followup_status = "pending"
                 db.execute(
                     "UPDATE intentions SET status=?,last_error=?,"
-                    "cancel_source='',cancel_previous_status='',"
+                    "cancel_source='',cancel_sources='[]',"
+                    "cancel_previous_status='',"
                     "cancel_previous_error='',"
                     "cancel_previous_closure_status='' WHERE id=?",
                     (

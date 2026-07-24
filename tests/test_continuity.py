@@ -152,6 +152,34 @@ def test_projection_owned_handoffs_reopen_to_their_previous_states():
     )
 
 
+def test_reopen_chooses_latest_handoff_per_target_surface():
+    memorial.create(
+        "test", "连续接力", "只恢复最新接力", preset="fyi", send=False)
+    entity_id = memorial.list_memorials()[0]["id"]
+    source = f"delegation:{entity_id}:completed"
+    older = create_handoff(
+        "memorial", entity_id, from_surface="desktop",
+        to_surface="mobile", notify=False, clock=lambda: 100.0)
+    complete_entity_handoffs(
+        "memorial", entity_id,
+        completion_source=source, clock=lambda: 101.0)
+    newer = create_handoff(
+        "memorial", entity_id, from_surface="desktop",
+        to_surface="mobile", notify=False, clock=lambda: 102.0)
+    complete_entity_handoffs(
+        "memorial", entity_id,
+        completion_source=source, clock=lambda: 103.0)
+
+    assert reopen_entity_handoffs(
+        "memorial", entity_id, completion_source=source
+    ) == 1
+    assert get_handoff(newer["id"])["status"] == "open"
+    assert get_handoff(older["id"])["status"] == "completed"
+    assert reopen_entity_handoffs(
+        "memorial", entity_id, completion_source=source
+    ) == 0
+
+
 def test_invalid_handoff_does_not_create_state():
     memorial.create(
         "test", "错误接力", "完整背景", preset="fyi", send=False)

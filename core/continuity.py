@@ -447,12 +447,27 @@ def reopen_entity_handoffs(
     changed = 0
     with closing(_connect()) as db, db:
         db.execute("BEGIN IMMEDIATE")
+        active_targets = {
+            str(row["to_surface"])
+            for row in db.execute(
+                "SELECT to_surface FROM surface_handoffs "
+                "WHERE entity_type=? AND entity_id=? "
+                "AND status IN ('open','claimed')",
+                (entity_type, str(entity_id)),
+            ).fetchall()
+        }
         rows = db.execute(
             "SELECT * FROM surface_handoffs "
-            "WHERE entity_type=? AND entity_id=? AND status='completed'",
+            "WHERE entity_type=? AND entity_id=? AND status='completed' "
+            "ORDER BY created_epoch DESC,id DESC",
             (entity_type, str(entity_id)),
         ).fetchall()
+        seen_targets = set(active_targets)
         for row in rows:
+            target_surface = str(row["to_surface"])
+            if target_surface in seen_targets:
+                continue
+            seen_targets.add(target_surface)
             try:
                 metadata = json.loads(row["metadata"] or "{}")
             except (json.JSONDecodeError, TypeError, ValueError):

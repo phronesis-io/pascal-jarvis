@@ -106,6 +106,101 @@ def test_projection_cancel_restores_parent_and_closure_followup(intent_db):
     assert get_intent(parent)["last_error"] == "owner confirmed cancellation"
 
 
+def test_shared_intent_waits_for_every_terminal_projection(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="共享委托跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+    )
+    first = "delegation:dlg-a:completed"
+    second = "delegation:dlg-b:completed"
+    cancel_intent(intent_id, "A completed", source=first)
+    cancel_intent(intent_id, "B completed", source=second)
+
+    assert not restore_cancelled_intent(intent_id, source=first)
+    still_cancelled = get_intent(intent_id)
+    assert still_cancelled["status"] == "cancelled"
+    assert json.loads(still_cancelled["cancel_sources"]) == [second]
+    assert restore_cancelled_intent(intent_id, source=second)
+    assert get_intent(intent_id)["status"] == "pending"
+
+
+def test_manual_followup_cancellation_survives_parent_projection_rollback(
+    intent_db,
+):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待共享结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="确认共享结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    source = "delegation:dlg-child:completed"
+    cancel_intent(parent, "delegation completed", source=source)
+    cancel_intent(followup, "owner cancelled followup")
+
+    assert restore_cancelled_intent(parent, source=source)
+    assert get_intent(parent)["status"] == "pending"
+    assert get_intent(followup)["status"] == "cancelled"
+    assert get_intent(followup)["last_error"] == "owner cancelled followup"
+
+
+def test_legacy_expired_intent_never_reactivates(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    intent_id = create_intent(
+        name="已经过期的委托跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2020-01-01T09:00:00"},
+    )
+    update_intent(intent_id, status="expired")
+    source = "delegation:dlg-old:completed"
+    reason = "delegation dlg-old reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "expired"
+
+
 def test_list_intents_filter(intent_db):
     from core.intentions import create_intent, list_intents
 

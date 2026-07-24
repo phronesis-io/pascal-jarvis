@@ -396,7 +396,8 @@ def test_duplicate_receipt_reopens_legacy_terminal_projections(tmp_path):
         )
         db.execute(
             "UPDATE intentions SET cancel_source='',"
-            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_sources='[]',cancel_previous_status='',"
+            "cancel_previous_error='',"
             "cancel_previous_closure_status='' WHERE id=?",
             (intent_id,),
         )

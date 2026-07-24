@@ -274,6 +274,15 @@ Its two findings were reproduced and closed:
 | 116 | A database already opened by the preceding build had no duplicate `msg_id` left for the corrected migration to discover | Startup now also detects every non-verified EigenFlux action whose exact Delegation still claims completion, independent of the mutable error string, then invalidates the stale evidence, receipt locator, and policy binding; predecessor-upgrade regression |
 | 117 | Reopening a Delegation did not restore linked Intents and Handoffs previously closed by its false terminal projection | Terminal projection now records exact source and prior state for Intent cancellation and Handoff completion; invalidation restores only matching projection-owned effects, manual confirmation clears that ownership, and bounded legacy reason/time compatibility remains durably retryable; source mismatch, user-confirmation, closure-follow-up, claimed-handoff, and legacy-upgrade regressions |
 
+The seventeenth independent review composed terminal projections instead of
+testing them in isolation. Its three findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 118 | One shared Intent could be reactivated when only one of several terminal Delegations was invalidated | Intent cancellation now keeps a transactional set of projection owners on both parent and generated closure follow-up; one rollback removes only its own hold, and exact prior state returns only after the final hold is gone; two-owner and manually-overridden child regressions |
+| 119 | A legacy Intent that had already expired could be inferred as pending and fire again | Legacy one-shot recovery now derives a future trigger as pending and a past trigger as expired, preserves executed evidence, and leaves unprovable states terminal for review; legacy-expired regression |
+| 120 | Reopening several completed Handoffs for one entity and target surface violated the active-handoff unique index | Handoff recovery now treats an existing active successor as converged and considers only the newest completed row per target surface in one immediate transaction; sequential-successor and idempotent-retry regressions |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -314,7 +323,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2098 passed` for this candidate);
+- full local test result (`2102 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;
