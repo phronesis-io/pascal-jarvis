@@ -38,6 +38,18 @@ def client_surface() -> tuple[str, str]:
         return "desktop", "local"
 
 
+def notify_safely(message: str, **kwargs) -> bool:
+    """Notify an attached page; quietly stop if the user already navigated."""
+    try:
+        ui.notify(message, **kwargs)
+        return True
+    except RuntimeError as exc:
+        text = str(exc)
+        if "slot" in text and "deleted" in text:
+            return False
+        raise
+
+
 _GENERIC_MEMORIAL_TITLES = {
     "", "EigenFlux", "eigenflux", "heartbeat", "pgc-improvement", "一件事",
     "Intent", "intent", "EigenFlux 消息", "EigenFlux 分析", "repos-sync",

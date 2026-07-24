@@ -59,6 +59,17 @@ PAGES = ["/", "/items", "/items/missing", "/matters", "/memorials", "/tasks", "/
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
+def test_notify_safely_ignores_deleted_page_slot(monkeypatch):
+    from dashboard import uiutil
+
+    def deleted_slot(*_args, **_kwargs):
+        raise RuntimeError(
+            "The parent element this slot belongs to has been deleted.")
+
+    monkeypatch.setattr(uiutil.ui, "notify", deleted_slot)
+    assert uiutil.notify_safely("done", type="positive") is False
+
+
 @pytest.fixture
 def test_db(tmp_path, monkeypatch):
     """Redirect dashboard.db (and core.intentions through it) to a tmp DB."""

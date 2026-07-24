@@ -597,6 +597,38 @@ def _decided_is_reply(state: dict) -> bool:
     return bool(opt and opt.get("reply"))
 
 
+def _replacement_card(rendered: str, state: dict) -> dict:
+    """Decode a replacement card, with a safe terminal-state fallback.
+
+    The sentinel gate intentionally suppresses cards whose original body
+    contains internal heartbeat residue. A later decision must still ACK the
+    callback instead of trying to decode that empty render.
+    """
+    if rendered:
+        try:
+            card = json.loads(rendered)
+            if isinstance(card, dict):
+                return card
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    fallback = build_card(
+        "Jarvis · 事项",
+        "状态已更新。请在 Jarvis「事项」中查看完整记录。",
+        button_groups=[[
+            {
+                "text": CHAT_BUTTON_LABEL,
+                "type": "default",
+                "value": {
+                    "action": "memorial",
+                    "id": state["id"],
+                    "opt": CHAT_OPT_KEY,
+                },
+            }
+        ]],
+    )
+    return json.loads(fallback)
+
+
 def _decided_card(state: dict) -> dict:
     """Replacement after 批红: durable proof plus a conversation escape hatch."""
     if _decided_is_reply(state):
@@ -608,17 +640,27 @@ def _decided_card(state: dict) -> dict:
         status = f"✅ 已批：{state['decided_label']} · {_hhmm(state['decided_ts'])}"
     if state.get("action_result"):
         status += f"\n{state['action_result']}"
-    return json.loads(_render_card(state, status_line=status, include_options=False,
-                                   include_chat=True))
+    return _replacement_card(
+        _render_card(
+            state, status_line=status, include_options=False,
+            include_chat=True,
+        ),
+        state,
+    )
 
 
 def _chatting_card(state: dict, ts: str) -> dict:
     """Replacement card after「聊聊这个」: chatting banner, remaining options
     stay tappable so Pascal can still 批 while (or after) chatting."""
     status = f"💬 聊天中 · {_hhmm(ts)} — 直接回消息就行"
-    return json.loads(_render_card(
-        state, status_line=status, include_options=state["status"] == "pending",
-        include_chat=False))
+    return _replacement_card(
+        _render_card(
+            state, status_line=status,
+            include_options=state["status"] == "pending",
+            include_chat=False,
+        ),
+        state,
+    )
 
 
 # ── sending (clone of heartbeat_loop's production lark-cli path) ────────

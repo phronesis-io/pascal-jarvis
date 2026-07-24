@@ -605,6 +605,22 @@ def test_memorialize_output_does_not_double_wrap_memorial(env):
     assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
 
 
+def test_decision_on_sentinel_suppressed_body_returns_safe_card(env):
+    mid, _ = memorial.create(
+        "test", "内部静默残留", "分析草稿\nHEARTBEAT_OK",
+        preset="decision", send=False,
+    )
+    assert memorial.card_json(mid) == ""
+
+    payload = memorial.decide(mid, "approve")
+
+    card = payload["card"]["data"]
+    encoded = json.dumps(card, ensure_ascii=False)
+    assert card["header"]["title"]["content"] == "Jarvis · 事项"
+    assert "状态已更新" in encoded
+    assert "HEARTBEAT_OK" not in encoded
+
+
 def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
     legacy = build_card("📡 EigenFlux", "同一条动态")
     first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")

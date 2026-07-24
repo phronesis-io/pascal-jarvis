@@ -18,7 +18,7 @@ from pathlib import Path
 
 from nicegui import ui
 
-from ..uiutil import jarvis_page
+from ..uiutil import jarvis_page, notify_safely
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -284,11 +284,17 @@ def settings_page():
                 except Exception:
                     result = "failed"
                 if result == "ok":
-                    ui.notify("手机通知已开启", type="positive")
+                    notify_safely("手机通知已开启", type="positive")
                 elif result == "denied":
-                    ui.notify("浏览器已拒绝通知，请在系统设置中重新允许", type="warning")
+                    notify_safely(
+                        "浏览器已拒绝通知，请在系统设置中重新允许",
+                        type="warning",
+                    )
                 else:
-                    ui.notify("当前浏览器暂时不能开启 Push 通知", type="warning")
+                    notify_safely(
+                        "当前浏览器暂时不能开启 Push 通知",
+                        type="warning",
+                    )
 
             @ui.refreshable
             def mobile_panel():
