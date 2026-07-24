@@ -106,6 +106,35 @@ def test_rejection_never_creates_taskline_work(monkeypatch, tmp_path):
     assert called == []
 
 
+def test_reopened_rejection_stores_fresh_baseline(tmp_path):
+    store = _store(tmp_path)
+    _signal(store)
+    second = _signal(store)
+    first, created = store.propose_from_signal(second)
+    assert created is True
+    store.review(
+        first["id"], approved=False, actor="owner", reason="not valuable"
+    )
+
+    third = _signal(store)
+    same, created = store.propose_from_signal(third)
+    assert created is False
+    assert same["id"] == first["id"]
+
+    fourth = _signal(store)
+    reopened, created = store.propose_from_signal(fourth)
+    assert created is True
+    assert reopened["baseline"]["occurrence_count"] == 4
+    store.review(
+        reopened["id"], approved=False, actor="owner", reason="still not valuable"
+    )
+
+    fifth = _signal(store)
+    unchanged, created = store.propose_from_signal(fifth)
+    assert created is False
+    assert unchanged["id"] == reopened["id"]
+
+
 def test_shell_cli_has_no_owner_proposal_review_command():
     with pytest.raises(SystemExit):
         main(["review", "prp_unsafe", "--approve"])

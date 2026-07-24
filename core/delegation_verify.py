@@ -312,6 +312,8 @@ class VerifierRegistry:
     def _eigenflux_message(
         self, expected: dict[str, Any], policy: dict[str, Any]
     ) -> Verification:
+        from core.eigenflux_messages import CliFailure, EigenFluxMessenger
+
         action_key = str(policy.get("idempotency_key") or "")
         msg_id = str(policy.get("msg_id") or expected.get("msg_id") or "")
         if action_key:
@@ -325,6 +327,21 @@ class VerifierRegistry:
             )
         else:
             raise VerificationError("message id or idempotency key is required")
+        if action_key and str(row.get("state") or "") != "verified":
+            try:
+                EigenFluxMessenger(
+                    root=self.root,
+                    db_path=self.db_path,
+                    runner=self.runner,
+                ).reconcile_action(action_key)
+            except CliFailure as exc:
+                raise VerificationError(
+                    f"EigenFlux history readback failed: {exc}"
+                ) from exc
+            row = self._db_row(
+                "SELECT * FROM verified_external_actions WHERE idempotency_key=?",
+                (action_key,),
+            )
         observed = {
             key: row.get(key)
             for key in ("state", "target_id", "conv_id", "msg_id", "payload_hash")

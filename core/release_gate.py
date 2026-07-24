@@ -68,6 +68,22 @@ class ReleaseGate:
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ReleaseGateError(f"{command[0]} returned invalid JSON") from exc
 
+    def _run_paginated(self, endpoint: str) -> list[dict[str, Any]]:
+        pages = self._run(
+            ["gh", "api", "--paginate", "--slurp", endpoint],
+            json_output=True,
+        )
+        if not isinstance(pages, list):
+            raise ReleaseGateError("paginated GitHub response is invalid")
+        if pages and all(isinstance(page, list) for page in pages):
+            return [
+                row
+                for page in pages
+                for row in page
+                if isinstance(row, dict)
+            ]
+        return [row for row in pages if isinstance(row, dict)]
+
     def verify(self, *, fetch: bool = True) -> dict[str, Any]:
         branch = self._run(["git", "branch", "--show-current"])
         if branch != "main":
@@ -151,13 +167,11 @@ class ReleaseGate:
                 "required checks are not successful: " + ", ".join(missing)
             )
 
-        reviews = self._run(
-            ["gh", "api", f"repos/{repo}/pulls/{number}/reviews"],
-            json_output=True,
+        reviews = self._run_paginated(
+            f"repos/{repo}/pulls/{number}/reviews"
         )
-        comments = self._run(
-            ["gh", "api", f"repos/{repo}/issues/{number}/comments"],
-            json_output=True,
+        comments = self._run_paginated(
+            f"repos/{repo}/issues/{number}/comments"
         )
         evidence = []
         for review in reviews if isinstance(reviews, list) else []:

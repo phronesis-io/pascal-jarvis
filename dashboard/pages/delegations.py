@@ -7,7 +7,7 @@ from datetime import datetime
 from nicegui import run, ui
 
 from core.continuity import create_handoff
-from core.delegations import DelegationStore
+from core.delegations import DelegationStore, is_confirmable
 from core.delegation_reconcile import sync_attention_item
 
 from ..uiutil import (
@@ -257,7 +257,7 @@ def delegation_detail_page(delegation_id: str):
                 ).classes("text-xs text-grey-6")
 
             with ui.row().classes("w-full gap-2 py-3"):
-                if detail["status"] in {"needs_user", "needs_clarification"}:
+                if is_confirmable(detail):
                     ui.button(
                         "确认", icon="check",
                         on_click=lambda: _confirm(detail, body.refresh),

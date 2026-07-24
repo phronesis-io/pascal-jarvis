@@ -63,6 +63,11 @@ def _gate(monkeypatch, responses):
 
     def fake_run(command, **_kwargs):
         key = tuple(command)
+        if (
+            key not in responses
+            and command[:4] == ["gh", "api", "--paginate", "--slurp"]
+        ):
+            key = ("gh", "api", command[4])
         if key not in responses:
             raise AssertionError(f"unexpected command: {command}")
         return responses[key]
@@ -82,6 +87,27 @@ def test_release_gate_accepts_merged_reviewed_checked_main(monkeypatch):
     assert result["ok"] is True
     assert result["pr"] == 42
     assert result["required_checks"] == ["test"]
+    assert result["review_evidence"] == ["review:review-bot:APPROVED"]
+
+
+def test_release_gate_reads_review_evidence_from_later_pages(monkeypatch):
+    endpoint = "repos/phronesis-io/pascal-jarvis/pulls/42/reviews"
+    responses = _responses()
+    responses[("gh", "api", "--paginate", "--slurp", endpoint)] = [
+        [{
+            "user": {"login": "review-bot"},
+            "state": "COMMENTED",
+            "body": "Earlier review.",
+        }],
+        [{
+            "user": {"login": "review-bot"},
+            "state": "APPROVED",
+            "commit_id": SHA,
+        }],
+    ]
+
+    result = _gate(monkeypatch, responses).verify()
+
     assert result["review_evidence"] == ["review:review-bot:APPROVED"]
 
 

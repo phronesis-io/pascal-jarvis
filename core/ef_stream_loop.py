@@ -92,6 +92,17 @@ def _healthy_churn(lifetime_s: float, replaced: bool,
     return not replaced and lifetime_s >= threshold
 
 
+def _advance_cursor(cursor_file: Path, cursor: str, *, accepted: bool) -> bool:
+    """Persist a cursor only after the represented event is durably accepted."""
+    if not cursor or not accepted:
+        return False
+    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cursor_file.with_suffix(cursor_file.suffix + ".tmp")
+    temporary.write_text(cursor, encoding="utf-8")
+    temporary.replace(cursor_file)
+    return True
+
+
 def _lark_send(text: str, user_id: str) -> bool:
     if not user_id or not text:
         return False
@@ -490,10 +501,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     proc.terminate()
                     break
 
-                # Advance cursor first (even on a duplicate, so we move past it)
                 new_cursor = parse_cursor(line)
-                if new_cursor:
-                    cursor_file.write_text(new_cursor)
 
                 # Friend-request / friend-accepted events ride a pm_push packet
                 # with an empty `messages` array (or a separate friend_accepted
@@ -510,24 +518,33 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                         save_seen(seen_file, seen)
                         log("ef-stream", "Friend request observed; lifecycle "
                             "delegated to eigenflux-friends")
+                        _advance_cursor(
+                            cursor_file, new_cursor, accepted=True
+                        )
                         continue
                     if rel_ids and is_duplicate_event(rel_ids, set(seen)):
                         log("ef-stream", "Skipping already-delivered friend event (dedup)")
+                        accepted = True
                     else:
-                        seen, _, _ = _deliver_memorial_and_mark(
+                        seen, accepted, _ = _deliver_memorial_and_mark(
                             rel, rel_ids, {"kind": "relation"}, user_id,
                             seen, seen_file, jd, title="EigenFlux 好友动态")
+                    _advance_cursor(
+                        cursor_file, new_cursor, accepted=accepted
+                    )
                     continue
 
                 # Format and deliver
                 msg = format_message(line)
                 if not msg:
+                    _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 
                 # Dedup: skip a re-delivered event (reconnect after a cursor-write gap)
                 ids = extract_item_ids(line)
                 if is_duplicate_event(ids, set(seen)):
                     log("ef-stream", "Skipping already-delivered message (dedup)")
+                    _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 
                 # ONE card per incoming message (7/22: the old raw-card-then-
@@ -572,6 +589,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     seen, seen_file, jd, title=title)
                 if not accepted:
                     continue
+                _advance_cursor(cursor_file, new_cursor, accepted=True)
 
                 # Reset backoff on successful message
                 backoff = 1

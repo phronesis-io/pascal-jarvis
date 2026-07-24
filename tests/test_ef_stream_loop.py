@@ -142,6 +142,23 @@ def test_suppressed_external_event_is_not_marked_seen(
     assert deadletters[-1]["kind"] == "ef_stream_send_failed"
 
 
+def test_cursor_advances_only_after_durable_acceptance(tmp_path):
+    cursor_file = tmp_path / "state" / "cursor"
+
+    assert not efsl._advance_cursor(
+        cursor_file, "cursor-1", accepted=False
+    )
+    assert not cursor_file.exists()
+    assert efsl._advance_cursor(
+        cursor_file, "cursor-1", accepted=True
+    )
+    assert cursor_file.read_text(encoding="utf-8") == "cursor-1"
+    assert not efsl._advance_cursor(
+        cursor_file, "cursor-2", accepted=False
+    )
+    assert cursor_file.read_text(encoding="utf-8") == "cursor-1"
+
+
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------
 
 def test_stall_predicate():

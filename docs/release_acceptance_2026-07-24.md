@@ -115,6 +115,18 @@ during remediation, were also closed:
 | 38 | Fresh installs loaded a missing optional Taskline binary | Installer removes/skips the optional service before bootstrap when its binary is absent; installer tests |
 | 39 | Lark card actions assumed every callback was Pascal | The sidecar matches the callback operator to the configured owner before any owner-only action; callback and Memorial tests |
 
+The fourth independent review concentrated on long-tail recovery and evidence
+integrity. Its six findings were closed with dedicated regressions:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 40 | An executing contract could be rebound without a new version | `bind` is limited to an unbound pre-execution contract; target changes use `revise_contract`, which invalidates old steps and leases; claimed-step regression |
+| 41 | An uncertain EigenFlux send only reread its local receipt row | The verifier now queries authoritative conversation history by target, payload hash, conversation ID, and message ID, then atomically converges the stored action without resending; interruption-recovery test |
+| 42 | The EigenFlux stream persisted its cursor before durable delivery acceptance | Cursor writes now occur atomically only after queue/delivery acceptance or a proven duplicate; suppression leaves the prior cursor replayable; cursor acceptance test |
+| 43 | Release evidence inspected only the first GitHub page | Reviews and comments use bounded GitHub pagination and flatten every returned page; second-page approval regression |
+| 44 | A reopened L3 proposal retained the prior rejection baseline | Material-change comparison uses the prior baseline while the new proposal stores the current one; latest rows have deterministic `created_at,rowid` ordering; repeated-rejection regression |
+| 45 | The dashboard offered confirmation for non-confirmable states | UI and domain both allow confirmation only for a bound, unauthorized R3 contract awaiting risk approval; R4, clarification, and verification recovery remain non-confirmable; state-machine tests |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -155,7 +167,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2004 passed` for this candidate);
+- full local test result (`2010 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

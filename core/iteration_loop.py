@@ -283,12 +283,14 @@ class IterationStore:
                 """
                 SELECT * FROM iteration_proposals
                  WHERE signal_fingerprint=?
-                 ORDER BY created_at DESC LIMIT 1
+                 ORDER BY created_at DESC,rowid DESC LIMIT 1
                 """,
                 (signal_fingerprint,),
             ).fetchone()
             if existing is not None and existing["status"] == "rejected":
-                baseline = json.loads(existing["baseline_json"] or "{}")
+                previous_baseline = json.loads(
+                    existing["baseline_json"] or "{}"
+                )
                 current_evidence_digest = hashlib.sha256(
                     str(signal["evidence_json"] or "{}").encode("utf-8")
                 ).hexdigest()
@@ -298,14 +300,18 @@ class IterationStore:
                     "major": 2,
                     "critical": 3,
                 }
-                previous_count = int(baseline.get("occurrence_count") or 0)
+                previous_count = int(
+                    previous_baseline.get("occurrence_count") or 0
+                )
                 materially_changed = bool(
                     severity_rank.get(str(signal["severity"]), 0)
-                    > severity_rank.get(str(baseline.get("severity")), 0)
+                    > severity_rank.get(
+                        str(previous_baseline.get("severity")), 0
+                    )
                     or int(signal["occurrence_count"])
                     >= max(previous_count + 2, previous_count * 2)
                     or current_evidence_digest
-                    != str(baseline.get("evidence_digest") or "")
+                    != str(previous_baseline.get("evidence_digest") or "")
                 )
                 if not materially_changed:
                     return self._decode_proposal(db, existing), False

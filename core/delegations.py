@@ -65,6 +65,29 @@ class DelegationNotFound(DelegationError):
     """The requested delegation or step does not exist."""
 
 
+def is_confirmable(delegation: dict[str, Any] | sqlite3.Row) -> bool:
+    """Return whether the owner can grant the contract's pending R3 approval."""
+    values = dict(delegation)
+    policy = values.get("verification_policy")
+    if policy is None:
+        try:
+            policy = json.loads(
+                str(values.get("verification_policy_json") or "{}")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            policy = {}
+    return bool(
+        str(values.get("status") or "") == "needs_user"
+        and int(values.get("risk_tier") or 0) == 3
+        and not bool(values.get("authorized"))
+        and str(values.get("waiting_on") or "") in {"", "user"}
+        and str(values.get("target_id") or "")
+        and str(values.get("authority") or "")
+        and isinstance(policy, dict)
+        and bool(policy)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Claim:
     delegation_id: str
@@ -591,8 +614,19 @@ class DelegationStore:
         with self._tx() as db:
             current = self._require(db, delegation_id)
             self._version(current, expected_version)
-            if current["status"] in TERMINAL_STATUSES:
-                raise DelegationConflict("terminal delegation cannot be rebound")
+            initial_unbound_risk_review = bool(
+                current["status"] == "needs_user"
+                and not current["target_id"]
+                and not current["authority"]
+            )
+            if (
+                current["status"] not in {"captured", "needs_clarification"}
+                and not initial_unbound_risk_review
+            ):
+                raise DelegationConflict(
+                    "binding is only allowed before execution; "
+                    "revise the contract to change a bound target"
+                )
             risk_tier = int(current["risk_tier"])
             approved = bool(authorized or current["authorized"])
             status = (
@@ -1293,14 +1327,14 @@ class DelegationStore:
             self._version(current, expected_version)
             if current["principal_id"] != principal_id:
                 raise DelegationConflict("principal cannot authorize this delegation")
-            if int(current["risk_tier"]) == 4:
-                raise DelegationConflict("R4 delegation must remain human-operated")
-            if current["status"] not in {"needs_user", "needs_clarification", "captured"}:
+            if not is_confirmable(current):
+                if int(current["risk_tier"]) == 4:
+                    raise DelegationConflict(
+                        "R4 delegation must remain human-operated"
+                    )
                 raise DelegationConflict(
-                    f"status {current['status']} does not need confirmation"
+                    "delegation is not awaiting an R3 risk confirmation"
                 )
-            if not current["target_id"] or not current["authority"]:
-                raise DelegationConflict("contract must be bound before confirmation")
             db.execute(
                 """
                 UPDATE delegations

@@ -7,6 +7,7 @@ from core.delegations import (
     DelegationConflict,
     DelegationError,
     DelegationStore,
+    is_confirmable,
 )
 
 
@@ -88,6 +89,62 @@ def test_create_is_idempotent_by_source_event(tmp_path):
     assert created is True
     assert created_again is False
     assert second["id"] == first["id"]
+
+
+def test_bound_contract_cannot_be_rebound_while_worker_holds_lease(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+
+    with pytest.raises(DelegationConflict, match="revise the contract"):
+        store.bind(
+            delegation["id"],
+            expected_version=1,
+            target_type="contact",
+            target_id="agent-2",
+            target_label="Other",
+            expected_postcondition={"recipient_id": "agent-2"},
+            authority="message_service",
+            verification_policy={"verifier": "message"},
+        )
+
+    detail = store.get(delegation["id"])
+    assert detail["target_id"] == "agent-1"
+    assert detail["steps"][0]["lease_owner"] == "worker"
+
+
+def test_initial_unbound_r3_contract_can_be_bound_then_confirmed(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(
+        store,
+        target_type="",
+        target_id="",
+        target_label="",
+        authority="",
+        verification_policy={},
+        risk_tier=3,
+        authorized=False,
+    )
+
+    bound = store.bind(
+        delegation["id"],
+        expected_version=1,
+        target_type="contact",
+        target_id="agent-1",
+        target_label="Partner",
+        expected_postcondition={"recipient_id": "agent-1"},
+        authority="message_service",
+        verification_policy={"verifier": "message"},
+    )
+
+    assert bound["status"] == "needs_user"
+    assert is_confirmable(store.get(delegation["id"])) is True
+    assert store.confirm(
+        delegation["id"], expected_version=1, principal_id="owner"
+    )["status"] == "bound"
 
 
 def test_completion_requires_required_step_and_qualifying_evidence(tmp_path):
@@ -347,6 +404,30 @@ def test_unapproved_high_risk_delegation_cannot_retry_past_confirmation(
     detail = store.get(delegation["id"])
     assert detail["status"] == "needs_user"
     assert detail["authorized"] == 0
+
+
+def test_verification_recovery_cannot_be_misread_as_risk_confirmation(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(
+        store,
+        risk_tier=3,
+        authorized=True,
+        operation="public_publish",
+    )
+    waiting = store.mark_waiting(
+        delegation["id"],
+        expected_version=1,
+        waiting_on="verification_recovery",
+        needs_user=True,
+        reason_code="verification_budget_exhausted",
+    )
+
+    assert is_confirmable(store.get(delegation["id"])) is False
+    with pytest.raises(DelegationConflict, match="R3 risk confirmation"):
+        store.confirm(
+            delegation["id"], expected_version=1, principal_id="owner"
+        )
+    assert waiting["status"] == "needs_user"
 
 
 def test_r4_stays_human_operated_even_when_created_as_authorized(tmp_path):

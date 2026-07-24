@@ -487,18 +487,37 @@ class EigenFluxMessenger:
         conv_id: str = "",
         msg_id: str = "",
     ) -> tuple[str, str] | None:
-        conversations = [conv_id] if conv_id else self._candidate_conversations(
-            friend.agent_id
+        return self._find_verified_hash(
+            friend.agent_id,
+            self._content_hash(content),
+            created_after,
+            conv_id=conv_id,
+            msg_id=msg_id,
         )
-        content_hash = self._content_hash(content)
+
+    def _find_verified_hash(
+        self,
+        target_id: str,
+        payload_hash: str,
+        created_after: float,
+        *,
+        conv_id: str = "",
+        msg_id: str = "",
+    ) -> tuple[str, str] | None:
+        conversations = [conv_id] if conv_id else self._candidate_conversations(
+            target_id
+        )
         for candidate_conv in conversations:
             for row in self._history_messages(candidate_conv):
                 row_msg_id = str(row.get("msg_id") or "").strip()
                 if msg_id and row_msg_id != msg_id:
                     continue
-                if str(row.get("receiver_id") or "") != friend.agent_id:
+                if str(row.get("receiver_id") or "") != target_id:
                     continue
-                if self._content_hash(str(row.get("content") or "")) != content_hash:
+                if (
+                    self._content_hash(str(row.get("content") or ""))
+                    != payload_hash
+                ):
                     continue
                 created = float(row.get("created_at") or 0)
                 if created > 10_000_000_000:
@@ -507,6 +526,70 @@ class EigenFluxMessenger:
                     continue
                 return candidate_conv, row_msg_id
         return None
+
+    def reconcile_action(self, idempotency_key: str) -> MessageReceipt:
+        """Re-read one uncertain send from authoritative conversation history."""
+        key = str(idempotency_key or "").strip()
+        if not key:
+            raise CliFailure("idempotency key is required")
+        with closing(self._connect()) as db:
+            row = db.execute(
+                """
+                SELECT * FROM verified_external_actions
+                 WHERE idempotency_key=?
+                """,
+                (key,),
+            ).fetchone()
+        if row is None or str(row["action_type"]) != "eigenflux_message":
+            raise CliFailure("EigenFlux action was not found")
+        friend = Friend(
+            agent_id=str(row["target_id"]),
+            agent_name=str(row["target_name"]),
+        )
+        if str(row["state"]) == "verified":
+            return MessageReceipt(
+                state="verified",
+                recipient_name=friend.agent_name,
+                recipient_id=friend.agent_id,
+                idempotency_key=key,
+                msg_id=str(row["msg_id"]),
+                conv_id=str(row["conv_id"]),
+                duplicate=True,
+            )
+        found = self._find_verified_hash(
+            friend.agent_id,
+            str(row["payload_hash"]),
+            (
+                0
+                if str(row["msg_id"] or "")
+                else float(row["created_epoch"])
+                - self.verification_clock_skew_seconds
+            ),
+            conv_id=str(row["conv_id"] or ""),
+            msg_id=str(row["msg_id"] or ""),
+        )
+        if found:
+            return self._verified_receipt(
+                friend, key, found[0], found[1], duplicate=True
+            )
+        detail = "权威历史中未找到目标一致的消息"
+        self._write_state(
+            key,
+            state="verifying",
+            conv_id=str(row["conv_id"] or ""),
+            msg_id=str(row["msg_id"] or ""),
+            error=detail,
+        )
+        return MessageReceipt(
+            state="verifying",
+            recipient_name=friend.agent_name,
+            recipient_id=friend.agent_id,
+            idempotency_key=key,
+            msg_id=str(row["msg_id"] or ""),
+            conv_id=str(row["conv_id"] or ""),
+            duplicate=True,
+            detail=detail,
+        )
 
     def _write_state(
         self,

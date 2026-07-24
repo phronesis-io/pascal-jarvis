@@ -348,14 +348,17 @@ def test_uncertain_action_projects_stable_key_for_later_reconciliation(
     assert detail["verification_policy"]["idempotency_key"]
     from core.delegation_verify import VerifierRegistry
 
+    cli.history_error = False
     verification = VerifierRegistry(
-        root=tmp_path, db_path=tmp_path / "jarvis.db"
+        root=tmp_path, db_path=tmp_path / "jarvis.db", runner=cli
     ).verify(
         "eigenflux_message",
         detail["expected_postcondition"],
         detail["verification_policy"],
     )
-    assert verification.matched is False
+    assert verification.matched is True
+    assert verification.observed_summary.find('"state":"verified"') >= 0
+    assert cli.send_count == 1
 
 
 class _ApiResponse:
