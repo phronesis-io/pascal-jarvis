@@ -258,6 +258,27 @@ def test_cli_signal_during_tool_spawn_reaps_new_process_group(
     assert spawned[0].poll() is not None
 
 
+def test_cli_signal_interrupts_blocking_api_outside_spawn(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("sys.stdin", io.StringIO("owner task"))
+
+    def interrupted_api(*_args, **_kwargs):
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        raise AssertionError("signal handler must interrupt the blocking API")
+
+    monkeypatch.setattr(of, "_api_call", interrupted_api)
+
+    try:
+        of.main(["--no-tools"])
+    except SystemExit as exc:
+        assert exc.code == 128 + signal.SIGTERM
+    else:
+        raise AssertionError("SIGTERM did not interrupt OpenAI API call")
+
+
 def test_execute_tool_file_read_write(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     of.execute_tool("file_write", {"path": "test.txt", "content": "hello"})

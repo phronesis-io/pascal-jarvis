@@ -169,7 +169,10 @@ def _exec_bash(
         BASH_TIMEOUT if timeout is None else min(BASH_TIMEOUT, max(0.05, timeout))
     )
     process: subprocess.Popen[str] | None = None
+    spawning_key = f"{process_key}:spawning"
     try:
+        if process_holder is not None:
+            process_holder[spawning_key] = True
         process = subprocess.Popen(
             ["bash", "-c", cmd],
             stdout=subprocess.PIPE,
@@ -180,6 +183,7 @@ def _exec_bash(
         )
         if process_holder is not None:
             process_holder[process_key] = process
+            process_holder[spawning_key] = False
         deadline = time.monotonic() + effective_timeout
         while True:
             if cancelled is not None and cancelled():
@@ -210,6 +214,8 @@ def _exec_bash(
             and process_holder.get(process_key) is process
         ):
             process_holder[process_key] = None
+        if process_holder is not None:
+            process_holder[spawning_key] = False
 
 
 def _exec_file_read(args: dict) -> str:
@@ -461,12 +467,17 @@ def main(argv: list[str] | None = None) -> int:
     user_input = sys.stdin.read()
     system_prompt = _read_optional(args.system_prompt_file)
 
-    process_holder: dict[str, Any] = {"tool": None}
+    process_holder: dict[str, Any] = {
+        "tool": None,
+        "tool:spawning": False,
+    }
     termination_signal = [0]
 
     def _terminate(signum, _frame):
         termination_signal[0] = signum
         _terminate_process_group(process_holder.get("tool"))
+        if not process_holder.get("tool:spawning"):
+            raise SystemExit(128 + signum)
 
     previous_handlers = {}
     for signum in (signal.SIGTERM, signal.SIGINT):

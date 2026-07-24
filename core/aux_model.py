@@ -129,24 +129,29 @@ def _invoke(
             env=env,
         )
 
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env=env,
-        start_new_session=True,
-    )
-    if process_holder is not None:
-        process_holder[process_key] = process
-    if cancelled is not None and cancelled():
-        _terminate_process_group(process)
-        return subprocess.CompletedProcess(
-            command, 143, "", "cancelled"
-        )
+    process: subprocess.Popen[str] | None = None
+    spawning_key = f"{process_key}:spawning"
     try:
+        if process_holder is not None:
+            process_holder[spawning_key] = True
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+        if process_holder is not None:
+            process_holder[process_key] = process
+            process_holder[spawning_key] = False
+        if cancelled is not None and cancelled():
+            _terminate_process_group(process)
+            return subprocess.CompletedProcess(
+                command, 143, "", "cancelled"
+            )
         stdout, stderr = process.communicate(prompt, timeout=timeout)
         return subprocess.CompletedProcess(
             command, process.returncode, stdout, stderr
@@ -171,6 +176,8 @@ def _invoke(
             and process_holder.get(process_key) is process
         ):
             process_holder[process_key] = None
+        if process_holder is not None:
+            process_holder[spawning_key] = False
 
 
 def _session_args(
@@ -479,12 +486,17 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             pass
 
-    process_holder: dict[str, Any] = {"model": None}
+    process_holder: dict[str, Any] = {
+        "model": None,
+        "model:spawning": False,
+    }
     termination_signal = [0]
 
     def _terminate(signum, _frame):
         termination_signal[0] = signum
         _terminate_process_group(process_holder.get("model"))
+        if not process_holder.get("model:spawning"):
+            raise SystemExit(128 + signum)
 
     previous_handlers = {}
     for signum in (signal.SIGTERM, signal.SIGINT):

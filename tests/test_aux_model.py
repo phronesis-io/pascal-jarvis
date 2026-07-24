@@ -227,8 +227,7 @@ def test_cli_signal_terminates_active_model_process_group(
         kwargs["process_holder"]["model"] = process
         handler = signal.getsignal(signal.SIGTERM)
         handler(signal.SIGTERM, None)
-        assert kwargs["cancelled"]()
-        return aux_model.AuxiliaryModelResult()
+        raise AssertionError("signal handler must interrupt outside spawn")
 
     monkeypatch.setattr(aux_model, "run_auxiliary_model", fake_run)
     monkeypatch.setattr(
@@ -238,10 +237,12 @@ def test_cli_signal_terminates_active_model_process_group(
     )
     monkeypatch.setattr("sys.stdin", StringIO("owner task"))
 
-    assert (
+    try:
         aux_model.main(["--root", str(tmp_path)])
-        == 128 + signal.SIGTERM
-    )
+    except SystemExit as exc:
+        assert exc.code == 128 + signal.SIGTERM
+    else:
+        raise AssertionError("SIGTERM did not interrupt auxiliary router")
 
     assert terminated
     assert terminated[0] is process

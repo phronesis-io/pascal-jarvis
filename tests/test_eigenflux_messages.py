@@ -348,6 +348,9 @@ def test_concurrent_explicit_repeats_claim_distinct_receipts_atomically(tmp_path
 
 
 def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
+    from core.delegation_connectors import project_eigenflux_message_receipt
+    from core.delegations import DelegationStore
+
     db_path = tmp_path / "jarvis.db"
     with sqlite3.connect(db_path) as db:
         db.executescript(
@@ -394,6 +397,24 @@ def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
             ("action-2", *values),
         )
 
+    store = DelegationStore(root=tmp_path, db_path=db_path)
+    for action_key in ("action-1", "action-2"):
+        project_eigenflux_message_receipt(
+            MessageReceipt(
+                state="verified",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=action_key,
+                msg_id="duplicate-message",
+                conv_id="conv-agent-spouse",
+            ),
+            root=tmp_path,
+            store=store,
+        )
+    assert {
+        row["status"] for row in store.list(limit=10)
+    } == {"completed"}
+
     messenger = EigenFluxMessenger(
         root=tmp_path,
         db_path=db_path,
@@ -419,6 +440,18 @@ def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
     assert rows[1][1:3] == ("verifying", "")
     assert rows[1][3] == "duplicate receipt claim released"
     assert unique_index == (1,)
+    projections = {
+        row["source_ref"]: store.get(row["id"])
+        for row in store.list(limit=10)
+    }
+    assert projections["attempt:action-1"]["status"] == "completed"
+    reopened = projections["attempt:action-2"]
+    assert reopened["status"] == "verifying"
+    assert reopened["steps"][0]["status"] == "verifying"
+    assert all(not evidence["trusted"] for evidence in reopened["evidence"])
+    assert reopened["events"][-1]["event_type"] == (
+        "delegation.evidence_invalidated"
+    )
 
 
 def test_missing_send_receipt_can_only_complete_from_history(tmp_path):

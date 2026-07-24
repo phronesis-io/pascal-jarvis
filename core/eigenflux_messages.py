@@ -25,6 +25,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -304,6 +305,7 @@ class EigenFluxMessenger:
                  GROUP BY msg_id HAVING COUNT(*) > 1
                 """
             ).fetchall()
+            reopened_delegations: set[str] = set()
             for duplicate in duplicate_ids:
                 claims = db.execute(
                     """
@@ -314,6 +316,8 @@ class EigenFluxMessenger:
                     (duplicate["msg_id"],),
                 ).fetchall()
                 for claim in claims[1:]:
+                    action_key = str(claim["idempotency_key"])
+                    now = self.now()
                     db.execute(
                         """
                         UPDATE verified_external_actions
@@ -322,7 +326,12 @@ class EigenFluxMessenger:
                                updated_epoch=?
                          WHERE idempotency_key=?
                         """,
-                        (self.now(), claim["idempotency_key"]),
+                        (now, action_key),
+                    )
+                    reopened_delegations.update(
+                        self._reopen_duplicate_projection(
+                            db, action_key, now
+                        )
                     )
             db.execute(
                 """
@@ -333,10 +342,146 @@ class EigenFluxMessenger:
                 """
             )
             db.commit()
+            if reopened_delegations:
+                try:
+                    from core.delegations import DelegationStore
+
+                    store = DelegationStore(
+                        root=self.root, db_path=self.db_path
+                    )
+                    for delegation_id in sorted(reopened_delegations):
+                        store.sync_projection(delegation_id)
+                except Exception:
+                    # Canonical state and a durable projection retry were
+                    # committed in the migration transaction.
+                    pass
             return db
         except Exception:
             db.close()
             raise
+
+    @staticmethod
+    def _reopen_duplicate_projection(
+        db: sqlite3.Connection, action_key: str, now: float
+    ) -> set[str]:
+        """Withdraw invalid completion evidence linked to a released receipt."""
+        tables = {
+            str(row["name"])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required = {
+            "delegations",
+            "delegation_steps",
+            "delegation_evidence",
+            "delegation_events",
+        }
+        if not required.issubset(tables):
+            return set()
+        rows = db.execute(
+            """
+            SELECT id,status,contract_version FROM delegations
+             WHERE source='eigenflux-message' AND source_ref=?
+            """,
+            (f"attempt:{action_key}",),
+        ).fetchall()
+        reopened: set[str] = set()
+        for delegation in rows:
+            if str(delegation["status"]) != "completed":
+                continue
+            delegation_id = str(delegation["id"])
+            version = int(delegation["contract_version"])
+            step_ids = [
+                str(row["id"])
+                for row in db.execute(
+                    """
+                    SELECT id FROM delegation_steps
+                     WHERE delegation_id=? AND contract_version=? AND required=1
+                    """,
+                    (delegation_id, version),
+                ).fetchall()
+            ]
+            if step_ids:
+                placeholders = ",".join("?" for _ in step_ids)
+                db.execute(
+                    f"""
+                    UPDATE delegation_evidence
+                       SET trusted=0,expires_at=?
+                     WHERE delegation_id=? AND contract_version=?
+                       AND step_id IN ({placeholders})
+                    """,
+                    (now, delegation_id, version, *step_ids),
+                )
+                db.execute(
+                    f"""
+                    UPDATE delegation_steps
+                       SET status='verifying',finished_at=NULL,
+                           lease_owner='',lease_expires_at=NULL,updated_at=?
+                     WHERE id IN ({placeholders})
+                    """,
+                    (now, *step_ids),
+                )
+            db.execute(
+                """
+                UPDATE delegations
+                   SET status='verifying',verified_at=NULL,completed_at=NULL,
+                       waiting_on='',last_error_code='duplicate_receipt_released',
+                       last_error_summary='Receipt authority was withdrawn',
+                       updated_at=?
+                 WHERE id=?
+                """,
+                (now, delegation_id),
+            )
+            db.execute(
+                """
+                INSERT INTO delegation_events(
+                    event_id,delegation_id,contract_version,event_type,
+                    actor_type,actor_id,from_status,to_status,reason_code,
+                    created_at,metadata_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"dle_{uuid.uuid4().hex[:20]}",
+                    delegation_id,
+                    version,
+                    "delegation.evidence_invalidated",
+                    "system",
+                    "eigenflux-receipt-migration",
+                    "completed",
+                    "verifying",
+                    "duplicate_receipt_released",
+                    now,
+                    json.dumps(
+                        {"idempotency_key": action_key},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            if "delegation_projection_queue" in tables:
+                db.execute(
+                    """
+                    INSERT INTO delegation_projection_queue(
+                        delegation_id,attempt_count,last_error,
+                        first_failed_at,updated_at
+                    ) VALUES (?,?,?,?,?)
+                    ON CONFLICT(delegation_id) DO UPDATE SET
+                        attempt_count=attempt_count+1,
+                        last_error=excluded.last_error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        delegation_id,
+                        1,
+                        "duplicate EigenFlux receipt authority withdrawn",
+                        now,
+                        now,
+                    ),
+                )
+            reopened.add(delegation_id)
+        return reopened
 
     def _run_json(self, command: list[str], timeout: int = 30) -> dict:
         try:

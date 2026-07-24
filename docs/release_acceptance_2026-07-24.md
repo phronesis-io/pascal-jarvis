@@ -256,6 +256,15 @@ findings were reproduced and closed:
 | 112 | SIGTERM or SIGINT between tool/model `Popen` and holder registration could leave the new process group alive or waiting until timeout | CLI signal handlers now record cancellation without unwinding the spawn expression; once the child is registered, both OpenAI and auxiliary routes observe cancellation and terminate the complete process group before returning the signal exit code; exact spawn-window regressions |
 | 113 | Any nonzero `launchctl print` result was treated as proof that an optional service was absent | Offline rotation now requires an explicit launchd service-not-found diagnostic; permission, domain, empty, and transient command failures remain `probe_failed` and leave the log inode untouched; ambiguous-probe regression |
 
+The fifteenth independent review checked migration effects beyond the action
+row and termination behavior beyond child processes. Its two findings were
+reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 114 | Releasing a legacy duplicate action receipt left its already-completed Delegation and evidence terminal forever | The receipt migration now withdraws trusted evidence, reopens the required step and parent Delegation, records an invalidation event, and refreshes or durably queues user projections in the same database transition; completed-projection migration regression |
+| 115 | Making signal handlers non-raising for the spawn race delayed shutdown during stdin or HTTP blocking | A per-process `:spawning` flag confines deferred termination to the exact `Popen` registration window; all other stages terminate the held group and immediately raise the signal exit, including text-only API calls; spawn-window and blocking-API regressions |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -296,7 +305,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2093 passed` for this candidate);
+- full local test result (`2094 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;
