@@ -99,12 +99,14 @@ class ActionProcessor:
 
     def __init__(self, jarvis_dir: str | Path, memory_dir: str | Path,
                  jobs_dir: str | Path, log_file: str = "",
-                 heartbeat_trigger_path: str | Path = "/tmp/jarvis-heartbeat-trigger"):
+                 heartbeat_trigger_path: str | Path = "/tmp/jarvis-heartbeat-trigger",
+                 owner_authenticated: bool = False):
         self.jarvis_dir = Path(jarvis_dir)
         self.memory_dir = Path(memory_dir)
         self.jobs_dir = Path(jobs_dir)
         self.log_file = log_file
         self.heartbeat_trigger_path = Path(heartbeat_trigger_path)
+        self.owner_authenticated = bool(owner_authenticated)
         self._tm = None  # lazy TaskManager
 
     @property
@@ -137,6 +139,16 @@ class ActionProcessor:
         results = []
         authoritative_results = []
         handled_markers = []
+        owner_actions = {
+            "delegation_confirm",
+            "delegation_cancel",
+            "iteration_approve",
+            "iteration_reject",
+        }
+        receipt_actions = owner_actions | {
+            "eigenflux_friend",
+            "eigenflux_message",
+        }
         for marker in markers:
             body = marker[8:-1]  # strip [ACTION: and ]
             action_type = body.split("|")[0]
@@ -144,9 +156,23 @@ class ActionProcessor:
 
             handler = getattr(self, f"_do_{action_type}", None)
             if handler:
-                result = handler(params_raw)
+                if action_type in owner_actions and not self.owner_authenticated:
+                    authoritative_results.append(
+                        "❌ 这个决定只能通过已认证的奏折按钮或控制台完成，"
+                        "模型输出没有获得主人授权。"
+                    )
+                    handled_markers.append(marker)
+                    continue
+                try:
+                    result = handler(params_raw)
+                except Exception as exc:
+                    if action_type not in receipt_actions:
+                        raise
+                    authoritative_results.append(f"❌ 动作未生效：{exc}")
+                    handled_markers.append(marker)
+                    continue
                 if result:
-                    if action_type == "eigenflux_message":
+                    if action_type in receipt_actions:
                         authoritative_results.append(result)
                     else:
                         results.append(result)
@@ -166,6 +192,12 @@ class ActionProcessor:
         if results:
             return cleaned + "\n" + "\n".join(results)
         return cleaned
+
+    def _require_owner_callback(self) -> None:
+        if not self.owner_authenticated:
+            raise RuntimeError(
+                "owner decision requires an authenticated Item/dashboard callback"
+            )
 
     # ── Feed / Content ──
 
@@ -338,6 +370,10 @@ class ActionProcessor:
                     if receipt.msg_id
                     else f"eigenflux-conversation:{receipt.conv_id}"
                 ),
+                verification_policy={
+                    "idempotency_key": receipt.idempotency_key,
+                    "msg_id": receipt.msg_id,
+                },
                 root=self.jarvis_dir,
             )
         except Exception as exc:
@@ -352,6 +388,7 @@ class ActionProcessor:
         from core.delegations import DelegationStore
         from core.delegation_reconcile import sync_attention_item
 
+        self._require_owner_callback()
         params = parse_params(raw)
         try:
             store = DelegationStore(root=self.jarvis_dir)
@@ -370,6 +407,7 @@ class ActionProcessor:
         from core.delegations import DelegationStore
         from core.delegation_reconcile import sync_attention_item
 
+        self._require_owner_callback()
         params = parse_params(raw)
         try:
             store = DelegationStore(root=self.jarvis_dir)
@@ -389,6 +427,7 @@ class ActionProcessor:
         """Approve one evidence-backed L3 proposal and queue it in Taskline."""
         from core.iteration_loop import IterationStore, sync_proposal_item
 
+        self._require_owner_callback()
         proposal_id = parse_params(raw).get("id", "")
         try:
             store = IterationStore(root=self.jarvis_dir)
@@ -407,6 +446,7 @@ class ActionProcessor:
         """Reject one L3 proposal without producing an engineering task."""
         from core.iteration_loop import IterationStore, sync_proposal_item
 
+        self._require_owner_callback()
         proposal_id = parse_params(raw).get("id", "")
         try:
             store = IterationStore(root=self.jarvis_dir)

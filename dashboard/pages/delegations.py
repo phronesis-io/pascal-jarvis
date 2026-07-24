@@ -266,7 +266,6 @@ def delegation_detail_page(delegation_id: str):
                     "failed",
                     "blocked",
                     "verifying",
-                    "needs_user",
                 }:
                     ui.button(
                         "重试", icon="refresh",

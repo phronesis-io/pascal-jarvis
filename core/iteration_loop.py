@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -285,12 +286,13 @@ class IterationStore:
                 """,
                 (signal_fingerprint,),
             ).fetchone()
-            if existing is not None and (
-                existing["status"] != "verified"
-                or float(signal["last_seen"] or 0)
-                <= float(existing["verified_at"] or 0)
-            ):
-                return self._decode_proposal(db, existing), False
+            if existing is not None and existing["status"] != "needs_followup":
+                if (
+                    existing["status"] != "verified"
+                    or float(signal["last_seen"] or 0)
+                    <= float(existing["verified_at"] or 0)
+                ):
+                    return self._decode_proposal(db, existing), False
             db.execute(
                 """
                 INSERT INTO iteration_proposals(
@@ -869,12 +871,146 @@ class DailyObserver:
             )
         return result
 
+    def _run_json(
+        self, command: list[str], *, timeout: int = 30
+    ) -> dict[str, Any]:
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(self.store.root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "TASKLINE_PROJECT": "pascal-jarvis"},
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise IterationError(f"{command[0]} readback failed: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "readback failed").strip()
+            raise IterationError(detail[:300])
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise IterationError(
+                f"{command[0]} returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise IterationError(f"{command[0]} returned a non-object")
+        return payload
+
+    @staticmethod
+    def _merged_pr_url(task: dict[str, Any]) -> str:
+        for link in task.get("links") or []:
+            if not isinstance(link, dict):
+                continue
+            url = str(link.get("url") or "").strip()
+            if re.fullmatch(
+                r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
+                url,
+            ):
+                return url
+        return ""
+
+    def _reconcile_existing(
+        self, raw_signals: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Move queued work through deployed SHA and same-source observation."""
+        shipped = 0
+        verified = 0
+        followups = 0
+        errors: list[dict[str, str]] = []
+        for proposal in self.store.list(status="queued", limit=50):
+            task_id = str(proposal.get("taskline_id") or "")
+            try:
+                if not task_id:
+                    raise IterationError("queued proposal has no Taskline id")
+                task = self._run_json(["taskline", "task", "get", task_id])
+                if str(task.get("state") or "") != "done":
+                    continue
+                pr_url = self._merged_pr_url(task)
+                if not pr_url:
+                    raise IterationError("completed Taskline task has no GitHub PR")
+                pull = self._run_json(
+                    [
+                        "gh",
+                        "pr",
+                        "view",
+                        pr_url,
+                        "--json",
+                        "mergedAt,mergeCommit",
+                    ]
+                )
+                release_sha = str(
+                    (pull.get("mergeCommit") or {}).get("oid") or ""
+                ).lower()
+                if (
+                    not pull.get("mergedAt")
+                    or not re.fullmatch(r"[0-9a-f]{40}", release_sha)
+                ):
+                    raise IterationError("Taskline PR is not merged")
+                deployed_sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(self.store.root),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if (
+                    deployed_sha.returncode != 0
+                    or deployed_sha.stdout.strip().lower() != release_sha
+                ):
+                    continue
+                self.store.mark_shipped(
+                    proposal["id"],
+                    release_sha=release_sha,
+                    actor="iteration-observe",
+                )
+                shipped += 1
+            except (IterationError, OSError, subprocess.SubprocessError) as exc:
+                errors.append(
+                    {
+                        "proposal_id": str(proposal["id"]),
+                        "error": str(exc)[:200],
+                    }
+                )
+
+        open_fingerprints = {
+            _fingerprint(
+                str(signal.get("source") or ""),
+                str(signal.get("category") or ""),
+                str(signal.get("key") or ""),
+            )
+            for signal in raw_signals
+        }
+        for proposal in self.store.list(status="shipped", limit=50):
+            if "signal_open" not in proposal["expected"]:
+                continue
+            is_open = proposal["signal_fingerprint"] in open_fingerprints
+            matched = is_open == bool(proposal["expected"]["signal_open"])
+            updated = self.store.verify_outcome(
+                proposal["id"],
+                actual={"signal_open": is_open},
+                matched=matched,
+                actor="iteration-observe",
+            )
+            if updated["status"] == "verified":
+                verified += 1
+            else:
+                followups += 1
+        return {
+            "shipped": shipped,
+            "verified": verified,
+            "needs_followup": followups,
+            "errors": errors,
+        }
+
     def run(self, *, create_proposals: bool = True) -> dict[str, Any]:
         raw = (
             self._component_signals()
             + self._delegation_signals()
             + self._conversation_signals()
         )
+        reconciliation = self._reconcile_existing(raw)
         signals = [self.store.record_signal(**item) for item in raw]
         proposals = []
         if create_proposals:
@@ -889,6 +1025,7 @@ class DailyObserver:
             "observed": len(raw),
             "signals": len(signals),
             "proposals": [proposal["id"] for proposal in proposals],
+            "reconciliation": reconciliation,
         }
 
 

@@ -1543,6 +1543,7 @@ def _execute_action(action: dict) -> str:
         memory_dir=os.environ.get("MEMORY_DIR", str(JARVIS_DIR / "memory")),
         jobs_dir=os.environ.get("JV_JOBS_DIR", str(JARVIS_DIR / "jobs")),
         log_file=os.environ.get("JV_LOG_FILE", ""),
+        owner_authenticated=True,
     )
     handler = getattr(ap, f"_do_{atype}", None)
     if handler is None:

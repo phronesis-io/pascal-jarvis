@@ -14,15 +14,19 @@ from core.delegation_verify import VerificationError, VerifierRegistry, verify_s
 
 
 def _attention_link(detail: dict[str, Any]) -> str:
-    return next(
-        (
-            str(link["entity_id"])
-            for link in detail.get("links", [])
-            if link.get("entity_type") == "memorial"
-            and link.get("relation") == "needs_attention"
-        ),
-        "",
+    candidates = [
+        link
+        for link in detail.get("links", [])
+        if link.get("entity_type") == "memorial"
+        and link.get("relation") == "needs_attention"
+    ]
+    if not candidates:
+        return ""
+    _, newest = max(
+        enumerate(candidates),
+        key=lambda item: (float(item[1].get("created_at") or 0), item[0]),
     )
+    return str(newest["entity_id"])
 
 
 def sync_attention_item(
@@ -44,8 +48,30 @@ def sync_attention_item(
                 f"委托现在是：{detail['status']}",
             )
         return existing
-    if existing and memorial.get_memorial(existing) is not None:
-        return existing
+    if existing:
+        state = memorial.get_memorial(existing)
+        context: dict[str, Any] = {}
+        if state is not None:
+            try:
+                context = json.loads(str(state.get("context") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                context = {}
+        current_item = bool(
+            state is not None
+            and state.get("status") == "pending"
+            and context.get("kind") == "delegation_attention"
+            and str(context.get("delegation_id") or "") == str(detail["id"])
+            and int(context.get("contract_version") or 0)
+            == int(detail["contract_version"])
+        )
+        if current_item:
+            return existing
+        if state is not None:
+            memorial.resolve(
+                existing,
+                "已失效",
+                f"委托契约已更新到 v{detail['contract_version']}",
+            )
 
     if int(detail.get("risk_tier") or 0) >= 4:
         options = [
@@ -123,7 +149,10 @@ def sync_attention_item(
         body=body,
         options=options,
         matter_id=str(detail.get("matter_id") or ""),
-        dedup_key=f"delegation-attention:{detail['id']}",
+        dedup_key=(
+            f"delegation-attention:{detail['id']}:"
+            f"v{detail['contract_version']}"
+        ),
         context=json.dumps(
             {
                 "kind": "delegation_attention",
@@ -189,6 +218,32 @@ class DelegationReconciler:
                 sync_attention_item(detail, store=self.store, send=send_items)
                 needs_user += 1
                 continue
+            if (
+                detail.get("source") == "taskline"
+                and not detail["verification_policy"].get("release_sha")
+            ):
+                try:
+                    from core.taskline_bridge import (
+                        TasklineBridge,
+                        TasklineBridgeError,
+                    )
+
+                    detail = TasklineBridge(
+                        root=self.store.root
+                    ).refresh_release(str(detail.get("source_ref") or ""))
+                except TasklineBridgeError as exc:
+                    deferred += 1
+                    errors.append(
+                        {
+                            "delegation_id": detail["id"],
+                            "step_id": "",
+                            "error": str(exc)[:200],
+                        }
+                    )
+                    continue
+                if not detail["verification_policy"].get("release_sha"):
+                    deferred += 1
+                    continue
             policy = detail["verification_policy"]
             timeout = max(
                 60, int(policy.get("verification_timeout_seconds", 3600))

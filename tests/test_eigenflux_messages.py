@@ -208,6 +208,18 @@ def test_ambiguous_exact_remark_refuses_to_send(tmp_path):
     assert cli.send_count == 0
 
 
+def test_verified_friend_id_bypasses_duplicate_display_names(tmp_path):
+    cli = FakeEigenFlux()
+    cli.friends[1]["agent_name"] = cli.friends[0]["agent_name"]
+    messenger = _messenger(tmp_path, cli)
+
+    receipt = messenger.send_to_friend_id("agent-spouse", "welcome")
+
+    assert receipt.completed
+    assert receipt.recipient_id == "agent-spouse"
+    assert cli.api_calls == [("agent-spouse", "welcome")]
+
+
 def test_binding_alias_is_checked_against_live_friend_record(tmp_path):
     cli = FakeEigenFlux()
     binding = tmp_path / "bindings.json"
@@ -303,6 +315,47 @@ def test_readback_failure_never_claims_completion_or_retries(tmp_path):
     assert not receipt.completed
     assert cli.send_count == 1
     assert "仍在核验" in receipt.human_text()
+
+
+def test_uncertain_action_projects_stable_key_for_later_reconciliation(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+
+    cli = FakeEigenFlux()
+    cli.history_error = True
+    messenger = _messenger(tmp_path, cli)
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger",
+        lambda **_kwargs: messenger,
+    )
+    processor = ActionProcessor(
+        jarvis_dir=tmp_path,
+        memory_dir=tmp_path / "memory",
+        jobs_dir=tmp_path / "jobs",
+    )
+    encoded = base64.b64encode(b"recover later").decode()
+
+    result = processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+    )
+
+    assert "仍在核验" in result
+    detail = DelegationStore(root=tmp_path).get(
+        DelegationStore(root=tmp_path).list()[0]["id"]
+    )
+    assert detail["status"] == "verifying"
+    assert detail["verification_policy"]["idempotency_key"]
+    from core.delegation_verify import VerifierRegistry
+
+    verification = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "jarvis.db"
+    ).verify(
+        "eigenflux_message",
+        detail["expected_postcondition"],
+        detail["verification_policy"],
+    )
+    assert verification.matched is False
 
 
 class _ApiResponse:

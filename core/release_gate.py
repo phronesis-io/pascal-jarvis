@@ -27,9 +27,10 @@ def _repo_name(remote: str) -> str:
     return match.group(1)
 
 
-def _has_pass_attestation(body: str) -> bool:
+def _has_pass_attestation(body: str, sha: str) -> bool:
+    expected = f"REVIEW-GATE: PASS {sha}".upper()
     return any(
-        line.strip().upper() == "REVIEW-GATE: PASS"
+        line.strip().upper() == expected
         for line in str(body or "").splitlines()
     )
 
@@ -163,13 +164,19 @@ class ReleaseGate:
             reviewer = str((review.get("user") or {}).get("login") or "")
             state = str(review.get("state") or "").upper()
             body = str(review.get("body") or "")
-            if reviewer and reviewer != author and state == "APPROVED":
+            reviewed_sha = str(review.get("commit_id") or "")
+            if (
+                reviewer
+                and reviewer != author
+                and state == "APPROVED"
+                and reviewed_sha == sha
+            ):
                 evidence.append(f"review:{reviewer}:{state}")
             elif (
                 reviewer
                 and reviewer != author
                 and state == "COMMENTED"
-                and _has_pass_attestation(body)
+                and _has_pass_attestation(body, sha)
             ):
                 evidence.append(f"attestation:{reviewer}")
         for comment in comments if isinstance(comments, list) else []:
@@ -178,7 +185,7 @@ class ReleaseGate:
             if (
                 reviewer
                 and reviewer != author
-                and _has_pass_attestation(body)
+                and _has_pass_attestation(body, sha)
             ):
                 evidence.append(f"attestation:{reviewer}")
         if not evidence:

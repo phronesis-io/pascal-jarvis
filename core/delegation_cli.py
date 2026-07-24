@@ -93,7 +93,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "attempt":
             result = store.record_attempt(args.id, **_input())
         elif args.command == "evidence":
-            result = store.record_evidence(args.id, **_input())
+            data = _input()
+            if set(data) != {"step_id"}:
+                raise DelegationError(
+                    "evidence accepts only step_id; authority, strength, and "
+                    "matching come from the registered verifier"
+                )
+            from core.delegation_verify import verify_step
+
+            result = verify_step(
+                args.id,
+                str(data["step_id"]),
+                store=store,
+            )
         elif args.command == "wait":
             result = store.mark_waiting(args.id, **_input())
         elif args.command == "resume":

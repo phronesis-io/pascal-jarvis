@@ -300,3 +300,124 @@ def test_daily_observer_preserves_human_gate(tmp_path, monkeypatch):
     result = Observer(store).run()
     assert len(result["proposals"]) == 1
     assert store.get(result["proposals"][0])["status"] == "pending"
+
+
+def _queued_observed_proposal(store, monkeypatch):
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            (
+                json.dumps({"tasks": []})
+                if command[1:3] == ["task", "list"]
+                else json.dumps({"id": "task-123"})
+            ),
+            "",
+        ),
+    )
+    return store.review(
+        proposal["id"], approved=True, actor="owner", queue=True
+    )
+
+
+def test_daily_observer_closes_taskline_release_after_deployed_sha(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    queued = _queued_observed_proposal(store, monkeypatch)
+    release_sha = "d" * 40
+
+    def readback(command, **_kwargs):
+        if command[:3] == ["taskline", "task", "get"]:
+            payload = {
+                "id": "task-123",
+                "state": "done",
+                "links": [{
+                    "url": "https://github.com/org/repo/pull/9",
+                }],
+            }
+        elif command[:3] == ["gh", "pr", "view"]:
+            payload = {
+                "mergedAt": "2026-07-24T12:00:00Z",
+                "mergeCommit": {"oid": release_sha},
+            }
+        elif command == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, release_sha + "\n", "")
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", readback)
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+    closed = store.get(queued["id"])
+
+    assert closed["status"] == "verified"
+    assert closed["release_sha"] == release_sha
+    assert closed["actual"] == {"signal_open": False}
+    assert result["reconciliation"] == {
+        "shipped": 1,
+        "verified": 1,
+        "needs_followup": 0,
+        "errors": [],
+    }
+
+
+def test_daily_observer_waits_until_merged_sha_is_deployed(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    queued = _queued_observed_proposal(store, monkeypatch)
+    release_sha = "d" * 40
+
+    def readback(command, **_kwargs):
+        if command[:3] == ["taskline", "task", "get"]:
+            payload = {
+                "id": "task-123",
+                "state": "done",
+                "links": [{
+                    "url": "https://github.com/org/repo/pull/9",
+                }],
+            }
+            output = json.dumps(payload)
+        elif command[:3] == ["gh", "pr", "view"]:
+            output = json.dumps({
+                "mergedAt": "2026-07-24T12:00:00Z",
+                "mergeCommit": {"oid": release_sha},
+            })
+        elif command == ["git", "rev-parse", "HEAD"]:
+            output = "e" * 40 + "\n"
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(subprocess, "run", readback)
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "queued"
+    assert result["reconciliation"]["shipped"] == 0

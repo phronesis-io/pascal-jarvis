@@ -210,8 +210,8 @@ def execute_friend_action(
             root=root,
             runner=lambda command, **_: runner(command)
         )
-        welcome = messenger.send(
-            str(friend.get("agent_name") or remark or from_name),
+        welcome = messenger.send_to_friend_id(
+            from_uid,
             WELCOME_MESSAGE,
         )
     except Exception as exc:

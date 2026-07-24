@@ -76,6 +76,7 @@ def _complete_step(store, delegation, step, *, owner="codex"):
         expected_summary="recipient=agent-1",
         observed_summary="recipient=agent-1",
         matched=True,
+        actor_id="message",
     )
     return claim
 
@@ -134,11 +135,81 @@ def test_completion_requires_required_step_and_qualifying_evidence(tmp_path):
         expected_summary="recipient=agent-1",
         observed_summary="recipient=agent-1",
         matched=True,
+        actor_id="message",
     )
     detail = store.get(delegation["id"])
     assert detail["status"] == "completed"
     assert detail["completed_at"] == 1_000
     assert detail["events"][-1]["event_type"] == "delegation.completed"
+
+
+def test_worker_claimed_strong_evidence_cannot_forge_completion(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+
+    store.record_evidence(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        evidence_type="worker_claim",
+        strength="strong",
+        authority="made_up",
+        resource_locator="",
+        observed_digest="sha256:" + "9" * 64,
+        expected_summary="sent",
+        observed_summary="worker says sent",
+        matched=True,
+        actor_id="worker",
+    )
+
+    detail = store.get(delegation["id"])
+    assert detail["status"] == "verifying"
+    assert detail["steps"][0]["status"] == "verifying"
+    assert detail["events"][-1]["metadata"]["trusted_verifier"] is False
+
+
+def test_correct_authority_with_wrong_actor_does_not_complete(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+
+    store.record_evidence(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        evidence_type="worker_claim",
+        strength="strong",
+        authority="message_service",
+        resource_locator="message:1",
+        observed_digest="sha256:" + "8" * 64,
+        expected_summary="sent",
+        observed_summary="sent",
+        matched=True,
+        actor_id="worker",
+    )
+
+    assert store.get(delegation["id"])["status"] == "verifying"
 
 
 def test_mismatch_never_completes(tmp_path):
@@ -167,6 +238,7 @@ def test_mismatch_never_completes(tmp_path):
         expected_summary="recipient=agent-1",
         observed_summary="recipient=agent-2",
         matched=False,
+        actor_id="message",
     )
     assert store.get(delegation["id"])["status"] == "verifying"
 
@@ -202,6 +274,7 @@ def test_external_wait_blocks_completion_until_cleared(tmp_path):
         expected_summary="message sent",
         observed_summary="message sent",
         matched=True,
+        actor_id="message",
     )
     assert store.get(delegation["id"])["status"] == "awaiting_external"
 
@@ -255,6 +328,25 @@ def test_high_risk_needs_same_principal_confirmation(tmp_path):
     )
     assert confirmed["status"] == "bound"
     assert confirmed["authorized"] == 1
+
+
+def test_unapproved_high_risk_delegation_cannot_retry_past_confirmation(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(
+        store,
+        risk_tier=3,
+        authorized=False,
+        operation="public_publish",
+    )
+
+    with pytest.raises(DelegationConflict, match="not retryable"):
+        store.retry(delegation["id"], expected_version=1, actor_id="owner")
+
+    detail = store.get(delegation["id"])
+    assert detail["status"] == "needs_user"
+    assert detail["authorized"] == 0
 
 
 def test_r4_stays_human_operated_even_when_created_as_authorized(tmp_path):
@@ -578,6 +670,7 @@ def test_metrics_detect_wrong_target_and_duplicate_external_receipts(tmp_path):
         expected_summary='{"recipient_id":"agent-1"}',
         observed_summary='{"recipient_id":"agent-2"}',
         matched=False,
+        actor_id="message",
     )
     for index in (1, 2):
         store.record_evidence(
@@ -592,6 +685,7 @@ def test_metrics_detect_wrong_target_and_duplicate_external_receipts(tmp_path):
             expected_summary='{"recipient_id":"agent-1"}',
             observed_summary='{"recipient_id":"agent-1"}',
             matched=True,
+            actor_id="message",
         )
 
     metrics = store.metrics()

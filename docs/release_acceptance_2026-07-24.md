@@ -78,8 +78,25 @@ blocking or material edge cases. All 15 were fixed before release:
 | 15 | Background verification could starve user decisions | Attention states are scanned before verification states; reconciler tests |
 
 The review gate itself was also hardened: generic `COMMENTED` reviews no longer
-count as approval, and explicit attestations must contain `REVIEW-GATE: PASS`
-on its own line.
+count as approval. A second independent red-team review then found ten
+authority, revision, and recovery gaps; all ten were fixed before release:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 16 | Model/CLI markers could invoke owner-only approvals | Owner decisions require an authenticated Item/dashboard callback; model prose is suppressed with an authoritative refusal; action tests |
+| 17 | Worker-controlled `strong` evidence could complete a Delegation | Worker CLI invokes only the registered verifier; store completion also checks contract authority, verifier identity, and execution phase; CLI/Delegation tests |
+| 18 | Review evidence was not bound to the deployed commit | Approvals require the exact commit ID; attestations require `REVIEW-GATE: PASS <40-char SHA>` on their own line; release-gate tests |
+| 19 | A healthy unrelated runtime could complete a Taskline task | Runtime contracts include the merged release SHA; completed Taskline tasks recover it from the linked PR and start a fresh versioned verifier step; bridge/verifier tests |
+| 20 | Suppressed EigenFlux events were marked seen and lost | Only queued/delivered outcomes advance the upstream cursor; suppression dead-letters and remains replayable; stream tests |
+| 21 | Uncertain EigenFlux sends lacked a reconciliation key | Message receipts expose the non-secret idempotency hash and persist it in verifier policy; messenger/reconciler tests |
+| 22 | Retry moved an unapproved R3 item out of confirmation | `needs_user` is not retryable and the dashboard no longer offers that action; state-machine/UI tests |
+| 23 | Contract revisions retained stale approval Items | Reconciliation resolves stale/decided cards and creates one version-bound current Item; reconciliation tests |
+| 24 | Welcome delivery re-resolved an ambiguous display name | The welcome path uses the already verified friend ID and rechecks it against the authoritative friend list; friend tests |
+| 25 | L3 proposals stayed queued after shipping | Daily observation now reconciles Taskline done state, merged PR SHA, deployed HEAD, and same-source outcome; failed outcomes create a fresh gated follow-up; iteration tests |
+
+Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
+mandatory, so a review submitted before the final push cannot authorize a
+later revision.
 
 ## 5. Engineering Loops
 
@@ -117,7 +134,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`1969 passed` for this candidate);
+- full local test result (`1987 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

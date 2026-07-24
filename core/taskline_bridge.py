@@ -107,7 +107,18 @@ class TasklineBridge:
         if not task_id:
             raise TasklineBridgeError("Taskline task has no id")
         store = DelegationStore(root=self.root)
-        expected = {"runtime_ok": True, "components_ok": True}
+        release_sha = self._task_release_sha(task)
+        expected = {
+            "git_head": release_sha or f"pending:{task_id}",
+            "runtime_ok": True,
+            "components_ok": True,
+        }
+        verification_policy = {
+            "verifier": "runtime_deploy",
+            "taskline_project": self.project,
+            "taskline_id": task_id,
+            "release_sha": release_sha,
+        }
         delegation, _ = store.create(
             principal_id="owner",
             source="taskline",
@@ -120,21 +131,21 @@ class TasklineBridge:
             target_label=self.root.name,
             expected_postcondition=expected,
             authority="jarvis_runtime",
-            verification_policy={
-                "verifier": "runtime_deploy",
-                "taskline_project": self.project,
-                "taskline_id": task_id,
-            },
+            verification_policy=verification_policy,
             privacy_class="internal",
             capture_mode="explicit",
             authorized=True,
         )
         detail = store.get(delegation["id"])
-        if detail["expected_postcondition"] != expected:
+        if (
+            detail["expected_postcondition"] != expected
+            or detail["verification_policy"] != verification_policy
+        ):
             delegation = store.revise_contract(
                 delegation["id"],
                 expected_version=detail["contract_version"],
                 expected_postcondition=expected,
+                verification_policy=verification_policy,
                 actor_id="taskline-bridge",
             )
             detail = store.get(delegation["id"])
@@ -153,6 +164,95 @@ class TasklineBridge:
             relation="tracks",
         )
         return str(delegation["id"])
+
+    @staticmethod
+    def _task_release_sha(task: dict[str, Any]) -> str:
+        """Return only an immutable full commit SHA supplied by Taskline."""
+        candidates = [
+            task.get("release_sha"),
+            task.get("merge_sha"),
+            task.get("commit_sha"),
+        ]
+        metadata = task.get("metadata")
+        if isinstance(metadata, dict):
+            candidates.extend(
+                metadata.get(key)
+                for key in ("release_sha", "merge_sha", "commit_sha")
+            )
+        for candidate in candidates:
+            value = str(candidate or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{40}", value):
+                return value
+        return ""
+
+    @staticmethod
+    def _pull_url(task: dict[str, Any]) -> str:
+        for link in task.get("links") or []:
+            if not isinstance(link, dict):
+                continue
+            value = str(link.get("url") or "").strip()
+            if re.fullmatch(
+                r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
+                value,
+            ):
+                return value
+        return ""
+
+    def refresh_release(self, task_id: str) -> dict[str, Any]:
+        """Bind a completed Taskline task to its immutable merged revision."""
+        from core.delegations import DelegationConflict, DelegationStore
+
+        task = self._run(["taskline", "task", "get", task_id])
+        if str(task.get("state") or "") != "done":
+            delegation_id = self._engineering_delegation(task)
+            return DelegationStore(root=self.root).get(delegation_id)
+        pull_url = self._pull_url(task)
+        if not pull_url:
+            raise TasklineBridgeError("completed task has no GitHub PR link")
+        pull = self._run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pull_url,
+                "--json",
+                "mergedAt,mergeCommit",
+            ]
+        )
+        release_sha = str(
+            (pull.get("mergeCommit") or {}).get("oid") or ""
+        ).lower()
+        if (
+            not pull.get("mergedAt")
+            or not re.fullmatch(r"[0-9a-f]{40}", release_sha)
+        ):
+            raise TasklineBridgeError("Taskline PR is not merged")
+        delegation_id = self._engineering_delegation(
+            {**task, "release_sha": release_sha}
+        )
+        store = DelegationStore(root=self.root)
+        detail = store.get(delegation_id)
+        step = detail["steps"][0]
+        if step["status"] == "pending":
+            try:
+                store.claim_step(
+                    delegation_id,
+                    step["id"],
+                    expected_version=detail["contract_version"],
+                    owner="taskline-release",
+                    lease_seconds=120,
+                )
+                store.record_attempt(
+                    delegation_id,
+                    step["id"],
+                    expected_version=detail["contract_version"],
+                    owner="taskline-release",
+                    succeeded=True,
+                    artifact_locator=pull_url,
+                )
+            except DelegationConflict:
+                pass
+        return store.get(delegation_id)
 
     def link_execution_context(
         self,

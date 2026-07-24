@@ -100,6 +100,7 @@ def test_matter_next_action_follows_authoritative_delegation(tmp_path):
         expected_summary='{"receiver_id":"agent-1"}',
         observed_summary='{"receiver_id":"agent-1"}',
         matched=True,
+        actor_id="message",
     )
 
     finished = get_matter(matter["id"])

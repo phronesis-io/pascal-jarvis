@@ -58,6 +58,7 @@ class MessageReceipt:
     state: str
     recipient_name: str
     recipient_id: str
+    idempotency_key: str = ""
     msg_id: str = ""
     conv_id: str = ""
     duplicate: bool = False
@@ -601,6 +602,7 @@ class EigenFluxMessenger:
             state="verified",
             recipient_name=friend.agent_name,
             recipient_id=friend.agent_id,
+            idempotency_key=key,
             msg_id=msg_id,
             conv_id=conv_id,
             duplicate=duplicate,
@@ -617,6 +619,45 @@ class EigenFluxMessenger:
         if not message:
             raise EigenFluxMessageError("消息正文为空，未发送")
         friend = self.resolve_friend(recipient)
+        return self._send_friend(
+            friend,
+            message,
+            repeat_token=repeat_token,
+        )
+
+    def send_to_friend_id(
+        self,
+        agent_id: str,
+        content: str,
+        *,
+        repeat_token: str = "",
+    ) -> MessageReceipt:
+        """Send to one server-verified friend ID without label ambiguity."""
+        wanted = str(agent_id or "").strip()
+        matches = [
+            friend for friend in self.list_friends()
+            if friend.agent_id == wanted
+        ]
+        if len(matches) != 1:
+            raise RecipientNotFound(
+                "权威好友列表中没有唯一匹配的 agent ID，未发送"
+            )
+        message = str(content or "").strip()
+        if not message:
+            raise EigenFluxMessageError("消息正文为空，未发送")
+        return self._send_friend(
+            matches[0],
+            message,
+            repeat_token=repeat_token,
+        )
+
+    def _send_friend(
+        self,
+        friend: Friend,
+        message: str,
+        *,
+        repeat_token: str,
+    ) -> MessageReceipt:
         payload_hash = self._content_hash(message)
         contract_version = (
             f"repeat:{repeat_token.strip()}" if repeat_token.strip() else "v1"
@@ -635,6 +676,7 @@ class EigenFluxMessenger:
                     state="verified",
                     recipient_name=friend.agent_name,
                     recipient_id=friend.agent_id,
+                    idempotency_key=key,
                     msg_id=str(existing["msg_id"]),
                     conv_id=str(existing["conv_id"]),
                     duplicate=True,
@@ -659,6 +701,7 @@ class EigenFluxMessenger:
                         state="verifying",
                         recipient_name=friend.agent_name,
                         recipient_id=friend.agent_id,
+                        idempotency_key=key,
                         detail=str(exc),
                     )
                 if found:
@@ -671,6 +714,7 @@ class EigenFluxMessenger:
                         state="attempting",
                         recipient_name=friend.agent_name,
                         recipient_id=friend.agent_id,
+                        idempotency_key=key,
                     )
             self._start_retry(key)
 
@@ -699,6 +743,7 @@ class EigenFluxMessenger:
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
+                idempotency_key=key,
                 detail=str(exc),
             )
 
@@ -741,6 +786,7 @@ class EigenFluxMessenger:
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
+                idempotency_key=key,
                 msg_id=msg_id,
                 conv_id=conv_id,
                 detail=str(exc),
@@ -758,6 +804,7 @@ class EigenFluxMessenger:
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
+                idempotency_key=key,
                 msg_id=msg_id,
                 conv_id=conv_id,
                 detail=detail,

@@ -25,7 +25,7 @@ def _completed_attempt(tmp_path, verifier, expected, policy):
         target_type="object",
         target_id="one",
         expected_postcondition=expected,
-        authority="authority",
+        authority="test_authority",
         verification_policy={"verifier": verifier, **policy},
         authorized=True,
     )

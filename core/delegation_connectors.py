@@ -32,6 +32,7 @@ def record_connector_receipt(
     observed: dict[str, Any],
     matched: bool,
     resource_locator: str,
+    verification_policy: dict[str, Any] | None = None,
     matter_id: str = "",
     principal_id: str = "owner",
     root: str | Path | None = None,
@@ -44,6 +45,10 @@ def record_connector_receipt(
     the mutation itself.
     """
     store = store or DelegationStore(root=root)
+    policy = {
+        "verifier": verifier,
+        **dict(verification_policy or {}),
+    }
     delegation, _ = store.create(
         principal_id=principal_id,
         source=source,
@@ -57,13 +62,25 @@ def record_connector_receipt(
         target_label=target_label,
         expected_postcondition=expected,
         authority=authority,
-        verification_policy={"verifier": verifier},
+        verification_policy=policy,
         capture_mode="explicit",
         authorized=True,
     )
     detail = store.get(delegation["id"])
     if detail["status"] == "completed":
         return detail
+    if (
+        detail["expected_postcondition"] != expected
+        or detail["verification_policy"] != policy
+    ):
+        delegation = store.revise_contract(
+            delegation["id"],
+            expected_version=detail["contract_version"],
+            expected_postcondition=expected,
+            verification_policy=policy,
+            actor_id="connector-bridge",
+        )
+        detail = store.get(delegation["id"])
     step = detail["steps"][0] if detail["steps"] else store.add_step(
         delegation["id"],
         expected_version=delegation["contract_version"],

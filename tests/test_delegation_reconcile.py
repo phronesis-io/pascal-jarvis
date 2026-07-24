@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from core.delegation_reconcile import DelegationReconciler
+import json
+
+from core.delegation_reconcile import (
+    DelegationReconciler,
+    sync_attention_item,
+)
 from core.delegation_verify import Verification, VerificationError
 from core.delegations import DelegationStore
 
@@ -221,3 +226,48 @@ def test_reconciler_prioritizes_user_attention_before_verification(
     assert result["needs_user"] == 1
     assert called == [attention["id"]]
     assert registry.calls == 0
+
+
+def test_contract_revision_replaces_stale_attention_item(
+    tmp_path, monkeypatch,
+):
+    from core import memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    store = DelegationStore(root=tmp_path, db_path=tmp_path / "jarvis.db")
+    delegation, _ = store.create(
+        principal_id="owner",
+        source="test",
+        source_ref="attention-revision",
+        title="需要确认",
+        operation="message_send",
+        risk_tier=3,
+        target_type="agent",
+        target_id="agent-1",
+        target_label="Agent 1",
+        expected_postcondition={"target_id": "agent-1"},
+        authority="message_service",
+        verification_policy={"verifier": "message"},
+    )
+    first_id = sync_attention_item(
+        store.get(delegation["id"]), store=store, send=False
+    )
+
+    revised = store.revise_contract(
+        delegation["id"],
+        expected_version=1,
+        target_id="agent-2",
+        expected_postcondition={"target_id": "agent-2"},
+    )
+    second_id = sync_attention_item(
+        store.get(delegation["id"]), store=store, send=False
+    )
+
+    assert second_id != first_id
+    assert memorial.get_memorial(first_id)["resolved_label"] == "已失效"
+    current = memorial.get_memorial(second_id)
+    assert current["status"] == "pending"
+    assert json.loads(current["context"])["contract_version"] == 2
+    assert sync_attention_item(
+        store.get(revised["id"]), store=store, send=False
+    ) == second_id

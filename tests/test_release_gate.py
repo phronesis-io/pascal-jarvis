@@ -48,6 +48,7 @@ def _responses(**overrides):
         ): [{
             "user": {"login": "review-bot"},
             "state": "APPROVED",
+            "commit_id": SHA,
         }],
         (
             "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
@@ -166,7 +167,7 @@ def test_release_gate_accepts_explicit_independent_attestation(monkeypatch):
     responses[reviews_key] = []
     responses[comments_key] = [{
         "user": {"login": "review-bot"},
-        "body": "REVIEW-GATE: PASS\nNo blocking findings.",
+        "body": f"REVIEW-GATE: PASS {SHA}\nNo blocking findings.",
     }]
 
     result = _gate(monkeypatch, responses).verify()
@@ -199,7 +200,40 @@ def test_release_gate_requires_attestation_on_its_own_line(monkeypatch):
     responses[reviews_key] = []
     responses[comments_key] = [{
         "user": {"login": "review-bot"},
-        "body": "This is not REVIEW-GATE: PASS because findings remain.",
+        "body": f"This is not REVIEW-GATE: PASS {SHA} because findings remain.",
+    }]
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_rejects_review_of_an_older_commit(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    responses = _responses()
+    responses[reviews_key] = [{
+        "user": {"login": "review-bot"},
+        "state": "APPROVED",
+        "commit_id": "b" * 40,
+    }]
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_rejects_unbound_pass_attestation(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "review-bot"},
+        "body": "REVIEW-GATE: PASS",
     }]
 
     with pytest.raises(ReleaseGateError, match="independent review evidence"):

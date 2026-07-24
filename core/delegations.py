@@ -659,6 +659,7 @@ class DelegationStore:
         expected_version: int,
         target_id: str | None = None,
         expected_postcondition: dict[str, Any] | None = None,
+        verification_policy: dict[str, Any] | None = None,
         actor_id: str = "",
     ) -> dict[str, Any]:
         """Create a new contract version; old evidence remains non-qualifying."""
@@ -677,6 +678,11 @@ class DelegationStore:
                 _object(expected_postcondition, "expected_postcondition")
                 if expected_postcondition is not None
                 else json.loads(current["expected_postcondition_json"])
+            )
+            policy = (
+                _object(verification_policy, "verification_policy")
+                if verification_policy is not None
+                else json.loads(current["verification_policy_json"])
             )
             key = self._action_key(
                 current["principal_id"],
@@ -703,7 +709,8 @@ class DelegationStore:
                 """
                 UPDATE delegations
                    SET contract_version=?,target_id=?,
-                       expected_postcondition_json=?,idempotency_key=?,
+                       expected_postcondition_json=?,verification_policy_json=?,
+                       idempotency_key=?,
                        status=?,authorized=0,waiting_on='',completed_at=NULL,
                        verified_at=NULL,updated_at=?
                  WHERE id=?
@@ -712,6 +719,7 @@ class DelegationStore:
                     new_version,
                     new_target,
                     _json(expected),
+                    _json(policy),
                     key,
                     status,
                     now,
@@ -1032,6 +1040,20 @@ class DelegationStore:
             delegation = self._require(db, delegation_id)
             self._version(delegation, expected_version)
             step = self._require_step(db, delegation_id, step_id, expected_version)
+            policy = json.loads(delegation["verification_policy_json"])
+            expected_verifier = str(
+                policy.get("verifier") or step["kind"] or ""
+            )
+            trusted_verifier = bool(
+                authority == str(delegation["authority"])
+                and actor_id
+                and actor_id == expected_verifier
+                and step["status"] in {
+                    "verifying",
+                    "awaiting_external",
+                    "blocked",
+                }
+            )
             db.execute(
                 """
                 INSERT INTO delegation_evidence(
@@ -1060,7 +1082,11 @@ class DelegationStore:
                     _json(metadata),
                 ),
             )
-            qualifies = bool(matched and strength in QUALIFYING_STRENGTHS)
+            qualifies = bool(
+                matched
+                and strength in QUALIFYING_STRENGTHS
+                and trusted_verifier
+            )
             if qualifies:
                 db.execute(
                     """
@@ -1091,6 +1117,7 @@ class DelegationStore:
                     "step_id": step_id,
                     "strength": strength,
                     "matched": bool(matched),
+                    "trusted_verifier": trusted_verifier,
                 },
             )
             self._evaluate_tx(db, delegation_id)
@@ -1314,7 +1341,6 @@ class DelegationStore:
                 "failed",
                 "blocked",
                 "verifying",
-                "needs_user",
             }:
                 raise DelegationConflict(f"status {current['status']} is not retryable")
             db.execute(

@@ -180,7 +180,7 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         root=jd,
         transport=transport,
     )
-    if not result.accepted:
+    if not result.accepted or result.state == "suppressed":
         _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
         return seen, False
     seen = remember_seen(seen, ids)

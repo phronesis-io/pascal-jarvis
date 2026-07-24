@@ -174,8 +174,11 @@ optional sidecar is unavailable.
 
 The L3 observation loop stores normalized signals and proposals, deduplicates
 repeated evidence, requires human acceptance before enqueueing work, and
-rechecks post-release outcomes. It may correctly finish an observation without
-creating a task.
+reconciles Taskline completion to the linked merged PR and the actually
+deployed SHA, then rechecks the same source after release. A failed outcome
+creates a new human-gated follow-up instead of silently closing or remaining
+queued forever. It may correctly finish an observation without creating a
+task.
 
 The release-by-release evidence matrix is
 [`release_acceptance_2026-07-24.md`](release_acceptance_2026-07-24.md).

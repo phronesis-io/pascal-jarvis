@@ -102,6 +102,46 @@ def test_queue_acceptance_does_not_depend_on_deadletter_sink(
     assert accepted is True and seen == ["id2"]
 
 
+def test_suppressed_external_event_is_not_marked_seen(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(efsl, "_lark_send", lambda _msg, _uid: True)
+    deadletters = []
+    monkeypatch.setattr(
+        efsl,
+        "record_overdue",
+        lambda *_args, **kwargs: deadletters.append(kwargs),
+    )
+    seen = []
+    seen_file = tmp_path / ".ef-seen"
+    for index in range(24):
+        seen, accepted = efsl._deliver_and_mark(
+            f"message-{index}",
+            [f"event-{index}"],
+            {},
+            "u1",
+            seen,
+            seen_file,
+            tmp_path,
+        )
+        assert accepted is True
+
+    seen, accepted = efsl._deliver_and_mark(
+        "message-24",
+        ["event-24"],
+        {},
+        "u1",
+        seen,
+        seen_file,
+        tmp_path,
+    )
+
+    assert accepted is False
+    assert "event-24" not in seen
+    assert "event-24" not in load_seen(seen_file)
+    assert deadletters[-1]["kind"] == "ef_stream_send_failed"
+
+
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------
 
 def test_stall_predicate():

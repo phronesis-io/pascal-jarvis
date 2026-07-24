@@ -20,7 +20,14 @@ def test_claim_checks_health_then_atomically_claims(tmp_path):
         calls.append((command, kwargs))
         if command == ["taskline", "status"]:
             return _result(command, {"healthy": True, "registered": True})
-        return _result(command, {"id": "12345678-abcd", "title": "Fix bug"})
+        return _result(
+            command,
+            {
+                "id": "12345678-abcd",
+                "title": "Fix bug",
+                "release_sha": "c" * 40,
+            },
+        )
 
     result = TasklineBridge(root=tmp_path, runner=runner).claim_next(
         lease="3h", labels=["p0"]
@@ -34,10 +41,77 @@ def test_claim_checks_health_then_atomically_claims(tmp_path):
     assert detail["source"] == "taskline"
     assert detail["links"][0]["entity_type"] == "taskline_task"
     assert detail["expected_postcondition"] == {
+        "git_head": "c" * 40,
         "runtime_ok": True,
         "components_ok": True,
     }
     assert detail["steps"][0]["kind"] == "runtime_deploy"
+
+
+def test_task_without_release_sha_cannot_match_an_unrelated_runtime(tmp_path):
+    bridge = TasklineBridge(root=tmp_path)
+    delegation_id = bridge._engineering_delegation(
+        {"id": "12345678-abcd", "title": "Fix bug"}
+    )
+
+    detail = DelegationStore(root=tmp_path).get(delegation_id)
+
+    assert detail["expected_postcondition"]["git_head"] == (
+        "pending:12345678-abcd"
+    )
+    assert detail["verification_policy"]["release_sha"] == ""
+
+
+def test_task_release_sha_revises_existing_runtime_contract(tmp_path):
+    bridge = TasklineBridge(root=tmp_path)
+    task = {"id": "12345678-abcd", "title": "Fix bug"}
+    delegation_id = bridge._engineering_delegation(task)
+
+    bridge._engineering_delegation({**task, "release_sha": "d" * 40})
+    detail = DelegationStore(root=tmp_path).get(delegation_id)
+
+    assert detail["contract_version"] == 2
+    assert detail["expected_postcondition"]["git_head"] == "d" * 40
+    assert len(detail["steps"]) == 1
+    assert detail["steps"][0]["contract_version"] == 2
+
+
+def test_completed_task_binds_merged_sha_and_starts_runtime_verification(
+    tmp_path,
+):
+    task = {
+        "id": "12345678-abcd",
+        "title": "Fix bug",
+        "state": "done",
+        "links": [{"url": "https://github.com/org/repo/pull/9"}],
+    }
+    release_sha = "d" * 40
+
+    def runner(command, **_kwargs):
+        if command[:3] == ["taskline", "task", "get"]:
+            payload = task
+        elif command[:3] == ["gh", "pr", "view"]:
+            payload = {
+                "mergedAt": "2026-07-24T12:00:00Z",
+                "mergeCommit": {"oid": release_sha},
+            }
+        else:
+            raise AssertionError(command)
+        return _result(command, payload)
+
+    bridge = TasklineBridge(root=tmp_path, runner=runner)
+    delegation_id = bridge._engineering_delegation(
+        {key: task[key] for key in ("id", "title")}
+    )
+    detail = bridge.refresh_release(task["id"])
+
+    assert detail["id"] == delegation_id
+    assert detail["contract_version"] == 2
+    assert detail["expected_postcondition"]["git_head"] == release_sha
+    assert detail["verification_policy"]["release_sha"] == release_sha
+    assert detail["status"] == "verifying"
+    assert detail["steps"][0]["status"] == "verifying"
+    assert detail["steps"][0]["artifact_locator"].endswith("/pull/9")
 
 
 def test_claim_fails_when_workspace_is_not_registered(tmp_path):
