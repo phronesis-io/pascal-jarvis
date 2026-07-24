@@ -103,6 +103,38 @@ def is_retryable(delegation: dict[str, Any] | sqlite3.Row) -> bool:
     )
 
 
+def step_verification_policy(
+    policy: dict[str, Any], step_kind: str
+) -> dict[str, Any]:
+    """Return the effective verifier policy for one contract step."""
+    effective = dict(policy)
+    step_policies = effective.get("steps", {})
+    override = (
+        step_policies.get(step_kind)
+        if isinstance(step_policies, dict)
+        else None
+    )
+    if isinstance(override, dict):
+        effective.update(override)
+    return effective
+
+
+def _derived_parent_status(steps: list[sqlite3.Row]) -> str:
+    """Aggregate every required step without hiding live parallel work."""
+    statuses = {str(step["status"]) for step in steps}
+    if "executing" in statuses:
+        return "executing"
+    if "failed" in statuses:
+        return "failed"
+    if "pending" in statuses:
+        return "bound"
+    if statuses & {"verifying", "awaiting_external"}:
+        return "verifying"
+    if "blocked" in statuses:
+        return "blocked"
+    return "verifying"
+
+
 @dataclass(frozen=True, slots=True)
 class Claim:
     delegation_id: str
@@ -282,6 +314,8 @@ class DelegationStore:
                     observed_at REAL NOT NULL,
                     expires_at REAL,
                     privacy_class TEXT NOT NULL DEFAULT 'private',
+                    trusted INTEGER NOT NULL DEFAULT 0,
+                    verifier_id TEXT NOT NULL DEFAULT '',
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(delegation_id) REFERENCES delegations(id),
                     FOREIGN KEY(step_id) REFERENCES delegation_steps(id)
@@ -330,6 +364,22 @@ class DelegationStore:
                 );
                 """
             )
+            evidence_columns = {
+                str(row["name"])
+                for row in db.execute(
+                    "PRAGMA table_info(delegation_evidence)"
+                ).fetchall()
+            }
+            if "trusted" not in evidence_columns:
+                db.execute(
+                    "ALTER TABLE delegation_evidence "
+                    "ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0"
+                )
+            if "verifier_id" not in evidence_columns:
+                db.execute(
+                    "ALTER TABLE delegation_evidence "
+                    "ADD COLUMN verifier_id TEXT NOT NULL DEFAULT ''"
+                )
 
     @contextmanager
     def _tx(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
@@ -1036,14 +1086,21 @@ class DelegationStore:
             )
             delegation_status = str(delegation["status"])
             if bool(step["required"]):
-                delegation_status = status
+                required = db.execute(
+                    """
+                    SELECT * FROM delegation_steps
+                     WHERE delegation_id=? AND contract_version=? AND required=1
+                    """,
+                    (delegation_id, expected_version),
+                ).fetchall()
+                delegation_status = _derived_parent_status(required)
                 db.execute(
                     """
                     UPDATE delegations
                        SET status=?,last_error_code=?,updated_at=?
                      WHERE id=?
                     """,
-                    (status, error_code, now, delegation_id),
+                    (delegation_status, error_code, now, delegation_id),
                 )
             self._event(
                 db,
@@ -1085,6 +1142,7 @@ class DelegationStore:
         expires_at: float | None = None,
         metadata: dict[str, Any] | None = None,
         actor_id: str = "",
+        resume_external: bool = False,
     ) -> dict[str, Any]:
         evidence_type = _safe_ref(evidence_type, "evidence_type", required=True)
         strength = _safe_ref(strength, "strength", required=True)
@@ -1107,11 +1165,19 @@ class DelegationStore:
             self._version(delegation, expected_version)
             step = self._require_step(db, delegation_id, step_id, expected_version)
             policy = json.loads(delegation["verification_policy_json"])
+            effective_policy = step_verification_policy(
+                policy, str(step["kind"])
+            )
             expected_verifier = str(
-                policy.get("verifier") or step["kind"] or ""
+                effective_policy.get("verifier") or step["kind"] or ""
+            )
+            expected_authority = str(
+                effective_policy.get("authority")
+                or delegation["authority"]
+                or ""
             )
             trusted_verifier = bool(
-                authority == str(delegation["authority"])
+                authority == expected_authority
                 and actor_id
                 and actor_id == expected_verifier
                 and step["status"] in {
@@ -1126,8 +1192,8 @@ class DelegationStore:
                     id,delegation_id,step_id,contract_version,evidence_type,
                     strength,authority,resource_locator,observed_digest,
                     expected_summary,observed_summary,matched,observed_at,
-                    expires_at,privacy_class,metadata_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    expires_at,privacy_class,trusted,verifier_id,metadata_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     evidence_id,
@@ -1145,6 +1211,8 @@ class DelegationStore:
                     now,
                     float(expires_at) if expires_at is not None else None,
                     privacy_class,
+                    int(trusted_verifier),
+                    actor_id,
                     _json(metadata),
                 ),
             )
@@ -1152,6 +1220,7 @@ class DelegationStore:
                 matched
                 and strength in QUALIFYING_STRENGTHS
                 and trusted_verifier
+                and (expires_at is None or float(expires_at) > now)
             )
             if qualifies:
                 db.execute(
@@ -1186,6 +1255,28 @@ class DelegationStore:
                     "trusted_verifier": trusted_verifier,
                 },
             )
+            if (
+                qualifies
+                and delegation["status"] == "awaiting_external"
+                and resume_external
+            ):
+                db.execute(
+                    """
+                    UPDATE delegations
+                       SET status='verifying',waiting_on='',updated_at=?
+                     WHERE id=?
+                    """,
+                    (now, delegation_id),
+                )
+                self._event(
+                    db,
+                    delegation_id,
+                    expected_version,
+                    "delegation.external_event_observed",
+                    from_status="awaiting_external",
+                    to_status="verifying",
+                    reason_code="authoritative_evidence_recorded",
+                )
             self._evaluate_tx(db, delegation_id)
             result = db.execute(
                 "SELECT * FROM delegation_evidence WHERE id=?", (evidence_id,)
@@ -1218,12 +1309,73 @@ class DelegationStore:
         ).fetchall()
         if not steps:
             return
-        if any(step["status"] != "completed" for step in steps):
-            status = (
-                "failed"
-                if any(step["status"] == "failed" for step in steps)
-                else "verifying"
+        policy = json.loads(delegation["verification_policy_json"])
+        now = self.now()
+        reopened: list[str] = []
+        for step in steps:
+            if step["status"] != "completed":
+                continue
+            effective_policy = step_verification_policy(
+                policy, str(step["kind"])
             )
+            expected_verifier = str(
+                effective_policy.get("verifier") or step["kind"] or ""
+            )
+            expected_authority = str(
+                effective_policy.get("authority")
+                or delegation["authority"]
+                or ""
+            )
+            qualifying = db.execute(
+                """
+                SELECT 1 FROM delegation_evidence
+                 WHERE delegation_id=? AND step_id=? AND contract_version=?
+                   AND matched=1 AND trusted=1
+                   AND verifier_id=? AND authority=?
+                   AND strength IN ('strong','corroborated','user_attested')
+                   AND (expires_at IS NULL OR expires_at>?)
+                 LIMIT 1
+                """,
+                (
+                    delegation_id,
+                    step["id"],
+                    version,
+                    expected_verifier,
+                    expected_authority,
+                    now,
+                ),
+            ).fetchone()
+            if qualifying is None:
+                db.execute(
+                    """
+                    UPDATE delegation_steps
+                       SET status='verifying',finished_at=NULL,updated_at=?
+                     WHERE id=?
+                    """,
+                    (now, step["id"]),
+                )
+                reopened.append(str(step["id"]))
+        if reopened:
+            steps = db.execute(
+                """
+                SELECT * FROM delegation_steps
+                 WHERE delegation_id=? AND contract_version=? AND required=1
+                 ORDER BY sequence
+                """,
+                (delegation_id, version),
+            ).fetchall()
+            self._event(
+                db,
+                delegation_id,
+                version,
+                "delegation.evidence_expired",
+                from_status=delegation["status"],
+                to_status="verifying",
+                reason_code="qualifying_evidence_expired",
+                metadata={"step_ids": reopened},
+            )
+        if any(step["status"] != "completed" for step in steps):
+            status = _derived_parent_status(steps)
             if delegation["status"] not in {
                 "awaiting_external",
                 "needs_user",
@@ -1232,26 +1384,44 @@ class DelegationStore:
             }:
                 db.execute(
                     "UPDATE delegations SET status=?,updated_at=? WHERE id=?",
-                    (status, self.now(), delegation_id),
+                    (status, now, delegation_id),
                 )
             return
         for step in steps:
+            effective_policy = step_verification_policy(
+                policy, str(step["kind"])
+            )
+            expected_verifier = str(
+                effective_policy.get("verifier") or step["kind"] or ""
+            )
+            expected_authority = str(
+                effective_policy.get("authority")
+                or delegation["authority"]
+                or ""
+            )
             qualifying = db.execute(
                 """
                 SELECT 1 FROM delegation_evidence
                  WHERE delegation_id=? AND step_id=? AND contract_version=?
-                   AND matched=1
+                   AND matched=1 AND trusted=1
+                   AND verifier_id=? AND authority=?
                    AND strength IN ('strong','corroborated','user_attested')
                    AND (expires_at IS NULL OR expires_at>?)
                  LIMIT 1
                 """,
-                (delegation_id, step["id"], version, self.now()),
+                (
+                    delegation_id,
+                    step["id"],
+                    version,
+                    expected_verifier,
+                    expected_authority,
+                    now,
+                ),
             ).fetchone()
             if qualifying is None:
                 return
         if delegation["waiting_on"]:
             return
-        now = self.now()
         db.execute(
             """
             UPDATE delegations
@@ -1344,6 +1514,49 @@ class DelegationStore:
                 to_status="verifying",
                 reason_code=reason_code,
             )
+            result = self._require(db, delegation_id)
+        output = _row(result) or {}
+        self.sync_projection(delegation_id)
+        return output
+
+    def recover_external_completion(
+        self, delegation_id: str
+    ) -> dict[str, Any]:
+        """Atomically recover an interrupted external-wait verification."""
+        with self._tx() as db:
+            current = self._require(db, delegation_id)
+            if current["status"] != "awaiting_external":
+                return _row(current) or {}
+            required = db.execute(
+                """
+                SELECT * FROM delegation_steps
+                 WHERE delegation_id=? AND contract_version=? AND required=1
+                """,
+                (delegation_id, current["contract_version"]),
+            ).fetchall()
+            if not required or any(
+                step["status"] != "completed" for step in required
+            ):
+                return _row(current) or {}
+            now = self.now()
+            db.execute(
+                """
+                UPDATE delegations
+                   SET status='verifying',waiting_on='',updated_at=?
+                 WHERE id=?
+                """,
+                (now, delegation_id),
+            )
+            self._event(
+                db,
+                delegation_id,
+                int(current["contract_version"]),
+                "delegation.external_event_observed",
+                from_status="awaiting_external",
+                to_status="verifying",
+                reason_code="interrupted_verification_recovered",
+            )
+            self._evaluate_tx(db, delegation_id)
             result = self._require(db, delegation_id)
         output = _row(result) or {}
         self.sync_projection(delegation_id)
@@ -1830,13 +2043,29 @@ class DelegationStore:
                     """,
                     (now, step["id"]),
                 )
-                db.execute(
+                required = db.execute(
                     """
-                    UPDATE delegations SET status='bound',updated_at=?
-                     WHERE id=? AND status='executing'
+                    SELECT * FROM delegation_steps
+                     WHERE delegation_id=? AND contract_version=? AND required=1
                     """,
-                    (now, step["delegation_id"]),
-                )
+                    (step["delegation_id"], step["contract_version"]),
+                ).fetchall()
+                next_status = _derived_parent_status(required)
+                current = self._require(db, str(step["delegation_id"]))
+                if current["status"] not in {
+                    "awaiting_external",
+                    "needs_user",
+                    "needs_clarification",
+                }:
+                    db.execute(
+                        """
+                        UPDATE delegations SET status=?,updated_at=?
+                         WHERE id=?
+                        """,
+                        (next_status, now, step["delegation_id"]),
+                    )
+                else:
+                    next_status = str(current["status"])
                 self._event(
                     db,
                     step["delegation_id"],
@@ -1845,7 +2074,7 @@ class DelegationStore:
                     actor_type="system",
                     actor_id=step["lease_owner"],
                     from_status="executing",
-                    to_status="bound",
+                    to_status=next_status,
                     reason_code="lease_expired",
                     metadata={"step_id": step["id"]},
                 )

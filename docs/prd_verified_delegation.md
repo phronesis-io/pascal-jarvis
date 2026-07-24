@@ -540,6 +540,7 @@ User-attested。Weak 只能用于排障，不能单独关闭委托。
 - `resource_locator`, `observed_digest`;
 - `expected_summary`, `observed_summary`, `matched`;
 - `observed_at`, `expires_at`, `privacy_class`;
+- `trusted`, `verifier_id`（按当前契约与分步骤 policy 校验后持久化）；
 - `metadata_json`.
 
 ### 11.4 `delegation_events`

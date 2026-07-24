@@ -259,6 +259,45 @@ def test_verify_step_records_evidence_and_completes(tmp_path):
     assert result["delegation"]["status"] == "completed"
 
 
+def test_step_specific_verifier_is_trusted_for_that_step(tmp_path):
+    store, delegation, step = _completed_attempt(
+        tmp_path,
+        "default_verifier",
+        {"status": "done"},
+        {
+            "steps": {
+                "verify": {
+                    "verifier": "step_verifier",
+                    "authority": "test_authority",
+                }
+            }
+        },
+    )
+
+    class Registry:
+        def verify(self, verifier, expected, policy):
+            assert verifier == "step_verifier"
+            return Verification(
+                matched=True,
+                authority="test_authority",
+                resource_locator="test:step",
+                evidence_type="readback",
+                strength="strong",
+                expected_summary='{"status":"done"}',
+                observed_summary='{"status":"done"}',
+                observed_digest="sha256:" + "b" * 64,
+                metadata={},
+            )
+
+    result = verify_step(
+        delegation["id"], step["id"], store=store, registry=Registry()
+    )
+
+    assert result["delegation"]["status"] == "completed"
+    assert result["delegation"]["evidence"][0]["trusted"] == 1
+    assert result["delegation"]["evidence"][0]["verifier_id"] == "step_verifier"
+
+
 def test_unknown_verifier_fails_closed(tmp_path):
     registry = VerifierRegistry(root=tmp_path, db_path=tmp_path / "db")
     with pytest.raises(VerificationError, match="unknown verifier"):

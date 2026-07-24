@@ -13,7 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from core.delegations import DelegationError, DelegationStore
+from core.delegations import (
+    DelegationError,
+    DelegationStore,
+    step_verification_policy,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,16 +509,16 @@ def verify_step(
     *,
     store: DelegationStore | None = None,
     registry: VerifierRegistry | None = None,
+    resume_external: bool = False,
 ) -> dict[str, Any]:
     store = store or DelegationStore()
     detail = store.get(delegation_id)
     step = next((row for row in detail["steps"] if row["id"] == step_id), None)
     if step is None:
         raise VerificationError("step is not in the current contract")
-    policy = dict(detail["verification_policy"])
-    step_policies = policy.get("steps", {})
-    if isinstance(step_policies, dict) and isinstance(step_policies.get(step["kind"]), dict):
-        policy.update(step_policies[step["kind"]])
+    policy = step_verification_policy(
+        detail["verification_policy"], str(step["kind"])
+    )
     verifier = str(policy.get("verifier") or step["kind"])
     registry = registry or VerifierRegistry(root=store.root, db_path=store.db_path)
     result = registry.verify(
@@ -535,6 +539,7 @@ def verify_step(
         privacy_class=detail["privacy_class"],
         metadata=result.metadata,
         actor_id=verifier,
+        resume_external=resume_external,
     )
     return {
         "matched": result.matched,

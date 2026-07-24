@@ -350,3 +350,92 @@ def test_contract_revision_replaces_stale_attention_item(
     assert sync_attention_item(
         store.get(revised["id"]), store=store, send=False
     ) == second_id
+
+
+def test_reconciler_recovers_interrupted_external_completion(tmp_path):
+    clock = [1_000.0]
+    store, delegation, step = _prepared(tmp_path, clock)
+    store.mark_waiting(
+        delegation["id"],
+        expected_version=1,
+        waiting_on="message:1",
+    )
+    with store._tx() as db:
+        db.execute(
+            """
+            UPDATE delegation_steps
+               SET status='completed',finished_at=?,updated_at=?
+             WHERE id=?
+            """,
+            (clock[0], clock[0], step["id"]),
+        )
+        db.execute(
+            """
+            INSERT INTO delegation_evidence(
+                id,delegation_id,step_id,contract_version,evidence_type,
+                strength,authority,resource_locator,observed_digest,
+                expected_summary,observed_summary,matched,observed_at,
+                expires_at,privacy_class,trusted,verifier_id,metadata_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "dev_interrupted",
+                delegation["id"],
+                step["id"],
+                1,
+                "authoritative_readback",
+                "strong",
+                "message_service",
+                "message:1",
+                "sha256:" + "a" * 64,
+                '{"state":"sent"}',
+                '{"state":"sent"}',
+                1,
+                clock[0],
+                None,
+                "private",
+                1,
+                "test_readback",
+                "{}",
+            ),
+        )
+
+    result = DelegationReconciler(
+        store=store, registry=_Registry(), now=lambda: clock[0]
+    ).run(send_items=False)
+
+    detail = store.get(delegation["id"])
+    assert result["verified"] == 1
+    assert detail["status"] == "completed"
+    assert detail["waiting_on"] == ""
+
+
+def test_attention_backlog_does_not_starve_verification(tmp_path, monkeypatch):
+    clock = [1_000.0]
+    store, delegation, _ = _prepared(tmp_path, clock)
+    for index in range(3):
+        store.create(
+            principal_id="owner",
+            source="test",
+            source_ref=f"attention-{index}",
+            title=f"需要用户确认 {index}",
+            operation="message_send",
+            risk_tier=3,
+            target_type="agent",
+            target_id=f"agent-{index}",
+            authority="message_service",
+            verification_policy={"verifier": "test_readback"},
+        )
+    monkeypatch.setattr(
+        "core.delegation_reconcile.sync_attention_item",
+        lambda *_args, **_kwargs: "item",
+    )
+
+    result = DelegationReconciler(
+        store=store, registry=_Registry(), now=lambda: clock[0]
+    ).run(limit=2, send_items=False)
+
+    assert result["scanned"] == 2
+    assert result["needs_user"] == 1
+    assert result["verified"] == 1
+    assert store.get(delegation["id"])["status"] == "completed"

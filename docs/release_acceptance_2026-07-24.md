@@ -156,6 +156,13 @@ closed ten more authority, state, and resilience gaps:
 | 61 | Claiming an optional step overwrote a required step's verification state | Optional execution updates only its step and timestamps; required-step aggregate state remains authoritative; completion-order regression |
 | 62 | Background and auxiliary calls stopped after Backup 1 | `core.aux_model` gives jobs, compaction, progress narration, EigenFlux analysis, and noise classification the same bounded Primary/Backup 1/Backup 2/GPT order; route regressions |
 | 63 | External or derived text could invoke local Claude tools during analysis | EigenFlux, narration, compaction, and classification explicitly use `--tools ""`; only owner background jobs retain agentic tools; permission-boundary regressions |
+| 64 | Expired trusted evidence could be replaced by a strong row from an untrusted actor | Evidence now persists `trusted` provenance and `verifier_id`; completion requires current trusted evidence from the contract's expected verifier and authority; forged-refresh regression |
+| 65 | Step-specific verifier overrides were executed but never trusted | Evidence validation now resolves the same effective per-step policy as the verifier registry, including verifier and authority overrides; per-step completion regression |
+| 66 | A crash between external verification and resume could strand a completed wait | Reconciler-owned external readback clears `waiting_on`, records the transition, and evaluates completion in one transaction; legacy interrupted rows have an atomic recovery path; interruption regression |
+| 67 | A same-name check from the wrong GitHub App could satisfy the release gate | Required checks are matched by `(context, app_id)` whenever branch protection binds an app; wrong-app and configured-app regressions |
+| 68 | A large user-attention backlog could starve all verification work | Reconciliation selects non-empty status buckets round-robin within its bounded limit, preserving priority without starvation; two-bucket fairness regression |
+| 69 | One parallel step could overwrite the parent while another mutation was executing | Parent state is derived from every current required step after attempts and lease expiry; live execution remains authoritative; parallel-attempt and lease regressions |
+| 70 | Expired evidence left its step completed and impossible to refresh | Active contracts reopen completed steps whose trusted proof has expired, making them eligible for authoritative re-verification; expiry-reopen regression |
 
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
@@ -197,7 +204,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2032 passed` for this candidate);
+- full local test result (`2041 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

@@ -169,6 +169,77 @@ def test_release_gate_rejects_failed_required_check(monkeypatch):
         _gate(monkeypatch, responses).verify()
 
 
+def test_release_gate_matches_required_check_to_github_app(monkeypatch):
+    protection_key = (
+        "gh", "api",
+        "repos/phronesis-io/pascal-jarvis/branches/main/protection",
+    )
+    runs_key = (
+        "gh", "api",
+        f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/check-runs",
+    )
+    responses = _responses()
+    responses[protection_key] = {
+        **responses[protection_key],
+        "required_status_checks": {
+            "strict": True,
+            "contexts": ["test"],
+            "checks": [{"context": "test", "app_id": 42}],
+        },
+    }
+    responses[runs_key] = {
+        "check_runs": [
+            {
+                "name": "test",
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"id": 99},
+            },
+            {
+                "name": "test",
+                "status": "completed",
+                "conclusion": "failure",
+                "app": {"id": 42},
+            },
+        ]
+    }
+
+    with pytest.raises(ReleaseGateError, match=r"test@app:42"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_accepts_required_check_from_configured_app(monkeypatch):
+    protection_key = (
+        "gh", "api",
+        "repos/phronesis-io/pascal-jarvis/branches/main/protection",
+    )
+    runs_key = (
+        "gh", "api",
+        f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/check-runs",
+    )
+    responses = _responses()
+    responses[protection_key] = {
+        **responses[protection_key],
+        "required_status_checks": {
+            "strict": True,
+            "contexts": ["test"],
+            "checks": [{"context": "test", "app_id": 42}],
+        },
+    }
+    responses[runs_key] = {
+        "check_runs": [{
+            "name": "test",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {"id": 42},
+        }]
+    }
+
+    result = _gate(monkeypatch, responses).verify()
+
+    assert result["required_checks"] == ["test@app:42"]
+
+
 def test_release_gate_rejects_unreviewed_or_self_reviewed_pr(monkeypatch):
     reviews_key = (
         "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",

@@ -186,24 +186,65 @@ class ReleaseGate:
             json_output=True,
         )
         runs = check_runs.get("check_runs", []) if isinstance(check_runs, dict) else []
-        required_contexts = {
-            str(value)
-            for value in checks_policy.get("contexts", [])
-            if value
+        configured_checks = [
+            value
+            for value in checks_policy.get("checks", [])
+            if isinstance(value, dict) and value.get("context")
+        ]
+        configured_names = {
+            str(value["context"]) for value in configured_checks
         }
-        conclusions = {
-            str(run.get("name") or ""): str(run.get("conclusion") or "")
+        required_checks: set[tuple[str, int | None]] = {
+            (
+                str(value["context"]),
+                (
+                    int(value["app_id"])
+                    if value.get("app_id") not in (None, -1)
+                    else None
+                ),
+            )
+            for value in configured_checks
+        }
+        required_checks.update(
+            (str(value), None)
+            for value in checks_policy.get("contexts", [])
+            if value and str(value) not in configured_names
+        )
+        successful_checks = {
+            (
+                str(run.get("name") or ""),
+                int((run.get("app") or {}).get("id"))
+                if (run.get("app") or {}).get("id") is not None
+                else None,
+            )
             for run in runs
-            if run.get("status") == "completed"
+            if (
+                run.get("status") == "completed"
+                and str(run.get("conclusion") or "")
+                in {"success", "neutral", "skipped"}
+            )
         }
         missing = [
-            context
-            for context in required_contexts
-            if conclusions.get(context) not in {"success", "neutral", "skipped"}
+            (context, app_id)
+            for context, app_id in required_checks
+            if (
+                (context, app_id) not in successful_checks
+                and not (
+                    app_id is None
+                    and any(
+                        name == context
+                        for name, _candidate_app in successful_checks
+                    )
+                )
+            )
         ]
         if missing:
             raise ReleaseGateError(
-                "required checks are not successful: " + ", ".join(missing)
+                "required checks are not successful: "
+                + ", ".join(
+                    context if app_id is None else f"{context}@app:{app_id}"
+                    for context, app_id in missing
+                )
             )
 
         reviews = self._run_paginated(
@@ -252,7 +293,10 @@ class ReleaseGate:
             "repo": repo,
             "sha": sha,
             "pr": number,
-            "required_checks": sorted(required_contexts),
+            "required_checks": sorted(
+                context if app_id is None else f"{context}@app:{app_id}"
+                for context, app_id in required_checks
+            ),
             "review_evidence": sorted(set(evidence)),
             "branch_protection": {
                 "admin_bypass": False,

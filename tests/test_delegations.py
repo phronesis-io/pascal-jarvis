@@ -962,3 +962,106 @@ def test_metrics_exclude_shadow_predictions_from_user_work(tmp_path):
 
     assert store.metrics()["total"] == 0
     assert store.shadow_metrics()["predictions"] == 1
+
+
+def test_expired_trusted_evidence_cannot_be_replaced_by_untrusted_actor(
+    tmp_path,
+):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    delegation, _ = _delegation(store)
+    first = _step(store, delegation, sequence=1, kind="send")
+    second = _step(store, delegation, sequence=2, kind="confirm")
+    for step, owner in ((first, "one"), (second, "two")):
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner=owner,
+        )
+        store.record_attempt(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner=owner,
+            succeeded=True,
+        )
+
+    def evidence(step, actor, *, expires_at=None):
+        return store.record_evidence(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            evidence_type="readback",
+            strength="strong",
+            authority="message_service",
+            resource_locator=f"message:{actor}",
+            observed_digest="sha256:" + "a" * 64,
+            expected_summary="expected",
+            observed_summary="observed",
+            matched=True,
+            expires_at=expires_at,
+            actor_id=actor,
+        )
+
+    evidence(first, "message", expires_at=1_010)
+    clock[0] = 1_011
+    forged = evidence(first, "other-verifier")
+    evidence(second, "message")
+
+    detail = store.get(delegation["id"])
+    first_state = next(
+        row for row in detail["steps"] if row["id"] == first["id"]
+    )
+    assert forged["trusted"] == 0
+    assert forged["verifier_id"] == "other-verifier"
+    assert first_state["status"] == "verifying"
+    assert detail["status"] == "verifying"
+
+    evidence(first, "message")
+    assert store.get(delegation["id"])["status"] == "completed"
+
+
+def test_parallel_required_steps_keep_parent_executing(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    delegation, _ = _delegation(store)
+    short = _step(store, delegation, sequence=1)
+    long = _step(store, delegation, sequence=2)
+    store.claim_step(
+        delegation["id"],
+        short["id"],
+        expected_version=1,
+        owner="short",
+        lease_seconds=30,
+    )
+    store.claim_step(
+        delegation["id"],
+        long["id"],
+        expected_version=1,
+        owner="long",
+        lease_seconds=300,
+    )
+    store.record_attempt(
+        delegation["id"],
+        short["id"],
+        expected_version=1,
+        owner="short",
+        succeeded=True,
+    )
+    assert store.get(delegation["id"])["status"] == "executing"
+
+    other, _ = _delegation(store, source_ref="parallel-expiry")
+    expired = _step(store, other, sequence=1)
+    active = _step(store, other, sequence=2)
+    store.claim_step(
+        other["id"], expired["id"], expected_version=1,
+        owner="expired", lease_seconds=30,
+    )
+    store.claim_step(
+        other["id"], active["id"], expected_version=1,
+        owner="active", lease_seconds=300,
+    )
+    clock[0] += 31
+    assert store.release_expired_leases() == [expired["id"]]
+    assert store.get(other["id"])["status"] == "executing"

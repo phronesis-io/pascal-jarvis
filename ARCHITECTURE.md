@@ -87,6 +87,9 @@ accepted outcome contract
 
 The reconciler scans only bounded non-terminal work. Shadow capture is
 observation-only and excluded from active Delegation lists and product metrics.
+Qualifying evidence persists its trusted verifier identity and authority;
+expired or untrusted evidence reopens active steps instead of satisfying
+completion.
 
 ### Engineering Loops
 

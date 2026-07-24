@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from core.delegations import (
-    DelegationConflict,
     DelegationStore,
     is_confirmable,
     is_retryable,
@@ -235,19 +234,28 @@ class DelegationReconciler:
         deferred = 0
         needs_user = 0
         errors: list[dict[str, str]] = []
-        rows: list[dict[str, Any]] = []
-        for status in (
+        statuses = (
             "needs_user",
             "needs_clarification",
             "verifying",
             "awaiting_external",
             "blocked",
             "bound",
-        ):
-            remaining = limit - len(rows)
-            if remaining <= 0:
+        )
+        buckets = [
+            self.store.list(status=status, limit=limit)
+            for status in statuses
+        ]
+        active_buckets = [bucket for bucket in buckets if bucket]
+        rows: list[dict[str, Any]] = []
+        # Round-robin preserves urgent-first ordering while guaranteeing that
+        # a large attention backlog cannot starve verification and recovery.
+        for index in range(limit):
+            active_buckets = [bucket for bucket in active_buckets if bucket]
+            if not active_buckets:
                 break
-            rows.extend(self.store.list(status=status, limit=remaining))
+            bucket = active_buckets[index % len(active_buckets)]
+            rows.append(bucket.pop(0))
 
         for row in rows:
             scanned += 1
@@ -285,6 +293,14 @@ class DelegationReconciler:
                 if not detail["verification_policy"].get("release_sha"):
                     deferred += 1
                     continue
+            if detail["status"] == "awaiting_external":
+                detail = self.store.recover_external_completion(detail["id"])
+                if detail["status"] == "completed":
+                    verified += 1
+                    sync_attention_item(
+                        detail, store=self.store, send=send_items
+                    )
+                    continue
             policy = detail["verification_policy"]
             timeout = max(
                 60, int(policy.get("verification_timeout_seconds", 3600))
@@ -317,18 +333,12 @@ class DelegationReconciler:
                         step["id"],
                         store=self.store,
                         registry=self.registry,
+                        resume_external=(
+                            detail["status"] == "awaiting_external"
+                        ),
                     )
                     if result["matched"]:
                         verified += 1
-                        if detail["status"] == "awaiting_external":
-                            try:
-                                self.store.resume_external(
-                                    detail["id"],
-                                    expected_version=detail["contract_version"],
-                                )
-                                self.store.evaluate_completion(detail["id"])
-                            except DelegationConflict:
-                                pass
                     else:
                         deferred += 1
                 except VerificationError as exc:
