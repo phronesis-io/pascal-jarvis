@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import sqlite3
 import subprocess
+import threading
 import urllib.error
 
 import pytest
@@ -295,6 +297,128 @@ def test_uncertain_explicit_repeat_cannot_reuse_first_message_receipt(tmp_path):
     assert reconciled.state == "verifying"
     assert reconciled.msg_id == ""
     assert reconciled.idempotency_key != first.idempotency_key
+
+
+def test_concurrent_explicit_repeats_claim_distinct_receipts_atomically(tmp_path):
+    cli = FakeEigenFlux()
+    cli.send_response_has_ids = False
+    barrier = threading.Barrier(2)
+    send_lock = threading.Lock()
+
+    def send_api(target, content):
+        with send_lock:
+            return cli.send_api(target, content)
+
+    class RacingMessenger(EigenFluxMessenger):
+        def _candidate_conversations(self, target_id):
+            barrier.wait(timeout=2)
+            return super()._candidate_conversations(target_id)
+
+    messenger = RacingMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=cli,
+        api_sender=send_api,
+        now=lambda: 2_000_000_000,
+    )
+    messenger._connect().close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(
+            executor.map(
+                lambda token: messenger.send(
+                    "Family agent",
+                    "same brief",
+                    repeat_token=token,
+                ),
+                ("owner-repeat-1", "owner-repeat-2"),
+            )
+        )
+
+    assert all(receipt.completed for receipt in receipts)
+    assert {receipt.msg_id for receipt in receipts} == {"msg-1", "msg-2"}
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        claimed, distinct = db.execute(
+            """
+            SELECT COUNT(msg_id), COUNT(DISTINCT msg_id)
+              FROM verified_external_actions WHERE msg_id != ''
+            """
+        ).fetchone()
+    assert claimed == distinct == 2
+
+
+def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
+    db_path = tmp_path / "jarvis.db"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE verified_external_actions (
+                idempotency_key TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                contract_version TEXT NOT NULL DEFAULT 'v1',
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                conv_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                created_epoch REAL NOT NULL,
+                updated_epoch REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        values = (
+            "eigenflux_message",
+            "agent-spouse",
+            "Family Research Agent",
+            "payload-hash",
+            "v1",
+            "verified",
+            1,
+            "conv-agent-spouse",
+            "duplicate-message",
+            1.0,
+            1.0,
+            "",
+        )
+        db.execute(
+            "INSERT INTO verified_external_actions VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("action-1", *values),
+        )
+        db.execute(
+            "INSERT INTO verified_external_actions VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("action-2", *values),
+        )
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=db_path,
+        runner=lambda *_args, **_kwargs: None,
+    )
+    messenger._connect().close()
+
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT idempotency_key,state,msg_id,last_error
+              FROM verified_external_actions ORDER BY idempotency_key
+            """
+        ).fetchall()
+        unique_index = db.execute(
+            """
+            SELECT 1 FROM sqlite_master
+             WHERE type='index'
+               AND name='idx_verified_actions_unique_message_receipt'
+            """
+        ).fetchone()
+    assert rows[0][1:3] == ("verified", "duplicate-message")
+    assert rows[1][1:3] == ("verifying", "")
+    assert rows[1][3] == "duplicate receipt claim released"
+    assert unique_index == (1,)
 
 
 def test_missing_send_receipt_can_only_complete_from_history(tmp_path):

@@ -293,6 +293,45 @@ class EigenFluxMessenger:
                     ON verified_external_actions(state, updated_epoch);
                 """
             )
+            # Older builds could bind the same server receipt to multiple
+            # explicit-repeat contracts. Preserve the earliest claim and
+            # reopen every duplicate before installing the invariant.
+            db.execute("BEGIN IMMEDIATE")
+            duplicate_ids = db.execute(
+                """
+                SELECT msg_id FROM verified_external_actions
+                 WHERE action_type='eigenflux_message' AND msg_id != ''
+                 GROUP BY msg_id HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            for duplicate in duplicate_ids:
+                claims = db.execute(
+                    """
+                    SELECT idempotency_key FROM verified_external_actions
+                     WHERE action_type='eigenflux_message' AND msg_id=?
+                     ORDER BY created_epoch, idempotency_key
+                    """,
+                    (duplicate["msg_id"],),
+                ).fetchall()
+                for claim in claims[1:]:
+                    db.execute(
+                        """
+                        UPDATE verified_external_actions
+                           SET state='verifying',conv_id='',msg_id='',
+                               last_error='duplicate receipt claim released',
+                               updated_epoch=?
+                         WHERE idempotency_key=?
+                        """,
+                        (self.now(), claim["idempotency_key"]),
+                    )
+            db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_verified_actions_unique_message_receipt
+                    ON verified_external_actions(msg_id)
+                    WHERE action_type='eigenflux_message' AND msg_id != ''
+                """
+            )
             db.commit()
             return db
         except Exception:
@@ -565,8 +604,53 @@ class EigenFluxMessenger:
                     created /= 1000
                 if not msg_id and created_after and created + 5 < created_after:
                     continue
+                if action_key and not self._claim_verified_receipt(
+                    action_key, candidate_conv, row_msg_id
+                ):
+                    # Another concurrent explicit-repeat action won this
+                    # receipt. Continue through history and atomically claim a
+                    # different matching server message.
+                    continue
                 return candidate_conv, row_msg_id
         return None
+
+    def _claim_verified_receipt(
+        self, key: str, conv_id: str, msg_id: str
+    ) -> bool:
+        """Atomically bind one server receipt to exactly one action contract."""
+        if not key or not msg_id:
+            return False
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                owner = db.execute(
+                    """
+                    SELECT idempotency_key FROM verified_external_actions
+                     WHERE action_type='eigenflux_message' AND msg_id=?
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if owner is not None and owner["idempotency_key"] != key:
+                    db.rollback()
+                    return False
+                updated = db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state='verified',conv_id=?,msg_id=?,last_error='',
+                           updated_epoch=?
+                     WHERE idempotency_key=?
+                       AND action_type='eigenflux_message'
+                    """,
+                    (conv_id, msg_id, self.now(), key),
+                )
+                if updated.rowcount != 1:
+                    db.rollback()
+                    return False
+                db.commit()
+                return True
+            except sqlite3.IntegrityError:
+                db.rollback()
+                return False
 
     def reconcile_action(self, idempotency_key: str) -> MessageReceipt:
         """Re-read one uncertain send from authoritative conversation history."""
@@ -642,16 +726,35 @@ class EigenFluxMessenger:
         msg_id: str = "",
         error: str = "",
     ) -> None:
-        with closing(self._connect()) as db, db:
-            db.execute(
-                """
-                UPDATE verified_external_actions
-                   SET state = ?, conv_id = ?, msg_id = ?, last_error = ?,
-                       updated_epoch = ?
-                 WHERE idempotency_key = ?
-                """,
-                (state, conv_id, msg_id, error[:300], self.now(), key),
-            )
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state = ?, conv_id = ?, msg_id = ?, last_error = ?,
+                           updated_epoch = ?
+                     WHERE idempotency_key = ?
+                    """,
+                    (state, conv_id, msg_id, error[:300], self.now(), key),
+                )
+                db.commit()
+            except sqlite3.IntegrityError:
+                db.rollback()
+                # A duplicate receipt is not completion evidence. Keep the
+                # action recoverable and let authoritative history find an
+                # unclaimed receipt on a later reconciliation pass.
+                db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state='verifying',conv_id='',msg_id='',
+                           last_error='receipt already belongs to another action',
+                           updated_epoch=?
+                     WHERE idempotency_key=?
+                    """,
+                    (self.now(), key),
+                )
+                db.commit()
 
     def _reserve(
         self,
@@ -720,9 +823,15 @@ class EigenFluxMessenger:
         *,
         duplicate: bool,
     ) -> MessageReceipt:
-        self._write_state(
-            key, state="verified", conv_id=conv_id, msg_id=msg_id
-        )
+        if not self._claim_verified_receipt(key, conv_id, msg_id):
+            return MessageReceipt(
+                state="verifying",
+                recipient_name=friend.agent_name,
+                recipient_id=friend.agent_id,
+                idempotency_key=key,
+                duplicate=duplicate,
+                detail="该服务端回执已被另一项动作认领，正在重新核验",
+            )
         return MessageReceipt(
             state="verified",
             recipient_name=friend.agent_name,

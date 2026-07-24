@@ -90,6 +90,21 @@ def _shift_generations(path: Path, keep: int) -> None:
     path.touch()
 
 
+def _service_is_explicitly_absent(
+    result: subprocess.CompletedProcess[str],
+) -> bool:
+    if result.returncode == 0:
+        return False
+    detail = f"{result.stderr or ''}\n{result.stdout or ''}".casefold()
+    return any(
+        marker in detail
+        for marker in (
+            "could not find service",
+            "service cannot be found",
+        )
+    )
+
+
 def _restore_loaded(runner: Runner, domain: str, target: str, plist: Path) -> str:
     """Best-effort bootstrap after a bootout attempt; return a recovery error."""
     bootstrap_error = ""
@@ -155,6 +170,17 @@ def rotate_managed_log(
                 "label": spec.label,
                 "status": "optional_missing_plist_loaded",
                 "ok": False,
+                "sizes": sizes,
+            }
+        if not _service_is_explicitly_absent(loaded):
+            detail = (
+                loaded.stderr or loaded.stdout or "launchctl print failed"
+            ).strip()
+            return {
+                "label": spec.label,
+                "status": "probe_failed",
+                "ok": False,
+                "detail": detail[:240],
                 "sizes": sizes,
             }
         try:

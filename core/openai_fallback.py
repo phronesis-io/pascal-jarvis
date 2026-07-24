@@ -462,10 +462,11 @@ def main(argv: list[str] | None = None) -> int:
     system_prompt = _read_optional(args.system_prompt_file)
 
     process_holder: dict[str, Any] = {"tool": None}
+    termination_signal = [0]
 
     def _terminate(signum, _frame):
+        termination_signal[0] = signum
         _terminate_process_group(process_holder.get("tool"))
-        raise SystemExit(128 + signum)
 
     previous_handlers = {}
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -483,15 +484,23 @@ def main(argv: list[str] | None = None) -> int:
                 args.max_output_tokens, api_key, args.base_url,
                 args.timeout, args.user_agent,
                 process_holder=process_holder,
+                cancelled=lambda: bool(termination_signal[0]),
             )
     except OpenAIFallbackError as e:
-        print(str(e), file=sys.stderr)
-        return 1
+        if not termination_signal[0]:
+            print(str(e), file=sys.stderr)
+        return (
+            128 + termination_signal[0]
+            if termination_signal[0]
+            else 1
+        )
     finally:
         _terminate_process_group(process_holder.get("tool"))
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
+    if termination_signal[0]:
+        return 128 + termination_signal[0]
     if not text:
         print("OpenAI fallback returned no text", file=sys.stderr)
         return 1

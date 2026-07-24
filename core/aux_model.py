@@ -116,6 +116,7 @@ def _invoke(
     runner: Runner | None,
     process_holder: dict[str, Any] | None,
     process_key: str,
+    cancelled: Callable[[], bool] | None,
 ) -> subprocess.CompletedProcess[str]:
     if runner is not None:
         return runner(
@@ -140,6 +141,11 @@ def _invoke(
     )
     if process_holder is not None:
         process_holder[process_key] = process
+    if cancelled is not None and cancelled():
+        _terminate_process_group(process)
+        return subprocess.CompletedProcess(
+            command, 143, "", "cancelled"
+        )
     try:
         stdout, stderr = process.communicate(prompt, timeout=timeout)
         return subprocess.CompletedProcess(
@@ -354,6 +360,7 @@ def run_auxiliary_model(
                         runner=runner,
                         process_holder=process_holder,
                         process_key=process_key,
+                        cancelled=cancelled,
                     )
                 except (subprocess.TimeoutExpired, OSError):
                     break
@@ -473,10 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     process_holder: dict[str, Any] = {"model": None}
+    termination_signal = [0]
 
     def _terminate(signum, _frame):
+        termination_signal[0] = signum
         _terminate_process_group(process_holder.get("model"))
-        raise SystemExit(128 + signum)
 
     previous_handlers = {}
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -491,11 +499,14 @@ def main(argv: list[str] | None = None) -> int:
             allow_tools=args.allow_tools,
             session_args=session,
             process_holder=process_holder,
+            cancelled=lambda: bool(termination_signal[0]),
         )
     finally:
         _terminate_process_group(process_holder.get("model"))
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+    if termination_signal[0]:
+        return 128 + termination_signal[0]
     if not result.text:
         return 1
     if args.metadata_file:

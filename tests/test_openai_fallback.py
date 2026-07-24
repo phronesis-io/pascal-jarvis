@@ -1,4 +1,7 @@
+import io
 import shlex
+import signal
+import subprocess
 import time
 
 from core import openai_fallback as of
@@ -214,6 +217,45 @@ def test_execute_tool_cancellation_kills_descendant_process_group(
 
     assert "cancelled" in result
     assert not marker.exists()
+
+
+def test_cli_signal_during_tool_spawn_reaps_new_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("sys.stdin", io.StringIO("owner task"))
+    calls = [0]
+
+    def fake_api(*_args, **_kwargs):
+        calls[0] += 1
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "arguments": '{"command":"sleep 30"}',
+                }
+            ]
+        }
+
+    real_popen = subprocess.Popen
+    spawned = []
+
+    def signal_during_spawn(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return process
+
+    monkeypatch.setattr(of, "_api_call", fake_api)
+    monkeypatch.setattr(of.subprocess, "Popen", signal_during_spawn)
+
+    assert of.main([]) == 128 + signal.SIGTERM
+    assert calls[0] == 1
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
 
 
 def test_execute_tool_file_read_write(monkeypatch, tmp_path):

@@ -246,6 +246,16 @@ four findings were reproduced and closed:
 | 109 | A failed initial launchd probe aborted log maintenance for every later service | Probe launch and timeout failures become one structured per-service result while the maintenance batch continues; two-service isolation regression |
 | 110 | A stale log from intentionally absent optional Taskline caused permanent maintenance failure | Taskline is explicitly optional; when its plist is absent, launchd must confirm it is unloaded before the stale file is safely rotated without bootstrap; optional-service regression |
 
+The fourteenth independent review narrowed its scope to the thirteenth-review
+fix commit and exercised concurrency plus signal-delivery races. Its three
+findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 111 | Two concurrent explicit-repeat sends could both claim the same newest EigenFlux history receipt | Message receipts have a partial unique database index and are selected plus claimed under `BEGIN IMMEDIATE`; a loser continues to another matching server message. Existing duplicate rows are migrated by preserving the earliest claim and reopening the others; concurrent-send and legacy-migration regressions |
+| 112 | SIGTERM or SIGINT between tool/model `Popen` and holder registration could leave the new process group alive or waiting until timeout | CLI signal handlers now record cancellation without unwinding the spawn expression; once the child is registered, both OpenAI and auxiliary routes observe cancellation and terminate the complete process group before returning the signal exit code; exact spawn-window regressions |
+| 113 | Any nonzero `launchctl print` result was treated as proof that an optional service was absent | Offline rotation now requires an explicit launchd service-not-found diagnostic; permission, domain, empty, and transient command failures remain `probe_failed` and leave the log inode untouched; ambiguous-probe regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -286,7 +296,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2088 passed` for this candidate);
+- full local test result (`2093 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

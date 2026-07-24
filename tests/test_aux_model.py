@@ -227,7 +227,8 @@ def test_cli_signal_terminates_active_model_process_group(
         kwargs["process_holder"]["model"] = process
         handler = signal.getsignal(signal.SIGTERM)
         handler(signal.SIGTERM, None)
-        raise AssertionError("signal handler must exit")
+        assert kwargs["cancelled"]()
+        return aux_model.AuxiliaryModelResult()
 
     monkeypatch.setattr(aux_model, "run_auxiliary_model", fake_run)
     monkeypatch.setattr(
@@ -237,15 +238,50 @@ def test_cli_signal_terminates_active_model_process_group(
     )
     monkeypatch.setattr("sys.stdin", StringIO("owner task"))
 
-    try:
+    assert (
         aux_model.main(["--root", str(tmp_path)])
-    except SystemExit as exc:
-        assert exc.code == 128 + signal.SIGTERM
-    else:
-        raise AssertionError("SIGTERM did not stop the auxiliary router")
+        == 128 + signal.SIGTERM
+    )
 
     assert terminated
     assert terminated[0] is process
+
+
+def test_cli_signal_during_model_spawn_reaps_new_process_group(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "claude"
+    executable.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "false")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "false")
+    monkeypatch.setattr("sys.stdin", StringIO("owner task"))
+    real_popen = subprocess.Popen
+    spawned = []
+
+    def signal_during_spawn(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return process
+
+    monkeypatch.setattr(aux_model.subprocess, "Popen", signal_during_spawn)
+
+    assert (
+        aux_model.main(
+            [
+                "--root",
+                str(tmp_path),
+                "--timeout",
+                "30",
+                "--allow-tools",
+            ]
+        )
+        == 128 + signal.SIGTERM
+    )
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
 
 
 def test_cli_sigterm_reaps_real_model_process_group(tmp_path):

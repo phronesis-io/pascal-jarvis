@@ -210,10 +210,19 @@ def test_absent_optional_service_rotates_stale_unowned_log(
     )
     calls = []
 
+    def explicitly_absent(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            113,
+            "",
+            'Could not find service "com.example.optional" in domain for user',
+        )
+
     result = rotate_managed_log(
         spec,
         max_bytes=1,
-        runner=_runner(calls, fail={"print"}),
+        runner=explicitly_absent,
     )
 
     assert result["ok"] is True
@@ -221,6 +230,30 @@ def test_absent_optional_service_rotates_stale_unowned_log(
     assert log.read_text() == ""
     assert (tmp_path / "optional.log.1").read_text() == "stale optional output"
     assert [command[1] for command in calls] == ["print"]
+
+
+def test_optional_service_ambiguous_probe_failure_does_not_rotate(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "optional.log"
+    log.write_text("possibly live output", encoding="utf-8")
+    spec = ManagedLog("com.example.optional", (log,), optional=True)
+    monkeypatch.setattr(
+        ManagedLog,
+        "plist",
+        property(lambda _self: tmp_path / "missing.plist"),
+    )
+
+    result = rotate_managed_log(
+        spec,
+        max_bytes=1,
+        runner=_runner([], fail={"print"}),
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "probe_failed"
+    assert log.read_text() == "possibly live output"
+    assert not (tmp_path / "optional.log.1").exists()
 
 
 def test_maintenance_aggregates_failure(tmp_path, monkeypatch):
