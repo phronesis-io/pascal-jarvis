@@ -303,6 +303,13 @@ the adjacent manual-ownership transition were closed:
 | 125 | A transient lock while adding the required parent-hold column could mark the table ready without the column | Migration re-reads the physical schema, raises on any still-missing required column, leaves `_table_ready` false, and succeeds on the next call; one-shot lock regression |
 | 126 | Manually confirming a projected parent cancellation could leave obsolete automatic owners on its inherited child | Manual parent confirmation now converts the child to a source-free permanent parent hold, so later projection withdrawal cannot revive the follow-up; manual-override regression |
 
+The first final-candidate CI run exposed one environment-dependent test
+assumption rather than a production-code defect:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 127 | The spawn-window signal test created a temporary Claude stub without placing it on `PATH`, so it passed only on developer machines that already had Claude installed and returned 1 on a clean GitHub runner before sending the signal | The test now prepends its isolated stub directory to `PATH`, guaranteeing that every environment exercises the intended Popen/SIGTERM/process-group path; clean-runner CI regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.

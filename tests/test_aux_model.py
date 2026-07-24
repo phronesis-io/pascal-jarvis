@@ -254,6 +254,10 @@ def test_cli_signal_during_model_spawn_reaps_new_process_group(
     executable = tmp_path / "claude"
     executable.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
     executable.chmod(0o755)
+    monkeypatch.setenv(
+        "PATH",
+        f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
+    )
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "false")
     monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "false")
     monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "false")
