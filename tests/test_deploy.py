@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 
+import core.deploy as deploy
 from core.delivery import DeliveryPipeline
 from core.deploy import (
     _dirty_runtime_paths,
@@ -107,3 +108,19 @@ def test_dirty_runtime_paths_preserves_worktree_only_filename(tmp_path):
     source.write_text("VALUE = 2\n", encoding="utf-8")
 
     assert _dirty_runtime_paths(tmp_path) == ["core/worker.py"]
+
+
+def test_verify_reads_dirty_runtime_paths_once(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        deploy,
+        "_dirty_runtime_paths",
+        lambda _root: calls.append(1) or ["core/worker.py"],
+    )
+
+    result = verify_runtime(root=tmp_path, db_path=tmp_path / "jarvis.db")
+
+    assert result["warnings"] == [
+        "uncommitted runtime code: core/worker.py"
+    ]
+    assert calls == [1]

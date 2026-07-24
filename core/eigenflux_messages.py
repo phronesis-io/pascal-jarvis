@@ -104,6 +104,17 @@ def _response_data(obj: dict) -> dict:
     return value if isinstance(value, dict) else obj
 
 
+def _next_cursor(obj: dict) -> str:
+    data = _response_data(obj)
+    return str(
+        data.get("next_cursor")
+        or data.get("nextCursor")
+        or obj.get("next_cursor")
+        or obj.get("nextCursor")
+        or ""
+    ).strip()
+
+
 class EigenFluxMessenger:
     """Deterministic friend resolver, sender, and receipt verifier."""
 
@@ -115,6 +126,7 @@ class EigenFluxMessenger:
         runner: Runner = subprocess.run,
         now: Callable[[], float] = time.time,
         attempt_stale_seconds: int = 60,
+        verification_clock_skew_seconds: int = 600,
     ):
         self.root = Path(
             root
@@ -133,6 +145,8 @@ class EigenFluxMessenger:
         self.runner = runner
         self.now = now
         self.attempt_stale_seconds = attempt_stale_seconds
+        self.verification_clock_skew_seconds = max(
+            0, int(verification_clock_skew_seconds))
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,24 +210,44 @@ class EigenFluxMessenger:
             raise CliFailure(str(obj.get("msg") or f"CLI code {code}")[:300])
         return obj
 
+    def _paged_payload(
+        self,
+        command: list[str],
+        key: str,
+        *,
+        max_pages: int = 20,
+    ) -> list[dict]:
+        rows: list[dict] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _ in range(max_pages):
+            page_command = [*command]
+            if cursor:
+                page_command.extend(["--cursor", cursor])
+            page_command.extend(["-f", "json", "--no-interactive"])
+            obj = self._run_json(page_command)
+            rows.extend(_payload_list(obj, key))
+            next_cursor = _next_cursor(obj)
+            if not next_cursor:
+                return rows
+            if next_cursor in seen_cursors:
+                raise CliFailure(f"{key} pagination cursor repeated")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        raise CliFailure(f"{key} pagination exceeded {max_pages} pages")
+
     def list_friends(self) -> list[Friend]:
-        obj = self._run_json(
-            [
-                "eigenflux",
-                "relation",
-                "friends",
-                "--limit",
-                "100",
-                "-f",
-                "json",
-                "--no-interactive",
-            ]
-        )
         friends: list[Friend] = []
-        for row in _payload_list(obj, "friends"):
+        seen: set[str] = set()
+        rows = self._paged_payload(
+            ["eigenflux", "relation", "friends", "--limit", "100"],
+            "friends",
+        )
+        for row in rows:
             agent_id = str(row.get("agent_id") or "").strip()
             agent_name = str(row.get("agent_name") or "").strip()
-            if agent_id and agent_name:
+            if agent_id and agent_name and agent_id not in seen:
+                seen.add(agent_id)
                 friends.append(
                     Friend(
                         agent_id=agent_id,
@@ -313,7 +347,7 @@ class EigenFluxMessenger:
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def _history_messages(self, conv_id: str) -> list[dict]:
-        obj = self._run_json(
+        return self._paged_payload(
             [
                 "eigenflux",
                 "msg",
@@ -322,35 +356,33 @@ class EigenFluxMessenger:
                 conv_id,
                 "--limit",
                 "100",
-                "-f",
-                "json",
-                "--no-interactive",
-            ]
+            ],
+            "messages",
+            max_pages=10,
         )
-        return _payload_list(obj, "messages")
 
     def _candidate_conversations(self, target_id: str) -> list[str]:
-        obj = self._run_json(
+        rows = self._paged_payload(
             [
                 "eigenflux",
                 "msg",
                 "conversations",
                 "--limit",
                 "100",
-                "-f",
-                "json",
-                "--no-interactive",
-            ]
+            ],
+            "conversations",
         )
         result: list[str] = []
-        for row in _payload_list(obj, "conversations"):
+        seen: set[str] = set()
+        for row in rows:
             participants = {
                 str(row.get("participant_a") or ""),
                 str(row.get("participant_b") or ""),
             }
             if target_id in participants:
                 conv_id = str(row.get("conv_id") or "").strip()
-                if conv_id:
+                if conv_id and conv_id not in seen:
+                    seen.add(conv_id)
                     result.append(conv_id)
         return result
 
@@ -378,7 +410,7 @@ class EigenFluxMessenger:
                 created = float(row.get("created_at") or 0)
                 if created > 10_000_000_000:
                     created /= 1000
-                if created_after and created + 5 < created_after:
+                if not msg_id and created_after and created + 5 < created_after:
                     continue
                 return candidate_conv, row_msg_id
         return None
@@ -411,38 +443,42 @@ class EigenFluxMessenger:
         contract_version: str,
     ) -> sqlite3.Row | None:
         now = self.now()
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            existing = db.execute(
-                """
-                SELECT * FROM verified_external_actions
-                 WHERE idempotency_key = ?
-                """,
-                (key,),
-            ).fetchone()
-            if existing is not None:
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                existing = db.execute(
+                    """
+                    SELECT * FROM verified_external_actions
+                     WHERE idempotency_key = ?
+                    """,
+                    (key,),
+                ).fetchone()
+                if existing is not None:
+                    db.commit()
+                    return existing
+                db.execute(
+                    """
+                    INSERT INTO verified_external_actions(
+                        idempotency_key, action_type, target_id, target_name,
+                        payload_hash, contract_version, state, attempts,
+                        created_epoch, updated_epoch
+                    ) VALUES (?, 'eigenflux_message', ?, ?, ?, ?, 'attempting',
+                              1, ?, ?)
+                    """,
+                    (
+                        key,
+                        friend.agent_id,
+                        friend.agent_name,
+                        payload_hash,
+                        contract_version,
+                        now,
+                        now,
+                    ),
+                )
                 db.commit()
-                return existing
-            db.execute(
-                """
-                INSERT INTO verified_external_actions(
-                    idempotency_key, action_type, target_id, target_name,
-                    payload_hash, contract_version, state, attempts,
-                    created_epoch, updated_epoch
-                ) VALUES (?, 'eigenflux_message', ?, ?, ?, ?, 'attempting',
-                          1, ?, ?)
-                """,
-                (
-                    key,
-                    friend.agent_id,
-                    friend.agent_name,
-                    payload_hash,
-                    contract_version,
-                    now,
-                    now,
-                ),
-            )
-            db.commit()
+            except Exception:
+                db.rollback()
+                raise
         return None
 
     def _start_retry(self, key: str) -> None:
@@ -496,6 +532,7 @@ class EigenFluxMessenger:
         key = self._action_key(
             friend.agent_id, payload_hash, contract_version
         )
+        operation_started = self.now()
         existing = self._reserve(
             key, friend, payload_hash, contract_version
         )
@@ -515,7 +552,12 @@ class EigenFluxMessenger:
                     found = self._find_verified_message(
                         friend,
                         message,
-                        float(existing["created_epoch"]),
+                        (
+                            0
+                            if str(existing["msg_id"] or "")
+                            else float(existing["created_epoch"])
+                            - self.verification_clock_skew_seconds
+                        ),
                         conv_id=str(existing["conv_id"] or ""),
                         msg_id=str(existing["msg_id"] or ""),
                     )
@@ -559,7 +601,9 @@ class EigenFluxMessenger:
             self._write_state(key, state="verifying", error=str(exc))
             try:
                 found = self._find_verified_message(
-                    friend, message, self.now() - 120
+                    friend,
+                    message,
+                    operation_started - self.verification_clock_skew_seconds,
                 )
             except CliFailure:
                 found = None
@@ -592,7 +636,12 @@ class EigenFluxMessenger:
             found = self._find_verified_message(
                 friend,
                 message,
-                self.now() - 120,
+                (
+                    0
+                    if msg_id
+                    else operation_started
+                    - self.verification_clock_skew_seconds
+                ),
                 conv_id=conv_id,
                 msg_id=msg_id,
             )

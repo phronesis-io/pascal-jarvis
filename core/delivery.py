@@ -20,6 +20,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import closing
@@ -32,14 +33,28 @@ from core.timeutil import now_local
 
 DELIVERY_STATES = {
     "queued", "attempting", "delivered", "read", "acted", "suppressed",
+    "failed",
 }
 FINAL_SUCCESS_STATES = {"delivered", "read", "acted"}
 RETRY_DELAYS = (0, 2, 5)
+MAX_DELIVERY_ATTEMPTS = 9
 SEND_TIMEOUT_SECONDS = 15
 ATTEMPT_STALE_SECONDS = 90
 DEDUP_WINDOW_SECONDS = 6 * 3600
 DEFAULT_SOURCE_DAILY_CAP = 24
 DEFAULT_GLOBAL_DAILY_CAP = 120
+
+_STATE_UPDATE_FIELDS = frozenset({
+    "attempts",
+    "delivered_epoch",
+    "next_attempt_epoch",
+    "last_error",
+    "message_id",
+    "read_epoch",
+    "acted_epoch",
+})
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_READY: dict[Path, tuple[int, int]] = {}
 
 _TOOL_NARRATION_RE = re.compile(
     r"^\s*(?:🔧\s*)?(?:"
@@ -141,7 +156,18 @@ def _connect(path: Path) -> sqlite3.Connection:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=NORMAL")
         db.execute("PRAGMA busy_timeout=5000")
-        _ensure_schema(db)
+        resolved = path.resolve()
+        with _SCHEMA_LOCK:
+            try:
+                stat = resolved.stat()
+                identity = (int(stat.st_dev), int(stat.st_ino))
+            except OSError:
+                identity = (-1, -1)
+            if _SCHEMA_READY.get(resolved) != identity:
+                _ensure_schema(db)
+                stat = resolved.stat()
+                _SCHEMA_READY[resolved] = (
+                    int(stat.st_dev), int(stat.st_ino))
         return db
     except Exception:
         db.close()
@@ -489,6 +515,12 @@ class DeliveryPipeline:
                    state: str, detail: str = "", **fields) -> None:
         if state not in DELIVERY_STATES:
             raise ValueError(f"invalid delivery state: {state}")
+        unsupported = set(fields) - _STATE_UPDATE_FIELDS
+        if unsupported:
+            raise ValueError(
+                "unsupported delivery fields: "
+                + ", ".join(sorted(unsupported))
+            )
         values = {"state": state, "updated_epoch": self.clock(), **fields}
         assignments = ", ".join(f"{key}=?" for key in values)
         db.execute(
@@ -597,10 +629,11 @@ class DeliveryPipeline:
             provider, model = current_provider_model(self.root)
             envelope.provider = envelope.provider or provider
             envelope.model = envelope.model or model
+        raw_content_hash = _content_hash(envelope)
         envelope, blocked = sanitize(envelope)
         now = self.clock()
         route = _route(envelope)
-        content_hash = _content_hash(envelope)
+        content_hash = raw_content_hash if blocked else _content_hash(envelope)
         with closing(_connect(self.path)) as db, db:
             duplicate = (
                 None if envelope.metadata.get("bypass_dedup")
@@ -655,130 +688,168 @@ class DeliveryPipeline:
 
     def _attempt(self, envelope: DeliveryEnvelope, route: str) -> DeliveryResult:
         claimed_at = self.clock()
-        with closing(_connect(self.path)) as db, db:
-            cursor = db.execute(
-                "UPDATE delivery_envelopes SET state='attempting',"
-                "updated_epoch=? WHERE id=? AND (state='queued' OR "
-                "(state='attempting' AND updated_epoch<=?))",
-                (
-                    claimed_at, envelope.id,
-                    claimed_at - ATTEMPT_STALE_SECONDS,
-                ),
-            )
-            if cursor.rowcount != 1:
+        with closing(_connect(self.path)) as db:
+            try:
+                cursor = db.execute(
+                    "UPDATE delivery_envelopes SET state='attempting',"
+                    "updated_epoch=? WHERE id=? AND (state='queued' OR "
+                    "(state='attempting' AND updated_epoch<=?))",
+                    (
+                        claimed_at, envelope.id,
+                        claimed_at - ATTEMPT_STALE_SECONDS,
+                    ),
+                )
                 row = db.execute(
-                    "SELECT state,route_channel,message_id,last_error "
+                    "SELECT state,route_channel,message_id,last_error,attempts "
                     "FROM delivery_envelopes WHERE id=?",
                     (envelope.id,),
                 ).fetchone()
-                if not row:
+                if cursor.rowcount != 1:
+                    if not row:
+                        return DeliveryResult(
+                            envelope.id, False, "queued", route,
+                            reason="delivery row disappeared")
+                    state = str(row["state"])
                     return DeliveryResult(
-                        envelope.id, False, "queued", route,
-                        reason="delivery row disappeared")
-                state = str(row["state"])
-                return DeliveryResult(
-                    envelope.id, True, state,
-                    str(row["route_channel"] or route),
-                    str(row["message_id"] or ""),
-                    "in_progress" if state == "attempting"
-                    else str(row["last_error"] or ""),
-                )
-            self._event(
-                db, envelope.id, "attempting", "attempt claimed")
-
-        last_error = ""
-        for number, delay in enumerate(RETRY_DELAYS, 1):
-            if delay:
-                self.sleeper(delay)
-            started = self.clock()
-            with closing(_connect(self.path)) as db, db:
-                self._set_state(
-                    db, envelope.id, "attempting",
-                    f"attempt {number}", attempts=number,
-                )
-                cursor = db.execute(
-                    "INSERT INTO delivery_attempts "
-                    "(delivery_id,attempt,channel,started_epoch,status) "
-                    "VALUES (?,?,?,?,?)",
-                    (envelope.id, number, route, started, "attempting"),
-                )
-                attempt_id = cursor.lastrowid
-            try:
-                result = self.transport(envelope, route)
-                if not isinstance(result, TransportResult):
-                    raise TypeError("transport must return TransportResult")
-            except Exception as exc:
-                result = TransportResult(False, error=str(exc))
-            with closing(_connect(self.path)) as db, db:
-                db.execute(
-                    "UPDATE delivery_attempts SET finished_epoch=?,status=?,"
-                    "error=?,message_id=? WHERE id=?",
-                    (
-                        self.clock(), "delivered" if result.ok else "failed",
-                        result.error[:500], result.message_id, attempt_id,
-                    ),
-                )
-                if result.ok:
-                    delivered_at = self.clock()
-                    self._set_state(
-                        db, envelope.id, "delivered", "transport confirmed",
-                        delivered_epoch=delivered_at,
-                        next_attempt_epoch=None,
-                        last_error="",
-                        message_id=result.message_id,
+                        envelope.id, True, state,
+                        str(row["route_channel"] or route),
+                        str(row["message_id"] or ""),
+                        "in_progress" if state == "attempting"
+                        else str(row["last_error"] or ""),
                     )
-                    try:
+                prior_attempts = int(row["attempts"] or 0)
+                self._event(
+                    db, envelope.id, "attempting", "attempt claimed")
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+            last_error = str(row["last_error"] or "")
+            remaining = max(0, MAX_DELIVERY_ATTEMPTS - prior_attempts)
+            delays = RETRY_DELAYS[:remaining]
+            for offset, delay in enumerate(delays, 1):
+                if delay:
+                    self.sleeper(delay)
+                number = prior_attempts + offset
+                started = self.clock()
+                try:
+                    self._set_state(
+                        db, envelope.id, "attempting",
+                        f"attempt {number}", attempts=number,
+                    )
+                    cursor = db.execute(
+                        "INSERT INTO delivery_attempts "
+                        "(delivery_id,attempt,channel,started_epoch,status) "
+                        "VALUES (?,?,?,?,?)",
+                        (envelope.id, number, route, started, "attempting"),
+                    )
+                    attempt_id = cursor.lastrowid
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+
+                try:
+                    result = self.transport(envelope, route)
+                    if not isinstance(result, TransportResult):
+                        raise TypeError("transport must return TransportResult")
+                except Exception as exc:
+                    result = TransportResult(False, error=str(exc))
+
+                try:
+                    db.execute(
+                        "UPDATE delivery_attempts SET finished_epoch=?,status=?,"
+                        "error=?,message_id=? WHERE id=?",
+                        (
+                            self.clock(),
+                            "delivered" if result.ok else "failed",
+                            result.error[:500],
+                            result.message_id,
+                            attempt_id,
+                        ),
+                    )
+                    if result.ok:
+                        delivered_at = self.clock()
+                        self._set_state(
+                            db, envelope.id, "delivered",
+                            "transport confirmed",
+                            delivered_epoch=delivered_at,
+                            next_attempt_epoch=None,
+                            last_error="",
+                            message_id=result.message_id,
+                        )
+                        try:
+                            db.execute(
+                                "INSERT INTO engagement_events "
+                                "(event_type,source,timestamp,engaged,"
+                                "gap_seconds,metadata) VALUES (?,?,?,?,?,?)",
+                                (
+                                    "sent", envelope.source,
+                                    datetime.fromtimestamp(
+                                        delivered_at,
+                                        tz=now_local().tzinfo,
+                                    ).isoformat(),
+                                    0, 0,
+                                    json.dumps({
+                                        "delivery_id": envelope.id,
+                                        "channel": route,
+                                        "provider": envelope.provider,
+                                        "model": envelope.model,
+                                    }, ensure_ascii=False),
+                                ),
+                            )
+                        except sqlite3.OperationalError:
+                            # A standalone pipeline DB may intentionally contain
+                            # only delivery tables.
+                            pass
+                        db.commit()
+                        return DeliveryResult(
+                            envelope.id, True, "delivered", route,
+                            result.message_id)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                last_error = result.error or "transport failed"
+
+            attempts = prior_attempts + len(delays)
+            terminal = attempts >= MAX_DELIVERY_ATTEMPTS
+            state = "failed" if terminal else "queued"
+            next_attempt = None if terminal else self.clock() + 5 * 60
+            try:
+                self._set_state(
+                    db, envelope.id, state,
+                    "retry terminal" if terminal else "retry batch exhausted",
+                    next_attempt_epoch=next_attempt,
+                    last_error=last_error[:500],
+                )
+                if (terminal
+                        and not envelope.metadata.get("suppress_dead_letter")):
+                    exists = db.execute(
+                        "SELECT 1 FROM delivery_dead_letters "
+                        "WHERE delivery_id=?",
+                        (envelope.id,),
+                    ).fetchone()
+                    if not exists:
                         db.execute(
-                            "INSERT INTO engagement_events "
-                            "(event_type,source,timestamp,engaged,gap_seconds,metadata) "
-                            "VALUES (?,?,?,?,?,?)",
+                            "INSERT INTO delivery_dead_letters "
+                            "(delivery_id,source,kind,detail,created_epoch) "
+                            "VALUES (?,?,?,?,?)",
                             (
-                                "sent", envelope.source,
-                                datetime.fromtimestamp(
-                                    delivered_at,
-                                    tz=now_local().tzinfo,
-                                ).isoformat(),
-                                0, 0,
-                                json.dumps({
-                                    "delivery_id": envelope.id,
-                                    "channel": route,
-                                    "provider": envelope.provider,
-                                    "model": envelope.model,
-                                }, ensure_ascii=False),
+                                envelope.id,
+                                envelope.source,
+                                envelope.kind,
+                                last_error[:500],
+                                self.clock(),
                             ),
                         )
-                    except sqlite3.OperationalError:
-                        # A standalone pipeline DB may intentionally contain
-                        # only delivery tables. Delivery itself must not depend
-                        # on the analytics projection.
-                        pass
-                    return DeliveryResult(
-                        envelope.id, True, "delivered", route,
-                        result.message_id)
-            last_error = result.error or "transport failed"
-
-        next_attempt = self.clock() + 5 * 60
-        with closing(_connect(self.path)) as db, db:
-            self._set_state(
-                db, envelope.id, "queued", "retry exhausted",
-                next_attempt_epoch=next_attempt, last_error=last_error[:500],
-            )
-            if not envelope.metadata.get("suppress_dead_letter"):
-                exists = db.execute(
-                    "SELECT 1 FROM delivery_dead_letters "
-                    "WHERE delivery_id=?",
-                    (envelope.id,),
-                ).fetchone()
-                if not exists:
-                    db.execute(
-                        "INSERT INTO delivery_dead_letters "
-                        "(delivery_id,source,kind,detail,created_epoch) "
-                        "VALUES (?,?,?,?,?)",
-                        (envelope.id, envelope.source, envelope.kind,
-                         last_error[:500], self.clock()),
-                    )
-        return DeliveryResult(
-            envelope.id, True, "queued", route, reason=last_error)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            return DeliveryResult(
+                envelope.id, True, state, route, reason=last_error)
 
     def flush_due(self, limit: int = 50) -> list[DeliveryResult]:
         now = self.clock()

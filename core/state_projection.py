@@ -57,6 +57,7 @@ def delivery_overview(root: str | Path) -> dict | None:
         "read": states.get("read", 0),
         "acted": states.get("acted", 0),
         "suppressed": states.get("suppressed", 0),
+        "failed": states.get("failed", 0),
         "dead_letters": dead_letters,
         # Compatibility key for the existing ops metric.
         "consec_fails": dead_letters,

@@ -46,8 +46,12 @@ def _record_sent_lark_id(memorial_id: str, ids_before: int) -> None:
     try:
         from core.memorial_thread import record_sent
         record_sent(memorial_id, _LAST_SENT_IDS[-1])
-    except Exception:
-        pass
+    except Exception as exc:
+        log(
+            "heartbeat",
+            f"memorial message binding failed for {memorial_id}: {exc}",
+            level="warn",
+        )
 
 
 def _lark_send_card(card_json: str, user_id: str, log_file: str,
@@ -375,7 +379,7 @@ def _note_delivery(jarvis_dir: Path, ok: bool, user_id: str = "",
     now = now if now is not None else time.time()
     state_path = jarvis_dir / DELIVERY_STATE_FILE
     try:
-        st = json.loads(state_path.read_text())
+        st = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         st = {}
 
@@ -487,7 +491,8 @@ def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
 def _peek_source(jarvis_dir: Path) -> str:
     """Read the source sidecar WITHOUT consuming it (that's _record_engagement's job)."""
     try:
-        return (jarvis_dir / ".heartbeat_last_source").read_text().strip()
+        return (jarvis_dir / ".heartbeat_last_source").read_text(
+            encoding="utf-8").strip()
     except OSError:
         return ""
 
@@ -540,7 +545,8 @@ def _user_recently_active(now: float | None = None) -> bool:
 def _read_flush_stamp(jarvis_dir: Path) -> float:
     """Epoch of the last successful batch flush (0.0 when none recorded)."""
     try:
-        return float((jarvis_dir / BATCH_FLUSH_STAMP).read_text().strip())
+        return float((jarvis_dir / BATCH_FLUSH_STAMP).read_text(
+            encoding="utf-8").strip())
     except (OSError, ValueError):
         return 0.0
 
@@ -548,7 +554,8 @@ def _read_flush_stamp(jarvis_dir: Path) -> float:
 def _read_attempt_stamp(jarvis_dir: Path) -> float:
     """Epoch of the last FAILED flush attempt (0.0 when none recorded)."""
     try:
-        return float((jarvis_dir / BATCH_ATTEMPT_STAMP).read_text().strip())
+        return float((jarvis_dir / BATCH_ATTEMPT_STAMP).read_text(
+            encoding="utf-8").strip())
     except (OSError, ValueError):
         return 0.0
 
@@ -929,6 +936,7 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
     delivered: list[dict] = []
     retained: list[dict] = []
     attempted_failure: dict | None = None
+    sent_id_start = len(_LAST_SENT_IDS)
 
     for index, entry in enumerate(selected):
         _ids_before = len(_LAST_SENT_IDS)
@@ -960,8 +968,8 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
                      detail="intact_memorial_card")
         ts = now_local_str("%Y-%m-%d %H:%M")
         epoch = int(time.time())
-        sent_ids = list(_LAST_SENT_IDS)
-        _LAST_SENT_IDS.clear()
+        sent_ids = list(_LAST_SENT_IDS[sent_id_start:])
+        del _LAST_SENT_IDS[sent_id_start:]
         with open(jarvis_dir / "engagement_log.jsonl", "a", encoding="utf-8") as f:
             for source in sorted({e.get("source", "memorial") for e in delivered}):
                 row = {"ts": ts, "source": source, "type": "sent",
@@ -1012,7 +1020,7 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
     if not queue_path.exists():
         return ""
     now = time.time()
-    all_lines = queue_path.read_text().splitlines()
+    all_lines = queue_path.read_text(encoding="utf-8").splitlines()
     overflow = []
     if len(all_lines) > NIGHT_QUEUE_MAX:
         # No silent caps: say what was dropped — and account for it
@@ -1127,6 +1135,7 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
     # to unlink the ENTIRE queue and write a false FLUSH_DELIVERED audit row.
     # Worst case now is one duplicate digest on a slow link — bounded by the
     # attempt-stamp retry floor and the per-entry retry budget.
+    sent_id_start = len(_LAST_SENT_IDS)
     if _lark_send_text(digest, user_id, assume_delivered_on_timeout=False):
         if len_dropped:
             # Deferred entries go back in for the next flush (NOT the old
@@ -1150,9 +1159,11 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
         # Deferred entries are NOT counted sent — they will be when delivered.
         ts = now_local_str("%Y-%m-%d %H:%M")
         epoch = int(time.time())
-        digest_ids = list(_LAST_SENT_IDS)
-        _LAST_SENT_IDS.clear()
-        with open(jarvis_dir / "engagement_log.jsonl", "a") as f:
+        digest_ids = list(_LAST_SENT_IDS[sent_id_start:])
+        del _LAST_SENT_IDS[sent_id_start:]
+        with open(
+            jarvis_dir / "engagement_log.jsonl", "a", encoding="utf-8"
+        ) as f:
             for source in sorted({e.get("source", "heartbeat") for e in included}):
                 row = {"ts": ts, "source": source, "type": "sent",
                        "via": "night-digest", "epoch": epoch}
@@ -1228,7 +1239,7 @@ def _is_duplicate_send(output: str, jarvis_dir: Path) -> bool:
     # NOT time.mktime — a TZ env mismatch would shift the window by hours.
     now_dt = now_local().replace(tzinfo=None)
     try:
-        lines = outbox.read_text().splitlines()[-30:]
+        lines = outbox.read_text(encoding="utf-8").splitlines()[-30:]
     except OSError:
         return False
     for line in lines:
@@ -1266,7 +1277,7 @@ def _record_engagement(jarvis_dir: Path):
     epoch = int(time.time())
     source_file = jarvis_dir / ".heartbeat_last_source"
     if source_file.exists():
-        sources = source_file.read_text().strip()
+        sources = source_file.read_text(encoding="utf-8").strip()
         source_file.unlink(missing_ok=True)
     else:
         sources = "heartbeat"
@@ -1400,8 +1411,8 @@ def _hourly_housekeeping(jd: Path):
       husks that every future audit re-investigated
     - views GC: expired RichView JSONs previously lingered until someone
       happened to GET them
-    - /tmp logs: launchd appends to jarvis-dashboard.log forever; restart.log
-      only rotated inside restart.sh
+    - /tmp restart log: bounded here because no resident process keeps that
+      file descriptor open
     """
     try:
         _trim_file(jd / "heartbeat_outbox.jsonl", 20)
@@ -1422,7 +1433,8 @@ def _hourly_housekeeping(jd: Path):
             n = 0
             for vf in views.glob("*.json"):
                 try:
-                    expires = json.loads(vf.read_text()).get("expires_at", 0)
+                    expires = json.loads(
+                        vf.read_text(encoding="utf-8")).get("expires_at", 0)
                     if expires and _t.time() > expires:
                         vf.unlink(missing_ok=True)
                         n += 1
@@ -1432,14 +1444,18 @@ def _hourly_housekeeping(jd: Path):
                 log("heartbeat", f"views GC: removed {n} expired view(s)")
     except Exception as e:
         log("heartbeat", f"views GC error: {e}", level="warn")
-    for tmp_log in (Path("/tmp/jarvis-dashboard.log"),
-                    Path("/tmp/jarvis_restart.log")):
+    # Do not copytruncate /tmp/jarvis-dashboard.log here. launchd keeps an
+    # O_APPEND descriptor open, so truncation can discard a concurrent write
+    # and rename would strand future writes on the old inode. Its eventual
+    # rotation must restart the supervised dashboard after swapping the file.
+    for tmp_log in (Path("/tmp/jarvis_restart.log"),):
         try:
             if tmp_log.exists() and tmp_log.stat().st_size > 500_000:
-                lines = tmp_log.read_text(errors="replace").splitlines()
-                # copytruncate: launchd/daemon hold O_APPEND fds — a rename
-                # would divert their writes to a dead inode until restart.
-                with open(tmp_log, "r+") as f:
+                lines = tmp_log.read_text(
+                    encoding="utf-8", errors="replace").splitlines()
+                # restart.log has no resident writer, so bounding it in place
+                # does not carry the dashboard log's descriptor race.
+                with open(tmp_log, "r+", encoding="utf-8") as f:
                     f.seek(0)
                     f.truncate()
                     f.write("\n".join(lines[-500:]) + "\n")
@@ -1619,7 +1635,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         want_full = False
         if heartbeat_trigger.exists():
             try:
-                _lines = heartbeat_trigger.read_text().splitlines()
+                _lines = heartbeat_trigger.read_text(
+                    encoding="utf-8").splitlines()
             except OSError:
                 _lines = []
             heartbeat_trigger.unlink(missing_ok=True)

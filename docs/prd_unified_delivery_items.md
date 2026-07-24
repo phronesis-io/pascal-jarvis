@@ -43,7 +43,7 @@ The design optimizes time returned to the user, not notification volume.
 | Item | Memorial | One visible notice or decision card |
 | Topic | Matter | Optional durable grouping and handoff context |
 | Timed reminder | Intent | Internal schedule and closure state |
-| Delivery | DeliveryEnvelope | One attempt to place output on a surface |
+| Delivery | DeliveryEnvelope | One durable placement contract on a surface |
 
 Matter remains a durable system identity for long-running work, but it is no
 longer a competing top-level inbox. Its detail page is a drill-down from an
@@ -107,7 +107,8 @@ direct reply, a conversation-bound output, an urgent alert, or a web placement.
 ```text
 queued -> attempting -> delivered -> read -> acted
    |          |
-   |          +-> queued after bounded retry exhaustion
+   |          +-> queued after a retry batch
+   |          +-> failed after the cumulative attempt budget
    +-> attempting when due
 
 queued/attempting -> suppressed
@@ -115,6 +116,15 @@ queued/attempting -> suppressed
 
 `suppressed` is a durable policy outcome, not a transport failure. Reasons
 include leak sentinel, deduplication, throttle, or empty output.
+
+One batch uses delays of 0s, 2s, and 5s. Attempts accumulate across scheduler
+flushes and stop at nine. Only terminal `failed` creates a dead letter; a
+temporary batch failure remains queued without pretending the message is
+permanently lost.
+
+Sanitization keeps a hash of the raw rejected payload for forensic
+distinguishability, while successful deliveries deduplicate on sanitized
+user-visible content.
 
 Read receipts update delivery rows by Lark `message_id`. Memorial decisions
 update every delivered copy by `memorial_id`.
@@ -137,6 +147,10 @@ upgrade adapters and audit inputs only; new policy does not depend on them.
 
 Operational pages read SQLite first and fall back to legacy files only before
 the migration is present.
+
+Every state transition uses an allowlisted update field set. Delivery
+connections are short-lived, schema DDL is cached per database inode, and no
+SQLite transaction remains open during a transport call.
 
 ## 6. Items Experience
 

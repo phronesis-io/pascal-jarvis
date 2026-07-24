@@ -1,7 +1,7 @@
 # PRD: Verified Delegation - 从一句话到可信完成
 
 - Date: 2026-07-24
-- Status: Active; connector-first Phase 1 in implementation
+- Status: Active design; EigenFlux message Phase 1 shipped
 - Owner: Pascal
 - Priority: P0
 - Product principle: 完成是一种有证据的状态，不是一句模型生成的话。
@@ -38,6 +38,21 @@ Jarvis 下一阶段最重要的产品对象不是新的聊天入口、任务列�
 
 本 PRD 不再增加一个顶层收件箱。Delegation 是控制平面对象，用户仍通过
 Item、Matter、飞书对话和跨端 Handoff 看到与自己有关的那一部分。
+
+### 1.1 当前实施边界
+
+已上线的是 connector-first Phase 1：
+
+- EigenFlux 好友按实时好友列表分页解析，不接受模型手写数字 ID；
+- 外部动作先写幂等预留，再执行发送；
+- 返回回执后按 conversation、message ID、recipient 和正文哈希回读；
+- 服务端已提交但本地返回失败时进入核验，不盲目重发；
+- 精确 message ID 是权威身份，不受本机与服务端时钟偏差影响。
+
+尚未上线的是本 PRD 后续的通用 Delegation schema、自动捕获、跨连接器
+evaluator、Dashboard 控制面和 Reconciler。它们仍是设计，不得从文档
+存在推断为运行能力。只有第二个独立连接器证明相同契约后，才提炼公共
+状态机，避免为了抽象而再造一套与 Item/Matter/Intent 重叠的系统。
 
 ## 2. 为什么这是现在最重要的角度
 

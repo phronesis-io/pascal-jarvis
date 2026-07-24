@@ -25,6 +25,9 @@ def _seed(tmp_path):
     db.execute(
         "INSERT INTO delivery_envelopes VALUES "
         "('dlv_1','heartbeat','text','lark','queued','offline',1,2,3)")
+    db.execute(
+        "INSERT INTO delivery_envelopes VALUES "
+        "('dlv_2','heartbeat','text','lark','failed','offline',1,NULL,9)")
     db.execute("INSERT INTO delivery_dead_letters VALUES (1,NULL)")
     db.execute(
         "INSERT INTO intent_breaches VALUES (?,?,?,?,NULL)",
@@ -39,6 +42,7 @@ def test_sqlite_operational_projections(tmp_path):
     delivery = delivery_overview(tmp_path)
     assert delivery["source"] == "sqlite"
     assert delivery["queued"] == 1
+    assert delivery["failed"] == 1
     assert delivery["dead_letters"] == 1
     assert delivery["queued_items"][0]["id"] == "dlv_1"
     assert breach_overview(tmp_path)[0]["name"] == "test"

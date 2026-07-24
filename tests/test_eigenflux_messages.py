@@ -10,6 +10,7 @@ import pytest
 
 from core.actions import ActionProcessor
 from core.eigenflux_messages import (
+    CliFailure,
     EigenFluxMessenger,
     RecipientAmbiguous,
     RecipientNotFound,
@@ -36,6 +37,7 @@ class FakeEigenFlux:
         self.send_response_has_ids = True
         self.history_error = False
         self.send_error_after_commit = False
+        self.friend_pages: list[list[dict]] | None = None
 
     @staticmethod
     def _value(command: list[str], flag: str) -> str:
@@ -53,7 +55,17 @@ class FakeEigenFlux:
     def __call__(self, command: list[str], **_kwargs):
         self.calls.append(command)
         if command[1:3] == ["relation", "friends"]:
-            return self._result({"friends": self.friends})
+            if self.friend_pages is None:
+                return self._result({"friends": self.friends})
+            cursor = (
+                self._value(command, "--cursor")
+                if "--cursor" in command else "0"
+            )
+            index = int(cursor)
+            payload = {"friends": self.friend_pages[index]}
+            if index + 1 < len(self.friend_pages):
+                payload["next_cursor"] = str(index + 1)
+            return self._result(payload)
         if command[1:3] == ["msg", "conversations"]:
             target_ids = {
                 str(message.get("receiver_id") or "")
@@ -134,6 +146,46 @@ def test_exact_remark_is_accepted(tmp_path):
     receipt = _messenger(tmp_path, cli).send("Family agent", "hello")
     assert receipt.completed
     assert receipt.recipient_name == "Family Research Agent"
+
+
+def test_friend_resolution_follows_all_cursor_pages(tmp_path):
+    cli = FakeEigenFlux()
+    cli.friend_pages = [
+        [cli.friends[1]],
+        [cli.friends[0]],
+    ]
+
+    receipt = _messenger(tmp_path, cli).send("Family agent", "hello")
+
+    assert receipt.completed
+    friend_calls = [
+        call for call in cli.calls if call[1:3] == ["relation", "friends"]
+    ]
+    assert len(friend_calls) == 2
+    assert "--cursor" in friend_calls[1]
+
+
+def test_repeated_pagination_cursor_fails_closed(tmp_path):
+    def looping_runner(command, **_kwargs):
+        assert command[1:3] == ["relation", "friends"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps({
+                "friends": [],
+                "next_cursor": "same-cursor",
+            }),
+            stderr="",
+        )
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=looping_runner,
+    )
+
+    with pytest.raises(CliFailure, match="cursor repeated"):
+        messenger.list_friends()
 
 
 def test_numeric_model_supplied_id_is_rejected_before_cli_call(tmp_path):
@@ -219,6 +271,21 @@ def test_connection_error_after_server_commit_reconciles_without_resend(tmp_path
 
     assert receipt.completed
     assert cli.send_count == 1
+
+
+def test_exact_receipt_ids_override_clock_skew(tmp_path):
+    cli = FakeEigenFlux()
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=cli,
+        now=lambda: 9_000_000_000,
+    )
+
+    receipt = messenger.send("Family agent", "clock-skewed receipt")
+
+    assert receipt.completed
+    assert receipt.msg_id == "msg-1"
 
 
 def test_readback_failure_never_claims_completion_or_retries(tmp_path):

@@ -40,7 +40,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 
 ## 3. Active Work
 
-### P0: Verified EigenFlux friend message
+### Completed: Verified EigenFlux friend message
 
 Real incident: a user request to send a directors' liability insurance brief
 to a family member's agent was interrupted, incorrectly reported as sent to a
@@ -60,9 +60,11 @@ Accepted requirements:
 - require a new contract token for an explicit repeat.
 
 Implementation: `core/eigenflux_messages.py`, action integration, local
-identity binding, skill guard, synthetic regression suite.
+identity binding, skill guard, cursor pagination, clock-skew-safe receipt
+matching, and synthetic regression suite. The generic Delegation control plane
+remains an active design, not a completed implementation.
 
-### P0: Resident SQLite descriptor exhaustion
+### Completed: Resident SQLite descriptor exhaustion
 
 Real incident: the heartbeat process approached launchd's 256-FD soft limit,
 then failed heartbeat locks, DB operations, queue flushes, and interrupted a
@@ -75,6 +77,21 @@ Accepted requirements:
 - monitor the resident heartbeat against launchd's real limit, not the much
   larger terminal-process limit;
 - restart and sample the deployed process to prove the count stays bounded.
+
+Delivery now uses two short-lived connections for a normal accepted send
+(acceptance and attempt), initializes schema once per database inode, and
+reuses the attempt connection without holding a transaction over transport.
+Continuity no longer borrows the dashboard singleton.
+
+### Completed: Delivery terminality and audit hardening
+
+- rejected payloads retain distinct raw audit hashes;
+- delivery attempts accumulate across flushes and terminate at nine;
+- only terminal failures create dead letters;
+- state update columns are allowlisted;
+- operational projections expose failed state;
+- runtime verification computes dirty paths once and binds SQL columns
+  explicitly.
 
 ### L1 Engineering Harness
 
@@ -93,6 +110,17 @@ The following are not hidden backlog:
 - A second personal task system beside Item/Matter/Intent.
 - A home-grown clone of taskline inside Jarvis.
 - A generic Delegation mega-migration before connector-specific evidence.
+
+Current external constraints and accepted residuals:
+
+- The installed EigenFlux CLI only accepts message content through
+  `--content`; the wrapper offers `--content-file`, but the child CLI still
+  exposes the value briefly in its process arguments. A real fix requires an
+  upstream stdin/file option or a stable direct API.
+- The active dashboard log is no longer copy-truncated by heartbeat because
+  launchd owns an open append descriptor and concurrent data loss cannot be
+  excluded. Bounded rotation requires swapping the file and restarting the
+  supervised dashboard as one deploy operation.
 
 These decisions protect simplicity, authority boundaries, and the user's
 attention. Reopening one requires new evidence, not elapsed time.

@@ -28,11 +28,12 @@ trigger, execution, breach, and closure state.
 
 ### Delivery
 
-One attempt to place output on a surface. It moves through queued, attempting,
-delivered, read, acted, or suppressed.
+A durable contract to place output on a surface. It moves through queued,
+attempting, delivered, read, acted, suppressed, or terminal failed. Transport
+attempts are children of the Delivery and share one cumulative retry budget.
 
 Invariant: producer code cannot maintain a parallel retry, dedup, or
-delivered-state truth.
+delivered-state truth. A failed Delivery is never left looking queued.
 
 ### Verified External Action
 

@@ -98,6 +98,30 @@ def test_memorial_queues_and_flushes_as_intact_card(tmp_path, monkeypatch):
     assert "memorial-card-queue" in (tmp_path / "engagement_log.jsonl").read_text()
 
 
+def test_memorial_flush_only_consumes_ids_from_its_own_send(
+        tmp_path, monkeypatch):
+    card = _memorial_card("mem_scoped")
+    (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
+    _queue_for_morning("CARD:" + card, tmp_path)
+    hbl._LAST_SENT_IDS[:] = ["om_previous"]
+
+    def send_card(*_args, **_kwargs):
+        hbl._LAST_SENT_IDS.append("om_memorial")
+        return True
+
+    monkeypatch.setattr(hbl, "_lark_send_card", send_card)
+    monkeypatch.setattr(hbl, "_record_sent_lark_id", lambda *_args: None)
+
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
+    assert hbl._LAST_SENT_IDS == ["om_previous"]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "engagement_log.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["message_ids"] == ["om_memorial"]
+    hbl._LAST_SENT_IDS.clear()
+
+
 def test_failed_memorial_flush_retains_exact_card(tmp_path, monkeypatch):
     card = _memorial_card("mem_retry")
     (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
@@ -227,6 +251,27 @@ def test_flush_dedups_and_records_engagement(tmp_path, monkeypatch):
     entries = [json.loads(l) for l in elog.splitlines()]
     assert any(e["type"] == "sent" and e["source"] == "content-recommend"
                and e.get("via") == "night-digest" for e in entries)
+
+
+def test_text_flush_only_consumes_ids_from_its_own_send(tmp_path, monkeypatch):
+    (tmp_path / ".heartbeat_last_source").write_text("content-recommend")
+    _queue_for_morning("自己的攒批消息", tmp_path)
+    hbl._LAST_SENT_IDS[:] = ["om_previous"]
+
+    def send_text(*_args, **_kwargs):
+        hbl._LAST_SENT_IDS.append("om_digest")
+        return True
+
+    monkeypatch.setattr(hbl, "_lark_send_text", send_text)
+
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
+    assert hbl._LAST_SENT_IDS == ["om_previous"]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "engagement_log.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["message_ids"] == ["om_digest"]
+    hbl._LAST_SENT_IDS.clear()
 
 
 def test_record_engagement_includes_prompt_variant_sidecar(tmp_path):

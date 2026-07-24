@@ -68,9 +68,29 @@ def test_every_delivery_connection_is_closed(monkeypatch, tmp_path):
         DeliveryEnvelope(source="fd-test", payload={"text": "hello"})
     ).state == "delivered"
     assert opened
+    assert len(opened) <= 2
     for connection in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connection.execute("SELECT 1")
+
+
+def test_delivery_schema_is_initialized_once_per_database(
+        monkeypatch, tmp_path):
+    calls = []
+    real_ensure = delivery._ensure_schema
+
+    def tracked_ensure(db):
+        calls.append(1)
+        real_ensure(db)
+
+    monkeypatch.setattr(delivery, "_ensure_schema", tracked_ensure)
+    path = tmp_path / "jarvis.db"
+    with delivery.closing(delivery._connect(path)):
+        pass
+    with delivery.closing(delivery._connect(path)):
+        pass
+
+    assert calls == [1]
 
 
 def test_notice_and_phone_decision_route_to_web(pipeline):
@@ -228,6 +248,29 @@ def test_sanitize_blocks_internal_surfaces(pipeline, text, reason):
     assert not sent
 
 
+def test_blocked_payloads_keep_distinct_audit_hashes(pipeline):
+    pipe, sent, _ = pipeline
+    first = pipe.deliver(DeliveryEnvelope(
+        source="heartbeat",
+        payload={"text": "You've hit your monthly spend limit"},
+        requested_channel="lark",
+    ))
+    second = pipe.deliver(DeliveryEnvelope(
+        source="heartbeat",
+        payload={"text": "Prompt is too long"},
+        requested_channel="lark",
+    ))
+
+    assert first.state == second.state == "suppressed"
+    assert first.delivery_id != second.delivery_id
+    assert pipe.get(first.delivery_id)["content_hash"]
+    assert (
+        pipe.get(first.delivery_id)["content_hash"]
+        != pipe.get(second.delivery_id)["content_hash"]
+    )
+    assert sent == []
+
+
 def test_sanitize_strips_plan_line_but_keeps_answer(pipeline):
     pipe, sent, _ = pipeline
     result = pipe.deliver(DeliveryEnvelope(
@@ -314,11 +357,14 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
     assert pipe.get(result.delivery_id)["last_error"] == "adapter crashed"
 
 
-def test_retry_exhaustion_is_durable_and_dead_lettered(tmp_path):
+def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
+    now = [datetime(2026, 7, 23, 14, 0).timestamp()]
+    calls = []
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite",
-        transport=lambda _e, _c: TransportResult(False, error="offline"),
-        clock=lambda: datetime(2026, 7, 23, 14, 0).timestamp(),
+        transport=lambda _e, _c: (
+            calls.append(1) or TransportResult(False, error="offline")),
+        clock=lambda: now[0],
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -326,13 +372,39 @@ def test_retry_exhaustion_is_durable_and_dead_lettered(tmp_path):
         requested_channel="lark"))
     assert result.accepted is True
     assert result.state == "queued"
+    assert pipe.pending_dead_letters() == []
+
+    now[0] += 301
+    assert pipe.flush_due()[0].state == "queued"
+    now[0] += 301
+    terminal = pipe.flush_due()[0]
+    assert terminal.state == "failed"
+    assert pipe.get(result.delivery_id)["attempts"] == delivery.MAX_DELIVERY_ATTEMPTS
     assert pipe.get(result.delivery_id)["last_error"] == "offline"
     dead = pipe.pending_dead_letters()
     assert dead[0]["delivery_id"] == result.delivery_id
     pipe.mark_dead_letters_notified([dead[0]["id"]])
     assert pipe.pending_dead_letters() == []
-    pipe.flush_due()
+    now[0] += 301
+    assert pipe.flush_due() == []
+    assert len(calls) == delivery.MAX_DELIVERY_ATTEMPTS
     assert pipe.pending_dead_letters() == []
+
+
+def test_state_updates_reject_unknown_columns(tmp_path):
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda _e, _c: TransportResult(True),
+        sleeper=lambda _: None,
+    )
+    result = pipe.deliver(DeliveryEnvelope(
+        source="test", payload={"text": "state allowlist"}))
+    with delivery.closing(delivery._connect(pipe.path)) as db:
+        with pytest.raises(ValueError, match="unsupported delivery fields"):
+            pipe._set_state(
+                db, result.delivery_id, "delivered",
+                unexpected_column="not allowed",
+            )
 
 
 def test_provider_and_model_are_recorded(pipeline):

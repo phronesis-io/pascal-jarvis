@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 SURFACES = {"desktop", "mobile"}
@@ -19,9 +21,65 @@ ACTIVE_STATES = {"open", "claimed"}
 TERMINAL_STATES = {"completed", "cancelled"}
 
 
-def _db():
-    from dashboard.db import get_db
-    return get_db()
+_HANDOFF_SCHEMA = """
+CREATE TABLE IF NOT EXISTS surface_handoffs (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL DEFAULT '',
+    from_surface TEXT NOT NULL,
+    to_surface TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    title TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT 'local',
+    created_epoch REAL NOT NULL,
+    claimed_epoch REAL,
+    completed_epoch REAL,
+    delivery_id TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_surface_handoff_active_unique
+    ON surface_handoffs(entity_type, entity_id, to_surface)
+    WHERE status IN ('open', 'claimed');
+CREATE INDEX IF NOT EXISTS idx_surface_handoff_target
+    ON surface_handoffs(to_surface, status, created_epoch DESC);
+CREATE INDEX IF NOT EXISTS idx_surface_handoff_entity
+    ON surface_handoffs(entity_type, entity_id, created_epoch DESC);
+"""
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_READY: dict[Path, tuple[int, int]] = {}
+
+
+def _database_path() -> Path:
+    from dashboard.db import _db_path
+    return Path(_db_path())
+
+
+def _connect() -> sqlite3.Connection:
+    path = _database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), timeout=5)
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=5000")
+        resolved = path.resolve()
+        with _SCHEMA_LOCK:
+            stat = resolved.stat()
+            identity = (int(stat.st_dev), int(stat.st_ino))
+            if _SCHEMA_READY.get(resolved) != identity:
+                db.executescript(_HANDOFF_SCHEMA)
+                db.commit()
+                stat = resolved.stat()
+                _SCHEMA_READY[resolved] = (
+                    int(stat.st_dev), int(stat.st_ino))
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def _decode(row) -> dict:
@@ -55,17 +113,6 @@ def _require_entity(entity_type: str, entity_id: str) -> None:
             entity_id, include_links=False, include_events=False) is not None
     if not exists:
         raise KeyError(entity_id)
-
-
-def _database_path() -> Path | None:
-    try:
-        rows = _db().execute("PRAGMA database_list").fetchall()
-    except sqlite3.Error:
-        return None
-    for row in rows:
-        if str(row["name"]) == "main" and row["file"]:
-            return Path(str(row["file"]))
-    return None
 
 
 def _notify_mobile(handoff: dict) -> dict:
@@ -137,49 +184,55 @@ def create_handoff(
     to_surface = str(to_surface or "").strip()
     _validate(entity_type, entity_id, from_surface, to_surface)
     _require_entity(entity_type, entity_id)
-    db = _db()
     now = float(clock())
-    existing = db.execute(
-        "SELECT * FROM surface_handoffs WHERE entity_type=? AND entity_id=? "
-        "AND to_surface=? AND status IN ('open','claimed') "
-        "ORDER BY created_epoch DESC LIMIT 1",
-        (entity_type, entity_id, to_surface),
-    ).fetchone()
-    if existing:
-        return {**_decode(existing), "created": False}
-
     handoff_id = f"hop_{uuid.uuid4().hex}"
-    try:
-        db.execute(
-            """
-            INSERT INTO surface_handoffs (
-                id,entity_type,entity_id,matter_id,from_surface,to_surface,
-                status,title,note,created_by,created_epoch,metadata
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                handoff_id, entity_type, entity_id, str(matter_id or ""),
-                from_surface, to_surface, "open", str(title or "")[:300],
-                str(note or "")[:1000], str(created_by or "local")[:120],
-                now, json.dumps(metadata or {}, ensure_ascii=False),
-            ),
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        db.rollback()
-        existing = db.execute(
-            "SELECT * FROM surface_handoffs WHERE entity_type=? AND entity_id=? "
-            "AND to_surface=? AND status IN ('open','claimed') "
-            "ORDER BY created_epoch DESC LIMIT 1",
-            (entity_type, entity_id, to_surface),
-        ).fetchone()
-        if existing:
-            return {**_decode(existing), "created": False}
-        raise
+    with closing(_connect()) as db:
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT * FROM surface_handoffs "
+                "WHERE entity_type=? AND entity_id=? AND to_surface=? "
+                "AND status IN ('open','claimed') "
+                "ORDER BY created_epoch DESC LIMIT 1",
+                (entity_type, entity_id, to_surface),
+            ).fetchone()
+            if existing:
+                db.commit()
+                return {**_decode(existing), "created": False}
+            db.execute(
+                """
+                INSERT INTO surface_handoffs (
+                    id,entity_type,entity_id,matter_id,from_surface,to_surface,
+                    status,title,note,created_by,created_epoch,metadata
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    handoff_id, entity_type, entity_id, str(matter_id or ""),
+                    from_surface, to_surface, "open", str(title or "")[:300],
+                    str(note or "")[:1000], str(created_by or "local")[:120],
+                    now, json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM surface_handoffs WHERE id=?", (handoff_id,)
+            ).fetchone()
+            db.commit()
+        except sqlite3.IntegrityError:
+            db.rollback()
+            existing = db.execute(
+                "SELECT * FROM surface_handoffs "
+                "WHERE entity_type=? AND entity_id=? AND to_surface=? "
+                "AND status IN ('open','claimed') "
+                "ORDER BY created_epoch DESC LIMIT 1",
+                (entity_type, entity_id, to_surface),
+            ).fetchone()
+            if existing:
+                return {**_decode(existing), "created": False}
+            raise
+        except Exception:
+            db.rollback()
+            raise
 
-    row = db.execute(
-        "SELECT * FROM surface_handoffs WHERE id=?", (handoff_id,)
-    ).fetchone()
     item = {**_decode(row), "created": True}
     if to_surface == "mobile" and notify:
         try:
@@ -191,11 +244,11 @@ def create_handoff(
                 "delivery_reason": str(exc)[:300],
             }
         if delivery["delivery_id"]:
-            db.execute(
-                "UPDATE surface_handoffs SET delivery_id=? WHERE id=?",
-                (delivery["delivery_id"], handoff_id),
-            )
-            db.commit()
+            with closing(_connect()) as db, db:
+                db.execute(
+                    "UPDATE surface_handoffs SET delivery_id=? WHERE id=?",
+                    (delivery["delivery_id"], handoff_id),
+                )
         item.update(delivery)
     return item
 
@@ -221,19 +274,21 @@ def list_handoffs(
         params.append(status)
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
     params.append(max(1, min(int(limit), 500)))
-    rows = _db().execute(
-        f"SELECT * FROM surface_handoffs{where} "
-        "ORDER BY created_epoch DESC LIMIT ?",
-        params,
-    ).fetchall()
+    with closing(_connect()) as db:
+        rows = db.execute(
+            f"SELECT * FROM surface_handoffs{where} "
+            "ORDER BY created_epoch DESC LIMIT ?",
+            params,
+        ).fetchall()
     return [_decode(row) for row in rows]
 
 
 def get_handoff(handoff_id: str) -> dict | None:
-    row = _db().execute(
-        "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
-    ).fetchone()
-    return _decode(row) if row else None
+    with closing(_connect()) as db:
+        existing = db.execute(
+            "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
+        ).fetchone()
+    return _decode(existing) if existing else None
 
 
 def claim_handoff(
@@ -244,39 +299,44 @@ def claim_handoff(
 ) -> dict:
     if surface not in SURFACES:
         raise ValueError("surface must be desktop or mobile")
-    db = _db()
-    row = db.execute(
-        "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
-    ).fetchone()
-    if not row:
-        raise KeyError(handoff_id)
-    if str(row["to_surface"]) != surface:
-        raise ValueError("handoff belongs to another surface")
-    if str(row["status"]) == "open":
-        db.execute(
-            "UPDATE surface_handoffs SET status='claimed',claimed_epoch=? "
-            "WHERE id=? AND status='open'",
-            (float(clock()), str(handoff_id)),
-        )
-        db.commit()
-    return get_handoff(handoff_id)
+    with closing(_connect()) as db, db:
+        row = db.execute(
+            "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
+        ).fetchone()
+        if not row:
+            raise KeyError(handoff_id)
+        if str(row["to_surface"]) != surface:
+            raise ValueError("handoff belongs to another surface")
+        if str(row["status"]) == "open":
+            db.execute(
+                "UPDATE surface_handoffs SET status='claimed',claimed_epoch=? "
+                "WHERE id=? AND status='open'",
+                (float(clock()), str(handoff_id)),
+            )
+        updated = db.execute(
+            "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
+        ).fetchone()
+    return _decode(updated)
 
 
 def complete_handoff(handoff_id: str, *, clock=time.time) -> dict:
-    db = _db()
-    row = db.execute(
-        "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
-    ).fetchone()
-    if not row:
-        raise KeyError(handoff_id)
-    if str(row["status"]) in ACTIVE_STATES:
-        db.execute(
-            "UPDATE surface_handoffs SET status='completed',completed_epoch=? "
-            "WHERE id=? AND status IN ('open','claimed')",
-            (float(clock()), str(handoff_id)),
-        )
-        db.commit()
-    return get_handoff(handoff_id)
+    with closing(_connect()) as db, db:
+        row = db.execute(
+            "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
+        ).fetchone()
+        if not row:
+            raise KeyError(handoff_id)
+        if str(row["status"]) in ACTIVE_STATES:
+            db.execute(
+                "UPDATE surface_handoffs "
+                "SET status='completed',completed_epoch=? "
+                "WHERE id=? AND status IN ('open','claimed')",
+                (float(clock()), str(handoff_id)),
+            )
+        updated = db.execute(
+            "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
+        ).fetchone()
+    return _decode(updated)
 
 
 def complete_entity_handoffs(
@@ -287,12 +347,11 @@ def complete_entity_handoffs(
 ) -> int:
     if entity_type not in ENTITY_TYPES:
         raise ValueError("entity_type must be memorial or matter")
-    db = _db()
-    changed = db.execute(
-        "UPDATE surface_handoffs SET status='completed',completed_epoch=? "
-        "WHERE entity_type=? AND entity_id=? "
-        "AND status IN ('open','claimed')",
-        (float(clock()), entity_type, str(entity_id)),
-    ).rowcount
-    db.commit()
+    with closing(_connect()) as db, db:
+        changed = db.execute(
+            "UPDATE surface_handoffs SET status='completed',completed_epoch=? "
+            "WHERE entity_type=? AND entity_id=? "
+            "AND status IN ('open','claimed')",
+            (float(clock()), entity_type, str(entity_id)),
+        ).rowcount
     return int(changed)

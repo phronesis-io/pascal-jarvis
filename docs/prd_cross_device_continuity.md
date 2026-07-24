@@ -104,6 +104,9 @@ attention state only.
 - A handoff must cross surfaces; desktop-to-desktop and mobile-to-mobile are
   rejected.
 - Creating the durable row happens before Push.
+- Handoff calls use one connection per operation and always close it. Active
+  creation runs under `BEGIN IMMEDIATE` plus the unique active-handoff index,
+  so concurrent desktop/mobile requests converge on one row.
 - Push uses `core.delivery`, including audit, retry, model metadata, and exact
   URL payload.
 - A missing Push subscription does not erase the handoff.

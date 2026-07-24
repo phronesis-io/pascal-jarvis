@@ -75,14 +75,17 @@ Item / Matter
 ## Module Boundaries
 
 - `core.delivery`: the only user-facing retry, dedup, quiet-hour, throttle,
-  routing, and delivery-state machine.
+  routing, and delivery-state machine. It uses short-lived connections,
+  initializes schema once per database inode, and never holds a transaction
+  across a network send.
 - `core.memorial`: visible Item and decision ledger.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.matters`: durable topic identity and executor context.
-- `core.continuity`: device handoff leases and resume state.
+- `core.continuity`: device handoff leases and resume state. Each operation
+  owns and closes its SQLite connection; active-handoff creation is atomic.
 - `core.perception`: typed inbound signals and sensitivity.
 - `core.eigenflux_messages`: deterministic friend identity, message
-  idempotency, send receipt, and authoritative read-back.
+  idempotency, paginated discovery, send receipt, and authoritative read-back.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.

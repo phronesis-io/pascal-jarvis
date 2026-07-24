@@ -71,6 +71,34 @@ def test_handoff_is_idempotent_claimable_and_completable():
     assert list_handoffs(target_surface="desktop") == []
 
 
+def test_every_handoff_connection_is_closed(monkeypatch):
+    from core import continuity
+
+    opened = []
+    real_connect = continuity._connect
+
+    def tracked_connect():
+        connection = real_connect()
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(continuity, "_connect", tracked_connect)
+    memorial_id, _ = memorial.create(
+        "test", "连接生命周期", "每次操作都应关闭", preset="fyi", send=False)
+    handoff = create_handoff(
+        "memorial", memorial_id, from_surface="mobile",
+        to_surface="desktop", notify=False)
+    assert get_handoff(handoff["id"])
+    assert list_handoffs(target_surface="desktop")
+    assert claim_handoff(handoff["id"], surface="desktop")["status"] == "claimed"
+    assert complete_handoff(handoff["id"])["status"] == "completed"
+
+    assert opened
+    for connection in opened:
+        with pytest.raises(Exception, match="closed"):
+            connection.execute("SELECT 1")
+
+
 def test_completing_entity_closes_every_direction():
     memorial.create(
         "test", "双向接力", "完整背景", preset="fyi", send=False)

@@ -161,7 +161,15 @@ def register_runtime(
                 heartbeat_sha256=excluded.heartbeat_sha256,
                 metadata=excluded.metadata
             """,
-            tuple(row.values()),
+            (
+                row["component"],
+                row["pid"],
+                row["git_head"],
+                row["code_mtime"],
+                row["started_epoch"],
+                row["heartbeat_sha256"],
+                row["metadata"],
+            ),
         )
     return {**row, "metadata": details}
 
@@ -239,14 +247,15 @@ def verify_runtime(
         })
     if not rows:
         issues.append("no runtime registrations")
+    dirty_paths = _dirty_runtime_paths(project)
     return {
         "ok": not issues,
         "git_head": current_head,
         "components": components,
         "issues": issues,
         "warnings": [
-            "uncommitted runtime code: " + ", ".join(_dirty_runtime_paths(project))
-        ] if _dirty_runtime_paths(project) else [],
+            "uncommitted runtime code: " + ", ".join(dirty_paths)
+        ] if dirty_paths else [],
     }
 
 
