@@ -10,6 +10,7 @@ Usage (from bot.sh):
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -134,6 +135,7 @@ class ActionProcessor:
             return (cleaned + "\n\n（⚙️ 动作类指令仅限主人触发，这里只答疑不执行）").strip()
 
         results = []
+        authoritative_results = []
         handled_markers = []
         for marker in markers:
             body = marker[8:-1]  # strip [ACTION: and ]
@@ -144,7 +146,10 @@ class ActionProcessor:
             if handler:
                 result = handler(params_raw)
                 if result:
-                    results.append(result)
+                    if action_type == "eigenflux_message":
+                        authoritative_results.append(result)
+                    else:
+                        results.append(result)
                 handled_markers.append(marker)
 
         # Only strip markers we actually handled — leave unknown ones for bash
@@ -153,6 +158,11 @@ class ActionProcessor:
             cleaned = cleaned.replace(marker, "", 1)
         cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip())
 
+        # A verified external action owns its completion wording. Suppress the
+        # model-authored wrapper entirely so "已发送" cannot survive beside a
+        # failed/verifying receipt.
+        if authoritative_results:
+            return "\n".join(authoritative_results + results)
         if results:
             return cleaned + "\n" + "\n".join(results)
         return cleaned
@@ -261,6 +271,36 @@ class ActionProcessor:
         if failed:
             raise RuntimeError(result)
         return result
+
+    def _do_eigenflux_message(self, raw: str) -> str:
+        """Send a friend DM through deterministic resolution and read-back.
+
+        ``content_b64`` keeps arbitrary message bodies out of the marker's
+        pipe-delimited parameter grammar.  The handler's result, not model
+        prose, is the user-visible completion receipt.
+        """
+        from core.eigenflux_messages import EigenFluxMessenger
+
+        params = parse_params(raw)
+        recipient = params.get("recipient", "")
+        encoded = params.get("content_b64", "")
+        if not recipient or not encoded:
+            return "❌ EigenFlux 消息缺少收件人或正文，未发送"
+        try:
+            content = base64.b64decode(
+                encoded.encode("ascii"), validate=True
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return "❌ EigenFlux 消息正文编码无效，未发送"
+        try:
+            receipt = EigenFluxMessenger(root=self.jarvis_dir).send(
+                recipient,
+                content,
+                repeat_token=params.get("repeat_token", ""),
+            )
+        except Exception as exc:
+            return f"❌ EigenFlux 消息未发送：{exc}"
+        return receipt.human_text()
 
     # ── Heartbeat ──
 

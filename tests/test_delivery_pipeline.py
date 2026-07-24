@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
 
 import pytest
 
+import core.delivery as delivery
 from core.delivery import (
     DeliveryEnvelope,
     DeliveryPipeline,
@@ -43,6 +45,32 @@ def test_state_machine_deliver_read_acted(pipeline):
     assert pipe.confirm(result.delivery_id, "read").state == "read"
     assert pipe.confirm(result.delivery_id, "acted").state == "acted"
     assert pipe.get(result.delivery_id)["acted_epoch"]
+
+
+def test_every_delivery_connection_is_closed(monkeypatch, tmp_path):
+    """A resident heartbeat must not leak one SQLite FD per state change."""
+    opened = []
+    real_connect = delivery._connect
+
+    def tracked_connect(path):
+        connection = real_connect(path)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(delivery, "_connect", tracked_connect)
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(True, "msg-ok"),
+        sleeper=lambda _seconds: None,
+    )
+    assert pipe.deliver(
+        DeliveryEnvelope(source="fd-test", payload={"text": "hello"})
+    ).state == "delivered"
+    assert opened
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
 
 
 def test_notice_and_phone_decision_route_to_web(pipeline):

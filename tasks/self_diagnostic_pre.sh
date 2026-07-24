@@ -177,6 +177,20 @@ echo ""
 (cd "$JARVIS_DIR" && python3 -m core.components 2>/dev/null) \
   || true  # non-zero exit = failing components; the ⚠️ lines carry the signal
 
+# 7c.1 Resident resource headroom. The 2026-07-24 heartbeat accumulated
+# SQLite descriptors until [Errno 24] interrupted live conversations.
+echo ""
+echo "--- Resident Resources ---"
+_heartbeat_pid=$(ps -eo pid,args | awk \
+  '/[Pp]ython[^ ]* -m core\.heartbeat_loop/ {print $1; exit}')
+if [ -n "$_heartbeat_pid" ]; then
+  (cd "$JARVIS_DIR" && python3 -m core.resource_health \
+    --pid "$_heartbeat_pid" 2>/dev/null) \
+    || true
+else
+  echo "⚠️ heartbeat-loop PID unavailable for resource check"
+fi
+
 # 7c. Intent breach daily check (REQ-35): silently-expired commitments in the
 #     last 24h mean the retry+breach pipeline itself is broken — page loudly.
 echo ""

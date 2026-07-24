@@ -8,6 +8,7 @@ the conftest guard forbids touching live repo state.
 
 import fcntl
 import json
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -49,6 +50,26 @@ def test_emit_appends_one_line_per_event(tmp_path):
     events = _read_events(tmp_path)
     assert [e["event"] for e in events] == ["task_spawn", "task_finish"]
     assert events[1]["status"] == "ok"
+
+
+def test_sqlite_projection_closes_connection(monkeypatch, tmp_path):
+    """The event writer is called continuously by the resident heartbeat."""
+    db_path = tmp_path / "data" / "jarvis.db"
+    db_path.parent.mkdir(parents=True)
+    sqlite3.connect(db_path).close()
+    opened = []
+    real_connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(se.sqlite3, "connect", tracked_connect)
+    emit(tmp_path, "task_spawn", task="fd-test", run_id="r1")
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
 
 
 # ── emit: never-raise contract ───────────────────────────────────────

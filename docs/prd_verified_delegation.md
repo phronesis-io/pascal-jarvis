@@ -1,7 +1,7 @@
 # PRD: Verified Delegation - 从一句话到可信完成
 
 - Date: 2026-07-24
-- Status: Proposed, ready for implementation review
+- Status: Active; connector-first Phase 1 in implementation
 - Owner: Pascal
 - Priority: P0
 - Product principle: 完成是一种有证据的状态，不是一句模型生成的话。

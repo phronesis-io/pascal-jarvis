@@ -1,0 +1,66 @@
+---
+name: jarvis-localtest
+description: Validate Pascal Jarvis changes from focused tests through production runtime smoke checks.
+metadata:
+  internal: true
+---
+
+# Jarvis Local Test
+
+Use this skill after any behavior or runtime change.
+
+## 1. Preserve the worktree
+
+Run `git status --short --branch`. Do not reset or stage files owned by another
+session. Review the exact diff you intend to ship.
+
+## 2. Focused verification
+
+Run the smallest tests that exercise the changed contract first. A bug fix
+must include the regression scenario, its interrupted/failure path, and
+idempotency when it performs a side effect.
+
+For shell changes:
+
+```bash
+bash -n bot.sh
+bash -n path/to/changed-script.sh
+```
+
+## 3. Full local gate
+
+```bash
+./scripts/localtest.sh
+```
+
+This runs shell syntax, shellcheck when installed, the full pytest suite, and
+public-repository hygiene.
+
+## 4. Self-review
+
+Inspect:
+
+- authority/read-back for completion claims;
+- duplicate mutation after retry or callback;
+- wrong-target and ambiguity behavior;
+- private data in tracked fixtures, docs, logs, and API results;
+- compatibility with existing dirty worktree changes;
+- current documentation and PRD portfolio status.
+
+## 5. Production verification
+
+Only on the production machine, after committing the intended revision:
+
+```bash
+./restart.sh --yes
+./scripts/localtest.sh --runtime
+```
+
+The runtime gate requires component health, deploy verification, and smoke
+checks. For resource-lifecycle changes, sample the live process more than once
+across real scheduler activity; a clean restart alone does not prove a leak is
+fixed.
+
+Do not perform a real message, calendar, document, or public mutation merely
+for smoke testing. Use a read-only preflight unless the owner explicitly
+authorized the test side effect.

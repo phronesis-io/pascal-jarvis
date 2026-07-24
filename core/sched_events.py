@@ -42,6 +42,7 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 from core.timeutil import now_local_str
@@ -63,7 +64,7 @@ def _sqlite_emit(jarvis_dir: Path, entry: dict) -> None:
     # "jarvis.db exists" as proof their own schema is available.
     if not path.exists():
         return
-    with sqlite3.connect(str(path), timeout=3) as db:
+    with closing(sqlite3.connect(str(path), timeout=3)) as db, db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=3000")
         db.execute("""
@@ -99,7 +100,7 @@ def _sqlite_query(jarvis_dir: Path, since: str, until: str,
     if not path.exists():
         return []
     try:
-        with sqlite3.connect(str(path), timeout=3) as db:
+        with closing(sqlite3.connect(str(path), timeout=3)) as db, db:
             db.row_factory = sqlite3.Row
             have = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -135,12 +136,16 @@ def _db_path(root: Path, explicit: str | Path | None = None) -> Path:
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(path), timeout=5)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    _ensure_schema(db)
-    return db
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        _ensure_schema(db)
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def _ensure_schema(db: sqlite3.Connection) -> None:
@@ -596,7 +601,7 @@ class DeliveryPipeline:
         now = self.clock()
         route = _route(envelope)
         content_hash = _content_hash(envelope)
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             duplicate = (
                 None if envelope.metadata.get("bypass_dedup")
                 else self._duplicate(db, envelope, content_hash, now)
@@ -650,7 +655,7 @@ class DeliveryPipeline:
 
     def _attempt(self, envelope: DeliveryEnvelope, route: str) -> DeliveryResult:
         claimed_at = self.clock()
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             cursor = db.execute(
                 "UPDATE delivery_envelopes SET state='attempting',"
                 "updated_epoch=? WHERE id=? AND (state='queued' OR "
@@ -686,7 +691,7 @@ class DeliveryPipeline:
             if delay:
                 self.sleeper(delay)
             started = self.clock()
-            with _connect(self.path) as db:
+            with closing(_connect(self.path)) as db, db:
                 self._set_state(
                     db, envelope.id, "attempting",
                     f"attempt {number}", attempts=number,
@@ -704,7 +709,7 @@ class DeliveryPipeline:
                     raise TypeError("transport must return TransportResult")
             except Exception as exc:
                 result = TransportResult(False, error=str(exc))
-            with _connect(self.path) as db:
+            with closing(_connect(self.path)) as db, db:
                 db.execute(
                     "UPDATE delivery_attempts SET finished_epoch=?,status=?,"
                     "error=?,message_id=? WHERE id=?",
@@ -753,7 +758,7 @@ class DeliveryPipeline:
             last_error = result.error or "transport failed"
 
         next_attempt = self.clock() + 5 * 60
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             self._set_state(
                 db, envelope.id, "queued", "retry exhausted",
                 next_attempt_epoch=next_attempt, last_error=last_error[:500],
@@ -777,7 +782,7 @@ class DeliveryPipeline:
 
     def flush_due(self, limit: int = 50) -> list[DeliveryResult]:
         now = self.clock()
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             rows = db.execute(
                 "SELECT * FROM delivery_envelopes WHERE "
                 "(state='queued' AND "
@@ -806,7 +811,7 @@ class DeliveryPipeline:
         if state not in {"read", "acted"}:
             raise ValueError("confirmation state must be read or acted")
         now = self.clock()
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             row = db.execute(
                 "SELECT * FROM delivery_envelopes WHERE id=?",
                 (delivery_id,),
@@ -844,7 +849,7 @@ class DeliveryPipeline:
             ("memorial_id", memorial_id) if memorial_id
             else ("message_id", message_id)
         )
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             rows = db.execute(
                 f"SELECT id FROM delivery_envelopes WHERE {where}=? "
                 "AND state IN ('delivered','read','acted')",
@@ -859,7 +864,7 @@ class DeliveryPipeline:
         return results
 
     def get(self, delivery_id: str) -> dict | None:
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             row = db.execute(
                 "SELECT * FROM delivery_envelopes WHERE id=?",
                 (delivery_id,),
@@ -874,11 +879,11 @@ class DeliveryPipeline:
             params.append(state)
         query += " ORDER BY created_epoch DESC LIMIT ?"
         params.append(max(1, min(int(limit), 500)))
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             return [dict(row) for row in db.execute(query, params).fetchall()]
 
     def pending_dead_letters(self, limit: int = 100) -> list[dict]:
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             rows = db.execute(
                 "SELECT * FROM delivery_dead_letters "
                 "WHERE notified_epoch IS NULL ORDER BY created_epoch LIMIT ?",
@@ -890,7 +895,7 @@ class DeliveryPipeline:
         if not ids:
             return
         placeholders = ",".join("?" for _ in ids)
-        with _connect(self.path) as db:
+        with closing(_connect(self.path)) as db, db:
             db.execute(
                 f"UPDATE delivery_dead_letters SET notified_epoch=? "
                 f"WHERE id IN ({placeholders})",
