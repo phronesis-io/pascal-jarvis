@@ -333,7 +333,25 @@ def _migrate():
             try:
                 db.execute(f"ALTER TABLE intentions ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError as e:
-                print(f"[intentions._migrate] skip {col}: {e}", file=sys.stderr)
+                print(
+                    f"[intentions._migrate] defer {col}: {e}",
+                    file=sys.stderr,
+                )
+    migrated = {
+        row[1]
+        for row in db.execute(
+            "PRAGMA table_info(intentions)"
+        ).fetchall()
+    }
+    remaining = {
+        col for col, _ddl in _NEW_COLS if col not in migrated
+    }
+    if remaining:
+        db.rollback()
+        raise sqlite3.OperationalError(
+            "intentions migration incomplete; missing columns: "
+            + ", ".join(sorted(remaining))
+        )
     db.execute("CREATE INDEX IF NOT EXISTS idx_intentions_closure ON intentions(closure_status)")
     db.commit()
     # Backfill next_fire_at for live cron rows that predate the column
@@ -536,6 +554,34 @@ def _cancel_sources(row) -> list[str]:
     return sources
 
 
+def _followup_inherits_parent(row, parent_intent_id: str) -> bool:
+    return bool(
+        str(row["cancel_parent_intent_id"] or "") == parent_intent_id
+        or (
+            not str(row["cancel_parent_intent_id"] or "")
+            and str(row["parent_intent_id"] or "") == parent_intent_id
+            and str(row["last_error"] or "") == "parent cancelled"
+        )
+    )
+
+
+def _cancelled_parent_for_followup(db, row):
+    parent_intent_id = str(row["parent_intent_id"] or "")
+    if not parent_intent_id:
+        return None
+    parent = db.execute(
+        "SELECT * FROM intentions WHERE id=?",
+        (parent_intent_id,),
+    ).fetchone()
+    if (
+        parent is None
+        or str(parent["status"]) != "cancelled"
+        or str(parent["closure_followup_id"] or "") != str(row["id"])
+    ):
+        return None
+    return parent
+
+
 def _legacy_cancelled_status(row) -> str | None:
     """Choose a non-repeating legacy state only when current facts support it."""
     trigger_type = str(row["trigger_type"] or "")
@@ -624,24 +670,9 @@ def cancel_intent(
                     ).fetchone()
                     inherited = bool(
                         followup is not None
-                        and (
-                            str(
-                                followup["cancel_parent_intent_id"] or ""
-                            )
-                            == intent_id
-                            or (
-                                not str(
-                                    followup[
-                                        "cancel_parent_intent_id"
-                                    ] or ""
-                                )
-                                and str(
-                                    followup["parent_intent_id"] or ""
-                                )
-                                == intent_id
-                                and str(followup["last_error"] or "")
-                                == "parent cancelled"
-                            )
+                        and _followup_inherits_parent(
+                            followup,
+                            intent_id,
                         )
                     )
                     if (
@@ -680,6 +711,23 @@ def cancel_intent(
                     intent_id,
                 ),
             )
+            followup_id = str(row["closure_followup_id"] or "")
+            if followup_id:
+                followup = db.execute(
+                    "SELECT * FROM intentions WHERE id=?",
+                    (followup_id,),
+                ).fetchone()
+                if (
+                    followup is not None
+                    and str(followup["status"]) == "cancelled"
+                    and _followup_inherits_parent(followup, intent_id)
+                ):
+                    db.execute(
+                        "UPDATE intentions SET last_error='parent cancelled',"
+                        "cancel_source='',cancel_sources='[]',"
+                        "cancel_parent_intent_id=? WHERE id=?",
+                        (intent_id, followup_id),
+                    )
             db.commit()
         elif started_transaction:
             db.rollback()
@@ -782,18 +830,9 @@ def restore_cancelled_intent(
             ).fetchone()
             inherited = bool(
                 followup is not None
-                and (
-                    str(followup["cancel_parent_intent_id"] or "")
-                    == intent_id
-                    or (
-                        not str(
-                            followup["cancel_parent_intent_id"] or ""
-                        )
-                        and str(followup["parent_intent_id"] or "")
-                        == intent_id
-                        and str(followup["last_error"] or "")
-                        == "parent cancelled"
-                    )
+                and _followup_inherits_parent(
+                    followup,
+                    intent_id,
                 )
             )
             if (
@@ -820,6 +859,23 @@ def restore_cancelled_intent(
                     ),
                 )
         if remaining_sources:
+            db.commit()
+            return False
+        parent = _cancelled_parent_for_followup(db, row)
+        if parent is not None:
+            parent_sources = _cancel_sources(parent)
+            parent_id = str(parent["id"])
+            db.execute(
+                "UPDATE intentions SET last_error='parent cancelled',"
+                "cancel_source=?,cancel_sources=?,"
+                "cancel_parent_intent_id=? WHERE id=?",
+                (
+                    parent_sources[0] if parent_sources else "",
+                    json.dumps(parent_sources, ensure_ascii=False),
+                    parent_id,
+                    intent_id,
+                ),
+            )
             db.commit()
             return False
     previous_status = str(row["cancel_previous_status"] or "")

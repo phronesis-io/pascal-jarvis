@@ -203,10 +203,54 @@ def test_parent_projection_does_not_claim_independently_cancelled_followup(
     child = get_intent(followup)
     assert json.loads(child["cancel_sources"]) == [independent]
     assert child["cancel_parent_intent_id"] == ""
-    assert restore_cancelled_intent(followup, source=independent)
+    assert not restore_cancelled_intent(followup, source=independent)
+    child = get_intent(followup)
+    assert child["status"] == "cancelled"
+    assert json.loads(child["cancel_sources"]) == [
+        first_parent,
+        second_parent,
+    ]
+    assert child["cancel_parent_intent_id"] == parent
     assert not restore_cancelled_intent(parent, source=second_parent)
     assert restore_cancelled_intent(parent, source=first_parent)
     assert get_intent(followup)["status"] == "pending"
+
+
+def test_manual_parent_cancellation_permanently_suppresses_followup(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="用户终止的事项",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="不应再出现的追问",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    projection = "delegation:dlg-manual-parent:completed"
+
+    cancel_intent(parent, "delegation completed", source=projection)
+    cancel_intent(parent, "owner confirmed cancellation")
+
+    child = get_intent(followup)
+    assert child["status"] == "cancelled"
+    assert json.loads(child["cancel_sources"]) == []
+    assert child["cancel_parent_intent_id"] == parent
+    assert not restore_cancelled_intent(parent, source=projection)
+    assert not restore_cancelled_intent(followup, source=projection)
+    assert get_intent(followup)["status"] == "cancelled"
 
 
 def test_legacy_expired_intent_never_reactivates(intent_db):
@@ -608,8 +652,72 @@ def test_migrate_adds_columns_idempotent(intent_db):
     conn.close()
     for c in ("category", "input_ctx", "decision", "closure_question",
               "closure_status", "closure_result", "closure_touches",
-              "closure_followup_id", "parent_intent_id"):
+              "closure_followup_id", "parent_intent_id",
+              "cancel_parent_intent_id"):
         assert c in cols, f"missing closure column {c}"
+
+
+def test_incomplete_column_migration_retries_before_table_ready(
+    intent_db,
+    monkeypatch,
+):
+    import core.intentions as mod
+
+    with sqlite3.connect(intent_db) as conn:
+        conn.execute(
+            "ALTER TABLE intentions DROP COLUMN cancel_parent_intent_id"
+        )
+
+    class LockedOnce:
+        def __init__(self, connection):
+            self.connection = connection
+            self.locked = True
+
+        @property
+        def in_transaction(self):
+            return self.connection.in_transaction
+
+        def execute(self, sql, *args):
+            if (
+                self.locked
+                and "ADD COLUMN cancel_parent_intent_id" in sql
+            ):
+                self.locked = False
+                raise sqlite3.OperationalError("database is locked")
+            return self.connection.execute(sql, *args)
+
+        def executescript(self, *args):
+            return self.connection.executescript(*args)
+
+        def commit(self):
+            return self.connection.commit()
+
+        def rollback(self):
+            return self.connection.rollback()
+
+    connection = sqlite3.connect(intent_db)
+    connection.row_factory = sqlite3.Row
+    locked = LockedOnce(connection)
+    monkeypatch.setattr(mod, "_get_db", lambda: locked)
+    mod._table_ready = False
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="migration incomplete",
+    ):
+        mod._init()
+    assert mod._table_ready is False
+
+    mod._init()
+    assert mod._table_ready is True
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(intentions)"
+        ).fetchall()
+    }
+    assert "cancel_parent_intent_id" in columns
+    connection.close()
 
 
 def test_stats_keeps_five_keys(intent_db):

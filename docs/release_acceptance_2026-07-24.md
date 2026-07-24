@@ -293,6 +293,16 @@ recovery risks discovered during the same audit were reproduced and closed:
 | 122 | A future date Intent whose explicit validity window had elapsed could be restored pending | Legacy recovery checks an explicit expiry before inferring future eligibility, while preserving true one-shot execution evidence; elapsed-window regression |
 | 123 | A recurring cron Intent with a previous successful run could be restored executed and silently stop recurring | Cron `executed_at` is now treated as a last-occurrence watermark and restores pending unless its explicit validity window elapsed; recurring-watermark regression |
 
+The nineteenth independent review then inverted the rollback order and forced
+the additive migration through a transient database lock. Both findings and
+the adjacent manual-ownership transition were closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 124 | With parent owners A/B still terminal, withdrawing independent child owner C could reactivate a due follow-up | Child restoration now checks its exact cancelled parent in the same write transaction and atomically adopts every active parent owner before it can become pending; inverted three-owner regression |
+| 125 | A transient lock while adding the required parent-hold column could mark the table ready without the column | Migration re-reads the physical schema, raises on any still-missing required column, leaves `_table_ready` false, and succeeds on the next call; one-shot lock regression |
+| 126 | Manually confirming a projected parent cancellation could leave obsolete automatic owners on its inherited child | Manual parent confirmation now converts the child to a source-free permanent parent hold, so later projection withdrawal cannot revive the follow-up; manual-override regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -333,7 +343,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2105 passed` for this candidate);
+- full local test result (`2107 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;
