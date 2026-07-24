@@ -941,6 +941,8 @@ except Exception:
   local _use_claude_backup=0
   local _claude_backup_tried=0
   local _claude_backup2_tried=0
+  local _claude_backup_token="${CLAUDE_BACKUP_AUTH_TOKEN:-}"
+  local _claude_backup_base_url="${CLAUDE_BACKUP_BASE_URL:-}"
   local _openai_tried=0
   local _answer_provider=""
   local _answer_model=""
@@ -973,8 +975,8 @@ except Exception:
     _use_claude_backup=1
     _claude_backup2_tried=1
     _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
-    CLAUDE_BACKUP_AUTH_TOKEN="$CLAUDE_BACKUP2_AUTH_TOKEN"
-    CLAUDE_BACKUP_BASE_URL="$CLAUDE_BACKUP2_BASE_URL"
+    _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
+    _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
     log_info "[$session_id] Provider gate: primary spend-limited — starting on backup2 provider (model=$_cur_model)"
   fi
 
@@ -998,8 +1000,8 @@ except Exception:
       if [ "$_use_claude_backup" -eq 1 ]; then
         log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
         (cd "$WORK_DIR" && printf '%s' "$content" | env \
-          ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" \
-          ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL" \
+          ANTHROPIC_AUTH_TOKEN="$_claude_backup_token" \
+          ANTHROPIC_BASE_URL="$_claude_backup_base_url" \
           claude -p \
           --resume "$session_id" \
           --model "$_cur_model" \
@@ -1024,8 +1026,8 @@ except Exception:
       if [ "$_use_claude_backup" -eq 1 ]; then
         log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
         (cd "$WORK_DIR" && printf '%s' "$content" | env \
-          ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" \
-          ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL" \
+          ANTHROPIC_AUTH_TOKEN="$_claude_backup_token" \
+          ANTHROPIC_BASE_URL="$_claude_backup_base_url" \
           claude -p \
           --session-id "$session_id" \
           --model "$_cur_model" \
@@ -1138,11 +1140,9 @@ for d in descs[offset:]:
              # Narrate in a BACKGROUND fork: an inline call (even with a real
              # timeout) blocks this poll loop, delaying the 120s promotion
              # check and the 6000s watchdog by up to 12s per narration.
-             ( _n=$(with_timeout 12 claude -p \
-                 "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
-$_formatted_capped" \
-                 --model haiku --no-session-persistence --disable-slash-commands \
-                 --dangerously-skip-permissions </dev/null 2>/dev/null | head -2 | tr '\n' ' ')
+             ( _n=$(printf '%s' "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
+$_formatted_capped" | python3 -m core.aux_model \
+                 --model haiku --timeout 12 2>/dev/null | head -2 | tr '\n' ' ')
                if [ -n "$_n" ] && [ "${#_n}" -lt 200 ] && ! looks_like_error "$_n"; then
                  lark_reply_text "$message_id" "🔧 $_n" >/dev/null 2>&1
                fi ) >/dev/null 2>&1 &
@@ -1289,6 +1289,8 @@ except Exception:
         && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
         _claude_backup_tried=1
         _use_claude_backup=1
+        _claude_backup_token="$CLAUDE_BACKUP_AUTH_TOKEN"
+        _claude_backup_base_url="$CLAUDE_BACKUP_BASE_URL"
         # Log BEFORE resetting _cur_model: the old order reported "exhausted
         # on opus" even when haiku was the model that actually failed.
         log_warn "[$session_id] Primary Claude exhausted on $_cur_model → trying Claude Code backup provider"
@@ -1305,8 +1307,8 @@ except Exception:
         _use_claude_backup=1
         log_warn "[$session_id] Backup1 exhausted on $_cur_model → trying Claude Code backup2 provider"
         _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
-        CLAUDE_BACKUP_AUTH_TOKEN="$CLAUDE_BACKUP2_AUTH_TOKEN"
-        CLAUDE_BACKUP_BASE_URL="$CLAUDE_BACKUP2_BASE_URL"
+        _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
+        _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
       elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
         && [ -n "${OPENAI_API_KEY:-}" ] \
         && [ "$_openai_tried" -eq 0 ] \
@@ -1561,20 +1563,15 @@ run_background_job() {
   local output_file="$JOBS_DIR/${job_id}/output.md"
   local log_file_job="$JOBS_DIR/${job_id}/log.txt"
 
-  # Provider gate (2026-07-07): background jobs had NO fallback tier at all —
-  # every promoted/forked job failed outright during the spend-limit outage
-  # while the backup relay sat healthy. Auxiliary caller: never wins the
-  # probe election (no-probe) — jobs can't clear the flag on success, so
-  # letting them probe would burn the slot without ever reopening primary.
-  local _bg_backup=0
+  # Background jobs use the shared auxiliary router, which follows the sticky
+  # gate without taking a primary-probe slot and can continue through Backup 1,
+  # Backup 2, and the tool-capable GPT fallback.
+  local _bg_gate="primary"
   local _bg_mem_budget=""
-  if [ "$(python3 -m core.model_fallback --gate no-probe 2>/dev/null || echo primary)" = "backup" ] \
-    && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
-    && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
-    && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
-    _bg_backup=1
+  _bg_gate=$(python3 -m core.model_fallback --gate no-probe 2>/dev/null || echo primary)
+  if [ "$_bg_gate" = "backup" ]; then
     _bg_mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
-    log_info "[bg:$job_id] Provider gate: primary spend-limited — running on backup provider"
+    log_info "[bg:$job_id] Provider gate: primary unavailable — following fallback chain"
   fi
 
   # Build a minimal system prompt for the background job
@@ -1587,6 +1584,10 @@ When done, provide a clear summary of results.
 Current time: $now_ts
 
 $memory"
+  local sys_prompt_file="$JOBS_DIR/${job_id}/system_prompt.txt"
+  local provider_file="$JOBS_DIR/${job_id}/provider.json"
+  rm -f "$provider_file"
+  printf '%s' "$sys_prompt" > "$sys_prompt_file"
 
   # Inherit conversation context (REQ-16 MVP-1): fork from the conversation's
   # active session if it has a transcript — the job sees the full dialog
@@ -1608,23 +1609,21 @@ except Exception:
   set -m
   if [ -n "$_main_sid" ] && [ -f "$CLAUDE_PROJECT_DIR/${_main_sid}.jsonl" ]; then
     log_info "[bg:$job_id] Forking from session $_main_sid"
-    (cd "$WORK_DIR" && \
-      if [ "$_bg_backup" -eq 1 ]; then export ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL"; fi && \
-      with_timeout 6000 claude -p "$content" \
+    (cd "$WORK_DIR" && printf '%s' "$content" | python3 -m core.aux_model \
+      --allow-tools --timeout 6000 --model "$MAIN_MODEL" \
+      --system-prompt-file "$sys_prompt_file" \
+      --consume-system-prompt-file \
+      --metadata-file "$provider_file" \
       --resume "$_main_sid" --fork-session \
-      --model "$MAIN_MODEL" \
-      --append-system-prompt "$sys_prompt" \
-      --dangerously-skip-permissions \
-      < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+      2>>"$log_file_job" > "$output_file") &
   else
-    (cd "$WORK_DIR" && \
-      if [ "$_bg_backup" -eq 1 ]; then export ANTHROPIC_AUTH_TOKEN="$CLAUDE_BACKUP_AUTH_TOKEN" ANTHROPIC_BASE_URL="$CLAUDE_BACKUP_BASE_URL"; fi && \
-      with_timeout 6000 claude -p "$content" \
+    (cd "$WORK_DIR" && printf '%s' "$content" | python3 -m core.aux_model \
+      --allow-tools --timeout 6000 --model "$MAIN_MODEL" \
+      --system-prompt-file "$sys_prompt_file" \
+      --consume-system-prompt-file \
+      --metadata-file "$provider_file" \
       --session-id "$bg_session_id" \
-      --model "$MAIN_MODEL" \
-      --append-system-prompt "$sys_prompt" \
-      --dangerously-skip-permissions \
-      < /dev/null 2>>"$log_file_job" > "$output_file" || true) &
+      2>>"$log_file_job" > "$output_file") &
   fi
   local _bg_pid=$!
   set +m
@@ -1634,8 +1633,9 @@ except Exception:
     2>>"$LOG_FILE" || log_warn "[bg:$job_id] Failed to register PID"
 
   # Wait for completion
-  wait $_bg_pid 2>/dev/null
-  local exit_code=$?
+  local exit_code=0
+  wait "$_bg_pid" 2>/dev/null || exit_code=$?
+  rm -f "$sys_prompt_file"
 
   # Read output
   local output=""
@@ -1643,7 +1643,7 @@ except Exception:
 
   # Determine status
   local status="completed"
-  if [ -z "$output" ] || looks_like_error "$output"; then
+  if [ "$exit_code" -ne 0 ] || [ -z "$output" ] || looks_like_error "$output"; then
     status="failed"
   fi
 
@@ -1665,7 +1665,11 @@ print(j['status'] if j else 'unknown')
   JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$job_id" "$status" \
     2>>"$LOG_FILE" || log_warn "[bg:$job_id] Failed to update job status"
 
-  log_info "[bg:$job_id] Finished with status=$status (${#output} chars)"
+  local _bg_provider=""
+  if [ -f "$provider_file" ]; then
+    _bg_provider=$(python3 -c "import json; d=json.load(open('$provider_file')); print(f\"{d.get('provider','')} {d.get('model','')}\".strip())" 2>/dev/null || true)
+  fi
+  log_info "[bg:$job_id] Finished with status=$status provider=${_bg_provider:-none} (${#output} chars)"
 
   # Queue the result for context merge (REQ-16): the conversation's next
   # message gets this summary prepended, so the dialog "knows" what the job

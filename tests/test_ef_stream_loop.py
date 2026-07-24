@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import core.ef_stream_loop as efsl
 from core.ef_stream import load_seen
+from core.aux_model import AuxiliaryModelResult
 
 
 # ---- _deliver_and_mark: only a REAL success is recorded -------------------
@@ -196,3 +197,35 @@ def test_healthy_churn_policy():
     # stream back and forth every second otherwise
     assert not efsl._healthy_churn(t + 1, replaced=True)
     assert not efsl._healthy_churn(t - 1, replaced=True)
+
+
+def test_message_analysis_uses_text_only_shared_provider_chain(
+    monkeypatch, tmp_path,
+):
+    seen = {}
+
+    def fake_run(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen.update(kwargs)
+        return AuxiliaryModelResult(
+            text="建议先核对原文",
+            provider="Claude backup2",
+            model="backup2-model",
+        )
+
+    monkeypatch.setattr(efsl, "run_auxiliary_model", fake_run)
+    monkeypatch.setattr(efsl, "_fetch_history", lambda _conv: "")
+    monkeypatch.setattr(
+        efsl.Path,
+        "home",
+        classmethod(lambda _cls: tmp_path),
+    )
+
+    result = efsl._run_analysis(
+        '{"content":"hello"}', "conv-1", str(tmp_path), ""
+    )
+
+    assert result == "建议先核对原文"
+    assert seen["allow_tools"] is False
+    assert seen["process_key"] == "analysis"
+    assert "hello" in seen["prompt"]

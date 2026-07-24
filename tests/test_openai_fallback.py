@@ -9,6 +9,7 @@ def test_build_payload_includes_system_prompt():
     assert payload["max_output_tokens"] == 123
     assert "fallback" in payload["instructions"]
     assert "System rules" in payload["instructions"]
+    assert "No local tools are available" in payload["instructions"]
 
 
 def test_extract_text_prefers_output_text():

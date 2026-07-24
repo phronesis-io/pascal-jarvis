@@ -119,3 +119,35 @@ def test_worker_cli_cannot_self_authorize_create(
 
     assert delegation_cli.main(["create"]) == 2
     assert "cannot create an owner-authorized" in capsys.readouterr().out
+
+
+def test_worker_cli_cannot_resolve_owner_verification_recovery(
+    tmp_path, monkeypatch, capsys,
+):
+    delegation, step = _prepared(tmp_path, monkeypatch)
+    store = DelegationStore()
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+    store.mark_waiting(
+        delegation["id"],
+        expected_version=1,
+        waiting_on="verification_recovery",
+        needs_user=True,
+        reason_code="verification_budget_exhausted",
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps({"expected_version": 1, "actor_id": "owner"})),
+    )
+
+    assert delegation_cli.main(["retry", delegation["id"]]) == 2
+    assert "owner recovery decision" in capsys.readouterr().out
+    assert store.get(delegation["id"])["status"] == "needs_user"

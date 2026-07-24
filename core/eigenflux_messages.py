@@ -90,6 +90,17 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 ApiSender = Callable[[str, str], dict]
 
 
+def _resolve_eigenflux_home(value: str | Path | None = None) -> Path:
+    """Mirror EigenFlux CLI's --homedir/EIGENFLUX_HOME suffix semantics."""
+    raw = value or os.environ.get("EIGENFLUX_HOME")
+    home = (
+        Path(raw).expanduser()
+        if raw
+        else Path.home() / ".eigenflux"
+    )
+    return home if home.name == ".eigenflux" else home / ".eigenflux"
+
+
 def _durable_failure(exc: BaseException, operation: str) -> str:
     """Return diagnostic metadata that cannot contain a submitted payload."""
     status = re.search(
@@ -145,9 +156,7 @@ class EigenFluxApiClient:
         *,
         opener: Callable = urllib.request.urlopen,
     ):
-        self.home = Path(
-            home or os.environ.get("EIGENFLUX_HOME") or Path.home() / ".eigenflux"
-        )
+        self.home = _resolve_eigenflux_home(home)
         self.opener = opener
 
     def _connection(self) -> tuple[str, str]:

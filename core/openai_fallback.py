@@ -34,6 +34,12 @@ FALLBACK_NOTICE = (
     "the Jarvis repo root."
 )
 
+FALLBACK_TEXT_NOTICE = (
+    "You are Jarvis running through an OpenAI text fallback because the "
+    "Claude-compatible routes failed. No local tools are available in this "
+    "call. Use only the supplied system instructions and user input."
+)
+
 TOOLS = [
     {
         "type": "function",
@@ -301,7 +307,7 @@ def run_agentic(system_prompt: str, user_input: str, model: str,
 
 def build_payload(system_prompt: str, user_input: str, model: str,
                   max_output_tokens: int) -> dict[str, Any]:
-    instructions = FALLBACK_NOTICE
+    instructions = FALLBACK_TEXT_NOTICE
     if system_prompt.strip():
         instructions = f"{instructions}\n\n{system_prompt}"
     return {

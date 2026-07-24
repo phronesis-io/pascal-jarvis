@@ -256,6 +256,31 @@ def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
     assert "前一条还在处理" in bot
 
 
+def test_bot_backup2_credentials_are_scoped_to_one_message():
+    from pathlib import Path
+
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+
+    assert (
+        'local _claude_backup_token="${CLAUDE_BACKUP_AUTH_TOKEN:-}"'
+        in bot
+    )
+    assert (
+        'local _claude_backup_base_url="${CLAUDE_BACKUP_BASE_URL:-}"'
+        in bot
+    )
+    assert (
+        'CLAUDE_BACKUP_AUTH_TOKEN="$CLAUDE_BACKUP2_AUTH_TOKEN"'
+        not in bot
+    )
+    assert (
+        'CLAUDE_BACKUP_BASE_URL="$CLAUDE_BACKUP2_BASE_URL"'
+        not in bot
+    )
+    assert 'ANTHROPIC_AUTH_TOKEN="$_claude_backup_token"' in bot
+    assert 'ANTHROPIC_BASE_URL="$_claude_backup_base_url"' in bot
+
+
 def test_bot_sh_wires_sticky_provider_gate():
     from pathlib import Path
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
@@ -264,6 +289,8 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert "core.model_fallback --trip" in bot
     assert "core.model_fallback --clear" in bot         # probe success reopens
     assert "--gate no-probe" in bot                     # background jobs follow flag
+    assert "python3 -m core.aux_model" in bot
+    assert "--allow-tools --timeout 6000" in bot
     # 2026-07-08 red-team fix: the backup-tried OpenAI arm needs a COMPLETED
     # backup failure in this run (the gate presets _claude_backup_tried=1
     # before attempt 1) — one transient relay blip must retry backup, not
@@ -570,6 +597,37 @@ def test_heartbeat_claude_call_starts_on_backup_when_gate_tripped(tmp_path, monk
     assert calls[0][1].get("ANTHROPIC_BASE_URL") == "https://backup.example"
     # backup success is NOT proof primary recovered — flag must stay
     assert mf.gate(tmp_path, probe=False) == "backup"
+
+
+def test_heartbeat_starts_on_backup2_when_gate_tripped_and_backup1_missing(
+    tmp_path, monkeypatch,
+):
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    mf.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_MODEL", "backup2-model")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env") or {}))
+        return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert len(calls) == 1
+    command, env = calls[0]
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "backup2-token"
+    assert env["ANTHROPIC_BASE_URL"] == "https://backup2.example"
+    assert command[command.index("--model") + 1] == "backup2-model"
+    assert runner.last_provider == "Claude backup2"
 
 
 def test_heartbeat_probe_success_reopens_primary(tmp_path, monkeypatch):

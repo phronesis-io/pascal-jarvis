@@ -420,6 +420,23 @@ def test_api_sender_keeps_message_body_out_of_url_and_headers(tmp_path):
     assert response["data"]["msg_id"] == "m1"
 
 
+def test_api_sender_resolves_cli_home_suffix_from_environment(
+    tmp_path, monkeypatch,
+):
+    base = tmp_path / "agent-home"
+    monkeypatch.setenv("EIGENFLUX_HOME", str(base))
+
+    client = EigenFluxApiClient()
+
+    assert client.home == base / ".eigenflux"
+
+
+def test_api_sender_does_not_duplicate_existing_home_suffix(tmp_path):
+    home = tmp_path / ".eigenflux"
+
+    assert EigenFluxApiClient(home).home == home
+
+
 def test_http_error_body_is_never_persisted_as_message_state(tmp_path):
     home = tmp_path / ".eigenflux"
     credentials = home / "servers" / "production" / "credentials.json"

@@ -115,6 +115,53 @@ def test_lark_verifier_rejects_path_injection(tmp_path):
         )
 
 
+def test_delivery_verifier_maps_persisted_fields_to_contract_names(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        "core.delivery.DeliveryPipeline.get",
+        lambda _self, _delivery_id: {
+            "id": "dlv_123",
+            "state": "delivered",
+            "route_channel": "lark",
+            "message_id": "om_123",
+            "memorial_id": "mem_123",
+        },
+    )
+
+    result = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "db"
+    ).verify(
+        "delivery",
+        {
+            "delivery_id": "dlv_123",
+            "state": "delivered",
+            "channel": "lark",
+        },
+        {"delivery_id": "dlv_123"},
+    )
+
+    assert result.matched is True
+    assert '"delivery_id":"dlv_123"' in result.observed_summary
+    assert '"channel":"lark"' in result.observed_summary
+
+
+def test_delivery_verifier_defers_missing_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "core.delivery.DeliveryPipeline.get",
+        lambda _self, _delivery_id: None,
+    )
+
+    with pytest.raises(VerificationError, match="receipt was not found"):
+        VerifierRegistry(
+            root=tmp_path, db_path=tmp_path / "db"
+        ).verify(
+            "delivery",
+            {"delivery_id": "dlv_missing"},
+            {"delivery_id": "dlv_missing"},
+        )
+
+
 def test_eigenflux_friend_verifier_reads_relationship(tmp_path):
     def runner(command, **kwargs):
         return subprocess.CompletedProcess(

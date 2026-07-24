@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from core.card import linkify_bare_urls
-from core.claude_bin import resolve_claude_bin
+from core.aux_model import run_auxiliary_model
 from core.delivery_deadletter import record_overdue
 from core.ef_stream import (
     extract_detail,
@@ -313,8 +313,15 @@ def _fetch_history(conv_id: str) -> str:
     return ""
 
 
-def _run_analysis(detail: str, conv_id: str, jarvis_dir: str, log_file: str, procs: dict | None = None):
-    """Background Claude analysis of an incoming message, with history context."""
+def _run_analysis(
+    detail: str,
+    conv_id: str,
+    jarvis_dir: str,
+    log_file: str,
+    procs: dict | None = None,
+    stop_event: threading.Event | None = None,
+):
+    """Analyze an incoming message without granting external text local tools."""
     # Load friend list
     friends_ctx = ""
     contacts = list(Path.home().glob(".eigenflux/**/contacts.json"))
@@ -349,49 +356,24 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user.
 若你给出了建议回复，在最后单独一行写按钮声明（每个标签=用户会打的那句话，≤14字）：
 OPTIONS: 就按建议回复 | 先不回"""
 
-    try:
-        # Spend-limit gate (probe=False: this aux caller never clear()s, so it
-        # must not win the probe election). 2026-07-07: with no gate and no
-        # returncode check, claude's spend-limit error text on stdout was
-        # returned as the "analysis" and sent to Pascal verbatim as a 💡 note.
-        env = None
-        try:
-            from core.model_fallback import gate
-            if gate(jarvis_dir, probe=False) == "backup" \
-                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN") \
-                    and os.environ.get("CLAUDE_BACKUP_BASE_URL"):
-                env = os.environ.copy()
-                env["ANTHROPIC_AUTH_TOKEN"] = env["CLAUDE_BACKUP_AUTH_TOKEN"]
-                env["ANTHROPIC_BASE_URL"] = env["CLAUDE_BACKUP_BASE_URL"]
-        except Exception:
-            pass
-        p = subprocess.Popen(
-            [resolve_claude_bin(), "--model", "opus", "--dangerously-skip-permissions",
-             "--no-session-persistence", "--disable-slash-commands", "-p", prompt],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            stdin=subprocess.DEVNULL, env=env,
+    result = run_auxiliary_model(
+        prompt,
+        root=jarvis_dir,
+        model="opus",
+        timeout=120,
+        allow_tools=False,
+        process_holder=procs,
+        process_key="analysis",
+        cancelled=stop_event.is_set if stop_event is not None else None,
+    )
+    if not result.text:
+        log(
+            "ef-stream",
+            "Message analysis exhausted provider chain: "
+            + ",".join(result.attempted),
+            level="warn",
         )
-        if procs is not None:
-            procs["analysis"] = p
-        try:
-            out, err = p.communicate(timeout=120)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.communicate()
-            return ""
-        if p.returncode != 0:
-            # Nonzero exit → stdout is an error surface, never user content.
-            excerpt = ((out or "") + " " + (err or "")).strip()[:200]
-            log("ef-stream", f"Claude analysis failed (exit={p.returncode}): {excerpt}",
-                level="warn")
-            return ""
-        return (out or "").strip()
-    except Exception as e:
-        log("ef-stream", f"Claude analysis failed: {e}", level="warn")
-        return ""
-    finally:
-        if procs is not None:
-            procs["analysis"] = None
+    return result.text
 
 
 def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
@@ -581,8 +563,14 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 if details and not stop.is_set():
                     detail_str = "\n".join(json.dumps(d, ensure_ascii=False) for d in details)
                     conv_id = details[0].get("conv_id", "")
-                    analysis = _run_analysis(detail_str, conv_id, jarvis_dir,
-                                             log_file, procs) or ""
+                    analysis = _run_analysis(
+                        detail_str,
+                        conv_id,
+                        jarvis_dir,
+                        log_file,
+                        procs,
+                        stop,
+                    ) or ""
                 body = msg
                 if analysis and "HEARTBEAT_OK" not in analysis:
                     body = f"{msg}\n\n💡 {analysis}"

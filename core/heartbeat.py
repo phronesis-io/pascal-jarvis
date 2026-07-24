@@ -848,6 +848,14 @@ class HeartbeatRunner:
             use_backup = True
             backup_tried = True
             model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
+        elif (gate_state == "backup"
+                and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
+                and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
+                and os.environ.get("CLAUDE_BACKUP2_BASE_URL")):
+            use_backup = True
+            backup_tried = True
+            _backup2_active = True
+            model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
 
         # Provider-aware memory budget: backup relay has a smaller context
         # window than the primary 1M channel.
@@ -1099,36 +1107,20 @@ You have access to the user's memory below. Use it to personalize your responses
             "answer DELIVER.\n\n"
             "--- TEXT ---\n" + message
         )
-        cmd = [
-            self._claude_bin,
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--disable-slash-commands",
-            "--model", "haiku",
-            "-p", judge_prompt,
-        ]
-        # Provider gate (2026-07-07): during the primary spend-limit outage
-        # every judge call failed → fail-open → noise filtering was
-        # effectively disabled. Auxiliary caller: never wins the probe
-        # election (probe=False), just follows the flag to the backup env.
-        env = None
         try:
-            from core.model_fallback import gate as _provider_gate
-            if (_provider_gate(self.jarvis_dir, probe=False) == "backup"
-                    and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
-                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
-                    and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
-                env = os.environ.copy()
-                env["ANTHROPIC_AUTH_TOKEN"] = os.environ["CLAUDE_BACKUP_AUTH_TOKEN"]
-                env["ANTHROPIC_BASE_URL"] = os.environ["CLAUDE_BACKUP_BASE_URL"]
-        except Exception:
-            env = None
-        try:
-            result = _run_isolated(
-                cmd, timeout=60, cwd=str(self.work_dir), env=env)
-            if result.returncode != 0:
+            from core.aux_model import run_auxiliary_model
+
+            result = run_auxiliary_model(
+                judge_prompt,
+                root=self.jarvis_dir,
+                model="haiku",
+                timeout=60,
+                allow_tools=False,
+                claude_bin=self._claude_bin,
+            )
+            if not result.text:
                 return False  # fail-open: deliver
-            verdict = result.stdout.strip().upper()
+            verdict = result.text.strip().upper()
             # Only drop on a clean, confident NOISE verdict.
             return verdict == "NOISE" or verdict.endswith("NOISE")
         except Exception as e:

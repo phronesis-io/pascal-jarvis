@@ -1,0 +1,214 @@
+import subprocess
+from io import StringIO
+
+from core import aux_model
+from core import model_fallback
+
+
+def _result(command, code, stdout="", stderr=""):
+    return subprocess.CompletedProcess(command, code, stdout, stderr)
+
+
+def test_tripped_gate_starts_on_backup2_when_backup1_is_missing(
+    tmp_path, monkeypatch,
+):
+    model_fallback.trip("spend_limit", tmp_path)
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_MODEL", "backup2-model")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return _result(command, 0, "answer")
+
+    result = aux_model.run_auxiliary_model(
+        "prompt", root=tmp_path, runner=runner
+    )
+
+    assert result.provider == "Claude backup2"
+    assert result.model == "backup2-model"
+    assert len(calls) == 1
+    assert calls[0][1]["env"]["ANTHROPIC_AUTH_TOKEN"] == "backup2-token"
+
+
+def test_backup1_transport_failure_advances_to_backup2(tmp_path, monkeypatch):
+    model_fallback.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    calls = []
+
+    def runner(command, **kwargs):
+        token = kwargs["env"]["ANTHROPIC_AUTH_TOKEN"]
+        calls.append(token)
+        if token == "backup1-token":
+            return _result(command, 1, stderr="connection reset")
+        return _result(command, 0, stdout="recovered")
+
+    result = aux_model.run_auxiliary_model(
+        "prompt", root=tmp_path, runner=runner
+    )
+
+    assert result.text == "recovered"
+    assert result.provider == "Claude backup2"
+    assert calls == ["backup1-token", "backup2-token"]
+
+
+def test_text_only_call_disables_claude_and_openai_tools(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return _result(command, 1, stderr="unavailable")
+
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = {}
+
+    def openai_call(payload, *_args):
+        seen.update(payload)
+        return {"output_text": "text fallback"}
+
+    monkeypatch.setattr("core.openai_fallback.call_openai", openai_call)
+
+    result = aux_model.run_auxiliary_model(
+        "untrusted external text",
+        root=tmp_path,
+        allow_tools=False,
+        runner=runner,
+    )
+
+    assert result.provider == "GPT fallback"
+    assert "--tools" in calls[0]
+    assert calls[0][calls[0].index("--tools") + 1] == ""
+    assert "--dangerously-skip-permissions" not in calls[0]
+    assert "--strict-mcp-config" in calls[0]
+    assert "tools" not in seen
+    assert "No local tools are available" in seen["instructions"]
+
+
+def test_owner_background_call_keeps_tool_capability(tmp_path, monkeypatch):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return _result(command, 0, stdout="done")
+
+    result = aux_model.run_auxiliary_model(
+        "owner task",
+        root=tmp_path,
+        allow_tools=True,
+        session_args=("--session-id", "first-session"),
+        runner=runner,
+    )
+
+    assert result.text == "done"
+    assert "--dangerously-skip-permissions" in calls[0]
+    assert "--tools" not in calls[0]
+    assert calls[0][calls[0].index("--session-id") + 1] == "first-session"
+
+
+def test_primary_spend_limit_trips_gate_and_reaches_backup(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def runner(command, **kwargs):
+        token = (kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", "")
+        calls.append(token)
+        if not token:
+            return _result(
+                command, 1, stdout="You've hit your monthly spend limit"
+            )
+        return _result(command, 0, stdout="backup answer")
+
+    result = aux_model.run_auxiliary_model(
+        "prompt", root=tmp_path, runner=runner
+    )
+
+    assert result.provider == "Claude backup"
+    assert calls == ["", "backup-token"]
+    assert model_fallback.gate(tmp_path, probe=False) == "backup"
+
+
+def test_error_stdout_is_never_returned_as_content(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = aux_model.run_auxiliary_model(
+        "prompt",
+        root=tmp_path,
+        runner=lambda command, **_kwargs: _result(
+            command,
+            0,
+            stdout="You've hit your monthly spend limit",
+        ),
+    )
+
+    assert result.text == ""
+
+
+def test_real_subprocess_adapter_reads_prompt_and_disables_tools(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "claude-stub"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "input=$(cat)\n"
+        "[ \"$input\" = \"hello over stdin\" ] || exit 9\n"
+        "printf 'stub answer'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = aux_model.run_auxiliary_model(
+        "hello over stdin",
+        root=tmp_path,
+        allow_tools=False,
+        claude_bin=str(executable),
+    )
+
+    assert result.text == "stub answer"
+    assert result.provider == "Claude primary"
+
+
+def test_cli_consumes_background_system_prompt_file(
+    tmp_path, monkeypatch, capsys,
+):
+    prompt_file = tmp_path / "system.txt"
+    prompt_file.write_text("private memory", encoding="utf-8")
+    seen = {}
+
+    def fake_run(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen.update(kwargs)
+        return aux_model.AuxiliaryModelResult(
+            text="done", provider="Claude primary", model="opus"
+        )
+
+    monkeypatch.setattr(aux_model, "run_auxiliary_model", fake_run)
+    monkeypatch.setattr("sys.stdin", StringIO("owner task"))
+
+    assert aux_model.main([
+        "--root",
+        str(tmp_path),
+        "--system-prompt-file",
+        str(prompt_file),
+        "--consume-system-prompt-file",
+    ]) == 0
+
+    assert capsys.readouterr().out == "done"
+    assert seen["system_prompt"] == "private memory"
+    assert not prompt_file.exists()

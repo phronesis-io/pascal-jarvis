@@ -576,7 +576,10 @@ its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
 - Configure `openai.api_key` or `OPENAI_API_KEY` for the final GPT fallback.
   Main-chat fallback can use the bounded `bash`, `file_read`, and `file_write`
   loop in `core.openai_fallback`; pass `--no-tools` for text-only operation.
-  Group conversations and heartbeat use text-only paths by design.
+  Owner background jobs retain the tool loop. Group conversations, heartbeat,
+  EigenFlux analysis, progress narration, and session compaction use text-only
+  paths by design. These auxiliary paths share the same four-stage provider
+  order through `core.aux_model`.
 
 **Heartbeat not running tasks**
 - Check `heartbeat_state.json` for last-run timestamps

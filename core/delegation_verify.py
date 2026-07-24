@@ -284,9 +284,14 @@ class VerifierRegistry:
         if not delivery_id:
             raise VerificationError("delivery_id is required")
         row = DeliveryPipeline(self.root, db_path=self.db_path).get(delivery_id)
+        if row is None:
+            raise VerificationError("delivery receipt was not found")
         observed = {
-            key: row.get(key)
-            for key in ("delivery_id", "state", "channel", "message_id", "memorial_id")
+            "delivery_id": row.get("id"),
+            "state": row.get("state"),
+            "channel": row.get("route_channel"),
+            "message_id": row.get("message_id"),
+            "memorial_id": row.get("memorial_id"),
         }
         return self._result(
             authority="delivery_store",

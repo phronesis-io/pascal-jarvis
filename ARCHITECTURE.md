@@ -130,6 +130,9 @@ own prose as proof.
   observability.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production restart.
+- `core.aux_model`: bounded Primary/Backup 1/Backup 2/GPT routing for
+  background jobs and text-only auxiliary calls. Untrusted or derived text
+  enters with all Claude/OpenAI tools disabled.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.

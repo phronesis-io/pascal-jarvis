@@ -509,6 +509,43 @@ def test_optional_step_failure_does_not_fail_required_outcome(tmp_path):
     )["status"] == "failed"
 
 
+def test_optional_step_cannot_overwrite_required_verification_state(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    required = _step(store, delegation, sequence=1)
+    optional = _step(store, delegation, sequence=2, required=False)
+    store.claim_step(
+        delegation["id"], required["id"], expected_version=1, owner="required"
+    )
+    store.record_attempt(
+        delegation["id"],
+        required["id"],
+        expected_version=1,
+        owner="required",
+        succeeded=True,
+    )
+    assert store.get(delegation["id"])["status"] == "verifying"
+
+    store.claim_step(
+        delegation["id"], optional["id"], expected_version=1, owner="optional"
+    )
+    assert store.get(delegation["id"])["status"] == "verifying"
+    store.record_attempt(
+        delegation["id"],
+        optional["id"],
+        expected_version=1,
+        owner="optional",
+        succeeded=False,
+        error_code="optional_export_failed",
+    )
+
+    detail = store.get(delegation["id"])
+    assert detail["status"] == "verifying"
+    assert next(
+        row for row in detail["steps"] if row["id"] == required["id"]
+    )["status"] == "verifying"
+
+
 def test_r4_stays_human_operated_even_when_created_as_authorized(tmp_path):
     store = _store(tmp_path)
     delegation, _ = _delegation(

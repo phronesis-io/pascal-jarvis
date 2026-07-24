@@ -924,15 +924,27 @@ class DelegationStore:
                 """,
                 (owner, expires, now, now, step_id),
             )
-            db.execute(
-                """
-                UPDATE delegations
-                   SET status='executing',waiting_on='',
-                       started_at=COALESCE(started_at,?),updated_at=?
-                 WHERE id=?
-                """,
-                (now, now, delegation_id),
-            )
+            delegation_status = str(delegation["status"])
+            if bool(step["required"]):
+                delegation_status = "executing"
+                db.execute(
+                    """
+                    UPDATE delegations
+                       SET status='executing',waiting_on='',
+                           started_at=COALESCE(started_at,?),updated_at=?
+                     WHERE id=?
+                    """,
+                    (now, now, delegation_id),
+                )
+            else:
+                db.execute(
+                    """
+                    UPDATE delegations
+                       SET started_at=COALESCE(started_at,?),updated_at=?
+                     WHERE id=?
+                    """,
+                    (now, now, delegation_id),
+                )
             self._event(
                 db,
                 delegation_id,
@@ -941,8 +953,12 @@ class DelegationStore:
                 actor_type="worker",
                 actor_id=owner,
                 from_status=delegation["status"],
-                to_status="executing",
-                metadata={"step_id": step_id, "lease_expires_at": expires},
+                to_status=delegation_status,
+                metadata={
+                    "step_id": step_id,
+                    "lease_expires_at": expires,
+                    "required": bool(step["required"]),
+                },
             )
         self.sync_projection(delegation_id)
         return Claim(delegation_id, step_id, expected_version, owner, expires)

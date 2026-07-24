@@ -93,6 +93,11 @@ Ops dashboard show configured position, requested model, observed model, last
 success, latency, and a sanitized failure category. A primary spend-limit
 canary trips the same fallback gate used by live routing.
 
+The live order also covers background jobs, session compaction, progress
+narration, EigenFlux message analysis, and heartbeat noise classification.
+Only owner-initiated background jobs retain local tools; derived conversation
+text and external-agent text are routed in a text-only sandbox.
+
 ### Completed: Resident SQLite descriptor exhaustion
 
 Real incident: the heartbeat process approached launchd's 256-FD soft limit,

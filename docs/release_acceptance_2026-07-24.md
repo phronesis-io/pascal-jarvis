@@ -141,6 +141,22 @@ processes, stream cursors, Lark actions, optional steps, and durable errors:
 | 52 | A failed optional step failed the whole Delegation | Delegation failure is derived only from required steps; optional failure remains visible on its step while qualifying required evidence can complete the contract; parallel-step regression |
 | 53 | Payload-bearing EigenFlux HTTP errors could enter durable state | HTTP bodies and provider messages are discarded; durable diagnostics retain only operation, exception type, or HTTP status class; privacy regression |
 
+The sixth independent review and the subsequent all-entry model-route audit
+closed ten more authority, state, and resilience gaps:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 54 | Any public GitHub account could post an exact-SHA release attestation | Review evidence now requires repository association or an authoritative write/triage permission read-back; hostile-public-attestation regression |
+| 55 | Selecting Backup 2 mutated process-wide Backup 1 credentials | Each Lark message carries provider credentials in call-local variables; cross-message scope regression |
+| 56 | Direct EigenFlux HTTPS used a different home path than the CLI | API credential lookup mirrors the CLI's `EIGENFLUX_HOME/.eigenflux` rule without duplicating an existing suffix; path regressions |
+| 57 | A tripped heartbeat gate still probed primary when only Backup 2 existed | Gate initialization selects configured Backup 2 directly with its own model and credentials; zero-primary-call regression |
+| 58 | Delivery verification read non-existent receipt field names | The verifier maps persisted `id` and `route_channel` to contract `delivery_id` and `channel`; matching-receipt regression |
+| 59 | A missing Delivery receipt raised an unhandled attribute error | Missing read-back is a typed verification deferral and remains recoverable; missing-receipt regression |
+| 60 | Worker CLI input could impersonate an owner during verification recovery | Worker retry refuses every `needs_user` state regardless of supplied actor text; spoofed-owner regression |
+| 61 | Claiming an optional step overwrote a required step's verification state | Optional execution updates only its step and timestamps; required-step aggregate state remains authoritative; completion-order regression |
+| 62 | Background and auxiliary calls stopped after Backup 1 | `core.aux_model` gives jobs, compaction, progress narration, EigenFlux analysis, and noise classification the same bounded Primary/Backup 1/Backup 2/GPT order; route regressions |
+| 63 | External or derived text could invoke local Claude tools during analysis | EigenFlux, narration, compaction, and classification explicitly use `--tools ""`; only owner background jobs retain agentic tools; permission-boundary regressions |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -181,7 +197,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2019 passed` for this candidate);
+- full local test result (`2032 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

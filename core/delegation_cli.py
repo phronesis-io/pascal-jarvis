@@ -122,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "resume":
             result = store.resume_external(args.id, **_input())
         elif args.command == "retry":
+            if store.get(args.id)["status"] == "needs_user":
+                raise DelegationError(
+                    "worker CLI cannot resolve an owner recovery decision"
+                )
             result = store.retry(args.id, **_input())
         elif args.command == "terminal":
             data = _input()

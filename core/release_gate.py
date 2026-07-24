@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 
 class ReleaseGateError(RuntimeError):
@@ -33,6 +34,10 @@ def _has_pass_attestation(body: str, sha: str) -> bool:
         line.strip().upper() == expected
         for line in str(body or "").splitlines()
     )
+
+
+_TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+_TRUSTED_PERMISSIONS = {"admin", "maintain", "write", "triage"}
 
 
 class ReleaseGate:
@@ -83,6 +88,40 @@ class ReleaseGate:
                 if isinstance(row, dict)
             ]
         return [row for row in pages if isinstance(row, dict)]
+
+    def _trusted_actor(
+        self,
+        record: dict[str, Any],
+        repo: str,
+        cache: dict[str, bool],
+    ) -> bool:
+        """Accept attestations only from repository-controlled identities."""
+        actor = str((record.get("user") or {}).get("login") or "")
+        if not actor:
+            return False
+        association = str(record.get("author_association") or "").upper()
+        if association in _TRUSTED_ASSOCIATIONS:
+            return True
+        if actor in cache:
+            return cache[actor]
+        try:
+            permission = self._run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/collaborators/{quote(actor, safe='')}/permission",
+                ],
+                json_output=True,
+            )
+        except ReleaseGateError:
+            cache[actor] = False
+            return False
+        level = str(permission.get("permission") or "").lower()
+        role = str(permission.get("role_name") or "").lower()
+        cache[actor] = bool(
+            level in _TRUSTED_PERMISSIONS or role in _TRUSTED_PERMISSIONS
+        )
+        return cache[actor]
 
     def verify(self, *, fetch: bool = True) -> dict[str, Any]:
         branch = self._run(["git", "branch", "--show-current"])
@@ -174,6 +213,7 @@ class ReleaseGate:
             f"repos/{repo}/issues/{number}/comments"
         )
         evidence = []
+        trust_cache: dict[str, bool] = {}
         for review in reviews if isinstance(reviews, list) else []:
             reviewer = str((review.get("user") or {}).get("login") or "")
             state = str(review.get("state") or "").upper()
@@ -184,6 +224,7 @@ class ReleaseGate:
                 and reviewer != author
                 and state == "APPROVED"
                 and reviewed_sha == sha
+                and self._trusted_actor(review, repo, trust_cache)
             ):
                 evidence.append(f"review:{reviewer}:{state}")
             elif (
@@ -191,6 +232,7 @@ class ReleaseGate:
                 and reviewer != author
                 and state == "COMMENTED"
                 and _has_pass_attestation(body, sha)
+                and self._trusted_actor(review, repo, trust_cache)
             ):
                 evidence.append(f"attestation:{reviewer}")
         for comment in comments if isinstance(comments, list) else []:
@@ -200,6 +242,7 @@ class ReleaseGate:
                 reviewer
                 and reviewer != author
                 and _has_pass_attestation(body, sha)
+                and self._trusted_actor(comment, repo, trust_cache)
             ):
                 evidence.append(f"attestation:{reviewer}")
         if not evidence:

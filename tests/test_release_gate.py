@@ -47,6 +47,7 @@ def _responses(**overrides):
             "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
         ): [{
             "user": {"login": "review-bot"},
+            "author_association": "MEMBER",
             "state": "APPROVED",
             "commit_id": SHA,
         }],
@@ -96,11 +97,13 @@ def test_release_gate_reads_review_evidence_from_later_pages(monkeypatch):
     responses[("gh", "api", "--paginate", "--slurp", endpoint)] = [
         [{
             "user": {"login": "review-bot"},
+            "author_association": "MEMBER",
             "state": "COMMENTED",
             "body": "Earlier review.",
         }],
         [{
             "user": {"login": "review-bot"},
+            "author_association": "MEMBER",
             "state": "APPROVED",
             "commit_id": SHA,
         }],
@@ -197,6 +200,7 @@ def test_release_gate_accepts_explicit_independent_attestation(monkeypatch):
     responses[reviews_key] = []
     responses[comments_key] = [{
         "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
         "body": f"REVIEW-GATE: PASS {SHA}\nNo blocking findings.",
     }]
 
@@ -211,6 +215,7 @@ def test_release_gate_rejects_generic_commented_review(monkeypatch):
     responses = _responses()
     responses[reviews_key] = [{
         "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
         "state": "COMMENTED",
         "body": "Found a blocking defect.",
     }]
@@ -230,6 +235,7 @@ def test_release_gate_requires_attestation_on_its_own_line(monkeypatch):
     responses[reviews_key] = []
     responses[comments_key] = [{
         "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
         "body": f"This is not REVIEW-GATE: PASS {SHA} because findings remain.",
     }]
 
@@ -244,6 +250,7 @@ def test_release_gate_rejects_review_of_an_older_commit(monkeypatch):
     responses = _responses()
     responses[reviews_key] = [{
         "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
         "state": "APPROVED",
         "commit_id": "b" * 40,
     }]
@@ -263,11 +270,65 @@ def test_release_gate_rejects_unbound_pass_attestation(monkeypatch):
     responses[reviews_key] = []
     responses[comments_key] = [{
         "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
         "body": "REVIEW-GATE: PASS",
     }]
 
     with pytest.raises(ReleaseGateError, match="independent review evidence"):
         _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_rejects_public_attestation_without_repo_permission(
+    monkeypatch,
+):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    permission_key = (
+        "gh",
+        "api",
+        "repos/phronesis-io/pascal-jarvis/collaborators/stranger/permission",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "stranger"},
+        "author_association": "NONE",
+        "body": f"REVIEW-GATE: PASS {SHA}",
+    }]
+    responses[permission_key] = {"permission": "read", "role_name": "read"}
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_accepts_trusted_bot_by_repository_permission(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    permission_key = (
+        "gh",
+        "api",
+        "repos/phronesis-io/pascal-jarvis/collaborators/review-bot/permission",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "review-bot"},
+        "author_association": "NONE",
+        "body": f"REVIEW-GATE: PASS {SHA}",
+    }]
+    responses[permission_key] = {"permission": "write", "role_name": "write"}
+
+    result = _gate(monkeypatch, responses).verify()
+
+    assert result["review_evidence"] == ["attestation:review-bot"]
 
 
 def test_restart_runs_release_gate_before_touching_deploy_guard():
