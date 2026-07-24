@@ -507,6 +507,100 @@ def test_tailnet_funnel_reports_enable_url_and_uses_funnel_command(monkeypatch):
         "funnel", "--bg", "--yes", "https+insecure://localhost:3458"]
 
 
+def test_tailnet_offline_backend_is_recovered_without_system_routes(monkeypatch):
+    from core import tailnet
+
+    calls = []
+    status_calls = {"count": 0}
+
+    def fake_status(_port=3458, mode=None):
+        status_calls["count"] += 1
+        online = status_calls["count"] > 1
+        return {
+            "available": True,
+            "online": online,
+            "ready": online,
+            "target": "https+insecure://localhost:3458",
+            "mode": mode or "serve",
+            "detail": "ok" if online else "offline",
+        }
+
+    def fake_run(args, timeout=8):
+        calls.append((args, timeout))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tailnet, "tailnet_status", fake_status)
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+
+    status = tailnet.ensure_mobile_access(mode="serve", timeout=2)
+
+    assert status["ready"] is True
+    assert calls == [([
+        "up", "--accept-dns=false", "--accept-routes=false",
+    ], 15)]
+
+
+def test_tailnet_offline_backend_returns_login_url_without_serving(monkeypatch):
+    from core import tailnet
+
+    calls = []
+    monkeypatch.setattr(
+        tailnet,
+        "tailnet_status",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "online": False,
+            "ready": False,
+            "target": "https+insecure://localhost:3458",
+            "detail": "offline",
+        },
+    )
+
+    def fake_run(args, timeout=8):
+        calls.append(args)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="To authenticate, visit:\nhttps://login.tailscale.com/a/abc123",
+            stderr="",
+        )
+
+    monkeypatch.setattr(tailnet, "_run", fake_run)
+    status = tailnet.ensure_mobile_access()
+
+    assert status["login_required"] is True
+    assert status["login_url"].endswith("/abc123")
+    assert calls == [[
+        "up", "--accept-dns=false", "--accept-routes=false",
+    ]]
+
+
+def test_tailnet_offline_backend_failure_does_not_claim_ready(monkeypatch):
+    from core import tailnet
+
+    monkeypatch.setattr(
+        tailnet,
+        "tailnet_status",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "online": False,
+            "ready": False,
+            "target": "https+insecure://localhost:3458",
+            "detail": "offline",
+        },
+    )
+    monkeypatch.setattr(
+        tailnet,
+        "_run",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="backend unavailable",
+        ),
+    )
+
+    status = tailnet.ensure_mobile_access()
+    assert status["ready"] is False
+    assert "backend unavailable" in status["detail"]
+
+
 def test_mobile_audit_does_not_trust_spoofed_forwarded_address(monkeypatch):
     from dashboard import mobile_gateway
     request = types.SimpleNamespace(

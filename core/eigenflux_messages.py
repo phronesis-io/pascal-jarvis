@@ -22,6 +22,8 @@ import subprocess
 import sys
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -83,6 +85,7 @@ class MessageReceipt:
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+ApiSender = Callable[[str, str], dict]
 
 
 def _normalize_label(value: str) -> str:
@@ -115,6 +118,93 @@ def _next_cursor(obj: dict) -> str:
     ).strip()
 
 
+class EigenFluxApiClient:
+    """Small authenticated client for payload-bearing operations.
+
+    Message content is encoded in the HTTPS request body. It never appears in
+    a child process argument, shell history, or process listing.
+    """
+
+    def __init__(
+        self,
+        home: str | Path | None = None,
+        *,
+        opener: Callable = urllib.request.urlopen,
+    ):
+        self.home = Path(
+            home or os.environ.get("EIGENFLUX_HOME") or Path.home() / ".eigenflux"
+        )
+        self.opener = opener
+
+    def _connection(self) -> tuple[str, str]:
+        try:
+            config = json.loads(
+                (self.home / "config.json").read_text(encoding="utf-8")
+            )
+            server_name = str(config.get("default_server") or "").strip()
+            server = next(
+                row
+                for row in config.get("servers", [])
+                if str(row.get("name") or "") == server_name
+            )
+            endpoint = str(server.get("endpoint") or "").rstrip("/")
+            credentials = json.loads(
+                (
+                    self.home
+                    / "servers"
+                    / server_name
+                    / "credentials.json"
+                ).read_text(encoding="utf-8")
+            )
+            token = str(credentials.get("access_token") or "").strip()
+        except (OSError, ValueError, TypeError, StopIteration) as exc:
+            raise CliFailure("EigenFlux authentication is not configured") from exc
+        if not endpoint.startswith("https://") or not token:
+            raise CliFailure("EigenFlux endpoint or access token is invalid")
+        return endpoint, token
+
+    def send(self, receiver_id: str, content: str) -> dict:
+        endpoint, token = self._connection()
+        body = json.dumps(
+            {"receiver_id": str(receiver_id), "content": str(content)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{endpoint}/api/v1/pm/send",
+            data=body,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with self.opener(request, timeout=30) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")
+            except OSError:
+                detail = ""
+            raise CliFailure(
+                f"EigenFlux API returned HTTP {exc.code}: {detail[:160]}"
+            ) from exc
+        except (OSError, TimeoutError) as exc:
+            raise CliFailure(f"EigenFlux API send failed: {exc}") from exc
+        try:
+            obj = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CliFailure("EigenFlux API returned invalid JSON") from exc
+        if not isinstance(obj, dict):
+            raise CliFailure("EigenFlux API returned a non-object response")
+        code = obj.get("code")
+        if code not in (None, 0, "0"):
+            raise CliFailure(str(obj.get("msg") or f"API code {code}")[:300])
+        return obj
+
+
 class EigenFluxMessenger:
     """Deterministic friend resolver, sender, and receipt verifier."""
 
@@ -124,6 +214,7 @@ class EigenFluxMessenger:
         db_path: str | Path | None = None,
         bindings_path: str | Path | None = None,
         runner: Runner = subprocess.run,
+        api_sender: ApiSender | None = None,
         now: Callable[[], float] = time.time,
         attempt_stale_seconds: int = 60,
         verification_clock_skew_seconds: int = 600,
@@ -143,6 +234,7 @@ class EigenFluxMessenger:
             or self.root / "data" / "eigenflux_contact_bindings.json"
         )
         self.runner = runner
+        self.api_sender = api_sender or EigenFluxApiClient().send
         self.now = now
         self.attempt_stale_seconds = attempt_stale_seconds
         self.verification_clock_skew_seconds = max(
@@ -583,21 +675,13 @@ class EigenFluxMessenger:
             self._start_retry(key)
 
         try:
-            response = self._run_json(
-                [
-                    "eigenflux",
-                    "msg",
-                    "send",
-                    "--content",
-                    message,
-                    "--receiver-id",
-                    friend.agent_id,
-                    "-f",
-                    "json",
-                    "--no-interactive",
-                ]
+            response = self.api_sender(friend.agent_id, message)
+        except Exception as raw_exc:
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, CliFailure)
+                else CliFailure(f"EigenFlux API send failed: {raw_exc}")
             )
-        except CliFailure as exc:
             self._write_state(key, state="verifying", error=str(exc))
             try:
                 found = self._find_verified_message(

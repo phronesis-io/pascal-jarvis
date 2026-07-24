@@ -22,6 +22,11 @@ _DEFAULTS = {
         "backup_enabled": True,
         "backup_auth_token": "",
         "backup_base_url": "",
+        "backup_model": "",
+        "backup2_enabled": False,
+        "backup2_auth_token": "",
+        "backup2_base_url": "",
+        "backup2_model": "",
         # Max seconds a single heartbeat Claude call may run. Raised from the
         # old hard-coded 300s so heartbeat tasks have room to fan out subagents
         # (Task/Agent) and wait for them. Bumping this lengthens the worst-case

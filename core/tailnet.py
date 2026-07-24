@@ -14,6 +14,7 @@ DEFAULT_SOCKET = Path.home() / ".local/state/tailscaled/tailscaled.sock"
 DEFAULT_BINARY = Path("/opt/homebrew/bin/tailscale")
 ENABLE_URL_RE = re.compile(
     r"https://login\.tailscale\.com/f/(?:serve|funnel)\?[^\s]+")
+AUTH_URL_RE = re.compile(r"https://login\.tailscale\.com/a/[^\s]+")
 
 
 def _command() -> list[str]:
@@ -134,9 +135,47 @@ def ensure_mobile_access(
     """Ensure the authenticated gateway uses the requested Tailscale mode."""
     desired_mode = _access_mode(mode)
     status = tailnet_status(port, mode=desired_mode)
-    if (not status.get("available") or not status.get("online")
-            or status.get("ready")):
+    if not status.get("available") or status.get("ready"):
         return status
+    if not status.get("online"):
+        try:
+            result = _run(
+                [
+                    "up",
+                    "--accept-dns=false",
+                    "--accept-routes=false",
+                ],
+                timeout=max(timeout, 15),
+            )
+            output = "\n".join(
+                part for part in (result.stdout, result.stderr) if part
+            )
+        except subprocess.TimeoutExpired:
+            return {**status, "detail": "Tailscale 恢复超时，将由 launchd 稍后重试"}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {**status, "detail": f"Tailscale 恢复失败：{exc}"}
+        auth = AUTH_URL_RE.search(output)
+        if auth:
+            return {
+                **status,
+                "login_required": True,
+                "login_url": auth.group(0),
+                "detail": "Tailscale 登录已失效，需要重新认证一次",
+            }
+        if result.returncode != 0:
+            message = (output.strip().splitlines() or ["未知错误"])[-1]
+            return {
+                **status,
+                "detail": f"Tailscale 恢复失败：{message[:240]}",
+            }
+        status = tailnet_status(port, mode=desired_mode)
+        if not status.get("online"):
+            return {
+                **status,
+                "detail": "Tailscale 已执行恢复，但节点仍未在线",
+            }
+        if status.get("ready"):
+            return status
     try:
         result = _run(
             [desired_mode, "--bg", "--yes", status["target"]], timeout=timeout,

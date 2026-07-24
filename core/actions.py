@@ -267,7 +267,9 @@ class ActionProcessor:
         """Accept/reject one card-bound request through the verified CLI path."""
         from core.eigenflux_friends import execute_friend_action
 
-        result, failed = execute_friend_action(parse_params(raw))
+        result, failed = execute_friend_action(
+            parse_params(raw), root=self.jarvis_dir
+        )
         if failed:
             raise RuntimeError(result)
         return result
@@ -300,7 +302,125 @@ class ActionProcessor:
             )
         except Exception as exc:
             return f"❌ EigenFlux 消息未发送：{exc}"
+        try:
+            import hashlib
+            from core.delegation_connectors import record_connector_receipt
+
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            source_ref = (
+                f"message:{receipt.msg_id}"
+                if receipt.msg_id
+                else f"attempt:{receipt.recipient_id}:{content_hash}"
+            )
+            record_connector_receipt(
+                source="eigenflux-message",
+                source_ref=source_ref,
+                title=f"发送消息给 {receipt.recipient_name}",
+                operation="message_send",
+                target_type="agent",
+                target_id=receipt.recipient_id,
+                target_label=receipt.recipient_name,
+                authority="eigenflux_message_history",
+                verifier="eigenflux_message",
+                expected={
+                    "state": "verified",
+                    "target_id": receipt.recipient_id,
+                },
+                observed={
+                    "state": receipt.state,
+                    "target_id": receipt.recipient_id,
+                    "msg_id": receipt.msg_id,
+                    "conv_id": receipt.conv_id,
+                },
+                matched=receipt.completed,
+                resource_locator=(
+                    f"eigenflux-message:{receipt.msg_id}"
+                    if receipt.msg_id
+                    else f"eigenflux-conversation:{receipt.conv_id}"
+                ),
+                root=self.jarvis_dir,
+            )
+        except Exception as exc:
+            print(
+                f"[actions] delegation receipt projection failed: {exc}",
+                file=sys.stderr,
+            )
         return receipt.human_text()
+
+    def _do_delegation_confirm(self, raw: str) -> str:
+        """Confirm one versioned high-risk Delegation from its unique Item."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.confirm(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                principal_id=params.get("principal", ""),
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            return f"委托确认未生效：{exc}"
+        return "已确认。系统会按同一契约执行并核验，不需要重复点击。"
+
+    def _do_delegation_cancel(self, raw: str) -> str:
+        """Cancel one versioned Delegation and converge its attention Item."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.terminal(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                status="cancelled",
+                reason_code="owner_cancelled",
+                actor_id="owner",
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            return f"委托取消未生效：{exc}"
+        return "已取消这个委托。"
+
+    def _do_iteration_approve(self, raw: str) -> str:
+        """Approve one evidence-backed L3 proposal and queue it in Taskline."""
+        from core.iteration_loop import IterationStore, sync_proposal_item
+
+        proposal_id = parse_params(raw).get("id", "")
+        try:
+            store = IterationStore(root=self.jarvis_dir)
+            proposal = store.review(
+                proposal_id,
+                approved=True,
+                actor="owner",
+                queue=True,
+            )
+            sync_proposal_item(proposal, store=store, send=False)
+        except Exception as exc:
+            return f"改进项没有进入研发队列：{exc}"
+        return f"已进入研发队列（Taskline {proposal['taskline_id'][:8]}）。"
+
+    def _do_iteration_reject(self, raw: str) -> str:
+        """Reject one L3 proposal without producing an engineering task."""
+        from core.iteration_loop import IterationStore, sync_proposal_item
+
+        proposal_id = parse_params(raw).get("id", "")
+        try:
+            store = IterationStore(root=self.jarvis_dir)
+            proposal = store.review(
+                proposal_id,
+                approved=False,
+                actor="owner",
+                reason="owner_rejected",
+                queue=False,
+            )
+            sync_proposal_item(proposal, store=store, send=False)
+        except Exception as exc:
+            return f"改进项没有关闭：{exc}"
+        return "已记录：这个改进项不进入研发队列。"
 
     # ── Heartbeat ──
 

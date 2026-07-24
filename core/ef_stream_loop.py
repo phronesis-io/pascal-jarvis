@@ -139,19 +139,60 @@ def _deadletter_failed_send(jarvis_dir: Path, kind: str, text: str) -> None:
 
 def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
                       success_log: str = "Delivered real-time message"):
-    """Send one formatted event to Lark; only a REAL success is recorded.
+    """Submit one formatted event to the durable delivery pipeline.
 
-    Returns (seen, delivered). On failure nothing is marked seen and no
-    outbox entry is written, so a gateway re-delivery gets a second chance
-    and the session ledger can't show a phantom success.
+    Once the pipeline has durably accepted the event, the upstream cursor may
+    advance without risking loss. Only immediate delivery is mirrored to the
+    conversation outbox; queued work remains honest until the pipeline flushes.
     """
-    if not _lark_send(msg, user_id):
+    from core.delivery import (
+        DeliveryEnvelope,
+        TransportResult,
+        deliver as deliver_envelope,
+    )
+
+    def transport(envelope, channel):
+        if channel == "web":
+            return TransportResult(True)
+        ok = _lark_send(
+            str(envelope.payload.get("text") or ""),
+            user_id,
+        )
+        return TransportResult(bool(ok), error="" if ok else "lark transport failed")
+
+    result = deliver_envelope(
+        DeliveryEnvelope(
+            source="eigenflux-stream",
+            kind="text",
+            payload={"text": msg},
+            attention="notice",
+            requested_channel="lark",
+            urgent=True,
+            dedup_key=(
+                f"eigenflux-stream:{ids[0]}" if ids else ""
+            ),
+            matter_id=str((metadata or {}).get("matter_id") or ""),
+            metadata={
+                "external_event_ids": list(ids or []),
+                "retry_existing": True,
+            },
+        ),
+        root=jd,
+        transport=transport,
+    )
+    if not result.accepted:
         _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
         return seen, False
-    _write_outbox(msg, metadata, jd)
-    log("ef-stream", success_log)
     seen = remember_seen(seen, ids)
     save_seen(seen_file, seen)
+    if result.state == "delivered":
+        _write_outbox(msg, metadata, jd)
+        log("ef-stream", success_log)
+    else:
+        log(
+            "ef-stream",
+            f"Accepted real-time message into delivery queue ({result.state})",
+        )
     return seen, True
 
 
@@ -185,9 +226,9 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         # The interaction adapter must never become a new message-loss mode.
         log("ef-stream", f"Memorial delivery failed ({e}); using legacy sender",
             level="warn")
-        seen, delivered = _deliver_and_mark(
+        seen, accepted = _deliver_and_mark(
             msg, ids, metadata, user_id, seen, seen_file, jd)
-        return seen, delivered, delivered
+        return seen, accepted, False
 
 
 def _send_memorial_notice(title: str, body: str, user_id: str,
@@ -201,9 +242,20 @@ def _send_memorial_notice(title: str, body: str, user_id: str,
         state = memorial.get_memorial(mid) or {}
         return memorial.delivery_accepted(state)
     except Exception as e:
-        log("ef-stream", f"Memorial notice failed ({e}); using legacy sender",
+        log("ef-stream", f"Memorial notice failed ({e}); using delivery fallback",
             level="warn")
-        return _lark_send(body, user_id)
+        jd = Path(os.environ.get("JARVIS_DIR") or Path(__file__).parent.parent)
+        _, accepted = _deliver_and_mark(
+            body,
+            [],
+            {"kind": "notice"},
+            user_id,
+            [],
+            jd / ".ef-notice-seen",
+            jd,
+            success_log=f"Delivered fallback notice: {title}",
+        )
+        return accepted
 
 
 def _fetch_history(conv_id: str) -> str:

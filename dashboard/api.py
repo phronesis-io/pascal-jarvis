@@ -604,7 +604,214 @@ def register_api_routes():
         except KeyError as exc:
             raise HTTPException(404, "handoff not found") from exc
 
+    # ── Verified Delegations ─────────────────────────────────────────
+
+    def _delegation_error(exc: Exception) -> HTTPException:
+        from core.delegations import (
+            DelegationConflict,
+            DelegationNotFound,
+        )
+        if isinstance(exc, DelegationNotFound):
+            return HTTPException(404, str(exc))
+        if isinstance(exc, DelegationConflict):
+            return HTTPException(409, str(exc))
+        return HTTPException(400, str(exc))
+
+    @app.post("/api/delegations", dependencies=_WRITE)
+    async def api_delegation_create(request: Request):
+        from core.delegations import DelegationStore
+        data = await request.json()
+        owner = str(os.environ.get("USER_ID") or data.get("principal_id") or "")
+        data["principal_id"] = owner
+        try:
+            row, created = await run_in_threadpool(
+                DelegationStore().create, **data
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return {"created": created, "delegation": row}
+
+    @app.get("/api/delegations")
+    async def api_delegation_list(status: str = "", matter_id: str = "",
+                                  needs_attention: bool = False,
+                                  limit: int = 100):
+        from core.delegations import DelegationStore
+        try:
+            items = await run_in_threadpool(
+                DelegationStore().list,
+                status=status,
+                matter_id=matter_id,
+                needs_attention=needs_attention,
+                limit=limit,
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return {"items": items}
+
+    @app.get("/api/delegations/metrics")
+    async def api_delegation_metrics():
+        from core.delegations import DelegationStore
+        return await run_in_threadpool(DelegationStore().metrics)
+
+    @app.get("/api/delegations/{delegation_id}")
+    async def api_delegation_get(delegation_id: str):
+        from core.delegations import DelegationStore
+        try:
+            return await run_in_threadpool(
+                DelegationStore().get, delegation_id
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+
+    @app.get("/api/delegations/{delegation_id}/evidence")
+    async def api_delegation_evidence(delegation_id: str):
+        from core.delegations import DelegationStore
+        try:
+            detail = await run_in_threadpool(
+                DelegationStore().get, delegation_id
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return {"items": detail["evidence"]}
+
+    @app.post("/api/delegations/{delegation_id}/confirm", dependencies=_WRITE)
+    async def api_delegation_confirm(delegation_id: str, request: Request):
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+        data = await request.json()
+        owner = str(os.environ.get("USER_ID") or data.get("principal_id") or "")
+        store = DelegationStore()
+        try:
+            detail = await run_in_threadpool(
+                store.confirm,
+                delegation_id,
+                expected_version=int(data.get("expected_version", 0)),
+                principal_id=owner,
+            )
+            await run_in_threadpool(
+                sync_attention_item, detail, store=store, send=False
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return detail
+
+    @app.post("/api/delegations/{delegation_id}/cancel", dependencies=_WRITE)
+    async def api_delegation_cancel(delegation_id: str, request: Request):
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+        data = await request.json()
+        store = DelegationStore()
+        try:
+            detail = await run_in_threadpool(
+                store.terminal,
+                delegation_id,
+                expected_version=int(data.get("expected_version", 0)),
+                status="cancelled",
+                reason_code="owner_cancelled",
+                actor_id=str(os.environ.get("USER_ID") or "owner"),
+            )
+            await run_in_threadpool(
+                sync_attention_item, detail, store=store, send=False
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return detail
+
+    @app.post("/api/delegations/{delegation_id}/retry", dependencies=_WRITE)
+    async def api_delegation_retry(delegation_id: str, request: Request):
+        from core.delegations import DelegationStore
+        data = await request.json()
+        try:
+            return await run_in_threadpool(
+                DelegationStore().retry,
+                delegation_id,
+                expected_version=int(data.get("expected_version", 0)),
+                actor_id=str(os.environ.get("USER_ID") or "owner"),
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+
+    @app.post("/api/delegations/{delegation_id}/handoff", dependencies=_WRITE)
+    async def api_delegation_handoff(delegation_id: str, request: Request):
+        from core.continuity import create_handoff
+        from core.delegations import DelegationStore
+        data = await request.json()
+        try:
+            detail = await run_in_threadpool(
+                DelegationStore().get, delegation_id
+            )
+            result = await run_in_threadpool(
+                create_handoff,
+                "delegation",
+                delegation_id,
+                from_surface=str(data.get("from_surface") or "desktop"),
+                to_surface=str(data.get("to_surface") or "mobile"),
+                title=detail["title"],
+                matter_id=str(detail.get("matter_id") or ""),
+                created_by=str(os.environ.get("USER_ID") or "owner"),
+            )
+        except Exception as exc:
+            raise _delegation_error(exc) from exc
+        return result
+
+    # ── L3 iteration proposals ───────────────────────────────────────
+
+    @app.get("/api/iteration/proposals")
+    async def api_iteration_proposals(status: str = "", limit: int = 100):
+        from core.iteration_loop import IterationStore
+        try:
+            items = await run_in_threadpool(
+                IterationStore().list, status=status, limit=limit
+            )
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"items": items}
+
+    @app.get("/api/iteration/proposals/{proposal_id}")
+    async def api_iteration_proposal_get(proposal_id: str):
+        from core.iteration_loop import IterationStore
+        try:
+            return await run_in_threadpool(
+                IterationStore().get, proposal_id
+            )
+        except Exception as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post(
+        "/api/iteration/proposals/{proposal_id}/review",
+        dependencies=_WRITE,
+    )
+    async def api_iteration_proposal_review(
+        proposal_id: str, request: Request
+    ):
+        from core.iteration_loop import IterationStore, sync_proposal_item
+        data = await request.json()
+        decision = str(data.get("decision") or "")
+        if decision not in {"approve", "reject"}:
+            raise HTTPException(400, "decision must be approve or reject")
+        store = IterationStore()
+        try:
+            proposal = await run_in_threadpool(
+                store.review,
+                proposal_id,
+                approved=decision == "approve",
+                actor=str(os.environ.get("USER_ID") or "owner"),
+                reason=str(data.get("reason") or ""),
+                queue=decision == "approve",
+            )
+            await run_in_threadpool(
+                sync_proposal_item, proposal, store=store, send=False
+            )
+        except Exception as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return proposal
+
     # ── Health ───────────────────────────────────────────────────────
+
+    @app.get("/api/provider-health")
+    async def api_provider_health():
+        from core.provider_health import snapshot
+        return await run_in_threadpool(snapshot)
 
     @app.get("/api/health")
     async def api_health():

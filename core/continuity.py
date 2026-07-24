@@ -1,7 +1,8 @@
 """Durable cross-device handoffs for existing Jarvis work objects.
 
 A handoff moves the next interaction between desktop and phone. It never
-copies the Memorial or Matter it points at; those stores remain authoritative.
+copies the Memorial, Matter, or Delegation it points at; those stores remain
+authoritative.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from contextlib import closing
 from pathlib import Path
 
 SURFACES = {"desktop", "mobile"}
-ENTITY_TYPES = {"memorial", "matter"}
+ENTITY_TYPES = {"memorial", "matter", "delegation"}
 ACTIVE_STATES = {"open", "claimed"}
 TERMINAL_STATES = {"completed", "cancelled"}
 
@@ -94,7 +95,7 @@ def _decode(row) -> dict:
 def _validate(entity_type: str, entity_id: str,
               from_surface: str, to_surface: str) -> None:
     if entity_type not in ENTITY_TYPES:
-        raise ValueError("entity_type must be memorial or matter")
+        raise ValueError("entity_type must be memorial, matter, or delegation")
     if not str(entity_id or "").strip():
         raise ValueError("entity_id is required")
     if from_surface not in SURFACES or to_surface not in SURFACES:
@@ -107,10 +108,17 @@ def _require_entity(entity_type: str, entity_id: str) -> None:
     if entity_type == "memorial":
         from core.memorial import get_memorial
         exists = get_memorial(entity_id) is not None
-    else:
+    elif entity_type == "matter":
         from core.matters import get_matter
         exists = get_matter(
             entity_id, include_links=False, include_events=False) is not None
+    else:
+        from core.delegations import DelegationNotFound, DelegationStore
+        try:
+            DelegationStore().get(entity_id)
+            exists = True
+        except DelegationNotFound:
+            exists = False
     if not exists:
         raise KeyError(entity_id)
 
@@ -126,6 +134,7 @@ def _notify_mobile(handoff: dict) -> dict:
     )
     pipeline = DeliveryPipeline(root, db_path=_database_path())
     is_matter = handoff["entity_type"] == "matter"
+    is_delegation = handoff["entity_type"] == "delegation"
     matter_id = str(handoff.get("matter_id") or (
         entity_id if is_matter else ""))
     result = pipeline.deliver(DeliveryEnvelope(
@@ -135,9 +144,13 @@ def _notify_mobile(handoff: dict) -> dict:
             "title": "Jarvis · 发到手机",
             "text": title,
             "url": (
-                f"/items/{entity_id}"
-                if not is_matter
-                else f"/matters/{entity_id}"
+                f"/matters/{entity_id}"
+                if is_matter
+                else (
+                    f"/delegations/{entity_id}"
+                    if is_delegation
+                    else f"/items/{entity_id}"
+                )
             ),
             "matter_id": matter_id,
         },
@@ -145,7 +158,7 @@ def _notify_mobile(handoff: dict) -> dict:
         requested_channel="push",
         urgent=True,
         conversation_bound=True,
-        memorial_id=entity_id if not is_matter else "",
+        memorial_id=entity_id if handoff["entity_type"] == "memorial" else "",
         matter_id=matter_id,
         dedup_key=f"surface-handoff:{handoff['id']}",
         metadata={
@@ -346,7 +359,7 @@ def complete_entity_handoffs(
     clock=time.time,
 ) -> int:
     if entity_type not in ENTITY_TYPES:
-        raise ValueError("entity_type must be memorial or matter")
+        raise ValueError("entity_type must be memorial, matter, or delegation")
     with closing(_connect()) as db, db:
         changed = db.execute(
             "UPDATE surface_handoffs SET status='completed',completed_epoch=? "

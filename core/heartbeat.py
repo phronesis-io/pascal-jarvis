@@ -369,7 +369,13 @@ class HeartbeatRunner:
     # ONLY for tasks where the pre-script already produces the final output
     # and the post-script just writes it to a file. Tasks that need Claude
     # to summarize/reason/index MUST NOT be here.
-    TIER0_TASKS = {"calendar-sync"}  # pre-script produces formatted calendar
+    TIER0_TASKS = {
+        "calendar-sync",
+        "delegation-reconcile",
+        "iteration-observe",
+        "log-maintenance",
+        "provider-canary",
+    }  # deterministic pre/post work; no model call
 
     # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /
     # self-diagnostic / thinking-review 视为 autonomous 内务：长期零响应，
@@ -1023,11 +1029,13 @@ You have access to the user's memory below. Use it to personalize your responses
                     model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
-                if (not use_backup and backup_tried
+                if (not _backup2_active
                         and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
                         and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP2_BASE_URL")
+                        and (use_backup or not backup_tried)
                         and (model_problem or gate_state != "primary")):
+                    backup_tried = True
                     use_backup = True
                     _backup2_active = True
                     model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model

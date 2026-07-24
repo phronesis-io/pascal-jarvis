@@ -268,8 +268,9 @@ def test_bot_sh_wires_sticky_provider_gate():
     # backup failure in this run (the gate presets _claude_backup_tried=1
     # before attempt 1) — one transient relay blip must retry backup, not
     # jump to a context-free GPT reply.
-    assert ('[ "$_claude_backup_tried" -eq 1 ] && [ "$_attempt" -ge 2 ]'
-            in bot)
+    assert '[ "$_claude_backup_tried" -eq 1 ]' in bot
+    assert '[ "$_claude_backup2_tried" -eq 1 ]' in bot
+    assert '&& [ "$_attempt" -ge 2 ]' in bot
 
 
 def test_bot_progress_narration_never_sends_claude_error_text():
@@ -398,6 +399,44 @@ def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path
                       if env.get("ANTHROPIC_AUTH_TOKEN") != "backup-token"]
     assert primary_models == ["opus"]
     assert mf.gate(tmp_path) == "backup"
+
+
+def test_heartbeat_claude_call_reaches_backup2_after_backup1(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.example")
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "backup1-model")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_MODEL", "backup2-model")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        env = kwargs.get("env") or {}
+        token = env.get("ANTHROPIC_AUTH_TOKEN", "")
+        calls.append((cmd, token, env.get("ANTHROPIC_BASE_URL", "")))
+        if token == "backup2-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        return CompletedProcess(
+            cmd, 1, stdout="You've hit your monthly spend limit", stderr=""
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert [token for _, token, _ in calls] == [
+        "",
+        "backup1-token",
+        "backup2-token",
+    ]
+    assert calls[-1][0][calls[-1][0].index("--model") + 1] == "backup2-model"
+    assert calls[-1][2] == "https://backup2.example"
+    assert runner.last_provider == "Claude backup2"
 
 
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):

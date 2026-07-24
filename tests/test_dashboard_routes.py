@@ -1328,3 +1328,34 @@ class TestRoutes:
         body = r.json()
         assert body["status"] == "ok"
         assert body["db"] == "connected"
+
+    def test_api_provider_health_exposes_status_without_credentials(
+        self, client, monkeypatch
+    ):
+        import core.provider_health as provider_health
+
+        monkeypatch.setattr(
+            provider_health,
+            "snapshot",
+            lambda: {
+                "version": 1,
+                "updated_at": "2026-07-24T12:00:00+08:00",
+                "providers": [
+                    {
+                        "id": "backup1",
+                        "label": "Claude backup",
+                        "status": "healthy",
+                        "requested_model": "relay-opus",
+                        "actual_model": "relay-opus",
+                        "checked_at": "2026-07-24T12:00:00+08:00",
+                        "detail": "bounded canary answered",
+                    }
+                ],
+            },
+        )
+
+        response = client.get("/api/provider-health")
+
+        assert response.status_code == 200
+        assert response.json()["providers"][0]["status"] == "healthy"
+        assert "token" not in response.text.lower()

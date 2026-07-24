@@ -36,7 +36,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `prd_matter_workspace_mobile.md` | Current, shipped | Canonical cross-entry topic and mobile workspace contract. |
 | `prd_unified_delivery_items.md` | Current, shipped | Canonical Item, attention routing, and delivery contract. |
 | `prd_cross_device_continuity.md` | Current, shipped | Canonical device handoff and pairing contract. |
-| `prd_verified_delegation.md` | Active, narrowed by incident evidence | The full generic control plane is too broad to land as one new state machine. Implement connector-specific verified actions first and extract shared Delegation machinery only after two distinct connectors prove the common contract. |
+| `prd_verified_delegation.md` | Current, implementation complete; production graduation gated | The generic control plane, deterministic verifiers, projections, reconciler, shadow evaluation, and connector receipts are implemented. Automatic promotion remains fail-closed until the production shadow sample meets the PRD thresholds. |
 
 ## 3. Active Work
 
@@ -61,8 +61,36 @@ Accepted requirements:
 
 Implementation: `core/eigenflux_messages.py`, action integration, local
 identity binding, skill guard, cursor pagination, clock-skew-safe receipt
-matching, and synthetic regression suite. The generic Delegation control plane
-remains an active design, not a completed implementation.
+matching, and synthetic regression suite. The same receipt now projects into
+the generic Delegation control plane.
+
+### Completed: Verified Delegation control plane
+
+- versioned Delegation contracts, required-step DAGs, idempotency, claims, and
+  expiring worker leases;
+- deterministic evidence evaluators for local file, Git commit/remote,
+  runtime deployment, Delivery, EigenFlux message/friend, Lark message,
+  calendar, and document state;
+- honest `verifying`, `waiting_external`, `blocked`, `failed`, `superseded`,
+  `cancelled`, and `completed` states;
+- one-way Item, Matter, Intent, Delivery, Handoff, Session, Job, and Taskline
+  links and projections;
+- bounded reconciliation and lease recovery;
+- dashboard/API/CLI inspection and operator metrics;
+- precision-first shadow capture with reviewed labels and an explicit,
+  metric-enforced graduation gate.
+
+The code is complete without pretending the production sample exists. Phase-0
+promotion stays disabled until at least 50 reviewed labels meet the precision,
+high-risk recall, and verifier-accuracy thresholds in the PRD.
+
+### Completed: Provider fallback observability
+
+Primary Claude, relay backup 1, optional relay backup 2, and GPT agentic
+fallback have bounded canaries and a shared health projection. `/model` and the
+Ops dashboard show configured position, requested model, observed model, last
+success, latency, and a sanitized failure category. A primary spend-limit
+canary trips the same fallback gate used by live routing.
 
 ### Completed: Resident SQLite descriptor exhaustion
 
@@ -108,19 +136,21 @@ The following are not hidden backlog:
 - Automatic promotion of REQ-88 prose-based write claims.
 - REQ-79.2 batch parse clamping after safe retry proved sufficient.
 - A second personal task system beside Item/Matter/Intent.
-- A home-grown clone of taskline inside Jarvis.
-- A generic Delegation mega-migration before connector-specific evidence.
+- A home-grown clone of taskline inside Jarvis; the external service owns L2.
 
 Current external constraints and accepted residuals:
 
-- The installed EigenFlux CLI only accepts message content through
-  `--content`; the wrapper offers `--content-file`, but the child CLI still
-  exposes the value briefly in its process arguments. A real fix requires an
-  upstream stdin/file option or a stable direct API.
-- The active dashboard log is no longer copy-truncated by heartbeat because
-  launchd owns an open append descriptor and concurrent data loss cannot be
-  excluded. Bounded rotation requires swapping the file and restarting the
-  supervised dashboard as one deploy operation.
+- Shadow capture cannot graduate itself. Production promotion requires the
+  reviewed sample and thresholds defined above.
+- Relay backup 2 is supported but remains disabled until the owner supplies a
+  second independent credential in gitignored configuration.
+- Real external message/calendar/document mutations are never generated merely
+  to make a smoke test pass. Their verifier implementations use synthetic
+  integration tests and authorized production receipts.
+
+The earlier EigenFlux argv exposure is closed by the direct HTTPS client, and
+descriptor-safe log maintenance now rotates by stopping and restarting the
+launchd-owned writer around the swap.
 
 These decisions protect simplicity, authority boundaries, and the user's
 attention. Reopening one requires new evidence, not elapsed time.
@@ -130,16 +160,25 @@ attention. Reopening one requires new evidence, not elapsed time.
 The three-loop model is adopted in this bounded form:
 
 - **L1**: repo knowledge, tests, localtest, review, CI, deploy evidence.
-- **L2**: use an external claim/lease/dependency sidecar when concurrent
-  engineering work exceeds one active Agent per worktree. Do not mix this
-  queue with Jarvis's personal Task/Intent domain.
+- **L2**: Taskline is the external claim/lease/dependency sidecar. Jarvis
+  projects Taskline context into Delegation without mixing the engineering
+  queue with the personal Task/Intent domain.
 - **L3**: conversation audit, production incidents, engagement, component
   health, and user feedback generate proposals. A human owns value and scope;
   only accepted proposals enter L1/L2.
 
-Taskline is a plausible L2 sidecar, not yet a dependency: it has the right
-claim/lease/DAG semantics but no stable release history in the reviewed state.
-A pilot should use a separate DB and one low-risk queue before adoption.
+Taskline is installed as an optional supervised component with a separate
+database, CLI wrapper, health check, claim heartbeat, stop conditions, isolated
+worktree support, and Delegation links. Jarvis remains operable when the
+optional sidecar is unavailable.
+
+The L3 observation loop stores normalized signals and proposals, deduplicates
+repeated evidence, requires human acceptance before enqueueing work, and
+rechecks post-release outcomes. It may correctly finish an observation without
+creating a task.
+
+The release-by-release evidence matrix is
+[`release_acceptance_2026-07-24.md`](release_acceptance_2026-07-24.md).
 
 ## 6. Definition of Done
 

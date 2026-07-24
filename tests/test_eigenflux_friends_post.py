@@ -23,7 +23,16 @@ def _run_main(monkeypatch, capsys, payload, results):
     return calls, capsys.readouterr()
 
 
-def test_accept_is_verified_then_welcome_is_sent(monkeypatch, capsys):
+def test_accept_is_verified_then_welcome_is_sent(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    api_calls = []
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxApiClient.send",
+        lambda _self, target, content: (
+            api_calls.append((target, content))
+            or {"code": 0, "data": {"msg_id": "m1", "conv_id": "c1"}}
+        ),
+    )
     payload = {
         "actions": [{
             "request_id": "123",
@@ -40,24 +49,50 @@ def test_accept_is_verified_then_welcome_is_sent(monkeypatch, capsys):
         "from_name": "金融 Agent",
         "greeting": "hello",
     })
-    ok = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+    friends_empty = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"friends": []}), stderr="")
+    friends_present = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"friends": [{
+            "agent_id": "456", "agent_name": "金融 Agent",
+        }]}), stderr="")
+    ok = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"code": 0}), stderr="")
+    history = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"messages": [{
+            "msg_id": "m1",
+            "receiver_id": "456",
+            "content": post.WELCOME_MESSAGE,
+            "created_at": 0,
+        }]}), stderr="")
 
-    calls, output = _run_main(monkeypatch, capsys, payload, [pending, ok, ok])
+    calls, output = _run_main(
+        monkeypatch,
+        capsys,
+        payload,
+        [
+            pending,
+            friends_empty,
+            ok,
+            friends_present,
+            friends_present,
+            history,
+        ],
+    )
 
     assert calls[0][:4] == [
         "eigenflux", "relation", "list", "--direction"]
-    assert calls[1][:4] == [
-        "eigenflux", "relation", "handle", "--request-id"]
     assert calls[2][:4] == [
-        "eigenflux", "msg", "send", "--receiver-id"]
-    assert post.WELCOME_MESSAGE in calls[2]
+        "eigenflux", "relation", "handle", "--request-id"]
+    assert api_calls == [("456", post.WELCOME_MESSAGE)]
+    assert not any(call[1:3] == ["msg", "send"] for call in calls)
     assert "已通过" in output.out
     assert "发了欢迎" in output.out
     assert "123" not in output.out
 
 
 def test_accept_failure_never_sends_welcome_or_claims_success(
-        monkeypatch, capsys):
+        monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     payload = {
         "actions": [{
             "request_id": "123",
@@ -75,10 +110,17 @@ def test_accept_failure_never_sends_welcome_or_claims_success(
         "from_name": "金融 Agent",
     })
 
-    calls, output = _run_main(monkeypatch, capsys, payload, [pending, failed])
+    friends_empty = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"friends": []}), stderr="")
+    calls, output = _run_main(
+        monkeypatch,
+        capsys,
+        payload,
+        [pending, friends_empty, failed, friends_empty],
+    )
 
-    assert len(calls) == 2
-    assert "处理未完成" in output.out
+    assert len(calls) == 4
+    assert "没有确认成功" in output.out
     assert "已通过" not in output.out
     assert "模型说已处理" not in output.out
     assert "server rejected" in output.err

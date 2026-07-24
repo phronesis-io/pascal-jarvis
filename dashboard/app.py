@@ -37,6 +37,7 @@ def create_app():
     from .pages import (  # noqa: F401
         home, items, tasks, bookmarks, settings, intentions, thinking,
         agent_calendar, engagement, ops, usage, memorials, matters,
+        delegations,
     )
 
     # Register REST API for bot.sh integration

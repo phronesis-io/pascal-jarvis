@@ -41,6 +41,16 @@ It routes based on the human attention cost.
 - Dense, factual, and diagnosis-oriented.
 - Uses live timestamps and authoritative component state.
 - Destructive controls require explicit operator intent and honest results.
+- Provider/model health shows configured position, observed model, last
+  success, latency, and sanitized failure category without credentials.
+
+### Delegation
+
+- Show the current required step, evidence state, blocker, and next action.
+- Keep progress inspectable on phone and desktop without pushing routine
+  transitions into Lark.
+- Never use completed styling for an unverified mutation.
+- Shadow predictions stay out of the active user surface.
 
 ## Interaction Rules
 
@@ -51,6 +61,8 @@ It routes based on the human attention cost.
 - A repeated callback or retry returns the original receipt.
 - An explicit "send again" creates a new contract version.
 - Missing evidence means unknown, not failure and not success.
+- Mobile and desktop operate the same Item and Delegation IDs. A Handoff moves
+  attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
   activity signals mean inactivity.
 

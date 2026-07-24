@@ -15,6 +15,8 @@ Jarvis should let the user:
 - batch ordinary decisions on phone or desktop without cluttering chat;
 - continue one body of work across Lark, phone, Claude Code, and Codex;
 - delegate an external action and know whether it was truly completed;
+- see which provider/model actually handled a request and whether each fallback
+  is currently usable, without exposing credentials;
 - trust reminders, delivery status, system health, and model fallback;
 - preserve useful context across sessions without leaking private data;
 - spend less time operating the assistant than the assistant returns.
@@ -44,6 +46,8 @@ Jarvis should let the user:
 8. A degraded model or channel is visible when it changes trust.
 9. Failure is honest, bounded, and recoverable.
 10. New complexity must retire more confusion than it creates.
+11. Automatic capture earns authority through reviewed production evidence;
+    code existence or elapsed time never promotes it.
 
 ## Non-Goals
 

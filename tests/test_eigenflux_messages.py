@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import subprocess
 
@@ -11,6 +12,7 @@ import pytest
 from core.actions import ActionProcessor
 from core.eigenflux_messages import (
     CliFailure,
+    EigenFluxApiClient,
     EigenFluxMessenger,
     RecipientAmbiguous,
     RecipientNotFound,
@@ -33,6 +35,7 @@ class FakeEigenFlux:
         ]
         self.messages: list[dict] = []
         self.calls: list[list[str]] = []
+        self.api_calls: list[tuple[str, str]] = []
         self.send_count = 0
         self.send_response_has_ids = True
         self.history_error = False
@@ -91,30 +94,30 @@ class FakeEigenFlux:
                 if message["conv_id"] == conv_id
             ]
             return self._result({"messages": messages})
-        if command[1:3] == ["msg", "send"]:
-            self.send_count += 1
-            target = self._value(command, "--receiver-id")
-            content = self._value(command, "--content")
-            msg_id = f"msg-{self.send_count}"
-            conv_id = f"conv-{target}"
-            self.messages.insert(
-                0,
-                {
-                    "content": content,
-                    "conv_id": conv_id,
-                    "created_at": 2_000_000_000_000,
-                    "msg_id": msg_id,
-                    "receiver_id": target,
-                    "sender_id": "agent-owner",
-                },
-            )
-            if self.send_error_after_commit:
-                return self._result({}, returncode=1, stderr="connection reset")
-            data = {"msg_id": msg_id, "conv_id": conv_id}
-            if not self.send_response_has_ids:
-                data = {}
-            return self._result({"code": 0, "data": data})
         raise AssertionError(f"unexpected command: {command}")
+
+    def send_api(self, target: str, content: str) -> dict:
+        self.api_calls.append((target, content))
+        self.send_count += 1
+        msg_id = f"msg-{self.send_count}"
+        conv_id = f"conv-{target}"
+        self.messages.insert(
+            0,
+            {
+                "content": content,
+                "conv_id": conv_id,
+                "created_at": 2_000_000_000_000,
+                "msg_id": msg_id,
+                "receiver_id": target,
+                "sender_id": "agent-owner",
+            },
+        )
+        if self.send_error_after_commit:
+            raise CliFailure("connection reset")
+        data = {"msg_id": msg_id, "conv_id": conv_id}
+        if not self.send_response_has_ids:
+            data = {}
+        return {"code": 0, "data": data}
 
 
 def _messenger(tmp_path, cli: FakeEigenFlux, **kwargs) -> EigenFluxMessenger:
@@ -122,6 +125,7 @@ def _messenger(tmp_path, cli: FakeEigenFlux, **kwargs) -> EigenFluxMessenger:
         root=tmp_path,
         db_path=tmp_path / "jarvis.db",
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 2_000_000_000,
         **kwargs,
     )
@@ -136,8 +140,8 @@ def test_exact_name_is_resolved_server_side_and_read_back(tmp_path):
     assert receipt.completed
     assert receipt.recipient_id == "agent-spouse"
     assert receipt.msg_id == "msg-1"
-    send = next(call for call in cli.calls if call[1:3] == ["msg", "send"])
-    assert send[send.index("--receiver-id") + 1] == "agent-spouse"
+    assert cli.api_calls == [("agent-spouse", "D&O insurance brief")]
+    assert all("D&O insurance brief" not in arg for call in cli.calls for arg in call)
     assert any(call[1:3] == ["msg", "history"] for call in cli.calls)
 
 
@@ -224,6 +228,7 @@ def test_binding_alias_is_checked_against_live_friend_record(tmp_path):
         db_path=tmp_path / "jarvis.db",
         bindings_path=binding,
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 2_000_000_000,
     )
     assert messenger.send("family", "hello").recipient_id == "agent-spouse"
@@ -279,6 +284,7 @@ def test_exact_receipt_ids_override_clock_skew(tmp_path):
         root=tmp_path,
         db_path=tmp_path / "jarvis.db",
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 9_000_000_000,
     )
 
@@ -297,6 +303,68 @@ def test_readback_failure_never_claims_completion_or_retries(tmp_path):
     assert not receipt.completed
     assert cli.send_count == 1
     assert "仍在核验" in receipt.human_text()
+
+
+class _ApiResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def test_api_sender_keeps_message_body_out_of_url_and_headers(tmp_path):
+    home = tmp_path / ".eigenflux"
+    credentials = home / "servers" / "production" / "credentials.json"
+    credentials.parent.mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({
+        "default_server": "production",
+        "servers": [{
+            "name": "production",
+            "endpoint": "https://eigenflux.example.test",
+        }],
+    }))
+    credentials.write_text(json.dumps({
+        "access_token": "private-token",
+        "agent_id": "owner",
+    }))
+    captured = {}
+
+    def open_request(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _ApiResponse({
+            "code": 0,
+            "data": {"msg_id": "m1", "conv_id": "c1"},
+        })
+
+    response = EigenFluxApiClient(home, opener=open_request).send(
+        "agent-spouse", "private insurance brief"
+    )
+
+    request = captured["request"]
+    assert request.full_url == "https://eigenflux.example.test/api/v1/pm/send"
+    assert "private insurance brief" not in request.full_url
+    assert all(
+        "private insurance brief" not in str(value)
+        for value in request.headers.values()
+    )
+    assert json.loads(request.data) == {
+        "receiver_id": "agent-spouse",
+        "content": "private insurance brief",
+    }
+    assert response["data"]["msg_id"] == "m1"
+
+
+def test_api_sender_fails_closed_without_credentials(tmp_path):
+    with pytest.raises(CliFailure, match="authentication is not configured"):
+        EigenFluxApiClient(tmp_path).send("agent", "content")
 
 
 def test_action_marker_returns_deterministic_receipt(monkeypatch, tmp_path):

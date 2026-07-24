@@ -500,6 +500,17 @@ delivery_send_reliable() {
   [ "$_state" = "delivered" ]
 }
 
+delivery_card_reliable() {
+  local card_json="$1" _json _state
+  _json=$(printf '%s' "$card_json" | python3 -m core.delivery send \
+    --source bot-card --kind card --attention notice --channel lark \
+    --urgent --stdin 2>>"$LOG_FILE") || return 1
+  _state=$(JV_DELIVERY_JSON="$_json" python3 -c \
+    'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("state",""))' \
+    2>>"$LOG_FILE") || return 1
+  [ "$_state" = "delivered" ]
+}
+
 # Thin wrapper around the unified delivery sender, with a local log line.
 send_to_lark() {
   local content="$1"
@@ -532,7 +543,8 @@ _queue_file="$JARVIS_DIR/.message_queue"
 if [ -f "$_queue_file" ] && [ -s "$_queue_file" ] && [ -n "$USER_ID" ]; then
   _dropped=$(wc -l < "$_queue_file" | tr -d ' ')
   log_warn "Found $_dropped interrupted message(s) from restart — notifying user"
-  lark_send "⚠️ 重启中断了 ${_dropped} 条正在处理的消息，请重新发送。" 2>/dev/null || true
+  delivery_send_reliable \
+    "⚠️ 重启中断了 ${_dropped} 条正在处理的消息，请重新发送。" || true
   rm -f "$_queue_file"
 fi
 
@@ -651,7 +663,8 @@ from core.card import build_card
 print(build_card('🚀 后台任务已启动', os.environ['JV_BODY']))
 " 2>>"$LOG_FILE") || _bg_start_card=""
           if [ -n "$_bg_start_card" ]; then
-            lark_send_card "$_bg_start_card"
+            delivery_card_reliable "$_bg_start_card" || \
+              send_to_lark "$_bg_start_body"
           else
             send_to_lark "🚀 后台任务已启动：$bg_desc （Job $job_id）"
           fi
@@ -728,6 +741,7 @@ No output found for job: $out_id"
 handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
   local reaction_id="$5" chat_type="${6:-p2p}" sender_id="${7:-}"
+  local _raw_user_content="$content"
 
   # ── Group chat mode (REQ-100~102) ──────────────────────────────────
   # A group session is visible to and drivable by non-owners: it gets the
@@ -761,6 +775,19 @@ handle_message() {
     [ "$sender_id" = "$USER_ID" ] && speaker="${OWNER_NAME:-主人}（主人）"
     content="[发言人: $speaker]
 $content"
+  fi
+
+  # Delegation Phase-0 shadow capture: precision-first and side-effect free.
+  # It stores only the stable message reference and a coarse prediction, never
+  # the private body. Group messages are excluded because their principals and
+  # permissions differ from the owner's private contract.
+  if [ "$chat_type" = "p2p" ] && [ -n "$message_id" ]; then
+    printf '%s' "$_raw_user_content" \
+      | python3 -m core.delegation_shadow capture \
+          --source lark \
+          --source-ref "$message_id" \
+          --principal "${sender_id:-${USER_ID:-owner}}" \
+          >/dev/null 2>>"$LOG_FILE" || true
   fi
 
   # Prepend an authoritative current-time line to the user's message body.
@@ -933,6 +960,16 @@ except Exception:
     _claude_backup_tried=1
     _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
     log_info "[$session_id] Provider gate: primary spend-limited — starting on backup provider (model=$_cur_model)"
+  elif [ "$_provider_gate" = "backup" ] \
+    && [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
+    && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
+    && [ -n "${CLAUDE_BACKUP2_BASE_URL:-}" ]; then
+    _use_claude_backup=1
+    _claude_backup2_tried=1
+    _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
+    CLAUDE_BACKUP_AUTH_TOKEN="$CLAUDE_BACKUP2_AUTH_TOKEN"
+    CLAUDE_BACKUP_BASE_URL="$CLAUDE_BACKUP2_BASE_URL"
+    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup2 provider (model=$_cur_model)"
   fi
 
   for _attempt in 1 2 3 4; do
@@ -1254,7 +1291,10 @@ except Exception:
         && [ "$_claude_backup2_tried" -eq 0 ] \
         && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
         && [ -n "${CLAUDE_BACKUP2_BASE_URL:-}" ] \
-        && [ "$_claude_backup_tried" -eq 1 ]; then
+        && { [ "$_claude_backup_tried" -eq 1 ] \
+             || [ "${CLAUDE_BACKUP_ENABLED:-true}" != "true" ] \
+             || [ -z "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
+             || [ -z "${CLAUDE_BACKUP_BASE_URL:-}" ]; }; then
         _claude_backup2_tried=1
         _use_claude_backup=1
         log_warn "[$session_id] Backup1 exhausted on $_cur_model → trying Claude Code backup2 provider"
@@ -1265,7 +1305,9 @@ except Exception:
         && [ -n "${OPENAI_API_KEY:-}" ] \
         && [ "$_openai_tried" -eq 0 ] \
         && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null \
-             || { [ "$_claude_backup_tried" -eq 1 ] && [ "$_attempt" -ge 2 ] \
+             || { { [ "$_claude_backup_tried" -eq 1 ] \
+                    || [ "$_claude_backup2_tried" -eq 1 ]; } \
+                  && [ "$_attempt" -ge 2 ] \
                   && [ -n "${_model_error_text//[[:space:]]/}" ]; }; }; then
         # The || arm: an auth/network error from the backup relay matches no
         # model-error signature (kept tight after the red-team fix), but once
@@ -1656,7 +1698,7 @@ from core.card import build_card
 print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
 " 2>/dev/null) || card_json=""
   if [ -n "$card_json" ]; then
-    lark_send_card "$card_json"
+    delivery_card_reliable "$card_json" || send_to_lark "$card_body"
   else
     send_to_lark "$card_body"
   fi

@@ -50,6 +50,26 @@ external actions or engineering steps.
 
 Invariant: partial step success does not make the whole Delegation complete.
 Ordinary conversation and life aspirations are not automatically Delegations.
+Shadow Delegations are labeled observations, not accepted responsibilities,
+and never appear in the user's active-work metrics.
+
+### Proposal
+
+A normalized L3 recommendation derived from one or more feedback signals. It
+contains the desired outcome, non-goals, acceptance evidence, impact, cost,
+priority, and dependency context.
+
+Invariant: a Proposal cannot enter the executable engineering queue until a
+human explicitly accepts it. Repeated signals update one Proposal instead of
+creating unbounded tasks.
+
+### Engineering Task
+
+An L2 Taskline object with dependency, priority, owner, lease, stage documents,
+PR, CI, review, and merge evidence.
+
+Invariant: it is not a personal Intent or Item. Losing an Agent context does
+not lose task ownership or stage evidence, and an expired lease is recoverable.
 
 ### Signal
 
@@ -82,6 +102,8 @@ completion is not automatically product-outcome completion.
 - Delivery transports an Item or reply; it does not own their business state.
 - A Handoff closes when its exact Item or Matter continuation is consumed.
 - Memory summarizes objects but never replaces their authoritative stores.
+- L3 proposes, L2 schedules engineering work, and L1 proves delivery; none of
+  these may infer a product outcome from an Agent's completion sentence.
 
 ## Risk Classes
 

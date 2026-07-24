@@ -95,6 +95,13 @@ def test_send_to_lark_uses_reliable_sender():
     assert "delivery_send_reliable" in _extract_fn("send_to_lark")
 
 
+def test_production_bot_cards_use_unified_delivery_sender():
+    assert 'delivery_card_reliable "$_bg_start_card"' in BOT_SH
+    assert 'delivery_card_reliable "$card_json"' in BOT_SH
+    assert "lark_send_card \"$_bg_start_card\"" not in BOT_SH
+    assert 'lark_send_card "$card_json"' not in BOT_SH
+
+
 def test_backoff_mirrors_heartbeat_send_retry_delays():
     """(2,5)s — same schedule as core/heartbeat_loop.py SEND_RETRY_DELAYS."""
     assert BOT_SH.count("for _delay in 2 5") == 2  # reply + send wrappers

@@ -36,7 +36,19 @@ bash -n path/to/changed-script.sh
 This runs shell syntax, shellcheck when installed, the full pytest suite, and
 public-repository hygiene.
 
-## 4. Self-review
+## 4. Engineering task evidence
+
+When Taskline is available:
+
+```bash
+./scripts/taskline.sh health
+./scripts/taskline.sh task heartbeat <task-id> --lease 30m
+```
+
+Keep Spec, Dev Notes, Test Report, real PR, review, CI, and merge evidence on
+the same Taskline task. An Agent saying "done" is not a stage exit condition.
+
+## 5. Self-review
 
 Inspect:
 
@@ -47,7 +59,7 @@ Inspect:
 - compatibility with existing dirty worktree changes;
 - current documentation and PRD portfolio status.
 
-## 5. Production verification
+## 6. Production verification
 
 Only on the production machine, after committing the intended revision:
 
@@ -56,10 +68,12 @@ Only on the production machine, after committing the intended revision:
 ./scripts/localtest.sh --runtime
 ```
 
-The runtime gate requires component health, deploy verification, and smoke
-checks. For resource-lifecycle changes, sample the live process more than once
-across real scheduler activity; a clean restart alone does not prove a leak is
-fixed.
+`restart.sh` first requires local `main`, `HEAD == origin/main`, a clean tracked
+worktree, protected-main policy, a merged PR, successful required checks, and
+independent review evidence. The runtime gate then requires component health,
+deploy verification, and smoke checks. For resource-lifecycle changes, sample
+the live process more than once across real scheduler activity; a clean
+restart alone does not prove a leak is fixed.
 
 Do not perform a real message, calendar, document, or public mutation merely
 for smoke testing. Use a read-only preflight unless the owner explicitly

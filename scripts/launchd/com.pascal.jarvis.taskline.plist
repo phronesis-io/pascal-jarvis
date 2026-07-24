@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pascal.jarvis.taskline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__WORK_DIR__/repos/taskline/dist/taskline-server</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__WORK_DIR__/repos/taskline</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>TASKLINE_LISTEN</key>
+        <string>127.0.0.1:8787</string>
+        <key>TASKLINE_DB</key>
+        <string>__HOME__/.local/share/taskline/taskline.db</string>
+        <key>TASKLINE_IMAGES_DIR</key>
+        <string>__HOME__/.local/share/taskline/images</string>
+        <key>TASKLINE_DOCS_DIR</key>
+        <string>__HOME__/.local/share/taskline/docs</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/jarvis-taskline.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/jarvis-taskline.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

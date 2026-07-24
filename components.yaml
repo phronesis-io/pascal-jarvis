@@ -25,6 +25,12 @@
 # agree, or every default install alarms forever on features it never enabled.
 
 components:
+  - name: taskline
+    check: launchctl
+    label: com.pascal.jarvis.taskline
+    critical: false
+    requires_file: ../taskline/dist/taskline-server
+
   - name: daemon
     check: pid
     path: .daemon.pid

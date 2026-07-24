@@ -31,21 +31,22 @@ def _deliver(monkeypatch, tmp_path, send_ok):
     return seen, delivered, seen_file, sent
 
 
-def test_failed_send_not_marked_seen_and_deadlettered(monkeypatch, tmp_path):
-    seen, delivered, seen_file, sent = _deliver(monkeypatch, tmp_path,
-                                                send_ok=False)
+def test_failed_immediate_send_is_durably_queued_before_marking_seen(
+        monkeypatch, tmp_path):
+    seen, accepted, seen_file, sent = _deliver(
+        monkeypatch, tmp_path, send_ok=False
+    )
     assert sent  # the send was attempted
-    assert delivered is False
-    assert seen == []                # dedup must NOT swallow a redelivery
-    assert not seen_file.exists()
-    # no phantom "Delivered" ledger entry
+    assert accepted is True
+    assert seen == ["id1"]
+    assert load_seen(seen_file) == ["id1"]
+    # Queued is durable acceptance, not a phantom delivered/outbox record.
     assert not (tmp_path / "heartbeat_outbox.jsonl").exists()
-    # dead-letter row for daemon.py's independent channel
-    dl = tmp_path / "data" / ".delivery_deadletter.jsonl"
-    assert dl.exists()
-    row = json.loads(dl.read_text(encoding="utf-8").splitlines()[-1])
-    assert row["kind"] == "ef_stream_send_failed"
-    assert "hello from ef" in row["detail"]
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+    from core.delivery import DeliveryPipeline
+    rows = DeliveryPipeline(tmp_path).list(limit=5)
+    assert rows[0]["state"] == "queued"
+    assert rows[0]["source"] == "eigenflux-stream"
 
 
 def test_successful_send_marks_seen_and_outbox(monkeypatch, tmp_path):
@@ -89,16 +90,16 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
     assert accepted is True and visible is True
 
 
-def test_deadletter_failure_does_not_raise(monkeypatch, tmp_path):
-    # Bookkeeping must never kill the stream loop.
+def test_queue_acceptance_does_not_depend_on_deadletter_sink(
+        monkeypatch, tmp_path):
     def boom(*a, **k):
         raise OSError("disk full")
 
     monkeypatch.setattr(efsl, "record_overdue", boom)
     monkeypatch.setattr(efsl, "_lark_send", lambda m, u: False)
-    seen, delivered = efsl._deliver_and_mark(
+    seen, accepted = efsl._deliver_and_mark(
         "msg", ["id2"], {}, "u1", [], tmp_path / ".ef-seen", tmp_path)
-    assert delivered is False and seen == []
+    assert accepted is True and seen == ["id2"]
 
 
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------
