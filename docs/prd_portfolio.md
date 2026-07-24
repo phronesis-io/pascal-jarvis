@@ -81,8 +81,9 @@ the generic Delegation control plane.
   metric-enforced graduation gate.
 
 The code is complete without pretending the production sample exists. Phase-0
-promotion stays disabled until at least 50 reviewed labels meet the precision,
-high-risk recall, and verifier-accuracy thresholds in the PRD.
+promotion stays disabled until at least 50 reviewed labels span 14 days and
+five connector classes while meeting the precision, high-risk recall, and
+verifier-accuracy thresholds in the PRD.
 
 ### Completed: Provider fallback observability
 
@@ -177,7 +178,9 @@ repeated evidence, requires human acceptance before enqueueing work, and
 reconciles Taskline completion to the linked merged PR and the actually
 deployed SHA, then rechecks the same source after release. A failed outcome
 creates a new human-gated follow-up instead of silently closing or remaining
-queued forever. It may correctly finish an observation without creating a
+queued forever. Source outages fail closed instead of treating missing
+evidence as success; stronger evidence can reopen a rejected direction for a
+new human judgment. It may correctly finish an observation without creating a
 task.
 
 The release-by-release evidence matrix is

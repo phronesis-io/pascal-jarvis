@@ -395,7 +395,9 @@ def items_page():
                 return
 
             def decide(mid: str, key: str):
-                payload = memorial.decide(mid, key)
+                payload = memorial.decide(
+                    mid, key, owner_authenticated=True
+                )
                 toast = payload.get("toast", {})
                 ui.notify(
                     toast.get("content", "已记录"),
@@ -551,7 +553,9 @@ def item_detail_page(memorial_id: str):
                 complete_entity_handoffs("memorial", memorial_id)
 
             def decide(key: str):
-                payload = memorial.decide(memorial_id, key)
+                payload = memorial.decide(
+                    memorial_id, key, owner_authenticated=True
+                )
                 toast = payload.get("toast", {})
                 ui.notify(
                     toast.get("content", "已记录"),

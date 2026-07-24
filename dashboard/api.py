@@ -56,6 +56,25 @@ async def _write_guard(request: Request) -> None:
 _WRITE = [Depends(_write_guard)]
 
 
+async def _owner_guard(request: Request) -> None:
+    """Require a device token already validated by the mobile gateway.
+
+    NiceGUI's desktop buttons execute their callbacks in-process and do not
+    use these REST mutations. Mobile REST calls arrive through :3458, whose
+    gateway forwards the paired device token as a Bearer credential.
+    """
+    auth = str(request.headers.get("authorization") or "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(401, "authenticated owner device required")
+    from core.mobile_access import validate_device_token
+    if validate_device_token(token, touch=False) is None:
+        raise HTTPException(401, "authenticated owner device required")
+
+
+_OWNER_WRITE = [Depends(_write_guard), Depends(_owner_guard)]
+
+
 def _validate_task_input(trigger_type: str, trigger_config,
                          action_type: str) -> None:
     """Reject malformed triggers and executor-less actions with a 400."""
@@ -401,7 +420,7 @@ def register_api_routes():
         return {"gateway": gateway, "devices": list_devices(),
                 "recent_access": recent_access(20)}
 
-    @app.post("/api/mobile/pair", dependencies=_WRITE)
+    @app.post("/api/mobile/pair", dependencies=_OWNER_WRITE)
     async def api_mobile_pair(request: Request):
         from core.config import Config
         from core.mobile_access import create_pair_code
@@ -426,7 +445,7 @@ def register_api_routes():
         result["pair_url"] = result["tailnet_pair_url"] or result["lan_pair_url"]
         return result
 
-    @app.delete("/api/mobile/devices/{device_id}", dependencies=_WRITE)
+    @app.delete("/api/mobile/devices/{device_id}", dependencies=_OWNER_WRITE)
     async def api_mobile_revoke(device_id: str):
         from core.mobile_access import revoke_device
         if not revoke_device(device_id):
@@ -438,7 +457,7 @@ def register_api_routes():
         from core.mobile_access import vapid_public_key
         return {"public_key": vapid_public_key()}
 
-    @app.post("/api/mobile/push-subscriptions", dependencies=_WRITE)
+    @app.post("/api/mobile/push-subscriptions", dependencies=_OWNER_WRITE)
     async def api_mobile_push_subscribe(request: Request):
         from core.mobile_access import register_push
         data = await request.json()
@@ -449,7 +468,7 @@ def register_api_routes():
             raise HTTPException(400, str(exc)) from exc
         return {"status": "subscribed", "id": subscription_id}
 
-    @app.post("/api/mobile/push-test", dependencies=_WRITE)
+    @app.post("/api/mobile/push-test", dependencies=_OWNER_WRITE)
     async def api_mobile_push_test(request: Request):
         from core.mobile_access import send_push
         data = await request.json()
@@ -487,11 +506,15 @@ def register_api_routes():
         )
         return {"items": items[:max(1, min(int(limit), 500))]}
 
-    @app.post("/api/items/{memorial_id}/decide", dependencies=_WRITE)
+    @app.post("/api/items/{memorial_id}/decide", dependencies=_OWNER_WRITE)
     async def api_item_decide(memorial_id: str, request: Request):
         from core.memorial import decide
         data = await request.json()
-        return decide(memorial_id, str(data.get("option", "")))
+        return decide(
+            memorial_id,
+            str(data.get("option", "")),
+            owner_authenticated=True,
+        )
 
     @app.post("/api/items/{memorial_id}/chat", dependencies=_WRITE)
     async def api_item_chat(memorial_id: str, request: Request):
@@ -674,7 +697,10 @@ def register_api_routes():
             raise _delegation_error(exc) from exc
         return {"items": detail["evidence"]}
 
-    @app.post("/api/delegations/{delegation_id}/confirm", dependencies=_WRITE)
+    @app.post(
+        "/api/delegations/{delegation_id}/confirm",
+        dependencies=_OWNER_WRITE,
+    )
     async def api_delegation_confirm(delegation_id: str, request: Request):
         from core.delegations import DelegationStore
         from core.delegation_reconcile import sync_attention_item
@@ -695,7 +721,10 @@ def register_api_routes():
             raise _delegation_error(exc) from exc
         return detail
 
-    @app.post("/api/delegations/{delegation_id}/cancel", dependencies=_WRITE)
+    @app.post(
+        "/api/delegations/{delegation_id}/cancel",
+        dependencies=_OWNER_WRITE,
+    )
     async def api_delegation_cancel(delegation_id: str, request: Request):
         from core.delegations import DelegationStore
         from core.delegation_reconcile import sync_attention_item
@@ -717,7 +746,10 @@ def register_api_routes():
             raise _delegation_error(exc) from exc
         return detail
 
-    @app.post("/api/delegations/{delegation_id}/retry", dependencies=_WRITE)
+    @app.post(
+        "/api/delegations/{delegation_id}/retry",
+        dependencies=_OWNER_WRITE,
+    )
     async def api_delegation_retry(delegation_id: str, request: Request):
         from core.delegations import DelegationStore
         data = await request.json()
@@ -779,7 +811,7 @@ def register_api_routes():
 
     @app.post(
         "/api/iteration/proposals/{proposal_id}/review",
-        dependencies=_WRITE,
+        dependencies=_OWNER_WRITE,
     )
     async def api_iteration_proposal_review(
         proposal_id: str, request: Request

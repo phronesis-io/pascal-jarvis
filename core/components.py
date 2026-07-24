@@ -247,6 +247,32 @@ def _check_tailnet(comp: dict, root: Path) -> tuple[bool, str]:
     return bool(status.get("ready")), str(status.get("detail") or "not served")
 
 
+def _check_taskline(comp: dict, root: Path) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["taskline", "status"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return False, f"status probe failed ({type(exc).__name__})"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "probe failed").strip()
+        return False, detail[:240]
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False, "status probe returned invalid JSON"
+    healthy = bool(payload.get("healthy") and payload.get("registered"))
+    return healthy, (
+        "healthy and workspace registered"
+        if healthy
+        else "server unhealthy or workspace unregistered"
+    )
+
+
 _CHECKS = {
     "pid": _check_pid,
     "pgrep": _check_pgrep,
@@ -254,6 +280,7 @@ _CHECKS = {
     "file_age": _check_file_age,
     "launchctl": _check_launchctl,
     "tailnet": _check_tailnet,
+    "taskline": _check_taskline,
 }
 
 

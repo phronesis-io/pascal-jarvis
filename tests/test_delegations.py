@@ -480,6 +480,13 @@ def test_active_lease_prevents_double_claim_and_can_be_renewed(tmp_path):
             expected_version=1,
             owner="claude",
         )
+    with pytest.raises(DelegationConflict):
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="codex",
+        )
     renewed = store.renew_claim(
         delegation["id"],
         step["id"],
@@ -622,7 +629,57 @@ def test_shadow_metrics_enforce_quality_gates(tmp_path):
     assert metrics["labeled"] == 1
     assert metrics["precision"] == 1
     assert metrics["verifier_accuracy"] == 1
+    assert metrics["observation_days"] == 0
+    assert metrics["connector_class_count"] == 1
     assert metrics["phase1_ready"] is False
+
+
+def test_shadow_gate_requires_two_weeks_and_five_connector_classes(tmp_path):
+    operations = [
+        "message_send",
+        "friend_relationship",
+        "calendar_upsert",
+        "document_update",
+        "git_push",
+    ]
+
+    def populate(path, *, spread_days, operation_count):
+        clock = [1_000.0]
+        store = _store(path, clock)
+        for index in range(50):
+            clock[0] = 1_000 + (spread_days * 86400 * index / 49)
+            operation = operations[index % operation_count]
+            row, _ = store.record_shadow_prediction(
+                principal_id="owner",
+                source="lark",
+                source_ref=f"shadow-{index}",
+                title="shadow",
+                operation=operation,
+                predicted_is_delegation=True,
+                predicted_target_risk=2,
+                predicted_verifier="authoritative",
+            )
+            store.label_shadow(
+                row["id"],
+                actual_is_delegation=True,
+                actual_target_risk=2,
+                actual_verifier="authoritative",
+            )
+        return store.shadow_metrics()
+
+    one_day = populate(tmp_path / "one-day", spread_days=1, operation_count=5)
+    one_connector = populate(
+        tmp_path / "one-connector", spread_days=15, operation_count=1
+    )
+    qualified = populate(
+        tmp_path / "qualified", spread_days=15, operation_count=5
+    )
+
+    assert one_day["phase1_ready"] is False
+    assert one_connector["phase1_ready"] is False
+    assert qualified["observation_days"] >= 14
+    assert qualified["connector_class_count"] == 5
+    assert qualified["phase1_ready"] is True
 
 
 def test_metrics_expose_user_and_reliability_states(tmp_path):

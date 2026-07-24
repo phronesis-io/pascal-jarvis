@@ -149,6 +149,75 @@ def test_reconciler_timeout_escalates_once_to_user(
     ) == 1
 
 
+def test_repeated_mismatch_does_not_reset_verification_budget(
+    tmp_path, monkeypatch,
+):
+    from core import memorial
+
+    clock = [1_000.0]
+    store, delegation, _ = _prepared(tmp_path, clock)
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    reconciler = DelegationReconciler(
+        store=store,
+        registry=_Registry(matched=False),
+        now=lambda: clock[0],
+    )
+
+    reconciler.run(send_items=False)
+    clock[0] += 30
+    reconciler.run(send_items=False)
+    clock[0] += 31
+    result = reconciler.run(send_items=False)
+
+    assert result["needs_user"] == 1
+    assert store.get(delegation["id"])["status"] == "needs_user"
+
+
+def test_reconciler_refreshes_bound_taskline_delegation(
+    tmp_path, monkeypatch,
+):
+    store = DelegationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+    )
+    delegation, _ = store.create(
+        principal_id="owner",
+        source="taskline",
+        source_ref="task-bound",
+        title="Deploy task",
+        operation="engineering_change",
+        target_type="repository",
+        target_id="jarvis",
+        authority="jarvis_runtime",
+        verification_policy={
+            "verifier": "runtime_deploy",
+            "release_sha": "",
+        },
+        expected_postcondition={"git_head": "pending:task-bound"},
+        authorized=True,
+    )
+    store.add_step(
+        delegation["id"],
+        expected_version=1,
+        sequence=1,
+        kind="runtime_deploy",
+        executor="release",
+    )
+    calls = []
+
+    def refresh(bridge, task_id):
+        calls.append((task_id, bridge.db_path))
+        return store.get(delegation["id"])
+
+    monkeypatch.setattr(
+        "core.taskline_bridge.TasklineBridge.refresh_release", refresh
+    )
+
+    DelegationReconciler(store=store).run(send_items=False)
+
+    assert calls == [("task-bound", store.db_path)]
+
+
 def test_reconciler_releases_only_expired_active_lease(tmp_path):
     clock = [1_000.0]
     store = DelegationStore(

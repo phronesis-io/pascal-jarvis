@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from core.iteration_loop import DailyObserver, IterationError, IterationStore
+from core.iteration_loop import DailyObserver, IterationError, IterationStore, main
 
 
 def _store(tmp_path, now=None):
@@ -104,6 +104,11 @@ def test_rejection_never_creates_taskline_work(monkeypatch, tmp_path):
     )
     assert rejected["status"] == "rejected"
     assert called == []
+
+
+def test_shell_cli_has_no_owner_proposal_review_command():
+    with pytest.raises(SystemExit):
+        main(["review", "prp_unsafe", "--approve"])
 
 
 def test_approval_requires_valid_taskline_receipt(monkeypatch, tmp_path):
@@ -218,6 +223,168 @@ def test_rejected_signal_does_not_create_a_daily_repeat_proposal(tmp_path):
 
     assert store.propose_from_signal(repeated)[1] is False
     assert len(store.list()) == 1
+
+
+def test_rejected_signal_reopens_after_materially_stronger_evidence(tmp_path):
+    store = _store(tmp_path)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    store.review(
+        proposal["id"],
+        approved=False,
+        actor="owner",
+        reason="not enough evidence",
+        queue=False,
+    )
+
+    second = _signal(store, severity="critical")
+    assert store.propose_from_signal(second)[1] is False
+    third = _signal(store, severity="critical")
+    reopened, created = store.propose_from_signal(third)
+
+    assert created is True
+    assert reopened["id"] != proposal["id"]
+    assert reopened["status"] == "pending"
+
+
+def test_observer_recovers_approved_taskline_enqueue(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, "", "taskline offline"
+        ),
+    )
+    with pytest.raises(IterationError):
+        store.review(proposal["id"], approved=True, actor="owner")
+    assert store.get(proposal["id"])["status"] == "approved"
+
+    def recovered(command, **_kwargs):
+        if command[1:3] == ["task", "list"]:
+            payload = {"tasks": []}
+        elif command[1:3] == ["task", "create"]:
+            payload = {"id": "task-recovered"}
+        elif command[:3] == ["taskline", "task", "get"]:
+            payload = {"id": "task-recovered", "state": "start"}
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(payload), ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", recovered)
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert result["reconciliation"]["queue_recovered"] == 1
+    assert store.get(proposal["id"])["status"] == "queued"
+    assert store.get(proposal["id"])["taskline_id"] == "task-recovered"
+
+
+def test_missing_source_coverage_cannot_verify_signal_absence(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            (
+                json.dumps({"tasks": []})
+                if command[1:3] == ["task", "list"]
+                else json.dumps({"id": "task-coverage"})
+            ),
+            "",
+        ),
+    )
+    queued = store.review(proposal["id"], approved=True, actor="owner")
+    store.mark_shipped(
+        queued["id"], release_sha="d" * 40, actor="deploy"
+    )
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            raise IterationError("component source unavailable")
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert store.get(proposal["id"])["status"] == "shipped"
+    assert result["reconciliation"]["coverage_skipped"] == 1
+    assert result["coverage"]["errors"][0]["source"] == "components"
+
+
+def test_conversation_observer_includes_open_findings_from_older_runs(
+    tmp_path,
+):
+    from datetime import datetime, timezone
+    from core.conversation_audit import connect
+
+    store = _store(tmp_path)
+    path = tmp_path / "data" / "conversation_audit.db"
+    db = connect(path)
+    started = datetime.now(timezone.utc).isoformat()
+    old_run = db.execute(
+        """
+        INSERT INTO audit_runs(started_at,since,completed_at)
+        VALUES (?,?,?)
+        """,
+        (started, started, started),
+    ).lastrowid
+    db.execute(
+        """
+        INSERT INTO audit_issues(
+            run_id,severity,issue_type,title,evidence,recommendation
+        ) VALUES (?,?,?,?,?,?)
+        """,
+        (
+            old_run,
+            "P1",
+            "closure_failure",
+            "Older issue is still open",
+            "stable evidence",
+            "repair the loop",
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO audit_runs(started_at,since,completed_at)
+        VALUES (?,?,?)
+        """,
+        (started, started, None),
+    )
+    db.commit()
+    db.close()
+
+    signals = DailyObserver(store)._conversation_signals()
+
+    assert [row["summary"] for row in signals] == [
+        "Older issue is still open"
+    ]
 
 
 def test_post_release_outcome_can_close_or_reopen_loop(monkeypatch, tmp_path):
@@ -370,9 +537,11 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
     assert closed["release_sha"] == release_sha
     assert closed["actual"] == {"signal_open": False}
     assert result["reconciliation"] == {
+        "queue_recovered": 0,
         "shipped": 1,
         "verified": 1,
         "needs_followup": 0,
+        "coverage_skipped": 0,
         "errors": [],
     }
 

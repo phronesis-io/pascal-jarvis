@@ -143,6 +143,55 @@ def test_terminal_delegation_closes_linked_intent_and_handoff(tmp_path):
     assert get_handoff(handoff["id"])["status"] == "completed"
 
 
+def test_failed_attempt_keeps_linked_intent_and_handoff_open(tmp_path):
+    matter = create_matter("失败后重试")
+    store = DelegationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: 2_000,
+    )
+    delegation = _delegation(store, matter["id"])
+    intent_id = intentions.create_intent(
+        name="等待重试结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        matter_id=matter["id"],
+    )
+    store.link(delegation["id"], "intent", intent_id)
+    handoff = create_handoff(
+        "delegation",
+        delegation["id"],
+        from_surface="desktop",
+        to_surface="mobile",
+        notify=False,
+    )
+    step = store.add_step(
+        delegation["id"],
+        expected_version=1,
+        sequence=1,
+        kind="send",
+        executor="worker",
+    )
+    store.claim_step(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=False,
+        error_code="temporary_failure",
+    )
+
+    assert store.get(delegation["id"])["status"] == "failed"
+    assert intentions.get_intent(intent_id)["status"] == "pending"
+    assert get_handoff(handoff["id"])["status"] == "open"
+
+
 def test_idempotent_create_repairs_matter_projection(tmp_path):
     matter = create_matter("投影修复")
     store = DelegationStore(

@@ -19,6 +19,7 @@ def _next_action(delegation: dict[str, Any]) -> str:
         "verifying": "正在核验",
         "awaiting_external": "等待外部结果",
         "blocked": "推进受阻",
+        "failed": "执行失败，待重试",
     }
     return f"{prefixes.get(status, '继续推进')}：{title}"
 

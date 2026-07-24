@@ -6,6 +6,11 @@ manifest now declares preconditions (requires_cmd / requires_file /
 requires_config); an unmet precondition means SKIPPED (ok, never ⚠️).
 """
 
+import json
+import subprocess
+from pathlib import Path
+
+import core.components as components
 from core.components import check_components, format_report
 
 
@@ -121,3 +126,58 @@ def test_daemon_critical_probe_ignores_skipped(tmp_path):
     by_name = {r["name"]: r for r in results}
     assert by_name["ef-stream"]["ok"] is True     # skipped → never pages
     assert by_name["bot"]["ok"] is False          # ungated check still real
+
+
+def test_taskline_component_checks_readiness_not_launchd_registration(
+    tmp_path, monkeypatch,
+):
+    binary = tmp_path / "taskline-server"
+    binary.write_text("binary")
+    manifest = _manifest(tmp_path, f"""
+  - name: taskline
+    check: taskline
+    requires_file: {binary}
+""")
+
+    monkeypatch.setattr(
+        components.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"healthy": False, "registered": True}),
+            "",
+        ),
+    )
+    (unhealthy,) = check_components(
+        manifest_path=manifest, root=tmp_path
+    )
+    assert unhealthy["ok"] is False
+
+    monkeypatch.setattr(
+        components.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"healthy": True, "registered": True}),
+            "",
+        ),
+    )
+    (healthy,) = check_components(
+        manifest_path=manifest, root=tmp_path
+    )
+    assert healthy["ok"] is True
+
+
+def test_launchd_installer_skips_optional_taskline_before_bootstrap():
+    script = (
+        Path(__file__).parent.parent / "scripts" / "launchd" / "install.sh"
+    ).read_text(encoding="utf-8")
+    guard = script.index(
+        '[[ "$label" == "com.pascal.jarvis.taskline"'
+    )
+    bootstrap = script.index("launchctl bootstrap")
+
+    assert guard < bootstrap
+    assert "optional Taskline binary not installed" in script

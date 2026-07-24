@@ -957,6 +957,13 @@ class TestRoutes:
             trigger_config={"datetime": (now + timedelta(days=2)).isoformat()})
         return TestClient(nicegui_app)
 
+    @staticmethod
+    def owner_headers():
+        from core.mobile_access import consume_pair_code, create_pair_code
+        paired = consume_pair_code(create_pair_code("owner test device")["code"])
+        assert paired is not None
+        return {"Authorization": f"Bearer {paired['token']}"}
+
     @pytest.mark.parametrize("path", PAGES)
     def test_page_renders_200(self, client, path):
         r = client.get(path)
@@ -1097,16 +1104,31 @@ class TestRoutes:
         assert forced.status_code == 200 and forced.json()["status"] == "done"
 
     def test_api_mobile_pairing_and_revocation(self, client):
-        assert client.post("/api/mobile/pair", json={"ttl": "bad"}).status_code == 400
-        paired = client.post("/api/mobile/pair", json={"label": "test phone", "ttl": 5})
+        assert client.post(
+            "/api/mobile/pair", json={"ttl": "bad"}
+        ).status_code == 401
+        headers = self.owner_headers()
+        assert client.post(
+            "/api/mobile/pair", json={"ttl": "bad"}, headers=headers
+        ).status_code == 400
+        paired = client.post(
+            "/api/mobile/pair",
+            json={"label": "test phone", "ttl": 5},
+            headers=headers,
+        )
         assert paired.status_code == 200
         from core.mobile_access import consume_pair_code
         device = consume_pair_code(paired.json()["code"])
         assert device is not None
         status = client.get("/api/mobile/status")
         assert status.status_code == 200
-        assert status.json()["devices"][0]["label"] == "test phone"
-        revoked = client.delete(f"/api/mobile/devices/{device['device_id']}")
+        assert "test phone" in {
+            item["label"] for item in status.json()["devices"]
+        }
+        revoked = client.delete(
+            f"/api/mobile/devices/{device['device_id']}",
+            headers=headers,
+        )
         assert revoked.status_code == 200
 
     def test_api_items_decision_and_delivery_confirmation(
@@ -1131,6 +1153,7 @@ class TestRoutes:
         decided = client.post(
             f"/api/items/{memorial_id}/decide",
             json={"option": "approve"},
+            headers=self.owner_headers(),
         )
         assert decided.status_code == 200
         assert memorial.get_memorial(memorial_id)["status"] == "decided"
@@ -1154,6 +1177,61 @@ class TestRoutes:
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["state"] == "read"
+
+    def test_owner_mutations_reject_direct_worker_http(
+            self, client, jarvis_tmp, monkeypatch):
+        from core.delegations import DelegationStore
+        from core.iteration_loop import IterationStore
+
+        monkeypatch.setenv("USER_ID", "owner")
+        delegation_store = DelegationStore(root=jarvis_tmp)
+        delegation, _ = delegation_store.create(
+            principal_id="owner",
+            source="test",
+            source_ref="api-owner-boundary",
+            title="Publish",
+            operation="public_publish",
+            risk_tier=3,
+            target_type="feed",
+            target_id="public",
+            authority="feed",
+            verification_policy={"verifier": "feed"},
+        )
+        iteration_store = IterationStore(root=jarvis_tmp)
+        signal = iteration_store.record_signal(
+            source="components",
+            category="health",
+            key="owner-boundary",
+            severity="critical",
+            summary="Owner review required",
+            evidence={"ok": False},
+        )
+        proposal, _ = iteration_store.propose_from_signal(signal)
+
+        assert client.post(
+            f"/api/delegations/{delegation['id']}/confirm",
+            json={"expected_version": 1, "principal_id": "owner"},
+        ).status_code == 401
+        assert client.post(
+            f"/api/iteration/proposals/{proposal['id']}/review",
+            json={"decision": "reject"},
+        ).status_code == 401
+
+        headers = self.owner_headers()
+        confirmed = client.post(
+            f"/api/delegations/{delegation['id']}/confirm",
+            json={"expected_version": 1, "principal_id": "owner"},
+            headers=headers,
+        )
+        rejected = client.post(
+            f"/api/iteration/proposals/{proposal['id']}/review",
+            json={"decision": "reject"},
+            headers=headers,
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["status"] == "bound"
+        assert rejected.status_code == 200
+        assert rejected.json()["status"] == "rejected"
 
     def test_api_cross_device_handoff_lifecycle(
             self, client, jarvis_tmp, monkeypatch):

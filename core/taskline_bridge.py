@@ -27,6 +27,7 @@ class TasklineBridge:
         *,
         project: str = "pascal-jarvis",
         runner: Runner = subprocess.run,
+        db_path: str | Path | None = None,
     ):
         self.root = Path(
             root
@@ -35,6 +36,11 @@ class TasklineBridge:
         ).resolve()
         self.project = project
         self.runner = runner
+        self.db_path = Path(
+            db_path
+            or os.environ.get("JARVIS_DB_PATH")
+            or self.root / "data" / "jarvis.db"
+        )
         self.worktree_root = Path(
             os.environ.get(
                 "JARVIS_WORKTREE_ROOT",
@@ -106,7 +112,7 @@ class TasklineBridge:
         task_id = str(task.get("id") or "")
         if not task_id:
             raise TasklineBridgeError("Taskline task has no id")
-        store = DelegationStore(root=self.root)
+        store = DelegationStore(root=self.root, db_path=self.db_path)
         release_sha = self._task_release_sha(task)
         expected = {
             "git_head": release_sha or f"pending:{task_id}",
@@ -205,7 +211,9 @@ class TasklineBridge:
         task = self._run(["taskline", "task", "get", task_id])
         if str(task.get("state") or "") != "done":
             delegation_id = self._engineering_delegation(task)
-            return DelegationStore(root=self.root).get(delegation_id)
+            return DelegationStore(
+                root=self.root, db_path=self.db_path
+            ).get(delegation_id)
         pull_url = self._pull_url(task)
         if not pull_url:
             raise TasklineBridgeError("completed task has no GitHub PR link")
@@ -230,7 +238,7 @@ class TasklineBridge:
         delegation_id = self._engineering_delegation(
             {**task, "release_sha": release_sha}
         )
-        store = DelegationStore(root=self.root)
+        store = DelegationStore(root=self.root, db_path=self.db_path)
         detail = store.get(delegation_id)
         step = detail["steps"][0]
         if step["status"] == "pending":
@@ -268,7 +276,7 @@ class TasklineBridge:
         from core.delegations import DelegationStore
 
         delegation_id = self._engineering_delegation(task)
-        store = DelegationStore(root=self.root)
+        store = DelegationStore(root=self.root, db_path=self.db_path)
         if provider and session_id:
             provider_ref = re.sub(
                 r"[^A-Za-z0-9_.:/@+-]", "-", provider

@@ -219,7 +219,7 @@ def _memorial_preview(state: dict, refresh) -> None:
     from core import memorial
 
     def decide(mid: str, key: str):
-        payload = memorial.decide(mid, key)
+        payload = memorial.decide(mid, key, owner_authenticated=True)
         toast = payload.get("toast", {})
         ui.notify(toast.get("content", "已记录"),
                   type="positive" if toast.get("type") == "success" else "info")

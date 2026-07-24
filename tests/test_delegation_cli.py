@@ -1,6 +1,8 @@
 import io
 import json
 
+import pytest
+
 from core import delegation_cli
 from core.delegations import DelegationStore
 
@@ -82,3 +84,38 @@ def test_worker_cli_routes_evidence_through_registered_verifier(
     assert called["delegation_id"] == delegation["id"]
     assert called["step_id"] == step["id"]
     assert json.loads(capsys.readouterr().out)["matched"] is False
+
+
+def test_worker_cli_has_no_owner_confirmation_command():
+    with pytest.raises(SystemExit):
+        delegation_cli.main(["confirm", "dlg_unsafe"])
+
+
+def test_worker_cli_cannot_self_authorize_create(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "principal_id": "owner",
+                    "source": "worker",
+                    "source_ref": "unsafe-create",
+                    "title": "Publish",
+                    "operation": "public_publish",
+                    "risk_tier": 3,
+                    "target_type": "feed",
+                    "target_id": "public",
+                    "authority": "feed",
+                    "verification_policy": {"verifier": "feed"},
+                    "authorized": True,
+                }
+            )
+        ),
+    )
+
+    assert delegation_cli.main(["create"]) == 2
+    assert "cannot create an owner-authorized" in capsys.readouterr().out

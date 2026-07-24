@@ -32,7 +32,14 @@ def test_audit_ingests_logs_and_derives_issues(tmp_path):
 
     run_id = audit.run_audit(paths, hours=48)
     report = audit.render_report(paths.db_path, run_id)
+    conn = audit.connect(paths.db_path)
+    completed_at = conn.execute(
+        "SELECT completed_at FROM audit_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()["completed_at"]
+    conn.close()
 
+    assert completed_at
     assert "Provider/account-limit text reached" in report
     assert "same-session" in report or "Same-session" in report
     assert "important signals were not surfaced" in report

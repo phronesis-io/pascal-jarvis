@@ -18,6 +18,7 @@ import sys
 import time
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -286,7 +287,29 @@ class IterationStore:
                 """,
                 (signal_fingerprint,),
             ).fetchone()
-            if existing is not None and existing["status"] != "needs_followup":
+            if existing is not None and existing["status"] == "rejected":
+                baseline = json.loads(existing["baseline_json"] or "{}")
+                current_evidence_digest = hashlib.sha256(
+                    str(signal["evidence_json"] or "{}").encode("utf-8")
+                ).hexdigest()
+                severity_rank = {
+                    "info": 0,
+                    "minor": 1,
+                    "major": 2,
+                    "critical": 3,
+                }
+                previous_count = int(baseline.get("occurrence_count") or 0)
+                materially_changed = bool(
+                    severity_rank.get(str(signal["severity"]), 0)
+                    > severity_rank.get(str(baseline.get("severity")), 0)
+                    or int(signal["occurrence_count"])
+                    >= max(previous_count + 2, previous_count * 2)
+                    or current_evidence_digest
+                    != str(baseline.get("evidence_digest") or "")
+                )
+                if not materially_changed:
+                    return self._decode_proposal(db, existing), False
+            elif existing is not None and existing["status"] != "needs_followup":
                 if (
                     existing["status"] != "verified"
                     or float(signal["last_seen"] or 0)
@@ -360,6 +383,9 @@ class IterationStore:
             baseline={
                 "occurrence_count": signal["occurrence_count"],
                 "severity": signal["severity"],
+                "evidence_digest": hashlib.sha256(
+                    _json(signal["evidence"]).encode("utf-8")
+                ).hexdigest(),
             },
             expected={"signal_open": False},
         )
@@ -773,7 +799,10 @@ class DailyObserver:
         from core.components import check_components
 
         signals = []
-        for row in check_components(root=self.store.root):
+        rows = check_components(root=self.store.root)
+        if not rows:
+            raise IterationError("component manifest is unavailable")
+        for row in rows:
             if row["ok"]:
                 continue
             severity = "critical" if row.get("critical") else "major"
@@ -823,27 +852,44 @@ class DailyObserver:
     def _conversation_signals(self) -> list[dict[str, Any]]:
         path = self.store.root / "data" / "conversation_audit.db"
         if not path.is_file():
-            return []
+            raise IterationError("conversation audit database is unavailable")
         try:
             db = sqlite3.connect(str(path), timeout=3)
             db.row_factory = sqlite3.Row
             run = db.execute(
-                "SELECT id FROM audit_runs ORDER BY id DESC LIMIT 1"
+                """
+                SELECT id,started_at,completed_at
+                  FROM audit_runs
+                 WHERE completed_at IS NOT NULL
+                 ORDER BY id DESC LIMIT 1
+                """
             ).fetchone()
             if run is None:
-                return []
-            rows = db.execute(
-                """
-                SELECT severity,issue_type,title,evidence,recommendation
-                  FROM audit_issues WHERE run_id=? AND status='open'
-                """,
-                (run["id"],),
-            ).fetchall()
-        except sqlite3.Error:
-            return []
+                raise IterationError("conversation audit has no completed run")
+            try:
+                completed = datetime.fromisoformat(str(run["completed_at"]))
+                if completed.tzinfo is None:
+                    completed = completed.replace(tzinfo=timezone.utc)
+                age = (
+                    datetime.now(timezone.utc)
+                    - completed.astimezone(timezone.utc)
+                )
+            except (TypeError, ValueError) as exc:
+                raise IterationError(
+                    "conversation audit run has an invalid timestamp"
+                ) from exc
+            if age.total_seconds() > 48 * 3600:
+                raise IterationError("conversation audit is stale")
+        except sqlite3.Error as exc:
+            raise IterationError(f"conversation audit read failed: {exc}") from exc
         finally:
             if "db" in locals():
                 db.close()
+        from core.conversation_audit import open_findings
+        # Resolution status, rather than an arbitrary reporting window, owns
+        # whether an issue remains open. Otherwise an old unresolved finding
+        # would disappear merely because it aged past seven days.
+        rows = open_findings(path, days=None)
         result = []
         for row in rows[:50]:
             raw = str(row["severity"] or "").lower()
@@ -912,13 +958,30 @@ class DailyObserver:
         return ""
 
     def _reconcile_existing(
-        self, raw_signals: list[dict[str, Any]]
+        self,
+        raw_signals: list[dict[str, Any]],
+        *,
+        covered_sources: set[str],
     ) -> dict[str, Any]:
         """Move queued work through deployed SHA and same-source observation."""
+        recovered = 0
         shipped = 0
         verified = 0
         followups = 0
+        coverage_skipped = 0
         errors: list[dict[str, str]] = []
+        for state in ("approved", "queueing"):
+            for proposal in self.store.list(status=state, limit=50):
+                try:
+                    self.store.queue(proposal["id"])
+                    recovered += 1
+                except IterationError as exc:
+                    errors.append(
+                        {
+                            "proposal_id": str(proposal["id"]),
+                            "error": str(exc)[:200],
+                        }
+                    )
         for proposal in self.store.list(status="queued", limit=50):
             task_id = str(proposal.get("taskline_id") or "")
             try:
@@ -985,6 +1048,29 @@ class DailyObserver:
         for proposal in self.store.list(status="shipped", limit=50):
             if "signal_open" not in proposal["expected"]:
                 continue
+            source = next(
+                (
+                    str(signal.get("source") or "")
+                    for signal in raw_signals
+                    if _fingerprint(
+                        str(signal.get("source") or ""),
+                        str(signal.get("category") or ""),
+                        str(signal.get("key") or ""),
+                    )
+                    == proposal["signal_fingerprint"]
+                ),
+                "",
+            )
+            if not source:
+                with closing(self.store._connect()) as db:
+                    signal_row = db.execute(
+                        "SELECT source FROM iteration_signals WHERE fingerprint=?",
+                        (proposal["signal_fingerprint"],),
+                    ).fetchone()
+                source = str(signal_row["source"] or "") if signal_row else ""
+            if not source or source not in covered_sources:
+                coverage_skipped += 1
+                continue
             is_open = proposal["signal_fingerprint"] in open_fingerprints
             matched = is_open == bool(proposal["expected"]["signal_open"])
             updated = self.store.verify_outcome(
@@ -998,19 +1084,36 @@ class DailyObserver:
             else:
                 followups += 1
         return {
+            "queue_recovered": recovered,
             "shipped": shipped,
             "verified": verified,
             "needs_followup": followups,
+            "coverage_skipped": coverage_skipped,
             "errors": errors,
         }
 
     def run(self, *, create_proposals: bool = True) -> dict[str, Any]:
-        raw = (
-            self._component_signals()
-            + self._delegation_signals()
-            + self._conversation_signals()
+        raw: list[dict[str, Any]] = []
+        covered_sources: set[str] = set()
+        coverage_errors: list[dict[str, str]] = []
+        collectors = (
+            ("components", self._component_signals),
+            ("delegations", self._delegation_signals),
+            ("conversation_audit", self._conversation_signals),
         )
-        reconciliation = self._reconcile_existing(raw)
+        for source, collector in collectors:
+            try:
+                batch = collector()
+            except (IterationError, OSError, sqlite3.Error) as exc:
+                coverage_errors.append(
+                    {"source": source, "error": str(exc)[:200]}
+                )
+                continue
+            raw.extend(batch)
+            covered_sources.add(source)
+        reconciliation = self._reconcile_existing(
+            raw, covered_sources=covered_sources
+        )
         signals = [self.store.record_signal(**item) for item in raw]
         proposals = []
         if create_proposals:
@@ -1025,6 +1128,10 @@ class DailyObserver:
             "observed": len(raw),
             "signals": len(signals),
             "proposals": [proposal["id"] for proposal in proposals],
+            "coverage": {
+                "covered": sorted(covered_sources),
+                "errors": coverage_errors,
+            },
             "reconciliation": reconciliation,
         }
 
@@ -1096,12 +1203,6 @@ def main(argv: list[str] | None = None) -> int:
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--status", default="")
     list_cmd.add_argument("--limit", type=int, default=100)
-    review = sub.add_parser("review")
-    review.add_argument("id")
-    review.add_argument("--approve", action="store_true")
-    review.add_argument("--reject", action="store_true")
-    review.add_argument("--actor", default="owner")
-    review.add_argument("--reason", default="")
     args = parser.parse_args(argv)
     try:
         store = IterationStore()
@@ -1111,15 +1212,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "list":
             result = {"items": store.list(status=args.status, limit=args.limit)}
-        else:
-            if args.approve == args.reject:
-                raise IterationError("choose exactly one of --approve/--reject")
-            result = store.review(
-                args.id,
-                approved=args.approve,
-                actor=args.actor,
-                reason=args.reason,
-            )
     except IterationError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False))
         return 2

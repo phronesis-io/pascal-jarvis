@@ -33,8 +33,9 @@ ACTIVE_STATUSES = {
     "awaiting_external",
     "needs_user",
     "blocked",
+    "failed",
 }
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "superseded"}
+TERMINAL_STATUSES = {"completed", "cancelled", "superseded"}
 ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 STEP_STATUSES = {
     "pending",
@@ -843,11 +844,7 @@ class DelegationStore:
             if step["status"] not in {"pending", "blocked", "executing"}:
                 raise DelegationConflict(f"step status {step['status']} is not claimable")
             lease_expiry = float(step["lease_expires_at"] or 0)
-            if (
-                step["status"] == "executing"
-                and lease_expiry > now
-                and step["lease_owner"] != owner
-            ):
+            if step["status"] == "executing" and lease_expiry > now:
                 raise DelegationConflict("step has an active lease")
             dependencies = json.loads(step["depends_on_json"] or "[]")
             if dependencies:
@@ -1347,7 +1344,8 @@ class DelegationStore:
                 """
                 UPDATE delegation_steps
                    SET status='pending',lease_owner='',lease_expires_at=NULL,
-                       last_error_code='',finished_at=NULL,updated_at=?
+                       last_error_code='',started_at=NULL,finished_at=NULL,
+                       updated_at=?
                  WHERE delegation_id=? AND contract_version=?
                    AND status IN ('failed','blocked','verifying')
                 """,
@@ -1394,7 +1392,7 @@ class DelegationStore:
         with self._tx() as db:
             current = self._require(db, delegation_id)
             self._version(current, expected_version)
-            if current["status"] in TERMINAL_STATUSES:
+            if current["status"] in TERMINAL_STATUSES or current["status"] == status:
                 result = current
             else:
                 db.execute(
@@ -1638,7 +1636,9 @@ class DelegationStore:
         with closing(self._connect()) as db:
             rows = db.execute(
                 """
-                SELECT * FROM delegation_shadow_labels
+                SELECT l.*,d.source,d.operation,d.created_at
+                  FROM delegation_shadow_labels l
+                  JOIN delegations d ON d.id=l.delegation_id
                  WHERE actual_is_delegation IS NOT NULL
                 """
             ).fetchall()
@@ -1678,6 +1678,21 @@ class DelegationStore:
             if str(row["predicted_verifier"] or "")
             == str(row["actual_verifier"] or "")
         )
+        observed_times = [
+            float(row["created_at"])
+            for row in rows
+            if row["created_at"] is not None
+        ]
+        observation_days = (
+            (max(observed_times) - min(observed_times)) / 86400
+            if len(observed_times) >= 2
+            else 0.0
+        )
+        connector_classes = {
+            str(row["operation"] or "")
+            for row in rows
+            if str(row["operation"] or "")
+        }
         return {
             "predictions": total_predictions,
             "labeled": labeled,
@@ -1695,8 +1710,13 @@ class DelegationStore:
                 risk_caught / risk_positive if risk_positive else None
             ),
             "verifier_accuracy": verifier_match / labeled if labeled else None,
+            "observation_days": observation_days,
+            "connector_classes": sorted(connector_classes),
+            "connector_class_count": len(connector_classes),
             "phase1_ready": bool(
                 labeled >= 50
+                and observation_days >= 14
+                and len(connector_classes) >= 5
                 and false_positive + true_positive > 0
                 and true_positive / (true_positive + false_positive) >= 0.95
                 and (not risk_positive or risk_caught / risk_positive >= 0.95)
@@ -1717,7 +1737,7 @@ class DelegationStore:
                  WHERE s.status='executing'
                    AND s.lease_expires_at IS NOT NULL
                    AND s.lease_expires_at<=?
-                   AND d.status NOT IN ('completed','failed','cancelled','superseded')
+                   AND d.status NOT IN ('completed','cancelled','superseded')
                  ORDER BY s.lease_expires_at
                  LIMIT ?
                 """,
@@ -1796,7 +1816,7 @@ class DelegationStore:
                     """
                     SELECT COUNT(*) AS count FROM delegations
                      WHERE deadline_at IS NOT NULL AND deadline_at<?
-                       AND status NOT IN ('completed','failed','cancelled','superseded')
+                       AND status NOT IN ('completed','cancelled','superseded')
                        AND capture_mode!='shadow'
                     """,
                     (now,),

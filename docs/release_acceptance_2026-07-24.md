@@ -31,7 +31,7 @@
 | VD-08 convergence | Existing objects project one-way from Delegation | link table and projection service | projection tests |
 | VD-09 external wait | Waiting is durable and resumable | waiting reason, resume event, reconciler | wait/resume tests |
 | VD-10 versioning | Changed or repeated contracts have a boundary | version conflict and supersede operations | revision/conflict tests |
-| Phase 0 gate | Automatic capture needs production quality evidence | shadow labels and `phase1_ready` calculation | threshold tests; production gate remains closed until 50 reviewed samples qualify |
+| Phase 0 gate | Automatic capture needs broad, sustained production quality evidence | shadow labels and `phase1_ready` calculation | threshold tests; gate remains closed until 50 reviewed samples span 14 days and 5 connector classes while meeting quality thresholds |
 
 ## 3. Incident Repairs
 
@@ -94,6 +94,27 @@ authority, revision, and recovery gaps; all ten were fixed before release:
 | 24 | Welcome delivery re-resolved an ambiguous display name | The welcome path uses the already verified friend ID and rechecks it against the authoritative friend list; friend tests |
 | 25 | L3 proposals stayed queued after shipping | Daily observation now reconciles Taskline done state, merged PR SHA, deployed HEAD, and same-source outcome; failed outcomes create a fresh gated follow-up; iteration tests |
 
+The third independent review examined the revised authority and recovery
+contracts. Its 13 findings, plus one related Lark callback provenance gap found
+during remediation, were also closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 26 | Dashboard owner mutations trusted any local caller | Mobile mutations require a validated paired-device Bearer token; direct NiceGUI callbacks carry explicit owner provenance; route tests |
+| 27 | Worker CLI exposed Delegation confirmation | `confirm` is absent; worker create/bind cannot set authorization; worker terminal reports only failure; CLI tests |
+| 28 | Shell CLI exposed L3 proposal approval | Proposal review is available only through the authenticated owner surface; CLI boundary tests |
+| 29 | The same worker label could claim one live step twice | Every active lease rejects a second claim; renewal uses the dedicated lease operation; claim tests |
+| 30 | Bound Taskline Delegations were never refreshed | Reconciliation scans bound Taskline rows and refreshes them in the same Delegation database; bridge tests |
+| 31 | Verification retries reset the timeout clock | Timeout age comes from the stable step start, with Delegation creation fallback; reconciliation tests |
+| 32 | Missing observations could be mistaken for success | Each source records fresh coverage; absence closes work only when that exact source was read successfully; iteration tests |
+| 33 | A failed attempt closed linked responsibility | `failed` remains active and retryable; Item, Matter, Intent, and Handoff projections stay open; projection tests |
+| 34 | An approved proposal could remain stranded after Taskline failure | Daily observation retries approved/ambiguous queueing states with label-based idempotent read-back; iteration tests |
+| 35 | Rejected proposals could never return after stronger evidence | Severity, occurrence growth, or changed evidence creates a fresh human-gated proposal; iteration tests |
+| 36 | Shadow promotion lacked time and connector diversity | Phase 1 now also requires 14 observation days and 5 connector classes; metric tests |
+| 37 | A loaded Taskline launch agent counted as healthy | Component health calls `taskline status` and requires both server health and workspace registration; component tests |
+| 38 | Fresh installs loaded a missing optional Taskline binary | Installer removes/skips the optional service before bootstrap when its binary is absent; installer tests |
+| 39 | Lark card actions assumed every callback was Pascal | The sidecar matches the callback operator to the configured owner before any owner-only action; callback and Memorial tests |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -134,7 +155,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`1987 passed` for this candidate);
+- full local test result (`2004 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

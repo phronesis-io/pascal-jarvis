@@ -122,6 +122,30 @@ def _app_id() -> str:
         return ""
 
 
+def _owner_id() -> str:
+    value = os.environ.get("USER_ID", "").strip()
+    if value:
+        return value
+    try:
+        from core.config import Config
+        return str(
+            Config(JARVIS_DIR / "jarvis.yaml").lark.get("user_id", "") or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _owner_card_callback(data) -> bool:
+    owner = _owner_id()
+    operator = getattr(getattr(data, "event", None), "operator", None)
+    if not owner or operator is None:
+        return False
+    return owner in {
+        str(getattr(operator, field, "") or "").strip()
+        for field in ("open_id", "user_id", "union_id")
+    }
+
+
 def _emit(obj_json: str):
     """One NDJSON line to stdout — bot.sh's while-read loop consumes it."""
     sys.stdout.write(obj_json.replace("\n", " ") + "\n")
@@ -188,7 +212,8 @@ def _intent_close_payload(value: dict) -> dict:
     }
 
 
-def _handle_card_action(value: dict) -> dict:
+def _handle_card_action(
+        value: dict, *, owner_authenticated: bool = False) -> dict:
     """Dispatch one parsed card action; returns the callback response payload.
 
     REQ-81.3: each success path logs one stderr line — card taps previously
@@ -196,6 +221,20 @@ def _handle_card_action(value: dict) -> dict:
     be confirmed nor disproven from the sidecar log.
     """
     action = value.get("action", "")
+    known_actions = {"feedback", "watchlater", "intent_close", "memorial"}
+    if action not in known_actions:
+        return {}
+    if action and not owner_authenticated:
+        print(
+            f"card action rejected: unauthenticated operator action={action}",
+            file=sys.stderr,
+        )
+        return {
+            "toast": {
+                "type": "info",
+                "content": "这个操作只能由主人完成",
+            }
+        }
     if action == "feedback":
         _record_feedback(value)
         print(f"card feedback recorded: source={value.get('source', '')} "
@@ -225,8 +264,15 @@ def _handle_card_action(value: dict) -> dict:
         opt = str(value.get("opt", ""))
         try:
             import core.memorial as memorial
-            payload = (memorial.chat(mem_id) if opt == "chat"
-                       else memorial.decide(mem_id, opt))
+            payload = (
+                memorial.chat(mem_id)
+                if opt == "chat"
+                else memorial.decide(
+                    mem_id,
+                    opt,
+                    owner_authenticated=owner_authenticated,
+                )
+            )
             print(f"card memorial handled: id={mem_id} opt={opt}", file=sys.stderr)
             return payload
         except Exception as e:
@@ -273,7 +319,12 @@ def main() -> int:
             value = (data.event.action.value or {}) if data.event and data.event.action else {}
             if isinstance(value, str):
                 value = json.loads(value)
-            return P2CardActionTriggerResponse(_handle_card_action(value))
+            return P2CardActionTriggerResponse(
+                _handle_card_action(
+                    value,
+                    owner_authenticated=_owner_card_callback(data),
+                )
+            )
         except Exception as e:
             print(f"card handler error: {e}", file=sys.stderr)
         return P2CardActionTriggerResponse({})

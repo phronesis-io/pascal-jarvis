@@ -294,6 +294,51 @@ def test_decide_runs_action_through_action_processor(env, monkeypatch):
     assert "Closure recorded" in payload["card"]["data"]["elements"][0]["text"]["content"]
 
 
+def test_owner_action_requires_authenticated_memorial_surface(
+    env, monkeypatch,
+):
+    calls = []
+
+    class FakeAP:
+        def __init__(self, **kwargs):
+            self.owner_authenticated = kwargs.get(
+                "owner_authenticated", False
+            )
+
+        def _do_delegation_confirm(self, raw):
+            calls.append((self.owner_authenticated, raw))
+            if not self.owner_authenticated:
+                raise RuntimeError("owner decision required")
+            return "confirmed"
+
+    import core.actions as actions
+    monkeypatch.setattr(actions, "ActionProcessor", FakeAP)
+    option = [{
+        "key": "confirm",
+        "label": "确认",
+        "action": {
+            "type": "delegation_confirm",
+            "params": {"id": "dlg_1", "version": "1"},
+        },
+    }]
+    denied, _ = memorial.create("test", "Denied", "body", options=option)
+    accepted, _ = memorial.create("test", "Accepted", "body", options=option)
+
+    denied_result = memorial.decide(denied, "confirm")
+    accepted_result = memorial.decide(
+        accepted,
+        "confirm",
+        owner_authenticated=True,
+    )
+
+    assert denied_result["toast"]["type"] == "info"
+    assert accepted_result["toast"]["type"] == "success"
+    assert calls == [
+        (False, "id=dlg_1|version=1"),
+        (True, "id=dlg_1|version=1"),
+    ]
+
+
 def test_decide_action_failure_still_records_with_info_toast(env, monkeypatch):
     class FakeAP:
         def __init__(self, **kw):

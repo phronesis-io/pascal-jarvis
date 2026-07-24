@@ -12,6 +12,7 @@
 #   http      — GET `url` answers < 5s with status < 500
 #   file_age  — `path` mtime younger than `max_age_hours`
 #   launchctl — `label` loaded in the gui domain
+#   taskline  — CLI reports both server healthy and workspace registered
 #
 # critical: true → daemon.py checks it every 30s (alert-only for components
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
@@ -26,8 +27,7 @@
 
 components:
   - name: taskline
-    check: launchctl
-    label: com.pascal.jarvis.taskline
+    check: taskline
     critical: false
     requires_file: ../taskline/dist/taskline-server
 

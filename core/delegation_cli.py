@@ -46,7 +46,6 @@ def _parser() -> argparse.ArgumentParser:
         "evidence",
         "wait",
         "resume",
-        "confirm",
         "retry",
         "terminal",
         "link",
@@ -66,7 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     store = DelegationStore()
     try:
         if args.command == "create":
-            row, created = store.create(**_input())
+            data = _input()
+            if data.get("authorized"):
+                raise DelegationError(
+                    "worker CLI cannot create an owner-authorized delegation"
+                )
+            data["authorized"] = False
+            row, created = store.create(**data)
             result = {"created": created, "delegation": row}
         elif args.command == "get":
             result = store.get(args.id)
@@ -81,7 +86,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             }
         elif args.command == "bind":
-            result = store.bind(args.id, **_input())
+            data = _input()
+            if data.get("authorized"):
+                raise DelegationError(
+                    "worker CLI cannot authorize a delegation binding"
+                )
+            data["authorized"] = False
+            result = store.bind(args.id, **data)
         elif args.command == "revise":
             result = store.revise_contract(args.id, **_input())
         elif args.command == "add-step":
@@ -110,12 +121,15 @@ def main(argv: list[str] | None = None) -> int:
             result = store.mark_waiting(args.id, **_input())
         elif args.command == "resume":
             result = store.resume_external(args.id, **_input())
-        elif args.command == "confirm":
-            result = store.confirm(args.id, **_input())
         elif args.command == "retry":
             result = store.retry(args.id, **_input())
         elif args.command == "terminal":
-            result = store.terminal(args.id, **_input())
+            data = _input()
+            if data.get("status") != "failed":
+                raise DelegationError(
+                    "worker CLI can only report a failed terminal result"
+                )
+            result = store.terminal(args.id, **data)
         elif args.command == "link":
             data = _input()
             store.link(args.id, **data)

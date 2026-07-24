@@ -75,7 +75,8 @@ def test_handle_card_feedback_logs_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sidecar, "JARVIS_DIR", tmp_path)
 
     payload = sidecar._handle_card_action(
-        {"action": "feedback", "source": "daily-reflect", "rating": "up"})
+        {"action": "feedback", "source": "daily-reflect", "rating": "up"},
+        owner_authenticated=True)
 
     assert payload["toast"]["type"] == "success"
     assert "card feedback recorded" in capsys.readouterr().err
@@ -90,7 +91,8 @@ def test_handle_card_watchlater_logs_success(monkeypatch, capsys):
         lambda *a, **k: SimpleNamespace(stdout="已收藏", stderr=""))
 
     payload = sidecar._handle_card_action(
-        {"action": "watchlater", "title": "T", "url": "https://example.com/v"})
+        {"action": "watchlater", "title": "T", "url": "https://example.com/v"},
+        owner_authenticated=True)
 
     assert payload["toast"]["type"] == "success"
     assert "card watchlater saved" in capsys.readouterr().err
@@ -101,7 +103,8 @@ def test_handle_card_intent_close_logs_success(monkeypatch, capsys):
     monkeypatch.setattr(intentions, "record_closure", lambda *a, **k: True)
 
     payload = sidecar._handle_card_action(
-        {"action": "intent_close", "id": "int_x", "outcome": "done"})
+        {"action": "intent_close", "id": "int_x", "outcome": "done"},
+        owner_authenticated=True)
 
     assert payload["toast"]["type"] == "success"
     assert "card intent_close handled" in capsys.readouterr().err
@@ -122,7 +125,8 @@ def test_handle_card_memorial_decide_routes_and_logs(monkeypatch, capsys):
     sentinel = {"toast": {"type": "success", "content": "已批：已阅 ✓"}}
     calls = []
 
-    def fake_decide(mid, opt):
+    def fake_decide(mid, opt, *, owner_authenticated=False):
+        assert owner_authenticated is True
         calls.append((mid, opt))
         return sentinel
 
@@ -131,7 +135,8 @@ def test_handle_card_memorial_decide_routes_and_logs(monkeypatch, capsys):
                         lambda mid: (_ for _ in ()).throw(AssertionError("chat called")))
 
     payload = sidecar._handle_card_action(
-        {"action": "memorial", "id": "mem_1", "opt": "read"})
+        {"action": "memorial", "id": "mem_1", "opt": "read"},
+        owner_authenticated=True)
 
     assert payload is sentinel
     assert calls == [("mem_1", "read")]
@@ -153,7 +158,8 @@ def test_handle_card_memorial_chat_routes_to_chat(monkeypatch, capsys):
         lambda *a: (_ for _ in ()).throw(AssertionError("decide called")))
 
     payload = sidecar._handle_card_action(
-        {"action": "memorial", "id": "mem_2", "opt": "chat"})
+        {"action": "memorial", "id": "mem_2", "opt": "chat"},
+        owner_authenticated=True)
 
     assert payload is sentinel
     assert calls == ["mem_2"]
@@ -164,15 +170,49 @@ def test_handle_card_memorial_failure_returns_info_toast(monkeypatch, capsys):
     import core.memorial as memorial
     monkeypatch.setattr(
         memorial, "decide",
-        lambda *a: (_ for _ in ()).throw(RuntimeError("ledger on fire")))
+        lambda *a, **k: (
+            _ for _ in ()
+        ).throw(RuntimeError("ledger on fire")))
 
     payload = sidecar._handle_card_action(
-        {"action": "memorial", "id": "mem_3", "opt": "read"})
+        {"action": "memorial", "id": "mem_3", "opt": "read"},
+        owner_authenticated=True)
 
     assert payload == {"toast": {"type": "info",
                                  "content": "出错了，直接在对话里告诉我"}}
     err = capsys.readouterr().err
     assert "card memorial failed" in err and "ledger on fire" in err
+
+
+def test_handle_card_action_rejects_unauthenticated_operator(capsys):
+    payload = sidecar._handle_card_action(
+        {"action": "memorial", "id": "mem_4", "opt": "read"}
+    )
+
+    assert payload["toast"]["type"] == "info"
+    assert "只能由主人" in payload["toast"]["content"]
+    assert "unauthenticated operator" in capsys.readouterr().err
+
+
+def test_owner_card_callback_matches_configured_operator(monkeypatch):
+    monkeypatch.setattr(sidecar, "_owner_id", lambda: "ou_owner")
+    owner = SimpleNamespace(
+        event=SimpleNamespace(
+            operator=SimpleNamespace(
+                open_id="ou_owner", user_id="", union_id=""
+            )
+        )
+    )
+    stranger = SimpleNamespace(
+        event=SimpleNamespace(
+            operator=SimpleNamespace(
+                open_id="ou_other", user_id="", union_id=""
+            )
+        )
+    )
+
+    assert sidecar._owner_card_callback(owner) is True
+    assert sidecar._owner_card_callback(stranger) is False
 
 
 # ──────────────────────────────────────────────────────────────────────────

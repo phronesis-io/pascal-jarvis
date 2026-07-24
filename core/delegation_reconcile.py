@@ -205,6 +205,7 @@ class DelegationReconciler:
             "verifying",
             "awaiting_external",
             "blocked",
+            "bound",
         ):
             remaining = limit - len(rows)
             if remaining <= 0:
@@ -214,6 +215,8 @@ class DelegationReconciler:
         for row in rows:
             scanned += 1
             detail = self.store.get(row["id"])
+            if detail["status"] == "bound" and detail.get("source") != "taskline":
+                continue
             if detail["status"] in {"needs_user", "needs_clarification"}:
                 sync_attention_item(detail, store=self.store, send=send_items)
                 needs_user += 1
@@ -229,7 +232,8 @@ class DelegationReconciler:
                     )
 
                     detail = TasklineBridge(
-                        root=self.store.root
+                        root=self.store.root,
+                        db_path=self.store.db_path,
                     ).refresh_release(str(detail.get("source_ref") or ""))
                 except TasklineBridgeError as exc:
                     deferred += 1
@@ -248,7 +252,6 @@ class DelegationReconciler:
             timeout = max(
                 60, int(policy.get("verification_timeout_seconds", 3600))
             )
-            age = self.now() - float(detail["updated_at"])
             candidates = [
                 step
                 for step in detail["steps"]
@@ -261,6 +264,15 @@ class DelegationReconciler:
             ]
             if not candidates:
                 continue
+            phase_started_at = min(
+                float(
+                    step.get("started_at")
+                    or detail.get("started_at")
+                    or detail["created_at"]
+                )
+                for step in candidates
+            )
+            age = self.now() - phase_started_at
             for step in candidates:
                 try:
                     result = verify_step(

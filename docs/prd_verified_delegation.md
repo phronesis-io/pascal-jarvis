@@ -273,7 +273,8 @@ captured -> bound -> executing -> verifying -> completed
 captured -> needs_clarification -> bound
 executing/verifying -> awaiting_external -> executing
 captured/.../awaiting_external -> needs_user -> bound/executing
-any non-terminal state -> blocked / failed / cancelled / superseded
+executing/verifying -> failed -> bound
+any non-terminal state -> blocked / cancelled / superseded
 ```
 
 ### 7.3 硬性转换规则
@@ -285,6 +286,8 @@ any non-terminal state -> blocked / failed / cancelled / superseded
 - `executing -> awaiting_external`：本方动作已核验，但最终结果依赖他人。
 - `needs_user`：只有用户能够补充授权、身份或业务选择，系统不会自行重试。
 - `blocked`：当前依赖或系统条件不满足，但不需要用户立即做判断。
+- `failed`：本次执行尝试失败但责任仍然开放；显式重试后回到 `bound`，
+  不会提前关闭关联 Matter、Intent 或 Handoff。
 - 任意终态转换必须写入不可变事件记录。
 - 模型输出不能直接触发 `completed`。
 - 修改 Outcome Contract 后递增版本；旧版本的证据不能自动证明新版本。
