@@ -34,6 +34,7 @@ PROPOSAL_STATES = {
     "rejected",
 }
 SEVERITIES = {"info", "minor", "major", "critical"}
+CONVERSATION_SIGNAL_LIMIT = 50
 
 
 class IterationError(RuntimeError):
@@ -801,6 +802,7 @@ class DailyObserver:
     def __init__(self, store: IterationStore | None = None):
         self.store = store or IterationStore()
         self._collector_observed_at: dict[str, float] = {}
+        self._collector_incomplete: dict[str, str] = {}
 
     def _component_signals(self) -> list[dict[str, Any]]:
         from core.components import check_components
@@ -902,8 +904,13 @@ class DailyObserver:
         # whether an issue remains open. Otherwise an old unresolved finding
         # would disappear merely because it aged past seven days.
         rows = open_findings(path, days=None)
+        if len(rows) > CONVERSATION_SIGNAL_LIMIT:
+            self._collector_incomplete["conversation_audit"] = (
+                f"conversation audit has {len(rows)} open findings; "
+                f"only {CONVERSATION_SIGNAL_LIMIT} were ingested"
+            )
         result = []
-        for row in rows[:50]:
+        for row in rows[:CONVERSATION_SIGNAL_LIMIT]:
             raw = str(row["severity"] or "").lower()
             severity = (
                 "critical"
@@ -1196,6 +1203,7 @@ class DailyObserver:
         coverage_observed_at: dict[str, float] = {}
         coverage_errors: list[dict[str, str]] = []
         self._collector_observed_at = {}
+        self._collector_incomplete = {}
         collectors = (
             ("components", self._component_signals),
             ("delegations", self._delegation_signals),
@@ -1210,6 +1218,12 @@ class DailyObserver:
                 )
                 continue
             raw.extend(batch)
+            incomplete = self._collector_incomplete.get(source)
+            if incomplete:
+                coverage_errors.append(
+                    {"source": source, "error": incomplete[:200]}
+                )
+                continue
             covered_sources.add(source)
             coverage_observed_at[source] = float(
                 self._collector_observed_at.get(source, self.store.now())

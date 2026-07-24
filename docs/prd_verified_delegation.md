@@ -568,6 +568,9 @@ append-only 事件流：
 - `(delegation_id, contract_version, sequence)` 唯一；
 - active 状态按 `deadline_at`、`waiting_on` 和 `updated_at` 建索引；
 - 所有 JSON 字段进入数据库前做 schema validation。
+- Item、Matter、Intent、Handoff 投影失败写入
+  `delegation_projection_queue`；调和器必须重试 active 与 terminal
+  Delegation，成功后才删除队列项，不能依赖用户重放原动作。
 
 ## 12. 服务边界与接口
 
@@ -623,7 +626,8 @@ append-only 事件流：
 - `delegation.superseded`
 
 Item、Intent、Matter 和 Delivery 订阅这些事件，但不反向猜测 Delegation
-终态。
+终态。订阅投影失败不回滚已经提交的权威终态，但必须进入持久化重试队列，
+确保取消、完成或 supersede 后的 Intent/Handoff 最终收敛。
 
 ## 13. 各终端的产品体验
 

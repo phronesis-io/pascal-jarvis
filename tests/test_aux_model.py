@@ -1,6 +1,10 @@
+import os
+import signal
 import subprocess
+import sys
 import time
 from io import StringIO
+from pathlib import Path
 
 from core import aux_model
 from core import model_fallback
@@ -211,6 +215,110 @@ def test_real_subprocess_timeout_kills_descendants_holding_pipes(
 
     assert result.text == ""
     assert elapsed < 1.5
+
+
+def test_cli_signal_terminates_active_model_process_group(
+    tmp_path, monkeypatch,
+):
+    process = object()
+    terminated = []
+
+    def fake_run(_prompt, **kwargs):
+        kwargs["process_holder"]["model"] = process
+        handler = signal.getsignal(signal.SIGTERM)
+        handler(signal.SIGTERM, None)
+        raise AssertionError("signal handler must exit")
+
+    monkeypatch.setattr(aux_model, "run_auxiliary_model", fake_run)
+    monkeypatch.setattr(
+        aux_model,
+        "_terminate_process_group",
+        lambda current: terminated.append(current),
+    )
+    monkeypatch.setattr("sys.stdin", StringIO("owner task"))
+
+    try:
+        aux_model.main(["--root", str(tmp_path)])
+    except SystemExit as exc:
+        assert exc.code == 128 + signal.SIGTERM
+    else:
+        raise AssertionError("SIGTERM did not stop the auxiliary router")
+
+    assert terminated
+    assert terminated[0] is process
+
+
+def test_cli_sigterm_reaps_real_model_process_group(tmp_path):
+    executable = tmp_path / "claude"
+    pid_file = tmp_path / "model.pid"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "echo $$ > \"$AUX_CHILD_PID_FILE\"\n"
+        "trap '' TERM INT\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+        "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
+        "AUX_CHILD_PID_FILE": str(pid_file),
+        "CLAUDE_BACKUP_ENABLED": "false",
+        "CLAUDE_BACKUP2_ENABLED": "false",
+        "OPENAI_FALLBACK_ENABLED": "false",
+    }
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "core.aux_model",
+            "--root",
+            str(tmp_path),
+            "--timeout",
+            "30",
+            "--allow-tools",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+    )
+    model_pid = 0
+    try:
+        assert process.stdin is not None
+        process.stdin.write("owner task")
+        process.stdin.close()
+        deadline = time.monotonic() + 3
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists()
+        model_pid = int(pid_file.read_text(encoding="utf-8").strip())
+
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=3) == 128 + signal.SIGTERM
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(model_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(
+                "model process survived auxiliary-router SIGTERM"
+            )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        if model_pid:
+            try:
+                os.killpg(model_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_hung_primary_keeps_budget_for_backup(tmp_path, monkeypatch):

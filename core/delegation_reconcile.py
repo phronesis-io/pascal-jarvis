@@ -284,6 +284,21 @@ class DelegationReconciler:
             store=self.store,
             limit=limit,
         )
+        projections_repaired = 0
+        projection_errors: list[dict[str, str]] = []
+        for pending in self.store.pending_projections(limit=limit):
+            result = self.store.sync_projection(
+                str(pending["delegation_id"])
+            )
+            if result.get("issues"):
+                projection_errors.append(
+                    {
+                        "delegation_id": str(pending["delegation_id"]),
+                        "error": " | ".join(result["issues"])[:200],
+                    }
+                )
+            else:
+                projections_repaired += 1
         released = self.store.release_expired_leases(limit=limit)
         scanned = 0
         verified = 0
@@ -442,6 +457,8 @@ class DelegationReconciler:
         return {
             "connector_projections_repaired": projection_repair["repaired"],
             "connector_projection_errors": projection_repair["errors"],
+            "projections_repaired": projections_repaired,
+            "projection_errors": projection_errors,
             "released_leases": released,
             "scanned": scanned,
             "verified": verified,

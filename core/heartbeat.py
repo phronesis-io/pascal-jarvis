@@ -351,6 +351,10 @@ class HeartbeatRunner:
         "memory-daily": 3600,
         "memory-weekly": 3600,
         "memory-consolidate": 600,
+        "delegation-reconcile": 120,
+        "iteration-observe": 1800,
+        "log-maintenance": 900,
+        "provider-canary": 1800,
     }
 
     # Memory pipeline tasks — only one per cycle to prevent races

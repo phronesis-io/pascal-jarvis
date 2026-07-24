@@ -46,6 +46,10 @@ def test_claim_checks_health_then_atomically_claims(tmp_path):
         "components_ok": True,
     }
     assert detail["steps"][0]["kind"] == "runtime_deploy"
+    assert detail["verification_policy"]["required_components"] == [
+        "bot",
+        "heartbeat-loop",
+    ]
 
 
 def test_task_without_release_sha_cannot_match_an_unrelated_runtime(tmp_path):
@@ -74,6 +78,28 @@ def test_task_release_sha_revises_existing_runtime_contract(tmp_path):
     assert detail["expected_postcondition"]["release_sha"] == "d" * 40
     assert len(detail["steps"]) == 1
     assert detail["steps"][0]["contract_version"] == 2
+
+
+def test_link_context_preserves_existing_release_contract(tmp_path):
+    bridge = TasklineBridge(root=tmp_path)
+    task = {"id": "12345678-abcd", "title": "Fix bug"}
+    delegation_id = bridge._engineering_delegation(
+        {**task, "release_sha": "d" * 40}
+    )
+
+    detail = bridge.link_execution_context(
+        task,
+        provider="codex",
+        session_id="session-1",
+    )
+
+    assert detail["id"] == delegation_id
+    assert detail["contract_version"] == 1
+    assert detail["expected_postcondition"]["release_sha"] == "d" * 40
+    assert detail["verification_policy"]["release_sha"] == "d" * 40
+    assert ("session", "codex:session-1") in {
+        (row["entity_type"], row["entity_id"]) for row in detail["links"]
+    }
 
 
 def test_completed_task_binds_merged_sha_and_starts_runtime_verification(

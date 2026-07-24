@@ -102,6 +102,13 @@ def test_weekly_review_gets_30min_empty_pre_retry():
     assert HeartbeatRunner.EMPTY_RETRY_DELAYS["weekly-review"] == 1800
 
 
+def test_tier0_operations_have_bounded_failure_retries():
+    assert HeartbeatRunner.EMPTY_RETRY_DELAYS["delegation-reconcile"] == 120
+    assert HeartbeatRunner.EMPTY_RETRY_DELAYS["iteration-observe"] == 1800
+    assert HeartbeatRunner.EMPTY_RETRY_DELAYS["log-maintenance"] == 900
+    assert HeartbeatRunner.EMPTY_RETRY_DELAYS["provider-canary"] == 1800
+
+
 # ── F5 — fence-husk delivery guard ────────────────────────────────────────
 
 

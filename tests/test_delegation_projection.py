@@ -222,3 +222,62 @@ def test_idempotent_create_repairs_matter_projection(tmp_path):
         and link["entity_id"] == delegation["id"]
         for link in repaired["links"]
     )
+
+
+def test_terminal_projection_failure_is_durably_retried(
+    tmp_path, monkeypatch,
+):
+    import core.delegation_projection as projection_module
+    from core.delegation_reconcile import DelegationReconciler
+
+    matter = create_matter("终态投影重试")
+    store = DelegationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: 4_000,
+    )
+    delegation = _delegation(store, matter["id"])
+    intent_id = intentions.create_intent(
+        name="等待终态",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        matter_id=matter["id"],
+    )
+    store.link(delegation["id"], "intent", intent_id)
+    handoff = create_handoff(
+        "delegation",
+        delegation["id"],
+        from_surface="desktop",
+        to_surface="mobile",
+        notify=False,
+    )
+    real_sync = projection_module.sync_projection
+    monkeypatch.setattr(
+        projection_module,
+        "sync_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("projection unavailable")
+        ),
+    )
+
+    store.terminal(
+        delegation["id"],
+        expected_version=1,
+        status="cancelled",
+        reason_code="owner_cancelled",
+        actor_id="owner",
+    )
+
+    assert store.get(delegation["id"])["status"] == "cancelled"
+    assert store.pending_projections()[0]["delegation_id"] == delegation["id"]
+    assert intentions.get_intent(intent_id)["status"] == "pending"
+    assert get_handoff(handoff["id"])["status"] == "open"
+
+    monkeypatch.setattr(projection_module, "sync_projection", real_sync)
+    result = DelegationReconciler(store=store).run(send_items=False)
+
+    assert result["projections_repaired"] == 1
+    assert result["projection_errors"] == []
+    assert store.pending_projections() == []
+    assert intentions.get_intent(intent_id)["status"] == "cancelled"
+    assert get_handoff(handoff["id"])["status"] == "completed"

@@ -42,6 +42,36 @@ class AuxiliaryModelResult:
     attempted: tuple[str, ...] = ()
 
 
+def _terminate_process_group(
+    process: subprocess.Popen[str] | None,
+    *,
+    grace: float = 0.25,
+) -> None:
+    """Stop a model process and every tool process in its private session."""
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _enabled(name: str, default: str = "true") -> bool:
     return os.environ.get(name, default).lower() == "true"
 
@@ -116,26 +146,7 @@ def _invoke(
             command, process.returncode, stdout, stderr
         )
     except subprocess.TimeoutExpired as exc:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=0.25)
-        except subprocess.TimeoutExpired:
-            pass
-        # The parent may exit on SIGTERM while a descendant ignores it. Probe
-        # the process group itself before closing our pipe ends.
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        try:
-            process.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            pass
+        _terminate_process_group(process)
         for stream in (process.stdin, process.stdout, process.stderr):
             try:
                 if stream is not None:
@@ -452,7 +463,10 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             pass
 
+    process_holder: dict[str, Any] = {"model": None}
+
     def _terminate(signum, _frame):
+        _terminate_process_group(process_holder.get("model"))
         raise SystemExit(128 + signum)
 
     previous_handlers = {}
@@ -467,8 +481,10 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             allow_tools=args.allow_tools,
             session_args=session,
+            process_holder=process_holder,
         )
     finally:
+        _terminate_process_group(process_holder.get("model"))
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     if not result.text:

@@ -128,7 +128,8 @@ the exact release commit or a healthy resident descendant that contains it.
   state transitions, links, metrics, and shadow labels.
 - `core.delegation_verify`: read-only authoritative verifier registry.
 - `core.delegation_projection`: one-way projections into existing user and
-  execution objects.
+  execution objects. Projection failures enter a durable retry queue; the
+  reconciler drains that queue for active and terminal Delegations.
 - `core.iteration_loop`: L3 signals, proposals, human acceptance, and
   post-release outcome observations.
 - `core.taskline_bridge`: L2 sidecar health, claims, leases, isolated
@@ -154,7 +155,8 @@ the exact release commit or a healthy resident descendant that contains it.
 - Intent state and breaches;
 - schedule events and runtime versions;
 - Matters, Handoffs, and cross-device state;
-- Delegations, steps, evidence, events, links, and shadow labels;
+- Delegations, steps, evidence, events, links, shadow labels, and projection
+  retries;
 - L3 signals, proposals, and post-release observations;
 - verified external-action receipts.
 

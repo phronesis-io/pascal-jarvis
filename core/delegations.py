@@ -362,6 +362,18 @@ class DelegationStore:
                     labeled_at REAL,
                     FOREIGN KEY(delegation_id) REFERENCES delegations(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS delegation_projection_queue (
+                    delegation_id TEXT PRIMARY KEY,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    first_failed_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(delegation_id) REFERENCES delegations(id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_delegation_projection_retry
+                    ON delegation_projection_queue(updated_at);
                 """
             )
             evidence_columns = {
@@ -1754,12 +1766,60 @@ class DelegationStore:
         try:
             from core.delegation_projection import sync_projection
 
-            return sync_projection(self, delegation_id)
+            result = sync_projection(self, delegation_id)
         except Exception as exc:
-            return {
+            result = {
                 "delegation_id": delegation_id,
                 "issues": [f"projection:{exc}"],
             }
+        issues = [
+            str(issue)[:500]
+            for issue in result.get("issues", [])
+            if str(issue).strip()
+        ]
+        now = self.now()
+        with self._tx() as db:
+            if issues:
+                db.execute(
+                    """
+                    INSERT INTO delegation_projection_queue(
+                        delegation_id,attempt_count,last_error,
+                        first_failed_at,updated_at
+                    ) VALUES (?,?,?,?,?)
+                    ON CONFLICT(delegation_id) DO UPDATE SET
+                        attempt_count=attempt_count+1,
+                        last_error=excluded.last_error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        delegation_id,
+                        1,
+                        " | ".join(issues)[:1000],
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                db.execute(
+                    "DELETE FROM delegation_projection_queue "
+                    "WHERE delegation_id=?",
+                    (delegation_id,),
+                )
+        return {**result, "issues": issues}
+
+    def pending_projections(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return durable projection retries, including terminal Delegations."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                """
+                SELECT delegation_id,attempt_count,last_error,
+                       first_failed_at,updated_at
+                  FROM delegation_projection_queue
+                 ORDER BY updated_at,delegation_id LIMIT ?
+                """,
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [_row(row) or {} for row in rows]
 
     def get(self, delegation_id: str) -> dict[str, Any]:
         with closing(self._connect()) as db:

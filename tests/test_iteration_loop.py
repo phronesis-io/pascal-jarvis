@@ -416,6 +416,66 @@ def test_conversation_observer_includes_open_findings_from_older_runs(
     ]
 
 
+def test_truncated_conversation_findings_are_not_full_coverage(tmp_path):
+    from datetime import datetime, timezone
+    from core.conversation_audit import connect
+
+    store = _store(tmp_path)
+    path = tmp_path / "data" / "conversation_audit.db"
+    db = connect(path)
+    completed = datetime.now(timezone.utc).isoformat()
+    run_id = db.execute(
+        """
+        INSERT INTO audit_runs(started_at,since,completed_at)
+        VALUES (?,?,?)
+        """,
+        (completed, completed, completed),
+    ).lastrowid
+    db.executemany(
+        """
+        INSERT INTO audit_issues(
+            run_id,severity,issue_type,title,evidence,recommendation
+        ) VALUES (?,?,?,?,?,?)
+        """,
+        [
+            (
+                run_id,
+                "P1",
+                "closure_failure",
+                f"Open issue {index}",
+                f"evidence-{index}",
+                "repair the loop",
+            )
+            for index in range(51)
+        ],
+    )
+    db.commit()
+    db.close()
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = self.store.now()
+            return []
+
+        def _delegation_signals(self):
+            self._collector_observed_at["delegations"] = self.store.now()
+            return []
+
+    result = Observer(store).run(create_proposals=False)
+
+    assert result["observed"] == 50
+    assert "conversation_audit" not in result["coverage"]["covered"]
+    assert result["coverage"]["errors"] == [
+        {
+            "source": "conversation_audit",
+            "error": (
+                "conversation audit has 51 open findings; "
+                "only 50 were ingested"
+            ),
+        }
+    ]
+
+
 def test_post_release_outcome_can_close_or_reopen_loop(monkeypatch, tmp_path):
     store = _store(tmp_path)
     proposal = _proposal(store, _signal(store))

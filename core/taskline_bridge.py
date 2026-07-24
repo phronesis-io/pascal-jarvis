@@ -105,7 +105,12 @@ class TasklineBridge:
             "delegation_id": delegation_id,
         }
 
-    def _engineering_delegation(self, task: dict[str, Any]) -> str:
+    def _engineering_delegation(
+        self,
+        task: dict[str, Any],
+        *,
+        revise_existing: bool = True,
+    ) -> str:
         """Project one claimed engineering task into the common control plane."""
         from core.delegations import DelegationStore
 
@@ -124,8 +129,9 @@ class TasklineBridge:
             "taskline_project": self.project,
             "taskline_id": task_id,
             "release_sha": release_sha,
+            "required_components": ["bot", "heartbeat-loop"],
         }
-        delegation, _ = store.create(
+        delegation, _created = store.create(
             principal_id="owner",
             source="taskline",
             source_ref=task_id,
@@ -143,7 +149,7 @@ class TasklineBridge:
             authorized=True,
         )
         detail = store.get(delegation["id"])
-        if (
+        if revise_existing and (
             detail["expected_postcondition"] != expected
             or detail["verification_policy"] != verification_policy
         ):
@@ -275,7 +281,10 @@ class TasklineBridge:
         """Attach execution pointers, never transcript bodies, to Delegation."""
         from core.delegations import DelegationStore
 
-        delegation_id = self._engineering_delegation(task)
+        delegation_id = self._engineering_delegation(
+            task,
+            revise_existing=False,
+        )
         store = DelegationStore(root=self.root, db_path=self.db_path)
         if provider and session_id:
             provider_ref = re.sub(

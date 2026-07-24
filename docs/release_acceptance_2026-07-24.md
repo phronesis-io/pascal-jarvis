@@ -207,6 +207,19 @@ formal findings and one additional reproduced idempotency gap were closed:
 | 91 | A stale uncertain EigenFlux message automatically replayed the write | Existing `attempting` or `verifying` actions only re-read authority and never resend; a new external action requires an explicit repeat token; stale-idempotency regression |
 | 92 | EigenFlux preinstall overwrote Jarvis's verified-send safety contract with an upstream raw-ID example | The tracked overlay is deterministically composed after every upstream sync, replaces the unsafe direct-send example, fails closed when missing or malformed, and is checked against the live skill; overlay and skill-contract regressions |
 
+The eleventh independent review checked cancellation, L3 absence evidence,
+Taskline release continuity, scheduler recovery, and terminal projections. Its
+six findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 93 | Cancelling an auxiliary tool-capable call left its private model process group running | SIGTERM/SIGINT now terminates the active model session with TERM/KILL before the router exits; signal-handler regression |
+| 94 | More than 50 open conversation findings could falsely prove that the omitted finding disappeared | The bounded ingest remains 50, but truncation marks conversation coverage incomplete and blocks absence-based outcome verification; 51-finding regression |
+| 95 | Taskline deployment proof evaluated stale optional runtime registrations | Engineering contracts explicitly require only resident `bot` and `heartbeat-loop` registrations; contract-policy regression |
+| 96 | Failed Tier-0 observations waited their full 6-24 hour interval | Delegation reconciliation, L3 observation, log maintenance, and provider canaries have explicit bounded retry delays; scheduler-contract regression |
+| 97 | Linking a Codex/Claude execution pointer could replace an already-bound release SHA with `pending` | Context linking adopts the existing Delegation without revising outcome or verification policy; release-preservation regression |
+| 98 | A terminal Delegation projection failure left linked Matter, Intent, or Handoff state stale forever | Every projection failure enters a durable SQLite queue and the reconciler retries active and terminal rows until all projections converge; terminal-recovery regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -247,7 +260,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2066 passed` for this candidate);
+- full local test result (`2072 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;
