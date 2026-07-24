@@ -1,11 +1,10 @@
 """Tests for core.compact — session compaction (summary generation)."""
 
 import json
-import subprocess
 import uuid
-from pathlib import Path
 from unittest.mock import patch
 
+from core.aux_model import AuxiliaryModelResult
 from core.compact import (generate_compact, get_compact_path,
                           get_old_session_id, read_compact)
 
@@ -68,20 +67,16 @@ def _fake_session(tmp_path):
     return session_dir, sid
 
 
-def _run_generate(tmp_path, returncode, stdout, capture=None):
+def _run_generate(tmp_path, text, capture=None):
     session_dir, sid = _fake_session(tmp_path)
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(prompt, **kwargs):
         if capture is not None:
-            capture.setdefault("calls", []).append({
-                "cmd": cmd,
-                "env": kwargs.get("env"),
-            })
-        return subprocess.CompletedProcess(cmd, returncode,
-                                           stdout=stdout, stderr="")
+            capture["prompt"] = prompt
+            capture["kwargs"] = kwargs
+        return AuxiliaryModelResult(text=text)
 
-    with patch("core.compact.subprocess.run", side_effect=fake_run), \
-         patch("core.compact.resolve_claude_bin", return_value="claude"):
+    with patch("core.compact.run_auxiliary_model", side_effect=fake_run):
         return generate_compact(tmp_path, session_dir, sid, "user123")
 
 
@@ -89,7 +84,7 @@ def test_generate_compact_nonzero_rc_discards_stdout(tmp_path):
     """The live failure: the CLI prints the spend-limit error on STDOUT with
     rc=1; it is 76 chars so the old len>=50 guard passed it and the error line
     became the saved 'previous session summary'."""
-    out = _run_generate(tmp_path, returncode=1, stdout=_SPEND_LIMIT_LINE)
+    out = _run_generate(tmp_path, text="")
 
     assert out == ""
     assert not get_compact_path(tmp_path, "user123").exists()
@@ -100,89 +95,18 @@ def test_generate_compact_success_saves(tmp_path):
     summary = ("## 摘要\n- 用户在部署新版本，重点是守护进程与机器人重启顺序\n"
                "- 决定先修守护进程，再启动机器人，避免全线沉默\n"
                "- 待办：明早验证 launchd 任务稳定，无重复拉起")
-    out = _run_generate(tmp_path, returncode=0, stdout=summary)
+    out = _run_generate(tmp_path, text=summary)
 
     assert out == summary
     assert get_compact_path(tmp_path, "user123").read_text(encoding="utf-8") == summary
 
 
-def test_generate_compact_backup_gate_injects_env(tmp_path, monkeypatch):
-    """gate()=='backup' + backup creds present → the claude call must carry
-    the backup channel env (same pattern as the heartbeat idle-noise judge)."""
-    import core.model_fallback as mf
-    monkeypatch.setattr(mf, "gate", lambda *a, **k: "backup")
-    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
-    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "bk-token")
-    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+def test_generate_compact_uses_text_only_shared_provider_chain(tmp_path):
     captured = {}
 
-    out = _run_generate(tmp_path, returncode=0,
-                        stdout=_OK_SUMMARY,
-                        capture=captured)
+    out = _run_generate(tmp_path, text=_OK_SUMMARY, capture=captured)
 
     assert out.startswith("## 摘要")
-    call = captured["calls"][0]
-    assert call["env"] is not None
-    assert call["env"]["ANTHROPIC_AUTH_TOKEN"] == "bk-token"
-    assert call["env"]["ANTHROPIC_BASE_URL"] == "https://backup.example"
-
-
-def test_generate_compact_primary_gate_ambient_env(tmp_path, monkeypatch):
-    """gate()=='primary' → ambient inherit (env=None), unchanged behavior."""
-    import core.model_fallback as mf
-    monkeypatch.setattr(mf, "gate", lambda *a, **k: "primary")
-    captured = {}
-
-    _run_generate(tmp_path, returncode=0,
-                  stdout=_OK_SUMMARY,
-                  capture=captured)
-
-    assert captured["calls"][0]["env"] is None
-
-
-def test_generate_compact_backup_gate_without_creds_stays_ambient(tmp_path, monkeypatch):
-    """Flag says backup but no backup creds in env → don't fabricate an env."""
-    import core.model_fallback as mf
-    monkeypatch.setattr(mf, "gate", lambda *a, **k: "backup")
-    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
-    captured = {}
-
-    _run_generate(tmp_path, returncode=0,
-                  stdout=_OK_SUMMARY,
-                  capture=captured)
-
-    assert captured["calls"][0]["env"] is None
-
-
-def test_generate_compact_backup_uses_configured_model(tmp_path, monkeypatch):
-    import core.model_fallback as mf
-    monkeypatch.setattr(mf, "gate", lambda *a, **k: "backup")
-    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
-    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "bk-token")
-    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
-    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "claude-opus-4-6")
-    captured = {}
-
-    _run_generate(tmp_path, returncode=0, stdout=_OK_SUMMARY,
-                  capture=captured)
-
-    assert "claude-opus-4-6" in captured["calls"][0]["cmd"]
-
-
-def test_generate_compact_falls_back_to_openai(tmp_path, monkeypatch):
-    import core.model_fallback as mf
-    import core.openai_fallback as of
-    monkeypatch.setattr(mf, "gate", lambda *a, **k: "primary")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
-    monkeypatch.setattr(
-        of, "call_openai",
-        lambda *a, **k: {"output_text": _OK_SUMMARY},
-    )
-
-    out = _run_generate(
-        tmp_path, returncode=1, stdout=_SPEND_LIMIT_LINE)
-
-    assert out == _OK_SUMMARY
-    assert get_compact_path(tmp_path, "user123").read_text() == _OK_SUMMARY
+    assert captured["kwargs"]["allow_tools"] is False
+    assert captured["kwargs"]["timeout"] == 180
+    assert "对话记录" in captured["prompt"]

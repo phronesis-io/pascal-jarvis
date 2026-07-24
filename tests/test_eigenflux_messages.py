@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import io
 import json
+import sqlite3
 import subprocess
+import threading
+import urllib.error
 
 import pytest
 
 from core.actions import ActionProcessor
 from core.eigenflux_messages import (
     CliFailure,
+    EigenFluxApiClient,
     EigenFluxMessenger,
+    MessageReceipt,
     RecipientAmbiguous,
     RecipientNotFound,
 )
@@ -33,6 +40,7 @@ class FakeEigenFlux:
         ]
         self.messages: list[dict] = []
         self.calls: list[list[str]] = []
+        self.api_calls: list[tuple[str, str]] = []
         self.send_count = 0
         self.send_response_has_ids = True
         self.history_error = False
@@ -91,30 +99,30 @@ class FakeEigenFlux:
                 if message["conv_id"] == conv_id
             ]
             return self._result({"messages": messages})
-        if command[1:3] == ["msg", "send"]:
-            self.send_count += 1
-            target = self._value(command, "--receiver-id")
-            content = self._value(command, "--content")
-            msg_id = f"msg-{self.send_count}"
-            conv_id = f"conv-{target}"
-            self.messages.insert(
-                0,
-                {
-                    "content": content,
-                    "conv_id": conv_id,
-                    "created_at": 2_000_000_000_000,
-                    "msg_id": msg_id,
-                    "receiver_id": target,
-                    "sender_id": "agent-owner",
-                },
-            )
-            if self.send_error_after_commit:
-                return self._result({}, returncode=1, stderr="connection reset")
-            data = {"msg_id": msg_id, "conv_id": conv_id}
-            if not self.send_response_has_ids:
-                data = {}
-            return self._result({"code": 0, "data": data})
         raise AssertionError(f"unexpected command: {command}")
+
+    def send_api(self, target: str, content: str) -> dict:
+        self.api_calls.append((target, content))
+        self.send_count += 1
+        msg_id = f"msg-{self.send_count}"
+        conv_id = f"conv-{target}"
+        self.messages.insert(
+            0,
+            {
+                "content": content,
+                "conv_id": conv_id,
+                "created_at": 2_000_000_000_000,
+                "msg_id": msg_id,
+                "receiver_id": target,
+                "sender_id": "agent-owner",
+            },
+        )
+        if self.send_error_after_commit:
+            raise CliFailure("connection reset")
+        data = {"msg_id": msg_id, "conv_id": conv_id}
+        if not self.send_response_has_ids:
+            data = {}
+        return {"code": 0, "data": data}
 
 
 def _messenger(tmp_path, cli: FakeEigenFlux, **kwargs) -> EigenFluxMessenger:
@@ -122,6 +130,7 @@ def _messenger(tmp_path, cli: FakeEigenFlux, **kwargs) -> EigenFluxMessenger:
         root=tmp_path,
         db_path=tmp_path / "jarvis.db",
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 2_000_000_000,
         **kwargs,
     )
@@ -136,8 +145,8 @@ def test_exact_name_is_resolved_server_side_and_read_back(tmp_path):
     assert receipt.completed
     assert receipt.recipient_id == "agent-spouse"
     assert receipt.msg_id == "msg-1"
-    send = next(call for call in cli.calls if call[1:3] == ["msg", "send"])
-    assert send[send.index("--receiver-id") + 1] == "agent-spouse"
+    assert cli.api_calls == [("agent-spouse", "D&O insurance brief")]
+    assert all("D&O insurance brief" not in arg for call in cli.calls for arg in call)
     assert any(call[1:3] == ["msg", "history"] for call in cli.calls)
 
 
@@ -204,6 +213,18 @@ def test_ambiguous_exact_remark_refuses_to_send(tmp_path):
     assert cli.send_count == 0
 
 
+def test_verified_friend_id_bypasses_duplicate_display_names(tmp_path):
+    cli = FakeEigenFlux()
+    cli.friends[1]["agent_name"] = cli.friends[0]["agent_name"]
+    messenger = _messenger(tmp_path, cli)
+
+    receipt = messenger.send_to_friend_id("agent-spouse", "welcome")
+
+    assert receipt.completed
+    assert receipt.recipient_id == "agent-spouse"
+    assert cli.api_calls == [("agent-spouse", "welcome")]
+
+
 def test_binding_alias_is_checked_against_live_friend_record(tmp_path):
     cli = FakeEigenFlux()
     binding = tmp_path / "bindings.json"
@@ -224,6 +245,7 @@ def test_binding_alias_is_checked_against_live_friend_record(tmp_path):
         db_path=tmp_path / "jarvis.db",
         bindings_path=binding,
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 2_000_000_000,
     )
     assert messenger.send("family", "hello").recipient_id == "agent-spouse"
@@ -254,6 +276,270 @@ def test_explicit_repeat_token_creates_a_new_contract(tmp_path):
     assert cli.send_count == 2
 
 
+def test_uncertain_explicit_repeat_cannot_reuse_first_message_receipt(tmp_path):
+    cli = FakeEigenFlux()
+    messenger = _messenger(tmp_path, cli)
+    first = messenger.send("Family agent", "same brief")
+    cli.history_error = True
+
+    def fail_before_commit(_target, _content):
+        raise CliFailure("connection reset before commit")
+
+    messenger.api_sender = fail_before_commit
+    repeated = messenger.send(
+        "Family agent", "same brief", repeat_token="owner-request-2"
+    )
+    assert repeated.state == "verifying"
+
+    cli.history_error = False
+    reconciled = messenger.reconcile_action(repeated.idempotency_key)
+
+    assert reconciled.state == "verifying"
+    assert reconciled.msg_id == ""
+    assert reconciled.idempotency_key != first.idempotency_key
+
+
+def test_concurrent_explicit_repeats_claim_distinct_receipts_atomically(tmp_path):
+    cli = FakeEigenFlux()
+    cli.send_response_has_ids = False
+    barrier = threading.Barrier(2)
+    send_lock = threading.Lock()
+
+    def send_api(target, content):
+        with send_lock:
+            return cli.send_api(target, content)
+
+    class RacingMessenger(EigenFluxMessenger):
+        def _candidate_conversations(self, target_id):
+            barrier.wait(timeout=2)
+            return super()._candidate_conversations(target_id)
+
+    messenger = RacingMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=cli,
+        api_sender=send_api,
+        now=lambda: 2_000_000_000,
+    )
+    messenger._connect().close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(
+            executor.map(
+                lambda token: messenger.send(
+                    "Family agent",
+                    "same brief",
+                    repeat_token=token,
+                ),
+                ("owner-repeat-1", "owner-repeat-2"),
+            )
+        )
+
+    assert all(receipt.completed for receipt in receipts)
+    assert {receipt.msg_id for receipt in receipts} == {"msg-1", "msg-2"}
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        claimed, distinct = db.execute(
+            """
+            SELECT COUNT(msg_id), COUNT(DISTINCT msg_id)
+              FROM verified_external_actions WHERE msg_id != ''
+            """
+        ).fetchone()
+    assert claimed == distinct == 2
+
+
+def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
+    from core.delegation_connectors import project_eigenflux_message_receipt
+    from core.delegations import DelegationStore
+
+    db_path = tmp_path / "jarvis.db"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE verified_external_actions (
+                idempotency_key TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                contract_version TEXT NOT NULL DEFAULT 'v1',
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                conv_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                created_epoch REAL NOT NULL,
+                updated_epoch REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        values = (
+            "eigenflux_message",
+            "agent-spouse",
+            "Family Research Agent",
+            "payload-hash",
+            "v1",
+            "verified",
+            1,
+            "conv-agent-spouse",
+            "duplicate-message",
+            1.0,
+            1.0,
+            "",
+        )
+        db.execute(
+            "INSERT INTO verified_external_actions VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("action-1", *values),
+        )
+        db.execute(
+            "INSERT INTO verified_external_actions VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("action-2", *values),
+        )
+
+    store = DelegationStore(root=tmp_path, db_path=db_path)
+    for action_key in ("action-1", "action-2"):
+        project_eigenflux_message_receipt(
+            MessageReceipt(
+                state="verified",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=action_key,
+                msg_id="duplicate-message",
+                conv_id="conv-agent-spouse",
+            ),
+            root=tmp_path,
+            store=store,
+        )
+    assert {
+        row["status"] for row in store.list(limit=10)
+    } == {"completed"}
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=db_path,
+        runner=lambda *_args, **_kwargs: None,
+    )
+    messenger._connect().close()
+
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT idempotency_key,state,msg_id,last_error
+              FROM verified_external_actions ORDER BY idempotency_key
+            """
+        ).fetchall()
+        unique_index = db.execute(
+            """
+            SELECT 1 FROM sqlite_master
+             WHERE type='index'
+               AND name='idx_verified_actions_unique_message_receipt'
+            """
+        ).fetchone()
+    assert rows[0][1:3] == ("verified", "duplicate-message")
+    assert rows[1][1:3] == ("verifying", "")
+    assert rows[1][3] == "duplicate receipt claim released"
+    assert unique_index == (1,)
+    projections = {
+        row["source_ref"]: store.get(row["id"])
+        for row in store.list(limit=10)
+    }
+    assert projections["attempt:action-1"]["status"] == "completed"
+    reopened = projections["attempt:action-2"]
+    assert reopened["status"] == "verifying"
+    assert reopened["steps"][0]["status"] == "verifying"
+    assert all(not evidence["trusted"] for evidence in reopened["evidence"])
+    assert reopened["events"][-1]["event_type"] == (
+        "delegation.evidence_invalidated"
+    )
+
+
+def test_prior_duplicate_migration_is_backfilled_on_upgrade(tmp_path):
+    from core.delegation_connectors import project_eigenflux_message_receipt
+    from core.delegations import DelegationStore
+
+    db_path = tmp_path / "jarvis.db"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE verified_external_actions (
+                idempotency_key TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                contract_version TEXT NOT NULL DEFAULT 'v1',
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                conv_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                created_epoch REAL NOT NULL,
+                updated_epoch REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        values = (
+            "eigenflux_message", "agent-spouse", "Family Research Agent",
+            "payload-hash", "v1", "verified", 1, "conv-agent-spouse",
+            "duplicate-message", 1.0, 1.0, "",
+        )
+        for key in ("action-1", "action-2"):
+            db.execute(
+                "INSERT INTO verified_external_actions VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (key, *values),
+            )
+
+    store = DelegationStore(root=tmp_path, db_path=db_path)
+    for action_key in ("action-1", "action-2"):
+        project_eigenflux_message_receipt(
+            MessageReceipt(
+                state="verified",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=action_key,
+                msg_id="duplicate-message",
+                conv_id="conv-agent-spouse",
+            ),
+            root=tmp_path,
+            store=store,
+        )
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE verified_external_actions
+               SET state='verifying',conv_id='',msg_id='',
+                   last_error='later reconciliation replaced the marker'
+             WHERE idempotency_key='action-2'
+            """
+        )
+        db.execute(
+            """
+            CREATE UNIQUE INDEX idx_verified_actions_unique_message_receipt
+                ON verified_external_actions(msg_id)
+             WHERE action_type='eigenflux_message' AND msg_id != ''
+            """
+        )
+
+    EigenFluxMessenger(
+        root=tmp_path,
+        db_path=db_path,
+        runner=lambda *_args, **_kwargs: None,
+    )._connect().close()
+
+    reopened = next(
+        store.get(row["id"])
+        for row in store.list(limit=10)
+        if row["source_ref"] == "attempt:action-2"
+    )
+    assert reopened["status"] == "verifying"
+    assert reopened["steps"][0]["status"] == "verifying"
+    assert reopened["steps"][0]["artifact_locator"] == ""
+    assert reopened["verification_policy"]["msg_id"] == ""
+    assert all(not evidence["trusted"] for evidence in reopened["evidence"])
+
+
 def test_missing_send_receipt_can_only_complete_from_history(tmp_path):
     cli = FakeEigenFlux()
     cli.send_response_has_ids = False
@@ -279,6 +565,7 @@ def test_exact_receipt_ids_override_clock_skew(tmp_path):
         root=tmp_path,
         db_path=tmp_path / "jarvis.db",
         runner=cli,
+        api_sender=cli.send_api,
         now=lambda: 9_000_000_000,
     )
 
@@ -297,6 +584,281 @@ def test_readback_failure_never_claims_completion_or_retries(tmp_path):
     assert not receipt.completed
     assert cli.send_count == 1
     assert "仍在核验" in receipt.human_text()
+
+
+def test_stale_uncertain_action_never_replays_without_repeat_token(tmp_path):
+    cli = FakeEigenFlux()
+    clock = [2_000_000_000.0]
+    sends = []
+
+    def uncertain_send(target, content):
+        sends.append((target, content))
+        return {
+            "code": 0,
+            "data": {"msg_id": "unknown-1", "conv_id": "conv-agent-spouse"},
+        }
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=cli,
+        api_sender=uncertain_send,
+        now=lambda: clock[0],
+        attempt_stale_seconds=60,
+    )
+
+    first = messenger.send("Family agent", "uncertain")
+    clock[0] += 61
+    second = messenger.send("Family agent", "uncertain")
+
+    assert first.state == "verifying"
+    assert second.state == "verifying"
+    assert second.duplicate is True
+    assert sends == [("agent-spouse", "uncertain")]
+
+
+def test_uncertain_action_projects_stable_key_for_later_reconciliation(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+
+    cli = FakeEigenFlux()
+    cli.history_error = True
+    messenger = _messenger(tmp_path, cli)
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger",
+        lambda **_kwargs: messenger,
+    )
+    processor = ActionProcessor(
+        jarvis_dir=tmp_path,
+        memory_dir=tmp_path / "memory",
+        jobs_dir=tmp_path / "jobs",
+    )
+    encoded = base64.b64encode(b"recover later").decode()
+
+    result = processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+    )
+
+    assert "仍在核验" in result
+    detail = DelegationStore(root=tmp_path).get(
+        DelegationStore(root=tmp_path).list()[0]["id"]
+    )
+    assert detail["status"] == "verifying"
+    assert detail["verification_policy"]["idempotency_key"]
+    from core.delegation_verify import VerifierRegistry
+
+    cli.history_error = False
+    verification = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "jarvis.db", runner=cli
+    ).verify(
+        "eigenflux_message",
+        detail["expected_postcondition"],
+        detail["verification_policy"],
+    )
+    assert verification.matched is True
+    assert verification.observed_summary.find('"state":"verified"') >= 0
+    assert cli.send_count == 1
+
+
+def test_reconciler_projects_an_unclaimed_message_receipt(
+    tmp_path,
+):
+    from core.delegation_reconcile import DelegationReconciler
+    from core.delegations import DelegationStore
+
+    cli = FakeEigenFlux()
+    cli.history_error = True
+    receipt = _messenger(tmp_path, cli).send(
+        "Family agent", "welcome needs recovery"
+    )
+    assert receipt.state == "verifying"
+    store = DelegationStore(root=tmp_path, db_path=tmp_path / "jarvis.db")
+    assert store.list() == []
+
+    result = DelegationReconciler(store=store).run(send_items=False)
+
+    assert result["connector_projections_repaired"] == 1
+    detail = store.get(store.list()[0]["id"])
+    assert detail["status"] == "verifying"
+    assert (
+        detail["verification_policy"]["idempotency_key"]
+        == receipt.idempotency_key
+    )
+
+
+def test_uncertain_explicit_repeats_keep_separate_delegations(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+
+    keys = iter(("action-key-one", "action-key-two"))
+
+    class FakeMessenger:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send(self, _recipient, _content, repeat_token=""):
+            return MessageReceipt(
+                state="verifying",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=next(keys),
+            )
+
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger", FakeMessenger
+    )
+    processor = ActionProcessor(
+        jarvis_dir=tmp_path,
+        memory_dir=tmp_path / "memory",
+        jobs_dir=tmp_path / "jobs",
+    )
+    encoded = base64.b64encode(b"same uncertain brief").decode()
+
+    processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+    )
+    processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+        "|repeat_token=owner-request-2"
+    )
+
+    rows = DelegationStore(root=tmp_path).list(limit=10)
+    assert len(rows) == 2
+    assert {row["source_ref"] for row in rows} == {
+        "attempt:action-key-one",
+        "attempt:action-key-two",
+    }
+
+
+class _ApiResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def test_api_sender_keeps_message_body_out_of_url_and_headers(tmp_path):
+    home = tmp_path / ".eigenflux"
+    credentials = home / "servers" / "production" / "credentials.json"
+    credentials.parent.mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({
+        "default_server": "production",
+        "servers": [{
+            "name": "production",
+            "endpoint": "https://eigenflux.example.test",
+        }],
+    }))
+    credentials.write_text(json.dumps({
+        "access_token": "private-token",
+        "agent_id": "owner",
+    }))
+    captured = {}
+
+    def open_request(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _ApiResponse({
+            "code": 0,
+            "data": {"msg_id": "m1", "conv_id": "c1"},
+        })
+
+    response = EigenFluxApiClient(home, opener=open_request).send(
+        "agent-spouse", "private insurance brief"
+    )
+
+    request = captured["request"]
+    assert request.full_url == "https://eigenflux.example.test/api/v1/pm/send"
+    assert "private insurance brief" not in request.full_url
+    assert all(
+        "private insurance brief" not in str(value)
+        for value in request.headers.values()
+    )
+    assert json.loads(request.data) == {
+        "receiver_id": "agent-spouse",
+        "content": "private insurance brief",
+    }
+    assert response["data"]["msg_id"] == "m1"
+
+
+def test_api_sender_resolves_cli_home_suffix_from_environment(
+    tmp_path, monkeypatch,
+):
+    base = tmp_path / "agent-home"
+    monkeypatch.setenv("EIGENFLUX_HOME", str(base))
+
+    client = EigenFluxApiClient()
+
+    assert client.home == base / ".eigenflux"
+
+
+def test_api_sender_does_not_duplicate_existing_home_suffix(tmp_path):
+    home = tmp_path / ".eigenflux"
+
+    assert EigenFluxApiClient(home).home == home
+
+
+def test_http_error_body_is_never_persisted_as_message_state(tmp_path):
+    home = tmp_path / ".eigenflux"
+    credentials = home / "servers" / "production" / "credentials.json"
+    credentials.parent.mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({
+        "default_server": "production",
+        "servers": [{
+            "name": "production",
+            "endpoint": "https://eigenflux.example.test",
+        }],
+    }))
+    credentials.write_text(json.dumps({
+        "access_token": "private-token",
+        "agent_id": "owner",
+    }))
+    private_body = "private insurance brief must not persist"
+
+    def rejected(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            422,
+            "validation failed",
+            {},
+            io.BytesIO(
+                json.dumps({"error": private_body}).encode("utf-8")
+            ),
+        )
+
+    cli = FakeEigenFlux()
+    database = tmp_path / "jarvis.db"
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=database,
+        runner=cli,
+        api_sender=EigenFluxApiClient(home, opener=rejected).send,
+        now=lambda: 2_000_000_000,
+    )
+
+    receipt = messenger.send("Family agent", private_body)
+
+    assert receipt.state == "verifying"
+    assert private_body not in receipt.detail
+    with sqlite3.connect(database) as db:
+        error = db.execute(
+            "SELECT last_error FROM verified_external_actions"
+        ).fetchone()[0]
+    assert error == "EigenFlux send failed: HTTP 4xx"
+    assert private_body not in error
+
+
+def test_api_sender_fails_closed_without_credentials(tmp_path):
+    with pytest.raises(CliFailure, match="authentication is not configured"):
+        EigenFluxApiClient(tmp_path).send("agent", "content")
 
 
 def test_action_marker_returns_deterministic_receipt(monkeypatch, tmp_path):

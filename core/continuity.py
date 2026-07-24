@@ -1,7 +1,8 @@
 """Durable cross-device handoffs for existing Jarvis work objects.
 
 A handoff moves the next interaction between desktop and phone. It never
-copies the Memorial or Matter it points at; those stores remain authoritative.
+copies the Memorial, Matter, or Delegation it points at; those stores remain
+authoritative.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from contextlib import closing
 from pathlib import Path
 
 SURFACES = {"desktop", "mobile"}
-ENTITY_TYPES = {"memorial", "matter"}
+ENTITY_TYPES = {"memorial", "matter", "delegation"}
 ACTIVE_STATES = {"open", "claimed"}
 TERMINAL_STATES = {"completed", "cancelled"}
 
@@ -94,7 +95,7 @@ def _decode(row) -> dict:
 def _validate(entity_type: str, entity_id: str,
               from_surface: str, to_surface: str) -> None:
     if entity_type not in ENTITY_TYPES:
-        raise ValueError("entity_type must be memorial or matter")
+        raise ValueError("entity_type must be memorial, matter, or delegation")
     if not str(entity_id or "").strip():
         raise ValueError("entity_id is required")
     if from_surface not in SURFACES or to_surface not in SURFACES:
@@ -107,10 +108,17 @@ def _require_entity(entity_type: str, entity_id: str) -> None:
     if entity_type == "memorial":
         from core.memorial import get_memorial
         exists = get_memorial(entity_id) is not None
-    else:
+    elif entity_type == "matter":
         from core.matters import get_matter
         exists = get_matter(
             entity_id, include_links=False, include_events=False) is not None
+    else:
+        from core.delegations import DelegationNotFound, DelegationStore
+        try:
+            DelegationStore().get(entity_id)
+            exists = True
+        except DelegationNotFound:
+            exists = False
     if not exists:
         raise KeyError(entity_id)
 
@@ -126,6 +134,7 @@ def _notify_mobile(handoff: dict) -> dict:
     )
     pipeline = DeliveryPipeline(root, db_path=_database_path())
     is_matter = handoff["entity_type"] == "matter"
+    is_delegation = handoff["entity_type"] == "delegation"
     matter_id = str(handoff.get("matter_id") or (
         entity_id if is_matter else ""))
     result = pipeline.deliver(DeliveryEnvelope(
@@ -135,9 +144,13 @@ def _notify_mobile(handoff: dict) -> dict:
             "title": "Jarvis · 发到手机",
             "text": title,
             "url": (
-                f"/items/{entity_id}"
-                if not is_matter
-                else f"/matters/{entity_id}"
+                f"/matters/{entity_id}"
+                if is_matter
+                else (
+                    f"/delegations/{entity_id}"
+                    if is_delegation
+                    else f"/items/{entity_id}"
+                )
             ),
             "matter_id": matter_id,
         },
@@ -145,7 +158,7 @@ def _notify_mobile(handoff: dict) -> dict:
         requested_channel="push",
         urgent=True,
         conversation_bound=True,
-        memorial_id=entity_id if not is_matter else "",
+        memorial_id=entity_id if handoff["entity_type"] == "memorial" else "",
         matter_id=matter_id,
         dedup_key=f"surface-handoff:{handoff['id']}",
         metadata={
@@ -319,19 +332,49 @@ def claim_handoff(
     return _decode(updated)
 
 
-def complete_handoff(handoff_id: str, *, clock=time.time) -> dict:
+def complete_handoff(
+    handoff_id: str,
+    *,
+    completion_source: str = "",
+    clock=time.time,
+) -> dict:
     with closing(_connect()) as db, db:
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
         ).fetchone()
         if not row:
             raise KeyError(handoff_id)
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         if str(row["status"]) in ACTIVE_STATES:
+            if completion_source:
+                metadata["completion_source"] = str(completion_source)
+                metadata["completion_previous_status"] = str(row["status"])
             db.execute(
                 "UPDATE surface_handoffs "
-                "SET status='completed',completed_epoch=? "
+                "SET status='completed',completed_epoch=?,metadata=? "
                 "WHERE id=? AND status IN ('open','claimed')",
-                (float(clock()), str(handoff_id)),
+                (
+                    float(clock()),
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(handoff_id),
+                ),
+            )
+        elif not completion_source and metadata.get("completion_source"):
+            metadata.pop("completion_source", None)
+            metadata.pop("completion_previous_status", None)
+            metadata["completion_confirmed_by"] = "manual"
+            db.execute(
+                "UPDATE surface_handoffs SET metadata=? WHERE id=?",
+                (
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(handoff_id),
+                ),
             )
         updated = db.execute(
             "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
@@ -343,15 +386,131 @@ def complete_entity_handoffs(
     entity_type: str,
     entity_id: str,
     *,
+    completion_source: str = "",
     clock=time.time,
 ) -> int:
     if entity_type not in ENTITY_TYPES:
-        raise ValueError("entity_type must be memorial or matter")
+        raise ValueError("entity_type must be memorial, matter, or delegation")
     with closing(_connect()) as db, db:
-        changed = db.execute(
-            "UPDATE surface_handoffs SET status='completed',completed_epoch=? "
+        db.execute("BEGIN IMMEDIATE")
+        now = float(clock())
+        if not completion_source:
+            changed = db.execute(
+                "UPDATE surface_handoffs "
+                "SET status='completed',completed_epoch=? "
+                "WHERE entity_type=? AND entity_id=? "
+                "AND status IN ('open','claimed')",
+                (now, entity_type, str(entity_id)),
+            ).rowcount
+            return int(changed)
+        rows = db.execute(
+            "SELECT id,status,metadata FROM surface_handoffs "
             "WHERE entity_type=? AND entity_id=? "
             "AND status IN ('open','claimed')",
-            (float(clock()), entity_type, str(entity_id)),
-        ).rowcount
-    return int(changed)
+            (entity_type, str(entity_id)),
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["completion_source"] = str(completion_source)
+            metadata["completion_previous_status"] = str(row["status"])
+            db.execute(
+                "UPDATE surface_handoffs "
+                "SET status='completed',completed_epoch=?,metadata=? "
+                "WHERE id=? AND status IN ('open','claimed')",
+                (
+                    now,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(row["id"]),
+                ),
+            )
+    return len(rows)
+
+
+def reopen_entity_handoffs(
+    entity_type: str,
+    entity_id: str,
+    *,
+    completion_source: str,
+    legacy_completed_at: float | None = None,
+    legacy_window_seconds: float = 60.0,
+) -> int:
+    """Undo only handoff completions owned by one terminal projection."""
+    if entity_type not in ENTITY_TYPES:
+        raise ValueError("entity_type must be memorial, matter, or delegation")
+    if not str(completion_source or "").strip():
+        raise ValueError("completion_source is required")
+    changed = 0
+    with closing(_connect()) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        active_targets = {
+            str(row["to_surface"])
+            for row in db.execute(
+                "SELECT to_surface FROM surface_handoffs "
+                "WHERE entity_type=? AND entity_id=? "
+                "AND status IN ('open','claimed')",
+                (entity_type, str(entity_id)),
+            ).fetchall()
+        }
+        rows = db.execute(
+            "SELECT * FROM surface_handoffs "
+            "WHERE entity_type=? AND entity_id=? AND status='completed' "
+            "ORDER BY created_epoch DESC,id DESC",
+            (entity_type, str(entity_id)),
+        ).fetchall()
+        seen_targets = set(active_targets)
+        for row in rows:
+            target_surface = str(row["to_surface"])
+            if target_surface in seen_targets:
+                continue
+            seen_targets.add(target_surface)
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            owned = metadata.get("completion_source") == completion_source
+            legacy_owned = False
+            if (
+                not metadata.get("completion_source")
+                and legacy_completed_at is not None
+            ):
+                completed_epoch = float(row["completed_epoch"] or 0)
+                created_epoch = float(row["created_epoch"] or 0)
+                terminal_epoch = float(legacy_completed_at)
+                legacy_owned = bool(
+                    created_epoch <= terminal_epoch
+                    and terminal_epoch <= completed_epoch
+                    <= terminal_epoch + max(1.0, legacy_window_seconds)
+                )
+            if not (owned or legacy_owned):
+                continue
+            previous = str(
+                metadata.get("completion_previous_status") or ""
+            )
+            if previous not in ACTIVE_STATES:
+                previous = (
+                    "claimed"
+                    if row["claimed_epoch"] is not None
+                    else "open"
+                )
+            metadata.pop("completion_source", None)
+            metadata.pop("completion_previous_status", None)
+            metadata["reopened_completion_source"] = completion_source
+            updated = db.execute(
+                "UPDATE surface_handoffs "
+                "SET status=?,completed_epoch=NULL,metadata=? "
+                "WHERE id=? AND status='completed'",
+                (
+                    previous,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(row["id"]),
+                ),
+            )
+            changed += int(updated.rowcount)
+    return changed

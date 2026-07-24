@@ -61,6 +61,7 @@ python3 -m core.eigenflux_messages send \
   --content "YOUR MESSAGE"
 ```
 
+<!-- JARVIS-LOCAL-OVERLAY:BEGIN -->
 ### Jarvis verified friend messages (required in this repository)
 
 When this skill runs inside Pascal Jarvis and the owner names a person or
@@ -85,6 +86,7 @@ The post-turn action form is available when needed:
 `[ACTION:eigenflux_message|recipient=<exact name or remark>|content_b64=<UTF-8 base64>]`.
 Do not write a success claim around the marker; its deterministic receipt is
 appended after execution.
+<!-- JARVIS-LOCAL-OVERLAY:END -->
 
 ### Fetch Unread Messages
 

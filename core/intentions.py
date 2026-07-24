@@ -312,13 +312,20 @@ _NEW_COLS = [
     ("attempt",             "INTEGER NOT NULL DEFAULT 0"),  # execution attempts since last success
     ("next_fire_at",        "TEXT"),                        # cron catch-up watermark
     ("closed_at",           "TEXT"),                        # closure-axis terminal timestamp
+    ("cancel_source",       "TEXT NOT NULL DEFAULT ''"),
+    ("cancel_sources",      "TEXT NOT NULL DEFAULT '[]'"),
+    ("cancel_previous_status", "TEXT NOT NULL DEFAULT ''"),
+    ("cancel_previous_error",  "TEXT NOT NULL DEFAULT ''"),
+    ("cancel_previous_closure_status", "TEXT NOT NULL DEFAULT ''"),
+    ("cancel_parent_intent_id", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
 def _migrate():
     """Idempotent ALTER migration for the closure columns. Safe to call on every
-    init: it only adds columns that are missing. A lock-contention OperationalError
-    (busy dashboard connection) is logged, not raised — must never crash heartbeat.
+    init: it only adds columns that are missing. Lock contention is logged and
+    re-raised while a required column is absent, so _init remains retryable
+    instead of marking an incomplete schema ready for the process lifetime.
     """
     db = _get_db()
     have = {r[1] for r in db.execute("PRAGMA table_info(intentions)").fetchall()}
@@ -327,7 +334,25 @@ def _migrate():
             try:
                 db.execute(f"ALTER TABLE intentions ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError as e:
-                print(f"[intentions._migrate] skip {col}: {e}", file=sys.stderr)
+                print(
+                    f"[intentions._migrate] defer {col}: {e}",
+                    file=sys.stderr,
+                )
+    migrated = {
+        row[1]
+        for row in db.execute(
+            "PRAGMA table_info(intentions)"
+        ).fetchall()
+    }
+    remaining = {
+        col for col, _ddl in _NEW_COLS if col not in migrated
+    }
+    if remaining:
+        db.rollback()
+        raise sqlite3.OperationalError(
+            "intentions migration incomplete; missing columns: "
+            + ", ".join(sorted(remaining))
+        )
     db.execute("CREATE INDEX IF NOT EXISTS idx_intentions_closure ON intentions(closure_status)")
     db.commit()
     # Backfill next_fire_at for live cron rows that predate the column
@@ -514,7 +539,87 @@ def get_intent(intent_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def cancel_intent(intent_id: str, reason: str = "") -> bool:
+def _cancel_sources(row) -> list[str]:
+    try:
+        decoded = json.loads(str(row["cancel_sources"] or "[]"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        decoded = []
+    sources = [
+        str(value)
+        for value in decoded
+        if str(value or "").strip()
+    ] if isinstance(decoded, list) else []
+    legacy_source = str(row["cancel_source"] or "")
+    if legacy_source and legacy_source not in sources:
+        sources.insert(0, legacy_source)
+    return sources
+
+
+def _followup_inherits_parent(row, parent_intent_id: str) -> bool:
+    return bool(
+        str(row["cancel_parent_intent_id"] or "") == parent_intent_id
+        or (
+            not str(row["cancel_parent_intent_id"] or "")
+            and str(row["parent_intent_id"] or "") == parent_intent_id
+            and str(row["last_error"] or "") == "parent cancelled"
+        )
+    )
+
+
+def _cancelled_parent_for_followup(db, row):
+    parent_intent_id = str(row["parent_intent_id"] or "")
+    if not parent_intent_id:
+        return None
+    parent = db.execute(
+        "SELECT * FROM intentions WHERE id=?",
+        (parent_intent_id,),
+    ).fetchone()
+    if (
+        parent is None
+        or str(parent["status"]) != "cancelled"
+        or str(parent["closure_followup_id"] or "") != str(row["id"])
+    ):
+        return None
+    return parent
+
+
+def _legacy_cancelled_status(row) -> str | None:
+    """Choose a non-repeating legacy state only when current facts support it."""
+    trigger_type = str(row["trigger_type"] or "")
+    now = now_local()
+    if trigger_type != "cron" and row["executed_at"]:
+        return "executed"
+    expires_at = str(row["expires_at"] or "")
+    if expires_at:
+        try:
+            if _coerce(datetime.fromisoformat(expires_at)) <= now:
+                return "expired"
+        except (TypeError, ValueError):
+            return None
+    if trigger_type == "cron":
+        # A cron row remains pending after every successful occurrence;
+        # executed_at is its last-run watermark, not a terminal state.
+        return "pending"
+    if trigger_type == "date":
+        try:
+            config = json.loads(str(row["trigger_config"] or "{}"))
+            target = _coerce(
+                datetime.fromisoformat(str(config.get("datetime") or ""))
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return "pending" if target > now else "expired"
+    if trigger_type in {"interval", "event"}:
+        return "pending"
+    return None
+
+
+def cancel_intent(
+    intent_id: str,
+    reason: str = "",
+    *,
+    source: str = "",
+) -> bool:
     """Retire an intent from ANY state (pending/triggered/executed/expired).
 
     Previously this only accepted pending/triggered, so 'executed' residue —
@@ -534,17 +639,114 @@ def cancel_intent(intent_id: str, reason: str = "") -> bool:
     """
     _init()
     db = _get_db()
+    started_transaction = not db.in_transaction
+    if started_transaction:
+        db.execute("BEGIN IMMEDIATE")
     row = db.execute(
-        "SELECT status, closure_status, closure_followup_id FROM intentions WHERE id = ?",
+        "SELECT * "
+        "FROM intentions WHERE id = ?",
         (intent_id,),
     ).fetchone()
     if not row:
+        if started_transaction:
+            db.rollback()
         return False
     if row["status"] == "cancelled":
+        sources = _cancel_sources(row)
+        if source and sources:
+            if source not in sources:
+                sources.append(source)
+                db.execute(
+                    "UPDATE intentions SET cancel_sources=? WHERE id=?",
+                    (
+                        json.dumps(sources, ensure_ascii=False),
+                        intent_id,
+                    ),
+                )
+                followup_id = str(row["closure_followup_id"] or "")
+                if followup_id:
+                    followup = db.execute(
+                        "SELECT * FROM intentions WHERE id=?",
+                        (followup_id,),
+                    ).fetchone()
+                    inherited = bool(
+                        followup is not None
+                        and _followup_inherits_parent(
+                            followup,
+                            intent_id,
+                        )
+                    )
+                    if (
+                        followup is not None
+                        and str(followup["status"]) == "cancelled"
+                        and inherited
+                    ):
+                        followup_sources = _cancel_sources(followup)
+                        if followup_sources and source not in followup_sources:
+                            followup_sources.append(source)
+                            db.execute(
+                                "UPDATE intentions SET cancel_sources=?,"
+                                "cancel_parent_intent_id=? "
+                                "WHERE id=?",
+                                (
+                                    json.dumps(
+                                        followup_sources,
+                                        ensure_ascii=False,
+                                    ),
+                                    intent_id,
+                                    followup_id,
+                                ),
+                            )
+                db.commit()
+            elif started_transaction:
+                db.rollback()
+        elif not source and sources:
+            db.execute(
+                "UPDATE intentions SET last_error=?,cancel_source='',"
+                "cancel_sources='[]',"
+                "cancel_previous_status='',cancel_previous_error='',"
+                "cancel_previous_closure_status='',"
+                "cancel_parent_intent_id='' WHERE id=?",
+                (
+                    reason or str(row["last_error"] or "owner confirmed"),
+                    intent_id,
+                ),
+            )
+            followup_id = str(row["closure_followup_id"] or "")
+            if followup_id:
+                followup = db.execute(
+                    "SELECT * FROM intentions WHERE id=?",
+                    (followup_id,),
+                ).fetchone()
+                if (
+                    followup is not None
+                    and str(followup["status"]) == "cancelled"
+                    and _followup_inherits_parent(followup, intent_id)
+                ):
+                    db.execute(
+                        "UPDATE intentions SET last_error='parent cancelled',"
+                        "cancel_source='',cancel_sources='[]',"
+                        "cancel_parent_intent_id=? WHERE id=?",
+                        (intent_id, followup_id),
+                    )
+            db.commit()
+        elif started_transaction:
+            db.rollback()
         return True
     db.execute(
-        "UPDATE intentions SET status = 'cancelled', last_error = ? WHERE id = ?",
-        (reason or f"cancelled (was {row['status']})", intent_id),
+        "UPDATE intentions SET status='cancelled',last_error=?,"
+        "cancel_source=?,cancel_sources=?,cancel_previous_status=?,"
+        "cancel_previous_error=?,"
+        "cancel_previous_closure_status=? WHERE id=?",
+        (
+            reason or f"cancelled (was {row['status']})",
+            str(source or ""),
+            json.dumps([source] if source else [], ensure_ascii=False),
+            str(row["status"]),
+            str(row["last_error"] or ""),
+            str(row["closure_status"] or ""),
+            intent_id,
+        ),
     )
     # Retire a dangling closure loop, and the still-pending follow-up with it.
     if row["closure_status"] == "awaiting":
@@ -552,13 +754,234 @@ def cancel_intent(intent_id: str, reason: str = "") -> bool:
         fu_id = row["closure_followup_id"]
         if fu_id:
             db.execute(
-                "UPDATE intentions SET status = 'cancelled', last_error = ? "
+                "UPDATE intentions SET status='cancelled',last_error=?,"
+                "cancel_source=?,cancel_sources=?,"
+                "cancel_previous_status=status,"
+                "cancel_previous_error=COALESCE(last_error,''),"
+                "cancel_previous_closure_status=closure_status,"
+                "cancel_parent_intent_id=? "
                 "WHERE id = ? AND status = 'pending'",
-                ("parent cancelled", fu_id),
+                (
+                    "parent cancelled",
+                    str(source or ""),
+                    json.dumps(
+                        [source] if source else [],
+                        ensure_ascii=False,
+                    ),
+                    intent_id,
+                    fu_id,
+                ),
             )
     db.commit()
     _matter_intent_event(intent_id, "intent_cancelled",
                          reason or "意图已取消", status="cancelled")
+    return True
+
+
+def restore_cancelled_intent(
+    intent_id: str,
+    *,
+    source: str,
+    legacy_reason: str = "",
+) -> bool:
+    """Restore an Intent only when this projection previously cancelled it."""
+    _init()
+    db = _get_db()
+    started_transaction = not db.in_transaction
+    if started_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    row = db.execute(
+        "SELECT * FROM intentions WHERE id=?",
+        (intent_id,),
+    ).fetchone()
+    if row is None or str(row["status"]) != "cancelled":
+        if started_transaction:
+            db.rollback()
+        return False
+    sources = _cancel_sources(row)
+    owned = bool(source and source in sources)
+    legacy_owned = bool(
+        legacy_reason
+        and not sources
+        and str(row["last_error"] or "") == legacy_reason
+    )
+    if not (owned or legacy_owned):
+        if started_transaction:
+            db.rollback()
+        return False
+    followup_id = str(row["closure_followup_id"] or "")
+    followup_releasable = False
+    if owned:
+        remaining_sources = [
+            owner for owner in sources if owner != source
+        ]
+        db.execute(
+            "UPDATE intentions SET cancel_source=?,cancel_sources=? "
+            "WHERE id=?",
+            (
+                remaining_sources[0] if remaining_sources else "",
+                json.dumps(remaining_sources, ensure_ascii=False),
+                intent_id,
+            ),
+        )
+        if followup_id:
+            followup = db.execute(
+                "SELECT * FROM intentions WHERE id=?",
+                (followup_id,),
+            ).fetchone()
+            inherited = bool(
+                followup is not None
+                and _followup_inherits_parent(
+                    followup,
+                    intent_id,
+                )
+            )
+            if (
+                followup is not None
+                and str(followup["status"]) == "cancelled"
+                and inherited
+            ):
+                current_followup_sources = _cancel_sources(followup)
+                followup_releasable = source in current_followup_sources
+                followup_sources = [
+                    owner
+                    for owner in current_followup_sources
+                    if owner != source
+                ]
+                db.execute(
+                    "UPDATE intentions SET cancel_source=?,cancel_sources=?,"
+                    "cancel_parent_intent_id=? "
+                    "WHERE id=?",
+                    (
+                        followup_sources[0] if followup_sources else "",
+                        json.dumps(followup_sources, ensure_ascii=False),
+                        intent_id,
+                        followup_id,
+                    ),
+                )
+        if remaining_sources:
+            db.commit()
+            return False
+        parent = _cancelled_parent_for_followup(db, row)
+        if parent is not None:
+            parent_sources = _cancel_sources(parent)
+            parent_id = str(parent["id"])
+            db.execute(
+                "UPDATE intentions SET last_error='parent cancelled',"
+                "cancel_source=?,cancel_sources=?,"
+                "cancel_parent_intent_id=? WHERE id=?",
+                (
+                    parent_sources[0] if parent_sources else "",
+                    json.dumps(parent_sources, ensure_ascii=False),
+                    parent_id,
+                    intent_id,
+                ),
+            )
+            db.commit()
+            return False
+    previous_status = str(row["cancel_previous_status"] or "")
+    if previous_status not in {
+        "pending", "triggered", "executed", "expired"
+    }:
+        previous_status = _legacy_cancelled_status(row) or ""
+    if not previous_status:
+        db.execute(
+            "UPDATE intentions SET last_error=?,cancel_source='',"
+            "cancel_sources='[]' WHERE id=?",
+            (
+                "legacy terminal projection withdrawn; "
+                "previous Intent state requires review",
+                intent_id,
+            ),
+        )
+        db.commit()
+        return False
+    previous_error = (
+        str(row["cancel_previous_error"] or "") if owned else ""
+    )
+    previous_closure = str(
+        row["cancel_previous_closure_status"] or ""
+    )
+    if not previous_closure:
+        previous_closure = str(row["closure_status"] or "")
+        if followup_id:
+            followup = db.execute(
+                "SELECT status,last_error,cancel_source "
+                "FROM intentions WHERE id=?",
+                (followup_id,),
+            ).fetchone()
+            if (
+                followup is not None
+                and str(followup["status"]) == "cancelled"
+                and (
+                    str(followup["cancel_source"] or "") == source
+                    or (
+                        legacy_owned
+                        and not str(followup["cancel_source"] or "")
+                        and str(followup["last_error"] or "")
+                        == "parent cancelled"
+                    )
+                )
+            ):
+                previous_closure = "awaiting"
+    db.execute(
+        "UPDATE intentions SET status=?,last_error=?,closure_status=?,"
+        "cancel_source='',cancel_sources='[]',cancel_previous_status='',"
+        "cancel_previous_error='',cancel_previous_closure_status='',"
+        "cancel_parent_intent_id='' "
+        "WHERE id=? AND status='cancelled'",
+        (
+            previous_status,
+            previous_error,
+            previous_closure,
+            intent_id,
+        ),
+    )
+    if followup_id and previous_closure == "awaiting":
+        followup = db.execute(
+            "SELECT * FROM intentions WHERE id=?",
+            (followup_id,),
+        ).fetchone()
+        if followup is not None and str(followup["status"]) == "cancelled":
+            followup_owned = bool(
+                followup_releasable and not _cancel_sources(followup)
+            )
+            followup_legacy = bool(
+                legacy_owned
+                and not str(followup["cancel_source"] or "")
+                and str(followup["last_error"] or "") == "parent cancelled"
+            )
+            if followup_owned or followup_legacy:
+                followup_status = str(
+                    followup["cancel_previous_status"] or "pending"
+                )
+                if followup_status not in {
+                    "pending", "triggered", "executed", "expired"
+                }:
+                    followup_status = "pending"
+                db.execute(
+                    "UPDATE intentions SET status=?,last_error=?,"
+                    "cancel_source='',cancel_sources='[]',"
+                    "cancel_previous_status='',"
+                    "cancel_previous_error='',"
+                    "cancel_previous_closure_status='',"
+                    "cancel_parent_intent_id='' WHERE id=?",
+                    (
+                        followup_status,
+                        (
+                            str(followup["cancel_previous_error"] or "")
+                            if followup_owned else ""
+                        ),
+                        followup_id,
+                    ),
+                )
+    db.commit()
+    _matter_intent_event(
+        intent_id,
+        "intent_reopened",
+        "错误终态投影已撤销",
+        status=previous_status,
+    )
     return True
 
 

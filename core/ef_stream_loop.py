@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from core.card import linkify_bare_urls
-from core.claude_bin import resolve_claude_bin
+from core.aux_model import run_auxiliary_model
 from core.delivery_deadletter import record_overdue
 from core.ef_stream import (
     extract_detail,
@@ -92,6 +92,35 @@ def _healthy_churn(lifetime_s: float, replaced: bool,
     return not replaced and lifetime_s >= threshold
 
 
+def _advance_cursor(cursor_file: Path, cursor: str, *, accepted: bool) -> bool:
+    """Persist a cursor only after the represented event is durably accepted."""
+    if not cursor or not accepted:
+        return False
+    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cursor_file.with_suffix(cursor_file.suffix + ".tmp")
+    temporary.write_text(cursor, encoding="utf-8")
+    temporary.replace(cursor_file)
+    return True
+
+
+def _can_continue_after_delivery(proc, *, accepted: bool) -> bool:
+    """Return false and close the stream when the contiguous cursor has a gap."""
+    if accepted:
+        return True
+    log(
+        "ef-stream",
+        "Delivery was not durably accepted; reconnecting from the last "
+        "contiguous cursor",
+        level="warn",
+    )
+    try:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+    except Exception:
+        pass
+    return False
+
+
 def _lark_send(text: str, user_id: str) -> bool:
     if not user_id or not text:
         return False
@@ -139,19 +168,60 @@ def _deadletter_failed_send(jarvis_dir: Path, kind: str, text: str) -> None:
 
 def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
                       success_log: str = "Delivered real-time message"):
-    """Send one formatted event to Lark; only a REAL success is recorded.
+    """Submit one formatted event to the durable delivery pipeline.
 
-    Returns (seen, delivered). On failure nothing is marked seen and no
-    outbox entry is written, so a gateway re-delivery gets a second chance
-    and the session ledger can't show a phantom success.
+    Once the pipeline has durably accepted the event, the upstream cursor may
+    advance without risking loss. Only immediate delivery is mirrored to the
+    conversation outbox; queued work remains honest until the pipeline flushes.
     """
-    if not _lark_send(msg, user_id):
+    from core.delivery import (
+        DeliveryEnvelope,
+        TransportResult,
+        deliver as deliver_envelope,
+    )
+
+    def transport(envelope, channel):
+        if channel == "web":
+            return TransportResult(True)
+        ok = _lark_send(
+            str(envelope.payload.get("text") or ""),
+            user_id,
+        )
+        return TransportResult(bool(ok), error="" if ok else "lark transport failed")
+
+    result = deliver_envelope(
+        DeliveryEnvelope(
+            source="eigenflux-stream",
+            kind="text",
+            payload={"text": msg},
+            attention="notice",
+            requested_channel="lark",
+            urgent=True,
+            dedup_key=(
+                f"eigenflux-stream:{ids[0]}" if ids else ""
+            ),
+            matter_id=str((metadata or {}).get("matter_id") or ""),
+            metadata={
+                "external_event_ids": list(ids or []),
+                "retry_existing": True,
+            },
+        ),
+        root=jd,
+        transport=transport,
+    )
+    if not result.accepted or result.state == "suppressed":
         _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
         return seen, False
-    _write_outbox(msg, metadata, jd)
-    log("ef-stream", success_log)
     seen = remember_seen(seen, ids)
     save_seen(seen_file, seen)
+    if result.state == "delivered":
+        _write_outbox(msg, metadata, jd)
+        log("ef-stream", success_log)
+    else:
+        log(
+            "ef-stream",
+            f"Accepted real-time message into delivery queue ({result.state})",
+        )
     return seen, True
 
 
@@ -185,9 +255,9 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         # The interaction adapter must never become a new message-loss mode.
         log("ef-stream", f"Memorial delivery failed ({e}); using legacy sender",
             level="warn")
-        seen, delivered = _deliver_and_mark(
+        seen, accepted = _deliver_and_mark(
             msg, ids, metadata, user_id, seen, seen_file, jd)
-        return seen, delivered, delivered
+        return seen, accepted, False
 
 
 def _send_memorial_notice(title: str, body: str, user_id: str,
@@ -201,9 +271,20 @@ def _send_memorial_notice(title: str, body: str, user_id: str,
         state = memorial.get_memorial(mid) or {}
         return memorial.delivery_accepted(state)
     except Exception as e:
-        log("ef-stream", f"Memorial notice failed ({e}); using legacy sender",
+        log("ef-stream", f"Memorial notice failed ({e}); using delivery fallback",
             level="warn")
-        return _lark_send(body, user_id)
+        jd = Path(os.environ.get("JARVIS_DIR") or Path(__file__).parent.parent)
+        _, accepted = _deliver_and_mark(
+            body,
+            [],
+            {"kind": "notice"},
+            user_id,
+            [],
+            jd / ".ef-notice-seen",
+            jd,
+            success_log=f"Delivered fallback notice: {title}",
+        )
+        return accepted
 
 
 def _fetch_history(conv_id: str) -> str:
@@ -232,8 +313,15 @@ def _fetch_history(conv_id: str) -> str:
     return ""
 
 
-def _run_analysis(detail: str, conv_id: str, jarvis_dir: str, log_file: str, procs: dict | None = None):
-    """Background Claude analysis of an incoming message, with history context."""
+def _run_analysis(
+    detail: str,
+    conv_id: str,
+    jarvis_dir: str,
+    log_file: str,
+    procs: dict | None = None,
+    stop_event: threading.Event | None = None,
+):
+    """Analyze an incoming message without granting external text local tools."""
     # Load friend list
     friends_ctx = ""
     contacts = list(Path.home().glob(".eigenflux/**/contacts.json"))
@@ -268,49 +356,24 @@ Otherwise reply with a brief Chinese note (≤60 words) for the user.
 若你给出了建议回复，在最后单独一行写按钮声明（每个标签=用户会打的那句话，≤14字）：
 OPTIONS: 就按建议回复 | 先不回"""
 
-    try:
-        # Spend-limit gate (probe=False: this aux caller never clear()s, so it
-        # must not win the probe election). 2026-07-07: with no gate and no
-        # returncode check, claude's spend-limit error text on stdout was
-        # returned as the "analysis" and sent to Pascal verbatim as a 💡 note.
-        env = None
-        try:
-            from core.model_fallback import gate
-            if gate(jarvis_dir, probe=False) == "backup" \
-                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN") \
-                    and os.environ.get("CLAUDE_BACKUP_BASE_URL"):
-                env = os.environ.copy()
-                env["ANTHROPIC_AUTH_TOKEN"] = env["CLAUDE_BACKUP_AUTH_TOKEN"]
-                env["ANTHROPIC_BASE_URL"] = env["CLAUDE_BACKUP_BASE_URL"]
-        except Exception:
-            pass
-        p = subprocess.Popen(
-            [resolve_claude_bin(), "--model", "opus", "--dangerously-skip-permissions",
-             "--no-session-persistence", "--disable-slash-commands", "-p", prompt],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            stdin=subprocess.DEVNULL, env=env,
+    result = run_auxiliary_model(
+        prompt,
+        root=jarvis_dir,
+        model="opus",
+        timeout=120,
+        allow_tools=False,
+        process_holder=procs,
+        process_key="analysis",
+        cancelled=stop_event.is_set if stop_event is not None else None,
+    )
+    if not result.text:
+        log(
+            "ef-stream",
+            "Message analysis exhausted provider chain: "
+            + ",".join(result.attempted),
+            level="warn",
         )
-        if procs is not None:
-            procs["analysis"] = p
-        try:
-            out, err = p.communicate(timeout=120)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.communicate()
-            return ""
-        if p.returncode != 0:
-            # Nonzero exit → stdout is an error surface, never user content.
-            excerpt = ((out or "") + " " + (err or "")).strip()[:200]
-            log("ef-stream", f"Claude analysis failed (exit={p.returncode}): {excerpt}",
-                level="warn")
-            return ""
-        return (out or "").strip()
-    except Exception as e:
-        log("ef-stream", f"Claude analysis failed: {e}", level="warn")
-        return ""
-    finally:
-        if procs is not None:
-            procs["analysis"] = None
+    return result.text
 
 
 def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
@@ -438,10 +501,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     proc.terminate()
                     break
 
-                # Advance cursor first (even on a duplicate, so we move past it)
                 new_cursor = parse_cursor(line)
-                if new_cursor:
-                    cursor_file.write_text(new_cursor)
 
                 # Friend-request / friend-accepted events ride a pm_push packet
                 # with an empty `messages` array (or a separate friend_accepted
@@ -458,24 +518,37 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                         save_seen(seen_file, seen)
                         log("ef-stream", "Friend request observed; lifecycle "
                             "delegated to eigenflux-friends")
+                        _advance_cursor(
+                            cursor_file, new_cursor, accepted=True
+                        )
                         continue
                     if rel_ids and is_duplicate_event(rel_ids, set(seen)):
                         log("ef-stream", "Skipping already-delivered friend event (dedup)")
+                        accepted = True
                     else:
-                        seen, _, _ = _deliver_memorial_and_mark(
+                        seen, accepted, _ = _deliver_memorial_and_mark(
                             rel, rel_ids, {"kind": "relation"}, user_id,
                             seen, seen_file, jd, title="EigenFlux 好友动态")
+                    _advance_cursor(
+                        cursor_file, new_cursor, accepted=accepted
+                    )
+                    if not _can_continue_after_delivery(
+                        proc, accepted=accepted
+                    ):
+                        break
                     continue
 
                 # Format and deliver
                 msg = format_message(line)
                 if not msg:
+                    _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 
                 # Dedup: skip a re-delivered event (reconnect after a cursor-write gap)
                 ids = extract_item_ids(line)
                 if is_duplicate_event(ids, set(seen)):
                     log("ef-stream", "Skipping already-delivered message (dedup)")
+                    _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 
                 # ONE card per incoming message (7/22: the old raw-card-then-
@@ -490,8 +563,14 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 if details and not stop.is_set():
                     detail_str = "\n".join(json.dumps(d, ensure_ascii=False) for d in details)
                     conv_id = details[0].get("conv_id", "")
-                    analysis = _run_analysis(detail_str, conv_id, jarvis_dir,
-                                             log_file, procs) or ""
+                    analysis = _run_analysis(
+                        detail_str,
+                        conv_id,
+                        jarvis_dir,
+                        log_file,
+                        procs,
+                        stop,
+                    ) or ""
                 body = msg
                 if analysis and "HEARTBEAT_OK" not in analysis:
                     body = f"{msg}\n\n💡 {analysis}"
@@ -518,8 +597,11 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 seen, accepted, _ = _deliver_memorial_and_mark(
                     body, ids, metadata, user_id,
                     seen, seen_file, jd, title=title)
-                if not accepted:
-                    continue
+                if not _can_continue_after_delivery(
+                    proc, accepted=accepted
+                ):
+                    break
+                _advance_cursor(cursor_file, new_cursor, accepted=True)
 
                 # Reset backoff on successful message
                 backoff = 1

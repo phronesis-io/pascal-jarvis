@@ -351,6 +351,10 @@ class HeartbeatRunner:
         "memory-daily": 3600,
         "memory-weekly": 3600,
         "memory-consolidate": 600,
+        "delegation-reconcile": 120,
+        "iteration-observe": 1800,
+        "log-maintenance": 900,
+        "provider-canary": 1800,
     }
 
     # Memory pipeline tasks — only one per cycle to prevent races
@@ -369,7 +373,13 @@ class HeartbeatRunner:
     # ONLY for tasks where the pre-script already produces the final output
     # and the post-script just writes it to a file. Tasks that need Claude
     # to summarize/reason/index MUST NOT be here.
-    TIER0_TASKS = {"calendar-sync"}  # pre-script produces formatted calendar
+    TIER0_TASKS = {
+        "calendar-sync",
+        "delegation-reconcile",
+        "iteration-observe",
+        "log-maintenance",
+        "provider-canary",
+    }  # deterministic pre/post work; no model call
 
     # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /
     # self-diagnostic / thinking-review 视为 autonomous 内务：长期零响应，
@@ -842,6 +852,14 @@ class HeartbeatRunner:
             use_backup = True
             backup_tried = True
             model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
+        elif (gate_state == "backup"
+                and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
+                and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
+                and os.environ.get("CLAUDE_BACKUP2_BASE_URL")):
+            use_backup = True
+            backup_tried = True
+            _backup2_active = True
+            model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
 
         # Provider-aware memory budget: backup relay has a smaller context
         # window than the primary 1M channel.
@@ -1023,11 +1041,17 @@ You have access to the user's memory below. Use it to personalize your responses
                     model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
-                if (not use_backup and backup_tried
+                if (not _backup2_active
                         and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
                         and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP2_BASE_URL")
-                        and (model_problem or gate_state != "primary")):
+                        and (use_backup or not backup_tried)
+                        and (
+                            use_backup
+                            or model_problem
+                            or gate_state != "primary"
+                        )):
+                    backup_tried = True
                     use_backup = True
                     _backup2_active = True
                     model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model
@@ -1087,36 +1111,20 @@ You have access to the user's memory below. Use it to personalize your responses
             "answer DELIVER.\n\n"
             "--- TEXT ---\n" + message
         )
-        cmd = [
-            self._claude_bin,
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--disable-slash-commands",
-            "--model", "haiku",
-            "-p", judge_prompt,
-        ]
-        # Provider gate (2026-07-07): during the primary spend-limit outage
-        # every judge call failed → fail-open → noise filtering was
-        # effectively disabled. Auxiliary caller: never wins the probe
-        # election (probe=False), just follows the flag to the backup env.
-        env = None
         try:
-            from core.model_fallback import gate as _provider_gate
-            if (_provider_gate(self.jarvis_dir, probe=False) == "backup"
-                    and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
-                    and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
-                    and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
-                env = os.environ.copy()
-                env["ANTHROPIC_AUTH_TOKEN"] = os.environ["CLAUDE_BACKUP_AUTH_TOKEN"]
-                env["ANTHROPIC_BASE_URL"] = os.environ["CLAUDE_BACKUP_BASE_URL"]
-        except Exception:
-            env = None
-        try:
-            result = _run_isolated(
-                cmd, timeout=60, cwd=str(self.work_dir), env=env)
-            if result.returncode != 0:
+            from core.aux_model import run_auxiliary_model
+
+            result = run_auxiliary_model(
+                judge_prompt,
+                root=self.jarvis_dir,
+                model="haiku",
+                timeout=60,
+                allow_tools=False,
+                claude_bin=self._claude_bin,
+            )
+            if not result.text:
                 return False  # fail-open: deliver
-            verdict = result.stdout.strip().upper()
+            verdict = result.text.strip().upper()
             # Only drop on a clean, confident NOISE verdict.
             return verdict == "NOISE" or verdict.endswith("NOISE")
         except Exception as e:
@@ -1315,8 +1323,8 @@ You have access to the user's memory below. Use it to personalize your responses
         for task in due_tasks:
             if task["pre"]:
                 data = self.run_script(task["pre"])
-                if not data:
-                    outcome = getattr(self, "_last_script_outcome", "ok")
+                outcome = getattr(self, "_last_script_outcome", "ok")
+                if outcome in {"timeout", "error", "nonzero"} or not data:
                     ts = TaskState.from_dict(state.get(task["name"], {}))
                     # Backdate against the effective interval (the due-check's
                     # chain — see _effective_interval). Unlisted tasks default
@@ -1375,25 +1383,39 @@ You have access to the user's memory below. Use it to personalize your responses
         tier2 = [t for t in runnable if t["name"] not in self.TIER0_TASKS]
         user_messages = []
         producing_tasks = []
+        tier0_failures = []
 
         for task in tier0:
             t0 = time.time()
             self._event("task_spawn", task=task["name"], tier=0)
             pre_data = task_data.get(task["name"], "")
+            tier0_outcome = "ok"
             if task["post"] and pre_data:
                 post_output = self.run_script(task["post"], stdin_data=pre_data)
-                if post_output:
+                tier0_outcome = getattr(self, "_last_script_outcome", "ok")
+                if post_output and tier0_outcome == "ok":
                     self._collect_output(task["name"], post_output,
                                          user_messages, producing_tasks)
-            # Update state — task ran successfully
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
-            ts.last_success = now
-            ts.last_status = "ok"
-            ts.circuit.record_success()
+            if tier0_outcome in {"timeout", "error", "nonzero"}:
+                ts.last_status = f"post_{tier0_outcome}"
+                ts.circuit.record_failure()
+                status = ts.last_status
+                tier0_failures.append(f"{task['name']}:{status}")
+            else:
+                ts.last_success = now
+                ts.last_status = "ok"
+                ts.circuit.record_success()
+                status = "ok"
             state[task["name"]] = ts.to_dict()
-            self._event("task_finish", task=task["name"], status="ok",
-                        duration_s=round(time.time() - t0, 2), tier=0)
+            self._event(
+                "task_finish",
+                task=task["name"],
+                status=status,
+                duration_s=round(time.time() - t0, 2),
+                tier=0,
+            )
 
         if tier0:
             self._log(f"Tier 0 direct: {[t['name'] for t in tier0]}")
@@ -1432,6 +1454,13 @@ You have access to the user's memory below. Use it to personalize your responses
                         pass
                 self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (no batch)")
                 return combined
+            if tier0_failures:
+                self._log(
+                    f"{self._beat_status(due_tasks, skipped, tier0, tasks)} "
+                    f"→ FAILED ({', '.join(tier0_failures)}) (no batch)",
+                    level="warn",
+                )
+                return ""
             self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → OK (no batch)")
             return ""
 

@@ -9,10 +9,8 @@ from nicegui import run, ui
 
 from core.matters import (
     MatterConflict,
-    create_matter,
     get_matter,
     link_entity,
-    list_matters,
     unlink_entity,
     update_matter,
 )
@@ -93,128 +91,13 @@ def _short_time(value: str) -> str:
         return str(value)[:16].replace("T", " ")
 
 
-def _matter_providers(matter: dict) -> list[str]:
-    return [item for item in str(matter.get("providers", "") or "").split(",")
-            if item]
-
-
 def _status_class(status: str) -> str:
     return f"matter-status is-{status}"
-
-
-def _matter_card(matter: dict) -> None:
-    with ui.link(target=f"/matters/{matter['id']}").classes("matter-card"):
-        with ui.row().classes("matter-card-meta"):
-            ui.label(KIND_LABELS.get(matter.get("kind", ""), "事项")).classes(
-                "matter-kind")
-            ui.label(STATUS_LABELS.get(matter.get("status", ""), "事项")).classes(
-                _status_class(matter.get("status", "active")))
-            if int(matter.get("priority", 5) or 5) >= 8:
-                ui.label("重点").classes("matter-priority")
-            ui.label(_short_time(matter.get("updated_at", ""))).classes(
-                "matter-updated")
-        ui.label(matter.get("title", "未命名事项")).classes("matter-list-title")
-        if matter.get("summary"):
-            ui.label(matter["summary"]).classes("matter-summary")
-        with ui.element("div").classes("matter-next-line"):
-            ui.label("下一步").classes("matter-next-label")
-            ui.label(matter.get("next_action") or "尚未定义").classes(
-                "matter-next-text")
-        providers = _matter_providers(matter)
-        if providers:
-            with ui.row().classes("matter-provider-row"):
-                for provider in providers[:4]:
-                    ui.icon(PROVIDER_ICONS.get(provider, "link"), size="15px")
-                    ui.label(PROVIDER_LABELS.get(provider, provider)).classes(
-                        "matter-provider-name")
-                extra = int(matter.get("link_count", 0) or 0) - len(providers[:4])
-                if extra > 0:
-                    ui.label(f"另有 {extra} 项").classes("matter-provider-name")
 
 
 @ui.page("/matters")
 def matters_page():
     ui.navigate.to("/items")
-    return
-    add_dashboard_head()
-    mode = {"value": "open"}
-
-    with ui.column().classes("jarvis-page"):
-        dashboard_header("/matters", "事项", "跨入口继续同一件事；先看现在到哪，再决定下一步。")
-
-        with ui.dialog() as create_dialog, ui.card().classes("matter-dialog"):
-            ui.label("新建事项").classes("matter-dialog-title")
-            title_input = ui.input("事项名称", placeholder="比如：统一 Jarvis 多入口").classes(
-                "w-full")
-            summary_input = ui.textarea(
-                "当前共识", placeholder="把已经确定的背景压缩成几句话").classes("w-full")
-            next_input = ui.input(
-                "明确下一步", placeholder="下一次打开时，可以直接做什么").classes("w-full")
-            with ui.row().classes("w-full gap-3 matter-form-row"):
-                kind_input = ui.select(
-                    {key: value for key, value in KIND_LABELS.items()},
-                    value="project", label="类型").classes("matter-form-field")
-                priority_input = ui.number(
-                    "优先级", value=5, min=1, max=10, step=1).classes(
-                    "matter-form-field")
-
-            def submit_matter():
-                try:
-                    matter = create_matter(
-                        title=title_input.value,
-                        summary=summary_input.value,
-                        next_action=next_input.value,
-                        kind=kind_input.value,
-                        priority=int(priority_input.value or 5),
-                        source="dashboard",
-                        actor="user",
-                    )
-                except ValueError as exc:
-                    ui.notify(str(exc), type="warning")
-                    return
-                create_dialog.close()
-                ui.navigate.to(f"/matters/{matter['id']}")
-
-            with ui.row().classes("matter-dialog-actions"):
-                ui.button("建立事项", icon="add", on_click=submit_matter).props(
-                    "unelevated no-caps").classes("memorial-primary")
-                ui.button("取消", on_click=create_dialog.close).props(
-                    "flat no-caps").classes("memorial-secondary")
-
-        with ui.row().classes("w-full items-center justify-end"):
-            ui.button("新建", icon="add", on_click=create_dialog.open).props(
-                "unelevated no-caps").classes("memorial-primary matter-create-button")
-
-        @ui.refreshable
-        def board():
-            with ui.row().classes("w-full items-center gap-2"):
-                for value, text in (("open", "进行中"), ("done", "已完成"),
-                                    ("all", "全部")):
-                    def set_mode(selected=value):
-                        mode["value"] = selected
-                        board.refresh()
-
-                    ui.button(text, on_click=set_mode).props(
-                        ("unelevated" if mode["value"] == value else "outline")
-                        + " no-caps dense").classes(
-                        "filter-chip " + ("memorial-primary" if mode["value"] == value
-                                          else "memorial-secondary"))
-            status = {
-                "open": "active,waiting,blocked",
-                "done": "done",
-                "all": None,
-            }[mode["value"]]
-            matters = list_matters(status=status, limit=200)
-            if not matters:
-                text = ("还没有进行中的事项。先建立一件，之后从飞书、Claude 或 Codex "
-                        "回来时都会有同一个落点。")
-                ui.label(text).classes("empty-guidance")
-                return
-            with ui.element("div").classes("matter-list"):
-                for matter in matters:
-                    _matter_card(matter)
-
-        board()
 
 
 def _timeline_nodes(matter: dict) -> list[dict]:

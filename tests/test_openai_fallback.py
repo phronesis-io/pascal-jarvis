@@ -1,3 +1,9 @@
+import io
+import shlex
+import signal
+import subprocess
+import time
+
 from core import openai_fallback as of
 
 
@@ -9,6 +15,7 @@ def test_build_payload_includes_system_prompt():
     assert payload["max_output_tokens"] == 123
     assert "fallback" in payload["instructions"]
     assert "System rules" in payload["instructions"]
+    assert "No local tools are available" in payload["instructions"]
 
 
 def test_extract_text_prefers_output_text():
@@ -108,6 +115,44 @@ def test_agentic_tool_loop(monkeypatch):
     }
 
 
+def test_agentic_rounds_share_one_deadline(monkeypatch):
+    clock = [100.0]
+    api_timeouts = []
+    tool_timeouts = []
+
+    def fake_call(payload, api_key, base_url, timeout, user_agent=""):
+        api_timeouts.append(timeout)
+        clock[0] += 3
+        if len(api_timeouts) == 1:
+            return {
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "bash",
+                    "arguments": '{"command":"echo hi"}',
+                }]
+            }
+        return {"output_text": "done", "output": []}
+
+    def fake_tool(name, arguments, *, timeout=None, **_kwargs):
+        tool_timeouts.append(timeout)
+        clock[0] += 4
+        return "ok"
+
+    monkeypatch.setattr(of.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(of, "_api_call", fake_call)
+    monkeypatch.setattr(of, "execute_tool", fake_tool)
+
+    result = of.run_agentic(
+        "sys", "do it", "gpt-test", 4096,
+        "sk-test", "http://fake", 10,
+    )
+
+    assert result == "done"
+    assert api_timeouts == [10, 3]
+    assert tool_timeouts == [7]
+
+
 def test_execute_tool_bash(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     result = of.execute_tool("bash", {"command": "echo works"})
@@ -122,6 +167,116 @@ def test_execute_tool_bash_exposes_nonzero_exit(monkeypatch, tmp_path):
 
     assert "usage text" in result
     assert "(exit 2)" in result
+
+
+def test_execute_tool_timeout_kills_descendant_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    marker = tmp_path / "descendant-finished"
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import pathlib,time;"
+            "time.sleep(0.5);"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        + " & wait"
+    )
+
+    result = of.execute_tool("bash", {"command": command}, timeout=0.1)
+    time.sleep(0.7)
+
+    assert "timed out" in result
+    assert not marker.exists()
+
+
+def test_execute_tool_cancellation_kills_descendant_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    marker = tmp_path / "cancelled-descendant-finished"
+    checks = [False, True]
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import pathlib,time;"
+            "time.sleep(0.5);"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        + " & wait"
+    )
+
+    result = of.execute_tool(
+        "bash",
+        {"command": command},
+        timeout=2,
+        cancelled=lambda: checks.pop(0) if checks else True,
+    )
+    time.sleep(0.7)
+
+    assert "cancelled" in result
+    assert not marker.exists()
+
+
+def test_cli_signal_during_tool_spawn_reaps_new_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("sys.stdin", io.StringIO("owner task"))
+    calls = [0]
+
+    def fake_api(*_args, **_kwargs):
+        calls[0] += 1
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "bash",
+                    "arguments": '{"command":"sleep 30"}',
+                }
+            ]
+        }
+
+    real_popen = subprocess.Popen
+    spawned = []
+
+    def signal_during_spawn(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return process
+
+    monkeypatch.setattr(of, "_api_call", fake_api)
+    monkeypatch.setattr(of.subprocess, "Popen", signal_during_spawn)
+
+    assert of.main([]) == 128 + signal.SIGTERM
+    assert calls[0] == 1
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+
+
+def test_cli_signal_interrupts_blocking_api_outside_spawn(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("sys.stdin", io.StringIO("owner task"))
+
+    def interrupted_api(*_args, **_kwargs):
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        raise AssertionError("signal handler must interrupt the blocking API")
+
+    monkeypatch.setattr(of, "_api_call", interrupted_api)
+
+    try:
+        of.main(["--no-tools"])
+    except SystemExit as exc:
+        assert exc.code == 128 + signal.SIGTERM
+    else:
+        raise AssertionError("SIGTERM did not interrupt OpenAI API call")
 
 
 def test_execute_tool_file_read_write(monkeypatch, tmp_path):

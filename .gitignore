@@ -143,3 +143,4 @@ memorials.jsonl.bak-*
 .memorials_rotated.json
 mail/.pending_batch.json
 mail/.*.json
+.config/taskline/

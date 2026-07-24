@@ -7,7 +7,9 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 **Priority tasks** bypass the batch cap and run every cycle when due:
 `calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`, `eigenflux-friends`, `intention-check`
 
-**Tier 0 tasks** bypass Claude entirely (pre→post direct pipe): `calendar-sync`
+**Tier 0 tasks** bypass Claude entirely (deterministic local work):
+`calendar-sync`, `delegation-reconcile`, `iteration-observe`, `log-maintenance`,
+`provider-canary`
 
 ## Task Index
 
@@ -25,7 +27,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Thinking Review | thinking-review | silent (log only) |
 | Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup); metrics-digest yes (daily probe snapshot cards + anomaly alerts; skips when no metrics_probe sources configured) |
 | Team | phronesis-monitor | yes (if relevant) |
-| Maintenance | repos-sync, eigenflux-preinstall, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
+| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
 
 **Permanently silent tasks** (behavioral_rules.md — autonomous 内务，长期零响应):
 `daily-plan`, `self-diagnostic`, `thinking-review`. Enforced IN CODE via
@@ -967,6 +969,41 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
     Or HEARTBEAT_OK if everything is fresh.
 
 ## Maintenance
+
+### delegation-reconcile
+- interval: 10m
+- pre: tasks/delegation_reconcile_pre.sh
+- prompt: |
+    Deterministic Tier-0 task. The pre-script releases expired worker leases,
+    retries bounded authoritative readback for active Delegations, and maintains
+    one aggregate Item only when Pascal is genuinely required. Its output is
+    operational JSON and is never sent as model prose.
+
+### iteration-observe
+- interval: 24h
+- pre: tasks/iteration_observe_pre.sh
+- prompt: |
+    Deterministic Tier-0 L3 observation. It aggregates conversation-audit
+    issues, component health, and Delegation outcome metrics. Signals are
+    deduplicated; only repeated major or one critical signal becomes a Proposal.
+    A Proposal remains pending until Pascal explicitly sends it to Taskline.
+
+### log-maintenance
+- interval: 6h
+- pre: tasks/log_maintenance_pre.sh
+- prompt: |
+    Deterministic Tier-0 maintenance. Logs that exceed the bound are rotated
+    only after launchd has closed the owning service's append descriptors;
+    the same installed plist is then bootstrapped before success is recorded.
+
+### provider-canary
+- interval: 12h
+- pre: tasks/provider_canary_pre.sh
+- prompt: |
+    Deterministic Tier-0 health check. Each configured model-provider rung gets
+    one tiny bounded request. Credentials stay in environment variables or HTTP
+    headers; only status, latency, requested/observed model and a redacted error
+    are persisted. Disabled or unconfigured routes are reported honestly.
 
 ### repos-sync
 - interval: 2h

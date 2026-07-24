@@ -16,15 +16,16 @@ and wired straight into the heartbeat task system and `bot.sh`:
   server can attribute jarvis's traffic (otherwise it reports as a generic terminal).
 - `client.sh` is a thin bash wrapper around the CLI, sourced by every
   task script for consistent error handling and auth-required detection
-- `skills/` holds **jarvis-owned real files** (not a symlink), a byte-for-byte
-  copy of the official skill bundle from
-  [phronesis-io/eigenflux-claude-plugin](https://github.com/phronesis-io/eigenflux-claude-plugin/tree/main/skills),
-  plus jarvis-local skills (e.g. `ef-localdev`, marked `jarvis-local: true`).
+- `skills/` holds **jarvis-owned real files** (not a symlink), composed from
+  the canonical bundle in the `eigenflux` main repository plus reviewed
+  Jarvis contracts in `overlays/`, and jarvis-local skills (e.g.
+  `ef-localdev`, marked `jarvis-local: true`).
   `core/prompt.py::load_ef_skills()` inlines each `ef-*/SKILL.md` into the main
   conversation's system prompt so Claude always has the docs in context — no
   on-demand loading. The copy is kept current and verified daily by the
   **`eigenflux-preinstall` parity tracker** (see below); do **not** hand-edit
-  the mirrored skills — edit upstream, the tracker re-syncs them.
+  generated files in `skills/` directly. Edit upstream for shared behavior or
+  `overlays/` for a Jarvis-only safety contract; the tracker re-composes them.
 
 ## Layout
 
@@ -32,7 +33,8 @@ and wired straight into the heartbeat task system and `bot.sh`:
 plugins/eigenflux/
 ├── client.sh         — bash wrapper around the eigenflux CLI (sets HOST/CHANNEL identity)
 ├── feed_search.py    — search the CLI's local feed cache for the bot's feed_search ACTION
-├── skills/           — jarvis-owned copy of eigenflux-claude-plugin/skills (synced by the parity tracker)
+├── overlays/         — reviewed Jarvis-only contracts applied after upstream sync
+├── skills/           — composed upstream + overlay skill bundle used at runtime
 │   ├── ef-profile/      — auth, profile, server management (SKILL.md + 4 references)
 │   ├── ef-broadcast/    — feed + publish                   (SKILL.md + 2 references)
 │   ├── ef-communication/ — messaging, friends, streaming   (SKILL.md + 3 references)
@@ -170,9 +172,10 @@ Each run (idempotent, < 60s — the heartbeat pre-script cap):
    (the behavioral source of truth: same host class as jarvis — Claude driving the
    CLI) and `eigenflux` (CLI contract). `repos-sync` (every 2h) owns the full pull;
    this is a top-up.
-2. **Sync skills** — mirror `eigenflux-claude-plugin/skills` → `skills/`,
-   byte-for-byte, add+update. Preserves `jarvis-local: true` skills (`ef-localdev`).
-   Never deletes — upstream-removed files are flagged for review.
+2. **Sync skills** — mirror `eigenflux/skills` → `skills/`, add+update, then
+   deterministically apply the reviewed files in `overlays/`. Preserves
+   `jarvis-local: true` skills (`ef-localdev`). Never deletes —
+   upstream-removed files are flagged for review.
 3. **Upgrade the CLI** — if the installed `eigenflux` is behind the CDN's latest,
    a detached, **test-before-swap** helper (`scripts/eigenflux_cli_upgrade.sh`)
    downloads only the binary (no OpenClaw plugin side-effects), verifies it reports
@@ -186,7 +189,8 @@ Each run (idempotent, < 60s — the heartbeat pre-script cap):
    single-user Lark bot does not have.
 5. **Verify ("测通")** — pytest (`test_prompt`, `test_eigenflux_feed_search`,
    `test_eigenflux_publish_post`), a live `load_ef_skills()` check, CLI smoke
-   (`version` + `server list`), an auth probe, skill-integrity (jarvis == plugin),
+   (`version` + `server list`), an auth probe, skill-integrity (rendered upstream
+   + Jarvis overlays equals the live copy),
    a live feed-shape check (`item_id`/`url` still present), and `bash -n` on every
    eigenflux script.
 6. **Report** — emits `PREINSTALL_OK` (no beat) / `PREINSTALL_CHANGES` (brief beat)

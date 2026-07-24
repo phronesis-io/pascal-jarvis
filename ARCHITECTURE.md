@@ -4,6 +4,7 @@
 
 ```text
 launchd
+  -> taskline sidecar :8787 (optional engineering queue)
   -> daemon.py
        -> bot.sh
             -> Lark event listener
@@ -72,6 +73,43 @@ Item / Matter
   -> all stale handoffs close
 ```
 
+### Verified Delegation
+
+```text
+accepted outcome contract
+  -> stable target + risk/authorization binding
+  -> required-step DAG with claim/lease
+  -> connector mutation with idempotency key
+  -> authoritative read-back verifier
+  -> evidence-derived Delegation state
+  -> one-way Item/Matter/Intent/Handoff projections
+```
+
+The reconciler scans only bounded non-terminal work. Shadow capture is
+observation-only and excluded from active Delegation lists and product metrics.
+Qualifying evidence persists its trusted verifier identity and authority;
+expired or untrusted evidence reopens active steps instead of satisfying
+completion. A failed execution creates one retry/cancel attention Item. An
+active `verifying` step is read-back-only: user recovery resumes the verifier
+and never resets the external mutation to pending.
+
+### Engineering Loops
+
+```text
+L3 signal -> deduplicated Proposal -> human accept
+  -> L2 Taskline dependency queue + claim/lease/worktree
+  -> L1 spec -> dev -> test -> review -> merged PR
+  -> release gate -> runtime verify/smoke
+  -> L3 outcome observation
+```
+
+Taskline is an optional external sidecar with a separate database. Its tasks
+never become personal Intents. `core.taskline_bridge` links engineering
+evidence into Delegation so an Agent can recover context without treating its
+own prose as proof. A merged task starts its pending runtime-verification step
+even when its release SHA was bound in an earlier pass. Runtime proof accepts
+the exact release commit or a healthy resident descendant that contains it.
+
 ## Module Boundaries
 
 - `core.delivery`: the only user-facing retry, dedup, quiet-hour, throttle,
@@ -86,6 +124,24 @@ Item / Matter
 - `core.perception`: typed inbound signals and sensitivity.
 - `core.eigenflux_messages`: deterministic friend identity, message
   idempotency, paginated discovery, send receipt, and authoritative read-back.
+- `core.delegations`: accepted outcome contracts, step DAGs, claims, evidence,
+  state transitions, links, metrics, and shadow labels.
+- `core.delegation_verify`: read-only authoritative verifier registry.
+- `core.delegation_projection`: one-way projections into existing user and
+  execution objects. Projection failures enter a durable retry queue; the
+  reconciler drains that queue for active and terminal Delegations.
+- `core.iteration_loop`: L3 signals, proposals, human acceptance, and
+  post-release outcome observations.
+- `core.taskline_bridge`: L2 sidecar health, claims, leases, isolated
+  worktrees, and Delegation links.
+- `core.provider_health`: bounded provider canaries and sanitized model-chain
+  observability.
+- `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
+  independent-review evidence before a production restart.
+- `core.aux_model`: bounded Primary/Backup 1/Backup 2/GPT routing for
+  background jobs and text-only auxiliary calls. Untrusted or derived text
+  enters with all Claude/OpenAI tools disabled. Every configured provider
+  selected by the route receives one bounded call before the chain advances.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.
@@ -99,6 +155,9 @@ Item / Matter
 - Intent state and breaches;
 - schedule events and runtime versions;
 - Matters, Handoffs, and cross-device state;
+- Delegations, steps, evidence, events, links, shadow labels, and projection
+  retries;
+- L3 signals, proposals, and post-release observations;
 - verified external-action receipts.
 
 Append-only JSONL remains where event history itself is useful, notably
@@ -111,10 +170,12 @@ sources for the same state.
 |---|---|
 | component is healthy | `core.components` live check |
 | message was sent to an EigenFlux friend | server friend record + message history |
+| Delegation is complete | all required steps have matching authoritative evidence |
 | Lark output was delivered | transport `message_id` / delivery row |
 | Item was decided | Memorial ledger projected into delivery state |
 | Intent completed | Intent lifecycle and closure evidence |
 | deployment is complete | git revision + runtime version + components + smoke |
+| model fallback is usable | bounded provider canary plus live routing state |
 | calendar is current | calendar API/sync artifact with freshness |
 
 Model prose and memory summaries are never authorities for these claims.

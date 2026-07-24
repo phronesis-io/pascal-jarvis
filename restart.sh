@@ -337,6 +337,17 @@ _set_deploy_guard() {
   trap 'rm -f "$JARVIS_DIR/.deploying"' EXIT
 }
 
+_verify_release_gate() {
+  echo "Verifying PR, CI, review, and branch-protection evidence..."
+  if python3 -m core.release_gate >/tmp/jarvis_release_gate.json; then
+    green "  Release gate passed."
+  else
+    red "  Release gate failed; runtime was not touched."
+    cat /tmp/jarvis_release_gate.json
+    exit 1
+  fi
+}
+
 case "${1:-}" in
   --status|-s)
     status
@@ -344,6 +355,7 @@ case "${1:-}" in
   --full|-f)
     echo "=== Full Restart (daemon + bot) ==="
     echo ""
+    _verify_release_gate
     _set_deploy_guard
     kill_bot
     echo ""
@@ -369,6 +381,7 @@ case "${1:-}" in
   *)
     echo "=== Bot Restart ==="
     echo ""
+    _verify_release_gate
     _set_deploy_guard
     kill_bot
     echo ""

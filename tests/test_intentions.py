@@ -49,6 +49,313 @@ def test_create_and_get(intent_db):
     assert intent["status"] == "pending"
 
 
+def test_projection_cancel_restores_parent_and_closure_followup(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待委托",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_question="完成了吗？",
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="确认委托结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    source = "delegation:dlg-1:completed"
+
+    assert cancel_intent(
+        parent,
+        "delegation dlg-1 reached completed",
+        source=source,
+    )
+    assert get_intent(parent)["status"] == "cancelled"
+    assert get_intent(parent)["closure_status"] == "na"
+    assert get_intent(followup)["status"] == "cancelled"
+    assert not restore_cancelled_intent(
+        parent,
+        source="delegation:another:completed",
+    )
+    assert restore_cancelled_intent(parent, source=source)
+
+    restored = get_intent(parent)
+    assert restored["status"] == "pending"
+    assert restored["closure_status"] == "awaiting"
+    assert restored["cancel_source"] == ""
+    assert get_intent(followup)["status"] == "pending"
+
+    assert cancel_intent(
+        parent,
+        "delegation dlg-1 reached completed",
+        source=source,
+    )
+    assert cancel_intent(parent, "owner confirmed cancellation")
+    assert not restore_cancelled_intent(parent, source=source)
+    assert get_intent(parent)["status"] == "cancelled"
+    assert get_intent(parent)["last_error"] == "owner confirmed cancellation"
+
+
+def test_shared_intent_waits_for_every_terminal_projection(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="共享委托跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+    )
+    first = "delegation:dlg-a:completed"
+    second = "delegation:dlg-b:completed"
+    cancel_intent(intent_id, "A completed", source=first)
+    cancel_intent(intent_id, "B completed", source=second)
+
+    assert not restore_cancelled_intent(intent_id, source=first)
+    still_cancelled = get_intent(intent_id)
+    assert still_cancelled["status"] == "cancelled"
+    assert json.loads(still_cancelled["cancel_sources"]) == [second]
+    assert restore_cancelled_intent(intent_id, source=second)
+    assert get_intent(intent_id)["status"] == "pending"
+
+
+def test_manual_followup_cancellation_survives_parent_projection_rollback(
+    intent_db,
+):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待共享结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="确认共享结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    source = "delegation:dlg-child:completed"
+    cancel_intent(parent, "delegation completed", source=source)
+    cancel_intent(followup, "owner cancelled followup")
+
+    assert restore_cancelled_intent(parent, source=source)
+    assert get_intent(parent)["status"] == "pending"
+    assert get_intent(followup)["status"] == "cancelled"
+    assert get_intent(followup)["last_error"] == "owner cancelled followup"
+
+
+def test_parent_projection_does_not_claim_independently_cancelled_followup(
+    intent_db,
+):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待独立结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="独立取消的跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    first_parent = "delegation:dlg-parent-a:completed"
+    second_parent = "delegation:dlg-parent-b:completed"
+    independent = "delegation:dlg-independent:completed"
+
+    cancel_intent(followup, "independent completed", source=independent)
+    cancel_intent(parent, "parent A completed", source=first_parent)
+    cancel_intent(parent, "parent B completed", source=second_parent)
+
+    child = get_intent(followup)
+    assert json.loads(child["cancel_sources"]) == [independent]
+    assert child["cancel_parent_intent_id"] == ""
+    assert not restore_cancelled_intent(followup, source=independent)
+    child = get_intent(followup)
+    assert child["status"] == "cancelled"
+    assert json.loads(child["cancel_sources"]) == [
+        first_parent,
+        second_parent,
+    ]
+    assert child["cancel_parent_intent_id"] == parent
+    assert not restore_cancelled_intent(parent, source=second_parent)
+    assert restore_cancelled_intent(parent, source=first_parent)
+    assert get_intent(followup)["status"] == "pending"
+
+
+def test_manual_parent_cancellation_permanently_suppresses_followup(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="用户终止的事项",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="不应再出现的追问",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    projection = "delegation:dlg-manual-parent:completed"
+
+    cancel_intent(parent, "delegation completed", source=projection)
+    cancel_intent(parent, "owner confirmed cancellation")
+
+    child = get_intent(followup)
+    assert child["status"] == "cancelled"
+    assert json.loads(child["cancel_sources"]) == []
+    assert child["cancel_parent_intent_id"] == parent
+    assert not restore_cancelled_intent(parent, source=projection)
+    assert not restore_cancelled_intent(followup, source=projection)
+    assert get_intent(followup)["status"] == "cancelled"
+
+
+def test_legacy_expired_intent_never_reactivates(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    intent_id = create_intent(
+        name="已经过期的委托跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2020-01-01T09:00:00"},
+    )
+    update_intent(intent_id, status="expired")
+    source = "delegation:dlg-old:completed"
+    reason = "delegation dlg-old reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "expired"
+
+
+def test_legacy_future_date_with_elapsed_expiry_stays_expired(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="已越过有效期的未来动作",
+        trigger_type="date",
+        trigger_config={"datetime": "2999-01-01T09:00:00"},
+        expires_at="2020-01-01T09:00:00",
+    )
+    source = "delegation:dlg-expired-window:completed"
+    reason = "delegation dlg-expired-window reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "expired"
+
+
+def test_legacy_cron_execution_watermark_restores_pending(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        mark_executed,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="持续巡检",
+        trigger_type="cron",
+        trigger_config={"expression": "0 9 * * *"},
+    )
+    mark_executed(intent_id)
+    assert get_intent(intent_id)["status"] == "pending"
+    assert get_intent(intent_id)["executed_at"]
+    source = "delegation:dlg-cron:completed"
+    reason = "delegation dlg-cron reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "pending"
+
+
 def test_list_intents_filter(intent_db):
     from core.intentions import create_intent, list_intents
 
@@ -345,8 +652,72 @@ def test_migrate_adds_columns_idempotent(intent_db):
     conn.close()
     for c in ("category", "input_ctx", "decision", "closure_question",
               "closure_status", "closure_result", "closure_touches",
-              "closure_followup_id", "parent_intent_id"):
+              "closure_followup_id", "parent_intent_id",
+              "cancel_parent_intent_id"):
         assert c in cols, f"missing closure column {c}"
+
+
+def test_incomplete_column_migration_retries_before_table_ready(
+    intent_db,
+    monkeypatch,
+):
+    import core.intentions as mod
+
+    with sqlite3.connect(intent_db) as conn:
+        conn.execute(
+            "ALTER TABLE intentions DROP COLUMN cancel_parent_intent_id"
+        )
+
+    class LockedOnce:
+        def __init__(self, connection):
+            self.connection = connection
+            self.locked = True
+
+        @property
+        def in_transaction(self):
+            return self.connection.in_transaction
+
+        def execute(self, sql, *args):
+            if (
+                self.locked
+                and "ADD COLUMN cancel_parent_intent_id" in sql
+            ):
+                self.locked = False
+                raise sqlite3.OperationalError("database is locked")
+            return self.connection.execute(sql, *args)
+
+        def executescript(self, *args):
+            return self.connection.executescript(*args)
+
+        def commit(self):
+            return self.connection.commit()
+
+        def rollback(self):
+            return self.connection.rollback()
+
+    connection = sqlite3.connect(intent_db)
+    connection.row_factory = sqlite3.Row
+    locked = LockedOnce(connection)
+    monkeypatch.setattr(mod, "_get_db", lambda: locked)
+    mod._table_ready = False
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="migration incomplete",
+    ):
+        mod._init()
+    assert mod._table_ready is False
+
+    mod._init()
+    assert mod._table_ready is True
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(intentions)"
+        ).fetchall()
+    }
+    assert "cancel_parent_intent_id" in columns
+    connection.close()
 
 
 def test_stats_keeps_five_keys(intent_db):

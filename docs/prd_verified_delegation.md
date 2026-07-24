@@ -1,7 +1,7 @@
 # PRD: Verified Delegation - 从一句话到可信完成
 
 - Date: 2026-07-24
-- Status: Active design; EigenFlux message Phase 1 shipped
+- Status: Implementation complete; production shadow graduation gated
 - Owner: Pascal
 - Priority: P0
 - Product principle: 完成是一种有证据的状态，不是一句模型生成的话。
@@ -41,18 +41,27 @@ Item、Matter、飞书对话和跨端 Handoff 看到与自己有关的那一部�
 
 ### 1.1 当前实施边界
 
-已上线的是 connector-first Phase 1：
+控制平面已经实现：
 
-- EigenFlux 好友按实时好友列表分页解析，不接受模型手写数字 ID；
-- 外部动作先写幂等预留，再执行发送；
-- 返回回执后按 conversation、message ID、recipient 和正文哈希回读；
-- 服务端已提交但本地返回失败时进入核验，不盲目重发；
-- 精确 message ID 是权威身份，不受本机与服务端时钟偏差影响。
+- 通用、版本化 Delegation schema 与 required-step DAG；
+- 动作幂等、worker claim/lease、超时释放和中断恢复；
+- `verifying`、外部等待、确认、重试、失败、取消、取代和完成状态；
+- 只有确定性 evidence evaluator 能把 required step 推进到完成；
+- 本地文件、Git、部署、Delivery、EigenFlux 好友/消息、飞书消息、
+  日历和文档的权威回读 verifier；
+- Item、Matter、Intent、Handoff、Session、Job 和 Taskline 单向投影；
+- Dashboard、API、CLI、指标和 bounded reconciler；
+- 对明确动作请求的 precision-first shadow capture、人工标签和准出指标。
 
-尚未上线的是本 PRD 后续的通用 Delegation schema、自动捕获、跨连接器
-evaluator、Dashboard 控制面和 Reconciler。它们仍是设计，不得从文档
-存在推断为运行能力。只有第二个独立连接器证明相同契约后，才提炼公共
-状态机，避免为了抽象而再造一套与 Item/Matter/Intent 重叠的系统。
+EigenFlux 好友与消息路径已经接入真实 connector receipt：好友状态按
+服务端权威状态收敛；消息按实时好友列表绑定对象，使用直接 HTTPS body
+发送，按 conversation、message ID、recipient 和正文哈希回读。
+
+尚未自动打开的是 **shadow -> automatic capture 的生产准出开关**。
+这不是缺少代码，而是有意保留的人类质量门禁：至少 50 条生产人工标注
+同时满足 precision、高风险歧义 recall 和 verifier accuracy 阈值前，
+shadow 记录不得接管外部动作。第二中转账号同样只在 owner 提供独立
+gitignored credential 后启用。
 
 ## 2. 为什么这是现在最重要的角度
 
@@ -264,7 +273,8 @@ captured -> bound -> executing -> verifying -> completed
 captured -> needs_clarification -> bound
 executing/verifying -> awaiting_external -> executing
 captured/.../awaiting_external -> needs_user -> bound/executing
-any non-terminal state -> blocked / failed / cancelled / superseded
+executing/verifying -> failed -> bound
+any non-terminal state -> blocked / cancelled / superseded
 ```
 
 ### 7.3 硬性转换规则
@@ -276,6 +286,9 @@ any non-terminal state -> blocked / failed / cancelled / superseded
 - `executing -> awaiting_external`：本方动作已核验，但最终结果依赖他人。
 - `needs_user`：只有用户能够补充授权、身份或业务选择，系统不会自行重试。
 - `blocked`：当前依赖或系统条件不满足，但不需要用户立即做判断。
+- `failed`：本次执行尝试失败但责任仍然开放；显式重试后回到 `bound`，
+  只重置 failed/blocked 的未完成步骤，不会提前关闭关联 Matter、Intent 或
+  Handoff。已经进入 `verifying` 的外部动作不能通过普通重试重新执行。
 - 任意终态转换必须写入不可变事件记录。
 - 模型输出不能直接触发 `completed`。
 - 修改 Outcome Contract 后递增版本；旧版本的证据不能自动证明新版本。
@@ -339,6 +352,8 @@ hash(principal + operation + stable_target + normalized_payload +
 - 外部 API 不支持幂等键时，本地先占用 action lease，并在重试前回读；
 - lease 必须有 owner、版本、超时和续租，不能只依赖内存锁；
 - 用户主动要求“再发一次”时创建新契约版本或新的 Delegation。
+- 外部回执暂时没有 message ID 时，以本次动作的 `idempotency_key` 作为
+  source reference；两次明确重复发送不得因目标和正文相同而合并。
 
 ### 8.5 第五步：权威核验
 
@@ -352,8 +367,9 @@ attempt result != completion evidence
 
 - 状态进入 `verifying`；
 - 用户可见文案为“已执行，待核验”；
-- 使用有上限的退避重试；
+- 只使用有上限的权威回读重试，不重新调用外部 mutation；
 - 超出时间预算后进入 `needs_user` 或 `failed`；
+- 用户选择“重新核验”时恢复同一步的 read-back，不把步骤改回 pending；
 - 不得用模型生成的安慰性文案掩盖不确定性。
 
 ### 8.6 第六步：完成与报告
@@ -528,6 +544,7 @@ User-attested。Weak 只能用于排障，不能单独关闭委托。
 - `resource_locator`, `observed_digest`;
 - `expected_summary`, `observed_summary`, `matched`;
 - `observed_at`, `expires_at`, `privacy_class`;
+- `trusted`, `verifier_id`（按当前契约与分步骤 policy 校验后持久化）；
 - `metadata_json`.
 
 ### 11.4 `delegation_events`
@@ -551,6 +568,9 @@ append-only 事件流：
 - `(delegation_id, contract_version, sequence)` 唯一；
 - active 状态按 `deadline_at`、`waiting_on` 和 `updated_at` 建索引；
 - 所有 JSON 字段进入数据库前做 schema validation。
+- Item、Matter、Intent、Handoff 投影失败写入
+  `delegation_projection_queue`；调和器必须重试 active 与 terminal
+  Delegation，成功后才删除队列项，不能依赖用户重放原动作。
 
 ## 12. 服务边界与接口
 
@@ -606,7 +626,8 @@ append-only 事件流：
 - `delegation.superseded`
 
 Item、Intent、Matter 和 Delivery 订阅这些事件，但不反向猜测 Delegation
-终态。
+终态。订阅投影失败不回滚已经提交的权威终态，但必须进入持久化重试队列，
+确保取消、完成或 supersede 后的 Intent/Handoff 最终收敛。
 
 ## 13. 各终端的产品体验
 
@@ -682,6 +703,8 @@ Reconciler 只扫描非终态 Delegation，并按 policy：
 6. 为真正需要用户的异常维护一个聚合 Item。
 
 它不扫描全部历史对象，也不通过不断重发通知“修复”状态。
+执行失败会产生一个“重试执行 / 取消委托”Item；核验恢复则产生
+“重新核验 / 取消委托”Item。两种动作的文案和状态转换不可混用。
 
 ### 14.2 陈旧策略
 

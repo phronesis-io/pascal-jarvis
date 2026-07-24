@@ -99,12 +99,14 @@ class ActionProcessor:
 
     def __init__(self, jarvis_dir: str | Path, memory_dir: str | Path,
                  jobs_dir: str | Path, log_file: str = "",
-                 heartbeat_trigger_path: str | Path = "/tmp/jarvis-heartbeat-trigger"):
+                 heartbeat_trigger_path: str | Path = "/tmp/jarvis-heartbeat-trigger",
+                 owner_authenticated: bool = False):
         self.jarvis_dir = Path(jarvis_dir)
         self.memory_dir = Path(memory_dir)
         self.jobs_dir = Path(jobs_dir)
         self.log_file = log_file
         self.heartbeat_trigger_path = Path(heartbeat_trigger_path)
+        self.owner_authenticated = bool(owner_authenticated)
         self._tm = None  # lazy TaskManager
 
     @property
@@ -137,6 +139,17 @@ class ActionProcessor:
         results = []
         authoritative_results = []
         handled_markers = []
+        owner_actions = {
+            "delegation_confirm",
+            "delegation_cancel",
+            "delegation_retry",
+            "iteration_approve",
+            "iteration_reject",
+        }
+        receipt_actions = owner_actions | {
+            "eigenflux_friend",
+            "eigenflux_message",
+        }
         for marker in markers:
             body = marker[8:-1]  # strip [ACTION: and ]
             action_type = body.split("|")[0]
@@ -144,9 +157,23 @@ class ActionProcessor:
 
             handler = getattr(self, f"_do_{action_type}", None)
             if handler:
-                result = handler(params_raw)
+                if action_type in owner_actions and not self.owner_authenticated:
+                    authoritative_results.append(
+                        "❌ 这个决定只能通过已认证的奏折按钮或控制台完成，"
+                        "模型输出没有获得主人授权。"
+                    )
+                    handled_markers.append(marker)
+                    continue
+                try:
+                    result = handler(params_raw)
+                except Exception as exc:
+                    if action_type not in receipt_actions:
+                        raise
+                    authoritative_results.append(f"❌ 动作未生效：{exc}")
+                    handled_markers.append(marker)
+                    continue
                 if result:
-                    if action_type == "eigenflux_message":
+                    if action_type in receipt_actions:
                         authoritative_results.append(result)
                     else:
                         results.append(result)
@@ -166,6 +193,12 @@ class ActionProcessor:
         if results:
             return cleaned + "\n" + "\n".join(results)
         return cleaned
+
+    def _require_owner_callback(self) -> None:
+        if not self.owner_authenticated:
+            raise RuntimeError(
+                "owner decision requires an authenticated Item/dashboard callback"
+            )
 
     # ── Feed / Content ──
 
@@ -267,7 +300,9 @@ class ActionProcessor:
         """Accept/reject one card-bound request through the verified CLI path."""
         from core.eigenflux_friends import execute_friend_action
 
-        result, failed = execute_friend_action(parse_params(raw))
+        result, failed = execute_friend_action(
+            parse_params(raw), root=self.jarvis_dir
+        )
         if failed:
             raise RuntimeError(result)
         return result
@@ -300,7 +335,119 @@ class ActionProcessor:
             )
         except Exception as exc:
             return f"❌ EigenFlux 消息未发送：{exc}"
+        try:
+            from core.delegation_connectors import (
+                project_eigenflux_message_receipt,
+            )
+
+            project_eigenflux_message_receipt(
+                receipt,
+                root=self.jarvis_dir,
+            )
+        except Exception as exc:
+            print(
+                f"[actions] delegation receipt projection failed: {exc}",
+                file=sys.stderr,
+            )
         return receipt.human_text()
+
+    def _do_delegation_confirm(self, raw: str) -> str:
+        """Confirm one versioned high-risk Delegation from its unique Item."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        self._require_owner_callback()
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.confirm(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                principal_id=params.get("principal", ""),
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"委托确认未生效：{exc}") from exc
+        return "已确认。系统会按同一契约执行并核验，不需要重复点击。"
+
+    def _do_delegation_cancel(self, raw: str) -> str:
+        """Cancel one versioned Delegation and converge its attention Item."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        self._require_owner_callback()
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.terminal(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                status="cancelled",
+                reason_code="owner_cancelled",
+                actor_id="owner",
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"委托取消未生效：{exc}") from exc
+        return "已取消这个委托。"
+
+    def _do_delegation_retry(self, raw: str) -> str:
+        """Resume a versioned Delegation from an explicit recovery decision."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        self._require_owner_callback()
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.retry(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                actor_id="owner",
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"委托核验没有恢复：{exc}") from exc
+        return "已恢复权威核验；外部结果确认前仍不会标记完成。"
+
+    def _do_iteration_approve(self, raw: str) -> str:
+        """Approve one evidence-backed L3 proposal and queue it in Taskline."""
+        from core.iteration_loop import IterationStore, sync_proposal_item
+
+        self._require_owner_callback()
+        proposal_id = parse_params(raw).get("id", "")
+        try:
+            store = IterationStore(root=self.jarvis_dir)
+            proposal = store.review(
+                proposal_id,
+                approved=True,
+                actor="owner",
+                queue=True,
+            )
+            sync_proposal_item(proposal, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"改进项没有进入研发队列：{exc}") from exc
+        return f"已进入研发队列（Taskline {proposal['taskline_id'][:8]}）。"
+
+    def _do_iteration_reject(self, raw: str) -> str:
+        """Reject one L3 proposal without producing an engineering task."""
+        from core.iteration_loop import IterationStore, sync_proposal_item
+
+        self._require_owner_callback()
+        proposal_id = parse_params(raw).get("id", "")
+        try:
+            store = IterationStore(root=self.jarvis_dir)
+            proposal = store.review(
+                proposal_id,
+                approved=False,
+                actor="owner",
+                reason="owner_rejected",
+                queue=False,
+            )
+            sync_proposal_item(proposal, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"改进项没有关闭：{exc}") from exc
+        return "已记录：这个改进项不进入研发队列。"
 
     # ── Heartbeat ──
 

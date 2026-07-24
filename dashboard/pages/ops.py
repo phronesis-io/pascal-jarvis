@@ -187,12 +187,32 @@ def queue_overview(jarvis_dir: Path | None = None) -> dict:
             jd / ".delivery_state.json", ttl=0, default={}) or {}
     if not isinstance(delivery, dict):
         delivery = {}
+    try:
+        from core.delegations import DelegationStore
+        delegation_metrics = DelegationStore(root=jd).metrics()
+    except Exception:
+        delegation_metrics = {"by_status": {}, "total": 0}
+    try:
+        from core.iteration_loop import IterationStore
+        pending_proposals = len(
+            IterationStore(root=jd).list(status="pending", limit=500)
+        )
+    except Exception:
+        pending_proposals = 0
+    try:
+        from core.provider_health import snapshot as provider_snapshot
+        providers = provider_snapshot(jd)
+    except Exception:
+        providers = {"updated_at": "", "providers": []}
 
     return {
         "night_queue": night,
         "breach_queue": breach,
         "jobs": jobs,
         "delivery_state": delivery,
+        "delegations": delegation_metrics,
+        "pending_proposals": pending_proposals,
+        "providers": providers,
     }
 
 
@@ -241,20 +261,112 @@ def ops_page():
             snap = ops_snapshot(JARVIS_DIR)
             queues = snap["queues"]
             delivery = queues["delivery_state"]
+            delegation_states = queues["delegations"].get("by_status", {})
+            unhealthy_providers = sum(
+                1 for row in queues["providers"].get("providers", [])
+                if row.get("status") == "unhealthy"
+            )
             metrics = (
                 ("异常日志", snap["flagged_count"], True),
                 ("异常事件", len(snap["failed_events"]), True),
                 ("夜间队列", len(queues["night_queue"]), False),
                 ("意图违约", len(queues["breach_queue"]), True),
                 ("送达失败", delivery.get("consec_fails", 0), True),
+                (
+                    "委托待核验",
+                    delegation_states.get("verifying", 0),
+                    True,
+                ),
+                (
+                    "错发目标",
+                    queues["delegations"].get("wrong_target_actions", 0),
+                    True,
+                ),
+                (
+                    "重复外部动作",
+                    queues["delegations"].get(
+                        "duplicate_external_mutations", 0
+                    ),
+                    True,
+                ),
+                (
+                    "委托待我",
+                    queues["delegations"].get("attention_asks", 0),
+                    False,
+                ),
+                (
+                    "跨端滞留",
+                    queues["delegations"].get("stale_handoffs", 0),
+                    True,
+                ),
+                (
+                    "队列终败",
+                    queues["delegations"].get(
+                        "delivery_queue_failures", 0
+                    ),
+                    True,
+                ),
+                (
+                    "改进待判断",
+                    queues["pending_proposals"],
+                    False,
+                ),
+                ("模型通道异常", unhealthy_providers, True),
             )
-            with ui.row().classes("w-full gap-3"):
+            with ui.row().classes("w-full gap-3 flex-wrap"):
                 for label, value, alertable in metrics:
                     alert = alertable and value not in (0, "0", None)
-                    with ui.element("div").classes("metric-cell flex-1"):
+                    with ui.element("div").classes(
+                        "metric-cell flex-1 min-w-[120px]"
+                    ):
                         ui.label(str(value)).classes(
                             "metric-value" + (" is-alert" if alert else ""))
                         ui.label(label).classes("metric-label")
+
+            ui.label("模型通道").classes("section-kicker mt-2")
+            ui.label("当前配置与最近验真").classes("section-title")
+            provider_rows = queues["providers"].get("providers", [])
+            if provider_rows:
+                status_labels = {
+                    "healthy": "正常",
+                    "unhealthy": "异常",
+                    "disabled": "未启用",
+                    "unconfigured": "未配置",
+                    "not_run": "待验真",
+                }
+                columns = [
+                    {"name": "label", "label": "通道", "field": "label",
+                     "align": "left"},
+                    {"name": "model", "label": "模型", "field": "model",
+                     "align": "left"},
+                    {"name": "status", "label": "状态", "field": "status",
+                     "align": "left"},
+                    {"name": "checked_at", "label": "最近验真",
+                     "field": "checked_at", "align": "left"},
+                    {"name": "detail", "label": "证据", "field": "detail",
+                     "align": "left"},
+                ]
+                rows = [
+                    {
+                        "_id": row.get("id"),
+                        "label": row.get("label"),
+                        "model": (
+                            row.get("actual_model")
+                            or row.get("requested_model")
+                            or "unknown"
+                        ),
+                        "status": status_labels.get(
+                            row.get("status"), row.get("status")
+                        ),
+                        "checked_at": row.get("checked_at") or "尚未",
+                        "detail": row.get("detail") or "",
+                    }
+                    for row in provider_rows
+                ]
+                with ui.element("div").classes("table-scroll"):
+                    ui.table(
+                        columns=columns, rows=rows, row_key="_id"
+                    ).classes("jarvis-table")
 
             ui.label("壹 · 调度").classes("section-kicker mt-2")
             ui.label("最近的调度事件").classes("section-title")

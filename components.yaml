@@ -12,6 +12,7 @@
 #   http      — GET `url` answers < 5s with status < 500
 #   file_age  — `path` mtime younger than `max_age_hours`
 #   launchctl — `label` loaded in the gui domain
+#   taskline  — CLI reports both server healthy and workspace registered
 #
 # critical: true → daemon.py checks it every 30s (alert-only for components
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
@@ -25,6 +26,11 @@
 # agree, or every default install alarms forever on features it never enabled.
 
 components:
+  - name: taskline
+    check: taskline
+    critical: false
+    requires_file: ../taskline/dist/taskline-server
+
   - name: daemon
     check: pid
     path: .daemon.pid

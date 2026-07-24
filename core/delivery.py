@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from core.card import extract_card_text
 from core.timeutil import now_local
 
 DELIVERY_STATES = {
@@ -1044,10 +1045,16 @@ def flush_due(root: str | Path | None = None, limit: int = 50) -> list[DeliveryR
 
 def _cli_send(args: argparse.Namespace) -> int:
     text = sys.stdin.read() if args.stdin else args.text
+    kind = "reply" if args.reply_to else args.kind
+    payload = (
+        {"card_json": text, "text": extract_card_text(text)}
+        if kind == "card"
+        else {"text": text}
+    )
     envelope = DeliveryEnvelope(
         source=args.source,
-        kind="reply" if args.reply_to else args.kind,
-        payload={"text": text},
+        kind=kind,
+        payload=payload,
         attention="reply" if args.reply_to else args.attention,
         requested_channel=args.channel,
         urgent=args.urgent,
@@ -1088,7 +1095,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     send = sub.add_parser("send")
     send.add_argument("--source", required=True)
-    send.add_argument("--kind", default="text", choices=["text", "web", "push"])
+    send.add_argument(
+        "--kind", default="text", choices=["text", "card", "web", "push"]
+    )
     send.add_argument("--attention", default="notice",
                       choices=["decision", "notice", "alert", "reply"])
     send.add_argument("--channel", default="auto")

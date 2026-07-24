@@ -17,11 +17,15 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
 import unicodedata
+import urllib.error
+import urllib.request
+import uuid
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -56,6 +60,7 @@ class MessageReceipt:
     state: str
     recipient_name: str
     recipient_id: str
+    idempotency_key: str = ""
     msg_id: str = ""
     conv_id: str = ""
     duplicate: bool = False
@@ -83,6 +88,30 @@ class MessageReceipt:
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+ApiSender = Callable[[str, str], dict]
+
+
+def _resolve_eigenflux_home(value: str | Path | None = None) -> Path:
+    """Mirror EigenFlux CLI's --homedir/EIGENFLUX_HOME suffix semantics."""
+    raw = value or os.environ.get("EIGENFLUX_HOME")
+    home = (
+        Path(raw).expanduser()
+        if raw
+        else Path.home() / ".eigenflux"
+    )
+    return home if home.name == ".eigenflux" else home / ".eigenflux"
+
+
+def _durable_failure(exc: BaseException, operation: str) -> str:
+    """Return diagnostic metadata that cannot contain a submitted payload."""
+    status = re.search(
+        r"\bHTTP\s+([1-5])(?:\d{2}|xx)\b",
+        str(exc),
+        flags=re.IGNORECASE,
+    )
+    if status:
+        return f"EigenFlux {operation} failed: HTTP {status.group(1)}xx"
+    return f"EigenFlux {operation} failed ({type(exc).__name__})"
 
 
 def _normalize_label(value: str) -> str:
@@ -115,6 +144,92 @@ def _next_cursor(obj: dict) -> str:
     ).strip()
 
 
+class EigenFluxApiClient:
+    """Small authenticated client for payload-bearing operations.
+
+    Message content is encoded in the HTTPS request body. It never appears in
+    a child process argument, shell history, or process listing.
+    """
+
+    def __init__(
+        self,
+        home: str | Path | None = None,
+        *,
+        opener: Callable = urllib.request.urlopen,
+    ):
+        self.home = _resolve_eigenflux_home(home)
+        self.opener = opener
+
+    def _connection(self) -> tuple[str, str]:
+        try:
+            config = json.loads(
+                (self.home / "config.json").read_text(encoding="utf-8")
+            )
+            server_name = str(config.get("default_server") or "").strip()
+            server = next(
+                row
+                for row in config.get("servers", [])
+                if str(row.get("name") or "") == server_name
+            )
+            endpoint = str(server.get("endpoint") or "").rstrip("/")
+            credentials = json.loads(
+                (
+                    self.home
+                    / "servers"
+                    / server_name
+                    / "credentials.json"
+                ).read_text(encoding="utf-8")
+            )
+            token = str(credentials.get("access_token") or "").strip()
+        except (OSError, ValueError, TypeError, StopIteration) as exc:
+            raise CliFailure("EigenFlux authentication is not configured") from exc
+        if not endpoint.startswith("https://") or not token:
+            raise CliFailure("EigenFlux endpoint or access token is invalid")
+        return endpoint, token
+
+    def send(self, receiver_id: str, content: str) -> dict:
+        endpoint, token = self._connection()
+        body = json.dumps(
+            {"receiver_id": str(receiver_id), "content": str(content)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{endpoint}/api/v1/pm/send",
+            data=body,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with self.opener(request, timeout=30) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            raise CliFailure(
+                f"EigenFlux API returned HTTP {int(exc.code) // 100}xx"
+            ) from exc
+        except (OSError, TimeoutError) as exc:
+            raise CliFailure(f"EigenFlux API send failed: {exc}") from exc
+        try:
+            obj = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CliFailure("EigenFlux API returned invalid JSON") from exc
+        if not isinstance(obj, dict):
+            raise CliFailure("EigenFlux API returned a non-object response")
+        code = obj.get("code")
+        if code not in (None, 0, "0"):
+            safe_code = str(code)
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,40}", safe_code):
+                safe_code = "nonzero"
+            raise CliFailure(
+                f"EigenFlux API returned application error code {safe_code}"
+            )
+        return obj
+
+
 class EigenFluxMessenger:
     """Deterministic friend resolver, sender, and receipt verifier."""
 
@@ -124,6 +239,7 @@ class EigenFluxMessenger:
         db_path: str | Path | None = None,
         bindings_path: str | Path | None = None,
         runner: Runner = subprocess.run,
+        api_sender: ApiSender | None = None,
         now: Callable[[], float] = time.time,
         attempt_stale_seconds: int = 60,
         verification_clock_skew_seconds: int = 600,
@@ -143,6 +259,7 @@ class EigenFluxMessenger:
             or self.root / "data" / "eigenflux_contact_bindings.json"
         )
         self.runner = runner
+        self.api_sender = api_sender or EigenFluxApiClient().send
         self.now = now
         self.attempt_stale_seconds = attempt_stale_seconds
         self.verification_clock_skew_seconds = max(
@@ -177,11 +294,268 @@ class EigenFluxMessenger:
                     ON verified_external_actions(state, updated_epoch);
                 """
             )
+            # Older builds could bind the same server receipt to multiple
+            # explicit-repeat contracts. Preserve the earliest claim and
+            # reopen every duplicate before installing the invariant.
+            db.execute("BEGIN IMMEDIATE")
+            duplicate_ids = db.execute(
+                """
+                SELECT msg_id FROM verified_external_actions
+                 WHERE action_type='eigenflux_message' AND msg_id != ''
+                 GROUP BY msg_id HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            reopened_delegations: set[str] = set()
+            for duplicate in duplicate_ids:
+                claims = db.execute(
+                    """
+                    SELECT idempotency_key FROM verified_external_actions
+                     WHERE action_type='eigenflux_message' AND msg_id=?
+                     ORDER BY created_epoch, idempotency_key
+                    """,
+                    (duplicate["msg_id"],),
+                ).fetchall()
+                for claim in claims[1:]:
+                    action_key = str(claim["idempotency_key"])
+                    now = self.now()
+                    db.execute(
+                        """
+                        UPDATE verified_external_actions
+                           SET state='verifying',conv_id='',msg_id='',
+                               last_error='duplicate receipt claim released',
+                               updated_epoch=?
+                         WHERE idempotency_key=?
+                        """,
+                        (now, action_key),
+                    )
+                    reopened_delegations.update(
+                        self._reopen_duplicate_projection(
+                            db, action_key, now
+                        )
+                    )
+            released_keys = {
+                str(row["idempotency_key"])
+                for row in db.execute(
+                    """
+                    SELECT idempotency_key
+                      FROM verified_external_actions
+                     WHERE action_type='eigenflux_message'
+                       AND state='verifying' AND msg_id=''
+                       AND last_error='duplicate receipt claim released'
+                    """
+                ).fetchall()
+            }
+            tables = {
+                str(row["name"])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "delegations" in tables:
+                released_keys.update(
+                    str(row["idempotency_key"])
+                    for row in db.execute(
+                        """
+                        SELECT a.idempotency_key
+                          FROM verified_external_actions AS a
+                          JOIN delegations AS d
+                            ON d.source='eigenflux-message'
+                           AND d.source_ref=(
+                               'attempt:' || a.idempotency_key
+                           )
+                         WHERE a.action_type='eigenflux_message'
+                           AND a.state!='verified'
+                           AND d.status='completed'
+                        """
+                    ).fetchall()
+                )
+            for action_key in sorted(released_keys):
+                reopened_delegations.update(
+                    self._reopen_duplicate_projection(
+                        db, action_key, self.now()
+                    )
+                )
+            db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_verified_actions_unique_message_receipt
+                    ON verified_external_actions(msg_id)
+                    WHERE action_type='eigenflux_message' AND msg_id != ''
+                """
+            )
             db.commit()
+            if reopened_delegations:
+                try:
+                    from core.delegations import DelegationStore
+
+                    store = DelegationStore(
+                        root=self.root, db_path=self.db_path
+                    )
+                    for delegation_id in sorted(reopened_delegations):
+                        store.sync_projection(delegation_id)
+                except Exception:
+                    # Canonical state and a durable projection retry were
+                    # committed in the migration transaction.
+                    pass
             return db
         except Exception:
             db.close()
             raise
+
+    @staticmethod
+    def _reopen_duplicate_projection(
+        db: sqlite3.Connection, action_key: str, now: float
+    ) -> set[str]:
+        """Withdraw invalid completion evidence linked to a released receipt."""
+        tables = {
+            str(row["name"])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required = {
+            "delegations",
+            "delegation_steps",
+            "delegation_evidence",
+            "delegation_events",
+        }
+        if not required.issubset(tables):
+            return set()
+        rows = db.execute(
+            """
+            SELECT id,status,contract_version,completed_at,
+                   verification_policy_json
+              FROM delegations
+             WHERE source='eigenflux-message' AND source_ref=?
+            """,
+            (f"attempt:{action_key}",),
+        ).fetchall()
+        reopened: set[str] = set()
+        for delegation in rows:
+            if str(delegation["status"]) != "completed":
+                continue
+            delegation_id = str(delegation["id"])
+            version = int(delegation["contract_version"])
+            terminal_at = (
+                float(delegation["completed_at"])
+                if delegation["completed_at"] is not None
+                else None
+            )
+            try:
+                policy = json.loads(
+                    str(delegation["verification_policy_json"] or "{}")
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                policy = {}
+            if not isinstance(policy, dict):
+                policy = {}
+            policy["msg_id"] = ""
+            step_ids = [
+                str(row["id"])
+                for row in db.execute(
+                    """
+                    SELECT id FROM delegation_steps
+                     WHERE delegation_id=? AND contract_version=? AND required=1
+                    """,
+                    (delegation_id, version),
+                ).fetchall()
+            ]
+            if step_ids:
+                placeholders = ",".join("?" for _ in step_ids)
+                db.execute(
+                    f"""
+                    UPDATE delegation_evidence
+                       SET trusted=0,expires_at=?
+                     WHERE delegation_id=? AND contract_version=?
+                       AND step_id IN ({placeholders})
+                    """,
+                    (now, delegation_id, version, *step_ids),
+                )
+                db.execute(
+                    f"""
+                    UPDATE delegation_steps
+                       SET status='verifying',finished_at=NULL,
+                           lease_owner='',lease_expires_at=NULL,
+                           artifact_locator='',
+                           last_error_code='duplicate_receipt_released',
+                           updated_at=?
+                     WHERE id IN ({placeholders})
+                    """,
+                    (now, *step_ids),
+                )
+            db.execute(
+                """
+                UPDATE delegations
+                   SET status='verifying',verified_at=NULL,completed_at=NULL,
+                       waiting_on='',last_error_code='duplicate_receipt_released',
+                       last_error_summary='Receipt authority was withdrawn',
+                       verification_policy_json=?,
+                       updated_at=?
+                 WHERE id=?
+                """,
+                (
+                    json.dumps(
+                        policy,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                    delegation_id,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO delegation_events(
+                    event_id,delegation_id,contract_version,event_type,
+                    actor_type,actor_id,from_status,to_status,reason_code,
+                    created_at,metadata_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"dle_{uuid.uuid4().hex[:20]}",
+                    delegation_id,
+                    version,
+                    "delegation.evidence_invalidated",
+                    "system",
+                    "eigenflux-receipt-migration",
+                    "completed",
+                    "verifying",
+                    "duplicate_receipt_released",
+                    now,
+                    json.dumps(
+                        {
+                            "idempotency_key": action_key,
+                            "terminal_at": terminal_at,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            if "delegation_projection_queue" in tables:
+                db.execute(
+                    """
+                    INSERT INTO delegation_projection_queue(
+                        delegation_id,attempt_count,last_error,
+                        first_failed_at,updated_at
+                    ) VALUES (?,?,?,?,?)
+                    ON CONFLICT(delegation_id) DO UPDATE SET
+                        attempt_count=attempt_count+1,
+                        last_error=excluded.last_error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        delegation_id,
+                        1,
+                        "duplicate EigenFlux receipt authority withdrawn",
+                        now,
+                        now,
+                    ),
+                )
+            reopened.add(delegation_id)
+        return reopened
 
     def _run_json(self, command: list[str], timeout: int = 30) -> dict:
         try:
@@ -393,27 +767,174 @@ class EigenFluxMessenger:
         created_after: float,
         conv_id: str = "",
         msg_id: str = "",
+        action_key: str = "",
     ) -> tuple[str, str] | None:
-        conversations = [conv_id] if conv_id else self._candidate_conversations(
-            friend.agent_id
+        return self._find_verified_hash(
+            friend.agent_id,
+            self._content_hash(content),
+            created_after,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            action_key=action_key,
         )
-        content_hash = self._content_hash(content)
+
+    def _find_verified_hash(
+        self,
+        target_id: str,
+        payload_hash: str,
+        created_after: float,
+        *,
+        conv_id: str = "",
+        msg_id: str = "",
+        action_key: str = "",
+    ) -> tuple[str, str] | None:
+        bound_receipts: set[str] = set()
+        if action_key:
+            with closing(self._connect()) as db:
+                bound_receipts = {
+                    str(row["msg_id"])
+                    for row in db.execute(
+                        """
+                        SELECT msg_id FROM verified_external_actions
+                         WHERE idempotency_key != ? AND msg_id != ''
+                        """,
+                        (action_key,),
+                    )
+                }
+        conversations = [conv_id] if conv_id else self._candidate_conversations(
+            target_id
+        )
         for candidate_conv in conversations:
             for row in self._history_messages(candidate_conv):
                 row_msg_id = str(row.get("msg_id") or "").strip()
+                if not row_msg_id or row_msg_id in bound_receipts:
+                    continue
                 if msg_id and row_msg_id != msg_id:
                     continue
-                if str(row.get("receiver_id") or "") != friend.agent_id:
+                if str(row.get("receiver_id") or "") != target_id:
                     continue
-                if self._content_hash(str(row.get("content") or "")) != content_hash:
+                if (
+                    self._content_hash(str(row.get("content") or ""))
+                    != payload_hash
+                ):
                     continue
                 created = float(row.get("created_at") or 0)
                 if created > 10_000_000_000:
                     created /= 1000
                 if not msg_id and created_after and created + 5 < created_after:
                     continue
+                if action_key and not self._claim_verified_receipt(
+                    action_key, candidate_conv, row_msg_id
+                ):
+                    # Another concurrent explicit-repeat action won this
+                    # receipt. Continue through history and atomically claim a
+                    # different matching server message.
+                    continue
                 return candidate_conv, row_msg_id
         return None
+
+    def _claim_verified_receipt(
+        self, key: str, conv_id: str, msg_id: str
+    ) -> bool:
+        """Atomically bind one server receipt to exactly one action contract."""
+        if not key or not msg_id:
+            return False
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                owner = db.execute(
+                    """
+                    SELECT idempotency_key FROM verified_external_actions
+                     WHERE action_type='eigenflux_message' AND msg_id=?
+                    """,
+                    (msg_id,),
+                ).fetchone()
+                if owner is not None and owner["idempotency_key"] != key:
+                    db.rollback()
+                    return False
+                updated = db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state='verified',conv_id=?,msg_id=?,last_error='',
+                           updated_epoch=?
+                     WHERE idempotency_key=?
+                       AND action_type='eigenflux_message'
+                    """,
+                    (conv_id, msg_id, self.now(), key),
+                )
+                if updated.rowcount != 1:
+                    db.rollback()
+                    return False
+                db.commit()
+                return True
+            except sqlite3.IntegrityError:
+                db.rollback()
+                return False
+
+    def reconcile_action(self, idempotency_key: str) -> MessageReceipt:
+        """Re-read one uncertain send from authoritative conversation history."""
+        key = str(idempotency_key or "").strip()
+        if not key:
+            raise CliFailure("idempotency key is required")
+        with closing(self._connect()) as db:
+            row = db.execute(
+                """
+                SELECT * FROM verified_external_actions
+                 WHERE idempotency_key=?
+                """,
+                (key,),
+            ).fetchone()
+        if row is None or str(row["action_type"]) != "eigenflux_message":
+            raise CliFailure("EigenFlux action was not found")
+        friend = Friend(
+            agent_id=str(row["target_id"]),
+            agent_name=str(row["target_name"]),
+        )
+        if str(row["state"]) == "verified":
+            return MessageReceipt(
+                state="verified",
+                recipient_name=friend.agent_name,
+                recipient_id=friend.agent_id,
+                idempotency_key=key,
+                msg_id=str(row["msg_id"]),
+                conv_id=str(row["conv_id"]),
+                duplicate=True,
+            )
+        found = self._find_verified_hash(
+            friend.agent_id,
+            str(row["payload_hash"]),
+            (
+                0
+                if str(row["msg_id"] or "")
+                else float(row["created_epoch"])
+                - self.verification_clock_skew_seconds
+            ),
+            conv_id=str(row["conv_id"] or ""),
+            msg_id=str(row["msg_id"] or ""),
+            action_key=key,
+        )
+        if found:
+            return self._verified_receipt(
+                friend, key, found[0], found[1], duplicate=True
+            )
+        detail = "权威历史中未找到目标一致的消息"
+        self._write_state(
+            key,
+            state="verifying",
+            conv_id=str(row["conv_id"] or ""),
+            msg_id=str(row["msg_id"] or ""),
+            error=detail,
+        )
+        return MessageReceipt(
+            state="verifying",
+            recipient_name=friend.agent_name,
+            recipient_id=friend.agent_id,
+            idempotency_key=key,
+            msg_id=str(row["msg_id"] or ""),
+            conv_id=str(row["conv_id"] or ""),
+            duplicate=True,
+            detail=detail,
+        )
 
     def _write_state(
         self,
@@ -424,16 +945,35 @@ class EigenFluxMessenger:
         msg_id: str = "",
         error: str = "",
     ) -> None:
-        with closing(self._connect()) as db, db:
-            db.execute(
-                """
-                UPDATE verified_external_actions
-                   SET state = ?, conv_id = ?, msg_id = ?, last_error = ?,
-                       updated_epoch = ?
-                 WHERE idempotency_key = ?
-                """,
-                (state, conv_id, msg_id, error[:300], self.now(), key),
-            )
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state = ?, conv_id = ?, msg_id = ?, last_error = ?,
+                           updated_epoch = ?
+                     WHERE idempotency_key = ?
+                    """,
+                    (state, conv_id, msg_id, error[:300], self.now(), key),
+                )
+                db.commit()
+            except sqlite3.IntegrityError:
+                db.rollback()
+                # A duplicate receipt is not completion evidence. Keep the
+                # action recoverable and let authoritative history find an
+                # unclaimed receipt on a later reconciliation pass.
+                db.execute(
+                    """
+                    UPDATE verified_external_actions
+                       SET state='verifying',conv_id='',msg_id='',
+                           last_error='receipt already belongs to another action',
+                           updated_epoch=?
+                     WHERE idempotency_key=?
+                    """,
+                    (self.now(), key),
+                )
+                db.commit()
 
     def _reserve(
         self,
@@ -502,13 +1042,20 @@ class EigenFluxMessenger:
         *,
         duplicate: bool,
     ) -> MessageReceipt:
-        self._write_state(
-            key, state="verified", conv_id=conv_id, msg_id=msg_id
-        )
+        if not self._claim_verified_receipt(key, conv_id, msg_id):
+            return MessageReceipt(
+                state="verifying",
+                recipient_name=friend.agent_name,
+                recipient_id=friend.agent_id,
+                idempotency_key=key,
+                duplicate=duplicate,
+                detail="该服务端回执已被另一项动作认领，正在重新核验",
+            )
         return MessageReceipt(
             state="verified",
             recipient_name=friend.agent_name,
             recipient_id=friend.agent_id,
+            idempotency_key=key,
             msg_id=msg_id,
             conv_id=conv_id,
             duplicate=duplicate,
@@ -525,6 +1072,45 @@ class EigenFluxMessenger:
         if not message:
             raise EigenFluxMessageError("消息正文为空，未发送")
         friend = self.resolve_friend(recipient)
+        return self._send_friend(
+            friend,
+            message,
+            repeat_token=repeat_token,
+        )
+
+    def send_to_friend_id(
+        self,
+        agent_id: str,
+        content: str,
+        *,
+        repeat_token: str = "",
+    ) -> MessageReceipt:
+        """Send to one server-verified friend ID without label ambiguity."""
+        wanted = str(agent_id or "").strip()
+        matches = [
+            friend for friend in self.list_friends()
+            if friend.agent_id == wanted
+        ]
+        if len(matches) != 1:
+            raise RecipientNotFound(
+                "权威好友列表中没有唯一匹配的 agent ID，未发送"
+            )
+        message = str(content or "").strip()
+        if not message:
+            raise EigenFluxMessageError("消息正文为空，未发送")
+        return self._send_friend(
+            matches[0],
+            message,
+            repeat_token=repeat_token,
+        )
+
+    def _send_friend(
+        self,
+        friend: Friend,
+        message: str,
+        *,
+        repeat_token: str,
+    ) -> MessageReceipt:
         payload_hash = self._content_hash(message)
         contract_version = (
             f"repeat:{repeat_token.strip()}" if repeat_token.strip() else "v1"
@@ -543,6 +1129,7 @@ class EigenFluxMessenger:
                     state="verified",
                     recipient_name=friend.agent_name,
                     recipient_id=friend.agent_id,
+                    idempotency_key=key,
                     msg_id=str(existing["msg_id"]),
                     conv_id=str(existing["conv_id"]),
                     duplicate=True,
@@ -560,14 +1147,17 @@ class EigenFluxMessenger:
                         ),
                         conv_id=str(existing["conv_id"] or ""),
                         msg_id=str(existing["msg_id"] or ""),
+                        action_key=key,
                     )
                 except CliFailure as exc:
-                    self._write_state(key, state="verifying", error=str(exc))
+                    detail = _durable_failure(exc, "history readback")
+                    self._write_state(key, state="verifying", error=detail)
                     return MessageReceipt(
                         state="verifying",
                         recipient_name=friend.agent_name,
                         recipient_id=friend.agent_id,
-                        detail=str(exc),
+                        idempotency_key=key,
+                        detail=detail,
                     )
                 if found:
                     return self._verified_receipt(
@@ -579,31 +1169,40 @@ class EigenFluxMessenger:
                         state="attempting",
                         recipient_name=friend.agent_name,
                         recipient_id=friend.agent_id,
+                        idempotency_key=key,
                     )
-            self._start_retry(key)
+                return MessageReceipt(
+                    state="verifying",
+                    recipient_name=friend.agent_name,
+                    recipient_id=friend.agent_id,
+                    idempotency_key=key,
+                    msg_id=str(existing["msg_id"] or ""),
+                    conv_id=str(existing["conv_id"] or ""),
+                    duplicate=True,
+                    detail=(
+                        str(existing["last_error"] or "")
+                        or "权威历史尚未确认，未自动重复发送"
+                    ),
+                )
 
         try:
-            response = self._run_json(
-                [
-                    "eigenflux",
-                    "msg",
-                    "send",
-                    "--content",
-                    message,
-                    "--receiver-id",
-                    friend.agent_id,
-                    "-f",
-                    "json",
-                    "--no-interactive",
-                ]
+            response = self.api_sender(friend.agent_id, message)
+        except Exception as raw_exc:
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, CliFailure)
+                else CliFailure(
+                    f"EigenFlux API send failed ({type(raw_exc).__name__})"
+                )
             )
-        except CliFailure as exc:
-            self._write_state(key, state="verifying", error=str(exc))
+            detail = _durable_failure(exc, "send")
+            self._write_state(key, state="verifying", error=detail)
             try:
                 found = self._find_verified_message(
                     friend,
                     message,
                     operation_started - self.verification_clock_skew_seconds,
+                    action_key=key,
                 )
             except CliFailure:
                 found = None
@@ -615,7 +1214,8 @@ class EigenFluxMessenger:
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
-                detail=str(exc),
+                idempotency_key=key,
+                detail=detail,
             )
 
         data = _response_data(response)
@@ -644,22 +1244,25 @@ class EigenFluxMessenger:
                 ),
                 conv_id=conv_id,
                 msg_id=msg_id,
+                action_key=key,
             )
         except CliFailure as exc:
+            detail = _durable_failure(exc, "history readback")
             self._write_state(
                 key,
                 state="verifying",
                 conv_id=conv_id,
                 msg_id=msg_id,
-                error=str(exc),
+                error=detail,
             )
             return MessageReceipt(
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
+                idempotency_key=key,
                 msg_id=msg_id,
                 conv_id=conv_id,
-                detail=str(exc),
+                detail=detail,
             )
         if not found:
             detail = "权威历史中未找到目标一致的消息"
@@ -674,6 +1277,7 @@ class EigenFluxMessenger:
                 state="verifying",
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
+                idempotency_key=key,
                 msg_id=msg_id,
                 conv_id=conv_id,
                 detail=detail,

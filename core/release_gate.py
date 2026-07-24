@@ -1,0 +1,361 @@
+"""Fail-closed PR/CI/review gate for production restarts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import quote
+
+
+class ReleaseGateError(RuntimeError):
+    """The revision has not met production release evidence requirements."""
+
+
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _repo_name(remote: str) -> str:
+    match = re.search(
+        r"(?:github\.com[:/])([^/\s]+/[^/\s]+?)(?:\.git)?$", remote.strip()
+    )
+    if not match:
+        raise ReleaseGateError("origin is not a GitHub repository")
+    return match.group(1)
+
+
+def _has_pass_attestation(body: str, sha: str) -> bool:
+    expected = f"REVIEW-GATE: PASS {sha}".upper()
+    return any(
+        line.strip().upper() == expected
+        for line in str(body or "").splitlines()
+    )
+
+
+_TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+_TRUSTED_PERMISSIONS = {"admin", "maintain", "write", "triage"}
+
+
+class ReleaseGate:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        runner: Runner = subprocess.run,
+    ):
+        self.root = Path(root or Path(__file__).resolve().parent.parent).resolve()
+        self.runner = runner
+
+    def _run(
+        self, command: list[str], *, json_output: bool = False, timeout: int = 30
+    ) -> Any:
+        try:
+            result = self.runner(
+                command,
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReleaseGateError(f"{command[0]} failed: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "command failed").strip()
+            raise ReleaseGateError(detail[:500])
+        if not json_output:
+            return result.stdout.strip()
+        try:
+            return json.loads(result.stdout or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ReleaseGateError(f"{command[0]} returned invalid JSON") from exc
+
+    def _run_paginated(self, endpoint: str) -> list[dict[str, Any]]:
+        pages = self._run(
+            ["gh", "api", "--paginate", "--slurp", endpoint],
+            json_output=True,
+        )
+        if not isinstance(pages, list):
+            raise ReleaseGateError("paginated GitHub response is invalid")
+        if pages and all(isinstance(page, list) for page in pages):
+            return [
+                row
+                for page in pages
+                for row in page
+                if isinstance(row, dict)
+            ]
+        return [row for row in pages if isinstance(row, dict)]
+
+    def _run_check_runs(self, endpoint: str) -> list[dict[str, Any]]:
+        pages = self._run(
+            ["gh", "api", "--paginate", "--slurp", endpoint],
+            json_output=True,
+        )
+        if isinstance(pages, dict):
+            pages = [pages]
+        if not isinstance(pages, list):
+            raise ReleaseGateError("check-runs response is invalid")
+        runs: list[dict[str, Any]] = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            values = page.get("check_runs", [])
+            if isinstance(values, list):
+                runs.extend(row for row in values if isinstance(row, dict))
+        return runs
+
+    def _trusted_actor(
+        self,
+        record: dict[str, Any],
+        repo: str,
+        cache: dict[str, bool],
+    ) -> bool:
+        """Accept attestations only from repository-controlled identities."""
+        actor = str((record.get("user") or {}).get("login") or "")
+        if not actor:
+            return False
+        association = str(record.get("author_association") or "").upper()
+        if association in _TRUSTED_ASSOCIATIONS:
+            return True
+        if actor in cache:
+            return cache[actor]
+        try:
+            permission = self._run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/collaborators/{quote(actor, safe='')}/permission",
+                ],
+                json_output=True,
+            )
+        except ReleaseGateError:
+            cache[actor] = False
+            return False
+        level = str(permission.get("permission") or "").lower()
+        role = str(permission.get("role_name") or "").lower()
+        cache[actor] = bool(
+            level in _TRUSTED_PERMISSIONS or role in _TRUSTED_PERMISSIONS
+        )
+        return cache[actor]
+
+    def verify(self, *, fetch: bool = True) -> dict[str, Any]:
+        branch = self._run(["git", "branch", "--show-current"])
+        if branch != "main":
+            raise ReleaseGateError("production restart requires local main")
+        sha = self._run(["git", "rev-parse", "HEAD"])
+        if fetch:
+            self._run(["git", "fetch", "--quiet", "origin", "main"], timeout=60)
+        origin_sha = self._run(["git", "rev-parse", "origin/main"])
+        if sha != origin_sha:
+            raise ReleaseGateError("HEAD does not equal origin/main")
+        dirty = self._run(
+            ["git", "status", "--porcelain", "--untracked-files=all"]
+        )
+        if dirty:
+            raise ReleaseGateError("worktree changes are not deployable")
+        remote = self._run(["git", "remote", "get-url", "origin"])
+        repo = _repo_name(remote)
+
+        protection = self._run(
+            ["gh", "api", f"repos/{repo}/branches/main/protection"],
+            json_output=True,
+        )
+        if not protection.get("enforce_admins", {}).get("enabled"):
+            raise ReleaseGateError("branch protection still allows admin bypass")
+        checks_policy = protection.get("required_status_checks") or {}
+        if not checks_policy.get("strict"):
+            raise ReleaseGateError("required checks are not strict against main")
+        if not protection.get("required_pull_request_reviews"):
+            raise ReleaseGateError("main does not require a pull request")
+        if not protection.get("required_conversation_resolution", {}).get("enabled"):
+            raise ReleaseGateError("review conversation resolution is not required")
+
+        pulls = self._run(
+            [
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"repos/{repo}/commits/{sha}/pulls",
+            ],
+            json_output=True,
+        )
+        if not isinstance(pulls, list):
+            raise ReleaseGateError("associated PR response is invalid")
+        merged = next(
+            (
+                pr
+                for pr in pulls
+                if pr.get("merged_at")
+                and (pr.get("base") or {}).get("ref") == "main"
+            ),
+            None,
+        )
+        if merged is None:
+            raise ReleaseGateError("HEAD is not backed by a merged PR to main")
+        number = int(merged["number"])
+        author = str((merged.get("user") or {}).get("login") or "")
+
+        runs = self._run_check_runs(
+            f"repos/{repo}/commits/{sha}/check-runs"
+        )
+        combined_status = self._run(
+            ["gh", "api", f"repos/{repo}/commits/{sha}/status"],
+            json_output=True,
+        )
+        statuses = (
+            combined_status.get("statuses", [])
+            if isinstance(combined_status, dict)
+            else []
+        )
+        configured_checks = [
+            value
+            for value in checks_policy.get("checks", [])
+            if isinstance(value, dict) and value.get("context")
+        ]
+        configured_names = {
+            str(value["context"]) for value in configured_checks
+        }
+        required_checks: set[tuple[str, int | None]] = {
+            (
+                str(value["context"]),
+                (
+                    int(value["app_id"])
+                    if value.get("app_id") not in (None, -1)
+                    else None
+                ),
+            )
+            for value in configured_checks
+        }
+        required_checks.update(
+            (str(value), None)
+            for value in checks_policy.get("contexts", [])
+            if value and str(value) not in configured_names
+        )
+        if not required_checks:
+            raise ReleaseGateError(
+                "main branch protection defines no required checks"
+            )
+        successful_checks = {
+            (
+                str(run.get("name") or ""),
+                int((run.get("app") or {}).get("id"))
+                if (run.get("app") or {}).get("id") is not None
+                else None,
+            )
+            for run in runs
+            if (
+                run.get("status") == "completed"
+                and str(run.get("conclusion") or "")
+                in {"success", "neutral", "skipped"}
+            )
+        }
+        successful_checks.update(
+            (str(status.get("context") or ""), None)
+            for status in statuses
+            if (
+                isinstance(status, dict)
+                and str(status.get("state") or "") == "success"
+            )
+        )
+        missing = [
+            (context, app_id)
+            for context, app_id in required_checks
+            if (
+                (context, app_id) not in successful_checks
+                and not (
+                    app_id is None
+                    and any(
+                        name == context
+                        for name, _candidate_app in successful_checks
+                    )
+                )
+            )
+        ]
+        if missing:
+            raise ReleaseGateError(
+                "required checks are not successful: "
+                + ", ".join(
+                    context if app_id is None else f"{context}@app:{app_id}"
+                    for context, app_id in missing
+                )
+            )
+
+        reviews = self._run_paginated(
+            f"repos/{repo}/pulls/{number}/reviews"
+        )
+        comments = self._run_paginated(
+            f"repos/{repo}/issues/{number}/comments"
+        )
+        evidence = []
+        trust_cache: dict[str, bool] = {}
+        for review in reviews if isinstance(reviews, list) else []:
+            reviewer = str((review.get("user") or {}).get("login") or "")
+            state = str(review.get("state") or "").upper()
+            body = str(review.get("body") or "")
+            reviewed_sha = str(review.get("commit_id") or "")
+            if (
+                reviewer
+                and reviewer != author
+                and state == "APPROVED"
+                and reviewed_sha == sha
+                and self._trusted_actor(review, repo, trust_cache)
+            ):
+                evidence.append(f"review:{reviewer}:{state}")
+            elif (
+                reviewer
+                and reviewer != author
+                and state == "COMMENTED"
+                and _has_pass_attestation(body, sha)
+                and self._trusted_actor(review, repo, trust_cache)
+            ):
+                evidence.append(f"attestation:{reviewer}")
+        for comment in comments if isinstance(comments, list) else []:
+            reviewer = str((comment.get("user") or {}).get("login") or "")
+            body = str(comment.get("body") or "").strip()
+            if (
+                reviewer
+                and reviewer != author
+                and _has_pass_attestation(body, sha)
+                and self._trusted_actor(comment, repo, trust_cache)
+            ):
+                evidence.append(f"attestation:{reviewer}")
+        if not evidence:
+            raise ReleaseGateError("merged PR has no independent review evidence")
+        return {
+            "ok": True,
+            "repo": repo,
+            "sha": sha,
+            "pr": number,
+            "required_checks": sorted(
+                context if app_id is None else f"{context}@app:{app_id}"
+                for context, app_id in required_checks
+            ),
+            "review_evidence": sorted(set(evidence)),
+            "branch_protection": {
+                "admin_bypass": False,
+                "strict_checks": True,
+                "pull_request_required": True,
+                "conversation_resolution": True,
+            },
+        }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Jarvis production release gate")
+    parser.add_argument("--no-fetch", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        result = ReleaseGate().verify(fetch=not args.no_fetch)
+    except ReleaseGateError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

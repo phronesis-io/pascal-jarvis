@@ -13,6 +13,8 @@ Read these current-state documents before changing behavior:
 4. `DESIGN.md` - interaction and surface rules.
 5. `docs/prd_portfolio.md` - which historical PRDs are shipped, superseded,
    rejected, or active.
+6. `docs/release_acceptance_2026-07-24.md` - the current requirement-to-evidence
+   ledger.
 
 Then inspect the worktree:
 
@@ -31,13 +33,15 @@ For behavior changes:
 1. Reconstruct the real failure from logs, ledgers, and authoritative APIs.
 2. Write or update the product contract when the behavior is not already
    specified.
-3. Add the regression test that fails for the observed incident.
-4. Implement at the narrowest shared boundary that prevents the failure class.
-5. Run focused tests, then the full suite.
-6. Review the diff for privacy, false completion claims, duplicate side
+3. Claim executable engineering work through Taskline when L2 is available;
+   use a separate worktree for concurrent agents.
+4. Add the regression test that fails for the observed incident.
+5. Implement at the narrowest shared boundary that prevents the failure class.
+6. Run focused tests, then the full suite.
+7. Review the diff for privacy, false completion claims, duplicate side
    effects, and stale documentation.
-7. Commit and push a focused change.
-8. For resident-runtime changes, restart and run deploy verification plus
+8. Commit and push a focused change through a real PR and independent review.
+9. For resident-runtime changes, restart and run deploy verification plus
    smoke tests. Code on disk is not deployed until the live process is proven
    to run that revision.
 
@@ -54,6 +58,8 @@ restart.
 ## Authority Rules
 
 - A model response is a proposal, never completion evidence.
+- Delegation terminal state comes only from `core.delegations` after matching
+  verifier evidence; linked objects are projections, not competing authorities.
 - External mutations complete only after deterministic code verifies an
   authoritative read-back or receipt.
 - Never copy a numeric EigenFlux agent ID from model context. Use
@@ -96,6 +102,7 @@ git diff --cached
   Admin.
 - `components.yaml` - single source of truth for supervised components.
 - `data/jarvis.db` - shared SQLite WAL state store.
+- `:8787` - optional local Taskline engineering sidecar.
 
 Do not expose a new network surface or external side effect without an
 explicit authority, security, and rollback design.

@@ -45,6 +45,8 @@ JARVIS_DIR = Path(__file__).parent.parent.parent
 def _entity_url(handoff: dict) -> str:
     if handoff.get("entity_type") == "matter":
         return f"/matters/{handoff.get('entity_id', '')}"
+    if handoff.get("entity_type") == "delegation":
+        return f"/delegations/{handoff.get('entity_id', '')}"
     return f"/items/{handoff.get('entity_id', '')}"
 
 
@@ -256,6 +258,37 @@ def _render_handoff_band(surface: str, refresh) -> None:
                     ).props("flat round dense").tooltip("移出接力区")
 
 
+def _render_delegation_band() -> None:
+    """A compact shared-state view; decisions still live in the Item list."""
+    try:
+        from core.delegations import DelegationStore, TERMINAL_STATUSES
+        rows = DelegationStore().list(limit=50)
+    except Exception:
+        return
+    active = [row for row in rows if row["status"] not in TERMINAL_STATUSES]
+    needs_user = [
+        row
+        for row in active
+        if row["status"] in {"needs_user", "needs_clarification"}
+    ]
+    if not active:
+        return
+    with ui.element("section").classes(
+        "w-full border-b border-grey-3 pb-4 mb-2"
+    ):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            with ui.column().classes("gap-1"):
+                ui.label("Jarvis 正在承担").classes("section-kicker")
+                ui.label(
+                    f"{len(active)} 项进行中"
+                    + (f" · {len(needs_user)} 项需要你" if needs_user else "")
+                ).classes("text-sm font-medium")
+            ui.button(
+                icon="arrow_forward",
+                on_click=lambda: ui.navigate.to("/delegations"),
+            ).props("flat round dense").tooltip("查看委托进展")
+
+
 @ui.page("/items")
 def items_page():
     add_dashboard_head()
@@ -273,6 +306,7 @@ def items_page():
             "/items", "事项",
             "需要你管的都在这里；主题与定时提醒只作为上下文。",
         )
+        _render_delegation_band()
 
         @ui.refreshable
         def board():
@@ -361,7 +395,9 @@ def items_page():
                 return
 
             def decide(mid: str, key: str):
-                payload = memorial.decide(mid, key)
+                payload = memorial.decide(
+                    mid, key, owner_authenticated=True
+                )
                 toast = payload.get("toast", {})
                 ui.notify(
                     toast.get("content", "已记录"),
@@ -517,7 +553,9 @@ def item_detail_page(memorial_id: str):
                 complete_entity_handoffs("memorial", memorial_id)
 
             def decide(key: str):
-                payload = memorial.decide(memorial_id, key)
+                payload = memorial.decide(
+                    memorial_id, key, owner_authenticated=True
+                )
                 toast = payload.get("toast", {})
                 ui.notify(
                     toast.get("content", "已记录"),

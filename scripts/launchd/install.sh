@@ -23,6 +23,13 @@ WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/../.." 2>/dev/null && pwd || echo "$JARV
 for plist in "$HERE"/com.*.plist; do
   name=$(basename "$plist")
   label="${name%.plist}"
+  if [[ "$label" == "com.pascal.jarvis.taskline" \
+        && ! -x "$WORK_DIR/repos/taskline/dist/taskline-server" ]]; then
+    launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
+    rm -f "$DEST/$name" "$DEST/$name.tmp"
+    echo "skipped $name (optional Taskline binary not installed)"
+    continue
+  fi
   # Template substitution → installed copy
   sed \
     -e "s|__JARVIS_DIR__|$JARVIS_DIR|g" \

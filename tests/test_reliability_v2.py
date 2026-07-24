@@ -312,6 +312,76 @@ def test_pre_timeout_records_circuit_failure(tmp_path, monkeypatch):
     assert state["t"]["circuit"]["consecutive_failures"] == 1
 
 
+def test_nonzero_pre_with_json_output_is_still_a_failure(tmp_path, monkeypatch):
+    from core.heartbeat import HeartbeatRunner
+
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text(
+        "### provider-canary\n- interval: 1h\n"
+        "- pre: tasks/provider.sh\n- prompt: x\n"
+    )
+    jarvis_dir = tmp_path / "jarvis"
+    (jarvis_dir / "tasks").mkdir(parents=True)
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    runner = HeartbeatRunner(
+        jarvis_dir=jarvis_dir,
+        heartbeat_file=hb,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        idle_judge=False,
+    )
+
+    def failed_with_output(_path, stdin_data=""):
+        runner._last_script_outcome = "nonzero"
+        return '{"ok": false}'
+
+    monkeypatch.setattr(runner, "run_script", failed_with_output)
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()["provider-canary"]
+    assert state["last_status"] == "pre_nonzero"
+    assert state.get("last_success", 0) == 0
+
+
+def test_tier0_post_failure_is_not_recorded_as_success(
+    tmp_path, monkeypatch, capsys
+):
+    from core.heartbeat import HeartbeatRunner
+
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text(
+        "### calendar-sync\n- interval: 1h\n"
+        "- pre: tasks/pre.sh\n- post: tasks/post.sh\n- prompt: x\n"
+    )
+    jarvis_dir = tmp_path / "jarvis"
+    (jarvis_dir / "tasks").mkdir(parents=True)
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    runner = HeartbeatRunner(
+        jarvis_dir=jarvis_dir,
+        heartbeat_file=hb,
+        state_file=tmp_path / "state.json",
+        memory_dir=memory_dir,
+        idle_judge=False,
+    )
+
+    def scripts(path, stdin_data=""):
+        if path.endswith("pre.sh"):
+            runner._last_script_outcome = "ok"
+            return "payload"
+        runner._last_script_outcome = "nonzero"
+        return '{"ok": false}'
+
+    monkeypatch.setattr(runner, "run_script", scripts)
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()["calendar-sync"]
+    assert state["last_status"] == "post_nonzero"
+    assert state.get("last_success", 0) == 0
+    assert "FAILED (calendar-sync:post_nonzero)" in capsys.readouterr().err
+
+
 # ── REQ-42: daemon deploy guard ─────────────────────────────────────────
 
 def test_daemon_deploy_guard(tmp_path, monkeypatch):

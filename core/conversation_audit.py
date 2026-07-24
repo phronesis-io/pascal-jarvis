@@ -130,7 +130,8 @@ def connect(path: Path) -> sqlite3.Connection:
             since TEXT NOT NULL,
             log_events INTEGER NOT NULL DEFAULT 0,
             session_messages INTEGER NOT NULL DEFAULT 0,
-            issues INTEGER NOT NULL DEFAULT 0
+            issues INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS conversation_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,6 +177,10 @@ def connect(path: Path) -> sqlite3.Connection:
     try:
         conn.execute(
             "ALTER TABLE audit_issues ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE audit_runs ADD COLUMN completed_at TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
     return conn
@@ -693,22 +698,30 @@ def derive_card_leak_issues(conn: sqlite3.Connection, run_id: int,
 
 # ── Closure workflow (REQ-105, approved 2026-07-14) ──────────────────────
 
-def open_findings(db_path: Path, days: int = 7) -> list[dict]:
-    """Open issues across all runs of the last `days`, deduped by
-    (issue_type, evidence) keeping the newest row. This is the mandatory
-    read at the start of a self-improve round."""
+def open_findings(
+    db_path: Path, days: int | None = 7
+) -> list[dict]:
+    """Return open issues, deduped by ``(issue_type, evidence)``.
+
+    ``days=None`` deliberately removes the reporting-window cutoff. The L3
+    observer uses that mode because unresolved responsibility must not expire
+    merely because no newer audit reproduced it.
+    """
     conn = connect(db_path)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    rows = conn.execute(
-        """
+    query = """
         SELECT i.id, i.run_id, r.started_at, i.severity, i.issue_type,
                i.title, i.evidence, i.recommendation
-        FROM audit_issues i JOIN audit_runs r ON r.id = i.run_id
-        WHERE i.status='open' AND r.started_at >= ?
-        ORDER BY i.id DESC
-        """,
-        (cutoff,),
-    ).fetchall()
+          FROM audit_issues i JOIN audit_runs r ON r.id = i.run_id
+         WHERE i.status='open'
+    """
+    params: tuple[str, ...] = ()
+    if days is not None:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+        query += " AND r.started_at >= ?"
+        params = (cutoff,)
+    rows = conn.execute(query + " ORDER BY i.id DESC", params).fetchall()
     conn.close()
     seen, out = set(), []
     for row in rows:  # newest first
@@ -799,10 +812,16 @@ def run_audit(paths: AuditPaths, hours: int = 24) -> int:
     conn.execute(
         """
         UPDATE audit_runs
-        SET log_events=?, session_messages=?, issues=?
+        SET log_events=?, session_messages=?, issues=?, completed_at=?
         WHERE id=?
         """,
-        (log_events, session_messages, issues, run_id),
+        (
+            log_events,
+            session_messages,
+            issues,
+            datetime.now(timezone.utc).isoformat(),
+            run_id,
+        ),
     )
     conn.commit()
     conn.close()

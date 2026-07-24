@@ -194,14 +194,25 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
         if row:
             state = dict(row)
             provider = state.get("provider") or "unknown"
+            try:
+                from core.provider_health import summary_text
+                chain = "\n\n通道验真：\n" + summary_text()
+            except Exception:
+                chain = ""
             return {"handled": True, "reply": (
                 f"上一条实际由 {provider} / {state.get('model') or 'unknown'} 回答。\n"
-                f"记录时间：{state.get('updated_at', '')}"
+                f"记录时间：{state.get('updated_at', '')}{chain}"
             )}
         from core.config import Config
+        try:
+            from core.provider_health import summary_text
+            chain = "\n\n通道验真：\n" + summary_text()
+        except Exception:
+            chain = ""
         model = Config().claude.get("main_model", "opus") or "opus"
         return {"handled": True, "reply": (
-            f"这段对话还没有成功回复记录；当前首选通道是 Claude primary / {model}。"
+            f"这段对话还没有成功回复记录；当前首选通道是 "
+            f"Claude primary / {model}。{chain}"
         )}
     parsed = _match_command(content)
     if not parsed:

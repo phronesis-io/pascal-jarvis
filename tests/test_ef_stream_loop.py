@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import core.ef_stream_loop as efsl
 from core.ef_stream import load_seen
+from core.aux_model import AuxiliaryModelResult
 
 
 # ---- _deliver_and_mark: only a REAL success is recorded -------------------
@@ -31,21 +32,22 @@ def _deliver(monkeypatch, tmp_path, send_ok):
     return seen, delivered, seen_file, sent
 
 
-def test_failed_send_not_marked_seen_and_deadlettered(monkeypatch, tmp_path):
-    seen, delivered, seen_file, sent = _deliver(monkeypatch, tmp_path,
-                                                send_ok=False)
+def test_failed_immediate_send_is_durably_queued_before_marking_seen(
+        monkeypatch, tmp_path):
+    seen, accepted, seen_file, sent = _deliver(
+        monkeypatch, tmp_path, send_ok=False
+    )
     assert sent  # the send was attempted
-    assert delivered is False
-    assert seen == []                # dedup must NOT swallow a redelivery
-    assert not seen_file.exists()
-    # no phantom "Delivered" ledger entry
+    assert accepted is True
+    assert seen == ["id1"]
+    assert load_seen(seen_file) == ["id1"]
+    # Queued is durable acceptance, not a phantom delivered/outbox record.
     assert not (tmp_path / "heartbeat_outbox.jsonl").exists()
-    # dead-letter row for daemon.py's independent channel
-    dl = tmp_path / "data" / ".delivery_deadletter.jsonl"
-    assert dl.exists()
-    row = json.loads(dl.read_text(encoding="utf-8").splitlines()[-1])
-    assert row["kind"] == "ef_stream_send_failed"
-    assert "hello from ef" in row["detail"]
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+    from core.delivery import DeliveryPipeline
+    rows = DeliveryPipeline(tmp_path).list(limit=5)
+    assert rows[0]["state"] == "queued"
+    assert rows[0]["source"] == "eigenflux-stream"
 
 
 def test_successful_send_marks_seen_and_outbox(monkeypatch, tmp_path):
@@ -89,16 +91,86 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
     assert accepted is True and visible is True
 
 
-def test_deadletter_failure_does_not_raise(monkeypatch, tmp_path):
-    # Bookkeeping must never kill the stream loop.
+def test_queue_acceptance_does_not_depend_on_deadletter_sink(
+        monkeypatch, tmp_path):
     def boom(*a, **k):
         raise OSError("disk full")
 
     monkeypatch.setattr(efsl, "record_overdue", boom)
     monkeypatch.setattr(efsl, "_lark_send", lambda m, u: False)
-    seen, delivered = efsl._deliver_and_mark(
+    seen, accepted = efsl._deliver_and_mark(
         "msg", ["id2"], {}, "u1", [], tmp_path / ".ef-seen", tmp_path)
-    assert delivered is False and seen == []
+    assert accepted is True and seen == ["id2"]
+
+
+def test_suppressed_external_event_is_not_marked_seen(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(efsl, "_lark_send", lambda _msg, _uid: True)
+    deadletters = []
+    monkeypatch.setattr(
+        efsl,
+        "record_overdue",
+        lambda *_args, **kwargs: deadletters.append(kwargs),
+    )
+    seen = []
+    seen_file = tmp_path / ".ef-seen"
+    for index in range(24):
+        seen, accepted = efsl._deliver_and_mark(
+            f"message-{index}",
+            [f"event-{index}"],
+            {},
+            "u1",
+            seen,
+            seen_file,
+            tmp_path,
+        )
+        assert accepted is True
+
+    seen, accepted = efsl._deliver_and_mark(
+        "message-24",
+        ["event-24"],
+        {},
+        "u1",
+        seen,
+        seen_file,
+        tmp_path,
+    )
+
+    assert accepted is False
+    assert "event-24" not in seen
+    assert "event-24" not in load_seen(seen_file)
+    assert deadletters[-1]["kind"] == "ef_stream_send_failed"
+
+
+def test_cursor_advances_only_after_durable_acceptance(tmp_path):
+    cursor_file = tmp_path / "state" / "cursor"
+
+    assert not efsl._advance_cursor(
+        cursor_file, "cursor-1", accepted=False
+    )
+    assert not cursor_file.exists()
+    assert efsl._advance_cursor(
+        cursor_file, "cursor-1", accepted=True
+    )
+    assert cursor_file.read_text(encoding="utf-8") == "cursor-1"
+    assert not efsl._advance_cursor(
+        cursor_file, "cursor-2", accepted=False
+    )
+    assert cursor_file.read_text(encoding="utf-8") == "cursor-1"
+
+
+def test_cursor_gap_terminates_stream_before_later_events_can_advance():
+    state = {"terminated": False}
+    process = SimpleNamespace(
+        poll=lambda: None,
+        terminate=lambda: state.__setitem__("terminated", True),
+    )
+
+    assert not efsl._can_continue_after_delivery(process, accepted=False)
+
+    assert state["terminated"] is True
+    assert efsl._can_continue_after_delivery(process, accepted=True)
 
 
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------
@@ -125,3 +197,35 @@ def test_healthy_churn_policy():
     # stream back and forth every second otherwise
     assert not efsl._healthy_churn(t + 1, replaced=True)
     assert not efsl._healthy_churn(t - 1, replaced=True)
+
+
+def test_message_analysis_uses_text_only_shared_provider_chain(
+    monkeypatch, tmp_path,
+):
+    seen = {}
+
+    def fake_run(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen.update(kwargs)
+        return AuxiliaryModelResult(
+            text="建议先核对原文",
+            provider="Claude backup2",
+            model="backup2-model",
+        )
+
+    monkeypatch.setattr(efsl, "run_auxiliary_model", fake_run)
+    monkeypatch.setattr(efsl, "_fetch_history", lambda _conv: "")
+    monkeypatch.setattr(
+        efsl.Path,
+        "home",
+        classmethod(lambda _cls: tmp_path),
+    )
+
+    result = efsl._run_analysis(
+        '{"content":"hello"}', "conv-1", str(tmp_path), ""
+    )
+
+    assert result == "建议先核对原文"
+    assert seen["allow_tools"] is False
+    assert seen["process_key"] == "analysis"
+    assert "hello" in seen["prompt"]

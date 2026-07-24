@@ -1529,7 +1529,8 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
     return "\n".join(rendered)
 
 
-def _execute_action(action: dict) -> str:
+def _execute_action(
+        action: dict, *, owner_authenticated: bool = False) -> str:
     """Run one option action through ActionProcessor's _do_* handler —
     the single source of truth for action execution (no new executor)."""
     from core.actions import ActionProcessor
@@ -1543,6 +1544,7 @@ def _execute_action(action: dict) -> str:
         memory_dir=os.environ.get("MEMORY_DIR", str(JARVIS_DIR / "memory")),
         jobs_dir=os.environ.get("JV_JOBS_DIR", str(JARVIS_DIR / "jobs")),
         log_file=os.environ.get("JV_LOG_FILE", ""),
+        owner_authenticated=owner_authenticated,
     )
     handler = getattr(ap, f"_do_{atype}", None)
     if handler is None:
@@ -1617,7 +1619,12 @@ def resolve(memorial_id: str, label: str,
     return True
 
 
-def decide(memorial_id: str, opt_key: str) -> dict:
+def decide(
+        memorial_id: str,
+        opt_key: str,
+        *,
+        owner_authenticated: bool = False,
+) -> dict:
     """批红 one option. Returns the card-callback response payload.
 
     Idempotent: a second tap (any option) returns「已批过」without re-running
@@ -1656,7 +1663,10 @@ def decide(memorial_id: str, opt_key: str) -> dict:
     action_result, action_failed = "", False
     if opt.get("action"):
         try:
-            action_result = _execute_action(opt["action"])
+            action_result = _execute_action(
+                opt["action"],
+                owner_authenticated=owner_authenticated,
+            )
         except Exception as e:
             action_result = f"FAILED: {e}"
             action_failed = True

@@ -19,6 +19,7 @@ VALID_KINDS = {"project", "decision", "research", "personal", "incident"}
 VALID_STATUSES = {"active", "waiting", "blocked", "done", "archived"}
 VALID_ENTITY_TYPES = {
     "session", "memorial", "intent", "job", "artifact", "conversation",
+    "delegation",
 }
 VALID_PROVIDERS = {
     "", "claude", "codex", "lark", "eigenflux", "file", "git", "github",
@@ -260,6 +261,23 @@ def open_followups(matter_id: str) -> list[dict]:
                     "entity_type": "job", "entity_id": entity_id,
                     "title": (job or {}).get("description") or link.get("title") or entity_id,
                     "status": status,
+                })
+        elif entity_type == "delegation":
+            try:
+                from core.delegations import ACTIVE_STATUSES, DelegationStore
+                delegation = DelegationStore().get(entity_id)
+            except Exception:
+                delegation = None
+            if delegation and delegation.get("status") in ACTIVE_STATUSES:
+                followups.append({
+                    "entity_type": "delegation",
+                    "entity_id": entity_id,
+                    "title": (
+                        delegation.get("title")
+                        or link.get("title")
+                        or entity_id
+                    ),
+                    "status": delegation.get("status", ""),
                 })
     return followups
 

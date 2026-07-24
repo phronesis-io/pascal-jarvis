@@ -451,6 +451,10 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         headers["Cookie"] = backend_cookies
     headers["X-Jarvis-Device"] = device["id"]
     headers["X-Forwarded-For"] = _remote(request)
+    # The backend never trusts X-Jarvis-Device by itself. Forward the token
+    # only after this gateway has validated it, so owner mutations cannot be
+    # reached by a direct unauthenticated request to :3457.
+    headers["Authorization"] = f"Bearer {_token(request)}"
     target = BACKEND + request.rel_url.path_qs
     body = await request.read()
     session = request.app[SESSION_KEY]
