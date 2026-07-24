@@ -283,6 +283,16 @@ testing them in isolation. Its three findings were reproduced and closed:
 | 119 | A legacy Intent that had already expired could be inferred as pending and fire again | Legacy one-shot recovery now derives a future trigger as pending and a past trigger as expired, preserves executed evidence, and leaves unprovable states terminal for review; legacy-expired regression |
 | 120 | Reopening several completed Handoffs for one entity and target surface violated the active-handoff unique index | Handoff recovery now treats an existing active successor as converged and considers only the newest completed row per target surface in one immediate transaction; sequential-successor and idempotent-retry regressions |
 
+The eighteenth independent review combined an independently owned closure
+follow-up with two parent projections. Its finding and two adjacent legacy
+recovery risks discovered during the same audit were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 121 | A parent projection could claim an independently cancelled follow-up and later strand it cancelled with no owner | Follow-ups now persist the parent Intent whose cancellation they inherited; parent owners propagate and release only across that exact relationship, with a bounded legacy marker fallback; three-owner interleaving regression |
+| 122 | A future date Intent whose explicit validity window had elapsed could be restored pending | Legacy recovery checks an explicit expiry before inferring future eligibility, while preserving true one-shot execution evidence; elapsed-window regression |
+| 123 | A recurring cron Intent with a previous successful run could be restored executed and silently stop recurring | Cron `executed_at` is now treated as a last-occurrence watermark and restores pending unless its explicit validity window elapsed; recurring-watermark regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -323,7 +333,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2102 passed` for this candidate);
+- full local test result (`2105 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

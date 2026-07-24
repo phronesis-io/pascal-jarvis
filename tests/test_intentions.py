@@ -167,6 +167,48 @@ def test_manual_followup_cancellation_survives_parent_projection_rollback(
     assert get_intent(followup)["last_error"] == "owner cancelled followup"
 
 
+def test_parent_projection_does_not_claim_independently_cancelled_followup(
+    intent_db,
+):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待独立结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="独立取消的跟进",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    first_parent = "delegation:dlg-parent-a:completed"
+    second_parent = "delegation:dlg-parent-b:completed"
+    independent = "delegation:dlg-independent:completed"
+
+    cancel_intent(followup, "independent completed", source=independent)
+    cancel_intent(parent, "parent A completed", source=first_parent)
+    cancel_intent(parent, "parent B completed", source=second_parent)
+
+    child = get_intent(followup)
+    assert json.loads(child["cancel_sources"]) == [independent]
+    assert child["cancel_parent_intent_id"] == ""
+    assert restore_cancelled_intent(followup, source=independent)
+    assert not restore_cancelled_intent(parent, source=second_parent)
+    assert restore_cancelled_intent(parent, source=first_parent)
+    assert get_intent(followup)["status"] == "pending"
+
+
 def test_legacy_expired_intent_never_reactivates(intent_db):
     from core.intentions import (
         cancel_intent,
@@ -199,6 +241,75 @@ def test_legacy_expired_intent_never_reactivates(intent_db):
         legacy_reason=reason,
     )
     assert get_intent(intent_id)["status"] == "expired"
+
+
+def test_legacy_future_date_with_elapsed_expiry_stays_expired(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="已越过有效期的未来动作",
+        trigger_type="date",
+        trigger_config={"datetime": "2999-01-01T09:00:00"},
+        expires_at="2020-01-01T09:00:00",
+    )
+    source = "delegation:dlg-expired-window:completed"
+    reason = "delegation dlg-expired-window reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "expired"
+
+
+def test_legacy_cron_execution_watermark_restores_pending(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        mark_executed,
+        restore_cancelled_intent,
+    )
+
+    intent_id = create_intent(
+        name="持续巡检",
+        trigger_type="cron",
+        trigger_config={"expression": "0 9 * * *"},
+    )
+    mark_executed(intent_id)
+    assert get_intent(intent_id)["status"] == "pending"
+    assert get_intent(intent_id)["executed_at"]
+    source = "delegation:dlg-cron:completed"
+    reason = "delegation dlg-cron reached completed"
+    cancel_intent(intent_id, reason, source=source)
+    with sqlite3.connect(intent_db) as db:
+        db.execute(
+            "UPDATE intentions SET cancel_source='',cancel_sources='[]',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+
+    assert restore_cancelled_intent(
+        intent_id,
+        source=source,
+        legacy_reason=reason,
+    )
+    assert get_intent(intent_id)["status"] == "pending"
 
 
 def test_list_intents_filter(intent_db):
