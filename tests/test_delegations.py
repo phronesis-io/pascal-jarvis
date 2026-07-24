@@ -257,6 +257,96 @@ def test_high_risk_needs_same_principal_confirmation(tmp_path):
     assert confirmed["authorized"] == 1
 
 
+def test_r4_stays_human_operated_even_when_created_as_authorized(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(
+        store,
+        risk_tier=4,
+        authorized=True,
+        operation="legal_commitment",
+    )
+    step = _step(store, delegation)
+
+    assert delegation["status"] == "needs_user"
+    assert delegation["authorized"] == 0
+    with pytest.raises(DelegationConflict, match="human-operated"):
+        store.confirm(
+            delegation["id"], expected_version=1, principal_id="owner"
+        )
+    with pytest.raises(DelegationConflict):
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="worker",
+        )
+
+
+def test_r3_contract_revision_requires_fresh_approval(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(
+        store,
+        risk_tier=3,
+        authorized=True,
+        operation="public_publish",
+    )
+
+    revised = store.revise_contract(
+        delegation["id"],
+        expected_version=1,
+        target_id="agent-2",
+        expected_postcondition={"recipient_id": "agent-2"},
+    )
+    step = _step(store, revised)
+
+    assert revised["status"] == "needs_user"
+    assert revised["authorized"] == 0
+    with pytest.raises(DelegationConflict):
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=2,
+            owner="worker",
+        )
+    confirmed = store.confirm(
+        delegation["id"], expected_version=2, principal_id="owner"
+    )
+    assert confirmed["status"] == "bound"
+
+
+def test_unbound_and_shadow_delegations_cannot_reach_workers(tmp_path):
+    store = _store(tmp_path)
+    unbound, _ = store.create(
+        principal_id="owner",
+        source="test",
+        source_ref="unbound",
+        title="Unbound",
+        operation="message_send",
+        authorized=True,
+    )
+    step = _step(store, unbound)
+    with pytest.raises(DelegationConflict, match="not executable"):
+        store.claim_step(
+            unbound["id"],
+            step["id"],
+            expected_version=1,
+            owner="worker",
+        )
+
+    shadow, _ = store.record_shadow_prediction(
+        principal_id="owner",
+        source="lark",
+        source_ref="shadow-no-step",
+        title="Shadow",
+        operation="message_send",
+        predicted_is_delegation=True,
+        predicted_target_risk=2,
+        predicted_verifier="lark_message",
+    )
+    with pytest.raises(DelegationConflict, match="shadow"):
+        _step(store, shadow)
+
+
 def test_dependency_dag_blocks_out_of_order_claim(tmp_path):
     store = _store(tmp_path)
     delegation, _ = _delegation(store, operation="engineering_change")

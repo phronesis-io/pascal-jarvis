@@ -342,31 +342,61 @@ class VerifierRegistry:
         target_id = str(policy.get("agent_id") or expected.get("agent_id") or "")
         if not target_id:
             raise VerificationError("agent_id is required")
-        payload = _run_json(
-            [
+        cursor = ""
+        seen: set[str] = set()
+        friend = None
+        for _ in range(20):
+            command = [
                 "eigenflux",
                 "relation",
                 "friends",
                 "--limit",
                 "100",
-                "-f",
-                "json",
-                "--no-interactive",
-            ],
-            cwd=self.root,
-            runner=self.runner,
-        )
-        rows = payload.get("friends")
-        if rows is None and isinstance(payload.get("data"), dict):
-            rows = payload["data"].get("friends")
-        friend = next(
-            (
-                row
-                for row in (rows or [])
-                if isinstance(row, dict) and str(row.get("agent_id") or "") == target_id
-            ),
-            None,
-        )
+            ]
+            if cursor:
+                command.extend(["--cursor", cursor])
+            command.extend(["-f", "json", "--no-interactive"])
+            payload = _run_json(
+                command,
+                cwd=self.root,
+                runner=self.runner,
+            )
+            data = payload.get("data") if isinstance(
+                payload.get("data"), dict
+            ) else {}
+            rows = payload.get("friends")
+            if rows is None:
+                rows = data.get("friends")
+            friend = next(
+                (
+                    row
+                    for row in (rows or [])
+                    if isinstance(row, dict)
+                    and str(row.get("agent_id") or "") == target_id
+                ),
+                None,
+            )
+            if friend is not None:
+                break
+            next_cursor = str(
+                data.get("next_cursor")
+                or data.get("nextCursor")
+                or payload.get("next_cursor")
+                or payload.get("nextCursor")
+                or ""
+            ).strip()
+            if not next_cursor:
+                break
+            if next_cursor in seen:
+                raise VerificationError(
+                    "friend readback pagination cursor repeated"
+                )
+            seen.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise VerificationError(
+                "friend readback pagination exceeded 20 pages"
+            )
         observed = {
             "agent_id": target_id,
             "relationship": "friend" if friend else "absent",

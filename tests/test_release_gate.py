@@ -47,7 +47,7 @@ def _responses(**overrides):
             "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
         ): [{
             "user": {"login": "review-bot"},
-            "state": "COMMENTED",
+            "state": "APPROVED",
         }],
         (
             "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
@@ -81,7 +81,7 @@ def test_release_gate_accepts_merged_reviewed_checked_main(monkeypatch):
     assert result["ok"] is True
     assert result["pr"] == 42
     assert result["required_checks"] == ["test"]
-    assert result["review_evidence"] == ["review:review-bot:COMMENTED"]
+    assert result["review_evidence"] == ["review:review-bot:APPROVED"]
 
 
 @pytest.mark.parametrize(
@@ -171,6 +171,39 @@ def test_release_gate_accepts_explicit_independent_attestation(monkeypatch):
 
     result = _gate(monkeypatch, responses).verify()
     assert result["review_evidence"] == ["attestation:review-bot"]
+
+
+def test_release_gate_rejects_generic_commented_review(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    responses = _responses()
+    responses[reviews_key] = [{
+        "user": {"login": "review-bot"},
+        "state": "COMMENTED",
+        "body": "Found a blocking defect.",
+    }]
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_requires_attestation_on_its_own_line(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "review-bot"},
+        "body": "This is not REVIEW-GATE: PASS because findings remain.",
+    }]
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
 
 
 def test_restart_runs_release_gate_before_touching_deploy_guard():

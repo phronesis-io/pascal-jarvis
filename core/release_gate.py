@@ -27,6 +27,13 @@ def _repo_name(remote: str) -> str:
     return match.group(1)
 
 
+def _has_pass_attestation(body: str) -> bool:
+    return any(
+        line.strip().upper() == "REVIEW-GATE: PASS"
+        for line in str(body or "").splitlines()
+    )
+
+
 class ReleaseGate:
     def __init__(
         self,
@@ -155,15 +162,23 @@ class ReleaseGate:
         for review in reviews if isinstance(reviews, list) else []:
             reviewer = str((review.get("user") or {}).get("login") or "")
             state = str(review.get("state") or "").upper()
-            if reviewer and reviewer != author and state in {"APPROVED", "COMMENTED"}:
+            body = str(review.get("body") or "")
+            if reviewer and reviewer != author and state == "APPROVED":
                 evidence.append(f"review:{reviewer}:{state}")
+            elif (
+                reviewer
+                and reviewer != author
+                and state == "COMMENTED"
+                and _has_pass_attestation(body)
+            ):
+                evidence.append(f"attestation:{reviewer}")
         for comment in comments if isinstance(comments, list) else []:
             reviewer = str((comment.get("user") or {}).get("login") or "")
             body = str(comment.get("body") or "").strip()
             if (
                 reviewer
                 and reviewer != author
-                and "REVIEW-GATE: PASS" in body.upper()
+                and _has_pass_attestation(body)
             ):
                 evidence.append(f"attestation:{reviewer}")
         if not evidence:

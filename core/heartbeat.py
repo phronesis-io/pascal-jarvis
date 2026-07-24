@@ -1034,7 +1034,11 @@ You have access to the user's memory below. Use it to personalize your responses
                         and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP2_BASE_URL")
                         and (use_backup or not backup_tried)
-                        and (model_problem or gate_state != "primary")):
+                        and (
+                            use_backup
+                            or model_problem
+                            or gate_state != "primary"
+                        )):
                     backup_tried = True
                     use_backup = True
                     _backup2_active = True
@@ -1323,8 +1327,8 @@ You have access to the user's memory below. Use it to personalize your responses
         for task in due_tasks:
             if task["pre"]:
                 data = self.run_script(task["pre"])
-                if not data:
-                    outcome = getattr(self, "_last_script_outcome", "ok")
+                outcome = getattr(self, "_last_script_outcome", "ok")
+                if outcome in {"timeout", "error", "nonzero"} or not data:
                     ts = TaskState.from_dict(state.get(task["name"], {}))
                     # Backdate against the effective interval (the due-check's
                     # chain — see _effective_interval). Unlisted tasks default
@@ -1383,25 +1387,39 @@ You have access to the user's memory below. Use it to personalize your responses
         tier2 = [t for t in runnable if t["name"] not in self.TIER0_TASKS]
         user_messages = []
         producing_tasks = []
+        tier0_failures = []
 
         for task in tier0:
             t0 = time.time()
             self._event("task_spawn", task=task["name"], tier=0)
             pre_data = task_data.get(task["name"], "")
+            tier0_outcome = "ok"
             if task["post"] and pre_data:
                 post_output = self.run_script(task["post"], stdin_data=pre_data)
-                if post_output:
+                tier0_outcome = getattr(self, "_last_script_outcome", "ok")
+                if post_output and tier0_outcome == "ok":
                     self._collect_output(task["name"], post_output,
                                          user_messages, producing_tasks)
-            # Update state — task ran successfully
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
-            ts.last_success = now
-            ts.last_status = "ok"
-            ts.circuit.record_success()
+            if tier0_outcome in {"timeout", "error", "nonzero"}:
+                ts.last_status = f"post_{tier0_outcome}"
+                ts.circuit.record_failure()
+                status = ts.last_status
+                tier0_failures.append(f"{task['name']}:{status}")
+            else:
+                ts.last_success = now
+                ts.last_status = "ok"
+                ts.circuit.record_success()
+                status = "ok"
             state[task["name"]] = ts.to_dict()
-            self._event("task_finish", task=task["name"], status="ok",
-                        duration_s=round(time.time() - t0, 2), tier=0)
+            self._event(
+                "task_finish",
+                task=task["name"],
+                status=status,
+                duration_s=round(time.time() - t0, 2),
+                tier=0,
+            )
 
         if tier0:
             self._log(f"Tier 0 direct: {[t['name'] for t in tier0]}")
@@ -1440,6 +1458,13 @@ You have access to the user's memory below. Use it to personalize your responses
                         pass
                 self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → delivered (no batch)")
                 return combined
+            if tier0_failures:
+                self._log(
+                    f"{self._beat_status(due_tasks, skipped, tier0, tasks)} "
+                    f"→ FAILED ({', '.join(tier0_failures)}) (no batch)",
+                    level="warn",
+                )
+                return ""
             self._log(f"{self._beat_status(due_tasks, skipped, tier0, tasks)} → OK (no batch)")
             return ""
 

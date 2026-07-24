@@ -33,6 +33,11 @@ def test_claim_checks_health_then_atomically_claims(tmp_path):
     detail = DelegationStore(root=tmp_path).get(result["delegation_id"])
     assert detail["source"] == "taskline"
     assert detail["links"][0]["entity_type"] == "taskline_task"
+    assert detail["expected_postcondition"] == {
+        "runtime_ok": True,
+        "components_ok": True,
+    }
+    assert detail["steps"][0]["kind"] == "runtime_deploy"
 
 
 def test_claim_fails_when_workspace_is_not_registered(tmp_path):
@@ -111,4 +116,62 @@ def test_unsafe_task_id_cannot_become_a_path(tmp_path):
     with pytest.raises(TasklineBridgeError, match="unsafe"):
         TasklineBridge(root=tmp_path).prepare_worktree(
             {"id": "../../secret", "title": "bad"}
+        )
+
+
+def test_existing_registered_worktree_repairs_missing_links(
+    tmp_path, monkeypatch
+):
+    calls = []
+    worktree_root = tmp_path / "worktrees"
+    path = worktree_root / "12345678"
+    path.mkdir(parents=True)
+    monkeypatch.setenv("JARVIS_WORKTREE_ROOT", str(worktree_root))
+    branch = "agent/fix-delivery-12345678"
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if command[:4] == ["git", "worktree", "list", "--porcelain"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"worktree {path}\nHEAD {'a' * 40}\n"
+                f"branch refs/heads/{branch}\n",
+                "",
+            )
+        if command[:3] == ["taskline", "task", "update"]:
+            return _result(command, {"id": "12345678-abcd"})
+        raise AssertionError(command)
+
+    result = TasklineBridge(root=tmp_path, runner=runner).prepare_worktree(
+        {"id": "12345678-abcd", "title": "Fix Delivery"},
+    )
+
+    assert result["created"] == "false"
+    detail = DelegationStore(root=tmp_path).list()[0]
+    links = DelegationStore(root=tmp_path).get(detail["id"])["links"]
+    assert {row["entity_type"] for row in links} == {
+        "taskline_task",
+        "workspace",
+        "git_branch",
+    }
+    assert not any(command[:3] == ["git", "worktree", "add"] for command in calls)
+
+
+def test_unregistered_existing_directory_is_rejected(tmp_path, monkeypatch):
+    worktree_root = tmp_path / "worktrees"
+    (worktree_root / "12345678").mkdir(parents=True)
+    monkeypatch.setenv("JARVIS_WORKTREE_ROOT", str(worktree_root))
+
+    def runner(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            f"worktree {tmp_path / 'other'}\nbranch refs/heads/other\n",
+            "",
+        )
+
+    with pytest.raises(TasklineBridgeError, match="not the expected"):
+        TasklineBridge(root=tmp_path, runner=runner).prepare_worktree(
+            {"id": "12345678-abcd", "title": "Fix Delivery"},
         )

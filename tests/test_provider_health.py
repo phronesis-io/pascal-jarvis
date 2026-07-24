@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 
 from core import provider_health as ph
 
@@ -115,6 +116,27 @@ def test_probe_all_persists_redacted_results(tmp_path):
     serialized = json.dumps(saved)
     assert "backup-secret-token" not in serialized
     assert "sk-super-secret-value" not in serialized
+
+
+def test_probe_all_runs_independent_claude_routes_concurrently(tmp_path):
+    _write_config(tmp_path)
+    rendezvous = threading.Barrier(2)
+
+    def runner(cmd, **kwargs):
+        rendezvous.wait(timeout=1)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}), stderr=""
+        )
+
+    state = ph.probe_all(
+        tmp_path,
+        runner=runner,
+        openai_caller=lambda *a, **k: {"output_text": ph.CANARY_MARKER},
+    )
+
+    rows = {row["id"]: row for row in state["providers"]}
+    assert rows["primary"]["status"] == "healthy"
+    assert rows["backup1"]["status"] == "healthy"
 
 
 def test_spend_limit_canary_trips_shared_provider_gate(tmp_path):

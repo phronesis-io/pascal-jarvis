@@ -362,7 +362,7 @@ class ActionProcessor:
             )
             sync_attention_item(detail, store=store, send=False)
         except Exception as exc:
-            return f"委托确认未生效：{exc}"
+            raise RuntimeError(f"委托确认未生效：{exc}") from exc
         return "已确认。系统会按同一契约执行并核验，不需要重复点击。"
 
     def _do_delegation_cancel(self, raw: str) -> str:
@@ -382,7 +382,7 @@ class ActionProcessor:
             )
             sync_attention_item(detail, store=store, send=False)
         except Exception as exc:
-            return f"委托取消未生效：{exc}"
+            raise RuntimeError(f"委托取消未生效：{exc}") from exc
         return "已取消这个委托。"
 
     def _do_iteration_approve(self, raw: str) -> str:
@@ -400,7 +400,7 @@ class ActionProcessor:
             )
             sync_proposal_item(proposal, store=store, send=False)
         except Exception as exc:
-            return f"改进项没有进入研发队列：{exc}"
+            raise RuntimeError(f"改进项没有进入研发队列：{exc}") from exc
         return f"已进入研发队列（Taskline {proposal['taskline_id'][:8]}）。"
 
     def _do_iteration_reject(self, raw: str) -> str:
@@ -419,7 +419,7 @@ class ActionProcessor:
             )
             sync_proposal_item(proposal, store=store, send=False)
         except Exception as exc:
-            return f"改进项没有关闭：{exc}"
+            raise RuntimeError(f"改进项没有关闭：{exc}") from exc
         return "已记录：这个改进项不进入研发队列。"
 
     # ── Heartbeat ──

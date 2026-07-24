@@ -9,6 +9,7 @@ and are never written to the state file or child-process argv.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -297,16 +298,25 @@ def probe_all(
 ) -> dict[str, Any]:
     base = _root(root)
     config = Config(base / "jarvis.yaml")
-    rows = [
-        probe_provider(
+    specs = provider_specs(config)
+
+    def probe(spec: dict[str, Any]) -> dict[str, Any]:
+        return probe_provider(
             spec,
             root=base,
             timeout=timeout,
             runner=runner,
             openai_caller=openai_caller,
         )
-        for spec in provider_specs(config)
-    ]
+
+    # Heartbeat gives deterministic pre-scripts a 60-second process budget.
+    # Probing independent providers concurrently keeps the total bounded by
+    # one provider timeout instead of multiplying it by the chain length.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(specs)),
+        thread_name_prefix="provider-canary",
+    ) as pool:
+        rows = list(pool.map(probe, specs))
     primary = next((row for row in rows if row["id"] == "primary"), None)
     if primary:
         try:

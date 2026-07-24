@@ -41,7 +41,7 @@ public-repository hygiene.
 When Taskline is available:
 
 ```bash
-./scripts/taskline.sh health
+./scripts/taskline.sh status
 ./scripts/taskline.sh task heartbeat <task-id> --lease 30m
 ```
 

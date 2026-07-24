@@ -47,7 +47,26 @@ def sync_attention_item(
     if existing and memorial.get_memorial(existing) is not None:
         return existing
 
-    if detail["status"] == "needs_user" and detail.get("target_id"):
+    if int(detail.get("risk_tier") or 0) >= 4:
+        options = [
+            {
+                "key": "cancel",
+                "label": "关闭委托",
+                "action": {
+                    "type": "delegation_cancel",
+                    "params": {
+                        "id": detail["id"],
+                        "version": str(detail["contract_version"]),
+                    },
+                },
+            }
+        ]
+        body = (
+            f"{detail['title']}\n\n"
+            "这是 R4 高风险事项，Jarvis 不会代为执行。请由你本人在权威系统"
+            "中完成；这个委托只能作为提醒保留或由你关闭。"
+        )
+    elif detail["status"] == "needs_user" and detail.get("target_id"):
         options = [
             {
                 "key": "confirm",
@@ -151,7 +170,13 @@ class DelegationReconciler:
         needs_user = 0
         errors: list[dict[str, str]] = []
         rows: list[dict[str, Any]] = []
-        for status in ("verifying", "awaiting_external", "blocked", "needs_user"):
+        for status in (
+            "needs_user",
+            "needs_clarification",
+            "verifying",
+            "awaiting_external",
+            "blocked",
+        ):
             remaining = limit - len(rows)
             if remaining <= 0:
                 break
@@ -160,7 +185,7 @@ class DelegationReconciler:
         for row in rows:
             scanned += 1
             detail = self.store.get(row["id"])
-            if detail["status"] == "needs_user":
+            if detail["status"] in {"needs_user", "needs_clarification"}:
                 sync_attention_item(detail, store=self.store, send=send_items)
                 needs_user += 1
                 continue

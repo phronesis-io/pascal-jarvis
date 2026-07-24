@@ -439,6 +439,42 @@ def test_heartbeat_claude_call_reaches_backup2_after_backup1(tmp_path, monkeypat
     assert runner.last_provider == "Claude backup2"
 
 
+def test_heartbeat_reaches_backup2_after_backup1_transport_error(
+    tmp_path, monkeypatch
+):
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.example")
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "backup1-model")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_MODEL", "backup2-model")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        token = (kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", "")
+        calls.append(token)
+        if token == "backup2-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        if token == "backup1-token":
+            return CompletedProcess(
+                cmd, 1, stdout="", stderr="connection reset by relay"
+            )
+        return CompletedProcess(
+            cmd, 1, stdout="You've hit your monthly spend limit", stderr=""
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert calls == ["", "backup1-token", "backup2-token"]
+
+
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
     from subprocess import CompletedProcess
     from core.heartbeat import HeartbeatRunner

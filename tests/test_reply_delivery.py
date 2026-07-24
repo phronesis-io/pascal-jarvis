@@ -102,6 +102,14 @@ def test_production_bot_cards_use_unified_delivery_sender():
     assert 'lark_send_card "$card_json"' not in BOT_SH
 
 
+def test_queued_cards_do_not_fall_back_to_duplicate_plain_text():
+    card_sender = _extract_fn("delivery_card_reliable")
+    notice_sender = _extract_fn("delivery_send_reliable")
+
+    assert "queued|attempting|delivered|read|acted|suppressed" in card_sender
+    assert "queued|attempting|delivered|read|acted|suppressed" in notice_sender
+
+
 def test_backoff_mirrors_heartbeat_send_retry_delays():
     """(2,5)s — same schedule as core/heartbeat_loop.py SEND_RETRY_DELAYS."""
     assert BOT_SH.count("for _delay in 2 5") == 2  # reply + send wrappers

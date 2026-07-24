@@ -24,6 +24,7 @@ from typing import Any, Callable
 PROPOSAL_STATES = {
     "pending",
     "approved",
+    "queueing",
     "queued",
     "shipped",
     "verified",
@@ -279,11 +280,16 @@ class IterationStore:
             existing = db.execute(
                 """
                 SELECT * FROM iteration_proposals
-                 WHERE signal_fingerprint=? AND status='pending'
+                 WHERE signal_fingerprint=?
+                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (signal_fingerprint,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and (
+                existing["status"] != "verified"
+                or float(signal["last_seen"] or 0)
+                <= float(existing["verified_at"] or 0)
+            ):
                 return self._decode_proposal(db, existing), False
             db.execute(
                 """
@@ -371,25 +377,35 @@ class IterationStore:
         with closing(self._connect()) as db, db:
             current = self._require_proposal(db, proposal_id)
             if current["status"] != "pending":
-                raise IterationError("only a pending proposal can be reviewed")
-            status = "approved" if approved else "rejected"
-            db.execute(
-                """
-                UPDATE iteration_proposals
-                   SET status=?,review_reason=?,reviewed_at=?,updated_at=?
-                 WHERE id=?
-                """,
-                (status, reason, now, now, proposal_id),
-            )
-            self._event(
-                db,
-                proposal_id,
-                f"proposal.{status}",
-                actor=actor,
-                from_status="pending",
-                to_status=status,
-                metadata={"reason": reason},
-            )
+                if approved and queue and current["status"] in {
+                    "approved",
+                    "queueing",
+                    "queued",
+                }:
+                    pass
+                elif not approved and current["status"] == "rejected":
+                    return self._decode_proposal(db, current)
+                else:
+                    raise IterationError("only a pending proposal can be reviewed")
+            else:
+                status = "approved" if approved else "rejected"
+                db.execute(
+                    """
+                    UPDATE iteration_proposals
+                       SET status=?,review_reason=?,reviewed_at=?,updated_at=?
+                     WHERE id=?
+                    """,
+                    (status, reason, now, now, proposal_id),
+                )
+                self._event(
+                    db,
+                    proposal_id,
+                    f"proposal.{status}",
+                    actor=actor,
+                    from_status="pending",
+                    to_status=status,
+                    metadata={"reason": reason},
+                )
         if approved and queue:
             return self.queue(proposal_id)
         return self.get(proposal_id)
@@ -404,9 +420,46 @@ class IterationStore:
             )
 
     def queue(self, proposal_id: str) -> dict[str, Any]:
+        now = self.now()
+        with closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                current = self._require_proposal(db, proposal_id)
+                if current["status"] == "queued":
+                    db.commit()
+                    return self._decode_proposal(db, current)
+                if current["status"] == "approved":
+                    db.execute(
+                        """
+                        UPDATE iteration_proposals
+                           SET status='queueing',updated_at=? WHERE id=?
+                        """,
+                        (now, proposal_id),
+                    )
+                    self._event(
+                        db,
+                        proposal_id,
+                        "proposal.queueing",
+                        actor="taskline",
+                        from_status="approved",
+                        to_status="queueing",
+                    )
+                elif current["status"] == "queueing":
+                    if now - float(current["updated_at"] or 0) < 60:
+                        raise IterationError("Taskline enqueue is already in progress")
+                    db.execute(
+                        "UPDATE iteration_proposals SET updated_at=? WHERE id=?",
+                        (now, proposal_id),
+                    )
+                else:
+                    raise IterationError(
+                        "only an approved proposal can enter Taskline"
+                    )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
         detail = self.get(proposal_id)
-        if detail["status"] != "approved":
-            raise IterationError("only an approved proposal can enter Taskline")
         description = "\n\n".join(
             (
                 f"Problem: {detail['problem']}",
@@ -418,7 +471,7 @@ class IterationStore:
                 f"Jarvis proposal: {detail['id']}",
             )
         )
-        command = [
+        create_command = [
             "taskline",
             "task",
             "create",
@@ -437,29 +490,85 @@ class IterationStore:
             "--label",
             detail["id"],
         ]
+        lookup_command = [
+            "taskline",
+            "task",
+            "list",
+            "--project",
+            "pascal-jarvis",
+            "--label",
+            detail["id"],
+        ]
         try:
             result = subprocess.run(
-                command,
+                lookup_command,
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as exc:
+            self._reset_queueing(proposal_id)
             raise IterationError(f"Taskline queue failed: {exc}") from exc
         if result.returncode != 0:
+            self._reset_queueing(proposal_id)
             raise IterationError(
                 (result.stderr or result.stdout or "Taskline queue failed").strip()[:300]
             )
         try:
-            task = json.loads(result.stdout)
-            task_id = str(task["id"])
+            listed = json.loads(result.stdout or "{}")
+            tasks = listed.get("tasks") or []
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            self._reset_queueing(proposal_id)
             raise IterationError("Taskline returned invalid task receipt") from exc
+        if not isinstance(tasks, list):
+            self._reset_queueing(proposal_id)
+            raise IterationError("Taskline returned invalid task list")
+        if len(tasks) > 1:
+            raise IterationError("Taskline contains duplicate proposal tasks")
+        if tasks:
+            if not isinstance(tasks[0], dict):
+                self._reset_queueing(proposal_id)
+                raise IterationError("Taskline returned invalid task receipt")
+            task_id = str(tasks[0].get("id") or "")
+        else:
+            try:
+                result = subprocess.run(
+                    create_command,
+                    cwd=str(self.root),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except OSError as exc:
+                self._reset_queueing(proposal_id)
+                raise IterationError(f"Taskline queue failed: {exc}") from exc
+            except subprocess.SubprocessError as exc:
+                # A timeout is ambiguous: the server may have committed the
+                # labeled task. Keep queueing so recovery performs readback.
+                raise IterationError(f"Taskline queue outcome is unknown: {exc}") from exc
+            if result.returncode != 0:
+                self._reset_queueing(proposal_id)
+                raise IterationError(
+                    (
+                        result.stderr
+                        or result.stdout
+                        or "Taskline queue failed"
+                    ).strip()[:300]
+                )
+            try:
+                task = json.loads(result.stdout)
+                task_id = str(task["id"])
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                raise IterationError(
+                    "Taskline returned invalid task receipt"
+                ) from exc
+        if not task_id:
+            raise IterationError("Taskline task receipt has no id")
         now = self.now()
         with closing(self._connect()) as db, db:
             current = self._require_proposal(db, proposal_id)
-            if current["status"] != "approved":
+            if current["status"] != "queueing":
                 raise IterationError("proposal changed before Taskline receipt")
             db.execute(
                 """
@@ -474,11 +583,21 @@ class IterationStore:
                 proposal_id,
                 "proposal.queued",
                 actor="taskline",
-                from_status="approved",
+                from_status="queueing",
                 to_status="queued",
                 metadata={"taskline_id": task_id},
             )
         return self.get(proposal_id)
+
+    def _reset_queueing(self, proposal_id: str) -> None:
+        with closing(self._connect()) as db, db:
+            db.execute(
+                """
+                UPDATE iteration_proposals SET status='approved',updated_at=?
+                 WHERE id=? AND status='queueing'
+                """,
+                (self.now(), proposal_id),
+            )
 
     def mark_shipped(
         self, proposal_id: str, *, release_sha: str, actor: str
@@ -761,7 +880,7 @@ class DailyObserver:
         if create_proposals:
             for signal in signals:
                 proposal = self.store.propose_from_signal(signal)
-                if proposal:
+                if proposal and proposal[1]:
                     proposals.append(proposal[0])
                     sync_proposal_item(
                         proposal[0], store=self.store, send=True

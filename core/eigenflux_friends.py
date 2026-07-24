@@ -35,31 +35,62 @@ def _payload_list(result: subprocess.CompletedProcess, key: str) -> list[dict]:
     return [row for row in (value or []) if isinstance(row, dict)]
 
 
+def _next_cursor(result: subprocess.CompletedProcess) -> str:
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return str(
+        data.get("next_cursor")
+        or data.get("nextCursor")
+        or payload.get("next_cursor")
+        or payload.get("nextCursor")
+        or ""
+    ).strip()
+
+
 def _friend_by_id(
     agent_id: str,
     runner,
 ) -> dict | None:
-    result = runner([
-        "eigenflux",
-        "relation",
-        "friends",
-        "--limit",
-        "100",
-        "-f",
-        "json",
-        "--no-interactive",
-    ])
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "friend readback failed").strip()
-        raise RuntimeError(detail[:300])
-    return next(
-        (
-            row
-            for row in _payload_list(result, "friends")
-            if str(row.get("agent_id") or "") == agent_id
-        ),
-        None,
-    )
+    cursor = ""
+    seen: set[str] = set()
+    for _ in range(20):
+        command = [
+            "eigenflux",
+            "relation",
+            "friends",
+            "--limit",
+            "100",
+        ]
+        if cursor:
+            command.extend(["--cursor", cursor])
+        command.extend(["-f", "json", "--no-interactive"])
+        result = runner(command)
+        if result.returncode != 0:
+            detail = (
+                result.stderr or result.stdout or "friend readback failed"
+            ).strip()
+            raise RuntimeError(detail[:300])
+        match = next(
+            (
+                row
+                for row in _payload_list(result, "friends")
+                if str(row.get("agent_id") or "") == agent_id
+            ),
+            None,
+        )
+        if match is not None:
+            return match
+        next_cursor = _next_cursor(result)
+        if not next_cursor:
+            return None
+        if next_cursor in seen:
+            raise RuntimeError("friend readback pagination cursor repeated")
+        seen.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("friend readback pagination exceeded 20 pages")
 
 
 def execute_friend_action(

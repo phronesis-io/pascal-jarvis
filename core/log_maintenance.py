@@ -88,6 +88,27 @@ def _shift_generations(path: Path, keep: int) -> None:
     path.touch()
 
 
+def _restore_loaded(runner: Runner, domain: str, target: str, plist: Path) -> str:
+    """Best-effort bootstrap after a bootout attempt; return a recovery error."""
+    bootstrap_error = ""
+    try:
+        started = _run(runner, ["launchctl", "bootstrap", domain, str(plist)])
+        if started.returncode != 0:
+            bootstrap_error = (
+                started.stderr or started.stdout or "bootstrap failed"
+            ).strip()[:240]
+    except (OSError, subprocess.SubprocessError) as exc:
+        bootstrap_error = str(exc)[:240]
+    try:
+        loaded = _run(runner, ["launchctl", "print", target])
+        if loaded.returncode == 0:
+            return ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        if not bootstrap_error:
+            bootstrap_error = str(exc)[:240]
+    return bootstrap_error or "service is not loaded after recovery"
+
+
 def rotate_managed_log(
     spec: ManagedLog,
     *,
@@ -125,14 +146,35 @@ def rotate_managed_log(
             "sizes": sizes,
         }
 
-    stopped = _run(runner, ["launchctl", "bootout", target])
-    if stopped.returncode != 0:
-        detail = (stopped.stderr or stopped.stdout or "bootout failed").strip()
+    try:
+        stopped = _run(runner, ["launchctl", "bootout", target])
+    except (OSError, subprocess.SubprocessError) as exc:
+        recovery_error = _restore_loaded(runner, domain, target, spec.plist)
         return {
             "label": spec.label,
-            "status": "stop_failed",
+            "status": (
+                "stop_failed_recovered"
+                if not recovery_error
+                else "stop_failed_recovery_failed"
+            ),
+            "ok": False,
+            "detail": str(exc)[:240],
+            "recovery_error": recovery_error,
+            "sizes": sizes,
+        }
+    if stopped.returncode != 0:
+        detail = (stopped.stderr or stopped.stdout or "bootout failed").strip()
+        recovery_error = _restore_loaded(runner, domain, target, spec.plist)
+        return {
+            "label": spec.label,
+            "status": (
+                "stop_failed_recovered"
+                if not recovery_error
+                else "stop_failed_recovery_failed"
+            ),
             "ok": False,
             "detail": detail[:240],
+            "recovery_error": recovery_error,
             "sizes": sizes,
         }
 
@@ -143,17 +185,13 @@ def rotate_managed_log(
     except OSError as exc:
         rotation_error = str(exc)
 
-    started = _run(
-        runner,
-        ["launchctl", "bootstrap", domain, str(spec.plist)],
-    )
-    if started.returncode != 0:
-        detail = (started.stderr or started.stdout or "bootstrap failed").strip()
+    recovery_error = _restore_loaded(runner, domain, target, spec.plist)
+    if recovery_error:
         return {
             "label": spec.label,
             "status": "restart_failed",
             "ok": False,
-            "detail": detail[:240],
+            "detail": recovery_error,
             "rotation_error": rotation_error,
             "sizes": sizes,
         }

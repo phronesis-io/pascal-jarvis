@@ -38,6 +38,22 @@ def _make_processor(tmp_path) -> ActionProcessor:
     )
 
 
+def test_failed_delegation_card_action_raises_instead_of_claiming_success(tmp_path):
+    processor = _make_processor(tmp_path)
+
+    with pytest.raises(RuntimeError, match="未生效"):
+        processor._do_delegation_confirm(
+            "id=missing|version=1|principal=owner"
+        )
+
+
+def test_failed_iteration_card_action_raises_instead_of_claiming_success(tmp_path):
+    processor = _make_processor(tmp_path)
+
+    with pytest.raises(RuntimeError, match="没有进入研发队列"):
+        processor._do_iteration_approve("id=missing")
+
+
 def test_no_actions_passthrough(tmp_path):
     ap = _make_processor(tmp_path)
     reply = "Hello, this is a normal reply."

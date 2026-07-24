@@ -140,6 +140,32 @@ def test_eigenflux_friend_verifier_reads_relationship(tmp_path):
     assert result.resource_locator == "eigenflux-friend:agent-1"
 
 
+def test_eigenflux_friend_verifier_paginates_relationships(tmp_path):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if "--cursor" not in command:
+            payload = {"code": 0, "friends": [], "next_cursor": "next"}
+        else:
+            payload = {
+                "code": 0,
+                "friends": [{"agent_id": "agent-2", "agent_name": "Friend"}],
+            }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    result = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "db", runner=runner
+    ).verify(
+        "eigenflux_friend",
+        {"agent_id": "agent-2", "relationship": "friend"},
+        {"agent_id": "agent-2"},
+    )
+
+    assert result.matched is True
+    assert calls[1][calls[1].index("--cursor") + 1] == "next"
+
+
 def test_eigenflux_friend_absence_is_mismatch(tmp_path):
     def runner(command, **kwargs):
         return subprocess.CompletedProcess(

@@ -15,6 +15,35 @@ def _processor(tmp_path):
     )
 
 
+def test_friend_readback_paginates_until_target():
+    calls = []
+
+    def runner(command):
+        calls.append(command)
+        cursor = (
+            command[command.index("--cursor") + 1]
+            if "--cursor" in command
+            else ""
+        )
+        payload = (
+            {"friends": [], "next_cursor": "page-2"}
+            if not cursor
+            else {
+                "friends": [
+                    {"agent_id": "target", "agent_name": "Target Agent"}
+                ]
+            }
+        )
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        )
+
+    friend = eigenflux_friends._friend_by_id("target", runner)
+
+    assert friend["agent_name"] == "Target Agent"
+    assert calls[1][calls[1].index("--cursor") + 1] == "page-2"
+
+
 def test_card_action_accepts_and_sends_fixed_welcome(monkeypatch, tmp_path):
     calls = []
     api_calls = []

@@ -188,3 +188,36 @@ def test_reconciler_releases_only_expired_active_lease(tmp_path):
     detail = store.get(delegation["id"])
     assert detail["status"] == "bound"
     assert detail["steps"][0]["status"] == "pending"
+
+
+def test_reconciler_prioritizes_user_attention_before_verification(
+    tmp_path, monkeypatch
+):
+    store = DelegationStore(root=tmp_path, db_path=tmp_path / "jarvis.db")
+    attention, _ = store.create(
+        principal_id="owner",
+        source="test",
+        source_ref="attention-first",
+        title="需要用户确认",
+        operation="message_send",
+        risk_tier=3,
+        target_type="agent",
+        target_id="agent-1",
+        authority="message_service",
+        verification_policy={"verifier": "test_readback"},
+    )
+    called = []
+    monkeypatch.setattr(
+        "core.delegation_reconcile.sync_attention_item",
+        lambda detail, **_kwargs: called.append(detail["id"]) or "item-1",
+    )
+    registry = _Registry()
+
+    result = DelegationReconciler(store=store, registry=registry).run(
+        limit=1, send_items=False
+    )
+
+    assert result["scanned"] == 1
+    assert result["needs_user"] == 1
+    assert called == [attention["id"]]
+    assert registry.calls == 0

@@ -136,8 +136,88 @@ def test_approved_proposal_enters_external_taskline(monkeypatch, tmp_path):
     queued = store.review(proposal["id"], approved=True, actor="owner")
     assert queued["status"] == "queued"
     assert queued["taskline_id"] == "task-123"
-    assert commands[0][:4] == ["taskline", "task", "create", "--project"]
-    assert "l3-proposal" in commands[0]
+    assert commands[0][:4] == ["taskline", "task", "list", "--project"]
+    assert commands[1][:4] == ["taskline", "task", "create", "--project"]
+    assert "l3-proposal" in commands[1]
+
+
+def test_ambiguous_taskline_timeout_recovers_by_label_without_duplicate(
+    monkeypatch, tmp_path
+):
+    clock = [1_000.0]
+    store = IterationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: clock[0],
+    )
+    proposal = _proposal(store, _signal(store))
+    calls = []
+
+    def uncertain(command, **kwargs):
+        calls.append(command)
+        if command[1:3] == ["task", "list"]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"tasks": None}), ""
+            )
+        raise subprocess.TimeoutExpired(command, 30)
+
+    monkeypatch.setattr(subprocess, "run", uncertain)
+    with pytest.raises(IterationError, match="outcome is unknown"):
+        store.review(proposal["id"], approved=True, actor="owner")
+    assert store.get(proposal["id"])["status"] == "queueing"
+
+    clock[0] += 61
+
+    def recovered(command, **kwargs):
+        calls.append(command)
+        assert command[1:3] == ["task", "list"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"tasks": [{"id": "task-existing"}]}),
+            "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", recovered)
+    queued = store.review(proposal["id"], approved=True, actor="owner")
+
+    assert queued["status"] == "queued"
+    assert queued["taskline_id"] == "task-existing"
+
+
+def test_taskline_lookup_rejects_malformed_task_rows(monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    proposal = _proposal(store, _signal(store))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps({"tasks": ["not-an-object"]}), ""
+        ),
+    )
+
+    with pytest.raises(IterationError, match="invalid task receipt"):
+        store.review(proposal["id"], approved=True, actor="owner")
+
+    assert store.get(proposal["id"])["status"] == "approved"
+
+
+def test_rejected_signal_does_not_create_a_daily_repeat_proposal(tmp_path):
+    store = _store(tmp_path)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    store.review(
+        proposal["id"],
+        approved=False,
+        actor="owner",
+        reason="not valuable",
+        queue=False,
+    )
+
+    repeated = _signal(store, severity="critical")
+
+    assert store.propose_from_signal(repeated)[1] is False
+    assert len(store.list()) == 1
 
 
 def test_post_release_outcome_can_close_or_reopen_loop(monkeypatch, tmp_path):

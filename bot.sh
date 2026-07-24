@@ -497,7 +497,10 @@ delivery_send_reliable() {
   _state=$(JV_DELIVERY_JSON="$_json" python3 -c \
     'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("state",""))' \
     2>>"$LOG_FILE") || return 1
-  [ "$_state" = "delivered" ]
+  case "$_state" in
+    queued|attempting|delivered|read|acted|suppressed) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 delivery_card_reliable() {
@@ -508,7 +511,10 @@ delivery_card_reliable() {
   _state=$(JV_DELIVERY_JSON="$_json" python3 -c \
     'import json,os; print(json.loads(os.environ["JV_DELIVERY_JSON"]).get("state",""))' \
     2>>"$LOG_FILE") || return 1
-  [ "$_state" = "delivered" ]
+  case "$_state" in
+    queued|attempting|delivered|read|acted|suppressed) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Thin wrapper around the unified delivery sender, with a local log line.

@@ -409,8 +409,10 @@ class DelegationStore:
         status = "captured"
         if target_id and authority and policy:
             status = "bound"
-        if risk_tier >= 3 and not authorized:
+        if risk_tier == 4 or (risk_tier >= 3 and not authorized):
             status = "needs_user"
+        if risk_tier == 4:
+            authorized = False
         if capture_mode == "shadow":
             status = "captured"
         now = self.now()
@@ -590,12 +592,15 @@ class DelegationStore:
             self._version(current, expected_version)
             if current["status"] in TERMINAL_STATUSES:
                 raise DelegationConflict("terminal delegation cannot be rebound")
+            risk_tier = int(current["risk_tier"])
+            approved = bool(authorized or current["authorized"])
             status = (
                 "needs_user"
-                if int(current["risk_tier"]) >= 3
-                and not (authorized or bool(current["authorized"]))
+                if risk_tier == 4 or (risk_tier >= 3 and not approved)
                 else "bound"
             )
+            if risk_tier == 4:
+                approved = False
             key = self._action_key(
                 current["principal_id"],
                 current["operation"],
@@ -621,7 +626,7 @@ class DelegationStore:
                     authority,
                     _json(policy),
                     key,
-                    int(authorized or bool(current["authorized"])),
+                    int(approved),
                     status,
                     "user" if status == "needs_user" else "",
                     now,
@@ -691,16 +696,27 @@ class DelegationStore:
                 """,
                 (now, now, delegation_id, expected_version),
             )
+            status = (
+                "needs_user" if int(current["risk_tier"]) >= 3 else "bound"
+            )
             db.execute(
                 """
                 UPDATE delegations
                    SET contract_version=?,target_id=?,
                        expected_postcondition_json=?,idempotency_key=?,
-                       status='bound',waiting_on='',completed_at=NULL,
+                       status=?,authorized=0,waiting_on='',completed_at=NULL,
                        verified_at=NULL,updated_at=?
                  WHERE id=?
                 """,
-                (new_version, new_target, _json(expected), key, now, delegation_id),
+                (
+                    new_version,
+                    new_target,
+                    _json(expected),
+                    key,
+                    status,
+                    now,
+                    delegation_id,
+                ),
             )
             self._event(
                 db,
@@ -710,7 +726,7 @@ class DelegationStore:
                 actor_type="principal",
                 actor_id=actor_id,
                 from_status=current["status"],
-                to_status="bound",
+                to_status=status,
                 metadata={"previous_version": expected_version},
             )
             result = self._require(db, delegation_id)
@@ -741,6 +757,8 @@ class DelegationStore:
             self._version(current, expected_version)
             if current["status"] in TERMINAL_STATUSES:
                 raise DelegationConflict("cannot add a step to a terminal delegation")
+            if current["capture_mode"] == "shadow":
+                raise DelegationConflict("shadow delegation cannot have executable steps")
             key = hashlib.sha256(
                 f"{current['idempotency_key']}\0{sequence}\0{kind}".encode("utf-8")
             ).hexdigest()
@@ -792,12 +810,25 @@ class DelegationStore:
             delegation = self._require(db, delegation_id)
             self._version(delegation, expected_version)
             if delegation["status"] in TERMINAL_STATUSES | {
+                "captured",
                 "needs_clarification",
                 "needs_user",
             }:
                 raise DelegationConflict(
                     f"delegation status {delegation['status']} is not executable"
                 )
+            if delegation["capture_mode"] == "shadow":
+                raise DelegationConflict("shadow delegation is not executable")
+            if int(delegation["risk_tier"]) == 4:
+                raise DelegationConflict("R4 delegation must remain human-operated")
+            if int(delegation["risk_tier"]) >= 3 and not delegation["authorized"]:
+                raise DelegationConflict("delegation requires principal approval")
+            if (
+                not delegation["target_id"]
+                or not delegation["authority"]
+                or not json.loads(delegation["verification_policy_json"] or "{}")
+            ):
+                raise DelegationConflict("delegation contract is not bound")
             step = self._require_step(db, delegation_id, step_id, expected_version)
             if step["status"] == "completed":
                 raise DelegationConflict("step is already complete")
@@ -1238,6 +1269,8 @@ class DelegationStore:
             self._version(current, expected_version)
             if current["principal_id"] != principal_id:
                 raise DelegationConflict("principal cannot authorize this delegation")
+            if int(current["risk_tier"]) == 4:
+                raise DelegationConflict("R4 delegation must remain human-operated")
             if current["status"] not in {"needs_user", "needs_clarification", "captured"}:
                 raise DelegationConflict(
                     f"status {current['status']} does not need confirmation"

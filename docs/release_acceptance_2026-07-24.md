@@ -1,6 +1,6 @@
 # Release Acceptance Ledger - 2026-07-24
 
-- Status: Implementation complete; release evidence enforced externally
+- Status: Implementation and local verification complete; release in progress
 - Scope: the two supplied review documents, Verified Delegation, provider
   fallback reliability, and L1/L2/L3 engineering loops.
 - Rule: implementation, deterministic test, and production evidence are
@@ -54,7 +54,34 @@
 | 15 | Copy-truncate could lose active log writes | Stop writer, rotate, restart same launchd plist | log-maintenance tests |
 | 16 | Delivery update fields accepted arbitrary SQL names | Explicit allowlist | delivery state tests |
 
-## 4. Engineering Loops
+## 4. Independent Review Remediation
+
+An independent Codex review of the complete `main...feature` diff found 15
+blocking or material edge cases. All 15 were fixed before release:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 1 | R4 Delegations could become executable | R4 is permanently human-operated; create, bind, confirm, claim, and Item-action tests |
+| 2 | A revised R3 contract retained old approval | Revision clears authorization and requires fresh approval; revision tests |
+| 3 | Captured, shadow, or unbound rows could claim steps | Add-step/claim guards require a bound executable contract; lifecycle tests |
+| 4 | Failed Item actions looked successful | Delegation and iteration actions now raise on failure; action tests |
+| 5 | Non-zero scripts with JSON output looked healthy | Pre/post outcome is checked separately from stdout; heartbeat tests |
+| 6 | Backup 1 transport errors skipped Backup 2 | Every failed Backup 1 route may continue to enabled Backup 2; fallback tests |
+| 7 | L3 Taskline enqueue could duplicate after a crash | Transactional `queueing` reservation plus label read-back recovery; iteration tests |
+| 8 | Repeated rejected signals recreated proposals | Latest unresolved/rejected proposal deduplicates until new verified evidence; iteration tests |
+| 9 | Queued cards fell back to duplicate plain text | Durable accepted states suppress transport fallback; reply-delivery tests |
+| 10 | Taskline's completion contract could not verify | Contract now uses runtime and component truth plus a runtime-deploy step; bridge/verifier tests |
+| 11 | Existing worktree paths bypassed reconciliation | Git worktree/branch ownership is verified and links are repaired; bridge tests |
+| 12 | Friend read-back stopped at the first page | Bounded cursor pagination in action and verifier paths; friend tests |
+| 13 | Sequential provider probes exceeded heartbeat budget | Providers are probed concurrently within one timeout window; provider tests |
+| 14 | Log rotation failure could leave launchd stopped | Every stop-path attempts restore and authoritative status read-back; maintenance tests |
+| 15 | Background verification could starve user decisions | Attention states are scanned before verification states; reconciler tests |
+
+The review gate itself was also hardened: generic `COMMENTED` reviews no longer
+count as approval, and explicit attestations must contain `REVIEW-GATE: PASS`
+on its own line.
+
+## 5. Engineering Loops
 
 | Layer | Contract | Implementation | Exit evidence |
 |---|---|---|---|
@@ -62,7 +89,7 @@
 | L2 | Agents consume a dependency queue without duplicate ownership | external Taskline service, wrapper, component check, bridge, claims, leases, worktrees, stop reasons | Taskline bridge tests and this release task |
 | L3 | Real feedback creates only worthwhile accepted work | signal/proposal store, dedup, human acceptance, Taskline enqueue, post-release observation | iteration-loop tests and observation records |
 
-## 5. Provider Chain
+## 6. Provider Chain
 
 | Position | Contract | Current code status |
 |---|---|---|
@@ -75,7 +102,7 @@ Canary state stores only provider labels, model labels, timestamps, latency, and
 sanitized categories. Tokens, authorization headers, and private response
 content are neither persisted nor placed in process arguments.
 
-## 6. Deliberate Non-Goals
+## 7. Deliberate Non-Goals
 
 The following are decisions, not unfinished promises:
 
@@ -86,11 +113,11 @@ The following are decisions, not unfinished promises:
 - enabling relay backup 2 without an owner-provided independent credential;
 - treating Taskline engineering tasks as personal Intents.
 
-## 7. Required Release Evidence
+## 8. Required Release Evidence
 
 Each production release must carry:
 
-- full local test result;
+- full local test result (`1969 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

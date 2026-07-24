@@ -107,6 +107,7 @@ class TasklineBridge:
         if not task_id:
             raise TasklineBridgeError("Taskline task has no id")
         store = DelegationStore(root=self.root)
+        expected = {"runtime_ok": True, "components_ok": True}
         delegation, _ = store.create(
             principal_id="owner",
             source="taskline",
@@ -117,20 +118,34 @@ class TasklineBridge:
             target_type="repository",
             target_id=self.root.name,
             target_label=self.root.name,
-            expected_postcondition={
-                "taskline_id": task_id,
-                "merged": True,
-                "deployed": True,
-            },
-            authority="github_release_gate",
+            expected_postcondition=expected,
+            authority="jarvis_runtime",
             verification_policy={
                 "verifier": "runtime_deploy",
                 "taskline_project": self.project,
+                "taskline_id": task_id,
             },
             privacy_class="internal",
             capture_mode="explicit",
             authorized=True,
         )
+        detail = store.get(delegation["id"])
+        if detail["expected_postcondition"] != expected:
+            delegation = store.revise_contract(
+                delegation["id"],
+                expected_version=detail["contract_version"],
+                expected_postcondition=expected,
+                actor_id="taskline-bridge",
+            )
+            detail = store.get(delegation["id"])
+        if not detail["steps"]:
+            store.add_step(
+                delegation["id"],
+                expected_version=int(delegation["contract_version"]),
+                sequence=1,
+                kind="runtime_deploy",
+                executor="release",
+            )
         store.link(
             delegation["id"],
             "taskline_task",
@@ -224,32 +239,56 @@ class TasklineBridge:
         branch = f"agent/{self._slug(title)}-{task_id[:8]}"
         path = (self.worktree_root / task_id[:8]).resolve()
         self.worktree_root.mkdir(parents=True, exist_ok=True)
+        created = False
         if path.exists():
-            return {"path": str(path), "branch": branch, "created": "false"}
-
-        branch_exists = self.runner(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).returncode == 0
-        command = ["git", "worktree", "add"]
-        if branch_exists:
-            command.extend([str(path), branch])
-        else:
-            command.extend(["-b", branch, str(path), base])
-        result = self.runner(
-            command,
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            raise TasklineBridgeError(
-                (result.stderr or result.stdout or "worktree setup failed").strip()[:500]
+            result = self.runner(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
+            if result.returncode != 0:
+                raise TasklineBridgeError("cannot inspect existing worktrees")
+            entries = result.stdout.split("\n\n")
+            expected_branch = f"branch refs/heads/{branch}"
+            registered = any(
+                f"worktree {path}" in entry and expected_branch in entry
+                for entry in entries
+            )
+            if not registered:
+                raise TasklineBridgeError(
+                    "existing workspace is not the expected registered worktree"
+                )
+        else:
+            branch_exists = self.runner(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).returncode == 0
+            command = ["git", "worktree", "add"]
+            if branch_exists:
+                command.extend([str(path), branch])
+            else:
+                command.extend(["-b", branch, str(path), base])
+            result = self.runner(
+                command,
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                raise TasklineBridgeError(
+                    (
+                        result.stderr
+                        or result.stdout
+                        or "worktree setup failed"
+                    ).strip()[:500]
+                )
+            created = True
         self._run(
             [
                 "taskline",
@@ -265,7 +304,11 @@ class TasklineBridge:
             workspace=str(path),
             branch=branch,
         )
-        return {"path": str(path), "branch": branch, "created": "true"}
+        return {
+            "path": str(path),
+            "branch": branch,
+            "created": "true" if created else "false",
+        }
 
     def queue_state(self) -> dict[str, Any]:
         self.status()
