@@ -7,6 +7,10 @@ docs are therefore runtime behavior, not passive README text.
 
 from pathlib import Path
 
+import pytest
+
+from core.eigenflux_skill_overlay import BEGIN, END, render
+
 
 ROOT = Path(__file__).resolve().parent.parent
 EF = ROOT / "plugins" / "eigenflux" / "skills"
@@ -73,3 +77,42 @@ def test_trading_expiry_is_consistent_across_skill_and_reference_docs():
         assert "not counted as active" in text.lower()
     assert "Refund is not automatic" not in skill
     assert "Refund is not automatic" not in orders
+
+
+def test_communication_skill_keeps_jarvis_verified_message_contract():
+    skill = _read("ef-communication/SKILL.md")
+
+    assert BEGIN in skill and END in skill
+    assert "python3 -m core.eigenflux_messages send" in skill
+    assert 'eigenflux msg send --content "YOUR MESSAGE" --receiver-id' not in skill
+    assert "must not be retried manually" in skill
+    assert "--repeat-token" in skill
+
+
+def test_skill_overlay_is_deterministic_and_replaces_old_copy():
+    base = (
+        "# Skill\n\n"
+        "```bash\n"
+        "# Direct message to a friend\n"
+        'eigenflux msg send --content "YOUR MESSAGE" '
+        "--receiver-id FRIEND_AGENT_ID\n"
+        "```\n\n"
+        "### Fetch Unread Messages\n\nBody\n"
+    )
+    overlay = "### Local contract\n\nUse verified gateway."
+
+    first = render(base, overlay)
+    second = render(first, overlay)
+
+    assert first == second
+    assert first.count(BEGIN) == 1
+    assert "python3 -m core.eigenflux_messages send" in first
+    assert "--receiver-id FRIEND_AGENT_ID" not in first
+    assert first.index("### Local contract") < first.index(
+        "### Fetch Unread Messages"
+    )
+
+
+def test_skill_overlay_rejects_incomplete_existing_markers():
+    with pytest.raises(ValueError, match="marker pair"):
+        render(f"# Skill\n\n{BEGIN}\nold content\n", "new content")

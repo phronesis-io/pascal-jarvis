@@ -205,6 +205,7 @@ formal findings and one additional reproduced idempotency gap were closed:
 | 89 | L3 could verify a release from evidence collected before deployment | Source coverage now carries an observation timestamp and must be strictly newer than `shipped_at`; same-pass and stale-audit evidence is deferred; post-release observation regressions |
 | 90 | One deferred authority error caused the global reconciliation task to trip its circuit | Item errors stay visible in structured output while the pre-script exits successfully; only an unhandled process-level failure makes the task nonzero; scheduler regression |
 | 91 | A stale uncertain EigenFlux message automatically replayed the write | Existing `attempting` or `verifying` actions only re-read authority and never resend; a new external action requires an explicit repeat token; stale-idempotency regression |
+| 92 | EigenFlux preinstall overwrote Jarvis's verified-send safety contract with an upstream raw-ID example | The tracked overlay is deterministically composed after every upstream sync, replaces the unsafe direct-send example, fails closed when missing or malformed, and is checked against the live skill; overlay and skill-contract regressions |
 
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
@@ -246,7 +247,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2063 passed` for this candidate);
+- full local test result (`2066 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

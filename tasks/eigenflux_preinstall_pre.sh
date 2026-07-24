@@ -14,9 +14,9 @@
 #   1. Freshen the two source repos (bounded git fetch+ff; repos-sync owns the
 #      full pull, this is only a top-up — failure is tolerated).
 #   2. SKILL SYNC: mirror eigenflux/skills (main) -> plugins/eigenflux/skills
-#      (jarvis-owned real files), byte-for-byte, add+update. Preserves jarvis-local
-#      skills (frontmatter `jarvis-local: true`, e.g. ef-localdev). NEVER deletes:
-#      upstream-removed files/skills are flagged for review.
+#      (jarvis-owned real files), add+update, then apply reviewed local overlays.
+#      Preserves jarvis-local skills (frontmatter `jarvis-local: true`, e.g.
+#      ef-localdev). NEVER deletes: upstream-removed files/skills are flagged.
 #   3. CLI: compare installed vs latest; if behind, launch a detached
 #      test-before-swap upgrade (scripts/eigenflux_cli_upgrade.sh).
 #   4. PARITY DRIFT: diff watched upstream paths since the last stored commit —
@@ -25,7 +25,7 @@
 #      types / changed flags are surfaced and appended to a durable review backlog
 #      (eigenflux/parity_todo.md). openclaw-eigenflux/src is intentionally excluded.
 #   5. VERIFY ("测通"): eigenflux pytest suite, live load_ef_skills(), CLI smoke,
-#      auth probe, skill-integrity (jarvis == claude-plugin), live feed-shape, and
+#      auth probe, skill-integrity (upstream + Jarvis overlays), live feed-shape, and
 #      bash -n on every eigenflux script.
 #   6. Emit a report + one sentinel: PREINSTALL_OK / PREINSTALL_CHANGES /
 #      PREINSTALL_FAIL. Stored commit SHAs advance only when verification is green.
@@ -51,6 +51,7 @@ MAIN_DIR="$REPOS_DIR/eigenflux"                   # TRUE upstream: CLI contract 
 # rely on. Sourcing from main keeps jarvis on the freshest, most protective text.
 SRC_SKILLS="$MAIN_DIR/skills"
 DST_SKILLS="$JARVIS_DIR/plugins/eigenflux/skills"
+SKILL_OVERLAYS="$JARVIS_DIR/plugins/eigenflux/overlays"
 CLIENT_SH="$JARVIS_DIR/plugins/eigenflux/client.sh"
 STATE_FILE="$JARVIS_DIR/eigenflux/preinstall_state.json"
 BACKLOG="$JARVIS_DIR/eigenflux/parity_todo.md"
@@ -96,13 +97,41 @@ PY
 added=(); updated=(); orphan_files=(); orphan_skills=(); local_skills=()
 fail=(); notes=(); review=()
 
+if [ ! -f "$SKILL_OVERLAYS/ef-communication/SKILL.md" ]; then
+  echo "  FATAL: required Jarvis communication overlay is missing"
+  echo ""
+  echo "PREINSTALL_FAIL"
+  exit 0
+fi
+
 mirror_one() {
   local src="$1" dst="$2" rel="$3"
-  if [ ! -f "$dst" ]; then
-    mkdir -p "$(dirname "$dst")"; cp -p "$src" "$dst" && added+=("$rel")
-  elif ! cmp -s "$src" "$dst"; then
-    cp -p "$src" "$dst" && updated+=("$rel")
+  local candidate="$src" rendered=""
+  if [ -f "$SKILL_OVERLAYS/$rel" ]; then
+    rendered="$(mktemp /tmp/jarvis-ef-skill.XXXXXX)"
+    if ! python3 "$JARVIS_DIR/core/eigenflux_skill_overlay.py" \
+        --base "$src" --overlay "$SKILL_OVERLAYS/$rel" \
+        --output "$rendered"; then
+      rm -f "$rendered"
+      fail+=("skill overlay failed: $rel")
+      return
+    fi
+    candidate="$rendered"
   fi
+  if [ ! -f "$dst" ]; then
+    if mkdir -p "$(dirname "$dst")" && cp -p "$candidate" "$dst"; then
+      added+=("$rel")
+    else
+      fail+=("skill copy failed: $rel")
+    fi
+  elif ! cmp -s "$candidate" "$dst"; then
+    if cp -p "$candidate" "$dst"; then
+      updated+=("$rel")
+    else
+      fail+=("skill copy failed: $rel")
+    fi
+  fi
+  [ -n "$rendered" ] && rm -f "$rendered"
 }
 
 echo "EigenFlux parity tracker:"
@@ -280,14 +309,29 @@ if [ -n "$cli_current" ]; then
     else echo "    • auth probe: inconclusive (rc=$rc)"; fi
   fi
 fi
-# 5e. Skill integrity — jarvis managed skills must equal claude-plugin source
+# 5e. Skill integrity — managed files equal upstream plus reviewed overlays.
 integrity_bad=()
 for skill in "${managed[@]}"; do
   while IFS= read -r f; do
-    rel="${f#"$SRC_SKILLS"/}"; cmp -s "$f" "$DST_SKILLS/$rel" || integrity_bad+=("$rel")
+    rel="${f#"$SRC_SKILLS"/}"
+    expected="$f"; rendered=""
+    if [ -f "$SKILL_OVERLAYS/$rel" ]; then
+      rendered="$(mktemp /tmp/jarvis-ef-integrity.XXXXXX)"
+      if python3 "$JARVIS_DIR/core/eigenflux_skill_overlay.py" \
+          --base "$f" --overlay "$SKILL_OVERLAYS/$rel" \
+          --output "$rendered"; then
+        expected="$rendered"
+      else
+        integrity_bad+=("$rel")
+        rm -f "$rendered"
+        continue
+      fi
+    fi
+    cmp -s "$expected" "$DST_SKILLS/$rel" || integrity_bad+=("$rel")
+    [ -n "$rendered" ] && rm -f "$rendered"
   done < <(find "$SRC_SKILLS/$skill" -type f | sort)
 done
-if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (jarvis == eigenflux main)"
+if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (upstream + Jarvis overlays)"
 else echo "    ✗ skill integrity drift: ${integrity_bad[*]}"; fail+=("skill integrity: ${integrity_bad[*]}"); fi
 # 5f. Live feed-shape check — only when authed (read-only, small sample).
 # Contract (ef-broadcast/references/feed.md): every item carries a STRING
