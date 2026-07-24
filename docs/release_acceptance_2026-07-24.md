@@ -235,6 +235,17 @@ findings were reproduced and closed:
 | 105 | L3 watched the schema-protected duplicate idempotency-key count instead of the observed duplicate external mutation metric | The daily observer now emits a critical signal from `duplicate_external_mutations`; signal regression |
 | 106 | The qualifying-evidence metric counted stale contracts, expired evidence, and untrusted or wrong-authority receipts | Metrics now apply the evaluator's current-version, required-step, trust, verifier, authority, strength, match, and expiry rules; evaluator-parity regression |
 
+The thirteenth independent review exercised repeated external actions,
+tool-process cancellation, and launchd log-maintenance failure isolation. Its
+four findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 107 | An uncertain explicit repeat of identical EigenFlux content could claim the first send's receipt | Authoritative history candidates already bound to another action contract are excluded, so each explicit repeat requires a distinct message ID; failed-repeat reconciliation regression |
+| 108 | A timed-out or cancelled GPT bash tool could leave descendants mutating after failure | Every bash tool runs in a private process session; timeout, cancellation callback, SIGTERM, and SIGINT terminate the full process group with bounded TERM/KILL cleanup; real descendant timeout and cancellation regressions |
+| 109 | A failed initial launchd probe aborted log maintenance for every later service | Probe launch and timeout failures become one structured per-service result while the maintenance batch continues; two-service isolation regression |
+| 110 | A stale log from intentionally absent optional Taskline caused permanent maintenance failure | Taskline is explicitly optional; when its plist is absent, launchd must confirm it is unloaded before the stale file is safely rotated without bootstrap; optional-service regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -275,7 +286,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2083 passed` for this candidate);
+- full local test result (`2088 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

@@ -509,6 +509,7 @@ class EigenFluxMessenger:
         created_after: float,
         conv_id: str = "",
         msg_id: str = "",
+        action_key: str = "",
     ) -> tuple[str, str] | None:
         return self._find_verified_hash(
             friend.agent_id,
@@ -516,6 +517,7 @@ class EigenFluxMessenger:
             created_after,
             conv_id=conv_id,
             msg_id=msg_id,
+            action_key=action_key,
         )
 
     def _find_verified_hash(
@@ -526,13 +528,29 @@ class EigenFluxMessenger:
         *,
         conv_id: str = "",
         msg_id: str = "",
+        action_key: str = "",
     ) -> tuple[str, str] | None:
+        bound_receipts: set[str] = set()
+        if action_key:
+            with closing(self._connect()) as db:
+                bound_receipts = {
+                    str(row["msg_id"])
+                    for row in db.execute(
+                        """
+                        SELECT msg_id FROM verified_external_actions
+                         WHERE idempotency_key != ? AND msg_id != ''
+                        """,
+                        (action_key,),
+                    )
+                }
         conversations = [conv_id] if conv_id else self._candidate_conversations(
             target_id
         )
         for candidate_conv in conversations:
             for row in self._history_messages(candidate_conv):
                 row_msg_id = str(row.get("msg_id") or "").strip()
+                if not row_msg_id or row_msg_id in bound_receipts:
+                    continue
                 if msg_id and row_msg_id != msg_id:
                     continue
                 if str(row.get("receiver_id") or "") != target_id:
@@ -590,6 +608,7 @@ class EigenFluxMessenger:
             ),
             conv_id=str(row["conv_id"] or ""),
             msg_id=str(row["msg_id"] or ""),
+            action_key=key,
         )
         if found:
             return self._verified_receipt(
@@ -800,6 +819,7 @@ class EigenFluxMessenger:
                         ),
                         conv_id=str(existing["conv_id"] or ""),
                         msg_id=str(existing["msg_id"] or ""),
+                        action_key=key,
                     )
                 except CliFailure as exc:
                     detail = _durable_failure(exc, "history readback")
@@ -854,6 +874,7 @@ class EigenFluxMessenger:
                     friend,
                     message,
                     operation_started - self.verification_clock_skew_seconds,
+                    action_key=key,
                 )
             except CliFailure:
                 found = None
@@ -895,6 +916,7 @@ class EigenFluxMessenger:
                 ),
                 conv_id=conv_id,
                 msg_id=msg_id,
+                action_key=key,
             )
         except CliFailure as exc:
             detail = _durable_failure(exc, "history readback")

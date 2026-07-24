@@ -186,6 +186,9 @@ def _openai_result(
     *,
     allow_tools: bool,
     timeout: int,
+    process_holder: dict[str, Any] | None = None,
+    process_key: str = "model",
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, str]:
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not _enabled("OPENAI_FALLBACK_ENABLED") or not api_key:
@@ -218,6 +221,9 @@ def _openai_result(
             base_url,
             timeout,
             user_agent,
+            process_holder=process_holder,
+            process_key=process_key,
+            cancelled=cancelled,
         )
     else:
         payload = openai_fallback.build_payload(
@@ -404,6 +410,9 @@ def run_auxiliary_model(
                 prompt,
                 allow_tools=allow_tools,
                 timeout=max(1, int(remaining)),
+                process_holder=process_holder,
+                process_key=process_key,
+                cancelled=cancelled,
             )
         except Exception:
             text, openai_model = "", ""

@@ -159,6 +159,70 @@ def test_bootout_timeout_attempts_recovery_before_returning(
     ]
 
 
+def test_initial_probe_timeout_isolated_from_later_services(
+    tmp_path, monkeypatch
+):
+    first, first_plist, _ = _spec(tmp_path / "first")
+    second, second_plist, second_log = _spec(tmp_path / "second")
+    first = ManagedLog("com.example.first", first.paths)
+    second = ManagedLog("com.example.second", second.paths)
+    plists = {
+        first.label: first_plist,
+        second.label: second_plist,
+    }
+    monkeypatch.setattr(
+        ManagedLog,
+        "plist",
+        property(lambda self: plists[self.label]),
+    )
+
+    def runner(command, **_kwargs):
+        if command[1] == "print" and command[-1].endswith(first.label):
+            raise subprocess.TimeoutExpired(command, 15)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = maintain_logs(
+        max_bytes=1,
+        specs=(first, second),
+        runner=runner,
+        lock_path=tmp_path / "maintenance.lock",
+    )
+
+    assert result["ok"] is False
+    assert [item["status"] for item in result["results"]] == [
+        "probe_failed",
+        "rotated",
+    ]
+    assert second_log.read_text() == ""
+
+
+def test_absent_optional_service_rotates_stale_unowned_log(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "optional.log"
+    log.write_text("stale optional output", encoding="utf-8")
+    missing_plist = tmp_path / "missing.plist"
+    spec = ManagedLog("com.example.optional", (log,), optional=True)
+    monkeypatch.setattr(
+        ManagedLog,
+        "plist",
+        property(lambda _self: missing_plist),
+    )
+    calls = []
+
+    result = rotate_managed_log(
+        spec,
+        max_bytes=1,
+        runner=_runner(calls, fail={"print"}),
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "optional_absent_rotated"
+    assert log.read_text() == ""
+    assert (tmp_path / "optional.log.1").read_text() == "stale optional output"
+    assert [command[1] for command in calls] == ["print"]
+
+
 def test_maintenance_aggregates_failure(tmp_path, monkeypatch):
     spec, plist, _log = _spec(tmp_path)
     monkeypatch.setattr(

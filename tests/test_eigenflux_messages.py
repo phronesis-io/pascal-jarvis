@@ -274,6 +274,29 @@ def test_explicit_repeat_token_creates_a_new_contract(tmp_path):
     assert cli.send_count == 2
 
 
+def test_uncertain_explicit_repeat_cannot_reuse_first_message_receipt(tmp_path):
+    cli = FakeEigenFlux()
+    messenger = _messenger(tmp_path, cli)
+    first = messenger.send("Family agent", "same brief")
+    cli.history_error = True
+
+    def fail_before_commit(_target, _content):
+        raise CliFailure("connection reset before commit")
+
+    messenger.api_sender = fail_before_commit
+    repeated = messenger.send(
+        "Family agent", "same brief", repeat_token="owner-request-2"
+    )
+    assert repeated.state == "verifying"
+
+    cli.history_error = False
+    reconciled = messenger.reconcile_action(repeated.idempotency_key)
+
+    assert reconciled.state == "verifying"
+    assert reconciled.msg_id == ""
+    assert reconciled.idempotency_key != first.idempotency_key
+
+
 def test_missing_send_receipt_can_only_complete_from_history(tmp_path):
     cli = FakeEigenFlux()
     cli.send_response_has_ids = False

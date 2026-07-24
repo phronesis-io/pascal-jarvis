@@ -20,6 +20,7 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 class ManagedLog:
     label: str
     paths: tuple[Path, ...]
+    optional: bool = False
 
     @property
     def plist(self) -> Path:
@@ -39,6 +40,7 @@ def managed_logs() -> tuple[ManagedLog, ...]:
         ManagedLog(
             "com.pascal.jarvis.taskline",
             (Path("/tmp/jarvis-taskline.log"),),
+            optional=True,
         ),
         ManagedLog(
             "com.pascal.jarvis.daemon",
@@ -128,16 +130,50 @@ def rotate_managed_log(
             "status": "below_threshold",
             "sizes": sizes,
         }
-    if not spec.plist.exists():
+    domain = f"gui/{uid if uid is not None else os.getuid()}"
+    target = f"{domain}/{spec.label}"
+    if not spec.plist.exists() and not spec.optional:
         return {
             "label": spec.label,
             "status": "missing_plist",
             "ok": False,
             "sizes": sizes,
         }
-    domain = f"gui/{uid if uid is not None else os.getuid()}"
-    target = f"{domain}/{spec.label}"
-    loaded = _run(runner, ["launchctl", "print", target])
+    try:
+        loaded = _run(runner, ["launchctl", "print", target])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "label": spec.label,
+            "status": "probe_failed",
+            "ok": False,
+            "detail": str(exc)[:240],
+            "sizes": sizes,
+        }
+    if not spec.plist.exists():
+        if loaded.returncode == 0:
+            return {
+                "label": spec.label,
+                "status": "optional_missing_plist_loaded",
+                "ok": False,
+                "sizes": sizes,
+            }
+        try:
+            for path in spec.paths:
+                _shift_generations(path, keep)
+        except OSError as exc:
+            return {
+                "label": spec.label,
+                "status": "optional_absent_rotation_failed",
+                "ok": False,
+                "detail": str(exc)[:240],
+                "sizes": sizes,
+            }
+        return {
+            "label": spec.label,
+            "status": "optional_absent_rotated",
+            "ok": True,
+            "sizes": sizes,
+        }
     if loaded.returncode != 0:
         return {
             "label": spec.label,

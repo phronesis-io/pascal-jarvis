@@ -1,3 +1,6 @@
+import shlex
+import time
+
 from core import openai_fallback as of
 
 
@@ -128,7 +131,7 @@ def test_agentic_rounds_share_one_deadline(monkeypatch):
             }
         return {"output_text": "done", "output": []}
 
-    def fake_tool(name, arguments, *, timeout=None):
+    def fake_tool(name, arguments, *, timeout=None, **_kwargs):
         tool_timeouts.append(timeout)
         clock[0] += 4
         return "ok"
@@ -161,6 +164,56 @@ def test_execute_tool_bash_exposes_nonzero_exit(monkeypatch, tmp_path):
 
     assert "usage text" in result
     assert "(exit 2)" in result
+
+
+def test_execute_tool_timeout_kills_descendant_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    marker = tmp_path / "descendant-finished"
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import pathlib,time;"
+            "time.sleep(0.5);"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        + " & wait"
+    )
+
+    result = of.execute_tool("bash", {"command": command}, timeout=0.1)
+    time.sleep(0.7)
+
+    assert "timed out" in result
+    assert not marker.exists()
+
+
+def test_execute_tool_cancellation_kills_descendant_process_group(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    marker = tmp_path / "cancelled-descendant-finished"
+    checks = [False, True]
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import pathlib,time;"
+            "time.sleep(0.5);"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        + " & wait"
+    )
+
+    result = of.execute_tool(
+        "bash",
+        {"command": command},
+        timeout=2,
+        cancelled=lambda: checks.pop(0) if checks else True,
+    )
+    time.sleep(0.7)
+
+    assert "cancelled" in result
+    assert not marker.exists()
 
 
 def test_execute_tool_file_read_write(monkeypatch, tmp_path):
