@@ -877,6 +877,7 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
 
     reset = 0
     terminal_moments: list[dict] = []
+    lifecycle_events: list[tuple[str, str, dict]] = []
     for row in stuck:
         intent = dict(row)
         if intent.get("trigger_type") != "date":
@@ -885,8 +886,11 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"auto-reset after {stale_minutes}m stuck in triggered", intent["id"]),
             )
-            _emit_intent("intent_retry", intent["id"],
-                         attempt=intent.get("attempt") or 0, kind=intent.get("trigger_type"))
+            lifecycle_events.append((
+                "intent_retry", intent["id"],
+                {"attempt": intent.get("attempt") or 0,
+                 "kind": intent.get("trigger_type")},
+            ))
             reset += 1
             continue
 
@@ -905,14 +909,20 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
                 db.execute(
                     "UPDATE intentions SET closure_status = 'na', closed_at = ? WHERE id = ?",
                     (now.strftime("%Y-%m-%dT%H:%M:%S"), intent["id"]))
-            _emit_intent("intent_expired", intent["id"], attempt=attempt,
-                         notified=False, reason="storm_class")
+            lifecycle_events.append((
+                "intent_expired", intent["id"],
+                {"attempt": attempt, "notified": False,
+                 "reason": "storm_class"},
+            ))
         elif attempt < MAX_ATTEMPTS and age < RETRY_GRACE:
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"retry {attempt}/{MAX_ATTEMPTS} after stuck in triggered", intent["id"]),
             )
-            _emit_intent("intent_retry", intent["id"], attempt=attempt, kind="date")
+            lifecycle_events.append((
+                "intent_retry", intent["id"],
+                {"attempt": attempt, "kind": "date"},
+            ))
             reset += 1
         else:
             # Retries exhausted — expire LOUDLY: breach queue + closure axis.
@@ -922,10 +932,18 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
                  intent["id"]),
             )
             _queue_breach(intent, now)
-            _emit_intent("intent_expired", intent["id"], attempt=attempt,
-                         notified=True, reason="retries_exhausted")
+            lifecycle_events.append((
+                "intent_expired", intent["id"],
+                {"attempt": attempt, "notified": True,
+                 "reason": "retries_exhausted"},
+            ))
             terminal_moments.append(dict(intent))
     db.commit()
+    # sched_events projects into the same SQLite database using a separate
+    # connection. Emitting before this commit makes this process wait on its
+    # own writer lock and then drop the SQLite projection.
+    for event, intent_id, fields in lifecycle_events:
+        _emit_intent(event, intent_id, **fields)
 
     # Closure spawns AFTER the commit: _on_moment_terminal opens its own
     # connection — running it inside the sweep's open transaction deadlocks
@@ -941,6 +959,7 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
     awaiting = db.execute(
         "SELECT * FROM intentions WHERE closure_status = 'awaiting'"
     ).fetchall()
+    closure_events: list[tuple[str, str, dict]] = []
     for row in awaiting:
         it = dict(row)
         pol = CLOSURE_POLICY.get(it.get("category", "none"), CLOSURE_POLICY["none"])
@@ -964,8 +983,12 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
              f"ttl: no signal within {pol.get('awaiting_ttl_days', 3)}d window",
              it["id"]),
         )
-        _emit_intent("intent_closure", it["id"], outcome="na", via="ttl")
+        closure_events.append((
+            "intent_closure", it["id"], {"outcome": "na", "via": "ttl"},
+        ))
     db.commit()
+    for event, intent_id, fields in closure_events:
+        _emit_intent(event, intent_id, **fields)
     return reset
 
 
@@ -2118,6 +2141,7 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
     now = now_local()
     covered = set(covered_ids)
     terminal_moments: list[dict] = []
+    lifecycle_events: list[tuple[str, str, dict]] = []
     for iid in inflight:
         if iid in covered:
             continue
@@ -2164,8 +2188,10 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 ("retry: envelope missing", iid))
-            _emit_intent("intent_retry", iid, attempt=attempt,
-                         kind=it.get("trigger_type"))
+            lifecycle_events.append((
+                "intent_retry", iid,
+                {"attempt": attempt, "kind": it.get("trigger_type")},
+            ))
             out["retried"].append(iid)
             continue
         target = _trigger_dt(it)
@@ -2174,19 +2200,26 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"retry {attempt}/{MAX_ATTEMPTS}: envelope missing", iid))
-            _emit_intent("intent_retry", iid, attempt=attempt, kind="date")
+            lifecycle_events.append((
+                "intent_retry", iid, {"attempt": attempt, "kind": "date"},
+            ))
             out["retried"].append(iid)
         else:
             db.execute(
                 "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
                 (f"expired after {attempt} attempts (envelope missing) — breach queued", iid))
             _queue_breach(it, now)
-            _emit_intent("intent_expired", iid, attempt=attempt,
-                         notified=True, reason="retries_exhausted")
+            lifecycle_events.append((
+                "intent_expired", iid,
+                {"attempt": attempt, "notified": True,
+                 "reason": "retries_exhausted"},
+            ))
             terminal_moments.append(it)
             out["expired"].append(iid)
             out["breached"].append(iid)
     db.commit()
+    for event, intent_id, fields in lifecycle_events:
+        _emit_intent(event, intent_id, **fields)
     # Closure spawns after the commit — see lifecycle_sweep (lock contention).
     for it in terminal_moments:
         try:

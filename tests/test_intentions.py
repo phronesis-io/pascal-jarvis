@@ -147,6 +147,47 @@ def test_lifecycle_sweep_retries_future_oneshot(intent_db):
     assert get_intent(iid)["status"] == "pending"
 
 
+def test_lifecycle_sweep_projects_event_after_commit(intent_db, tmp_path,
+                                                     monkeypatch, capsys):
+    """The stale-intent sweep must not project telemetry while its intent
+    update still owns the SQLite writer lock."""
+    import core.intentions as mod
+    from core.sched_events import emit as sched_emit
+
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        mod, "_emit_intent",
+        lambda event, intent_id, **fields: sched_emit(
+            mod.ROOT, event, task=intent_id, **fields),
+    )
+
+    iid = mod.create_intent(
+        name="stale retry projection",
+        trigger_type="date",
+        trigger_config={"datetime": "2999-01-01T09:00:00"},
+    )
+    mod.mark_triggered(iid)
+    with sqlite3.connect(str(intent_db)) as db:
+        db.execute(
+            "UPDATE intentions SET triggered_at=datetime('now', '-20 minutes') "
+            "WHERE id=?",
+            (iid,),
+        )
+    capsys.readouterr()
+
+    assert mod.lifecycle_sweep(stale_minutes=10) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    with sqlite3.connect(str(intent_db)) as db:
+        projected = db.execute(
+            "SELECT event,task FROM schedule_events "
+            "WHERE event='intent_retry' AND task=?",
+            (iid,),
+        ).fetchone()
+    assert projected == ("intent_retry", iid)
+
+
 def test_lifecycle_sweep_bounded_retry_then_breach(intent_db, tmp_path, monkeypatch):
     """REQ-31 core: a one-shot that just fired and got stuck retries (≤3 within
     2h grace) instead of dying; exhausted retries expire LOUDLY via the breach
@@ -574,6 +615,48 @@ def test_inflight_manifest_reconcile(intent_db, tmp_path, monkeypatch):
     assert result["retried"] == [b]
     assert mod.get_intent(b)["status"] == "pending"
     assert mod.read_inflight() == []                 # manifest cleared
+
+
+def test_reconcile_projects_event_after_commit(intent_db, tmp_path, monkeypatch,
+                                               capsys):
+    """The intent transaction must release its writer lock before sched_events
+    opens a second connection to project the retry into the same database."""
+    import core.intentions as mod
+    from core.sched_events import emit as sched_emit
+    from datetime import timedelta
+    from core.timeutil import now_local
+
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    monkeypatch.setattr(mod, "INFLIGHT_FILE", tmp_path / "data" / "inflight.json")
+    monkeypatch.setattr(mod, "BREACH_QUEUE", tmp_path / "data" / "breach.jsonl")
+    monkeypatch.setattr(
+        mod, "_emit_intent",
+        lambda event, intent_id, **fields: sched_emit(
+            mod.ROOT, event, task=intent_id, **fields),
+    )
+
+    recent = (now_local() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    iid = mod.create_intent(
+        name="retry projection",
+        trigger_type="date",
+        trigger_config={"datetime": recent},
+    )
+    mod.mark_triggered(iid)
+    mod.write_inflight([iid])
+    capsys.readouterr()
+
+    result = mod.reconcile_inflight([])
+
+    assert result["retried"] == [iid]
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    with sqlite3.connect(str(intent_db)) as db:
+        projected = db.execute(
+            "SELECT event,task FROM schedule_events "
+            "WHERE event='intent_retry' AND task=?",
+            (iid,),
+        ).fetchone()
+    assert projected == ("intent_retry", iid)
 
 
 def test_breach_queue_peek_and_mark_shown(intent_db, tmp_path, monkeypatch):
