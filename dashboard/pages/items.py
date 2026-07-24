@@ -9,13 +9,21 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import run, ui
 
 from core import memorial
+from core.continuity import (
+    claim_handoff,
+    complete_entity_handoffs,
+    complete_handoff,
+    create_handoff,
+    list_handoffs,
+)
 
 from ..telemetry import memorial_states
 from ..uiutil import (
     add_dashboard_head,
+    client_surface,
     dashboard_header,
     guarded_refresh_timer,
     memorial_attention_rank,
@@ -28,9 +36,16 @@ from ..uiutil import (
     memorial_surface_label,
     memorial_visible_options,
     source_label,
+    surface_from_headers,
 )
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
+
+
+def _entity_url(handoff: dict) -> str:
+    if handoff.get("entity_type") == "matter":
+        return f"/matters/{handoff.get('entity_id', '')}"
+    return f"/items/{handoff.get('entity_id', '')}"
 
 
 def _live_intent(intent: dict) -> bool:
@@ -156,9 +171,95 @@ def _load_context() -> tuple[list[dict], list[dict], dict[str, str]]:
     return matters, intents, intent_topics
 
 
+def _load_item(memorial_id: str) -> dict | None:
+    state = memorial.get_memorial(memorial_id)
+    if state is None:
+        return None
+    matters, intents, intent_topics = _load_context()
+    enriched = enrich_items(
+        [state], matters=matters, intents=intents,
+        intent_topics=intent_topics,
+    )
+    return enriched[0] if enriched else None
+
+
+async def _send_handoff(state: dict, surface: str, actor: str) -> dict:
+    target = "desktop" if surface == "mobile" else "mobile"
+    return await run.io_bound(
+        create_handoff,
+        "memorial",
+        state["id"],
+        from_surface=surface,
+        to_surface=target,
+        title=memorial_display_title(state),
+        matter_id=str(state.get("matter_id", "") or ""),
+        created_by=actor,
+    )
+
+
+def _handoff_notice(result: dict, target: str) -> tuple[str, str]:
+    if not result.get("created"):
+        return (
+            "已经在电脑接力区" if target == "desktop" else "已经发到手机",
+            "info",
+        )
+    if target == "desktop":
+        return "已放到电脑接力区", "positive"
+    if result.get("delivery_state") == "delivered":
+        return "已发到手机", "positive"
+    return "已放到手机接力区；通知暂未送达", "warning"
+
+
+def _render_handoff_band(surface: str, refresh) -> None:
+    try:
+        handoffs = list_handoffs(target_surface=surface, limit=8)
+    except Exception:
+        return
+    if not handoffs:
+        return
+
+    def resume(handoff: dict):
+        claim_handoff(handoff["id"], surface=surface)
+        ui.navigate.to(_entity_url(handoff))
+
+    def dismiss(handoff: dict):
+        complete_handoff(handoff["id"])
+        refresh()
+
+    origin = "手机" if surface == "desktop" else "电脑"
+    with ui.element("section").classes("continuity-band"):
+        with ui.row().classes("w-full items-end justify-between gap-3"):
+            with ui.column().classes("gap-1"):
+                ui.label("跨端接力").classes("section-kicker")
+                ui.label(f"从{origin}带过来的下一步").classes(
+                    "continuity-title")
+            ui.label(f"{len(handoffs)} 项").classes("continuity-count")
+        with ui.column().classes("continuity-list"):
+            for handoff in handoffs:
+                with ui.element("div").classes("continuity-row"):
+                    with ui.column().classes("continuity-copy"):
+                        ui.label(
+                            handoff.get("title") or "未命名事项"
+                        ).classes("continuity-item-title")
+                        ui.label(
+                            "正在接着处理"
+                            if handoff.get("status") == "claimed"
+                            else "等待继续"
+                        ).classes("continuity-meta")
+                    ui.button(
+                        "接着处理", icon="arrow_forward",
+                        on_click=lambda item=handoff: resume(item),
+                    ).props("flat no-caps").classes("memorial-chat")
+                    ui.button(
+                        icon="close",
+                        on_click=lambda item=handoff: dismiss(item),
+                    ).props("flat round dense").tooltip("移出接力区")
+
+
 @ui.page("/items")
 def items_page():
     add_dashboard_head()
+    surface, actor = client_surface()
     filters = {
         "mode": "pending",
         "topic": "",
@@ -187,6 +288,7 @@ def items_page():
                     all_items, mode=mode, time_window="all"))
                 for mode in ("pending", "notice", "decided", "all")
             }
+            _render_handoff_band(surface, board.refresh)
 
             def change(key: str, value: str):
                 filters[key] = value
@@ -276,6 +378,13 @@ def items_page():
                 else:
                     ui.notify("飞书入口暂不可用", type="warning")
 
+            async def handoff(state: dict):
+                result = await _send_handoff(state, surface, actor)
+                target = "desktop" if surface == "mobile" else "mobile"
+                message, tone = _handoff_notice(result, target)
+                ui.notify(message, type=tone)
+                board.refresh()
+
             with ui.element("div").classes("memorial-grid item-grid"):
                 for state in shown:
                     decided_state = state.get("status") == "decided"
@@ -336,6 +445,20 @@ def items_page():
                                         button.get("text", "打开来源"),
                                         button["url"], new_tab=True,
                                     ).classes("jarvis-nav-link")
+                            with ui.link(
+                                    target=f"/items/{state['id']}").classes(
+                                        "item-detail-link"):
+                                ui.icon("open_in_full", size="16px")
+                                ui.label("查看全文")
+                            if not decided_state:
+                                ui.button(
+                                    "电脑继续" if surface == "mobile"
+                                    else "发到手机",
+                                    icon=("computer" if surface == "mobile"
+                                          else "smartphone"),
+                                    on_click=lambda item=state: handoff(item),
+                                ).props("flat no-caps").classes(
+                                    "memorial-chat")
                             ui.button(
                                 "去飞书聊", icon="forum",
                                 on_click=lambda mid=state["id"]: chat(mid),
@@ -354,3 +477,135 @@ def items_page():
 
         board()
         guarded_refresh_timer(20, board.refresh)
+
+
+@ui.page("/items/{memorial_id}")
+def item_detail_page(memorial_id: str):
+    add_dashboard_head()
+    surface, actor = client_surface()
+
+    try:
+        from core.delivery import DeliveryPipeline
+        DeliveryPipeline(JARVIS_DIR).confirm_entity(
+            memorial_id=memorial_id, state="read")
+    except Exception:
+        pass
+    try:
+        for handoff in list_handoffs(target_surface=surface, limit=100):
+            if (handoff.get("entity_type") == "memorial"
+                    and handoff.get("entity_id") == memorial_id):
+                claim_handoff(handoff["id"], surface=surface)
+    except Exception:
+        pass
+
+    with ui.column().classes("jarvis-page"):
+        dashboard_header(
+            "/items", "事项详情",
+            "在这里读完整背景；批示、飞书和另一台设备共享同一状态。",
+        )
+
+        @ui.refreshable
+        def detail():
+            state = _load_item(memorial_id)
+            if state is None:
+                ui.label("这个事项不存在，或已经被归档。").classes(
+                    "empty-guidance")
+                ui.link("返回事项", "/items").classes("jarvis-nav-link")
+                return
+            decided_state = state.get("status") == "decided"
+            if decided_state:
+                complete_entity_handoffs("memorial", memorial_id)
+
+            def decide(key: str):
+                payload = memorial.decide(memorial_id, key)
+                toast = payload.get("toast", {})
+                ui.notify(
+                    toast.get("content", "已记录"),
+                    type=("positive"
+                          if toast.get("type") == "success" else "info"),
+                )
+                detail.refresh()
+
+            def chat():
+                payload = memorial.chat(memorial_id)
+                deep_link = str(payload.get("deep_link", "") or "")
+                if deep_link:
+                    ui.navigate.to(deep_link)
+                else:
+                    ui.notify("飞书入口暂不可用", type="warning")
+
+            async def handoff():
+                result = await _send_handoff(state, surface, actor)
+                target = "desktop" if surface == "mobile" else "mobile"
+                message, tone = _handoff_notice(result, target)
+                ui.notify(message, type=tone)
+
+            with ui.row().classes("w-full items-center justify-between gap-3"):
+                ui.link("返回事项", "/items").classes("jarvis-nav-link")
+                ui.label(state.get("ts", "")).classes("memorial-time")
+            with ui.element("article").classes("item-detail"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    if state.get("_topic_id"):
+                        ui.link(
+                            state["_topic_label"],
+                            f"/matters/{state['_topic_id']}",
+                        ).classes("memorial-source item-topic")
+                    else:
+                        ui.label(state["_topic_label"]).classes(
+                            "memorial-source")
+                    ui.label(memorial_surface_label(state)).classes(
+                        "memorial-surface")
+                    if state.get("_has_timer"):
+                        with ui.element("span").classes("item-timer"):
+                            ui.icon("schedule", size="14px")
+                            ui.label("有定时提醒")
+                ui.label(memorial_display_title(state)).classes(
+                    "item-detail-title")
+                ui.markdown(memorial_display_body(state)).classes(
+                    "item-detail-body")
+                context = str(state.get("context", "") or "").strip()
+                if context:
+                    with ui.expansion(
+                            "相关背景", icon="subject").classes(
+                                "item-context w-full"):
+                        ui.markdown(context).classes("item-detail-body")
+                if decided_state:
+                    ui.label(
+                        "已批 · " + memorial_option_label(
+                            state.get("decided_label", ""))
+                    ).classes("item-decision-result")
+                with ui.row().classes("memorial-actions item-detail-actions"):
+                    if not decided_state:
+                        for index, option in enumerate(
+                                memorial_visible_options(state)[:4]):
+                            ui.button(
+                                memorial_option_label(
+                                    option.get("label", "选择")),
+                                on_click=lambda key=option.get("key", ""):
+                                    decide(key),
+                            ).props(
+                                "unelevated no-caps" if index == 0
+                                else "outline no-caps"
+                            ).classes(
+                                "memorial-primary" if index == 0
+                                else "memorial-secondary")
+                    for button in state.get("extra_buttons", []):
+                        if button.get("url"):
+                            ui.link(
+                                button.get("text", "打开来源"),
+                                button["url"], new_tab=True,
+                            ).classes("jarvis-nav-link")
+                    if not decided_state:
+                        ui.button(
+                            "电脑继续" if surface == "mobile" else "发到手机",
+                            icon=("computer" if surface == "mobile"
+                                  else "smartphone"),
+                            on_click=handoff,
+                        ).props("outline no-caps").classes(
+                            "memorial-secondary")
+                    ui.button(
+                        "去飞书聊", icon="forum", on_click=chat,
+                    ).props("flat no-caps").classes("memorial-chat")
+
+        detail()
+        guarded_refresh_timer(20, detail.refresh)

@@ -372,6 +372,34 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_schedule_events_created
         ON schedule_events(created_epoch DESC);
     """,
+    # v8: Durable cross-device continuation without copying work objects.
+    """
+    CREATE TABLE IF NOT EXISTS surface_handoffs (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        matter_id TEXT NOT NULL DEFAULT '',
+        from_surface TEXT NOT NULL,
+        to_surface TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        title TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT 'local',
+        created_epoch REAL NOT NULL,
+        claimed_epoch REAL,
+        completed_epoch REAL,
+        delivery_id TEXT NOT NULL DEFAULT '',
+        metadata TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_surface_handoff_active_unique
+        ON surface_handoffs(entity_type, entity_id, to_surface)
+        WHERE status IN ('open', 'claimed');
+    CREATE INDEX IF NOT EXISTS idx_surface_handoff_target
+        ON surface_handoffs(to_surface, status, created_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_surface_handoff_entity
+        ON surface_handoffs(entity_type, entity_id, created_epoch DESC);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

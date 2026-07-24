@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from nicegui import app
 
 from core.timeutil import now_local_str
@@ -519,6 +520,89 @@ def register_api_routes():
             "state": result.state,
             "channel": result.channel,
         }
+
+    # ── Cross-device continuity ──────────────────────────────────────
+
+    @app.get("/api/handoffs")
+    async def api_handoff_list(target_surface: str = "",
+                               status: str = "active",
+                               limit: int = 100):
+        from core.continuity import list_handoffs
+        try:
+            items = list_handoffs(
+                target_surface=target_surface, status=status, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"items": items}
+
+    @app.post("/api/handoffs", dependencies=_WRITE)
+    async def api_handoff_create(request: Request):
+        from core.continuity import create_handoff
+        data = await request.json()
+        device_id = request.headers.get("X-Jarvis-Device", "").strip()
+        from_surface = "mobile" if device_id else "desktop"
+        created_by = device_id or "local"
+        requested_source = str(data.get("from_surface", "") or "").strip()
+        if requested_source and requested_source != from_surface:
+            raise HTTPException(
+                403, "from_surface does not match authenticated device")
+        try:
+            return await run_in_threadpool(
+                create_handoff,
+                str(data.get("entity_type", "")),
+                str(data.get("entity_id", "")),
+                from_surface=from_surface,
+                to_surface=str(data.get("to_surface", "")),
+                title=str(data.get("title", "")),
+                matter_id=str(data.get("matter_id", "")),
+                note=str(data.get("note", "")),
+                created_by=created_by,
+                metadata=(
+                    data.get("metadata")
+                    if isinstance(data.get("metadata"), dict) else {}
+                ),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "handoff entity not found") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/handoffs/{handoff_id}/claim", dependencies=_WRITE)
+    async def api_handoff_claim(handoff_id: str, request: Request):
+        from core.continuity import claim_handoff
+        data = await request.json()
+        device_id = request.headers.get("X-Jarvis-Device", "").strip()
+        surface = "mobile" if device_id else "desktop"
+        requested_surface = str(data.get("surface", "") or "").strip()
+        if requested_surface and requested_surface != surface:
+            raise HTTPException(
+                403, "surface does not match authenticated device")
+        try:
+            return claim_handoff(handoff_id, surface=surface)
+        except KeyError as exc:
+            raise HTTPException(404, "handoff not found") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/handoffs/{handoff_id}/complete", dependencies=_WRITE)
+    async def api_handoff_complete(handoff_id: str, request: Request):
+        from core.continuity import complete_handoff, get_handoff
+        await request.json()
+        surface = (
+            "mobile"
+            if request.headers.get("X-Jarvis-Device", "").strip()
+            else "desktop"
+        )
+        handoff = get_handoff(handoff_id)
+        if handoff is None:
+            raise HTTPException(404, "handoff not found")
+        if handoff.get("to_surface") != surface:
+            raise HTTPException(
+                403, "handoff belongs to another surface")
+        try:
+            return complete_handoff(handoff_id)
+        except KeyError as exc:
+            raise HTTPException(404, "handoff not found") from exc
 
     # ── Health ───────────────────────────────────────────────────────
 

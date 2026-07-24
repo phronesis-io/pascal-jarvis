@@ -22,6 +22,22 @@ _NAV = [
     ("更多", "/settings"),
 ]
 
+
+def surface_from_headers(headers) -> tuple[str, str]:
+    """Map an authenticated gateway request to its product surface."""
+    device_id = str((headers or {}).get("X-Jarvis-Device", "") or "").strip()
+    return ("mobile", device_id) if device_id else ("desktop", "local")
+
+
+def client_surface() -> tuple[str, str]:
+    """Return the current NiceGUI surface and its trusted actor identity."""
+    try:
+        request = ui.context.client.request
+        return surface_from_headers(request.headers)
+    except (AttributeError, RuntimeError):
+        return "desktop", "local"
+
+
 _GENERIC_MEMORIAL_TITLES = {
     "", "EigenFlux", "eigenflux", "heartbeat", "pgc-improvement", "一件事",
     "Intent", "intent", "EigenFlux 消息", "EigenFlux 分析", "repos-sync",
@@ -249,7 +265,7 @@ def add_dashboard_head() -> None:
     ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
-        '<link rel="stylesheet" href="/static/style.css?v=20260723-items1">'
+        '<link rel="stylesheet" href="/static/style.css?v=20260724-continuity2">'
         # use-credentials: the browser's manifest fetch defaults to
         # credentials-omit, so behind the authenticated mobile gateway it 401s
         # and the PWA never gets its manifest.

@@ -52,6 +52,7 @@ class TestDatabase:
         assert "bookmarks" in table_names
         assert "agent_log" in table_names
         assert "kv_store" in table_names
+        assert "surface_handoffs" in table_names
 
     def test_bookmark_add_and_list(self):
         bm_id = db_module.bookmark_add("Test Article", "https://example.com", "test")

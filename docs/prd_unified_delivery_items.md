@@ -157,7 +157,13 @@ Each card shows:
 - optional `Timed reminder` attribute;
 - decision buttons;
 - source-native links;
+- an exact full-context route;
+- a context-aware `send to phone` or `continue on desktop` action;
 - `Go to Lark chat`.
+
+Cross-device Handoffs point to the same Item and automatically complete when
+that Item is resolved. They move the next interaction without duplicating the
+Memorial, Matter, or Intent.
 
 `/memorials`, `/intentions`, and the top-level `/matters` route redirect to
 Items. Matter detail remains available at `/matters/{id}` as context, not an
@@ -170,6 +176,10 @@ APIs:
 - `POST /api/items/{id}/chat`
 - `GET /api/deliveries`
 - `POST /api/deliveries/{id}/confirm`
+- `GET /api/handoffs`
+- `POST /api/handoffs`
+- `POST /api/handoffs/{id}/claim`
+- `POST /api/handoffs/{id}/complete`
 
 ## 7. Intent Module Boundaries
 

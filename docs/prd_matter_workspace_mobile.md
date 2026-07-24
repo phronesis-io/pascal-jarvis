@@ -75,6 +75,16 @@ Implemented on 2026-07-22:
   reach the dashboard nor displace real device activity from the mobile access
   review.
 
+2026-07-24 cross-device continuity round:
+
+- Items and Matter details can move the next interaction between phone and
+  desktop without copying the underlying work object.
+- Durable handoffs survive Push failure, open the exact Item or Matter, and
+  disappear when the canonical work reaches a terminal state.
+- The mobile gateway preserves paired-device identity across both HTTP and
+  NiceGUI WebSocket traffic, while ordinary PWA suspension is a quiet
+  disconnect rather than a daemon error.
+
 The installed personal gateway binds only the machine's current private LAN
 address (plus loopback for the tailnet path) and proxies only
 `127.0.0.1:3457`. Funnel never exposes `:3456` or `:3457` directly, and every
@@ -325,9 +335,10 @@ It excludes unrelated private memory and raw transcripts by default.
 
 ### R5 Dashboard
 
-- Add Matters as a primary navigation destination.
-- Show active/waiting/done counts.
-- Matter cards show status, next action, update time, and linked runtimes.
+- Use Items as the primary decision/notices destination; Matter is an optional
+  topic reached by drill-down or an exact continuation link.
+- Item cards show topic, review surface, timer presence, decisions, full-text
+  access, and the cross-device continuation command.
 - Matter detail shows a chronological spine of events and links.
 - Create and edit flows use plain language and work on mobile.
 - A recent-session picker allows attaching Claude/Codex sessions.
@@ -339,8 +350,8 @@ It excludes unrelated private memory and raw transcripts by default.
 - Service worker caches only the application shell and static assets.
 - Dynamic/private API data is network-first and is not stored in a public
   shared cache.
-- Mobile navigation keeps Today, Matters, Memorials, and More reachable with
-  one thumb.
+- Mobile navigation keeps Today, Items, and More reachable with one thumb;
+  Matter detail remains reachable from its Item or an exact handoff.
 
 ### R7 Lark handoff
 
@@ -348,7 +359,8 @@ It excludes unrelated private memory and raw transcripts by default.
 - Web and Lark decisions update the same ledger.
 - A Matter ID can ride in card callback metadata without being shown to the
   user.
-- Later phase: update the original Lark card when a web decision changes it.
+- A web decision updates every known delivered Lark card copy. This is part of
+  the current convergence contract and is covered by integration tests.
 
 ### R8 Artifacts and outcomes
 
@@ -494,6 +506,16 @@ is why the migration is links-first and prospective.
 - Private Tailscale access remains a maintenance fallback. It is not required
   for normal phone use and must not displace the phone's existing VPN.
 - Optional native shell only after PWA usage proves a native capability gap.
+
+### Phase 5: cross-device continuity (complete)
+
+- Stable focused Item routes for full context and exact Push destinations.
+- Durable, idempotent phone-to-desktop and desktop-to-phone handoffs.
+- Item and Matter detail expose the same continuation command.
+- Handoffs close when their canonical Item or Matter is resolved on any
+  surface.
+- Expected PWA WebSocket resets are treated as normal reconnects.
+- See `docs/prd_cross_device_continuity.md`.
 
 ## 14. Operations
 

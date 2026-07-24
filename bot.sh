@@ -215,7 +215,7 @@ emit("CLAUDE_BACKUP2_MODEL", c.claude.get("backup2_model", ""))
 emit("BACKUP_MAX_SESSION_SIZE", c.claude.get("backup_max_session_size", 100000))
 emit("BACKUP_MAX_MEMORY_CHARS", c.claude.get("backup_max_memory_chars", 40000))
 emit("OPENAI_FALLBACK_ENABLED", str(bool(c.openai.get("fallback_enabled", True))).lower())
-emit("OPENAI_FALLBACK_MODEL", c.openai.get("fallback_model", "gpt-5.2"))
+emit("OPENAI_FALLBACK_MODEL", c.openai.get("fallback_model", "gpt-5.5"))
 emit("OPENAI_API_KEY_CONFIG", c.openai.get("api_key", ""))
 emit("OPENAI_BASE_URL", c.openai.get("base_url", "https://api.openai.com/v1"))
 emit("OPENAI_USER_AGENT", c.openai.get("user_agent", ""))
@@ -736,6 +736,7 @@ handle_message() {
   # not execute anything on this machine), owner-only action markers, and
   # speaker attribution so the model knows who is talking.
   local is_group=0 allow_actions=1 claude_tool_flags=()
+  local openai_fallback_flags=()
   # Fail CLOSED on empty/unknown chat_type (red-team: missing field defaults
   # to p2p → full memory + full tools for a group message). Only an explicit
   # "p2p" unlocks the private path; everything else is treated as a group.
@@ -746,6 +747,10 @@ handle_message() {
     # exfiltrate memory/logs through it. Bash/file tools would be code
     # execution on this machine for anyone in the group.
     claude_tool_flags=(--allowedTools "WebSearch" --disallowedTools "Bash,Edit,Write,NotebookEdit,Read,Glob,Grep,Agent,Skill,WebFetch,TaskCreate,TaskUpdate")
+    # The final GPT route must preserve the same group trust boundary.
+    # Otherwise a Claude outage would silently turn an untrusted group prompt
+    # into local bash/file access.
+    openai_fallback_flags=(--no-tools)
     if [ -z "$sender_id" ] || [ "$sender_id" != "$USER_ID" ]; then
       allow_actions=0
     fi
@@ -1272,14 +1277,15 @@ except Exception:
         # context-free GPT reply; requiring a completed failed attempt means
         # backup really failed at least once in THIS handler run.
         _openai_tried=1
-        log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.2})"
+        log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
         answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
           python3 -m core.openai_fallback \
+          ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
           2>"${ANSWER_FILE}.openai.stderr")
         _openai_exit=$?
         if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
           _answer_provider="GPT fallback"
-          _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.2}"
+          _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
           log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
           break
         fi

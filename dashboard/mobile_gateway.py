@@ -22,6 +22,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from aiohttp import ClientSession, WSMsgType, web
+from aiohttp.client_exceptions import ClientConnectionResetError
 
 from core.mobile_access import audit_access, consume_pair_code, validate_device_token
 
@@ -371,6 +372,38 @@ async def mobile_ca(_request: web.Request) -> web.Response:
     )
 
 
+async def _relay_websockets(client_ws, backend_ws) -> None:
+    """Relay until either side closes; phone suspension is a normal exit."""
+    async def relay(source, target):
+        try:
+            async for msg in source:
+                if msg.type == WSMsgType.TEXT:
+                    await target.send_str(msg.data)
+                elif msg.type == WSMsgType.BINARY:
+                    await target.send_bytes(msg.data)
+                elif msg.type in {WSMsgType.CLOSE, WSMsgType.ERROR}:
+                    break
+        except (ClientConnectionResetError, ConnectionResetError,
+                BrokenPipeError):
+            return
+        except RuntimeError:
+            if getattr(target, "closed", False):
+                return
+            raise
+
+    tasks = {
+        asyncio.create_task(relay(client_ws, backend_ws)),
+        asyncio.create_task(relay(backend_ws, client_ws)),
+    }
+    done, pending = await asyncio.wait(
+        tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        task.result()
+
+
 async def _proxy_websocket(request: web.Request, device: dict) -> web.StreamResponse:
     client_ws = web.WebSocketResponse(heartbeat=25)
     await client_ws.prepare(request)
@@ -378,30 +411,16 @@ async def _proxy_websocket(request: web.Request, device: dict) -> web.StreamResp
     session = request.app[SESSION_KEY]
     backend_cookies = "; ".join(
         f"{key}={value}" for key, value in request.cookies.items() if key != COOKIE)
-    ws_headers = {"Origin": BACKEND}
+    ws_headers = {
+        "Origin": BACKEND,
+        "X-Jarvis-Device": device["id"],
+        "X-Forwarded-For": _remote(request),
+    }
     if backend_cookies:
         ws_headers["Cookie"] = backend_cookies
     async with session.ws_connect(target, heartbeat=25,
                                   headers=ws_headers) as backend_ws:
-        async def client_to_backend():
-            async for msg in client_ws:
-                if msg.type == WSMsgType.TEXT:
-                    await backend_ws.send_str(msg.data)
-                elif msg.type == WSMsgType.BINARY:
-                    await backend_ws.send_bytes(msg.data)
-                elif msg.type in {WSMsgType.CLOSE, WSMsgType.ERROR}:
-                    break
-
-        async def backend_to_client():
-            async for msg in backend_ws:
-                if msg.type == WSMsgType.TEXT:
-                    await client_ws.send_str(msg.data)
-                elif msg.type == WSMsgType.BINARY:
-                    await client_ws.send_bytes(msg.data)
-                elif msg.type in {WSMsgType.CLOSE, WSMsgType.ERROR}:
-                    break
-
-        await asyncio.gather(client_to_backend(), backend_to_client())
+        await _relay_websockets(client_ws, backend_ws)
     audit_access(device["id"], _remote(request), "WS", request.path, 101)
     return client_ws
 

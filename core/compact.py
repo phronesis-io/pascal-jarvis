@@ -137,7 +137,7 @@ def _openai_compact(prompt: str) -> str:
         return ""
     try:
         from core.openai_fallback import build_payload, call_openai, extract_text
-        model = os.environ.get("OPENAI_FALLBACK_MODEL", "gpt-5.2")
+        model = os.environ.get("OPENAI_FALLBACK_MODEL", "gpt-5.5")
         max_tokens = int(os.environ.get(
             "OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", "4096"))
         payload = build_payload("", prompt, model, max_tokens)

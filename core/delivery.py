@@ -230,6 +230,12 @@ def _default_transport(root: Path) -> Transport:
                 result = send_push(
                     str(envelope.payload.get("title") or "Jarvis"),
                     str(envelope.payload.get("text") or "有一项新内容"),
+                    url=str(envelope.payload.get("url") or "/items"),
+                    matter_id=str(
+                        envelope.payload.get("matter_id")
+                        or envelope.matter_id
+                        or envelope.memorial_id
+                        or ""),
                 )
                 ok = int(result.get("sent", 0) or 0) > 0
                 return TransportResult(ok, error="" if ok else "no push subscriber")

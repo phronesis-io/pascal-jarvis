@@ -91,7 +91,7 @@ claude:
 
 openai:
   fallback_enabled: true
-  fallback_model: "gpt-5.2"
+  fallback_model: "gpt-5.5"
   # Prefer env var OPENAI_API_KEY for normal installs. This field exists for
   # private, gitignored deployments that keep provider keys in jarvis.yaml.
   api_key: ""

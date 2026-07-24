@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/items", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/items", "/items/missing", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -1143,6 +1143,82 @@ class TestRoutes:
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["state"] == "read"
+
+    def test_api_cross_device_handoff_lifecycle(
+            self, client, jarvis_tmp, monkeypatch):
+        from core import memorial
+        monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
+        memorial_id, _ = memorial.create(
+            "api", "回电脑继续", "完整背景", preset="fyi", send=False)
+        created = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": memorial_id,
+            "from_surface": "mobile",
+            "to_surface": "desktop",
+            "title": "回电脑继续",
+        }, headers={"X-Jarvis-Device": "dev_test_phone"})
+        assert created.status_code == 200
+        handoff = created.json()
+        assert handoff["created"] is True
+        assert handoff["created_by"] == "dev_test_phone"
+
+        duplicate = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": memorial_id,
+            "from_surface": "mobile",
+            "to_surface": "desktop",
+        }, headers={"X-Jarvis-Device": "dev_test_phone"})
+        assert duplicate.status_code == 200
+        assert duplicate.json()["id"] == handoff["id"]
+        assert duplicate.json()["created"] is False
+
+        listed = client.get(
+            "/api/handoffs?target_surface=desktop&status=active")
+        assert listed.status_code == 200
+        assert [row["id"] for row in listed.json()["items"]] == [handoff["id"]]
+        wrong = client.post(
+            f"/api/handoffs/{handoff['id']}/claim",
+            json={"surface": "mobile"},
+        )
+        assert wrong.status_code == 403
+        claimed = client.post(
+            f"/api/handoffs/{handoff['id']}/claim",
+            json={"surface": "desktop"},
+        )
+        assert claimed.status_code == 200
+        assert claimed.json()["status"] == "claimed"
+        wrong_complete = client.post(
+            f"/api/handoffs/{handoff['id']}/complete",
+            json={},
+            headers={"X-Jarvis-Device": "dev_test_phone"},
+        )
+        assert wrong_complete.status_code == 403
+        completed = client.post(
+            f"/api/handoffs/{handoff['id']}/complete", json={})
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "completed"
+
+        invalid = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": "mem_invalid",
+            "from_surface": "mobile",
+            "to_surface": "mobile",
+        }, headers={"X-Jarvis-Device": "dev_test_phone"})
+        assert invalid.status_code == 400
+        spoofed = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": memorial_id,
+            "from_surface": "mobile",
+            "to_surface": "desktop",
+        })
+        assert spoofed.status_code == 403
+        missing = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": "mem_missing",
+            "from_surface": "desktop",
+            "to_surface": "mobile",
+        })
+        assert missing.status_code == 404
 
     def test_api_work_sessions(self, client, monkeypatch):
         import core.work_sessions as work_sessions

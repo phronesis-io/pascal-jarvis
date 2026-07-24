@@ -216,6 +216,8 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "core.model_fallback" in bot        # REQ-77 wired
     assert '"$_cur_model"' in bot              # main path uses degradable model
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
+    assert "openai_fallback_flags=(--no-tools)" in bot
+    assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
     assert "ANTHROPIC_BASE_URL" in bot
     # 7/7: English "Model: Claude backup opus" footer was jargon in Pascal's

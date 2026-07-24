@@ -204,7 +204,7 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
 .matter-detail-title {
     max-width: 820px;
     font-family: "Songti SC", "STSong", serif;
-    font-size: clamp(27px, 4vw, 40px);
+    font-size: 40px;
     font-weight: 700;
     line-height: 1.16;
     overflow-wrap: anywhere;
@@ -481,6 +481,85 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     font-size: 12px;
     white-space: nowrap;
 }
+.item-detail-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--ink-soft) !important;
+    font-size: 12px;
+    text-decoration: none !important;
+}
+.continuity-band {
+    width: 100%;
+    padding: 18px 0;
+    border-top: 1px solid var(--mist);
+    border-bottom: 1px solid var(--mist);
+}
+.continuity-title {
+    color: var(--ink);
+    font-family: "Songti SC", "STSong", serif;
+    font-size: 20px;
+    font-weight: 700;
+}
+.continuity-count {
+    color: var(--ink-soft);
+    font-family: "SFMono-Regular", monospace;
+    font-size: 12px;
+}
+.continuity-list { width: 100%; gap: 0; }
+.continuity-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 34px;
+    gap: 12px;
+    align-items: center;
+    width: 100%;
+    min-height: 52px;
+    border-top: 1px solid var(--mist-soft);
+}
+.continuity-copy { min-width: 0; gap: 2px; }
+.continuity-item-title {
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 14px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.continuity-meta { color: var(--ink-soft); font-size: 11px; }
+.item-detail {
+    width: min(100%, 820px);
+    margin: 0 auto;
+    padding: 26px 0 12px;
+    border-top: 4px solid var(--cinnabar);
+}
+.item-detail-title {
+    max-width: 760px;
+    color: var(--ink);
+    font-family: "Songti SC", "STSong", serif;
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1.3;
+}
+.item-detail-body {
+    max-width: 760px;
+    color: var(--ink-soft);
+    font-size: 15px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+}
+.item-detail-body p { margin: 0 0 .75rem; }
+.item-context {
+    background: transparent !important;
+    border-top: 1px solid var(--mist) !important;
+    border-bottom: 1px solid var(--mist) !important;
+    box-shadow: none !important;
+}
+.item-decision-result {
+    color: var(--jade);
+    font-size: 14px;
+    font-weight: 700;
+}
+.item-detail-actions { padding-top: 8px; }
 
 /* Data tables on machinery pages — one look, phone-safe. */
 .table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -517,7 +596,7 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
         bottom: 0;
         left: 0;
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(3, 1fr);
         padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
         background: color-mix(in srgb, var(--paper-raised) 94%, transparent);
         border-top: 1px solid var(--mist);
@@ -539,6 +618,10 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     .metric-strip { grid-template-columns: repeat(2, 1fr); }
     .memorial-grid { grid-template-columns: 1fr; }
     .memorial-card { min-height: auto; padding: 18px 16px 16px 20px; }
+    .item-detail { padding-top: 20px; }
+    .item-detail-title { font-size: 28px; }
+    .item-detail-body { font-size: 14px; }
+    .item-detail-actions .q-btn { flex: 1 1 140px; }
     .timeline-entry { grid-template-columns: 58px minmax(0, 1fr); }
     .activity-time { grid-column: 2; }
     .matter-card { padding: 16px 14px 16px 19px; }
@@ -546,9 +629,21 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     .matter-updated { width: 100%; margin-left: 0; }
     .matter-detail-heading { flex-direction: column; gap: 14px; }
     .matter-detail-copy { width: 100%; flex: 0 1 auto; }
-    .matter-detail-actions { width: 100%; }
-    .matter-detail-actions .q-btn { flex: 1 1 0; }
-    .matter-action-link { flex: 1 1 0; justify-content: center; }
+    .matter-detail-title { font-size: 28px; }
+    .matter-detail-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+    }
+    .matter-detail-actions .q-btn {
+        width: 100%;
+        min-width: 0;
+    }
+    .matter-action-link {
+        width: 100%;
+        min-width: 0;
+        justify-content: center;
+    }
     .matter-next-band { padding: 16px; }
     .matter-executor-band { align-items: flex-start; flex-direction: column; }
     .matter-executor-actions { display: grid; grid-template-columns: 1fr; width: 100%; }

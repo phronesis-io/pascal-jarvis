@@ -1536,6 +1536,16 @@ def _sync_lark_card(memorial_id: str, card: dict) -> None:
                   file=sys.stderr)
 
 
+def _complete_surface_handoffs(memorial_id: str) -> None:
+    """Best-effort convergence for phone/desktop continuation affordances."""
+    try:
+        from core.continuity import complete_entity_handoffs
+        complete_entity_handoffs("memorial", memorial_id)
+    except Exception as e:
+        print(f"memorial {memorial_id}: handoff completion failed: {e}",
+              file=sys.stderr)
+
+
 def resolve(memorial_id: str, label: str,
             action_result: str = "") -> bool:
     """Converge a memorial to an externally confirmed terminal state.
@@ -1561,6 +1571,7 @@ def resolve(memorial_id: str, label: str,
     resolved = get_memorial(memorial_id)
     if resolved is not None:
         _sync_lark_card(memorial_id, _decided_card(resolved))
+    _complete_surface_handoffs(memorial_id)
     return True
 
 
@@ -1575,6 +1586,7 @@ def decide(memorial_id: str, opt_key: str) -> dict:
         return {"toast": {"type": "info",
                           "content": "这张卡对应的事项找不到了，直接在对话里告诉我"}}
     if st["status"] == "decided":
+        _complete_surface_handoffs(memorial_id)
         return {"toast": {"type": "info", "content": f"已批过：{st['decided_label']}"},
                 "card": {"type": "raw", "data": _decided_card(st)}}
     opt = next((o for o in st["options"] if o.get("key") == opt_key), None)
@@ -1642,6 +1654,7 @@ def decide(memorial_id: str, opt_key: str) -> dict:
         toast = {"type": "success", "content": f"已批：{opt.get('label', '')} ✓"}
     decided_card = _decided_card(st)
     _sync_lark_card(memorial_id, decided_card)
+    _complete_surface_handoffs(memorial_id)
     return {"toast": toast, "card": {"type": "raw", "data": decided_card}}
 
 

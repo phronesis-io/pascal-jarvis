@@ -255,7 +255,9 @@ def _memorial_preview(state: dict, refresh) -> None:
             ui.button("去飞书聊", icon="forum",
                       on_click=lambda mid=state["id"]: chat(mid)).props(
                 "flat no-caps").classes("memorial-chat")
-            ui.link("全文 →", "/items").classes("jarvis-nav-link")
+            ui.link(
+                "全文 →", f"/items/{state['id']}"
+            ).classes("jarvis-nav-link")
 
 
 @ui.page("/")

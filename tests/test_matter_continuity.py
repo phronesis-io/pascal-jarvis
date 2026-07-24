@@ -545,6 +545,17 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
         backend_app = web.Application()
 
         async def backend(request):
+            if request.headers.get("Upgrade", "").lower() == "websocket":
+                ws = web.WebSocketResponse()
+                await ws.prepare(request)
+                async for message in ws:
+                    await ws.send_json({
+                        "message": message.data,
+                        "device": request.headers.get(
+                            "X-Jarvis-Device", ""),
+                    })
+                    await ws.close()
+                return ws
             return web.json_response({
                 "path": request.path,
                 "origin": request.headers.get("Origin", ""),
@@ -593,6 +604,14 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             payload = await allowed.json()
             assert payload["path"] == "/matters"
             assert payload["device"].startswith("dev_")
+            websocket = await client.ws_connect("/ws")
+            await websocket.send_str("continue")
+            websocket_payload = await websocket.receive_json()
+            assert websocket_payload == {
+                "message": "continue",
+                "device": payload["device"],
+            }
+            await websocket.close()
             rejected = await client.post(
                 "/api/test", headers={"Origin": "https://attacker.example"})
             assert rejected.status == 403
@@ -637,6 +656,46 @@ def test_gateway_backend_constant_never_points_at_admin():
     from dashboard.mobile_gateway import BACKEND
     assert BACKEND == "http://127.0.0.1:3457"
     assert "3456" not in BACKEND
+
+
+def test_gateway_websocket_reset_is_a_normal_disconnect():
+    from aiohttp import WSMsgType
+    from aiohttp.client_exceptions import ClientConnectionResetError
+    from dashboard.mobile_gateway import _relay_websockets
+
+    class FakeSocket:
+        def __init__(self, messages=(), fail_send=False, idle=False):
+            self.messages = list(messages)
+            self.fail_send = fail_send
+            self.idle = idle
+            self.closed = False
+            self.sent = []
+
+        def __aiter__(self):
+            async def stream():
+                for message in self.messages:
+                    yield message
+                if self.idle:
+                    await asyncio.Event().wait()
+            return stream()
+
+        async def send_str(self, value):
+            if self.fail_send:
+                raise ClientConnectionResetError("phone suspended")
+            self.sent.append(value)
+
+        async def send_bytes(self, value):
+            await self.send_str(value)
+
+    async def scenario():
+        client = FakeSocket([
+            types.SimpleNamespace(type=WSMsgType.TEXT, data="resume"),
+        ])
+        backend = FakeSocket(fail_send=True, idle=True)
+        await asyncio.wait_for(
+            _relay_websockets(client, backend), timeout=1)
+
+    asyncio.run(scenario())
 
 
 def test_web_decision_updates_every_delivered_lark_card(monkeypatch):

@@ -18,7 +18,7 @@ _DEFAULTS = {
         "max_session_size": 512000,
         # Optional Claude Code-compatible backup provider. When configured,
         # main chat can retry `claude -p` with ANTHROPIC_* env pointed at this
-        # endpoint before falling back to text-only OpenAI.
+        # endpoint before falling back to OpenAI.
         "backup_enabled": True,
         "backup_auth_token": "",
         "backup_base_url": "",
@@ -33,7 +33,7 @@ _DEFAULTS = {
         # model/account limit. It is deliberately off unless an API key exists
         # and bot.sh sees a Claude model error.
         "fallback_enabled": True,
-        "fallback_model": "gpt-5.2",
+        "fallback_model": "gpt-5.5",
         "api_key": "",
         "base_url": "https://api.openai.com/v1",
         "user_agent": "",
