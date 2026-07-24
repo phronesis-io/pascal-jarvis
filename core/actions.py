@@ -336,49 +336,12 @@ class ActionProcessor:
         except Exception as exc:
             return f"❌ EigenFlux 消息未发送：{exc}"
         try:
-            import hashlib
-            from core.delegation_connectors import record_connector_receipt
-
-            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            source_ref = (
-                f"message:{receipt.msg_id}"
-                if receipt.msg_id
-                else (
-                    f"attempt:{receipt.idempotency_key}"
-                    if receipt.idempotency_key
-                    else f"attempt:{receipt.recipient_id}:{content_hash}"
-                )
+            from core.delegation_connectors import (
+                project_eigenflux_message_receipt,
             )
-            record_connector_receipt(
-                source="eigenflux-message",
-                source_ref=source_ref,
-                title=f"发送消息给 {receipt.recipient_name}",
-                operation="message_send",
-                target_type="agent",
-                target_id=receipt.recipient_id,
-                target_label=receipt.recipient_name,
-                authority="eigenflux_message_history",
-                verifier="eigenflux_message",
-                expected={
-                    "state": "verified",
-                    "target_id": receipt.recipient_id,
-                },
-                observed={
-                    "state": receipt.state,
-                    "target_id": receipt.recipient_id,
-                    "msg_id": receipt.msg_id,
-                    "conv_id": receipt.conv_id,
-                },
-                matched=receipt.completed,
-                resource_locator=(
-                    f"eigenflux-message:{receipt.msg_id}"
-                    if receipt.msg_id
-                    else f"eigenflux-conversation:{receipt.conv_id}"
-                ),
-                verification_policy={
-                    "idempotency_key": receipt.idempotency_key,
-                    "msg_id": receipt.msg_id,
-                },
+
+            project_eigenflux_message_receipt(
+                receipt,
                 root=self.jarvis_dir,
             )
         except Exception as exc:

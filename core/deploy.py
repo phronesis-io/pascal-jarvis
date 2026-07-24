@@ -245,7 +245,12 @@ def verify_runtime(
     for name in required:
         if name not in by_name:
             issues.append(f"{name}: no runtime registration")
-    for row in rows:
+    selected_rows = (
+        [row for row in rows if str(row["component"]) in set(required)]
+        if required
+        else rows
+    )
+    for row in selected_rows:
         name = str(row["component"])
         alive = _pid_alive(int(row["pid"]))
         status_issues = []
@@ -279,7 +284,7 @@ def verify_runtime(
             "started_epoch": float(row["started_epoch"]),
             "issues": status_issues,
         })
-    if not rows:
+    if not rows and not required:
         issues.append("no runtime registrations")
     dirty_paths = _dirty_runtime_paths(project)
     return {

@@ -320,6 +320,37 @@ def test_readback_failure_never_claims_completion_or_retries(tmp_path):
     assert "仍在核验" in receipt.human_text()
 
 
+def test_stale_uncertain_action_never_replays_without_repeat_token(tmp_path):
+    cli = FakeEigenFlux()
+    clock = [2_000_000_000.0]
+    sends = []
+
+    def uncertain_send(target, content):
+        sends.append((target, content))
+        return {
+            "code": 0,
+            "data": {"msg_id": "unknown-1", "conv_id": "conv-agent-spouse"},
+        }
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=cli,
+        api_sender=uncertain_send,
+        now=lambda: clock[0],
+        attempt_stale_seconds=60,
+    )
+
+    first = messenger.send("Family agent", "uncertain")
+    clock[0] += 61
+    second = messenger.send("Family agent", "uncertain")
+
+    assert first.state == "verifying"
+    assert second.state == "verifying"
+    assert second.duplicate is True
+    assert sends == [("agent-spouse", "uncertain")]
+
+
 def test_uncertain_action_projects_stable_key_for_later_reconciliation(
     monkeypatch, tmp_path,
 ):
@@ -362,6 +393,32 @@ def test_uncertain_action_projects_stable_key_for_later_reconciliation(
     assert verification.matched is True
     assert verification.observed_summary.find('"state":"verified"') >= 0
     assert cli.send_count == 1
+
+
+def test_reconciler_projects_an_unclaimed_message_receipt(
+    tmp_path,
+):
+    from core.delegation_reconcile import DelegationReconciler
+    from core.delegations import DelegationStore
+
+    cli = FakeEigenFlux()
+    cli.history_error = True
+    receipt = _messenger(tmp_path, cli).send(
+        "Family agent", "welcome needs recovery"
+    )
+    assert receipt.state == "verifying"
+    store = DelegationStore(root=tmp_path, db_path=tmp_path / "jarvis.db")
+    assert store.list() == []
+
+    result = DelegationReconciler(store=store).run(send_items=False)
+
+    assert result["connector_projections_repaired"] == 1
+    detail = store.get(store.list()[0]["id"])
+    assert detail["status"] == "verifying"
+    assert (
+        detail["verification_policy"]["idempotency_key"]
+        == receipt.idempotency_key
+    )
 
 
 def test_uncertain_explicit_repeats_keep_separate_delegations(

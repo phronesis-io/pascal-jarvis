@@ -275,6 +275,15 @@ class DelegationReconciler:
 
     def run(self, *, limit: int = 50, send_items: bool = True) -> dict[str, Any]:
         limit = max(1, min(int(limit), 200))
+        from core.delegation_connectors import (
+            repair_eigenflux_message_projections,
+        )
+
+        projection_repair = repair_eigenflux_message_projections(
+            root=self.store.root,
+            store=self.store,
+            limit=limit,
+        )
         released = self.store.release_expired_leases(limit=limit)
         scanned = 0
         verified = 0
@@ -431,6 +440,8 @@ class DelegationReconciler:
                     refreshed, store=self.store, send=send_items
                 )
         return {
+            "connector_projections_repaired": projection_repair["repaired"],
+            "connector_projection_errors": projection_repair["errors"],
             "released_leases": released,
             "scanned": scanned,
             "verified": verified,
@@ -449,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit, send_items=not args.no_send
     )
     print(json.dumps(result, ensure_ascii=False))
-    return 0 if not result["errors"] else 3
+    return 0
 
 
 if __name__ == "__main__":

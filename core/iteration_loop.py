@@ -800,6 +800,7 @@ class DailyObserver:
 
     def __init__(self, store: IterationStore | None = None):
         self.store = store or IterationStore()
+        self._collector_observed_at: dict[str, float] = {}
 
     def _component_signals(self) -> list[dict[str, Any]]:
         from core.components import check_components
@@ -808,6 +809,7 @@ class DailyObserver:
         rows = check_components(root=self.store.root)
         if not rows:
             raise IterationError("component manifest is unavailable")
+        self._collector_observed_at["components"] = self.store.now()
         for row in rows:
             if row["ok"]:
                 continue
@@ -830,6 +832,7 @@ class DailyObserver:
         metrics = DelegationStore(
             root=self.store.root, db_path=self.store.db_path
         ).metrics()
+        self._collector_observed_at["delegations"] = self.store.now()
         signals = []
         if metrics["overdue_active"]:
             signals.append(
@@ -886,6 +889,9 @@ class DailyObserver:
                 ) from exc
             if age.total_seconds() > 48 * 3600:
                 raise IterationError("conversation audit is stale")
+            self._collector_observed_at[
+                "conversation_audit"
+            ] = completed.timestamp()
         except sqlite3.Error as exc:
             raise IterationError(f"conversation audit read failed: {exc}") from exc
         finally:
@@ -1024,6 +1030,7 @@ class DailyObserver:
         raw_signals: list[dict[str, Any]],
         *,
         covered_sources: set[str],
+        coverage_observed_at: dict[str, float],
     ) -> dict[str, Any]:
         """Move queued work through deployed SHA and same-source observation."""
         recovered = 0
@@ -1158,6 +1165,10 @@ class DailyObserver:
             if not source or source not in covered_sources:
                 coverage_skipped += 1
                 continue
+            observed_at = float(coverage_observed_at.get(source) or 0)
+            if observed_at <= float(proposal.get("shipped_at") or 0):
+                coverage_skipped += 1
+                continue
             is_open = proposal["signal_fingerprint"] in open_fingerprints
             matched = is_open == bool(proposal["expected"]["signal_open"])
             updated = self.store.verify_outcome(
@@ -1182,7 +1193,9 @@ class DailyObserver:
     def run(self, *, create_proposals: bool = True) -> dict[str, Any]:
         raw: list[dict[str, Any]] = []
         covered_sources: set[str] = set()
+        coverage_observed_at: dict[str, float] = {}
         coverage_errors: list[dict[str, str]] = []
+        self._collector_observed_at = {}
         collectors = (
             ("components", self._component_signals),
             ("delegations", self._delegation_signals),
@@ -1198,8 +1211,13 @@ class DailyObserver:
                 continue
             raw.extend(batch)
             covered_sources.add(source)
+            coverage_observed_at[source] = float(
+                self._collector_observed_at.get(source, self.store.now())
+            )
         reconciliation = self._reconcile_existing(
-            raw, covered_sources=covered_sources
+            raw,
+            covered_sources=covered_sources,
+            coverage_observed_at=coverage_observed_at,
         )
         signals = [self.store.record_signal(**item) for item in raw]
         proposals = []

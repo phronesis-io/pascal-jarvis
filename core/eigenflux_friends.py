@@ -112,6 +112,47 @@ def execute_friend_action(
     if not from_uid:
         return (f"「{from_name}」的好友申请缺少稳定对象标识，未执行。"), True
 
+    from core.delegation_connectors import (
+        project_eigenflux_message_receipt,
+        record_connector_receipt,
+    )
+
+    friend_expected = {
+        "agent_id": from_uid,
+        "relationship": "friend",
+    }
+
+    def project_friend(friend: dict | None, *, matched: bool) -> None:
+        record_connector_receipt(
+            source="eigenflux-friend",
+            source_ref=f"request:{request_id}:accept",
+            title=f"通过 {from_name} 的好友申请",
+            operation="friend_accept",
+            target_type="agent",
+            target_id=from_uid,
+            target_label=from_name,
+            authority="eigenflux_relationship_service",
+            verifier="eigenflux_friend",
+            expected=friend_expected,
+            observed={
+                "agent_id": from_uid,
+                "relationship": "friend" if matched else "absent",
+                **(
+                    {
+                        "agent_name": str(
+                            (friend or {}).get("agent_name") or from_name
+                        )
+                    }
+                    if matched
+                    else {}
+                ),
+            },
+            matched=matched,
+            resource_locator=f"eigenflux-friend:{from_uid}",
+            verification_policy={"agent_id": from_uid},
+            root=root,
+        )
+
     try:
         already_friend = _friend_by_id(from_uid, runner)
     except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
@@ -142,6 +183,14 @@ def execute_friend_action(
                 f"服务端没有确认成功{detail}"
             ), True
         return f"已拒绝「{from_name}」的好友申请。", False
+
+    try:
+        project_friend(already_friend, matched=already_friend is not None)
+    except Exception as exc:
+        return (
+            f"「{from_name}」的好友申请尚未执行："
+            f"无法先建立可恢复记录（{exc}）"
+        ), True
 
     if already_friend is None:
         try:
@@ -176,31 +225,10 @@ def execute_friend_action(
         ), True
 
     try:
-        from core.delegation_connectors import record_connector_receipt
-
-        record_connector_receipt(
-            source="eigenflux-friend",
-            source_ref=f"request:{request_id}:accept",
-            title=f"通过 {from_name} 的好友申请",
-            operation="friend_accept",
-            target_type="agent",
-            target_id=from_uid,
-            target_label=from_name,
-            authority="eigenflux_relationship_service",
-            verifier="eigenflux_friend",
-            expected={"agent_id": from_uid, "relationship": "friend"},
-            observed={
-                "agent_id": from_uid,
-                "relationship": "friend",
-                "agent_name": str(friend.get("agent_name") or from_name),
-            },
-            matched=True,
-            resource_locator=f"eigenflux-friend:{from_uid}",
-            root=root,
-        )
+        project_friend(friend, matched=True)
     except Exception:
-        # The relationship is authoritative and already complete. A local
-        # projection outage is repaired by reconciliation, not by re-accepting.
+        # The pre-mutation projection remains in verifying and the scheduled
+        # reconciler can recover it from the relationship authority.
         pass
 
     try:
@@ -214,6 +242,7 @@ def execute_friend_action(
             from_uid,
             WELCOME_MESSAGE,
         )
+        project_eigenflux_message_receipt(welcome, root=root)
     except Exception as exc:
         return (
             f"已核验通过「{from_name}」的好友申请，但欢迎消息尚未核验：{exc}"

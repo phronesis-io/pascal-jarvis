@@ -823,7 +823,19 @@ class EigenFluxMessenger:
                         recipient_id=friend.agent_id,
                         idempotency_key=key,
                     )
-            self._start_retry(key)
+                return MessageReceipt(
+                    state="verifying",
+                    recipient_name=friend.agent_name,
+                    recipient_id=friend.agent_id,
+                    idempotency_key=key,
+                    msg_id=str(existing["msg_id"] or ""),
+                    conv_id=str(existing["conv_id"] or ""),
+                    duplicate=True,
+                    detail=(
+                        str(existing["last_error"] or "")
+                        or "权威历史尚未确认，未自动重复发送"
+                    ),
+                )
 
         try:
             response = self.api_sender(friend.agent_id, message)

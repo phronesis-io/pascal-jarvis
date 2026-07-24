@@ -176,13 +176,16 @@ class VerifierRegistry:
         return path
 
     def _git(self, repo: Path, *args: str) -> str:
-        result = self.runner(
-            ["git", *args],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
+        try:
+            result = self.runner(
+                ["git", *args],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise VerificationError(f"git readback failed: {exc}") from exc
         if result.returncode != 0:
             raise VerificationError((result.stderr or "git readback failed").strip()[:300])
         return result.stdout.strip()

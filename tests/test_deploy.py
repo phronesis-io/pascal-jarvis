@@ -78,6 +78,26 @@ def test_verify_requires_named_component(tmp_path):
     assert "bot: no runtime registration" in result["issues"]
 
 
+def test_verify_required_components_ignores_stale_optional_registration(
+    tmp_path,
+):
+    db_path = tmp_path / "jarvis.db"
+    register_runtime(
+        "bot", pid=os.getpid(), root=tmp_path, db_path=db_path
+    )
+    register_runtime(
+        "admin", pid=999_999_999, root=tmp_path, db_path=db_path
+    )
+
+    result = verify_runtime(
+        root=tmp_path, db_path=db_path, required=["bot"]
+    )
+
+    assert result["ok"] is True
+    assert [row["component"] for row in result["components"]] == ["bot"]
+    assert not any("admin" in issue for issue in result["issues"])
+
+
 def test_deploy_smoke_reaches_acted_within_budget(tmp_path):
     result = smoke_delivery(
         root=tmp_path, db_path=tmp_path / "jarvis.db", timeout=3)

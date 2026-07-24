@@ -109,6 +109,44 @@ def test_agentic_tool_loop(monkeypatch):
     }
 
 
+def test_agentic_rounds_share_one_deadline(monkeypatch):
+    clock = [100.0]
+    api_timeouts = []
+    tool_timeouts = []
+
+    def fake_call(payload, api_key, base_url, timeout, user_agent=""):
+        api_timeouts.append(timeout)
+        clock[0] += 3
+        if len(api_timeouts) == 1:
+            return {
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "bash",
+                    "arguments": '{"command":"echo hi"}',
+                }]
+            }
+        return {"output_text": "done", "output": []}
+
+    def fake_tool(name, arguments, *, timeout=None):
+        tool_timeouts.append(timeout)
+        clock[0] += 4
+        return "ok"
+
+    monkeypatch.setattr(of.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(of, "_api_call", fake_call)
+    monkeypatch.setattr(of, "execute_tool", fake_tool)
+
+    result = of.run_agentic(
+        "sys", "do it", "gpt-test", 4096,
+        "sk-test", "http://fake", 10,
+    )
+
+    assert result == "done"
+    assert api_timeouts == [10, 3]
+    assert tool_timeouts == [7]
+
+
 def test_execute_tool_bash(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     result = of.execute_tool("bash", {"command": "echo works"})

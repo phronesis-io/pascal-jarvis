@@ -106,6 +106,7 @@ def _invoke(
         text=True,
         cwd=cwd,
         env=env,
+        start_new_session=True,
     )
     if process_holder is not None:
         process_holder[process_key] = process
@@ -114,12 +115,39 @@ def _invoke(
         return subprocess.CompletedProcess(
             command, process.returncode, stdout, stderr
         )
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            pass
+        # The parent may exit on SIGTERM while a descendant ignores it. Probe
+        # the process group itself before closing our pipe ends.
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
         raise subprocess.TimeoutExpired(
-            command, timeout, output=stdout, stderr=stderr
-        )
+            command,
+            timeout,
+            output=getattr(exc, "output", None),
+            stderr=getattr(exc, "stderr", None),
+        ) from None
     finally:
         if (
             process_holder is not None
@@ -246,8 +274,10 @@ def run_auxiliary_model(
 
     try:
         attempt_index = 0
-        for provider, initial_model, env in _provider_candidates(
-            model, gate_state
+        candidates = _provider_candidates(model, gate_state)
+        gpt_available = _openai_configured()
+        for provider_index, (provider, initial_model, env) in enumerate(
+            candidates
         ):
             if cancelled is not None and cancelled():
                 return AuxiliaryModelResult(attempted=tuple(attempted))
@@ -288,11 +318,20 @@ def run_auxiliary_model(
                         ]
                     )
                 attempt_index += 1
+                later_routes = (
+                    len(candidates) - provider_index - 1
+                    + int(gpt_available)
+                )
+                attempt_timeout = (
+                    remaining
+                    if later_routes == 0
+                    else max(0.05, remaining / (later_routes + 1))
+                )
                 try:
                     result = _invoke(
                         command,
                         prompt,
-                        timeout=remaining,
+                        timeout=attempt_timeout,
                         cwd=str(work_dir or root_path),
                         env=env,
                         runner=runner,

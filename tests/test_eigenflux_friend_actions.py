@@ -151,3 +151,100 @@ def test_repeated_callback_reads_friend_and_does_not_accept_again(
     assert "没有重复执行好友操作" in result
     assert not any(call[1:3] == ["relation", "handle"] for call in calls)
     assert api_calls == [("456", eigenflux_friends.WELCOME_MESSAGE)]
+
+
+def test_accept_readback_timeout_leaves_recoverable_delegation(tmp_path):
+    from core.delegations import DelegationStore
+
+    friend_reads = 0
+
+    def runner(command):
+        nonlocal friend_reads
+        if command[1:3] == ["relation", "friends"]:
+            friend_reads += 1
+            if friend_reads == 1:
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps({"friends": []}), ""
+                )
+            raise subprocess.TimeoutExpired(command, 30)
+        if command[1:3] == ["relation", "handle"]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"code": 0}), ""
+            )
+        raise AssertionError(command)
+
+    result, failed = eigenflux_friends.execute_friend_action(
+        {
+            "request_id": "123",
+            "decision": "accept",
+            "from_uid": "456",
+            "from_name": "金融 Agent",
+        },
+        runner=runner,
+        root=tmp_path,
+    )
+
+    assert failed is True
+    assert "仍在核验" in result
+    store = DelegationStore(root=tmp_path)
+    detail = store.get(store.list()[0]["id"])
+    assert detail["source"] == "eigenflux-friend"
+    assert detail["status"] == "verifying"
+
+
+def test_uncertain_welcome_is_projected_for_scheduled_reconciliation(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+    from core.eigenflux_messages import MessageReceipt
+
+    friend = {"agent_id": "456", "agent_name": "金融 Agent"}
+
+    def runner(command):
+        if command[1:3] == ["relation", "friends"]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"friends": [friend]}), ""
+            )
+        raise AssertionError(command)
+
+    class Messenger:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_to_friend_id(self, _agent_id, _content):
+            return MessageReceipt(
+                state="verifying",
+                recipient_name="金融 Agent",
+                recipient_id="456",
+                idempotency_key="welcome-action-key",
+                conv_id="conv-1",
+            )
+
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger", Messenger
+    )
+
+    result, failed = eigenflux_friends.execute_friend_action(
+        {
+            "request_id": "123",
+            "decision": "accept",
+            "from_uid": "456",
+            "from_name": "金融 Agent",
+        },
+        runner=runner,
+        root=tmp_path,
+    )
+
+    assert failed is True
+    assert "欢迎消息已执行" in result
+    store = DelegationStore(root=tmp_path)
+    message = next(
+        row for row in store.list()
+        if row["source"] == "eigenflux-message"
+    )
+    detail = store.get(message["id"])
+    assert detail["status"] == "verifying"
+    assert (
+        detail["verification_policy"]["idempotency_key"]
+        == "welcome-action-key"
+    )

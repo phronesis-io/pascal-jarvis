@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -122,16 +123,19 @@ def _resolve_path(path: str) -> Path:
 
 # ── Tool executors ───────────────────────────────────────────────────────────
 
-def _exec_bash(args: dict) -> str:
+def _exec_bash(args: dict, *, timeout: float | None = None) -> str:
     cmd = args.get("command", "")
     if not cmd:
         return "error: empty command"
     cwd = os.environ.get("JARVIS_DIR") or str(Path(__file__).resolve().parent.parent)
+    effective_timeout = (
+        BASH_TIMEOUT if timeout is None else min(BASH_TIMEOUT, max(0.05, timeout))
+    )
     try:
         r = subprocess.run(
             ["bash", "-c", cmd],
             capture_output=True, text=True,
-            timeout=BASH_TIMEOUT, cwd=cwd,
+            timeout=effective_timeout, cwd=cwd,
         )
         out = r.stdout + r.stderr
         if r.returncode:
@@ -139,7 +143,7 @@ def _exec_bash(args: dict) -> str:
             return (out[:50000 - len(suffix)] + suffix) if out else suffix.lstrip()
         return out[:50000] or "(exit 0, no output)"
     except subprocess.TimeoutExpired:
-        return f"error: command timed out ({BASH_TIMEOUT}s)"
+        return f"error: command timed out ({effective_timeout:g}s)"
     except Exception as e:
         return f"error: {e}"
 
@@ -171,7 +175,12 @@ _EXECUTORS = {
 }
 
 
-def execute_tool(name: str, arguments: str | dict) -> str:
+def execute_tool(
+    name: str,
+    arguments: str | dict,
+    *,
+    timeout: float | None = None,
+) -> str:
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -180,13 +189,15 @@ def execute_tool(name: str, arguments: str | dict) -> str:
     executor = _EXECUTORS.get(name)
     if not executor:
         return f"error: unknown tool '{name}'"
+    if name == "bash":
+        return _exec_bash(arguments, timeout=timeout)
     return executor(arguments)
 
 
 # ── API call ─────────────────────────────────────────────────────────────────
 
 def _api_call(payload: dict[str, Any], api_key: str, base_url: str,
-              timeout: int, user_agent: str = "") -> dict[str, Any]:
+              timeout: float, user_agent: str = "") -> dict[str, Any]:
     import urllib.error
     import urllib.request
     url = base_url.rstrip("/") + "/responses"
@@ -245,8 +256,16 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict]:
 
 def run_agentic(system_prompt: str, user_input: str, model: str,
                 max_output_tokens: int, api_key: str, base_url: str,
-                timeout: int, user_agent: str = "") -> str:
-    """Run a tool-use loop until the model produces a text response."""
+                timeout: float, user_agent: str = "") -> str:
+    """Run a tool-use loop under one wall-clock deadline."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+
+    def remaining() -> float:
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise OpenAIFallbackError("OpenAI agentic fallback timed out")
+        return budget
+
     instructions = FALLBACK_NOTICE
     if system_prompt.strip():
         instructions = f"{instructions}\n\n{system_prompt}"
@@ -267,7 +286,9 @@ def run_agentic(system_prompt: str, user_input: str, model: str,
     }
 
     for _round in range(MAX_TOOL_ROUNDS):
-        response = _api_call(payload, api_key, base_url, timeout, user_agent)
+        response = _api_call(
+            payload, api_key, base_url, remaining(), user_agent
+        )
 
         tool_calls = _extract_tool_calls(response)
         if not tool_calls:
@@ -278,7 +299,7 @@ def run_agentic(system_prompt: str, user_input: str, model: str,
             call_id = tc.get("call_id", tc.get("id", ""))
             name = tc.get("name", "")
             arguments = tc.get("arguments", "{}")
-            result = execute_tool(name, arguments)
+            result = execute_tool(name, arguments, timeout=remaining())
             print(f"  [tool] {name}: {result[:100]}",
                   file=sys.stderr)
             tool_results.append({

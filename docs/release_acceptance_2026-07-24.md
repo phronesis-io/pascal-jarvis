@@ -188,6 +188,24 @@ before release:
 | 79 | Optional unhealthy services blocked otherwise valid deployment evidence | Runtime Delegation verification reads critical components only, matching the L3 deployment contract; critical-component regression |
 | 80 | Failed Delegations were omitted from the unified attention query | `needs_attention` includes failed recovery decisions alongside user confirmation and clarification states; attention-query regression |
 
+The tenth independent review exercised timeout behavior, fallback exhaustion,
+connector interruption, deployment scoping, and post-release evidence. Ten
+formal findings and one additional reproduced idempotency gap were closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 81 | Auxiliary timeout killed only the parent while descendants held capture pipes | Auxiliary Claude processes run in a separate session; timeout sends TERM and then KILL to the whole process group, closes descriptors, and returns within the hard bound; real descendant-process regression |
+| 82 | A hung primary could consume the entire budget before any backup ran | Each Claude-compatible attempt receives a bounded share while preserving one global deadline and budget for later providers; hung-primary-to-backup regression |
+| 83 | Optional stale runtime registrations could invalidate a required-component deployment proof | `verify_runtime(required=...)` evaluates and returns only the named runtime rows while still failing on missing required rows; stale-admin regression |
+| 84 | GPT agentic rounds reused the full timeout for every API and tool call | One monotonic deadline now governs all GPT API rounds and bash tools, with remaining time recomputed before each operation; multi-round deadline regression |
+| 85 | Git process failures escaped the typed verifier boundary | Git launch and timeout failures become `VerificationError`, allowing reconciliation to defer one item and continue; timeout regression |
+| 86 | A successful friend accept could disappear before its first read-back | The relationship Delegation is persisted before the mutation; an interrupted read-back leaves a verifying contract for scheduled authority recovery; accept-timeout regression |
+| 87 | An uncertain welcome message had no scheduled reconciliation path | Every welcome receipt is projected under its stable action key, and the reconciler repairs missing projections from `verified_external_actions`; uncertain-welcome regression |
+| 88 | A friend receipt projection failure could permanently lose control-plane state | The pre-mutation relationship projection remains repairable through the registered EigenFlux friend verifier even if the final matched projection fails; interruption regression |
+| 89 | L3 could verify a release from evidence collected before deployment | Source coverage now carries an observation timestamp and must be strictly newer than `shipped_at`; same-pass and stale-audit evidence is deferred; post-release observation regressions |
+| 90 | One deferred authority error caused the global reconciliation task to trip its circuit | Item errors stay visible in structured output while the pre-script exits successfully; only an unhandled process-level failure makes the task nonzero; scheduler regression |
+| 91 | A stale uncertain EigenFlux message automatically replayed the write | Existing `attempting` or `verifying` actions only re-read authority and never resend; a new external action requires an explicit repeat token; stale-idempotency regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -228,7 +246,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2052 passed` for this candidate);
+- full local test result (`2063 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

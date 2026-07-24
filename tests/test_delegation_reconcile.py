@@ -4,6 +4,7 @@ import json
 
 from core.delegation_reconcile import (
     DelegationReconciler,
+    main,
     sync_attention_item,
 )
 from core.delegation_verify import Verification, VerificationError
@@ -572,3 +573,17 @@ def test_attention_backlog_does_not_starve_verification(tmp_path, monkeypatch):
     assert result["needs_user"] == 1
     assert result["verified"] == 1
     assert store.get(delegation["id"])["status"] == "completed"
+
+
+def test_cli_item_readback_errors_do_not_fail_the_global_scheduler(
+    monkeypatch, capsys,
+):
+    monkeypatch.setattr(
+        "core.delegation_reconcile.DelegationReconciler.run",
+        lambda _self, **_kwargs: {
+            "errors": [{"delegation_id": "one", "error": "offline"}],
+        },
+    )
+
+    assert main(["--no-send"]) == 0
+    assert "offline" in capsys.readouterr().out

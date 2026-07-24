@@ -357,3 +357,21 @@ def test_unknown_verifier_fails_closed(tmp_path):
     registry = VerifierRegistry(root=tmp_path, db_path=tmp_path / "db")
     with pytest.raises(VerificationError, match="unknown verifier"):
         registry.verify("model_says_done", {}, {})
+
+
+def test_git_timeout_is_a_recoverable_verification_error(tmp_path):
+    (tmp_path / ".git").mkdir()
+
+    def runner(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    registry = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "db", runner=runner
+    )
+
+    with pytest.raises(VerificationError, match="git readback failed"):
+        registry.verify(
+            "git_commit",
+            {"sha": "HEAD"},
+            {"repo": str(tmp_path), "sha": "HEAD"},
+        )

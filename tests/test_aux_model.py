@@ -1,4 +1,5 @@
 import subprocess
+import time
 from io import StringIO
 
 from core import aux_model
@@ -182,6 +183,57 @@ def test_real_subprocess_adapter_reads_prompt_and_disables_tools(
 
     assert result.text == "stub answer"
     assert result.provider == "Claude primary"
+
+
+def test_real_subprocess_timeout_kills_descendants_holding_pipes(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "claude-with-child"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "python3 -c 'import subprocess,time;"
+        "subprocess.Popen([\"sleep\",\"3\"]);time.sleep(3)'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    started = time.monotonic()
+    result = aux_model.run_auxiliary_model(
+        "hang",
+        root=tmp_path,
+        timeout=0.2,
+        claude_bin=str(executable),
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.text == ""
+    assert elapsed < 1.5
+
+
+def test_hung_primary_keeps_budget_for_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    timeouts = []
+
+    def runner(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        if not (kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN"):
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return _result(command, 0, stdout="backup recovered")
+
+    result = aux_model.run_auxiliary_model(
+        "prompt", root=tmp_path, timeout=20, runner=runner
+    )
+
+    assert result.text == "backup recovered"
+    assert result.provider == "Claude backup"
+    assert timeouts[0] <= 10.1
+    assert len(timeouts) == 2
 
 
 def test_cli_consumes_background_system_prompt_file(

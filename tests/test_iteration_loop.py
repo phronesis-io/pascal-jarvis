@@ -565,7 +565,12 @@ def test_deployment_evidence_uses_resident_required_revisions(
 def test_daily_observer_closes_taskline_release_after_deployed_sha(
     tmp_path, monkeypatch,
 ):
-    store = _store(tmp_path)
+    clock = [1_000.0]
+    store = IterationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: clock[0],
+    )
     queued = _queued_observed_proposal(store, monkeypatch)
     release_sha = "d" * 40
 
@@ -608,6 +613,15 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
         def _conversation_signals(self):
             return []
 
+    first = Observer(store).run()
+    shipped = store.get(queued["id"])
+
+    assert shipped["status"] == "shipped"
+    assert first["reconciliation"]["shipped"] == 1
+    assert first["reconciliation"]["verified"] == 0
+    assert first["reconciliation"]["coverage_skipped"] == 1
+
+    clock[0] += 1
     result = Observer(store).run()
     closed = store.get(queued["id"])
 
@@ -616,12 +630,52 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
     assert closed["actual"] == {"signal_open": False}
     assert result["reconciliation"] == {
         "queue_recovered": 0,
-        "shipped": 1,
+        "shipped": 0,
         "verified": 1,
         "needs_followup": 0,
         "coverage_skipped": 0,
         "errors": [],
     }
+
+
+def test_shipped_work_waits_for_observation_newer_than_release(
+    tmp_path, monkeypatch,
+):
+    clock = [1_000.0]
+    store = IterationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: clock[0],
+    )
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps({"id": "task-123"}), ""
+        ),
+    )
+    queued = store.review(proposal["id"], approved=True, actor="owner")
+    store.mark_shipped(
+        queued["id"], release_sha="a" * 40, actor="deploy"
+    )
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = 999.0
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "shipped"
+    assert result["reconciliation"]["coverage_skipped"] == 1
 
 
 def test_daily_observer_waits_until_merged_sha_is_deployed(
@@ -682,7 +736,12 @@ def test_daily_observer_waits_until_merged_sha_is_deployed(
 def test_daily_observer_accepts_resident_descendant_of_merged_sha(
     tmp_path, monkeypatch,
 ):
-    store = _store(tmp_path)
+    clock = [1_000.0]
+    store = IterationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        now=lambda: clock[0],
+    )
     queued = _queued_observed_proposal(store, monkeypatch)
     release_sha = "d" * 40
     resident_sha = "e" * 40
@@ -733,10 +792,17 @@ def test_daily_observer_accepts_resident_descendant_of_merged_sha(
         def _conversation_signals(self):
             return []
 
+    first = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "shipped"
+    assert first["reconciliation"]["shipped"] == 1
+    assert first["reconciliation"]["verified"] == 0
+
+    clock[0] += 1
     result = Observer(store).run()
 
     assert store.get(queued["id"])["status"] == "verified"
-    assert result["reconciliation"]["shipped"] == 1
+    assert result["reconciliation"]["verified"] == 1
 
 
 def test_daily_observer_rejects_unhealthy_resident_release(
