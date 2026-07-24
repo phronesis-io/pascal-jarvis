@@ -142,6 +142,7 @@ class ActionProcessor:
         owner_actions = {
             "delegation_confirm",
             "delegation_cancel",
+            "delegation_retry",
             "iteration_approve",
             "iteration_reject",
         }
@@ -422,6 +423,25 @@ class ActionProcessor:
         except Exception as exc:
             raise RuntimeError(f"委托取消未生效：{exc}") from exc
         return "已取消这个委托。"
+
+    def _do_delegation_retry(self, raw: str) -> str:
+        """Resume a versioned Delegation from an explicit recovery decision."""
+        from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
+
+        self._require_owner_callback()
+        params = parse_params(raw)
+        try:
+            store = DelegationStore(root=self.jarvis_dir)
+            detail = store.retry(
+                params.get("id", ""),
+                expected_version=int(params.get("version", "0")),
+                actor_id="owner",
+            )
+            sync_attention_item(detail, store=store, send=False)
+        except Exception as exc:
+            raise RuntimeError(f"委托核验没有恢复：{exc}") from exc
+        return "已恢复权威核验；外部结果确认前仍不会标记完成。"
 
     def _do_iteration_approve(self, raw: str) -> str:
         """Approve one evidence-backed L3 proposal and queue it in Taskline."""

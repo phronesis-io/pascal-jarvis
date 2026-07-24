@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -87,6 +88,18 @@ class MessageReceipt:
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 ApiSender = Callable[[str, str], dict]
+
+
+def _durable_failure(exc: BaseException, operation: str) -> str:
+    """Return diagnostic metadata that cannot contain a submitted payload."""
+    status = re.search(
+        r"\bHTTP\s+([1-5])(?:\d{2}|xx)\b",
+        str(exc),
+        flags=re.IGNORECASE,
+    )
+    if status:
+        return f"EigenFlux {operation} failed: HTTP {status.group(1)}xx"
+    return f"EigenFlux {operation} failed ({type(exc).__name__})"
 
 
 def _normalize_label(value: str) -> str:
@@ -185,12 +198,8 @@ class EigenFluxApiClient:
             with self.opener(request, timeout=30) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")
-            except OSError:
-                detail = ""
             raise CliFailure(
-                f"EigenFlux API returned HTTP {exc.code}: {detail[:160]}"
+                f"EigenFlux API returned HTTP {int(exc.code) // 100}xx"
             ) from exc
         except (OSError, TimeoutError) as exc:
             raise CliFailure(f"EigenFlux API send failed: {exc}") from exc
@@ -202,7 +211,12 @@ class EigenFluxApiClient:
             raise CliFailure("EigenFlux API returned a non-object response")
         code = obj.get("code")
         if code not in (None, 0, "0"):
-            raise CliFailure(str(obj.get("msg") or f"API code {code}")[:300])
+            safe_code = str(code)
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,40}", safe_code):
+                safe_code = "nonzero"
+            raise CliFailure(
+                f"EigenFlux API returned application error code {safe_code}"
+            )
         return obj
 
 
@@ -779,13 +793,14 @@ class EigenFluxMessenger:
                         msg_id=str(existing["msg_id"] or ""),
                     )
                 except CliFailure as exc:
-                    self._write_state(key, state="verifying", error=str(exc))
+                    detail = _durable_failure(exc, "history readback")
+                    self._write_state(key, state="verifying", error=detail)
                     return MessageReceipt(
                         state="verifying",
                         recipient_name=friend.agent_name,
                         recipient_id=friend.agent_id,
                         idempotency_key=key,
-                        detail=str(exc),
+                        detail=detail,
                     )
                 if found:
                     return self._verified_receipt(
@@ -807,9 +822,12 @@ class EigenFluxMessenger:
             exc = (
                 raw_exc
                 if isinstance(raw_exc, CliFailure)
-                else CliFailure(f"EigenFlux API send failed: {raw_exc}")
+                else CliFailure(
+                    f"EigenFlux API send failed ({type(raw_exc).__name__})"
+                )
             )
-            self._write_state(key, state="verifying", error=str(exc))
+            detail = _durable_failure(exc, "send")
+            self._write_state(key, state="verifying", error=detail)
             try:
                 found = self._find_verified_message(
                     friend,
@@ -827,7 +845,7 @@ class EigenFluxMessenger:
                 recipient_name=friend.agent_name,
                 recipient_id=friend.agent_id,
                 idempotency_key=key,
-                detail=str(exc),
+                detail=detail,
             )
 
         data = _response_data(response)
@@ -858,12 +876,13 @@ class EigenFluxMessenger:
                 msg_id=msg_id,
             )
         except CliFailure as exc:
+            detail = _durable_failure(exc, "history readback")
             self._write_state(
                 key,
                 state="verifying",
                 conv_id=conv_id,
                 msg_id=msg_id,
-                error=str(exc),
+                error=detail,
             )
             return MessageReceipt(
                 state="verifying",
@@ -872,7 +891,7 @@ class EigenFluxMessenger:
                 idempotency_key=key,
                 msg_id=msg_id,
                 conv_id=conv_id,
-                detail=str(exc),
+                detail=detail,
             )
         if not found:
             detail = "权威历史中未找到目标一致的消息"

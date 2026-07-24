@@ -88,6 +88,21 @@ def is_confirmable(delegation: dict[str, Any] | sqlite3.Row) -> bool:
     )
 
 
+def is_retryable(delegation: dict[str, Any] | sqlite3.Row) -> bool:
+    """Return whether retry is a valid recovery transition for this contract."""
+    values = dict(delegation)
+    status = str(values.get("status") or "")
+    return bool(
+        status in {"failed", "blocked", "verifying"}
+        or (
+            status == "needs_user"
+            and str(values.get("waiting_on") or "") == "verification_recovery"
+            and int(values.get("risk_tier") or 0) < 4
+            and bool(values.get("authorized"))
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Claim:
     delegation_id: str
@@ -1003,14 +1018,17 @@ class DelegationStore:
                     step_id,
                 ),
             )
-            db.execute(
-                """
-                UPDATE delegations
-                   SET status=?,last_error_code=?,updated_at=?
-                 WHERE id=?
-                """,
-                (status, error_code, now, delegation_id),
-            )
+            delegation_status = str(delegation["status"])
+            if bool(step["required"]):
+                delegation_status = status
+                db.execute(
+                    """
+                    UPDATE delegations
+                       SET status=?,last_error_code=?,updated_at=?
+                     WHERE id=?
+                    """,
+                    (status, error_code, now, delegation_id),
+                )
             self._event(
                 db,
                 delegation_id,
@@ -1019,11 +1037,12 @@ class DelegationStore:
                 actor_type="worker",
                 actor_id=owner,
                 from_status=delegation["status"],
-                to_status=status,
+                to_status=delegation_status,
                 reason_code=error_code,
                 metadata={
                     "step_id": step_id,
                     "succeeded": bool(succeeded),
+                    "required": bool(step["required"]),
                     "artifact_locator": artifact_locator,
                 },
             )
@@ -1368,31 +1387,34 @@ class DelegationStore:
         with self._tx() as db:
             current = self._require(db, delegation_id)
             self._version(current, expected_version)
-            if current["status"] not in {
-                "failed",
-                "blocked",
-                "verifying",
-            }:
+            if not is_retryable(current):
                 raise DelegationConflict(f"status {current['status']} is not retryable")
-            db.execute(
-                """
-                UPDATE delegation_steps
-                   SET status='pending',lease_owner='',lease_expires_at=NULL,
-                       last_error_code='',started_at=NULL,finished_at=NULL,
-                       updated_at=?
-                 WHERE delegation_id=? AND contract_version=?
-                   AND status IN ('failed','blocked','verifying')
-                """,
-                (self.now(), delegation_id, expected_version),
+            verification_recovery = bool(
+                current["status"] == "needs_user"
+                and current["waiting_on"] == "verification_recovery"
             )
+            now = self.now()
+            if not verification_recovery:
+                db.execute(
+                    """
+                    UPDATE delegation_steps
+                       SET status='pending',lease_owner='',lease_expires_at=NULL,
+                           last_error_code='',started_at=NULL,finished_at=NULL,
+                           updated_at=?
+                     WHERE delegation_id=? AND contract_version=?
+                       AND status IN ('failed','blocked','verifying')
+                    """,
+                    (now, delegation_id, expected_version),
+                )
+            next_status = "verifying" if verification_recovery else "bound"
             db.execute(
                 """
                 UPDATE delegations
-                   SET status='bound',waiting_on='',last_error_code='',
+                   SET status=?,waiting_on='',last_error_code='',
                        last_error_summary='',updated_at=?
                  WHERE id=?
                 """,
-                (self.now(), delegation_id),
+                (next_status, now, delegation_id),
             )
             self._event(
                 db,
@@ -1402,7 +1424,12 @@ class DelegationStore:
                 actor_type="principal",
                 actor_id=actor_id,
                 from_status=current["status"],
-                to_status="bound",
+                to_status=next_status,
+                reason_code=(
+                    "verification_recovery"
+                    if verification_recovery
+                    else "execution_retry"
+                ),
             )
             result = self._require(db, delegation_id)
         output = _row(result) or {}

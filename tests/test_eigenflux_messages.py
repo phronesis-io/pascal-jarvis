@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import sqlite3
 import subprocess
+import urllib.error
 
 import pytest
 
@@ -416,6 +418,56 @@ def test_api_sender_keeps_message_body_out_of_url_and_headers(tmp_path):
         "content": "private insurance brief",
     }
     assert response["data"]["msg_id"] == "m1"
+
+
+def test_http_error_body_is_never_persisted_as_message_state(tmp_path):
+    home = tmp_path / ".eigenflux"
+    credentials = home / "servers" / "production" / "credentials.json"
+    credentials.parent.mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({
+        "default_server": "production",
+        "servers": [{
+            "name": "production",
+            "endpoint": "https://eigenflux.example.test",
+        }],
+    }))
+    credentials.write_text(json.dumps({
+        "access_token": "private-token",
+        "agent_id": "owner",
+    }))
+    private_body = "private insurance brief must not persist"
+
+    def rejected(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            422,
+            "validation failed",
+            {},
+            io.BytesIO(
+                json.dumps({"error": private_body}).encode("utf-8")
+            ),
+        )
+
+    cli = FakeEigenFlux()
+    database = tmp_path / "jarvis.db"
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=database,
+        runner=cli,
+        api_sender=EigenFluxApiClient(home, opener=rejected).send,
+        now=lambda: 2_000_000_000,
+    )
+
+    receipt = messenger.send("Family agent", private_body)
+
+    assert receipt.state == "verifying"
+    assert private_body not in receipt.detail
+    with sqlite3.connect(database) as db:
+        error = db.execute(
+            "SELECT last_error FROM verified_external_actions"
+        ).fetchone()[0]
+    assert error == "EigenFlux send failed: HTTP 4xx"
+    assert private_body not in error
 
 
 def test_api_sender_fails_closed_without_credentials(tmp_path):

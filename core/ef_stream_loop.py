@@ -103,6 +103,24 @@ def _advance_cursor(cursor_file: Path, cursor: str, *, accepted: bool) -> bool:
     return True
 
 
+def _can_continue_after_delivery(proc, *, accepted: bool) -> bool:
+    """Return false and close the stream when the contiguous cursor has a gap."""
+    if accepted:
+        return True
+    log(
+        "ef-stream",
+        "Delivery was not durably accepted; reconnecting from the last "
+        "contiguous cursor",
+        level="warn",
+    )
+    try:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+    except Exception:
+        pass
+    return False
+
+
 def _lark_send(text: str, user_id: str) -> bool:
     if not user_id or not text:
         return False
@@ -532,6 +550,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     _advance_cursor(
                         cursor_file, new_cursor, accepted=accepted
                     )
+                    if not _can_continue_after_delivery(
+                        proc, accepted=accepted
+                    ):
+                        break
                     continue
 
                 # Format and deliver
@@ -587,8 +609,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 seen, accepted, _ = _deliver_memorial_and_mark(
                     body, ids, metadata, user_id,
                     seen, seen_file, jd, title=title)
-                if not accepted:
-                    continue
+                if not _can_continue_after_delivery(
+                    proc, accepted=accepted
+                ):
+                    break
                 _advance_cursor(cursor_file, new_cursor, accepted=True)
 
                 # Reset backoff on successful message

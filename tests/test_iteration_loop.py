@@ -520,6 +520,48 @@ def _queued_observed_proposal(store, monkeypatch):
     )
 
 
+def test_deployment_evidence_uses_resident_required_revisions(
+    tmp_path, monkeypatch,
+):
+    release_sha = "d" * 40
+    monkeypatch.setattr(
+        "core.deploy.verify_runtime",
+        lambda **_kwargs: {
+            "ok": True,
+            "issues": [],
+            "components": [
+                {
+                    "component": "bot",
+                    "alive": True,
+                    "git_head": release_sha,
+                },
+                {
+                    "component": "heartbeat-loop",
+                    "alive": True,
+                    "git_head": release_sha,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "core.components.check_components",
+        lambda **_kwargs: [
+            {"name": "bot", "ok": True},
+            {"name": "heartbeat-loop", "ok": True},
+        ],
+    )
+    monkeypatch.setattr(
+        "core.deploy.smoke_delivery",
+        lambda **_kwargs: {"ok": True, "state": "acted"},
+    )
+
+    evidence = DailyObserver(_store(tmp_path))._deployment_evidence()
+
+    assert evidence["ok"] is True
+    assert evidence["resident_sha"] == release_sha
+    assert evidence["smoke"]["state"] == "acted"
+
+
 def test_daily_observer_closes_taskline_release_after_deployed_sha(
     tmp_path, monkeypatch,
 ):
@@ -541,8 +583,6 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
                 "mergedAt": "2026-07-24T12:00:00Z",
                 "mergeCommit": {"oid": release_sha},
             }
-        elif command == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(command, 0, release_sha + "\n", "")
         else:
             raise AssertionError(command)
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
@@ -550,6 +590,15 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
     monkeypatch.setattr(subprocess, "run", readback)
 
     class Observer(DailyObserver):
+        def _deployment_evidence(self):
+            return {
+                "ok": True,
+                "resident_sha": release_sha,
+                "runtime_issues": [],
+                "unhealthy_components": [],
+                "smoke": {"ok": True},
+            }
+
         def _component_signals(self):
             return []
 
@@ -606,6 +655,15 @@ def test_daily_observer_waits_until_merged_sha_is_deployed(
     monkeypatch.setattr(subprocess, "run", readback)
 
     class Observer(DailyObserver):
+        def _deployment_evidence(self):
+            return {
+                "ok": True,
+                "resident_sha": "e" * 40,
+                "runtime_issues": [],
+                "unhealthy_components": [],
+                "smoke": {"ok": True},
+            }
+
         def _component_signals(self):
             return []
 
@@ -619,3 +677,92 @@ def test_daily_observer_waits_until_merged_sha_is_deployed(
 
     assert store.get(queued["id"])["status"] == "queued"
     assert result["reconciliation"]["shipped"] == 0
+
+
+def test_daily_observer_rejects_unhealthy_resident_release(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    queued = _queued_observed_proposal(store, monkeypatch)
+    release_sha = "d" * 40
+
+    def readback(command, **_kwargs):
+        if command[:3] == ["taskline", "task", "get"]:
+            payload = {
+                "id": "task-123",
+                "state": "done",
+                "links": [{
+                    "url": "https://github.com/org/repo/pull/9",
+                }],
+            }
+        elif command[:3] == ["gh", "pr", "view"]:
+            payload = {
+                "mergedAt": "2026-07-24T12:00:00Z",
+                "mergeCommit": {"oid": release_sha},
+            }
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", readback)
+
+    class Observer(DailyObserver):
+        def _deployment_evidence(self):
+            return {
+                "ok": False,
+                "resident_sha": release_sha,
+                "runtime_issues": ["heartbeat-loop: process is not alive"],
+                "unhealthy_components": ["heartbeat-loop"],
+                "smoke": {"ok": False},
+            }
+
+        def _component_signals(self):
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "queued"
+    assert result["reconciliation"]["shipped"] == 0
+    assert "resident release evidence failed" in (
+        result["reconciliation"]["errors"][0]["error"]
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "coverage": {
+                "covered": ["delegations"],
+                "errors": [{"source": "components", "error": "offline"}],
+            },
+            "reconciliation": {"errors": []},
+        },
+        {
+            "coverage": {"covered": [], "errors": []},
+            "reconciliation": {
+                "errors": [{"proposal_id": "prp_1", "error": "taskline offline"}]
+            },
+        },
+    ],
+)
+def test_observe_cli_returns_failure_for_operational_errors(
+    monkeypatch, result,
+):
+    class Observer:
+        def __init__(self, _store):
+            pass
+
+        def run(self, **_kwargs):
+            return result
+
+    monkeypatch.setattr("core.iteration_loop.IterationStore", lambda: object())
+    monkeypatch.setattr("core.iteration_loop.DailyObserver", Observer)
+
+    assert main(["observe", "--no-proposals"]) == 1

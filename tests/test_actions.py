@@ -48,6 +48,13 @@ def test_failed_delegation_card_action_raises_instead_of_claiming_success(tmp_pa
         )
 
 
+def test_failed_delegation_retry_raises_instead_of_claiming_recovery(tmp_path):
+    processor = _make_processor(tmp_path, owner_authenticated=True)
+
+    with pytest.raises(RuntimeError, match="没有恢复"):
+        processor._do_delegation_retry("id=missing|version=1")
+
+
 def test_failed_iteration_card_action_raises_instead_of_claiming_success(tmp_path):
     processor = _make_processor(tmp_path, owner_authenticated=True)
 

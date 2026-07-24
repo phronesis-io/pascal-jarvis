@@ -14,7 +14,7 @@ def _responses(**overrides):
         ("git", "rev-parse", "HEAD"): SHA,
         ("git", "fetch", "--quiet", "origin", "main"): "",
         ("git", "rev-parse", "origin/main"): SHA,
-        ("git", "status", "--porcelain", "--untracked-files=no"): "",
+        ("git", "status", "--porcelain", "--untracked-files=all"): "",
         ("git", "remote", "get-url", "origin"):
             "git@github.com:phronesis-io/pascal-jarvis.git",
         (
@@ -117,9 +117,13 @@ def test_release_gate_reads_review_evidence_from_later_pages(monkeypatch):
         ({("git", "branch", "--show-current"): "feature"}, "local main"),
         ({("git", "rev-parse", "origin/main"): "b" * 40}, "origin/main"),
         ({
-            ("git", "status", "--porcelain", "--untracked-files=no"):
+            ("git", "status", "--porcelain", "--untracked-files=all"):
                 " M core/actions.py",
-        }, "tracked worktree"),
+        }, "worktree"),
+        ({
+            ("git", "status", "--porcelain", "--untracked-files=all"):
+                "?? sitecustomize.py",
+        }, "worktree"),
     ],
 )
 def test_release_gate_rejects_invalid_git_state(

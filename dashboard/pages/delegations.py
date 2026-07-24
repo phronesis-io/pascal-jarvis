@@ -7,7 +7,7 @@ from datetime import datetime
 from nicegui import run, ui
 
 from core.continuity import create_handoff
-from core.delegations import DelegationStore, is_confirmable
+from core.delegations import DelegationStore, is_confirmable, is_retryable
 from core.delegation_reconcile import sync_attention_item
 
 from ..uiutil import (
@@ -262,13 +262,14 @@ def delegation_detail_page(delegation_id: str):
                         "确认", icon="check",
                         on_click=lambda: _confirm(detail, body.refresh),
                     ).props("unelevated no-caps color=positive")
-                if detail["status"] in {
-                    "failed",
-                    "blocked",
-                    "verifying",
-                }:
+                if is_retryable(detail):
                     ui.button(
-                        "重试", icon="refresh",
+                        (
+                            "重新核验"
+                            if detail.get("waiting_on") == "verification_recovery"
+                            else "重试"
+                        ),
+                        icon="refresh",
                         on_click=lambda: _retry(detail, body.refresh),
                     ).props("flat no-caps")
                 if detail["status"] not in {

@@ -646,6 +646,10 @@ def register_api_routes():
         data = await request.json()
         owner = str(os.environ.get("USER_ID") or data.get("principal_id") or "")
         data["principal_id"] = owner
+        # This producer endpoint may capture work, but it is not an owner
+        # decision surface. R3 authorization is granted only by the protected
+        # confirm endpoint or an in-process trusted rule.
+        data["authorized"] = False
         try:
             row, created = await run_in_threadpool(
                 DelegationStore().create, **data

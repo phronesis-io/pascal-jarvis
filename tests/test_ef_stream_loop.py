@@ -159,6 +159,19 @@ def test_cursor_advances_only_after_durable_acceptance(tmp_path):
     assert cursor_file.read_text(encoding="utf-8") == "cursor-1"
 
 
+def test_cursor_gap_terminates_stream_before_later_events_can_advance():
+    state = {"terminated": False}
+    process = SimpleNamespace(
+        poll=lambda: None,
+        terminate=lambda: state.__setitem__("terminated", True),
+    )
+
+    assert not efsl._can_continue_after_delivery(process, accepted=False)
+
+    assert state["terminated"] is True
+    assert efsl._can_continue_after_delivery(process, accepted=True)
+
+
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------
 
 def test_stall_predicate():

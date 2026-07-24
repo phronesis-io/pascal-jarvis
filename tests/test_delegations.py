@@ -8,6 +8,7 @@ from core.delegations import (
     DelegationError,
     DelegationStore,
     is_confirmable,
+    is_retryable,
 )
 
 
@@ -39,7 +40,15 @@ def _delegation(store, **overrides):
     return store.create(**values)
 
 
-def _step(store, delegation, *, sequence=1, kind="send", depends_on=None):
+def _step(
+    store,
+    delegation,
+    *,
+    sequence=1,
+    kind="send",
+    depends_on=None,
+    required=True,
+):
     return store.add_step(
         delegation["id"],
         expected_version=delegation["contract_version"],
@@ -47,6 +56,7 @@ def _step(store, delegation, *, sequence=1, kind="send", depends_on=None):
         kind=kind,
         executor="worker",
         depends_on=depends_on or [],
+        required=required,
     )
 
 
@@ -414,6 +424,17 @@ def test_verification_recovery_cannot_be_misread_as_risk_confirmation(tmp_path):
         authorized=True,
         operation="public_publish",
     )
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
     waiting = store.mark_waiting(
         delegation["id"],
         expected_version=1,
@@ -423,11 +444,69 @@ def test_verification_recovery_cannot_be_misread_as_risk_confirmation(tmp_path):
     )
 
     assert is_confirmable(store.get(delegation["id"])) is False
+    assert is_retryable(store.get(delegation["id"])) is True
     with pytest.raises(DelegationConflict, match="R3 risk confirmation"):
         store.confirm(
             delegation["id"], expected_version=1, principal_id="owner"
         )
     assert waiting["status"] == "needs_user"
+    resumed = store.retry(
+        delegation["id"], expected_version=1, actor_id="owner"
+    )
+    assert resumed["status"] == "verifying"
+    assert resumed["waiting_on"] == ""
+    assert store.get(delegation["id"])["steps"][0]["status"] == "verifying"
+
+
+def test_optional_step_failure_does_not_fail_required_outcome(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    required = _step(store, delegation, sequence=1)
+    optional = _step(store, delegation, sequence=2, required=False)
+    store.claim_step(
+        delegation["id"], required["id"], expected_version=1, owner="required"
+    )
+    store.claim_step(
+        delegation["id"], optional["id"], expected_version=1, owner="optional"
+    )
+
+    store.record_attempt(
+        delegation["id"],
+        optional["id"],
+        expected_version=1,
+        owner="optional",
+        succeeded=False,
+        error_code="optional_export_failed",
+    )
+    assert store.get(delegation["id"])["status"] == "executing"
+
+    store.record_attempt(
+        delegation["id"],
+        required["id"],
+        expected_version=1,
+        owner="required",
+        succeeded=True,
+    )
+    store.record_evidence(
+        delegation["id"],
+        required["id"],
+        expected_version=1,
+        evidence_type="readback",
+        strength="strong",
+        authority="message_service",
+        resource_locator="message:required",
+        observed_digest="sha256:" + "9" * 64,
+        expected_summary="recipient=agent-1",
+        observed_summary="recipient=agent-1",
+        matched=True,
+        actor_id="message",
+    )
+
+    detail = store.get(delegation["id"])
+    assert detail["status"] == "completed"
+    assert next(
+        row for row in detail["steps"] if row["id"] == optional["id"]
+    )["status"] == "failed"
 
 
 def test_r4_stays_human_operated_even_when_created_as_authorized(tmp_path):

@@ -1184,6 +1184,27 @@ class TestRoutes:
         from core.iteration_loop import IterationStore
 
         monkeypatch.setenv("USER_ID", "owner")
+        captured = client.post(
+            "/api/delegations",
+            json={
+                "principal_id": "spoofed-owner",
+                "source": "worker-http",
+                "source_ref": "cannot-self-authorize",
+                "title": "Publish externally",
+                "operation": "public_publish",
+                "risk_tier": 3,
+                "target_type": "feed",
+                "target_id": "public",
+                "authority": "feed",
+                "verification_policy": {"verifier": "feed"},
+                "authorized": True,
+            },
+        )
+        assert captured.status_code == 200
+        assert captured.json()["delegation"]["principal_id"] == "owner"
+        assert captured.json()["delegation"]["authorized"] == 0
+        assert captured.json()["delegation"]["status"] == "needs_user"
+
         delegation_store = DelegationStore(root=jarvis_tmp)
         delegation, _ = delegation_store.create(
             principal_id="owner",

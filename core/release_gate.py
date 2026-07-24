@@ -95,10 +95,10 @@ class ReleaseGate:
         if sha != origin_sha:
             raise ReleaseGateError("HEAD does not equal origin/main")
         dirty = self._run(
-            ["git", "status", "--porcelain", "--untracked-files=no"]
+            ["git", "status", "--porcelain", "--untracked-files=all"]
         )
         if dirty:
-            raise ReleaseGateError("tracked worktree changes are not deployable")
+            raise ReleaseGateError("worktree changes are not deployable")
         remote = self._run(["git", "remote", "get-url", "origin"])
         repo = _repo_name(remote)
 

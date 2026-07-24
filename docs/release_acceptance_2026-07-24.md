@@ -127,6 +127,20 @@ integrity. Its six findings were closed with dedicated regressions:
 | 44 | A reopened L3 proposal retained the prior rejection baseline | Material-change comparison uses the prior baseline while the new proposal stores the current one; latest rows have deterministic `created_at,rowid` ordering; repeated-rejection regression |
 | 45 | The dashboard offered confirmation for non-confirmable states | UI and domain both allow confirmation only for a bound, unauthorized R3 contract awaiting risk approval; R4, clarification, and verification recovery remain non-confirmable; state-machine tests |
 
+The fifth independent review traced the same contracts through HTTP, resident
+processes, stream cursors, Lark actions, optional steps, and durable errors:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 46 | An unauthenticated producer could create an already-authorized R3 contract | The capture API always clears producer-supplied authorization; only the protected confirm endpoint or an in-process trusted rule can grant it; route regression |
+| 47 | The release gate ignored non-ignored untracked runtime files | Deployment now rejects the full Git worktree status, including untracked `sitecustomize.py` or dynamically discovered modules while Git-ignored private state remains ignored; release-gate regression |
+| 48 | L3 treated checked-out `HEAD` as proof that services were deployed | Shipping now requires matching resident bot and heartbeat revisions, critical component health, and a successful delivery smoke; deployment-evidence regressions |
+| 49 | A later accepted stream event could checkpoint past an earlier delivery gap | Any non-accepted event terminates the stream and reconnects from the last contiguous cursor before later events are read; cursor-gap regression |
+| 50 | Verification recovery rendered a confirmation button that the domain rejected | Domain, Lark, ActionProcessor, API, and dashboard share a retryable predicate; “重新核验” resumes authoritative read-back without replaying the external mutation; recovery regressions |
+| 51 | L3 operational errors exited successfully and waited 24 hours | Observation still persists safe partial results but exits nonzero when coverage or reconciliation errors exist, activating the scheduler's bounded retry path; CLI regressions |
+| 52 | A failed optional step failed the whole Delegation | Delegation failure is derived only from required steps; optional failure remains visible on its step while qualifying required evidence can complete the contract; parallel-step regression |
+| 53 | Payload-bearing EigenFlux HTTP errors could enter durable state | HTTP bodies and provider messages are discarded; durable diagnostics retain only operation, exception type, or HTTP status class; privacy regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -167,7 +181,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2010 passed` for this candidate);
+- full local test result (`2019 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

@@ -950,6 +950,62 @@ class DailyObserver:
             raise IterationError(f"{command[0]} returned a non-object")
         return payload
 
+    def _deployment_evidence(self) -> dict[str, Any]:
+        """Read resident revision, component health, and delivery smoke proof."""
+        from core.components import check_components
+        from core.deploy import smoke_delivery, verify_runtime
+
+        required = ("bot", "heartbeat-loop")
+        runtime = verify_runtime(
+            root=self.store.root,
+            db_path=self.store.db_path,
+            required=required,
+        )
+        required_rows = {
+            str(row.get("component") or ""): row
+            for row in runtime.get("components", [])
+            if isinstance(row, dict)
+            and str(row.get("component") or "") in required
+        }
+        resident_revisions = {
+            str(required_rows[name].get("git_head") or "").lower()
+            for name in required
+            if name in required_rows
+            and required_rows[name].get("alive")
+            and required_rows[name].get("git_head")
+        }
+        resident_sha = (
+            next(iter(resident_revisions))
+            if len(resident_revisions) == 1
+            and len(required_rows) == len(required)
+            else ""
+        )
+        components = check_components(
+            critical_only=True,
+            manifest_path=self.store.root / "components.yaml",
+            root=self.store.root,
+        )
+        unhealthy = [
+            str(row.get("name") or "")
+            for row in components
+            if isinstance(row, dict) and not row.get("ok", False)
+        ]
+        smoke = (
+            smoke_delivery(
+                root=self.store.root,
+                db_path=self.store.db_path,
+            )
+            if runtime.get("ok") and not unhealthy
+            else {"ok": False, "reason": "runtime_or_component_unhealthy"}
+        )
+        return {
+            "ok": bool(runtime.get("ok") and not unhealthy and smoke.get("ok")),
+            "resident_sha": resident_sha,
+            "runtime_issues": list(runtime.get("issues") or []),
+            "unhealthy_components": unhealthy,
+            "smoke": smoke,
+        }
+
     @staticmethod
     def _merged_pr_url(task: dict[str, Any]) -> str:
         for link in task.get("links") or []:
@@ -976,6 +1032,7 @@ class DailyObserver:
         followups = 0
         coverage_skipped = 0
         errors: list[dict[str, str]] = []
+        deployment_evidence: dict[str, Any] | None = None
         for state in ("approved", "queueing"):
             for proposal in self.store.list(status=state, limit=50):
                 try:
@@ -1017,18 +1074,32 @@ class DailyObserver:
                     or not re.fullmatch(r"[0-9a-f]{40}", release_sha)
                 ):
                     raise IterationError("Taskline PR is not merged")
-                deployed_sha = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(self.store.root),
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                if (
-                    deployed_sha.returncode != 0
-                    or deployed_sha.stdout.strip().lower() != release_sha
-                ):
+                if deployment_evidence is None:
+                    deployment_evidence = self._deployment_evidence()
+                resident_sha = str(
+                    deployment_evidence.get("resident_sha") or ""
+                ).lower()
+                if not resident_sha:
+                    raise IterationError(
+                        "resident runtime revision is unavailable"
+                    )
+                if resident_sha != release_sha:
                     continue
+                if not deployment_evidence.get("ok"):
+                    raise IterationError(
+                        "resident release evidence failed: "
+                        + _json(
+                            {
+                                "runtime_issues": deployment_evidence.get(
+                                    "runtime_issues", []
+                                ),
+                                "unhealthy_components": deployment_evidence.get(
+                                    "unhealthy_components", []
+                                ),
+                                "smoke": deployment_evidence.get("smoke", {}),
+                            }
+                        )[:500]
+                    )
                 self.store.mark_shipped(
                     proposal["id"],
                     release_sha=release_sha,
@@ -1222,6 +1293,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps(result, ensure_ascii=False))
+    if args.command == "observe" and (
+        result.get("coverage", {}).get("errors")
+        or result.get("reconciliation", {}).get("errors")
+    ):
+        return 1
     return 0
 
 

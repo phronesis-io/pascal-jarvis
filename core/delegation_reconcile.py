@@ -9,7 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from core.delegations import DelegationConflict, DelegationStore
+from core.delegations import (
+    DelegationConflict,
+    DelegationStore,
+    is_confirmable,
+    is_retryable,
+)
 from core.delegation_verify import VerificationError, VerifierRegistry, verify_step
 
 
@@ -73,6 +78,7 @@ def sync_attention_item(
                 f"委托契约已更新到 v{detail['contract_version']}",
             )
 
+    item_title = "需要你 · 委托确认"
     if int(detail.get("risk_tier") or 0) >= 4:
         options = [
             {
@@ -92,7 +98,7 @@ def sync_attention_item(
             "这是 R4 高风险事项，Jarvis 不会代为执行。请由你本人在权威系统"
             "中完成；这个委托只能作为提醒保留或由你关闭。"
         )
-    elif detail["status"] == "needs_user" and detail.get("target_id"):
+    elif is_confirmable(detail):
         options = [
             {
                 "key": "confirm",
@@ -124,6 +130,37 @@ def sync_attention_item(
             f"风险：R{detail['risk_tier']}\n"
             "系统会在你确认后执行，并从权威来源回读结果。"
         )
+    elif is_retryable(detail):
+        item_title = "需要你 · 恢复核验"
+        options = [
+            {
+                "key": "retry",
+                "label": "重新核验",
+                "action": {
+                    "type": "delegation_retry",
+                    "params": {
+                        "id": detail["id"],
+                        "version": str(detail["contract_version"]),
+                    },
+                },
+            },
+            {
+                "key": "cancel",
+                "label": "取消委托",
+                "action": {
+                    "type": "delegation_cancel",
+                    "params": {
+                        "id": detail["id"],
+                        "version": str(detail["contract_version"]),
+                    },
+                },
+            },
+        ]
+        body = (
+            f"{detail['title']}\n\n"
+            "权威回读在限定时间内没有得到结论。重新核验只恢复读回流程，"
+            "不会凭模型判断完成，也不会自动重复外部写操作。"
+        )
     else:
         options = [
             {
@@ -145,7 +182,7 @@ def sync_attention_item(
         )
     memorial_id, _ = memorial.create(
         source="delegation",
-        title="需要你 · 委托确认",
+        title=item_title,
         body=body,
         options=options,
         matter_id=str(detail.get("matter_id") or ""),

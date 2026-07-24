@@ -139,6 +139,16 @@ def test_reconciler_timeout_escalates_once_to_user(
         and link["relation"] == "needs_attention"
     ]
     assert len(attention) == 1
+    item = memorial.get_memorial(attention[0]["entity_id"])
+    assert item["title"] == "需要你 · 恢复核验"
+    assert [option["label"] for option in item["options"]] == [
+        "重新核验",
+        "取消委托",
+    ]
+    assert [option["action"]["type"] for option in item["options"]] == [
+        "delegation_retry",
+        "delegation_cancel",
+    ]
     assert second["needs_user"] == 1
     assert len(
         [
