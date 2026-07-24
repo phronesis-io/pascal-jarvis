@@ -323,8 +323,9 @@ _NEW_COLS = [
 
 def _migrate():
     """Idempotent ALTER migration for the closure columns. Safe to call on every
-    init: it only adds columns that are missing. A lock-contention OperationalError
-    (busy dashboard connection) is logged, not raised — must never crash heartbeat.
+    init: it only adds columns that are missing. Lock contention is logged and
+    re-raised while a required column is absent, so _init remains retryable
+    instead of marking an incomplete schema ready for the process lifetime.
     """
     db = _get_db()
     have = {r[1] for r in db.execute("PRAGMA table_info(intentions)").fetchall()}
