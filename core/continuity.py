@@ -332,19 +332,49 @@ def claim_handoff(
     return _decode(updated)
 
 
-def complete_handoff(handoff_id: str, *, clock=time.time) -> dict:
+def complete_handoff(
+    handoff_id: str,
+    *,
+    completion_source: str = "",
+    clock=time.time,
+) -> dict:
     with closing(_connect()) as db, db:
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
         ).fetchone()
         if not row:
             raise KeyError(handoff_id)
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         if str(row["status"]) in ACTIVE_STATES:
+            if completion_source:
+                metadata["completion_source"] = str(completion_source)
+                metadata["completion_previous_status"] = str(row["status"])
             db.execute(
                 "UPDATE surface_handoffs "
-                "SET status='completed',completed_epoch=? "
+                "SET status='completed',completed_epoch=?,metadata=? "
                 "WHERE id=? AND status IN ('open','claimed')",
-                (float(clock()), str(handoff_id)),
+                (
+                    float(clock()),
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(handoff_id),
+                ),
+            )
+        elif not completion_source and metadata.get("completion_source"):
+            metadata.pop("completion_source", None)
+            metadata.pop("completion_previous_status", None)
+            metadata["completion_confirmed_by"] = "manual"
+            db.execute(
+                "UPDATE surface_handoffs SET metadata=? WHERE id=?",
+                (
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(handoff_id),
+                ),
             )
         updated = db.execute(
             "SELECT * FROM surface_handoffs WHERE id=?", (str(handoff_id),)
@@ -356,15 +386,116 @@ def complete_entity_handoffs(
     entity_type: str,
     entity_id: str,
     *,
+    completion_source: str = "",
     clock=time.time,
 ) -> int:
     if entity_type not in ENTITY_TYPES:
         raise ValueError("entity_type must be memorial, matter, or delegation")
     with closing(_connect()) as db, db:
-        changed = db.execute(
-            "UPDATE surface_handoffs SET status='completed',completed_epoch=? "
+        db.execute("BEGIN IMMEDIATE")
+        now = float(clock())
+        if not completion_source:
+            changed = db.execute(
+                "UPDATE surface_handoffs "
+                "SET status='completed',completed_epoch=? "
+                "WHERE entity_type=? AND entity_id=? "
+                "AND status IN ('open','claimed')",
+                (now, entity_type, str(entity_id)),
+            ).rowcount
+            return int(changed)
+        rows = db.execute(
+            "SELECT id,status,metadata FROM surface_handoffs "
             "WHERE entity_type=? AND entity_id=? "
             "AND status IN ('open','claimed')",
-            (float(clock()), entity_type, str(entity_id)),
-        ).rowcount
-    return int(changed)
+            (entity_type, str(entity_id)),
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["completion_source"] = str(completion_source)
+            metadata["completion_previous_status"] = str(row["status"])
+            db.execute(
+                "UPDATE surface_handoffs "
+                "SET status='completed',completed_epoch=?,metadata=? "
+                "WHERE id=? AND status IN ('open','claimed')",
+                (
+                    now,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(row["id"]),
+                ),
+            )
+    return len(rows)
+
+
+def reopen_entity_handoffs(
+    entity_type: str,
+    entity_id: str,
+    *,
+    completion_source: str,
+    legacy_completed_at: float | None = None,
+    legacy_window_seconds: float = 60.0,
+) -> int:
+    """Undo only handoff completions owned by one terminal projection."""
+    if entity_type not in ENTITY_TYPES:
+        raise ValueError("entity_type must be memorial, matter, or delegation")
+    if not str(completion_source or "").strip():
+        raise ValueError("completion_source is required")
+    changed = 0
+    with closing(_connect()) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute(
+            "SELECT * FROM surface_handoffs "
+            "WHERE entity_type=? AND entity_id=? AND status='completed'",
+            (entity_type, str(entity_id)),
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            owned = metadata.get("completion_source") == completion_source
+            legacy_owned = False
+            if (
+                not metadata.get("completion_source")
+                and legacy_completed_at is not None
+            ):
+                completed_epoch = float(row["completed_epoch"] or 0)
+                created_epoch = float(row["created_epoch"] or 0)
+                terminal_epoch = float(legacy_completed_at)
+                legacy_owned = bool(
+                    created_epoch <= terminal_epoch
+                    and terminal_epoch <= completed_epoch
+                    <= terminal_epoch + max(1.0, legacy_window_seconds)
+                )
+            if not (owned or legacy_owned):
+                continue
+            previous = str(
+                metadata.get("completion_previous_status") or ""
+            )
+            if previous not in ACTIVE_STATES:
+                previous = (
+                    "claimed"
+                    if row["claimed_epoch"] is not None
+                    else "open"
+                )
+            metadata.pop("completion_source", None)
+            metadata.pop("completion_previous_status", None)
+            metadata["reopened_completion_source"] = completion_source
+            updated = db.execute(
+                "UPDATE surface_handoffs "
+                "SET status=?,completed_epoch=NULL,metadata=? "
+                "WHERE id=? AND status='completed'",
+                (
+                    previous,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    str(row["id"]),
+                ),
+            )
+            changed += int(updated.rowcount)
+    return changed

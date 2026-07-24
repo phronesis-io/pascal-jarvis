@@ -15,6 +15,7 @@ from core.continuity import (
     create_handoff,
     get_handoff,
     list_handoffs,
+    reopen_entity_handoffs,
 )
 from core.delivery import DeliveryEnvelope, DeliveryPipeline
 from dashboard.pages.items import surface_from_headers
@@ -113,6 +114,42 @@ def test_completing_entity_closes_every_direction():
     assert complete_entity_handoffs("memorial", entity_id) == 2
     assert get_handoff(desktop["id"])["status"] == "completed"
     assert get_handoff(mobile["id"])["status"] == "completed"
+
+
+def test_projection_owned_handoffs_reopen_to_their_previous_states():
+    memorial.create(
+        "test", "可逆接力", "保留完成来源", preset="fyi", send=False)
+    entity_id = memorial.list_memorials()[0]["id"]
+    desktop = create_handoff(
+        "memorial", entity_id, from_surface="mobile",
+        to_surface="desktop", notify=False)
+    mobile = create_handoff(
+        "memorial", entity_id, from_surface="desktop",
+        to_surface="mobile", notify=False)
+    claim_handoff(desktop["id"], surface="desktop")
+
+    source = f"delegation:{entity_id}:completed"
+    assert complete_entity_handoffs(
+        "memorial", entity_id, completion_source=source
+    ) == 2
+    assert reopen_entity_handoffs(
+        "memorial",
+        entity_id,
+        completion_source="another-projection",
+    ) == 0
+    complete_handoff(mobile["id"])
+    assert reopen_entity_handoffs(
+        "memorial",
+        entity_id,
+        completion_source=source,
+    ) == 1
+
+    assert get_handoff(desktop["id"])["status"] == "claimed"
+    assert get_handoff(mobile["id"])["status"] == "completed"
+    assert (
+        get_handoff(mobile["id"])["metadata"]["completion_confirmed_by"]
+        == "manual"
+    )
 
 
 def test_invalid_handoff_does_not_create_state():

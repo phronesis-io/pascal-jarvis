@@ -49,6 +49,63 @@ def test_create_and_get(intent_db):
     assert intent["status"] == "pending"
 
 
+def test_projection_cancel_restores_parent_and_closure_followup(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        restore_cancelled_intent,
+        update_intent,
+    )
+
+    parent = create_intent(
+        name="等待委托",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        closure_question="完成了吗？",
+        closure_status="awaiting",
+    )
+    followup = create_intent(
+        name="确认委托结果",
+        trigger_type="date",
+        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        source="closure",
+        parent_intent_id=parent,
+    )
+    update_intent(parent, closure_followup_id=followup)
+    source = "delegation:dlg-1:completed"
+
+    assert cancel_intent(
+        parent,
+        "delegation dlg-1 reached completed",
+        source=source,
+    )
+    assert get_intent(parent)["status"] == "cancelled"
+    assert get_intent(parent)["closure_status"] == "na"
+    assert get_intent(followup)["status"] == "cancelled"
+    assert not restore_cancelled_intent(
+        parent,
+        source="delegation:another:completed",
+    )
+    assert restore_cancelled_intent(parent, source=source)
+
+    restored = get_intent(parent)
+    assert restored["status"] == "pending"
+    assert restored["closure_status"] == "awaiting"
+    assert restored["cancel_source"] == ""
+    assert get_intent(followup)["status"] == "pending"
+
+    assert cancel_intent(
+        parent,
+        "delegation dlg-1 reached completed",
+        source=source,
+    )
+    assert cancel_intent(parent, "owner confirmed cancellation")
+    assert not restore_cancelled_intent(parent, source=source)
+    assert get_intent(parent)["status"] == "cancelled"
+    assert get_intent(parent)["last_error"] == "owner confirmed cancellation"
+
+
 def test_list_intents_filter(intent_db):
     from core.intentions import create_intent, list_intents
 

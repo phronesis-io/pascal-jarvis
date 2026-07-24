@@ -37,6 +37,9 @@ def sync_projection(store, delegation_id: str) -> dict[str, Any]:
         }
     matter_id = str(detail.get("matter_id") or "")
     issues: list[str] = []
+    projection_source = (
+        f"delegation:{delegation_id}:{detail['status']}"
+    )
 
     if matter_id:
         try:
@@ -89,7 +92,11 @@ def sync_projection(store, delegation_id: str) -> dict[str, Any]:
         try:
             from core.continuity import complete_entity_handoffs
 
-            complete_entity_handoffs("delegation", delegation_id)
+            complete_entity_handoffs(
+                "delegation",
+                delegation_id,
+                completion_source=projection_source,
+            )
         except Exception as exc:
             issues.append(f"handoff:{exc}")
         for link in detail.get("links", []):
@@ -101,9 +108,46 @@ def sync_projection(store, delegation_id: str) -> dict[str, Any]:
                 cancel_intent(
                     str(link["entity_id"]),
                     f"delegation {delegation_id} reached {detail['status']}",
+                    source=projection_source,
                 )
             except Exception as exc:
                 issues.append(f"intent:{link.get('entity_id')}:{exc}")
+    elif detail.get("last_error_code") == "duplicate_receipt_released":
+        completed_source = f"delegation:{delegation_id}:completed"
+        terminal_at = None
+        for event in reversed(detail.get("events", [])):
+            if event.get("reason_code") != "duplicate_receipt_released":
+                continue
+            terminal_at = event.get("metadata", {}).get("terminal_at")
+            break
+        try:
+            from core.continuity import reopen_entity_handoffs
+
+            reopen_entity_handoffs(
+                "delegation",
+                delegation_id,
+                completion_source=completed_source,
+                legacy_completed_at=terminal_at,
+            )
+        except Exception as exc:
+            issues.append(f"handoff-reopen:{exc}")
+        for link in detail.get("links", []):
+            if link.get("entity_type") != "intent":
+                continue
+            try:
+                from core.intent_lifecycle import restore_cancelled_intent
+
+                restore_cancelled_intent(
+                    str(link["entity_id"]),
+                    source=completed_source,
+                    legacy_reason=(
+                        f"delegation {delegation_id} reached completed"
+                    ),
+                )
+            except Exception as exc:
+                issues.append(
+                    f"intent-reopen:{link.get('entity_id')}:{exc}"
+                )
     return {
         "delegation_id": delegation_id,
         "status": detail["status"],

@@ -333,6 +333,48 @@ class EigenFluxMessenger:
                             db, action_key, now
                         )
                     )
+            released_keys = {
+                str(row["idempotency_key"])
+                for row in db.execute(
+                    """
+                    SELECT idempotency_key
+                      FROM verified_external_actions
+                     WHERE action_type='eigenflux_message'
+                       AND state='verifying' AND msg_id=''
+                       AND last_error='duplicate receipt claim released'
+                    """
+                ).fetchall()
+            }
+            tables = {
+                str(row["name"])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "delegations" in tables:
+                released_keys.update(
+                    str(row["idempotency_key"])
+                    for row in db.execute(
+                        """
+                        SELECT a.idempotency_key
+                          FROM verified_external_actions AS a
+                          JOIN delegations AS d
+                            ON d.source='eigenflux-message'
+                           AND d.source_ref=(
+                               'attempt:' || a.idempotency_key
+                           )
+                         WHERE a.action_type='eigenflux_message'
+                           AND a.state!='verified'
+                           AND d.status='completed'
+                        """
+                    ).fetchall()
+                )
+            for action_key in sorted(released_keys):
+                reopened_delegations.update(
+                    self._reopen_duplicate_projection(
+                        db, action_key, self.now()
+                    )
+                )
             db.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS
@@ -381,7 +423,9 @@ class EigenFluxMessenger:
             return set()
         rows = db.execute(
             """
-            SELECT id,status,contract_version FROM delegations
+            SELECT id,status,contract_version,completed_at,
+                   verification_policy_json
+              FROM delegations
              WHERE source='eigenflux-message' AND source_ref=?
             """,
             (f"attempt:{action_key}",),
@@ -392,6 +436,20 @@ class EigenFluxMessenger:
                 continue
             delegation_id = str(delegation["id"])
             version = int(delegation["contract_version"])
+            terminal_at = (
+                float(delegation["completed_at"])
+                if delegation["completed_at"] is not None
+                else None
+            )
+            try:
+                policy = json.loads(
+                    str(delegation["verification_policy_json"] or "{}")
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                policy = {}
+            if not isinstance(policy, dict):
+                policy = {}
+            policy["msg_id"] = ""
             step_ids = [
                 str(row["id"])
                 for row in db.execute(
@@ -417,7 +475,10 @@ class EigenFluxMessenger:
                     f"""
                     UPDATE delegation_steps
                        SET status='verifying',finished_at=NULL,
-                           lease_owner='',lease_expires_at=NULL,updated_at=?
+                           lease_owner='',lease_expires_at=NULL,
+                           artifact_locator='',
+                           last_error_code='duplicate_receipt_released',
+                           updated_at=?
                      WHERE id IN ({placeholders})
                     """,
                     (now, *step_ids),
@@ -428,10 +489,20 @@ class EigenFluxMessenger:
                    SET status='verifying',verified_at=NULL,completed_at=NULL,
                        waiting_on='',last_error_code='duplicate_receipt_released',
                        last_error_summary='Receipt authority was withdrawn',
+                       verification_policy_json=?,
                        updated_at=?
                  WHERE id=?
                 """,
-                (now, delegation_id),
+                (
+                    json.dumps(
+                        policy,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                    delegation_id,
+                ),
             )
             db.execute(
                 """
@@ -453,7 +524,10 @@ class EigenFluxMessenger:
                     "duplicate_receipt_released",
                     now,
                     json.dumps(
-                        {"idempotency_key": action_key},
+                        {
+                            "idempotency_key": action_key,
+                            "terminal_at": terminal_at,
+                        },
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),

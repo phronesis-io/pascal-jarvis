@@ -454,6 +454,92 @@ def test_legacy_duplicate_receipts_are_reopened_before_unique_index(tmp_path):
     )
 
 
+def test_prior_duplicate_migration_is_backfilled_on_upgrade(tmp_path):
+    from core.delegation_connectors import project_eigenflux_message_receipt
+    from core.delegations import DelegationStore
+
+    db_path = tmp_path / "jarvis.db"
+    with sqlite3.connect(db_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE verified_external_actions (
+                idempotency_key TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                contract_version TEXT NOT NULL DEFAULT 'v1',
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                conv_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                created_epoch REAL NOT NULL,
+                updated_epoch REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        values = (
+            "eigenflux_message", "agent-spouse", "Family Research Agent",
+            "payload-hash", "v1", "verified", 1, "conv-agent-spouse",
+            "duplicate-message", 1.0, 1.0, "",
+        )
+        for key in ("action-1", "action-2"):
+            db.execute(
+                "INSERT INTO verified_external_actions VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (key, *values),
+            )
+
+    store = DelegationStore(root=tmp_path, db_path=db_path)
+    for action_key in ("action-1", "action-2"):
+        project_eigenflux_message_receipt(
+            MessageReceipt(
+                state="verified",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=action_key,
+                msg_id="duplicate-message",
+                conv_id="conv-agent-spouse",
+            ),
+            root=tmp_path,
+            store=store,
+        )
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            UPDATE verified_external_actions
+               SET state='verifying',conv_id='',msg_id='',
+                   last_error='later reconciliation replaced the marker'
+             WHERE idempotency_key='action-2'
+            """
+        )
+        db.execute(
+            """
+            CREATE UNIQUE INDEX idx_verified_actions_unique_message_receipt
+                ON verified_external_actions(msg_id)
+             WHERE action_type='eigenflux_message' AND msg_id != ''
+            """
+        )
+
+    EigenFluxMessenger(
+        root=tmp_path,
+        db_path=db_path,
+        runner=lambda *_args, **_kwargs: None,
+    )._connect().close()
+
+    reopened = next(
+        store.get(row["id"])
+        for row in store.list(limit=10)
+        if row["source_ref"] == "attempt:action-2"
+    )
+    assert reopened["status"] == "verifying"
+    assert reopened["steps"][0]["status"] == "verifying"
+    assert reopened["steps"][0]["artifact_locator"] == ""
+    assert reopened["verification_policy"]["msg_id"] == ""
+    assert all(not evidence["trusted"] for evidence in reopened["evidence"])
+
+
 def test_missing_send_receipt_can_only_complete_from_history(tmp_path):
     cli = FakeEigenFlux()
     cli.send_response_has_ids = False

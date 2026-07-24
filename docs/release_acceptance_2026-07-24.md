@@ -265,6 +265,15 @@ reproduced and closed:
 | 114 | Releasing a legacy duplicate action receipt left its already-completed Delegation and evidence terminal forever | The receipt migration now withdraws trusted evidence, reopens the required step and parent Delegation, records an invalidation event, and refreshes or durably queues user projections in the same database transition; completed-projection migration regression |
 | 115 | Making signal handlers non-raising for the spawn race delayed shutdown during stdin or HTTP blocking | A per-process `:spawning` flag confines deferred termination to the exact `Popen` registration window; all other stages terminate the held group and immediately raise the signal exit, including text-only API calls; spawn-window and blocking-API regressions |
 
+The sixteenth independent review exercised both an upgrade from the immediately
+preceding migration and the downstream objects closed by a terminal projection.
+Its two findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 116 | A database already opened by the preceding build had no duplicate `msg_id` left for the corrected migration to discover | Startup now also detects every non-verified EigenFlux action whose exact Delegation still claims completion, independent of the mutable error string, then invalidates the stale evidence, receipt locator, and policy binding; predecessor-upgrade regression |
+| 117 | Reopening a Delegation did not restore linked Intents and Handoffs previously closed by its false terminal projection | Terminal projection now records exact source and prior state for Intent cancellation and Handoff completion; invalidation restores only matching projection-owned effects, manual confirmation clears that ownership, and bounded legacy reason/time compatibility remains durably retryable; source mismatch, user-confirmation, closure-follow-up, claimed-handoff, and legacy-upgrade regressions |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -305,7 +314,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2094 passed` for this candidate);
+- full local test result (`2098 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

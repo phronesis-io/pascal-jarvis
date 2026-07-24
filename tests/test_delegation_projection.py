@@ -281,3 +281,136 @@ def test_terminal_projection_failure_is_durably_retried(
     assert store.pending_projections() == []
     assert intentions.get_intent(intent_id)["status"] == "cancelled"
     assert get_handoff(handoff["id"])["status"] == "completed"
+
+
+def test_duplicate_receipt_reopens_legacy_terminal_projections(tmp_path):
+    from core.eigenflux_messages import EigenFluxMessenger
+
+    store = DelegationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+    )
+    delegation, _ = store.create(
+        principal_id="owner",
+        source="eigenflux-message",
+        source_ref="attempt:legacy-action",
+        title="发送消息给 Family Agent",
+        operation="message_send",
+        target_type="agent",
+        target_id="agent-spouse",
+        target_label="Family Agent",
+        expected_postcondition={
+            "state": "verified",
+            "target_id": "agent-spouse",
+        },
+        authority="eigenflux_message_history",
+        verification_policy={
+            "verifier": "eigenflux_message",
+            "idempotency_key": "legacy-action",
+            "msg_id": "duplicate-message",
+        },
+        authorized=True,
+    )
+    step = store.add_step(
+        delegation["id"],
+        expected_version=1,
+        sequence=1,
+        kind="eigenflux_message",
+        executor="eigenflux-message",
+    )
+    intent_id = intentions.create_intent(
+        name="等待消息送达",
+        trigger_type="date",
+        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+    )
+    store.link(delegation["id"], "intent", intent_id)
+    handoff = create_handoff(
+        "delegation",
+        delegation["id"],
+        from_surface="desktop",
+        to_surface="mobile",
+        notify=False,
+    )
+    store.claim_step(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="eigenflux-message",
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="eigenflux-message",
+        succeeded=True,
+        artifact_locator="eigenflux-message:duplicate-message",
+    )
+    store.record_evidence(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        evidence_type="connector_readback",
+        strength="strong",
+        authority="eigenflux_message_history",
+        resource_locator="eigenflux-message:duplicate-message",
+        observed_digest="sha256:" + "a" * 64,
+        expected_summary='{"state":"verified"}',
+        observed_summary='{"state":"verified"}',
+        matched=True,
+        actor_id="eigenflux_message",
+    )
+    assert intentions.get_intent(intent_id)["status"] == "cancelled"
+    assert get_handoff(handoff["id"])["status"] == "completed"
+
+    with store._tx() as db:
+        db.execute(
+            """
+            CREATE TABLE verified_external_actions (
+                idempotency_key TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                contract_version TEXT NOT NULL DEFAULT 'v1',
+                state TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                conv_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                created_epoch REAL NOT NULL,
+                updated_epoch REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO verified_external_actions VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-action", "eigenflux_message", "agent-spouse",
+                "Family Agent", "payload-hash", "v1", "verifying", 1,
+                "", "", 1.0, 1.0,
+                "duplicate receipt claim released",
+            ),
+        )
+        db.execute(
+            "UPDATE intentions SET cancel_source='',"
+            "cancel_previous_status='',cancel_previous_error='',"
+            "cancel_previous_closure_status='' WHERE id=?",
+            (intent_id,),
+        )
+        db.execute(
+            "UPDATE surface_handoffs SET metadata='{}' WHERE id=?",
+            (handoff["id"],),
+        )
+
+    EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=lambda *_args, **_kwargs: None,
+    )._connect().close()
+
+    assert store.get(delegation["id"])["status"] == "verifying"
+    assert intentions.get_intent(intent_id)["status"] == "pending"
+    assert get_handoff(handoff["id"])["status"] == "open"
