@@ -16,6 +16,7 @@ from core.eigenflux_messages import (
     CliFailure,
     EigenFluxApiClient,
     EigenFluxMessenger,
+    MessageReceipt,
     RecipientAmbiguous,
     RecipientNotFound,
 )
@@ -361,6 +362,51 @@ def test_uncertain_action_projects_stable_key_for_later_reconciliation(
     assert verification.matched is True
     assert verification.observed_summary.find('"state":"verified"') >= 0
     assert cli.send_count == 1
+
+
+def test_uncertain_explicit_repeats_keep_separate_delegations(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+
+    keys = iter(("action-key-one", "action-key-two"))
+
+    class FakeMessenger:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send(self, _recipient, _content, repeat_token=""):
+            return MessageReceipt(
+                state="verifying",
+                recipient_name="Family Research Agent",
+                recipient_id="agent-spouse",
+                idempotency_key=next(keys),
+            )
+
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger", FakeMessenger
+    )
+    processor = ActionProcessor(
+        jarvis_dir=tmp_path,
+        memory_dir=tmp_path / "memory",
+        jobs_dir=tmp_path / "jobs",
+    )
+    encoded = base64.b64encode(b"same uncertain brief").decode()
+
+    processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+    )
+    processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+        "|repeat_token=owner-request-2"
+    )
+
+    rows = DelegationStore(root=tmp_path).list(limit=10)
+    assert len(rows) == 2
+    assert {row["source_ref"] for row in rows} == {
+        "attempt:action-key-one",
+        "attempt:action-key-two",
+    }
 
 
 class _ApiResponse:

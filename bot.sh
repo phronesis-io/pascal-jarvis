@@ -980,7 +980,10 @@ except Exception:
     log_info "[$session_id] Provider gate: primary spend-limited — starting on backup2 provider (model=$_cur_model)"
   fi
 
-  for _attempt in 1 2 3 4; do
+  # Five bounded calls are enough for the longest route:
+  # primary opus → sonnet → haiku → Backup 1 → Backup 2. GPT is invoked
+  # immediately after the final failed Claude-compatible route.
+  for _attempt in 1 2 3 4 5; do
     if [ "$_attempt" -gt 1 ]; then
       log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
       sleep 3
@@ -1277,7 +1280,10 @@ except Exception:
       # A HARD spend limit yields NO same-provider fallback (empty _fallback):
       # degrading opus→haiku on an exhausted account just burned a second
       # doomed call — the elif below jumps straight to the backup provider.
-      _fallback=$(printf '%s' "$_model_error_text" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
+      _fallback=""
+      if [ "$_use_claude_backup" -eq 0 ]; then
+        _fallback=$(printf '%s' "$_model_error_text" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
+      fi
       if [ -n "$_fallback" ]; then
         log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
         _cur_model="$_fallback"

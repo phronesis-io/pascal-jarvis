@@ -89,7 +89,9 @@ The reconciler scans only bounded non-terminal work. Shadow capture is
 observation-only and excluded from active Delegation lists and product metrics.
 Qualifying evidence persists its trusted verifier identity and authority;
 expired or untrusted evidence reopens active steps instead of satisfying
-completion.
+completion. A failed execution creates one retry/cancel attention Item. An
+active `verifying` step is read-back-only: user recovery resumes the verifier
+and never resets the external mutation to pending.
 
 ### Engineering Loops
 
@@ -104,7 +106,9 @@ L3 signal -> deduplicated Proposal -> human accept
 Taskline is an optional external sidecar with a separate database. Its tasks
 never become personal Intents. `core.taskline_bridge` links engineering
 evidence into Delegation so an Agent can recover context without treating its
-own prose as proof.
+own prose as proof. A merged task starts its pending runtime-verification step
+even when its release SHA was bound in an earlier pass. Runtime proof accepts
+the exact release commit or a healthy resident descendant that contains it.
 
 ## Module Boundaries
 
@@ -135,7 +139,8 @@ own prose as proof.
   independent-review evidence before a production restart.
 - `core.aux_model`: bounded Primary/Backup 1/Backup 2/GPT routing for
   background jobs and text-only auxiliary calls. Untrusted or derived text
-  enters with all Claude/OpenAI tools disabled.
+  enters with all Claude/OpenAI tools disabled. Every configured provider
+  selected by the route receives one bounded call before the chain advances.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.

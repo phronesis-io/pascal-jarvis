@@ -1254,6 +1254,64 @@ class TestRoutes:
         assert rejected.status_code == 200
         assert rejected.json()["status"] == "rejected"
 
+    def test_api_retry_resolves_failed_delegation_attention(
+            self, client, jarvis_tmp, monkeypatch):
+        from core import memorial
+        from core.delegation_reconcile import sync_attention_item
+        from core.delegations import DelegationStore
+
+        monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
+        store = DelegationStore(root=jarvis_tmp)
+        delegation, _ = store.create(
+            principal_id="owner",
+            source="test",
+            source_ref="api-retry-attention",
+            title="Retry failed send",
+            operation="message_send",
+            target_type="agent",
+            target_id="agent-1",
+            authority="message_service",
+            verification_policy={"verifier": "message"},
+            authorized=True,
+        )
+        step = store.add_step(
+            delegation["id"],
+            expected_version=1,
+            sequence=1,
+            kind="message_send",
+            executor="worker",
+        )
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="worker",
+        )
+        store.record_attempt(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="worker",
+            succeeded=False,
+            error_code="provider_unavailable",
+        )
+        detail = store.get(delegation["id"])
+        memorial_id = sync_attention_item(
+            detail,
+            store=store,
+            send=False,
+        )
+
+        response = client.post(
+            f"/api/delegations/{delegation['id']}/retry",
+            json={"expected_version": 1},
+            headers=self.owner_headers(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "bound"
+        assert memorial.get_memorial(memorial_id)["resolved_label"] == "已处理"
+
     def test_api_cross_device_handoff_lifecycle(
             self, client, jarvis_tmp, monkeypatch):
         from core import memorial

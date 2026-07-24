@@ -1083,7 +1083,17 @@ class DailyObserver:
                     raise IterationError(
                         "resident runtime revision is unavailable"
                     )
-                if resident_sha != release_sha:
+                from core.deploy import revision_contains
+                try:
+                    deployed = revision_contains(
+                        release_sha,
+                        resident_sha,
+                        root=self.store.root,
+                        runner=subprocess.run,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    raise IterationError(str(exc)) from exc
+                if not deployed:
                     continue
                 if not deployment_evidence.get("ok"):
                     raise IterationError(

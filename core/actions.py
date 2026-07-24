@@ -343,7 +343,11 @@ class ActionProcessor:
             source_ref = (
                 f"message:{receipt.msg_id}"
                 if receipt.msg_id
-                else f"attempt:{receipt.recipient_id}:{content_hash}"
+                else (
+                    f"attempt:{receipt.idempotency_key}"
+                    if receipt.idempotency_key
+                    else f"attempt:{receipt.recipient_id}:{content_hash}"
+                )
             )
             record_connector_receipt(
                 source="eigenflux-message",

@@ -203,7 +203,7 @@ def test_reconciler_refreshes_bound_taskline_delegation(
             "verifier": "runtime_deploy",
             "release_sha": "",
         },
-        expected_postcondition={"git_head": "pending:task-bound"},
+        expected_postcondition={"release_sha": "pending:task-bound"},
         authorized=True,
     )
     store.add_step(
@@ -226,6 +226,139 @@ def test_reconciler_refreshes_bound_taskline_delegation(
     DelegationReconciler(store=store).run(send_items=False)
 
     assert calls == [("task-bound", store.db_path)]
+
+
+def test_reconciler_starts_pending_taskline_release_step(
+    tmp_path, monkeypatch,
+):
+    release_sha = "a" * 40
+    store = DelegationStore(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+    )
+    delegation, _ = store.create(
+        principal_id="owner",
+        source="taskline",
+        source_ref="task-with-release",
+        title="Deploy completed task",
+        operation="engineering_change",
+        target_type="repository",
+        target_id="jarvis",
+        authority="jarvis_runtime",
+        verification_policy={
+            "verifier": "runtime_deploy",
+            "release_sha": release_sha,
+        },
+        expected_postcondition={
+            "release_sha": release_sha,
+            "runtime_ok": True,
+            "components_ok": True,
+        },
+        authorized=True,
+    )
+    store.add_step(
+        delegation["id"],
+        expected_version=1,
+        sequence=1,
+        kind="runtime_deploy",
+        executor="release",
+    )
+    calls = []
+
+    def refresh(_bridge, task_id):
+        calls.append(task_id)
+        detail = store.get(delegation["id"])
+        step = detail["steps"][0]
+        store.claim_step(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="taskline-release",
+        )
+        store.record_attempt(
+            delegation["id"],
+            step["id"],
+            expected_version=1,
+            owner="taskline-release",
+            succeeded=True,
+            artifact_locator="https://github.com/example/repo/pull/1",
+        )
+        return store.get(delegation["id"])
+
+    monkeypatch.setattr(
+        "core.taskline_bridge.TasklineBridge.refresh_release", refresh
+    )
+
+    DelegationReconciler(
+        store=store,
+        registry=_Registry(matched=False),
+    ).run(send_items=False)
+
+    assert calls == ["task-with-release"]
+    assert store.get(delegation["id"])["steps"][0]["status"] == "verifying"
+
+
+def test_failed_delegation_surfaces_one_retry_attention_item(
+    tmp_path, monkeypatch,
+):
+    from core import memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    store = DelegationStore(root=tmp_path, db_path=tmp_path / "jarvis.db")
+    delegation, _ = store.create(
+        principal_id="owner",
+        source="test",
+        source_ref="failed-attention",
+        title="发送跨 Agent 消息",
+        operation="message_send",
+        target_type="agent",
+        target_id="agent-1",
+        authority="message_service",
+        verification_policy={"verifier": "message"},
+        authorized=True,
+    )
+    step = store.add_step(
+        delegation["id"],
+        expected_version=1,
+        sequence=1,
+        kind="message_send",
+        executor="worker",
+    )
+    store.claim_step(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=False,
+        error_code="provider_unavailable",
+    )
+    reconciler = DelegationReconciler(store=store)
+
+    first = reconciler.run(send_items=False)
+    second = reconciler.run(send_items=False)
+    detail = store.get(delegation["id"])
+
+    assert first["needs_user"] == 1
+    assert second["needs_user"] == 1
+    attention = [
+        link
+        for link in detail["links"]
+        if link["entity_type"] == "memorial"
+        and link["relation"] == "needs_attention"
+    ]
+    assert len(attention) == 1
+    item = memorial.get_memorial(attention[0]["entity_id"])
+    assert item["title"] == "需要你 · 委托失败"
+    assert [option["label"] for option in item["options"]] == [
+        "重试执行",
+        "取消委托",
+    ]
 
 
 def test_reconciler_releases_only_expired_active_lease(tmp_path):

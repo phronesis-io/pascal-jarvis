@@ -229,6 +229,58 @@ def test_eigenflux_friend_absence_is_mismatch(tmp_path):
     assert result.matched is False
 
 
+def test_runtime_deploy_accepts_resident_descendant(
+    tmp_path, monkeypatch,
+):
+    release_sha = "a" * 40
+    resident_sha = "b" * 40
+    calls = []
+
+    monkeypatch.setattr(
+        "core.deploy.verify_runtime",
+        lambda **_kwargs: {
+            "ok": True,
+            "git_head": resident_sha,
+            "issues": [],
+        },
+    )
+    monkeypatch.setattr(
+        "core.components.check_components",
+        lambda **_kwargs: [{"name": "bot", "ok": True}],
+    )
+
+    def runner(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = VerifierRegistry(
+        root=tmp_path,
+        db_path=tmp_path / "db",
+        runner=runner,
+    ).verify(
+        "runtime_deploy",
+        {
+            "release_sha": release_sha,
+            "runtime_ok": True,
+            "components_ok": True,
+        },
+        {"release_sha": release_sha},
+    )
+
+    assert result.matched is True
+    assert calls == [
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            release_sha,
+            resident_sha,
+        ]
+    ]
+    assert f'"release_sha":"{release_sha}"' in result.observed_summary
+    assert f'"git_head":"{resident_sha}"' in result.observed_summary
+
+
 def test_verify_step_records_evidence_and_completes(tmp_path):
     store, delegation, step = _completed_attempt(
         tmp_path,

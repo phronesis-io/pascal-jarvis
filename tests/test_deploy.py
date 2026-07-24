@@ -7,6 +7,7 @@ from core.delivery import DeliveryPipeline
 from core.deploy import (
     _dirty_runtime_paths,
     register_runtime,
+    revision_contains,
     smoke_delivery,
     verify_runtime,
 )
@@ -124,3 +125,44 @@ def test_verify_reads_dirty_runtime_paths_once(tmp_path, monkeypatch):
         "uncommitted runtime code: core/worker.py"
     ]
     assert calls == [1]
+
+
+def test_revision_contains_accepts_exact_and_descendant_revision(tmp_path):
+    release_sha = "a" * 40
+    resident_sha = "b" * 40
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    assert revision_contains(release_sha, release_sha, root=tmp_path) is True
+    assert revision_contains(
+        release_sha,
+        resident_sha,
+        root=tmp_path,
+        runner=runner,
+    ) is True
+    assert calls[0][0] == [
+        "git",
+        "merge-base",
+        "--is-ancestor",
+        release_sha,
+        resident_sha,
+    ]
+    assert calls[0][1]["cwd"] == str(tmp_path)
+
+
+def test_revision_contains_rejects_unrelated_revision(tmp_path):
+    release_sha = "c" * 40
+    resident_sha = "d" * 40
+
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "")
+
+    assert revision_contains(
+        release_sha,
+        resident_sha,
+        root=tmp_path,
+        runner=runner,
+    ) is False

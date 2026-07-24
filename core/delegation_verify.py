@@ -251,7 +251,7 @@ class VerifierRegistry:
         self, expected: dict[str, Any], policy: dict[str, Any]
     ) -> Verification:
         from core.components import check_components
-        from core.deploy import verify_runtime
+        from core.deploy import revision_contains, verify_runtime
 
         required = [
             str(value) for value in policy.get("required_components", []) if value
@@ -265,8 +265,22 @@ class VerifierRegistry:
             for row in component_rows
             if isinstance(row, dict) and not row.get("ok", False)
         ]
+        release_sha = str(policy.get("release_sha") or "").lower()
+        resident_sha = str(runtime.get("git_head") or "").lower()
+        contains_release = False
+        if release_sha:
+            try:
+                contains_release = revision_contains(
+                    release_sha,
+                    resident_sha,
+                    root=self.root,
+                    runner=self.runner,
+                )
+            except (ValueError, RuntimeError) as exc:
+                raise VerificationError(str(exc)) from exc
         observed = {
-            "git_head": runtime.get("git_head", ""),
+            "release_sha": release_sha if contains_release else "",
+            "git_head": resident_sha,
             "runtime_ok": bool(runtime.get("ok")),
             "components_ok": not unhealthy,
             "unhealthy_components": unhealthy,

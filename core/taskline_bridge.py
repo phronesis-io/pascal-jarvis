@@ -115,7 +115,7 @@ class TasklineBridge:
         store = DelegationStore(root=self.root, db_path=self.db_path)
         release_sha = self._task_release_sha(task)
         expected = {
-            "git_head": release_sha or f"pending:{task_id}",
+            "release_sha": release_sha or f"pending:{task_id}",
             "runtime_ok": True,
             "components_ok": True,
         }

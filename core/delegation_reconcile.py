@@ -42,8 +42,21 @@ def sync_attention_item(
     """Maintain at most one Item for a Delegation that genuinely needs Pascal."""
     from core import memorial
 
+    if "links" not in detail:
+        detail = store.get(str(detail["id"]))
     existing = _attention_link(detail)
-    needs_attention = detail["status"] in {"needs_user", "needs_clarification"}
+    needs_attention = detail["status"] in {
+        "needs_user",
+        "needs_clarification",
+        "failed",
+    }
+    attention_state = ":".join(
+        (
+            str(detail.get("status") or ""),
+            str(detail.get("waiting_on") or ""),
+            str(detail.get("last_error_code") or ""),
+        )
+    )
     if not needs_attention:
         if existing:
             memorial.resolve(
@@ -67,6 +80,7 @@ def sync_attention_item(
             and str(context.get("delegation_id") or "") == str(detail["id"])
             and int(context.get("contract_version") or 0)
             == int(detail["contract_version"])
+            and str(context.get("attention_state") or "") == attention_state
         )
         if current_item:
             return existing
@@ -129,6 +143,38 @@ def sync_attention_item(
             f"风险：R{detail['risk_tier']}\n"
             "系统会在你确认后执行，并从权威来源回读结果。"
         )
+    elif detail["status"] == "failed":
+        item_title = "需要你 · 委托失败"
+        options = [
+            {
+                "key": "retry",
+                "label": "重试执行",
+                "action": {
+                    "type": "delegation_retry",
+                    "params": {
+                        "id": detail["id"],
+                        "version": str(detail["contract_version"]),
+                    },
+                },
+            },
+            {
+                "key": "cancel",
+                "label": "取消委托",
+                "action": {
+                    "type": "delegation_cancel",
+                    "params": {
+                        "id": detail["id"],
+                        "version": str(detail["contract_version"]),
+                    },
+                },
+            },
+        ]
+        error_code = str(detail.get("last_error_code") or "execution_failed")
+        body = (
+            f"{detail['title']}\n\n"
+            f"执行没有成功（{error_code}）。重试会重新执行未完成步骤；"
+            "如果不再需要，请取消委托。"
+        )
     elif is_retryable(detail):
         item_title = "需要你 · 恢复核验"
         options = [
@@ -187,13 +233,14 @@ def sync_attention_item(
         matter_id=str(detail.get("matter_id") or ""),
         dedup_key=(
             f"delegation-attention:{detail['id']}:"
-            f"v{detail['contract_version']}"
+            f"v{detail['contract_version']}:{attention_state}"
         ),
         context=json.dumps(
             {
                 "kind": "delegation_attention",
                 "delegation_id": detail["id"],
                 "contract_version": detail["contract_version"],
+                "attention_state": attention_state,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -237,6 +284,7 @@ class DelegationReconciler:
         statuses = (
             "needs_user",
             "needs_clarification",
+            "failed",
             "verifying",
             "awaiting_external",
             "blocked",
@@ -262,13 +310,23 @@ class DelegationReconciler:
             detail = self.store.get(row["id"])
             if detail["status"] == "bound" and detail.get("source") != "taskline":
                 continue
-            if detail["status"] in {"needs_user", "needs_clarification"}:
+            if detail["status"] in {
+                "needs_user",
+                "needs_clarification",
+                "failed",
+            }:
                 sync_attention_item(detail, store=self.store, send=send_items)
                 needs_user += 1
                 continue
             if (
                 detail.get("source") == "taskline"
-                and not detail["verification_policy"].get("release_sha")
+                and (
+                    not detail["verification_policy"].get("release_sha")
+                    or any(
+                        step["required"] and step["status"] == "pending"
+                        for step in detail["steps"]
+                    )
+                )
             ):
                 try:
                     from core.taskline_bridge import (

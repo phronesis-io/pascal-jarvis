@@ -298,6 +298,17 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert '[ "$_claude_backup_tried" -eq 1 ]' in bot
     assert '[ "$_claude_backup2_tried" -eq 1 ]' in bot
     assert '&& [ "$_attempt" -ge 2 ]' in bot
+    assert "for _attempt in 1 2 3 4 5; do" in bot
+    fallback_call = bot.index(
+        '_fallback=$(printf \'%s\' "$_model_error_text"'
+    )
+    backup_guard = bot.rfind(
+        'if [ "$_use_claude_backup" -eq 0 ]; then',
+        0,
+        fallback_call,
+    )
+    assert backup_guard >= 0
+    assert bot.index("\n      fi", fallback_call) > fallback_call
 
 
 def test_bot_progress_narration_never_sends_claude_error_text():

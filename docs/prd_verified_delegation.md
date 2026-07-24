@@ -287,7 +287,8 @@ any non-terminal state -> blocked / cancelled / superseded
 - `needs_user`：只有用户能够补充授权、身份或业务选择，系统不会自行重试。
 - `blocked`：当前依赖或系统条件不满足，但不需要用户立即做判断。
 - `failed`：本次执行尝试失败但责任仍然开放；显式重试后回到 `bound`，
-  不会提前关闭关联 Matter、Intent 或 Handoff。
+  只重置 failed/blocked 的未完成步骤，不会提前关闭关联 Matter、Intent 或
+  Handoff。已经进入 `verifying` 的外部动作不能通过普通重试重新执行。
 - 任意终态转换必须写入不可变事件记录。
 - 模型输出不能直接触发 `completed`。
 - 修改 Outcome Contract 后递增版本；旧版本的证据不能自动证明新版本。
@@ -351,6 +352,8 @@ hash(principal + operation + stable_target + normalized_payload +
 - 外部 API 不支持幂等键时，本地先占用 action lease，并在重试前回读；
 - lease 必须有 owner、版本、超时和续租，不能只依赖内存锁；
 - 用户主动要求“再发一次”时创建新契约版本或新的 Delegation。
+- 外部回执暂时没有 message ID 时，以本次动作的 `idempotency_key` 作为
+  source reference；两次明确重复发送不得因目标和正文相同而合并。
 
 ### 8.5 第五步：权威核验
 
@@ -364,8 +367,9 @@ attempt result != completion evidence
 
 - 状态进入 `verifying`；
 - 用户可见文案为“已执行，待核验”；
-- 使用有上限的退避重试；
+- 只使用有上限的权威回读重试，不重新调用外部 mutation；
 - 超出时间预算后进入 `needs_user` 或 `failed`；
+- 用户选择“重新核验”时恢复同一步的 read-back，不把步骤改回 pending；
 - 不得用模型生成的安慰性文案掩盖不确定性。
 
 ### 8.6 第六步：完成与报告
@@ -695,6 +699,8 @@ Reconciler 只扫描非终态 Delegation，并按 policy：
 6. 为真正需要用户的异常维护一个聚合 Item。
 
 它不扫描全部历史对象，也不通过不断重发通知“修复”状态。
+执行失败会产生一个“重试执行 / 取消委托”Item；核验恢复则产生
+“重新核验 / 取消委托”Item。两种动作的文案和状态转换不可混用。
 
 ### 14.2 陈旧策略
 

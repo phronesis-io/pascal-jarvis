@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -70,6 +71,39 @@ def _git(root: Path, *args: str) -> str:
 
 def git_head(root: str | Path | None = None) -> str:
     return _git(_root(root), "rev-parse", "HEAD")
+
+
+def revision_contains(
+    release_sha: str,
+    resident_sha: str,
+    *,
+    root: str | Path | None = None,
+    runner=subprocess.run,
+) -> bool:
+    """Return whether the resident revision contains the released commit."""
+    release = str(release_sha or "").strip().lower()
+    resident = str(resident_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", release):
+        raise ValueError("release_sha must be a full commit SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", resident):
+        raise ValueError("resident_sha must be a full commit SHA")
+    if release == resident:
+        return True
+    try:
+        result = runner(
+            ["git", "merge-base", "--is-ancestor", release, resident],
+            cwd=str(_root(root)),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"git ancestry readback failed: {exc}") from exc
+    if result.returncode in {0, 1}:
+        return result.returncode == 0
+    detail = (result.stderr or result.stdout or "git ancestry readback failed").strip()
+    raise RuntimeError(detail[:300])
 
 
 def _runtime_files(root: Path):

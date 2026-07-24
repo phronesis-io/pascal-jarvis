@@ -164,6 +164,19 @@ closed ten more authority, state, and resilience gaps:
 | 69 | One parallel step could overwrite the parent while another mutation was executing | Parent state is derived from every current required step after attempts and lease expiry; live execution remains authoritative; parallel-attempt and lease regressions |
 | 70 | Expired evidence left its step completed and impossible to refresh | Active contracts reopen completed steps whose trusted proof has expired, making them eligible for authoritative re-verification; expiry-reopen regression |
 
+The eighth independent review traced retry boundaries, release recovery,
+provider exhaustion, and ambiguous connector receipts. Its six findings were
+closed before release:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 71 | Retrying an active verifier reset the step and could replay an external mutation | Direct retry is limited to failed/blocked execution; verification recovery resumes read-back without resetting the step; state-machine regression |
+| 72 | A Taskline Delegation with a release SHA but a pending step never started verification | Reconciliation refreshes when either the SHA is absent or a required release step is pending; bridge/reconciler regression |
+| 73 | A later healthy deployment could not prove an earlier merged release | Runtime proof uses `git merge-base --is-ancestor`, accepting exact or descendant resident revisions while rejecting unrelated commits; deploy/verifier/L3 regressions |
+| 74 | Backup 2 could be selected on the final loop iteration without receiving a call | The bounded route has enough iterations for every selected Claude-compatible provider, and backup failures advance providers without model-tier detours; routing regression |
+| 75 | Failed Delegations remained active but invisible to Pascal | Failure creates one state-bound retry/cancel Item; compact mutation results are rehydrated before stale-card convergence; reconciler/API regressions |
+| 76 | Two explicit uncertain sends without message IDs collapsed into one Delegation | Connector projection uses the action idempotency key as its stable source reference, preserving separately requested repeats; message regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -204,7 +217,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2041 passed` for this candidate);
+- full local test result (`2050 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

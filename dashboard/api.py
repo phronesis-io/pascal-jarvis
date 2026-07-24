@@ -756,16 +756,22 @@ def register_api_routes():
     )
     async def api_delegation_retry(delegation_id: str, request: Request):
         from core.delegations import DelegationStore
+        from core.delegation_reconcile import sync_attention_item
         data = await request.json()
+        store = DelegationStore()
         try:
-            return await run_in_threadpool(
-                DelegationStore().retry,
+            detail = await run_in_threadpool(
+                store.retry,
                 delegation_id,
                 expected_version=int(data.get("expected_version", 0)),
                 actor_id=str(os.environ.get("USER_ID") or "owner"),
             )
+            await run_in_threadpool(
+                sync_attention_item, detail, store=store, send=False
+            )
         except Exception as exc:
             raise _delegation_error(exc) from exc
+        return detail
 
     @app.post("/api/delegations/{delegation_id}/handoff", dependencies=_WRITE)
     async def api_delegation_handoff(delegation_id: str, request: Request):

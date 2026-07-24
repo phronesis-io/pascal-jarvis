@@ -646,8 +646,8 @@ def test_daily_observer_waits_until_merged_sha_is_deployed(
                 "mergedAt": "2026-07-24T12:00:00Z",
                 "mergeCommit": {"oid": release_sha},
             })
-        elif command == ["git", "rev-parse", "HEAD"]:
-            output = "e" * 40 + "\n"
+        elif command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
         else:
             raise AssertionError(command)
         return subprocess.CompletedProcess(command, 0, output, "")
@@ -677,6 +677,66 @@ def test_daily_observer_waits_until_merged_sha_is_deployed(
 
     assert store.get(queued["id"])["status"] == "queued"
     assert result["reconciliation"]["shipped"] == 0
+
+
+def test_daily_observer_accepts_resident_descendant_of_merged_sha(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    queued = _queued_observed_proposal(store, monkeypatch)
+    release_sha = "d" * 40
+    resident_sha = "e" * 40
+
+    def readback(command, **_kwargs):
+        if command[:3] == ["taskline", "task", "get"]:
+            payload = {
+                "id": "task-123",
+                "state": "done",
+                "links": [{
+                    "url": "https://github.com/org/repo/pull/9",
+                }],
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(payload), ""
+            )
+        if command[:3] == ["gh", "pr", "view"]:
+            payload = {
+                "mergedAt": "2026-07-24T12:00:00Z",
+                "mergeCommit": {"oid": release_sha},
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(payload), ""
+            )
+        if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+            assert command[-2:] == [release_sha, resident_sha]
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(subprocess, "run", readback)
+
+    class Observer(DailyObserver):
+        def _deployment_evidence(self):
+            return {
+                "ok": True,
+                "resident_sha": resident_sha,
+                "runtime_issues": [],
+                "unhealthy_components": [],
+                "smoke": {"ok": True},
+            }
+
+        def _component_signals(self):
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "verified"
+    assert result["reconciliation"]["shipped"] == 1
 
 
 def test_daily_observer_rejects_unhealthy_resident_release(

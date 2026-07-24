@@ -93,7 +93,7 @@ def is_retryable(delegation: dict[str, Any] | sqlite3.Row) -> bool:
     values = dict(delegation)
     status = str(values.get("status") or "")
     return bool(
-        status in {"failed", "blocked", "verifying"}
+        status in {"failed", "blocked"}
         or (
             status == "needs_user"
             and str(values.get("waiting_on") or "") == "verification_recovery"
@@ -1631,7 +1631,7 @@ class DelegationStore:
                            last_error_code='',started_at=NULL,finished_at=NULL,
                            updated_at=?
                      WHERE delegation_id=? AND contract_version=?
-                       AND status IN ('failed','blocked','verifying')
+                       AND status IN ('failed','blocked')
                     """,
                     (now, delegation_id, expected_version),
                 )

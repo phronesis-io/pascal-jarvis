@@ -458,6 +458,33 @@ def test_verification_recovery_cannot_be_misread_as_risk_confirmation(tmp_path):
     assert store.get(delegation["id"])["steps"][0]["status"] == "verifying"
 
 
+def test_active_verification_cannot_retry_external_mutation(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    verifying = store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+        artifact_locator="message:sent",
+    )
+
+    assert verifying["status"] == "verifying"
+    assert is_retryable(verifying) is False
+    with pytest.raises(DelegationConflict, match="not retryable"):
+        store.retry(
+            delegation["id"],
+            expected_version=1,
+            actor_id="owner",
+        )
+    assert store.get(delegation["id"])["steps"][0]["status"] == "verifying"
+
+
 def test_optional_step_failure_does_not_fail_required_outcome(tmp_path):
     store = _store(tmp_path)
     delegation, _ = _delegation(store)
