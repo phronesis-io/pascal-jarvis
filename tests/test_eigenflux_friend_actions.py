@@ -153,6 +153,185 @@ def test_repeated_callback_reads_friend_and_does_not_accept_again(
     assert api_calls == [("456", eigenflux_friends.WELCOME_MESSAGE)]
 
 
+def test_reject_does_not_require_friend_identity_or_readback(tmp_path):
+    calls = []
+
+    def runner(command):
+        calls.append(command)
+        assert command[1:3] == ["relation", "handle"]
+        return subprocess.CompletedProcess(command, 0, "{}", "")
+
+    result, failed = eigenflux_friends.execute_friend_action(
+        {
+            "request_id": "reject-123",
+            "decision": "reject",
+            "from_name": "Unknown Agent",
+        },
+        runner=runner,
+        root=tmp_path,
+    )
+
+    assert failed is False
+    assert "已拒绝" in result
+    assert len(calls) == 1
+
+
+def test_interrupted_accept_is_resumed_from_durable_pending_step(
+    monkeypatch, tmp_path,
+):
+    from core.delegation_reconcile import DelegationReconciler
+    from core.delegations import DelegationStore
+
+    def interrupted(command):
+        if command[1:3] == ["relation", "friends"]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"friends": []}), ""
+            )
+        if command[1:3] == ["relation", "handle"]:
+            raise KeyboardInterrupt
+        raise AssertionError(command)
+
+    with pytest.raises(KeyboardInterrupt):
+        eigenflux_friends.execute_friend_action(
+            {
+                "request_id": "resume-123",
+                "decision": "accept",
+                "from_uid": "456",
+                "from_name": "金融 Agent",
+            },
+            runner=interrupted,
+            root=tmp_path,
+        )
+
+    store = DelegationStore(root=tmp_path)
+    detail = store.get(store.list()[0]["id"])
+    assert detail["status"] == "executing"
+    assert detail["steps"][0]["attempt_count"] == 0
+    with store._tx() as db:
+        db.execute(
+            "UPDATE delegation_steps SET lease_expires_at=0 WHERE id=?",
+            (detail["steps"][0]["id"],),
+        )
+
+    friend_reads = 0
+
+    def recovered(command):
+        nonlocal friend_reads
+        if command[1:3] == ["relation", "friends"]:
+            friend_reads += 1
+            friends = (
+                []
+                if friend_reads == 1
+                else [{"agent_id": "456", "agent_name": "金融 Agent"}]
+            )
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"friends": friends}), ""
+            )
+        if command[1:3] == ["relation", "handle"]:
+            return subprocess.CompletedProcess(command, 0, "{}", "")
+        if command[1:3] == ["msg", "history"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"messages": [{
+                    "msg_id": "welcome-1",
+                    "receiver_id": "456",
+                    "content": eigenflux_friends.WELCOME_MESSAGE,
+                    "created_at": 0,
+                }]}),
+                "",
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setattr(eigenflux_friends, "run_cli", recovered)
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxApiClient.send",
+        lambda _self, _target, _content: {
+            "code": 0,
+            "data": {"msg_id": "welcome-1", "conv_id": "conv-1"},
+        },
+    )
+
+    result = DelegationReconciler(store=store).run(send_items=False)
+
+    assert result["released_leases"] == [detail["steps"][0]["id"]]
+    assert result["verified"] == 1
+    assert store.get(detail["id"])["status"] == "completed"
+
+
+def test_accept_recovers_after_remote_commit_before_attempt_record(
+    monkeypatch, tmp_path,
+):
+    from core.delegations import DelegationStore
+
+    friend = {"agent_id": "456", "agent_name": "金融 Agent"}
+    friend_reads = 0
+
+    def runner(command):
+        nonlocal friend_reads
+        if command[1:3] == ["relation", "friends"]:
+            friend_reads += 1
+            rows = [] if friend_reads == 1 else [friend]
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"friends": rows}), ""
+            )
+        if command[1:3] == ["relation", "handle"]:
+            return subprocess.CompletedProcess(command, 0, "{}", "")
+        if command[1:3] == ["msg", "history"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"messages": [{
+                    "msg_id": "welcome-2",
+                    "receiver_id": "456",
+                    "content": eigenflux_friends.WELCOME_MESSAGE,
+                    "created_at": 0,
+                }]}),
+                "",
+            )
+        raise AssertionError(command)
+
+    original = DelegationStore.record_attempt
+    interrupted = [False]
+
+    def crash_once(self, *args, **kwargs):
+        if not interrupted[0]:
+            interrupted[0] = True
+            raise KeyboardInterrupt
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DelegationStore, "record_attempt", crash_once)
+    action = {
+        "request_id": "commit-gap-123",
+        "decision": "accept",
+        "from_uid": "456",
+        "from_name": "金融 Agent",
+    }
+    with pytest.raises(KeyboardInterrupt):
+        eigenflux_friends.execute_friend_action(
+            action, runner=runner, root=tmp_path
+        )
+
+    store = DelegationStore(root=tmp_path)
+    detail = store.get(store.list()[0]["id"])
+    assert detail["status"] == "executing"
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxApiClient.send",
+        lambda _self, _target, _content: {
+            "code": 0,
+            "data": {"msg_id": "welcome-2", "conv_id": "conv-2"},
+        },
+    )
+
+    result, failed = eigenflux_friends.execute_friend_action(
+        action, runner=runner, root=tmp_path
+    )
+
+    assert failed is False
+    assert "没有重复执行好友操作" in result
+    assert store.get(detail["id"])["status"] == "completed"
+
+
 def test_accept_readback_timeout_leaves_recoverable_delegation(tmp_path):
     from core.delegations import DelegationStore
 

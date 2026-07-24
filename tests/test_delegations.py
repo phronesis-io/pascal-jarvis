@@ -925,6 +925,71 @@ def test_metrics_expose_user_and_reliability_states(tmp_path):
     assert metrics["duplicate_external_mutations"] == 0
 
 
+def test_metrics_qualifying_evidence_matches_completion_evaluator(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    valid, _ = _delegation(store, source_ref="valid")
+    valid_step = _step(store, valid, kind="message")
+    _complete_step(store, valid, valid_step)
+
+    expired, _ = _delegation(store, source_ref="expired")
+    expired_step = _step(store, expired, kind="message")
+    store.claim_step(
+        expired["id"], expired_step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        expired["id"],
+        expired_step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+    store.record_evidence(
+        expired["id"],
+        expired_step["id"],
+        expected_version=1,
+        evidence_type="readback",
+        strength="strong",
+        authority="message_service",
+        resource_locator="message:expired",
+        observed_digest="sha256:" + "b" * 64,
+        expected_summary="expected",
+        observed_summary="observed",
+        matched=True,
+        expires_at=999,
+        actor_id="message",
+    )
+
+    forged, _ = _delegation(store, source_ref="forged")
+    forged_step = _step(store, forged, kind="message")
+    store.claim_step(
+        forged["id"], forged_step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        forged["id"],
+        forged_step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+    store.record_evidence(
+        forged["id"],
+        forged_step["id"],
+        expected_version=1,
+        evidence_type="readback",
+        strength="strong",
+        authority="message_service",
+        resource_locator="message:forged",
+        observed_digest="sha256:" + "c" * 64,
+        expected_summary="expected",
+        observed_summary="observed",
+        matched=True,
+        actor_id="other-verifier",
+    )
+
+    assert store.metrics()["with_qualifying_evidence"] == 1
+
+
 def test_attention_query_includes_failed_recovery_decisions(tmp_path):
     store = _store(tmp_path)
     failed, _ = _delegation(store)
@@ -1078,6 +1143,34 @@ def test_expired_trusted_evidence_cannot_be_replaced_by_untrusted_actor(
 
     evidence(first, "message")
     assert store.get(delegation["id"])["status"] == "completed"
+
+
+def test_terminal_failure_cannot_erase_post_mutation_recovery_state(tmp_path):
+    store = _store(tmp_path)
+    delegation, _ = _delegation(store)
+    step = _step(store, delegation)
+    store.claim_step(
+        delegation["id"], step["id"], expected_version=1, owner="worker"
+    )
+    store.record_attempt(
+        delegation["id"],
+        step["id"],
+        expected_version=1,
+        owner="worker",
+        succeeded=True,
+    )
+
+    with pytest.raises(DelegationConflict, match="post-mutation"):
+        store.terminal(
+            delegation["id"],
+            expected_version=1,
+            status="failed",
+            reason_code="scheduler_timeout",
+        )
+
+    detail = store.get(delegation["id"])
+    assert detail["status"] == "verifying"
+    assert detail["steps"][0]["status"] == "verifying"
 
 
 def test_parallel_required_steps_keep_parent_executing(tmp_path):

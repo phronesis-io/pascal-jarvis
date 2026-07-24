@@ -89,6 +89,24 @@ class ReleaseGate:
             ]
         return [row for row in pages if isinstance(row, dict)]
 
+    def _run_check_runs(self, endpoint: str) -> list[dict[str, Any]]:
+        pages = self._run(
+            ["gh", "api", "--paginate", "--slurp", endpoint],
+            json_output=True,
+        )
+        if isinstance(pages, dict):
+            pages = [pages]
+        if not isinstance(pages, list):
+            raise ReleaseGateError("check-runs response is invalid")
+        runs: list[dict[str, Any]] = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            values = page.get("check_runs", [])
+            if isinstance(values, list):
+                runs.extend(row for row in values if isinstance(row, dict))
+        return runs
+
     def _trusted_actor(
         self,
         record: dict[str, Any],
@@ -181,11 +199,18 @@ class ReleaseGate:
         number = int(merged["number"])
         author = str((merged.get("user") or {}).get("login") or "")
 
-        check_runs = self._run(
-            ["gh", "api", f"repos/{repo}/commits/{sha}/check-runs"],
+        runs = self._run_check_runs(
+            f"repos/{repo}/commits/{sha}/check-runs"
+        )
+        combined_status = self._run(
+            ["gh", "api", f"repos/{repo}/commits/{sha}/status"],
             json_output=True,
         )
-        runs = check_runs.get("check_runs", []) if isinstance(check_runs, dict) else []
+        statuses = (
+            combined_status.get("statuses", [])
+            if isinstance(combined_status, dict)
+            else []
+        )
         configured_checks = [
             value
             for value in checks_policy.get("checks", [])
@@ -228,6 +253,14 @@ class ReleaseGate:
                 in {"success", "neutral", "skipped"}
             )
         }
+        successful_checks.update(
+            (str(status.get("context") or ""), None)
+            for status in statuses
+            if (
+                isinstance(status, dict)
+                and str(status.get("state") or "") == "success"
+            )
+        )
         missing = [
             (context, app_id)
             for context, app_id in required_checks

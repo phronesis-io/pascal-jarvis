@@ -95,6 +95,66 @@ def test_openai_probe_uses_auth_argument_and_records_observed_model(tmp_path):
     assert "sk-super-secret-value" not in json.dumps(result)
 
 
+def test_claude_probe_requires_exact_canary_marker(tmp_path):
+    _write_config(tmp_path)
+    spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[0]
+
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({
+                "result": f"Unable to return {ph.CANARY_MARKER}",
+            }),
+            stderr="",
+        )
+
+    result = ph.probe_provider(spec, root=tmp_path, runner=runner)
+
+    assert result["status"] == "unhealthy"
+
+
+def test_openai_probe_requires_exact_canary_marker(tmp_path):
+    _write_config(tmp_path)
+    spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[-1]
+
+    result = ph.probe_provider(
+        spec,
+        root=tmp_path,
+        openai_caller=lambda *_args, **_kwargs: {
+            "output_text": f"Unable to return {ph.CANARY_MARKER}",
+        },
+    )
+
+    assert result["status"] == "unhealthy"
+
+
+def test_explanatory_canary_output_does_not_clear_sticky_fallback(tmp_path):
+    from core.model_fallback import gate, trip
+
+    _write_config(tmp_path)
+    trip("spend_limit", tmp_path)
+
+    def runner(command, **kwargs):
+        if kwargs["env"].get("ANTHROPIC_AUTH_TOKEN"):
+            output = ph.CANARY_MARKER
+        else:
+            output = f"Unable to return {ph.CANARY_MARKER}"
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"result": output}), stderr=""
+        )
+
+    ph.probe_all(
+        tmp_path,
+        runner=runner,
+        openai_caller=lambda *_args, **_kwargs: {
+            "output_text": ph.CANARY_MARKER,
+        },
+    )
+
+    assert gate(tmp_path, probe=False) == "backup"
+
+
 def test_probe_all_persists_redacted_results(tmp_path):
     _write_config(tmp_path)
 

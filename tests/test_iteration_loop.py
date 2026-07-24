@@ -71,6 +71,27 @@ def test_critical_signal_can_propose_once(tmp_path):
     assert proposal["priority"] == 100
 
 
+def test_observer_emits_real_duplicate_external_mutation_signal(
+    monkeypatch, tmp_path,
+):
+    store = _store(tmp_path)
+    monkeypatch.setattr(
+        "core.delegations.DelegationStore.metrics",
+        lambda _self: {
+            "overdue_active": 0,
+            "duplicate_idempotency_keys": 0,
+            "duplicate_external_mutations": 2,
+        },
+    )
+
+    signals = DailyObserver(store)._delegation_signals()
+
+    assert [signal["key"] for signal in signals] == [
+        "duplicate_external_mutation"
+    ]
+    assert signals[0]["severity"] == "critical"
+
+
 def test_pending_proposal_is_deduplicated(tmp_path):
     store = _store(tmp_path)
     signal = _signal(store)

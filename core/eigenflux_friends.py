@@ -109,12 +109,32 @@ def execute_friend_action(
     if not request_id or decision not in {"accept", "reject"}:
         return "好友申请参数不完整，未执行。", True
 
+    cmd = [
+        "eigenflux", "relation", "handle",
+        "--request-id", request_id,
+        "--action", decision,
+    ]
+    if decision == "reject":
+        try:
+            result = runner(cmd)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return f"「{from_name}」的好友申请处理未完成，CLI 调用失败：{exc}", True
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout).strip()
+            detail = f"：{error[:180]}" if error else ""
+            return (
+                f"「{from_name}」的好友申请处理未完成，"
+                f"服务端没有确认成功{detail}"
+            ), True
+        return f"已拒绝「{from_name}」的好友申请。", False
+
     if not from_uid:
         return (f"「{from_name}」的好友申请缺少稳定对象标识，未执行。"), True
 
     from core.delegation_connectors import (
         project_eigenflux_message_receipt,
         record_connector_receipt,
+        reserve_connector_action,
     )
 
     friend_expected = {
@@ -154,48 +174,89 @@ def execute_friend_action(
         )
 
     try:
-        already_friend = _friend_by_id(from_uid, runner)
-    except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        return (
-            f"「{from_name}」的好友关系读取失败，未执行可能重复的操作：{exc}"
-        ), True
-
-    cmd = [
-        "eigenflux", "relation", "handle",
-        "--request-id", request_id,
-        "--action", decision,
-    ]
-    if remark and decision == "accept":
-        cmd.extend(["--remark", remark[:100]])
-    if decision == "accept":
-        cmd.extend(["--reason", "欢迎加入 EigenFlux，期待交流。"])
-
-    if decision == "reject":
-        try:
-            result = runner(cmd)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            return f"「{from_name}」的好友申请处理未完成，CLI 调用失败：{exc}", True
-        if result.returncode != 0:
-            error = (result.stderr or result.stdout).strip()
-            detail = f"：{error[:180]}" if error else ""
-            return (
-                f"「{from_name}」的好友申请处理未完成，"
-                f"服务端没有确认成功{detail}"
-            ), True
-        return f"已拒绝「{from_name}」的好友申请。", False
-
-    try:
-        project_friend(already_friend, matched=already_friend is not None)
+        store, delegation, step = reserve_connector_action(
+            source="eigenflux-friend",
+            source_ref=f"request:{request_id}:accept",
+            title=f"通过 {from_name} 的好友申请",
+            operation="friend_accept",
+            target_type="agent",
+            target_id=from_uid,
+            target_label=from_name,
+            authority="eigenflux_relationship_service",
+            verifier="eigenflux_friend",
+            expected=friend_expected,
+            verification_policy={"agent_id": from_uid},
+            root=root,
+        )
     except Exception as exc:
         return (
             f"「{from_name}」的好友申请尚未执行："
             f"无法先建立可恢复记录（{exc}）"
         ), True
+    if delegation["status"] == "completed":
+        already_friend = {"agent_id": from_uid, "agent_name": from_name}
+    else:
+        try:
+            already_friend = _friend_by_id(from_uid, runner)
+        except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return (
+                f"「{from_name}」的好友关系读取失败；可恢复记录已保留：{exc}"
+            ), True
+    was_existing_friend = already_friend is not None
+    if (
+        already_friend is not None
+        and step is not None
+        and step["status"] == "executing"
+    ):
+        try:
+            store.record_attempt(
+                delegation["id"],
+                step["id"],
+                expected_version=delegation["contract_version"],
+                owner="eigenflux-friend",
+                succeeded=True,
+                artifact_locator=f"eigenflux-friend:{from_uid}",
+            )
+        except Exception:
+            # The authoritative friend read-back is still recorded below.
+            # A competing worker or expired lease will be recovered normally.
+            pass
+
+    if remark:
+        cmd.extend(["--remark", remark[:100]])
+    cmd.extend(["--reason", "欢迎加入 EigenFlux，期待交流。"])
 
     if already_friend is None:
+        if step is None:
+            return f"「{from_name}」的好友申请缺少可执行步骤。", True
+        try:
+            store.claim_step(
+                delegation["id"],
+                step["id"],
+                expected_version=delegation["contract_version"],
+                owner="eigenflux-friend",
+                lease_seconds=120,
+            )
+        except Exception as exc:
+            return (
+                f"「{from_name}」的好友申请正在由其他执行器处理：{exc}"
+            ), True
         try:
             result = runner(cmd)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        except subprocess.TimeoutExpired as exc:
+            return (
+                f"「{from_name}」的好友申请结果未知，已保留执行租约等待回读："
+                f"{exc}"
+            ), True
+        except FileNotFoundError as exc:
+            store.record_attempt(
+                delegation["id"],
+                step["id"],
+                expected_version=delegation["contract_version"],
+                owner="eigenflux-friend",
+                succeeded=False,
+                error_code="eigenflux_cli_not_found",
+            )
             return f"「{from_name}」的好友申请处理未完成，CLI 调用失败：{exc}", True
         if result.returncode != 0:
             # An interrupted first callback may have committed remotely before
@@ -205,12 +266,28 @@ def execute_friend_action(
             except Exception:
                 already_friend = None
             if already_friend is None:
+                store.record_attempt(
+                    delegation["id"],
+                    step["id"],
+                    expected_version=delegation["contract_version"],
+                    owner="eigenflux-friend",
+                    succeeded=False,
+                    error_code="eigenflux_friend_accept_failed",
+                )
                 error = (result.stderr or result.stdout).strip()
                 detail = f"：{error[:180]}" if error else ""
                 return (
                     f"「{from_name}」的好友申请处理未完成，"
                     f"服务端没有确认成功{detail}"
                 ), True
+        store.record_attempt(
+            delegation["id"],
+            step["id"],
+            expected_version=delegation["contract_version"],
+            owner="eigenflux-friend",
+            succeeded=True,
+            artifact_locator=f"eigenflux-friend:{from_uid}",
+        )
 
     try:
         friend = _friend_by_id(from_uid, runner)
@@ -252,7 +329,7 @@ def execute_friend_action(
             f"已核验通过「{from_name}」的好友申请；欢迎消息已执行，"
             "仍在回读核验。"
         ), True
-    duplicate = "；没有重复执行好友操作" if already_friend is not None else ""
+    duplicate = "；没有重复执行好友操作" if was_existing_friend else ""
     return (
         f"已通过并核验「{from_name}」的好友申请，并以你作为首席科学家的"
         f"身份发了欢迎{duplicate}。"

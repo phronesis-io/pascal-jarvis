@@ -220,6 +220,21 @@ six findings were reproduced and closed:
 | 97 | Linking a Codex/Claude execution pointer could replace an already-bound release SHA with `pending` | Context linking adopts the existing Delegation without revising outcome or verification policy; release-preservation regression |
 | 98 | A terminal Delegation projection failure left linked Matter, Intent, or Handoff state stale forever | Every projection failure enters a durable SQLite queue and the reconciler retries active and terminal rows until all projections converge; terminal-recovery regression |
 
+The twelfth independent review focused on authority boundaries, crash
+recovery, release evidence completeness, and operational metrics. Its eight
+findings were reproduced and closed:
+
+| # | Finding | Resolution and regression evidence |
+|---|---|---|
+| 99 | A canary explanation containing the expected marker could be treated as a healthy provider | Claude-compatible and OpenAI probes now require the exact trimmed marker; explanatory-output and sticky-fallback regressions |
+| 100 | Rejecting an EigenFlux friend request unnecessarily depended on a successful friends-list read | Reject executes directly from the server request ID without the accept-only identity or relationship preflight; no-readback reject regression |
+| 101 | Friend acceptance could be marked executed before the remote mutation, leaving a crash gap that no scheduler could resume | A pending connector step is durably reserved before the mutation, claimed only at execution, and resumed by the reconciler after lease expiry; crashes before the mutation and after remote commit both recover without duplicate acceptance |
+| 102 | Terminal failure could rewrite post-mutation verification steps as retryable failures | Failure is rejected while any current step is verifying or awaiting external authority, preserving read-only recovery and preventing duplicate writes; terminal-transition regression |
+| 103 | A required GitHub Check Run on a later API page could be omitted from release evidence | The gate now aggregates every paginated Check Run page before evaluating required contexts and app identities; later-page regression |
+| 104 | Classic GitHub commit statuses could not satisfy a required legacy status context | Successful classic commit statuses are merged with Check Run evidence while app-bound checks remain identity-specific; classic-status regression |
+| 105 | L3 watched the schema-protected duplicate idempotency-key count instead of the observed duplicate external mutation metric | The daily observer now emits a critical signal from `duplicate_external_mutations`; signal regression |
+| 106 | The qualifying-evidence metric counted stale contracts, expired evidence, and untrusted or wrong-authority receipts | Metrics now apply the evaluator's current-version, required-step, trust, verifier, authority, strength, match, and expiry rules; evaluator-parity regression |
+
 Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
 mandatory, so a review submitted before the final push cannot authorize a
 later revision.
@@ -260,7 +275,7 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2072 passed` for this candidate);
+- full local test result (`2083 passed` for this candidate);
 - public-repository hygiene and secret scan;
 - independent review and all comments resolved;
 - required CI checks;

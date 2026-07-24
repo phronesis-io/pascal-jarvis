@@ -1697,6 +1697,21 @@ class DelegationStore:
             if current["status"] in TERMINAL_STATUSES or current["status"] == status:
                 result = current
             else:
+                if status == "failed":
+                    post_mutation = db.execute(
+                        """
+                        SELECT 1 FROM delegation_steps
+                         WHERE delegation_id=? AND contract_version=?
+                           AND status IN ('verifying','awaiting_external')
+                         LIMIT 1
+                        """,
+                        (delegation_id, expected_version),
+                    ).fetchone()
+                    if post_mutation is not None:
+                        raise DelegationConflict(
+                            "post-mutation steps must remain recoverable "
+                            "through authoritative verification"
+                        )
                 db.execute(
                     """
                     UPDATE delegation_steps
@@ -2166,19 +2181,65 @@ class DelegationStore:
                 ).fetchall()
             }
             total = sum(by_status.values())
-            qualifying = int(
-                db.execute(
-                    """
-                    SELECT COUNT(DISTINCT delegation_id) AS count
-                      FROM delegation_evidence
-                      JOIN delegations
-                        ON delegations.id=delegation_evidence.delegation_id
-                     WHERE matched=1
-                       AND strength IN ('strong','corroborated','user_attested')
-                       AND delegations.capture_mode!='shadow'
-                    """
-                ).fetchone()["count"]
-            )
+            evidence_rows = db.execute(
+                """
+                SELECT delegations.id AS delegation_id,
+                       delegations.authority AS delegation_authority,
+                       delegations.verification_policy_json,
+                       delegation_steps.kind,
+                       delegation_evidence.strength,
+                       delegation_evidence.authority,
+                       delegation_evidence.trusted,
+                       delegation_evidence.verifier_id,
+                       delegation_evidence.matched,
+                       delegation_evidence.expires_at
+                  FROM delegations
+                  JOIN delegation_steps
+                    ON delegation_steps.delegation_id=delegations.id
+                   AND delegation_steps.contract_version=
+                       delegations.contract_version
+                   AND delegation_steps.required=1
+                  JOIN delegation_evidence
+                    ON delegation_evidence.delegation_id=delegations.id
+                   AND delegation_evidence.step_id=delegation_steps.id
+                   AND delegation_evidence.contract_version=
+                       delegations.contract_version
+                 WHERE delegations.capture_mode!='shadow'
+                """
+            ).fetchall()
+            qualifying_ids: set[str] = set()
+            for row in evidence_rows:
+                try:
+                    policy = json.loads(
+                        row["verification_policy_json"] or "{}"
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    policy = {}
+                effective = step_verification_policy(
+                    policy if isinstance(policy, dict) else {},
+                    str(row["kind"]),
+                )
+                expected_verifier = str(
+                    effective.get("verifier") or row["kind"] or ""
+                )
+                expected_authority = str(
+                    effective.get("authority")
+                    or row["delegation_authority"]
+                    or ""
+                )
+                if (
+                    bool(row["matched"])
+                    and bool(row["trusted"])
+                    and str(row["strength"]) in QUALIFYING_STRENGTHS
+                    and str(row["verifier_id"]) == expected_verifier
+                    and str(row["authority"]) == expected_authority
+                    and (
+                        row["expires_at"] is None
+                        or float(row["expires_at"]) > now
+                    )
+                ):
+                    qualifying_ids.add(str(row["delegation_id"]))
+            qualifying = len(qualifying_ids)
             overdue = int(
                 db.execute(
                     """

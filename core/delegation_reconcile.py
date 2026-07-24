@@ -332,6 +332,55 @@ class DelegationReconciler:
         for row in rows:
             scanned += 1
             detail = self.store.get(row["id"])
+            if (
+                detail["status"] == "bound"
+                and detail.get("source") == "eigenflux-friend"
+                and detail.get("operation") == "friend_accept"
+            ):
+                source_ref = str(detail.get("source_ref") or "")
+                request_id = (
+                    source_ref[len("request:"):-len(":accept")]
+                    if (
+                        source_ref.startswith("request:")
+                        and source_ref.endswith(":accept")
+                    )
+                    else ""
+                )
+                if not request_id:
+                    deferred += 1
+                    errors.append(
+                        {
+                            "delegation_id": detail["id"],
+                            "step_id": "",
+                            "error": "friend request reference is invalid",
+                        }
+                    )
+                    continue
+                from core.eigenflux_friends import execute_friend_action
+
+                message, failed = execute_friend_action(
+                    {
+                        "request_id": request_id,
+                        "decision": "accept",
+                        "from_uid": detail.get("target_id") or "",
+                        "from_name": detail.get("target_label") or "",
+                    },
+                    root=self.store.root,
+                )
+                refreshed = self.store.get(detail["id"])
+                if refreshed["status"] == "completed":
+                    verified += 1
+                else:
+                    deferred += 1
+                    if failed:
+                        errors.append(
+                            {
+                                "delegation_id": detail["id"],
+                                "step_id": "",
+                                "error": message[:200],
+                            }
+                        )
+                continue
             if detail["status"] == "bound" and detail.get("source") != "taskline":
                 continue
             if detail["status"] in {

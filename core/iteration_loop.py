@@ -858,6 +858,17 @@ class DailyObserver:
                     "evidence": metrics,
                 }
             )
+        if metrics["duplicate_external_mutations"]:
+            signals.append(
+                {
+                    "source": "delegations",
+                    "category": "duplicate_action",
+                    "key": "duplicate_external_mutation",
+                    "severity": "critical",
+                    "summary": "检测到同一委托步骤产生多个外部资源",
+                    "evidence": metrics,
+                }
+            )
         return signals
 
     def _conversation_signals(self) -> list[dict[str, Any]]:

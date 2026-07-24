@@ -44,6 +44,10 @@ def _responses(**overrides):
             }],
         },
         (
+            "gh", "api",
+            f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/status",
+        ): {"statuses": []},
+        (
             "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
         ): [{
             "user": {"login": "review-bot"},
@@ -112,6 +116,49 @@ def test_release_gate_reads_review_evidence_from_later_pages(monkeypatch):
     result = _gate(monkeypatch, responses).verify()
 
     assert result["review_evidence"] == ["review:review-bot:APPROVED"]
+
+
+def test_release_gate_reads_required_check_from_later_page(monkeypatch):
+    endpoint = (
+        f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/check-runs"
+    )
+    responses = _responses()
+    responses[("gh", "api", "--paginate", "--slurp", endpoint)] = [
+        {"check_runs": [{
+            "name": "other",
+            "status": "completed",
+            "conclusion": "success",
+        }]},
+        {"check_runs": [{
+            "name": "test",
+            "status": "completed",
+            "conclusion": "success",
+        }]},
+    ]
+
+    result = _gate(monkeypatch, responses).verify()
+
+    assert result["required_checks"] == ["test"]
+
+
+def test_release_gate_accepts_required_classic_commit_status(monkeypatch):
+    runs_key = (
+        "gh", "api",
+        f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/check-runs",
+    )
+    status_key = (
+        "gh", "api",
+        f"repos/phronesis-io/pascal-jarvis/commits/{SHA}/status",
+    )
+    responses = _responses()
+    responses[runs_key] = {"check_runs": []}
+    responses[status_key] = {
+        "statuses": [{"context": "test", "state": "success"}],
+    }
+
+    result = _gate(monkeypatch, responses).verify()
+
+    assert result["required_checks"] == ["test"]
 
 
 @pytest.mark.parametrize(

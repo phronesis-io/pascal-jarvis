@@ -199,7 +199,7 @@ def _probe_claude(
             actual_model = str(payload.get("model") or "")
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-    if completed.returncode == 0 and CANARY_MARKER in output:
+    if completed.returncode == 0 and output.strip() == CANARY_MARKER:
         return {
             "status": "healthy",
             "detail": "bounded canary answered",
@@ -247,7 +247,7 @@ def _probe_openai(
             "latency_ms": round((time.monotonic() - started) * 1000),
         }
     latency = round((time.monotonic() - started) * 1000)
-    if CANARY_MARKER not in text:
+    if text.strip() != CANARY_MARKER:
         return {
             "status": "unhealthy",
             "detail": "canary returned unexpected content",
