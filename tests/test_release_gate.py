@@ -6,6 +6,7 @@ from core.release_gate import ReleaseGate, ReleaseGateError, _repo_name
 
 
 SHA = "a" * 40
+HEAD_SHA = "b" * 40
 
 
 def _responses(**overrides):
@@ -34,6 +35,7 @@ def _responses(**overrides):
             "merged_at": "2026-07-24T12:00:00Z",
             "base": {"ref": "main"},
             "user": {"login": "author"},
+            "head": {"sha": HEAD_SHA},
         }],
         (
             "gh", "api",
@@ -53,7 +55,7 @@ def _responses(**overrides):
             "user": {"login": "review-bot"},
             "author_association": "MEMBER",
             "state": "APPROVED",
-            "commit_id": SHA,
+            "commit_id": HEAD_SHA,
         }],
         (
             "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
@@ -109,7 +111,7 @@ def test_release_gate_reads_review_evidence_from_later_pages(monkeypatch):
             "user": {"login": "review-bot"},
             "author_association": "MEMBER",
             "state": "APPROVED",
-            "commit_id": SHA,
+            "commit_id": HEAD_SHA,
         }],
     ]
 
@@ -389,7 +391,23 @@ def test_release_gate_rejects_review_of_an_older_commit(monkeypatch):
         "user": {"login": "review-bot"},
         "author_association": "MEMBER",
         "state": "APPROVED",
-        "commit_id": "b" * 40,
+        "commit_id": "c" * 40,
+    }]
+
+    with pytest.raises(ReleaseGateError, match="independent review evidence"):
+        _gate(monkeypatch, responses).verify()
+
+
+def test_release_gate_rejects_review_bound_only_to_merge_commit(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    responses = _responses()
+    responses[reviews_key] = [{
+        "user": {"login": "review-bot"},
+        "author_association": "MEMBER",
+        "state": "APPROVED",
+        "commit_id": SHA,
     }]
 
     with pytest.raises(ReleaseGateError, match="independent review evidence"):
@@ -466,6 +484,149 @@ def test_release_gate_accepts_trusted_bot_by_repository_permission(monkeypatch):
     result = _gate(monkeypatch, responses).verify()
 
     assert result["review_evidence"] == ["attestation:review-bot"]
+
+
+def test_release_gate_accepts_explicit_admin_owner_decision(monkeypatch):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    permission_key = (
+        "gh",
+        "api",
+        "repos/phronesis-io/pascal-jarvis/collaborators/author/permission",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "author"},
+        "author_association": "MEMBER",
+        "created_at": "2026-07-24T12:01:00Z",
+        "body": (
+            f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+            "REASON: Pascal explicitly requested this verified release."
+        ),
+    }]
+    responses[permission_key] = {
+        "permission": "admin",
+        "role_name": "admin",
+    }
+
+    result = _gate(monkeypatch, responses).verify()
+
+    assert result["approval_mode"] == "owner_release_decision"
+    assert result["review_evidence"] == []
+    assert result["owner_release_decisions"] == [{
+        "actor": "author",
+        "reason": "Pascal explicitly requested this verified release.",
+    }]
+
+
+@pytest.mark.parametrize(
+    ("comment_body", "permission", "review_policy", "created_at"),
+    [
+        (
+            f"RELEASE-GATE: OWNER-APPROVED {SHA}",
+            "admin",
+            {"required_approving_review_count": 0},
+            "2026-07-24T12:01:00Z",
+        ),
+        (
+            (
+                f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+                "REASON: Pascal explicitly requested this verified release."
+            ),
+            "write",
+            {"required_approving_review_count": 0},
+            "2026-07-24T12:01:00Z",
+        ),
+        (
+            (
+                f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+                "REASON: Pascal explicitly requested this verified release."
+            ),
+            "admin",
+            {"required_approving_review_count": 1},
+            "2026-07-24T12:01:00Z",
+        ),
+        (
+            (
+                f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+                "REASON: Pascal explicitly requested this verified release."
+            ),
+            "admin",
+            {
+                "required_approving_review_count": 0,
+                "require_code_owner_reviews": True,
+            },
+            "2026-07-24T12:01:00Z",
+        ),
+        (
+            (
+                f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+                "REASON: Pascal explicitly requested this verified release."
+            ),
+            "admin",
+            {
+                "required_approving_review_count": 0,
+                "require_last_push_approval": True,
+            },
+            "2026-07-24T12:01:00Z",
+        ),
+        (
+            (
+                f"RELEASE-GATE: OWNER-APPROVED {SHA}\n"
+                "REASON: Pascal explicitly requested this verified release."
+            ),
+            "admin",
+            {"required_approving_review_count": 0},
+            "2026-07-24T11:59:00Z",
+        ),
+    ],
+)
+def test_release_gate_rejects_invalid_owner_decision(
+    monkeypatch,
+    comment_body,
+    permission,
+    review_policy,
+    created_at,
+):
+    reviews_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/pulls/42/reviews",
+    )
+    comments_key = (
+        "gh", "api", "repos/phronesis-io/pascal-jarvis/issues/42/comments",
+    )
+    permission_key = (
+        "gh",
+        "api",
+        "repos/phronesis-io/pascal-jarvis/collaborators/author/permission",
+    )
+    protection_key = (
+        "gh", "api",
+        "repos/phronesis-io/pascal-jarvis/branches/main/protection",
+    )
+    responses = _responses()
+    responses[reviews_key] = []
+    responses[comments_key] = [{
+        "user": {"login": "author"},
+        "author_association": "MEMBER",
+        "created_at": created_at,
+        "body": comment_body,
+    }]
+    responses[permission_key] = {
+        "permission": permission,
+        "role_name": permission,
+    }
+    responses[protection_key] = {
+        **responses[protection_key],
+        "required_pull_request_reviews": review_policy,
+    }
+
+    with pytest.raises(ReleaseGateError, match="owner release decision"):
+        _gate(monkeypatch, responses).verify()
 
 
 def test_restart_runs_release_gate_before_touching_deploy_guard():

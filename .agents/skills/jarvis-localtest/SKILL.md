@@ -70,10 +70,13 @@ Only on the production machine, after committing the intended revision:
 
 `restart.sh` first requires local `main`, `HEAD == origin/main`, a clean tracked
 worktree, protected-main policy, a merged PR, successful required checks, and
-independent review evidence. The runtime gate then requires component health,
-deploy verification, and smoke checks. For resource-lifecycle changes, sample
-the live process more than once across real scheduler activity; a clean
-restart alone does not prove a leak is fixed.
+release authority. Normal authority is an independent review bound to the
+final PR head. When branch protection explicitly requires zero approvals and
+has no code-owner or last-push review rule, an admin author may instead record
+a merge-SHA-bound owner release decision and reason. The runtime gate then
+requires component health, deploy verification, and smoke checks. For
+resource-lifecycle changes, sample the live process more than once across real
+scheduler activity; a clean restart alone does not prove a leak is fixed.
 
 Do not perform a real message, calendar, document, or public mutation merely
 for smoke testing. Use a read-only preflight unless the owner explicitly
