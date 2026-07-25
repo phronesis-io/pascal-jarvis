@@ -229,6 +229,30 @@ def test_eigenflux_friend_absence_is_mismatch(tmp_path):
     assert result.matched is False
 
 
+def test_eigenflux_friend_verifier_treats_zero_cursor_as_terminal(tmp_path):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"code": 0, "friends": [], "next_cursor": "0"}),
+            "",
+        )
+
+    result = VerifierRegistry(
+        root=tmp_path, db_path=tmp_path / "db", runner=runner
+    ).verify(
+        "eigenflux_friend",
+        {"agent_id": "agent-1", "relationship": "friend"},
+        {"agent_id": "agent-1"},
+    )
+
+    assert result.matched is False
+    assert len(calls) == 1
+
+
 def test_runtime_deploy_accepts_resident_descendant(
     tmp_path, monkeypatch,
 ):

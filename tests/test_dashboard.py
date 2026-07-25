@@ -15,6 +15,15 @@ sys.path.insert(0, str(ROOT))
 import dashboard.db as db_module
 
 
+def test_usage_heatmap_has_fixed_inner_canvas_for_scoped_mobile_scroll():
+    from dashboard.pages.usage import _heatmap_html
+
+    markup = _heatmap_html([[1] * 24 for _ in range(7)], 1)
+
+    assert "class='usage-heatmap'" in markup
+    assert markup.count("width:14px") == (7 * 24) + 24
+
+
 def setup_test_db():
     """Create a temp DB for testing."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

@@ -2391,9 +2391,12 @@ def generate_calendar_intents(calendar_md: str,
             # — skip the per-instance prep entirely (see standing_cron_names).
             covering = _covered_by_standing_cron(title) if prep_dt else None
             if covering:
-                print(f"[calendar-intents] skip prep for {title!r} @ "
-                      f"{current_date}: standing cron intent {covering!r} "
-                      "already covers it", file=sys.stderr)
+                if _skip_log_once(
+                    f"standing:{current_date}:{title[:20]}:{covering}"
+                ):
+                    print(f"[calendar-intents] skip prep for {title!r} @ "
+                          f"{current_date}: standing cron intent {covering!r} "
+                          "already covers it", file=sys.stderr)
                 prep_dt = None
 
             # REQ-68.2: a prep whose computed fire time is AT/AFTER the event

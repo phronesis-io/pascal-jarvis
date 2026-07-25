@@ -135,13 +135,14 @@ def _response_data(obj: dict) -> dict:
 
 def _next_cursor(obj: dict) -> str:
     data = _response_data(obj)
-    return str(
+    cursor = str(
         data.get("next_cursor")
         or data.get("nextCursor")
         or obj.get("next_cursor")
         or obj.get("nextCursor")
         or ""
     ).strip()
+    return "" if cursor == "0" else cursor
 
 
 class EigenFluxApiClient:

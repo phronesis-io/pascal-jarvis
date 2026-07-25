@@ -193,6 +193,13 @@ def memorial_display_body(state: dict) -> str:
             return body[len(raw_title):].lstrip(" \n:：")
     body = re.sub(r"^(?:TITLE|标题)\s*[:：]\s*[^\n]+\n?", "",
                   body, count=1, flags=re.I).lstrip()
+    if "friend readback pagination cursor repeated" in body:
+        subject = re.search(r"「([^」]+)」", body)
+        who = f"「{subject.group(1)}」" if subject else "这位申请者"
+        return (
+            f"{who}的好友关系当时未核验完成；系统已保留进度并自动重试，"
+            "不需要重复操作。"
+        )
     return body
 
 

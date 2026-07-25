@@ -44,6 +44,25 @@ def test_friend_readback_paginates_until_target():
     assert calls[1][calls[1].index("--cursor") + 1] == "page-2"
 
 
+def test_friend_readback_treats_zero_cursor_as_terminal():
+    calls = []
+
+    def runner(command):
+        calls.append(command)
+        payload = (
+            {"friends": [], "next_cursor": "28", "total": 18}
+            if "--cursor" not in command
+            else {"friends": [], "next_cursor": "0", "total": 18}
+        )
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(payload), stderr=""
+        )
+
+    assert eigenflux_friends._friend_by_id("new-agent", runner) is None
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--cursor") + 1] == "28"
+
+
 def test_card_action_accepts_and_sends_fixed_welcome(monkeypatch, tmp_path):
     calls = []
     api_calls = []

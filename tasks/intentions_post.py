@@ -148,12 +148,20 @@ PRODUCT_LOGS = {
 }
 
 
-def _append_product_log(intent_id: str, content: str) -> bool:
+def _append_product_log(
+    intent_id: str,
+    content: str,
+    *,
+    verify_only: bool = False,
+) -> bool:
     """Append the intent's delivered content under an hour header.
 
     Returns True when this hour's entry is on disk — written now, or already
-    written in-call by the model. False on write failure: executed is gated
-    on the file write for these intents.
+    written in-call by the model. ``verify_only`` checks for an existing
+    product without ever appending the supplied content; status-only replies
+    use it so a verified in-call write closes the occurrence while a bare
+    claim still cannot pass. False on write failure: executed is gated on the
+    file write for these intents.
 
     Dedup (F-16): the old rule required the intent name in a heading line
     starting with the exact '### YYYY-MM-DD HH' prefix, but the model's real
@@ -196,6 +204,8 @@ def _append_product_log(intent_id: str, content: str) -> bool:
                     if name in nxt.strip()[:20]:
                         return True  # (b) label on the body's first line
                     break
+        if verify_only:
+            return False
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as f:
             f.write(f"\n### {stamp} {name}\n{content.strip()}\n")
@@ -319,8 +329,17 @@ def _apply_action(intent_id: str, response: str, action: str,
             # File-product intent: the log entry is the product; a bare
             # status token ('已写入') or a husk can't be one — gate executed
             # on the deterministic write, never on the model's claim.
-            elif (_is_contentless(product) or _is_empty_product(product)
-                    or not _append_product_log(intent_id, product)):
+            elif (_is_contentless(product) or _is_empty_product(product)):
+                if _append_product_log(
+                    intent_id, product, verify_only=True
+                ):
+                    pass
+                else:
+                    print(f"[intentions_post] {intent_id}: no appendable product "
+                          f"(action={action}) — left for reconcile retry",
+                          file=sys.stderr)
+                    return False
+            elif not _append_product_log(intent_id, product):
                 print(f"[intentions_post] {intent_id}: no appendable product "
                       f"(action={action}) — left for reconcile retry",
                       file=sys.stderr)

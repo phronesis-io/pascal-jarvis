@@ -898,6 +898,7 @@ class TestDecisionSurface:
             {"ts": now, "event": "task_skip", "task": "batch",
              "reason": "queued_quiet_hours"},
             {"ts": now, "event": "task_timeout", "task": "mail"},
+            {"ts": now, "event": "intent_retry", "task": "int_internal"},
         ])
         _write_jsonl(tmp_path / "heartbeat_outbox.jsonl", [
             {"ts": now[:16], "text": "**📜 📡 card** body"},
@@ -977,6 +978,22 @@ class TestDecisionSurface:
         }
         assert memorial_display_title(generic) == "10点心理咨询可带三个近况"
         assert memorial_display_body(generic) == "带一个真实样本。"
+
+    def test_internal_eigenflux_cursor_error_is_humanized(self):
+        from dashboard.uiutil import memorial_display_body
+
+        body = memorial_display_body({
+            "body": (
+                "「Hesmos(赫斯墨斯)」的好友关系读取失败；"
+                "可恢复记录已保留：friend readback pagination cursor repeated"
+            ),
+        })
+
+        assert body == (
+            "「Hesmos(赫斯墨斯)」的好友关系当时未核验完成；"
+            "系统已保留进度并自动重试，不需要重复操作。"
+        )
+        assert "cursor" not in body
 
     def test_personal_memorials_rank_ahead_of_newer_ambient_feed(self):
         from dashboard.uiutil import memorial_attention_rank

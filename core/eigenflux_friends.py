@@ -41,13 +41,16 @@ def _next_cursor(result: subprocess.CompletedProcess) -> str:
     except (TypeError, ValueError, json.JSONDecodeError):
         return ""
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-    return str(
+    cursor = str(
         data.get("next_cursor")
         or data.get("nextCursor")
         or payload.get("next_cursor")
         or payload.get("nextCursor")
         or ""
     ).strip()
+    # EigenFlux uses the string "0" as its end-of-pagination sentinel.
+    # Sending it back restarts pagination and creates a false cursor loop.
+    return "" if cursor == "0" else cursor
 
 
 def _friend_by_id(

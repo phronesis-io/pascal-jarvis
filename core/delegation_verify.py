@@ -428,6 +428,8 @@ class VerifierRegistry:
                 or payload.get("nextCursor")
                 or ""
             ).strip()
+            if next_cursor == "0":
+                next_cursor = ""
             if not next_cursor:
                 break
             if next_cursor in seen:
