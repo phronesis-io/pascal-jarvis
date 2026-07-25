@@ -8,8 +8,8 @@
 # independent launchd cron (com.jarvis.conversation-audit, 04:20 daily),
 # NOT as a heartbeat task: Tier0's run_script 60s hard timeout is borderline
 # for a full transcript sweep, and the audit must not share fate with the
-# heartbeat it is auditing. Freshness is watched via components.yaml
-# (conversation-audit: file_age on data/conversation_audit.db, 48h).
+# heartbeat it is auditing. Freshness is watched via the latest successful
+# audit_runs.completed_at value in components.yaml (48h).
 #
 # default_paths() resolves everything from Path.cwd()
 # (core/conversation_audit.py) — the cd below is load-bearing.

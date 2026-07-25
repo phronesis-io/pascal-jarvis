@@ -29,10 +29,11 @@ def test_components_manifest_loads_and_covers_critical_set():
     crit = {c["name"] for c in comps if c.get("critical")}
     assert "dashboard" in crit and "ef-stream" in crit
     # REQ-82: the audit had no scheduler mount and sat idle for 13 days —
-    # freshness must be watched via the db mtime (48h = one missed daily run
-    # tolerated, two pages) and stay non-critical (observation layer).
+    # Freshness must come from the latest completed audit, not database mtime:
+    # migrations and issue resolution also write the file. One missed daily
+    # run is tolerated; two pages. The observation layer stays non-critical.
     ca = next(c for c in comps if c["name"] == "conversation-audit")
-    assert ca["check"] == "file_age"
+    assert ca["check"] == "audit_age"
     assert ca["path"] == "data/conversation_audit.db"
     assert ca["max_age_hours"] == 48
     assert not ca.get("critical", False)

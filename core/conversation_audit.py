@@ -170,6 +170,10 @@ def connect(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_audit_issues_run
             ON audit_issues(run_id, severity, issue_type);
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
         """
     )
     # Closure workflow (REQ-105, approved 2026-07-14): resolved findings carry
@@ -183,6 +187,25 @@ def connect(path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE audit_runs ADD COLUMN completed_at TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    migration = "audit_runs_completed_at_backfill_v1"
+    migrated = conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE name=?",
+        (migration,),
+    ).fetchone()
+    if migrated is None:
+        # The immediately preceding build could add the column without
+        # backfilling it. Its persisted rows were atomically completed, so
+        # mark them once; later interrupted runs keep their NULL marker.
+        conn.execute(
+            "UPDATE audit_runs SET completed_at=started_at "
+            "WHERE completed_at IS NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(name,applied_at) "
+            "VALUES (?,?)",
+            (migration, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
     return conn
 
 

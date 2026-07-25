@@ -7,7 +7,10 @@ requires_config); an unmet precondition means SKIPPED (ok, never ⚠️).
 """
 
 import json
+import os
+import sqlite3
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core.components as components
@@ -91,6 +94,116 @@ def test_requires_config_equality(tmp_path):
     (r2,) = check_components(manifest_path=m2, root=other)
     assert "skipped" not in r2
     assert r2["ok"] is False  # gate open, real check ran
+
+
+def test_audit_age_uses_completed_run_not_database_mtime(tmp_path):
+    database = tmp_path / "conversation_audit.db"
+    stale = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+    db = sqlite3.connect(database)
+    db.execute(
+        """
+        CREATE TABLE audit_runs (
+            id INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            since TEXT NOT NULL,
+            log_events INTEGER NOT NULL DEFAULT 0,
+            session_messages INTEGER NOT NULL DEFAULT 0,
+            issues INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO audit_runs(id,started_at,since,completed_at)
+        VALUES (1,?,?,?)
+        """,
+        (stale, stale, stale),
+    )
+    db.commit()
+    db.close()
+    os.utime(database, None)
+    manifest = _manifest(tmp_path, """
+  - name: conversation-audit
+    check: audit_age
+    path: conversation_audit.db
+    max_age_hours: 48
+""")
+
+    (stale_result,) = check_components(
+        manifest_path=manifest,
+        root=tmp_path,
+    )
+
+    assert stale_result["ok"] is False
+    assert "completed age 72." in stale_result["detail"]
+
+    recent = datetime.now(timezone.utc).isoformat()
+    db = sqlite3.connect(database)
+    db.execute(
+        """
+        INSERT INTO audit_runs(id,started_at,since,completed_at)
+        VALUES (2,?,?,?)
+        """,
+        (recent, recent, recent),
+    )
+    db.commit()
+    db.close()
+    old_mtime = (
+        datetime.now(timezone.utc) - timedelta(hours=72)
+    ).timestamp()
+    os.utime(database, (old_mtime, old_mtime))
+
+    (healthy_result,) = check_components(
+        manifest_path=manifest,
+        root=tmp_path,
+    )
+
+    assert healthy_result["ok"] is True
+    assert "completed age 0.0h" in healthy_result["detail"]
+
+
+def test_audit_age_migrates_legacy_database_before_health_read(tmp_path):
+    database = tmp_path / "conversation_audit.db"
+    completed = datetime.now(timezone.utc).isoformat()
+    db = sqlite3.connect(database)
+    db.execute(
+        """
+        CREATE TABLE audit_runs (
+            id INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            since TEXT NOT NULL,
+            log_events INTEGER NOT NULL DEFAULT 0,
+            session_messages INTEGER NOT NULL DEFAULT 0,
+            issues INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO audit_runs(id,started_at,since) VALUES (1,?,?)",
+        (completed, completed),
+    )
+    db.commit()
+    db.close()
+    manifest = _manifest(tmp_path, """
+  - name: conversation-audit
+    check: audit_age
+    path: conversation_audit.db
+    max_age_hours: 48
+""")
+
+    (result,) = check_components(
+        manifest_path=manifest,
+        root=tmp_path,
+    )
+
+    assert result["ok"] is True
+    migrated = sqlite3.connect(database)
+    value = migrated.execute(
+        "SELECT completed_at FROM audit_runs WHERE id=1"
+    ).fetchone()[0]
+    migrated.close()
+    assert value == completed
 
 
 def test_format_report_marks_skipped_not_warned(tmp_path):

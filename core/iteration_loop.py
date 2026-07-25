@@ -875,9 +875,9 @@ class DailyObserver:
         path = self.store.root / "data" / "conversation_audit.db"
         if not path.is_file():
             raise IterationError("conversation audit database is unavailable")
+        from core.conversation_audit import connect, open_findings
         try:
-            db = sqlite3.connect(str(path), timeout=3)
-            db.row_factory = sqlite3.Row
+            db = connect(path)
             run = db.execute(
                 """
                 SELECT id,started_at,completed_at
@@ -910,7 +910,6 @@ class DailyObserver:
         finally:
             if "db" in locals():
                 db.close()
-        from core.conversation_audit import open_findings
         # Resolution status, rather than an arbitrary reporting window, owns
         # whether an issue remains open. Otherwise an old unresolved finding
         # would disappear merely because it aged past seven days.
