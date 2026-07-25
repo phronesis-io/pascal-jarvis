@@ -164,6 +164,7 @@ def _notify_mobile(handoff: dict) -> dict:
         metadata={
             "bypass_quiet": True,
             "bypass_throttle": True,
+            "paired_only": True,
             "suppress_dead_letter": True,
             "from_surface": handoff["from_surface"],
             "to_surface": handoff["to_surface"],

@@ -11,6 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.runtime_paths import database_path
 from core.timeutil import now_local_str
 
 _DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
@@ -20,7 +21,7 @@ DB_PATH = _DEFAULT_DB_PATH
 
 
 def _db_path() -> Path:
-    """Resolve the DB path at call time, honoring JARVIS_DIR.
+    """Resolve the DB path at call time, honoring runtime overrides.
 
     Import-time constants pin the prod path even when JARVIS_DIR is set
     later (7/21 red-team family: tests polluted the production ledger).
@@ -28,10 +29,7 @@ def _db_path() -> Path:
     """
     if DB_PATH != _DEFAULT_DB_PATH:
         return Path(DB_PATH)
-    jarvis_dir = os.environ.get("JARVIS_DIR")
-    if jarvis_dir:
-        return Path(jarvis_dir) / "data" / "jarvis.db"
-    return _DEFAULT_DB_PATH
+    return database_path(default=_DEFAULT_DB_PATH)
 
 MIGRATIONS = [
     # v1: Core tables
@@ -399,6 +397,18 @@ MIGRATIONS = [
         ON surface_handoffs(to_surface, status, created_epoch DESC);
     CREATE INDEX IF NOT EXISTS idx_surface_handoff_entity
         ON surface_handoffs(entity_type, entity_id, created_epoch DESC);
+    """,
+    # v9: Atomic send-day cap reservations for concurrent delivery workers.
+    """
+    CREATE TABLE IF NOT EXISTS delivery_cap_reservations (
+        delivery_id TEXT PRIMARY KEY,
+        day_start_epoch REAL NOT NULL,
+        throttle_key TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        reserved_epoch REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_delivery_cap_reservation_day
+        ON delivery_cap_reservations(day_start_epoch, source, throttle_key);
     """,
 ]
 

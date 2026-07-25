@@ -152,6 +152,43 @@ def memorial_states(jarvis_dir: str | Path) -> list[dict]:
     return list(entry["states"])
 
 
+def memorial_states_all(jarvis_dir: str | Path) -> list[dict]:
+    """Fold archived and live Memorial generations for explicit all-time use."""
+    from core.memorial import _fold
+
+    root = Path(jarvis_dir)
+    paths = sorted(root.glob("memorials.????-??.jsonl"))
+    paths.append(root / "memorials.jsonl")
+    events: list[dict] = []
+    live_events: list[dict] = []
+    generation: list[tuple[str, object, int]] = []
+    for path in paths:
+        path_events = read_jsonl_tail(path)
+        events.extend(path_events)
+        if path.name == "memorials.jsonl":
+            live_events = path_events
+        tail = _tail_cache.get(str(path))
+        generation.append((
+            str(path),
+            tail.get("ino") if tail else "missing",
+            int(tail.get("offset", 0)) if tail else 0,
+        ))
+
+    key = f"all:{root}"
+    gen = tuple(generation)
+    entry = _memorial_fold_cache.get(key)
+    if entry is None or entry["gen"] != gen:
+        live_ids = set(_fold(live_events))
+        states = []
+        for raw_state in _fold(events).values():
+            state = dict(raw_state)
+            state["_archived"] = str(state.get("id") or "") not in live_ids
+            states.append(state)
+        entry = {"gen": gen, "states": states}
+        _memorial_fold_cache[key] = entry
+    return list(entry["states"])
+
+
 def parse_ts_epoch(ts: str) -> float | None:
     """'YYYY-mm-dd HH:MM[:SS]' (local time) → epoch seconds, else None."""
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):

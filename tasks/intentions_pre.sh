@@ -96,8 +96,13 @@ if not due and not breaches:
 #    inflight manifest — the deterministic execution-ack (REQ-30). The breach
 #    ids riding THIS cycle's prompt are recorded so post marks exactly those
 #    shown (not a blanket wipe that would eat reconcile's fresh breaches).
+claimed = []
 for intent in due:
-    mark_triggered(intent["id"])
+    if mark_triggered(intent["id"]):
+        claimed.append(intent)
+due = claimed
+if not due and not breaches:
+    sys.exit(0)
 try:
     write_inflight([i["id"] for i in due], breach_ids=[b.get("id", "") for b in breaches])
 except Exception as e:

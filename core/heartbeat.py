@@ -28,6 +28,32 @@ from .timeutil import now_local_str
 
 
 _ORIGINAL_SUBPROCESS_RUN = subprocess.run
+_CARD_SOURCE_FIELD = "__jarvis_source"
+
+
+def _annotate_card_source(message: str, task_name: str) -> str:
+    """Attach the exact producer to internal card JSON before batch merging.
+
+    The marker is consumed by ``core.memorial`` and never reaches Lark. Plain
+    prose keeps the batch-level source because it has no reliable boundaries
+    after the heartbeat combines several task outputs.
+    """
+    annotated: list[str] = []
+    for raw_line in str(message).splitlines():
+        stripped = raw_line.strip()
+        prefix = "CARD:" if stripped.startswith("CARD:") else ""
+        payload = stripped[5:] if prefix else stripped
+        try:
+            card = json.loads(payload) if payload else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            card = None
+        if isinstance(card, dict) and "config" in card and "elements" in card:
+            card[_CARD_SOURCE_FIELD] = str(task_name)
+            annotated.append(
+                prefix + json.dumps(card, ensure_ascii=False, separators=(",", ":")))
+        else:
+            annotated.append(raw_line)
+    return "\n".join(annotated)
 
 
 def _run_isolated(cmd: list[str], *, timeout: float,
@@ -650,7 +676,7 @@ class HeartbeatRunner:
             except Exception as e:
                 self._log(f"silent_outputs archive failed: {e}")
             return
-        user_messages.append(message)
+        user_messages.append(_annotate_card_source(message, task_name))
         producing_tasks.append(task_name)
 
     def _load_tasks(self) -> list[dict]:

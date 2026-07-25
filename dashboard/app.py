@@ -35,7 +35,7 @@ def create_app():
     # agent_calendar were previously never imported — their routes 404'd in
     # production while the home page linked to them (REQ-43).
     from .pages import (  # noqa: F401
-        home, items, tasks, bookmarks, settings, intentions, thinking,
+        home, items, signals, tasks, bookmarks, settings, intentions, thinking,
         agent_calendar, engagement, ops, usage, memorials, matters,
         delegations,
     )

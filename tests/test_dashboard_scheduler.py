@@ -404,9 +404,16 @@ class TestDbPathResolution:
         monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "patched.db")
         assert db_module._db_path() == tmp_path / "patched.db"
 
+    def test_jarvis_db_path_wins_over_runtime_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_PATH", db_module._DEFAULT_DB_PATH)
+        monkeypatch.setenv("JARVIS_DIR", str(tmp_path / "runtime"))
+        monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "shared.db"))
+        assert db_module._db_path() == tmp_path / "shared.db"
+
     def test_default_without_env(self, monkeypatch):
         monkeypatch.setattr(db_module, "DB_PATH", db_module._DEFAULT_DB_PATH)
         monkeypatch.delenv("JARVIS_DIR", raising=False)
+        monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
         assert db_module._db_path() == db_module._DEFAULT_DB_PATH
 
     def test_get_db_creates_under_jarvis_dir(self, tmp_path, monkeypatch):

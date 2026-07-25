@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/items", "/items/missing", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/items", "/items/missing", "/signals", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -89,9 +89,9 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import (home, items, memorials, tasks, settings,
+    from dashboard.pages import (home, items, signals, memorials, tasks, settings,
                                  agent_calendar, engagement, ops)
-    for mod in (home, items, memorials, tasks, settings,
+    for mod in (home, items, signals, memorials, tasks, settings,
                 agent_calendar, engagement, ops):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl
@@ -351,6 +351,16 @@ class TestIntentFunnel:
         from dashboard.pages.intentions import rearm_intent
         assert rearm_intent("int_nonexistent") is False
 
+    def test_rearm_stale_callback_does_not_overwrite_cancellation(self, test_db):
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+
+        ids = self._seed()
+        intents.cancel_intent(ids["leak1"], reason="owner cancelled")
+
+        assert rearm_intent(ids["leak1"]) is False
+        assert intents.get_intent(ids["leak1"])["status"] == "cancelled"
+
     def test_rearm_clears_past_expires_at_survives_cleanup(self, test_db):
         """FIX 1: a re-armed expired DATE intent must NOT silently re-expire.
         rearm clears expires_at; get_due_intents() runs cleanup_expired() first
@@ -398,10 +408,9 @@ class TestIntentFunnel:
         nfa = datetime.fromisoformat(row["next_fire_at"])
         assert nfa.replace(tzinfo=None) > now_local().replace(tzinfo=None)
 
-    def test_rearm_interval_reanchors_created_at(self, test_db):
-        """FIX 2: a re-armed INTERVAL intent re-anchors created_at=now (the
-        interval due-check anchors on created_at), so it fires within one
-        interval instead of instantly off a stale anchor."""
+    def test_rearm_interval_preserves_created_at_and_sets_next_fire(
+            self, test_db):
+        """Re-arm moves only the schedule watermark, not creation history."""
         import core.intentions as intents
         from dashboard.pages.intentions import rearm_intent
         iid = intents.create_intent(
@@ -415,10 +424,77 @@ class TestIntentFunnel:
         assert rearm_intent(iid)
         row = intents.get_intent(iid)
         assert row["status"] == "pending"
-        anchor = datetime.fromisoformat(row["created_at"])
-        # re-anchored to ~now (within a couple minutes), not 5 days ago.
-        delta = abs((now_local().replace(tzinfo=None) - anchor).total_seconds())
-        assert delta < 120
+        assert row["created_at"] == old
+        next_fire = datetime.fromisoformat(row["next_fire_at"])
+        delta = (
+            next_fire - now_local().replace(tzinfo=None)
+        ).total_seconds()
+        assert 58 * 60 < delta < 62 * 60
+
+    def test_rearm_malformed_cron_leaves_it_expired(self, test_db):
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+
+        iid = intents.create_intent(
+            name="bad cron",
+            trigger_type="cron",
+            trigger_config={"expression": "0 9 * * *"},
+        )
+        db = intents._get_db()
+        db.execute(
+            "UPDATE intentions SET status='expired',trigger_config=?,"
+            "next_fire_at=NULL WHERE id=?",
+            (json.dumps({"expression": "x * * * *"}), iid),
+        )
+        db.commit()
+
+        assert rearm_intent(iid) is False
+        assert intents.get_intent(iid)["status"] == "expired"
+        assert intents.get_due_intents() == []
+
+    @pytest.mark.parametrize("trigger_type", ["date", "cron", "interval"])
+    def test_rearm_schedule_is_one_atomic_update(
+            self, test_db, monkeypatch, trigger_type):
+        import core.intentions as intents
+        from dashboard.pages.intentions import rearm_intent
+
+        config = {
+            "date": {"datetime": "2026-01-01T09:00:00"},
+            "cron": {"expression": "0 9 * * *"},
+            "interval": {"seconds": 3600},
+        }[trigger_type]
+        iid = intents.create_intent(
+            name=f"dead {trigger_type}",
+            trigger_type=trigger_type,
+            trigger_config=config,
+            source="test",
+        )
+        db = intents._get_db()
+        db.execute(
+            "UPDATE intentions SET status='expired',attempt=3,"
+            "expires_at='2026-01-01T00:00:00' WHERE id=?",
+            (iid,),
+        )
+        db.commit()
+        monkeypatch.setattr(
+            intents,
+            "update_intent",
+            lambda *_args, **_kwargs: pytest.fail(
+                "re-arm must not expose a partially committed pending row"),
+        )
+        statements = []
+        db.set_trace_callback(statements.append)
+        try:
+            assert rearm_intent(iid)
+        finally:
+            db.set_trace_callback(None)
+
+        updates = [
+            statement for statement in statements
+            if statement.lstrip().upper().startswith(
+                "UPDATE INTENTIONS SET")
+        ]
+        assert len(updates) == 1
 
     def test_awaiting_age_zombie_flag(self, test_db):
         from dashboard.pages.intentions import awaiting_age_days
@@ -845,6 +921,47 @@ class TestDecisionSurface:
         assert states[0]["status"] == "pending"
         assert memorial_display_title(states[0]) == "OpenAI 发布新的语音模型"
         assert memorial_option_label("重要，持续盯") == "标为重点"
+
+    def test_all_time_signal_reader_folds_archives_and_live_ledger(
+            self, tmp_path):
+        from dashboard.telemetry import memorial_states_all, reset_cache
+
+        _write_jsonl(tmp_path / "memorials.2026-05.jsonl", [
+            {
+                "ev": "create",
+                "id": "archived",
+                "epoch": 1,
+                "ts": "2026-05-01 09:00",
+                "source": "eigenflux-feed-triage",
+                "title": "历史信号",
+                "body": "归档后仍应可检索",
+                "options": [],
+                "extra_buttons": [],
+                "context": "",
+            },
+        ])
+        _write_jsonl(tmp_path / "memorials.jsonl", [
+            {
+                "ev": "create",
+                "id": "live",
+                "epoch": 2,
+                "ts": "2026-07-25 09:00",
+                "source": "metrics-digest",
+                "title": "当前信号",
+                "body": "仍在活动账本",
+                "options": [],
+                "extra_buttons": [],
+                "context": "",
+            },
+        ])
+        reset_cache()
+
+        states = {
+            state["id"]: state for state in memorial_states_all(tmp_path)
+        }
+        assert set(states) == {"archived", "live"}
+        assert states["archived"]["_archived"] is True
+        assert states["live"]["_archived"] is False
 
     def test_legacy_title_framing_is_hidden_without_mutating_the_ledger(self):
         from dashboard.uiutil import memorial_display_body, memorial_display_title
@@ -1516,3 +1633,27 @@ class TestRoutes:
         assert response.status_code == 200
         assert response.json()["providers"][0]["status"] == "healthy"
         assert "token" not in response.text.lower()
+
+    def test_push_test_targets_the_authenticated_device(
+            self, client, monkeypatch):
+        from core import mobile_access
+
+        headers = self.owner_headers()
+        token = headers["Authorization"].split(" ", 1)[1]
+        device_id = token.split(".", 1)[0]
+        headers["X-Jarvis-Device"] = device_id
+        captured = {}
+
+        def fake_send_push(*_args, **kwargs):
+            captured.update(kwargs)
+            return {"sent": 1, "failed": 0, "disabled": 0}
+
+        monkeypatch.setattr(mobile_access, "send_push", fake_send_push)
+        response = client.post(
+            "/api/mobile/push-test",
+            json={"body": "test"},
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert captured["device_id"] == device_id

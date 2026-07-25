@@ -16,9 +16,9 @@ import json
 import time
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import run, ui
 
-from ..uiutil import jarvis_page, notify_safely
+from ..uiutil import client_surface, jarvis_page, notify_safely
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -32,10 +32,9 @@ _PANELS = [
 
 
 def _quiet_hours() -> tuple[str, str]:
-    """Live quiet-hours window from the code constants that enforce it."""
-    from core.heartbeat_loop import QUIET_START_MIN, QUIET_END_MIN
-    fmt = lambda m: f"{m // 60:02d}:{m % 60:02d}"  # noqa: E731
-    return fmt(QUIET_START_MIN), fmt(QUIET_END_MIN)
+    """Live quiet-hours window from the shared policy that enforces it."""
+    from core.attention_policy import quiet_window_labels
+    return quiet_window_labels()
 
 
 def _interval_overrides(jarvis_dir: Path | None = None) -> list[dict]:
@@ -100,9 +99,90 @@ def _section(kicker: str, title: str, note: str = "") -> None:
         ui.label(note).classes("section-note")
 
 
+def reconcile_browser_push(device_id: str, browser_result) -> dict:
+    """Fold browser permission/subscription truth back into the local store."""
+    if not isinstance(browser_result, dict):
+        return {
+            "checked": False, "enabled": False,
+            "reason": "unavailable", "endpoint": "",
+        }
+    status = str(browser_result.get("status") or "")
+    from core.mobile_access import register_push, unregister_push
+    if status == "enabled":
+        subscription = browser_result.get("subscription") or {}
+        endpoint = str(
+            subscription.get("endpoint") if isinstance(subscription, dict)
+            else ""
+        )
+        try:
+            register_push(device_id, subscription)
+        except (TypeError, ValueError):
+            return {
+                "checked": True, "enabled": False,
+                "reason": "invalid", "endpoint": "",
+            }
+        return {
+            "checked": True, "enabled": True,
+            "reason": "", "endpoint": endpoint,
+        }
+    if status in {"denied", "default", "missing", "unsupported"}:
+        endpoint = str(browser_result.get("endpoint") or "")
+        if endpoint:
+            unregister_push(endpoint, device_id)
+        return {
+            "checked": True, "enabled": False,
+            "reason": status, "endpoint": endpoint,
+        }
+    return {
+        "checked": False, "enabled": False,
+        "reason": "unavailable", "endpoint": "",
+    }
+
+
+def send_browser_test_notification(device_id: str, endpoint: str) -> dict:
+    """Send a diagnostic Push only to the subscription in this browser."""
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        return {
+            "sent": 0,
+            "failed": 0,
+            "disabled": 0,
+            "reason": "no_current_subscription",
+        }
+    from core.mobile_access import send_push
+    return send_push(
+        "Jarvis 已连接",
+        "这是一条来自 Jarvis 的测试通知。",
+        device_id=device_id,
+        endpoint=endpoint,
+    )
+
+
+def push_test_feedback(result: dict) -> tuple[str, str]:
+    """Map transport truth to a user-facing diagnostic and NiceGUI type."""
+    if int(result.get("sent") or 0) > 0:
+        return "推送服务已接收测试通知，请在设备上确认显示", "positive"
+    reason = str(result.get("reason") or "")
+    failed = int(result.get("failed") or 0)
+    disabled = int(result.get("disabled") or 0)
+    error = str(result.get("error") or "").strip()
+    if failed == 0 and reason in {
+        "no_current_subscription",
+        "no_subscriber",
+    }:
+        return "这台设备还没有可用的通知订阅", "warning"
+    if disabled > 0:
+        return "这台设备的通知订阅已失效，请重新开启通知", "warning"
+    if failed > 0 or error:
+        detail = error or reason or "推送服务暂时不可用"
+        return f"测试通知发送失败：{detail}", "negative"
+    return "测试通知未能送达，请稍后重试", "warning"
+
+
 @ui.page("/settings")
 def settings_page():
     """次级面板入口、只读配置真相和设备安全动作。"""
+    surface, actor = client_surface()
     with jarvis_page("/settings", "更多",
                      "次级面板、真实生效的配置，以及已授权的手机设备。"):
 
@@ -130,8 +210,9 @@ def settings_page():
                 ui.label(f"{start} → {end}（不着急的消息排队到次日再发）").classes(
                     "section-note")
                 ui.label(
-                    "生效机制：core/heartbeat_loop.py 里的 QUIET_START_MIN / "
-                    "QUIET_END_MIN 常量。要改就改代码并重启 bot——没有运行时开关。"
+                    "生效机制：core/attention_policy.py 的统一静默时段，心跳和 "
+                    "Push 共用。默认值在代码中；启动环境可用 "
+                    "JARVIS_QUIET_START / JARVIS_QUIET_END 覆盖。"
                 ).classes("text-xs text-gray-500")
 
             # 自动调频 — engagement-analyze 写 interval_overrides.json
@@ -257,6 +338,13 @@ def settings_page():
                 pair_content.refresh()
                 pair_dialog.open()
 
+            browser_push_state = {
+                "checked": False,
+                "enabled": False,
+                "reason": "",
+                "endpoint": "",
+            }
+
             async def enable_notifications():
                 script = r"""
                 return await (async () => {
@@ -272,20 +360,36 @@ def settings_page():
                   let sub = await reg.pushManager.getSubscription();
                   if (!sub) sub = await reg.pushManager.subscribe({userVisibleOnly: true,
                     applicationServerKey: key});
-                  const response = await fetch('/api/mobile/push-subscriptions', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({subscription: sub.toJSON()}),
-                  });
-                  return response.ok ? 'ok' : 'failed';
+                  localStorage.setItem('jarvisPushEndpoint', sub.endpoint);
+                  return {status: 'ok', subscription: sub.toJSON()};
                 })();
                 """
                 try:
                     result = await ui.run_javascript(script, timeout=30)
                 except Exception:
                     result = "failed"
-                if result == "ok":
-                    notify_safely("手机通知已开启", type="positive")
-                elif result == "denied":
+                if isinstance(result, dict) and result.get("status") == "ok":
+                    state = reconcile_browser_push(actor, {
+                        "status": "enabled",
+                        "subscription": result.get("subscription") or {},
+                    })
+                elif isinstance(result, str) and result in {
+                        "denied", "default", "unsupported"}:
+                    state = reconcile_browser_push(
+                        actor, {"status": result})
+                else:
+                    state = {
+                        "checked": False,
+                        "enabled": False,
+                        "reason": "unavailable",
+                        "endpoint": "",
+                    }
+                browser_push_state.update(state)
+                if state["enabled"]:
+                    notify_safely(
+                        "这台设备的通知已开启", type="positive")
+                    mobile_panel.refresh()
+                elif state["reason"] == "denied":
                     notify_safely(
                         "浏览器已拒绝通知，请在系统设置中重新允许",
                         type="warning",
@@ -296,9 +400,34 @@ def settings_page():
                         type="warning",
                     )
 
+            async def test_notifications():
+                try:
+                    result = await run.io_bound(
+                        send_browser_test_notification,
+                        actor,
+                        browser_push_state["endpoint"],
+                    )
+                except Exception:
+                    result = {
+                        "sent": 0,
+                        "failed": 1,
+                        "error": "推送服务暂时不可用",
+                    }
+                if not isinstance(result, dict):
+                    result = {
+                        "sent": 0,
+                        "failed": 1,
+                        "error": "推送服务返回了无效结果",
+                    }
+                message, notification_type = push_test_feedback(result)
+                notify_safely(message, type=notification_type)
+
             @ui.refreshable
             def mobile_panel():
-                from core.mobile_access import list_devices
+                from core.mobile_access import (
+                    list_devices,
+                    push_subscription_status,
+                )
                 from core.tailnet import tailnet_status
                 try:
                     gateway = json.loads((JARVIS_DIR / "mobile_access.json").read_text(
@@ -313,6 +442,8 @@ def settings_page():
                 if saved_tailnet.get("enable_url") and not live_tailnet.get("ready"):
                     live_tailnet["enable_url"] = saved_tailnet["enable_url"]
                     live_tailnet["enable_required"] = True
+                paired_push_status = push_subscription_status(
+                    paired_only=True)
                 with ui.element("section").classes("mobile-access-band"):
                     with ui.row().classes("w-full items-center justify-between gap-3"):
                         with ui.column().classes("gap-1"):
@@ -340,7 +471,40 @@ def settings_page():
                                 'outline round aria-label="连接新设备"').tooltip("连接新设备")
                             ui.button(icon="notifications_active",
                                       on_click=enable_notifications).props(
-                                'outline round aria-label="开启手机通知"').tooltip("开启手机通知")
+                                'outline round aria-label="开启此设备通知"').tooltip(
+                                    "开启此设备通知")
+                            ui.button(
+                                icon="send",
+                                on_click=test_notifications,
+                            ).props(
+                                'outline round aria-label="测试此设备通知"'
+                            ).tooltip("测试此设备通知")
+                    if not browser_push_state["checked"]:
+                        notification_label = "正在核对这台设备的通知状态"
+                    elif surface == "mobile":
+                        notification_label = (
+                            "这台手机的通知已开启"
+                            if browser_push_state["enabled"]
+                            else "这台手机的通知尚未开启"
+                        )
+                    else:
+                        notification_label = (
+                            "这台电脑的通知已开启"
+                            if browser_push_state["enabled"]
+                            else "这台电脑的通知尚未开启"
+                        )
+                        if paired_push_status["count"]:
+                            notification_label += (
+                                f" · {paired_push_status['count']} 台手机已开启")
+                    with ui.element("div").classes("mobile-notification-status"):
+                        ui.icon(
+                            "notifications_active"
+                            if browser_push_state["checked"]
+                            and browser_push_state["enabled"]
+                            else "notifications_off",
+                            size="17px",
+                        )
+                        ui.label(notification_label).classes("section-note")
                     devices = list_devices()
                     if devices:
                         for device in devices:
@@ -361,7 +525,33 @@ def settings_page():
                     else:
                         ui.label("还没有已连接的手机。").classes("section-note")
 
+            async def reconcile_notifications():
+                script = r"""
+                return await (async () => {
+                  const endpoint = localStorage.getItem('jarvisPushEndpoint') || '';
+                  if (!('Notification' in window) ||
+                      !('serviceWorker' in navigator) ||
+                      !('PushManager' in window))
+                    return {status: 'unsupported', endpoint};
+                  if (Notification.permission !== 'granted')
+                    return {status: Notification.permission, endpoint};
+                  const reg = await navigator.serviceWorker.ready;
+                  const sub = await reg.pushManager.getSubscription();
+                  if (!sub) return {status: 'missing', endpoint};
+                  localStorage.setItem('jarvisPushEndpoint', sub.endpoint);
+                  return {status: 'enabled', subscription: sub.toJSON()};
+                })();
+                """
+                try:
+                    result = await ui.run_javascript(script, timeout=10)
+                except Exception:
+                    result = None
+                browser_push_state.update(
+                    reconcile_browser_push(actor, result))
+                mobile_panel.refresh()
+
             mobile_panel()
+            ui.timer(0.2, reconcile_notifications, once=True)
             ui.timer(10, mobile_panel.refresh)
 
         # ── 数据操作（真实动作，保留） ──

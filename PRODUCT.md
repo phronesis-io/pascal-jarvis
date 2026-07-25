@@ -27,6 +27,11 @@ Jarvis should let the user:
   conversation-bound decisions.
 - **Items on phone/web**: canonical batch-review surface for notices and
   decisions.
+- **Signals on phone/web**: searchable notice projection for EigenFlux and
+  other proactive observations; it reads the Item ledger and is not another
+  inbox.
+- **Jarvis Calendar**: the next concrete fire time and closure state of
+  existing Intents; it is not the engineering task-health calendar.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
 - **Claude Code and Codex**: deep execution environments attached to the same
@@ -48,6 +53,8 @@ Jarvis should let the user:
 10. New complexity must retire more confusion than it creates.
 11. Automatic capture earns authority through reviewed production evidence;
     code existence or elapsed time never promotes it.
+12. Quiet is not invisible: anything removed from an interrupting channel
+    needs a named, searchable surface and a bounded way to regain attention.
 
 ## Non-Goals
 

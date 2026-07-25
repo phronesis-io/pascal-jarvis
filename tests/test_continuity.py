@@ -202,9 +202,10 @@ def test_invalid_handoff_does_not_create_state():
 def test_push_transport_preserves_exact_target_url(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_push(title, body, url="/items", matter_id=""):
+    def fake_push(title, body, url="/items", matter_id="", **scope):
         captured.update(
-            title=title, body=body, url=url, matter_id=matter_id)
+            title=title, body=body, url=url, matter_id=matter_id,
+            scope=scope)
         return {"sent": 1, "failed": 0, "disabled": 0}
 
     monkeypatch.setattr("core.mobile_access.send_push", fake_push)
@@ -236,6 +237,10 @@ def test_push_transport_preserves_exact_target_url(tmp_path, monkeypatch):
         "body": "完整事项",
         "url": "/items/mem_exact",
         "matter_id": "mem_exact",
+        "scope": {
+            "root": tmp_path,
+            "db_path": tmp_path / "delivery.db",
+        },
     }
 
 
@@ -271,13 +276,14 @@ def test_memorial_decision_completes_active_handoff():
     assert get_handoff(handoff["id"])["status"] == "completed"
 
 
-def test_matter_handoff_uses_exact_route_and_closes_on_terminal(monkeypatch):
+def test_matter_handoff_uses_exact_route_and_closes_on_terminal(
+        monkeypatch, tmp_path):
     from core.matters import create_matter, update_matter
 
     captured = {}
 
-    def fake_push(title, body, url="/items", matter_id=""):
-        captured.update(url=url, matter_id=matter_id)
+    def fake_push(title, body, url="/items", matter_id="", **scope):
+        captured.update(url=url, matter_id=matter_id, scope=scope)
         return {"sent": 1, "failed": 0, "disabled": 0}
 
     monkeypatch.setattr("core.mobile_access.send_push", fake_push)
@@ -294,6 +300,11 @@ def test_matter_handoff_uses_exact_route_and_closes_on_terminal(monkeypatch):
     assert captured == {
         "url": f"/matters/{matter['id']}",
         "matter_id": matter["id"],
+        "scope": {
+            "root": tmp_path,
+            "db_path": tmp_path / "jarvis.db",
+            "paired_only": True,
+        },
     }
 
     update_matter(matter["id"], status="done")

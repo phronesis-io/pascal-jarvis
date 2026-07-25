@@ -49,6 +49,37 @@ def test_create_and_get(intent_db):
     assert intent["status"] == "pending"
 
 
+def test_cancelled_intent_cannot_be_claimed_or_revived(intent_db):
+    from core.intentions import (
+        cancel_intent,
+        create_intent,
+        get_intent,
+        mark_executed,
+        mark_triggered,
+    )
+
+    before_claim = create_intent(
+        name="claim race",
+        trigger_type="interval",
+        trigger_config={"seconds": 60},
+    )
+    assert cancel_intent(before_claim, "owner cancelled")
+    assert mark_triggered(before_claim) is False
+    assert get_intent(before_claim)["status"] == "cancelled"
+
+    in_flight = create_intent(
+        name="completion race",
+        trigger_type="interval",
+        trigger_config={"seconds": 60},
+    )
+    assert mark_triggered(in_flight) is True
+    assert cancel_intent(in_flight, "owner cancelled while running")
+    assert mark_executed(in_flight, "late completion") is False
+    row = get_intent(in_flight)
+    assert row["status"] == "cancelled"
+    assert row["last_error"] == "owner cancelled while running"
+
+
 def test_projection_cancel_restores_parent_and_closure_followup(intent_db):
     from core.intentions import (
         cancel_intent,
@@ -326,6 +357,7 @@ def test_legacy_cron_execution_watermark_restores_pending(intent_db):
         create_intent,
         get_intent,
         mark_executed,
+        mark_triggered,
         restore_cancelled_intent,
     )
 
@@ -334,6 +366,7 @@ def test_legacy_cron_execution_watermark_restores_pending(intent_db):
         trigger_type="cron",
         trigger_config={"expression": "0 9 * * *"},
     )
+    mark_triggered(intent_id)
     mark_executed(intent_id)
     assert get_intent(intent_id)["status"] == "pending"
     assert get_intent(intent_id)["executed_at"]
@@ -613,10 +646,22 @@ def test_get_due_interval_does_not_crash(intent_db):
     now_local() is tz-aware. Subtracting them used to raise TypeError and
     crash the ENTIRE due-check (no intents fired that cycle). _coerce fixes it.
     """
+    from datetime import timedelta
+
     from core.intentions import create_intent, get_due_intents
+    from core.timeutil import now_local
 
     iid = create_intent(name="interval", trigger_type="interval",
-                        trigger_config={"seconds": 0})
+                        trigger_config={"seconds": 60})
+    db = sqlite3.connect(intent_db)
+    old = (now_local() - timedelta(minutes=2)).replace(
+        tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+    db.execute(
+        "UPDATE intentions SET next_fire_at=? WHERE id=?",
+        (old, iid),
+    )
+    db.commit()
+    db.close()
     due_ids = {d["id"] for d in get_due_intents()}
     assert iid in due_ids
 
@@ -1259,6 +1304,7 @@ def test_cron_next_fire_anchors_to_fired_occurrence(intent_db, monkeypatch):
                  (fired.replace(tzinfo=None).isoformat(), pid))
     conn.commit(); conn.close()
 
+    mod.mark_triggered(pid)
     mod.mark_executed(pid)
     row = mod.get_intent(pid)
     nxt = datetime.fromisoformat(row["next_fire_at"]).replace(tzinfo=None)

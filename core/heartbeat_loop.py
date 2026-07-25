@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+from core.attention_policy import in_quiet_hours
 from core.card import extract_card_text, extract_readable_from_output, linkify_bare_urls
 from core.delivery_deadletter import record_overdue
 from core.heartbeat import HeartbeatRunner
@@ -429,10 +430,6 @@ def _note_delivery(jarvis_dir: Path, ok: bool, user_id: str = "",
 # - breakpoint release: if the user messaged within the last 5 minutes
 #   (they're at the phone — a natural breakpoint), flush early
 
-QUIET_START_MIN = 23 * 60 + 30   # 23:30
-QUIET_END_MIN = 9 * 60 + 30      # 09:30 (back from 10:00 — Pascal 2026-07-18:
-                                 # the 10:00 wall was delaying morning anchors
-                                 # he asked for himself)
 URGENT_SOURCES = {"intention-check", "calendar-sync", "checkin"}
 # General-interest content per Iqbal & Bailey: tolerates coarse batching with
 # the least frustration cost. These are also the highest-volume noise sources.
@@ -485,7 +482,7 @@ def _in_quiet_hours(minutes_of_day: int | None = None) -> bool:
         from core.timeutil import now_local
         t = now_local()
         minutes_of_day = t.hour * 60 + t.minute
-    return minutes_of_day >= QUIET_START_MIN or minutes_of_day < QUIET_END_MIN
+    return in_quiet_hours(minutes_of_day)
 
 
 def _peek_source(jarvis_dir: Path) -> str:

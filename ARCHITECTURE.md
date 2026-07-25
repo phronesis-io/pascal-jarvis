@@ -117,6 +117,9 @@ the exact release commit or a healthy resident descendant that contains it.
   initializes schema once per database inode, and never holds a transaction
   across a network send.
 - `core.memorial`: visible Item and decision ledger.
+- `core.proactive`: narrow reach policy over already-durable notices. It may
+  request a paired-phone push for explicitly selected sources, but never owns
+  storage, quiet hours, retries, or delivery state.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.matters`: durable topic identity and executor context.
 - `core.continuity`: device handoff leases and resume state. Each operation
@@ -163,6 +166,20 @@ the exact release commit or a healthy resident descendant that contains it.
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
 sources for the same state.
+
+## Reach Policy
+
+| Attention | Durable surface | Interrupting reach |
+|---|---|---|
+| conversation reply | Lark thread | immediate Lark reply |
+| urgent/conversation-bound decision | Item | immediate Lark card |
+| ordinary decision | Item | phone/web batch review |
+| selected proactive signal | Item + Signals projection | paired-phone Push, quiet hours, max 2/day |
+| ordinary notice | Item + Signals projection | none |
+
+`web_only` means durable placement, not verified human reach. A source may be
+web-first only when it has a named navigation entry or source filter, text
+search, a documented reach rule, and deterministic discovery tests.
 
 ## Authority Matrix
 

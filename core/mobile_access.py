@@ -8,10 +8,13 @@ import hashlib
 import hmac
 import json
 import secrets
+import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
+from core.runtime_paths import database_path
 from core.timeutil import now_local, now_local_str
 
 PAIR_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -21,6 +24,65 @@ PAIR_CODE_LENGTH = 12
 def _db():
     from dashboard.db import get_db
     return get_db()
+
+
+def _ensure_mobile_schema(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS mobile_devices (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT,
+            revoked_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS matter_push_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL DEFAULT '',
+            endpoint TEXT NOT NULL UNIQUE,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+
+@contextmanager
+def _db_scope(
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+):
+    """Use the caller's runtime DB so alternate roots cannot reach prod."""
+    if root is None and db_path is None:
+        yield _db()
+        return
+
+    from dashboard import db as db_module
+
+    path = database_path(root, db_path)
+    try:
+        uses_dashboard_db = path.resolve() == db_module._db_path().resolve()
+    except OSError:
+        uses_dashboard_db = False
+    if uses_dashboard_db:
+        yield db_module.get_db()
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), timeout=5)
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        _ensure_mobile_schema(db)
+        yield db
+    finally:
+        db.close()
 
 
 def _now() -> str:
@@ -188,14 +250,18 @@ def recent_access(limit: int = 100) -> list[dict]:
     return items
 
 
-def _vapid_paths() -> tuple[Path, Path]:
-    from core.config import Config
-    directory = Config().jarvis_dir / "data" / "mobile"
+def _vapid_paths(root: str | Path | None = None) -> tuple[Path, Path]:
+    if root is None:
+        from core.config import Config
+        base = Config().jarvis_dir
+    else:
+        base = Path(root)
+    directory = base / "data" / "mobile"
     return directory / "vapid-private.pem", directory / "vapid-public.txt"
 
 
-def vapid_public_key() -> str:
-    private_path, public_path = _vapid_paths()
+def vapid_public_key(root: str | Path | None = None) -> str:
+    private_path, public_path = _vapid_paths(root)
     if public_path.exists() and private_path.exists():
         return public_path.read_text(encoding="utf-8").strip()
     from cryptography.hazmat.primitives import serialization
@@ -218,7 +284,13 @@ def vapid_public_key() -> str:
     return public
 
 
-def register_push(device_id: str, subscription: dict) -> int:
+def register_push(
+    device_id: str,
+    subscription: dict,
+    *,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> int:
     endpoint = str(subscription.get("endpoint") or "")
     keys = subscription.get("keys") or {}
     p256dh = str(keys.get("p256dh") or "")
@@ -227,20 +299,72 @@ def register_push(device_id: str, subscription: dict) -> int:
             or len(endpoint) > 2048 or len(p256dh) > 512 or len(auth) > 512):
         raise ValueError("invalid push subscription")
     now = _now()
-    db = _db()
-    db.execute(
-        """INSERT INTO matter_push_subscriptions
-           (device_id, endpoint, p256dh, auth, enabled, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, ?, ?)
-           ON CONFLICT(endpoint) DO UPDATE SET device_id=excluded.device_id,
-             p256dh=excluded.p256dh, auth=excluded.auth, enabled=1,
-             updated_at=excluded.updated_at""",
-        (device_id, endpoint, p256dh, auth, now, now),
+    with _db_scope(root, db_path) as db:
+        started_transaction = not db.in_transaction
+        if started_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        device = db.execute(
+            "SELECT revoked_at FROM mobile_devices WHERE id = ?",
+            (str(device_id),),
+        ).fetchone()
+        if device is not None and str(device["revoked_at"] or ""):
+            if started_transaction:
+                db.rollback()
+            raise ValueError("revoked device cannot register push")
+        db.execute(
+            """INSERT INTO matter_push_subscriptions
+               (device_id, endpoint, p256dh, auth, enabled, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 1, ?, ?)
+               ON CONFLICT(endpoint) DO UPDATE SET device_id=excluded.device_id,
+                 p256dh=excluded.p256dh, auth=excluded.auth, enabled=1,
+                 updated_at=excluded.updated_at""",
+            (device_id, endpoint, p256dh, auth, now, now),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id FROM matter_push_subscriptions WHERE endpoint = ?",
+            (endpoint,),
+        ).fetchone()
+        return int(row[0])
+
+
+def push_subscription_status(
+    device_id: str = "",
+    *,
+    paired_only: bool = False,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict:
+    """Return subscription availability without exposing endpoint secrets."""
+    clauses = ["subscription.enabled = 1"]
+    params: list[str] = []
+    join = (
+        " LEFT JOIN mobile_devices AS device"
+        " ON device.id = subscription.device_id"
     )
-    db.commit()
-    row = db.execute("SELECT id FROM matter_push_subscriptions WHERE endpoint = ?",
-                     (endpoint,)).fetchone()
-    return int(row[0])
+    if paired_only:
+        join = (
+            " JOIN mobile_devices AS device ON device.id = subscription.device_id"
+            " AND device.revoked_at IS NULL"
+        )
+    else:
+        clauses.append("(device.id IS NULL OR device.revoked_at IS NULL)")
+    if device_id:
+        clauses.append("subscription.device_id = ?")
+        params.append(str(device_id))
+    with _db_scope(root, db_path) as db:
+        row = db.execute(
+            "SELECT COUNT(*) FROM matter_push_subscriptions AS subscription"
+            f"{join} WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()
+    count = int(row[0] or 0)
+    return {
+        "enabled": count > 0,
+        "count": count,
+        "device_id": str(device_id or ""),
+        "paired_only": bool(paired_only),
+    }
 
 
 def unregister_push(endpoint: str, device_id: str = "") -> bool:
@@ -260,43 +384,87 @@ def unregister_push(endpoint: str, device_id: str = "") -> bool:
 
 
 def send_push(title: str, body: str, url: str = "/items",
-              matter_id: str = "") -> dict:
-    rows = _db().execute(
-        "SELECT * FROM matter_push_subscriptions WHERE enabled = 1"
-    ).fetchall()
-    if not rows:
-        return {"sent": 0, "failed": 0, "disabled": 0}
-    try:
-        from pywebpush import WebPushException, webpush
-    except ImportError:
-        return {"sent": 0, "failed": len(rows), "disabled": 0,
-                "error": "pywebpush is not installed"}
-    private_path, _ = _vapid_paths()
-    vapid_public_key()
-    payload = json.dumps({"title": str(title)[:100], "body": str(body)[:300],
-                          "url": url, "matter_id": matter_id}, ensure_ascii=False)
-    sent = failed = disabled = 0
-    for row in rows:
-        subscription = {"endpoint": row["endpoint"],
-                        "keys": {"p256dh": row["p256dh"], "auth": row["auth"]}}
+              matter_id: str = "", device_id: str = "",
+              endpoint: str = "",
+              paired_only: bool = False,
+              root: str | Path | None = None,
+              db_path: str | Path | None = None) -> dict:
+    clauses = ["subscription.enabled = 1"]
+    params: list[str] = []
+    if paired_only:
+        join = (
+            " JOIN mobile_devices AS device ON device.id = subscription.device_id"
+            " AND device.revoked_at IS NULL"
+        )
+    else:
+        join = (
+            " LEFT JOIN mobile_devices AS device"
+            " ON device.id = subscription.device_id"
+        )
+        clauses.append("(device.id IS NULL OR device.revoked_at IS NULL)")
+    if device_id:
+        clauses.append("subscription.device_id = ?")
+        params.append(str(device_id))
+    if endpoint:
+        clauses.append("subscription.endpoint = ?")
+        params.append(str(endpoint))
+    query = (
+        "SELECT subscription.* FROM matter_push_subscriptions AS subscription"
+        f"{join} WHERE {' AND '.join(clauses)}"
+    )
+    with _db_scope(root, db_path) as db:
+        rows = db.execute(query, params).fetchall()
+        if not rows:
+            return {
+                "sent": 0,
+                "failed": 0,
+                "disabled": 0,
+                "reason": "no_subscriber",
+            }
         try:
-            webpush(subscription_info=subscription, data=payload,
+            from pywebpush import WebPushException, webpush
+        except ImportError:
+            return {"sent": 0, "failed": len(rows), "disabled": 0,
+                    "error": "pywebpush is not installed"}
+        private_path, _ = _vapid_paths(root)
+        vapid_public_key(root)
+        payload = json.dumps(
+            {
+                "title": str(title)[:100],
+                "body": str(body)[:300],
+                "url": url,
+                "matter_id": matter_id,
+            },
+            ensure_ascii=False,
+        )
+        sent = failed = disabled = 0
+        for row in rows:
+            subscription = {
+                "endpoint": row["endpoint"],
+                "keys": {"p256dh": row["p256dh"], "auth": row["auth"]},
+            }
+            try:
+                webpush(
+                    subscription_info=subscription,
+                    data=payload,
                     vapid_private_key=str(private_path),
-                    vapid_claims={"sub": "mailto:jarvis@localhost"}, timeout=10)
-            sent += 1
-        except WebPushException as exc:
-            failed += 1
-            response = getattr(exc, "response", None)
-            if response is not None and response.status_code in {404, 410}:
-                _db().execute(
-                    "UPDATE matter_push_subscriptions SET enabled=0 WHERE id=?",
-                    (row["id"],),
+                    vapid_claims={"sub": "mailto:jarvis@localhost"},
+                    timeout=10,
                 )
-                disabled += 1
-        except Exception:
-            failed += 1
-    _db().commit()
-    return {"sent": sent, "failed": failed, "disabled": disabled}
+                sent += 1
+            except WebPushException as exc:
+                failed += 1
+                response = getattr(exc, "response", None)
+                if response is not None and response.status_code in {404, 410}:
+                    db.execute(
+                        "UPDATE matter_push_subscriptions SET enabled=0 WHERE id=?",
+                        (row["id"],),
+                    )
+                    disabled += 1
+            except Exception:
+                failed += 1
+        db.commit()
+        return {"sent": sent, "failed": failed, "disabled": disabled}
 
 
 def main(argv: list[str] | None = None) -> int:

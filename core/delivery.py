@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -29,7 +30,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from core.attention_policy import in_quiet_hours, next_awake
 from core.card import extract_card_text
+from core.runtime_paths import database_path
 from core.timeutil import now_local
 
 DELIVERY_STATES = {
@@ -130,6 +133,7 @@ class TransportResult:
     ok: bool
     message_id: str = ""
     error: str = ""
+    suppressed_reason: str = ""
 
 
 Transport = Callable[[DeliveryEnvelope, str], TransportResult]
@@ -143,10 +147,7 @@ def _root(value: str | Path | None = None) -> Path:
 
 
 def _db_path(root: Path, explicit: str | Path | None = None) -> Path:
-    if explicit:
-        return Path(explicit)
-    override = os.environ.get("JARVIS_DB_PATH", "")
-    return Path(override) if override else root / "data" / "jarvis.db"
+    return database_path(root, explicit)
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -214,6 +215,11 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             detail TEXT NOT NULL DEFAULT '', created_epoch REAL NOT NULL,
             notified_epoch REAL
         );
+        CREATE TABLE IF NOT EXISTS delivery_cap_reservations (
+            delivery_id TEXT PRIMARY KEY, day_start_epoch REAL NOT NULL,
+            throttle_key TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '', reserved_epoch REAL NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_delivery_dedup
             ON delivery_envelopes(content_hash, created_epoch DESC);
         CREATE INDEX IF NOT EXISTS idx_delivery_queue
@@ -222,6 +228,8 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             ON delivery_envelopes(source, created_epoch DESC);
         CREATE INDEX IF NOT EXISTS idx_delivery_deadletter_pending
             ON delivery_dead_letters(notified_epoch, created_epoch);
+        CREATE INDEX IF NOT EXISTS idx_delivery_cap_reservation_day
+            ON delivery_cap_reservations(day_start_epoch, source, throttle_key);
     """)
     db.commit()
 
@@ -252,25 +260,72 @@ def _extract_message_id(stdout: str) -> str:
         or message.get("message_id") or "")
 
 
-def _default_transport(root: Path) -> Transport:
+def _default_transport(
+    root: Path,
+    db_path: str | Path | None = None,
+) -> Transport:
     def send(envelope: DeliveryEnvelope, channel: str) -> TransportResult:
         if channel == "web":
             return TransportResult(True)
         if channel == "push":
             try:
                 from core.mobile_access import send_push
-                result = send_push(
-                    str(envelope.payload.get("title") or "Jarvis"),
-                    str(envelope.payload.get("text") or "有一项新内容"),
-                    url=str(envelope.payload.get("url") or "/items"),
-                    matter_id=str(
+                push_kwargs = {
+                    "url": str(envelope.payload.get("url") or "/items"),
+                    "matter_id": str(
                         envelope.payload.get("matter_id")
                         or envelope.matter_id
                         or envelope.memorial_id
                         or ""),
+                    "root": root,
+                }
+                if db_path is not None:
+                    push_kwargs["db_path"] = db_path
+                if envelope.metadata.get("paired_only"):
+                    push_kwargs["paired_only"] = True
+                # send_push is an established in-process transport seam. Keep
+                # older four-argument adapters usable while passing runtime
+                # scope to the production implementation.
+                try:
+                    signature = inspect.signature(send_push)
+                    accepts_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in signature.parameters.values()
+                    )
+                    if not accepts_kwargs:
+                        push_kwargs = {
+                            key: value
+                            for key, value in push_kwargs.items()
+                            if key in signature.parameters
+                        }
+                except (TypeError, ValueError):
+                    pass
+                result = send_push(
+                    str(envelope.payload.get("title") or "Jarvis"),
+                    str(envelope.payload.get("text") or "有一项新内容"),
+                    **push_kwargs,
                 )
                 ok = int(result.get("sent", 0) or 0) > 0
-                return TransportResult(ok, error="" if ok else "no push subscriber")
+                failed = int(result.get("failed", 0) or 0)
+                if ok:
+                    return TransportResult(True)
+                if (
+                    failed == 0
+                    and envelope.metadata.get("optional_no_subscriber")
+                ):
+                    return TransportResult(
+                        False,
+                        error=str(result.get("reason") or "no push subscriber"),
+                        suppressed_reason="no_paired_phone_subscription",
+                    )
+                return TransportResult(
+                    False,
+                    error=str(
+                        result.get("error")
+                        or result.get("reason")
+                        or "push transport failed"
+                    ),
+                )
             except Exception as exc:
                 return TransportResult(False, error=str(exc))
 
@@ -460,32 +515,11 @@ def _route(envelope: DeliveryEnvelope) -> str:
 
 
 def _quiet_now(moment: datetime) -> bool:
-    start = os.environ.get("JARVIS_QUIET_START", "23:30")
-    end = os.environ.get("JARVIS_QUIET_END", "10:00")
-    try:
-        sh, sm = (int(x) for x in start.split(":", 1))
-        eh, em = (int(x) for x in end.split(":", 1))
-    except (TypeError, ValueError):
-        sh, sm, eh, em = 23, 30, 10, 0
-    minute = moment.hour * 60 + moment.minute
-    start_minute, end_minute = sh * 60 + sm, eh * 60 + em
-    if start_minute == end_minute:
-        return False
-    if start_minute < end_minute:
-        return start_minute <= minute < end_minute
-    return minute >= start_minute or minute < end_minute
+    return in_quiet_hours(moment.hour * 60 + moment.minute)
 
 
 def _next_awake_epoch(moment: datetime) -> float:
-    end = os.environ.get("JARVIS_QUIET_END", "10:00")
-    try:
-        hour, minute = (int(x) for x in end.split(":", 1))
-    except (TypeError, ValueError):
-        hour, minute = 10, 0
-    wake = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if wake <= moment:
-        wake += timedelta(days=1)
-    return wake.timestamp()
+    return next_awake(moment).timestamp()
 
 
 class DeliveryPipeline:
@@ -500,7 +534,8 @@ class DeliveryPipeline:
     ):
         self.root = _root(root)
         self.path = _db_path(self.root, db_path)
-        self.transport = transport or _default_transport(self.root)
+        self.transport = transport or _default_transport(
+            self.root, self.path)
         self.clock = clock
         self.sleeper = sleeper
 
@@ -624,6 +659,129 @@ class DeliveryPipeline:
         ).fetchone()[0]
         return "global_daily_cap" if total > global_cap else ""
 
+    def _reserve_attempt_cap(
+        self,
+        db: sqlite3.Connection,
+        envelope: DeliveryEnvelope,
+        now: float,
+    ) -> str:
+        """Atomically reserve one send-day cap slot without holding network I/O.
+
+        Creation-time throttling bounds accepted work, but a quiet-hours queue
+        can cross midnight. Successful sends and live reservations are counted
+        together under BEGIN IMMEDIATE, so concurrent workers cannot both take
+        the final slot. The reservation is released after transport resolution.
+        """
+        if (envelope.metadata.get("bypass_throttle")
+                or envelope.kind == "reply"
+                or envelope.attention == "reply"):
+            return ""
+        local = datetime.fromtimestamp(now, tz=now_local().tzinfo)
+        start = local.replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM delivery_cap_reservations "
+                "WHERE reserved_epoch<=?",
+                (now - ATTEMPT_STALE_SECONDS,),
+            )
+            existing = db.execute(
+                "SELECT 1 FROM delivery_cap_reservations WHERE delivery_id=?",
+                (envelope.id,),
+            ).fetchone()
+            if existing:
+                db.commit()
+                return ""
+
+            reservations = (
+                "SELECT COUNT(*) FROM delivery_cap_reservations "
+                "WHERE day_start_epoch=?"
+            )
+            if envelope.throttle_key:
+                metric_cap = int(
+                    envelope.metadata.get("metric_daily_cap", 1) or 1)
+                sent = db.execute(
+                    "SELECT COUNT(*) FROM delivery_envelopes "
+                    "WHERE throttle_key=? AND delivered_epoch>=?",
+                    (envelope.throttle_key, start),
+                ).fetchone()[0]
+                held = db.execute(
+                    reservations + " AND throttle_key=?",
+                    (start, envelope.throttle_key),
+                ).fetchone()[0]
+                if sent + held >= metric_cap:
+                    db.commit()
+                    return "metric_daily_cap"
+
+            source_cap = int(envelope.metadata.get(
+                "source_daily_cap",
+                os.environ.get(
+                    "JARVIS_DELIVERY_SOURCE_DAILY_CAP",
+                    DEFAULT_SOURCE_DAILY_CAP,
+                ),
+            ))
+            source_sent = db.execute(
+                "SELECT COUNT(*) FROM delivery_envelopes "
+                "WHERE source=? AND delivered_epoch>=?",
+                (envelope.source, start),
+            ).fetchone()[0]
+            source_held = db.execute(
+                reservations + " AND source=?",
+                (start, envelope.source),
+            ).fetchone()[0]
+            if source_sent + source_held >= source_cap:
+                db.commit()
+                return "source_daily_cap"
+
+            global_cap = int(envelope.metadata.get(
+                "global_daily_cap",
+                os.environ.get(
+                    "JARVIS_DELIVERY_GLOBAL_DAILY_CAP",
+                    DEFAULT_GLOBAL_DAILY_CAP,
+                ),
+            ))
+            total_sent = db.execute(
+                "SELECT COUNT(*) FROM delivery_envelopes "
+                "WHERE delivered_epoch>=?",
+                (start,),
+            ).fetchone()[0]
+            total_held = db.execute(
+                reservations,
+                (start,),
+            ).fetchone()[0]
+            if total_sent + total_held >= global_cap:
+                db.commit()
+                return "global_daily_cap"
+
+            db.execute(
+                "INSERT INTO delivery_cap_reservations "
+                "(delivery_id,day_start_epoch,throttle_key,source,reserved_epoch) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    envelope.id,
+                    start,
+                    envelope.throttle_key,
+                    envelope.source,
+                    now,
+                ),
+            )
+            db.commit()
+            return ""
+        except Exception:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _release_attempt_cap(
+        db: sqlite3.Connection,
+        delivery_id: str,
+    ) -> None:
+        db.execute(
+            "DELETE FROM delivery_cap_reservations WHERE delivery_id=?",
+            (delivery_id,),
+        )
+
     def deliver(self, envelope: DeliveryEnvelope) -> DeliveryResult:
         envelope.normalized()
         if not envelope.provider or not envelope.model:
@@ -726,6 +884,30 @@ class DeliveryPipeline:
                 db.rollback()
                 raise
 
+            throttled = self._reserve_attempt_cap(
+                db, envelope, claimed_at)
+            if throttled:
+                try:
+                    self._set_state(
+                        db,
+                        envelope.id,
+                        "suppressed",
+                        throttled,
+                        next_attempt_epoch=None,
+                        last_error=throttled,
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                return DeliveryResult(
+                    envelope.id,
+                    True,
+                    "suppressed",
+                    route,
+                    reason=throttled,
+                )
+
             last_error = str(row["last_error"] or "")
             remaining = max(0, MAX_DELIVERY_ATTEMPTS - prior_attempts)
             delays = RETRY_DELAYS[:remaining]
@@ -764,7 +946,13 @@ class DeliveryPipeline:
                         "error=?,message_id=? WHERE id=?",
                         (
                             self.clock(),
-                            "delivered" if result.ok else "failed",
+                            (
+                                "delivered"
+                                if result.ok
+                                else "suppressed"
+                                if result.suppressed_reason
+                                else "failed"
+                            ),
                             result.error[:500],
                             result.message_id,
                             attempt_id,
@@ -772,6 +960,7 @@ class DeliveryPipeline:
                     )
                     if result.ok:
                         delivered_at = self.clock()
+                        self._release_attempt_cap(db, envelope.id)
                         self._set_state(
                             db, envelope.id, "delivered",
                             "transport confirmed",
@@ -808,6 +997,24 @@ class DeliveryPipeline:
                         return DeliveryResult(
                             envelope.id, True, "delivered", route,
                             result.message_id)
+                    if result.suppressed_reason:
+                        self._release_attempt_cap(db, envelope.id)
+                        self._set_state(
+                            db,
+                            envelope.id,
+                            "suppressed",
+                            result.suppressed_reason,
+                            next_attempt_epoch=None,
+                            last_error=result.suppressed_reason,
+                        )
+                        db.commit()
+                        return DeliveryResult(
+                            envelope.id,
+                            True,
+                            "suppressed",
+                            route,
+                            reason=result.suppressed_reason,
+                        )
                     db.commit()
                 except Exception:
                     db.rollback()
@@ -819,6 +1026,7 @@ class DeliveryPipeline:
             state = "failed" if terminal else "queued"
             next_attempt = None if terminal else self.clock() + 5 * 60
             try:
+                self._release_attempt_cap(db, envelope.id)
                 self._set_state(
                     db, envelope.id, state,
                     "retry terminal" if terminal else "retry batch exhausted",

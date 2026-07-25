@@ -963,7 +963,12 @@ def _find_recent_duplicate(source: str, title: str, body: str,
     return None
 
 
-def _deliver_existing(state: dict, urgent: bool = False) -> bool:
+def _deliver_existing(
+    state: dict,
+    urgent: bool = False,
+    *,
+    proactive_reach: bool = True,
+) -> bool:
     """Hand an already-ledgered memorial to the unified delivery pipeline."""
     from core.delivery import (DeliveryEnvelope, TransportResult,
                                deliver as deliver_envelope)
@@ -1025,6 +1030,8 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     if not push_lark:
         status = "phone_ready" if requires_decision(state) else "web_only"
         _record_delivery(mid, status)
+        if status == "web_only" and proactive_reach:
+            _request_proactive_reach(state)
         return result.accepted
 
     if result.state == "delivered":
@@ -1058,6 +1065,20 @@ def _deliver_existing(state: dict, urgent: bool = False) -> bool:
     _record_delivery(mid, "failed")
     _record_delivery(mid, "retry_queued")
     return False
+
+
+def _request_proactive_reach(state: dict) -> None:
+    """Best-effort phone reach after a notice is durably in Memorial."""
+    try:
+        from core.proactive import maybe_push_signal
+        maybe_push_signal(state, root=JARVIS_DIR)
+    except Exception as exc:
+        # The durable Memorial is the primary handoff. Optional reach must
+        # never turn a stored signal into a failed delivery.
+        print(
+            f"memorial {state.get('id', '')}: proactive reach skipped: {exc}",
+            file=sys.stderr,
+        )
 
 
 ROTATE_AFTER_DAYS = 45
@@ -1244,7 +1265,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         if not send:
             if (not should_push_to_lark(dup)
                     and not delivery_accepted(dup)):
-                return dup["id"], _deliver_existing(dup, urgent=urgent)
+                return dup["id"], _deliver_existing(
+                    dup, urgent=urgent, proactive_reach=False)
             return dup["id"], False
         if delivery_accepted(dup):
             return dup["id"], True
@@ -1285,7 +1307,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     cj = _render_card(state)
     if not send:
         if not should_push_to_lark(state):
-            return mid, _deliver_existing(state, urgent=urgent)
+            return mid, _deliver_existing(
+                state, urgent=urgent, proactive_reach=False)
         return mid, False
     if should_push_to_lark(state):
         return mid, _deliver_existing(state, urgent=urgent)
@@ -1312,7 +1335,8 @@ def _clean_adopted_title(header: str, source: str) -> str:
 
 def adopt_card(source: str, legacy_card_json: str, context: str = "",
                suppress_accepted: bool = False,
-               route_notices_to_web: bool = False) -> str:
+               route_notices_to_web: bool = False,
+               proactive_reach: bool = False) -> str:
     """Adopt an existing Lark card into the memorial interaction surface.
 
     Task-native actions/links are preserved. Cards that already offer a real
@@ -1324,8 +1348,9 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     may be several newline-joined single-line card JSONs.
     """
     card = json.loads(legacy_card_json)
+    source = str(card.pop("__jarvis_source", "") or source).strip()
     if _card_memorial_id(card):
-        return legacy_card_json
+        return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
 
     header = str(card.get("header", {}).get("title", {}).get("content", ""))
     body_parts: list[str] = []
@@ -1375,6 +1400,8 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         )
         state = get_memorial(mid) or {}
         if route_notices_to_web and not should_push_to_lark(state):
+            if proactive_reach:
+                _request_proactive_reach(state)
             continue
         if suppress_accepted:
             if delivery_accepted(state):
@@ -1495,6 +1522,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                                        else ""))
             state = get_memorial(mid) or {}
             if not should_push_to_lark(state):
+                _request_proactive_reach(state)
                 continue
             if delivery_accepted(state):
                 continue
@@ -1515,11 +1543,18 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             existing_id = _card_memorial_id(card)
             if existing_id:
                 state = get_memorial(existing_id) or {}
-                adopted = card_raw if should_push_to_lark(state) else ""
+                if should_push_to_lark(state):
+                    card.pop("__jarvis_source", None)
+                    adopted = json.dumps(
+                        card, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    _request_proactive_reach(state)
+                    adopted = ""
             else:
                 adopted = adopt_card(
                     single_source, card_raw, suppress_accepted=True,
                     route_notices_to_web=True,
+                    proactive_reach=True,
                 )
             if adopted:
                 rendered.append(adopted)
