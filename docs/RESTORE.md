@@ -49,9 +49,11 @@ for d in $B/sessions-*; do
   slug=${d##*/sessions}; cp -R $d/ ~/.claude/projects/$slug/
 done
 
-# 5) 起服务并体检
-cd $J && ./bot.sh &  # 或 launchctl kickstart（见 jarvis-deploy-gotchas：勿用 restart.sh --full）
-python3 -m core.components   # 期望 12/12 healthy
+# 5) 恢复 launchd 定义，起全套服务并体检
+cd $J
+./scripts/launchd/install.sh
+./restart.sh --full --yes
+python3 -m core.components   # 以 components.yaml 的当前清单为准，要求无失败项
 ```
 
 ## 恢复后验证（演练用过的检查）

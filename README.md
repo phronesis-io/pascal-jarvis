@@ -82,7 +82,7 @@ before killing an in-flight conversation:
 
 ```bash
 ./restart.sh            # graceful restart of the bot (daemon stays up)
-./restart.sh --full     # restart both the guardian daemon and the bot
+./restart.sh --full     # refresh/restart daemon, bot, dashboard, and mobile gateway
 ./restart.sh --status   # show daemon / bot / lark-cli process status
 ./restart.sh --yes      # skip the in-flight-conversation confirmation
                         # (required for non-interactive callers: cron, scripts)
