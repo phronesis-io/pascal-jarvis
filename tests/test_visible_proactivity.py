@@ -412,13 +412,20 @@ def test_agenda_keeps_overdue_cron_due_and_contains_malformed_cron():
         }, now=now) is None
 
 
-def test_agenda_converts_aware_schedule_to_user_timezone():
+@pytest.mark.parametrize(
+    ("timezone_name", "expected_hour"),
+    [("Asia/Shanghai", 9), ("UTC", 1)],
+)
+def test_agenda_converts_aware_schedule_to_user_timezone(
+    timezone_name, expected_hour,
+):
     pytest.importorskip("nicegui", exc_type=ImportError)
     from dashboard.pages.intentions import intent_next_fire
+    from zoneinfo import ZoneInfo
 
-    now = now_local().replace(
-        year=2026, month=7, day=25, hour=8, minute=0, second=0,
-        microsecond=0,
+    user_timezone = ZoneInfo(timezone_name)
+    now = datetime(
+        2026, 7, 25, 8, 0, 0, tzinfo=user_timezone,
     )
     result = intent_next_fire({
         "trigger_type": "date",
@@ -429,7 +436,7 @@ def test_agenda_converts_aware_schedule_to_user_timezone():
 
     assert result is not None
     assert result.tzinfo == now.tzinfo
-    assert (result.hour, result.minute) == (9, 0)
+    assert (result.hour, result.minute) == (expected_hour, 0)
 
 
 def test_agenda_rejects_recurring_closure_and_nonpositive_interval():
