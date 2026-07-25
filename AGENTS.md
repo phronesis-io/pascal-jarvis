@@ -40,7 +40,11 @@ For behavior changes:
 6. Run focused tests, then the full suite.
 7. Review the diff for privacy, false completion claims, duplicate side
    effects, and stale documentation.
-8. Commit and push a focused change through a real PR and independent review.
+8. Commit and push a focused change through a real PR. Prefer an independent
+   review of the final PR head. In a repository configured for zero required
+   approvals and no code-owner or last-push review rule, an explicit
+   admin-owner release decision may substitute only when it is bound to the
+   merged SHA and records a reason.
 9. For resident-runtime changes, restart and run deploy verification plus
    smoke tests. Code on disk is not deployed until the live process is proven
    to run that revision.

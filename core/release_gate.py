@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -34,6 +35,33 @@ def _has_pass_attestation(body: str, sha: str) -> bool:
         line.strip().upper() == expected
         for line in str(body or "").splitlines()
     )
+
+
+def _owner_release_reason(body: str, sha: str) -> str:
+    marker = f"RELEASE-GATE: OWNER-APPROVED {sha}".upper()
+    lines = [line.strip() for line in str(body or "").splitlines()]
+    if not any(line.upper() == marker for line in lines):
+        return ""
+    for line in lines:
+        prefix, separator, value = line.partition(":")
+        if separator and prefix.strip().upper() == "REASON":
+            reason = value.strip()
+            if len(reason) >= 12:
+                return reason
+    return ""
+
+
+def _github_timestamp_after(candidate: Any, baseline: Any) -> bool:
+    try:
+        candidate_time = datetime.fromisoformat(
+            str(candidate).replace("Z", "+00:00")
+        )
+        baseline_time = datetime.fromisoformat(
+            str(baseline).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False
+    return candidate_time > baseline_time
 
 
 _TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
@@ -141,6 +169,35 @@ class ReleaseGate:
         )
         return cache[actor]
 
+    def _admin_actor(
+        self,
+        record: dict[str, Any],
+        repo: str,
+        cache: dict[str, bool],
+    ) -> bool:
+        """Require authoritative admin permission for an owner release decision."""
+        actor = str((record.get("user") or {}).get("login") or "")
+        if not actor:
+            return False
+        if actor in cache:
+            return cache[actor]
+        try:
+            permission = self._run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/collaborators/{quote(actor, safe='')}/permission",
+                ],
+                json_output=True,
+            )
+        except ReleaseGateError:
+            cache[actor] = False
+            return False
+        level = str(permission.get("permission") or "").lower()
+        role = str(permission.get("role_name") or "").lower()
+        cache[actor] = level == "admin" or role == "admin"
+        return cache[actor]
+
     def verify(self, *, fetch: bool = True) -> dict[str, Any]:
         branch = self._run(["git", "branch", "--show-current"])
         if branch != "main":
@@ -198,6 +255,18 @@ class ReleaseGate:
             raise ReleaseGateError("HEAD is not backed by a merged PR to main")
         number = int(merged["number"])
         author = str((merged.get("user") or {}).get("login") or "")
+        head_sha = str((merged.get("head") or {}).get("sha") or "")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+            raise ReleaseGateError("merged PR is missing its final head revision")
+        review_policy = protection.get("required_pull_request_reviews") or {}
+        required_review_count = int(
+            review_policy.get("required_approving_review_count") or 0
+        )
+        owner_release_allowed = bool(
+            required_review_count == 0
+            and not review_policy.get("require_code_owner_reviews")
+            and not review_policy.get("require_last_push_approval")
+        )
 
         runs = self._run_check_runs(
             f"repos/{repo}/commits/{sha}/check-runs"
@@ -292,6 +361,7 @@ class ReleaseGate:
         )
         evidence = []
         trust_cache: dict[str, bool] = {}
+        admin_cache: dict[str, bool] = {}
         for review in reviews if isinstance(reviews, list) else []:
             reviewer = str((review.get("user") or {}).get("login") or "")
             state = str(review.get("state") or "").upper()
@@ -301,7 +371,7 @@ class ReleaseGate:
                 reviewer
                 and reviewer != author
                 and state == "APPROVED"
-                and reviewed_sha == sha
+                and reviewed_sha == head_sha
                 and self._trusted_actor(review, repo, trust_cache)
             ):
                 evidence.append(f"review:{reviewer}:{state}")
@@ -309,37 +379,71 @@ class ReleaseGate:
                 reviewer
                 and reviewer != author
                 and state == "COMMENTED"
-                and _has_pass_attestation(body, sha)
+                and (
+                    _has_pass_attestation(body, head_sha)
+                    or _has_pass_attestation(body, sha)
+                )
                 and self._trusted_actor(review, repo, trust_cache)
             ):
                 evidence.append(f"attestation:{reviewer}")
+        owner_decisions = []
         for comment in comments if isinstance(comments, list) else []:
             reviewer = str((comment.get("user") or {}).get("login") or "")
             body = str(comment.get("body") or "").strip()
             if (
                 reviewer
                 and reviewer != author
-                and _has_pass_attestation(body, sha)
+                and (
+                    _has_pass_attestation(body, head_sha)
+                    or _has_pass_attestation(body, sha)
+                )
                 and self._trusted_actor(comment, repo, trust_cache)
             ):
                 evidence.append(f"attestation:{reviewer}")
-        if not evidence:
-            raise ReleaseGateError("merged PR has no independent review evidence")
+            reason = _owner_release_reason(body, sha)
+            if (
+                owner_release_allowed
+                and reviewer == author
+                and reason
+                and _github_timestamp_after(
+                    comment.get("created_at"),
+                    merged.get("merged_at"),
+                )
+                and self._admin_actor(comment, repo, admin_cache)
+            ):
+                owner_decisions.append(
+                    {
+                        "actor": reviewer,
+                        "reason": reason,
+                    }
+                )
+        if not evidence and not owner_decisions:
+            raise ReleaseGateError(
+                "merged PR has no independent review evidence "
+                "or valid owner release decision"
+            )
         return {
             "ok": True,
             "repo": repo,
             "sha": sha,
+            "pr_head_sha": head_sha,
             "pr": number,
             "required_checks": sorted(
                 context if app_id is None else f"{context}@app:{app_id}"
                 for context, app_id in required_checks
             ),
             "review_evidence": sorted(set(evidence)),
+            "owner_release_decisions": owner_decisions,
+            "approval_mode": (
+                "independent_review" if evidence else "owner_release_decision"
+            ),
             "branch_protection": {
                 "admin_bypass": False,
                 "strict_checks": True,
                 "pull_request_required": True,
                 "conversation_resolution": True,
+                "required_approving_reviews": required_review_count,
+                "owner_release_allowed": owner_release_allowed,
             },
         }
 

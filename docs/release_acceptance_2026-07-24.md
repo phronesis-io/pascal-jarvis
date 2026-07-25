@@ -85,7 +85,7 @@ authority, revision, and recovery gaps; all ten were fixed before release:
 |---|---|---|
 | 16 | Model/CLI markers could invoke owner-only approvals | Owner decisions require an authenticated Item/dashboard callback; model prose is suppressed with an authoritative refusal; action tests |
 | 17 | Worker-controlled `strong` evidence could complete a Delegation | Worker CLI invokes only the registered verifier; store completion also checks contract authority, verifier identity, and execution phase; CLI/Delegation tests |
-| 18 | Review evidence was not bound to the deployed commit | Approvals require the exact commit ID; attestations require `REVIEW-GATE: PASS <40-char SHA>` on their own line; release-gate tests |
+| 18 | Review evidence was not bound to the code that entered the deployed commit | Formal approvals require the final PR head commit; explicit attestations require `REVIEW-GATE: PASS <PR-head-or-merge SHA>` on their own line; release-gate tests |
 | 19 | A healthy unrelated runtime could complete a Taskline task | Runtime contracts include the merged release SHA; completed Taskline tasks recover it from the linked PR and start a fresh versioned verifier step; bridge/verifier tests |
 | 20 | Suppressed EigenFlux events were marked seen and lost | Only queued/delivered outcomes advance the upstream cursor; suppression dead-letters and remains replayable; stream tests |
 | 21 | Uncertain EigenFlux sends lacked a reconciliation key | Message receipts expose the non-secret idempotency hash and persist it in verifier policy; messenger/reconciler tests |
@@ -309,16 +309,21 @@ assumption rather than a production-code defect:
 | # | Finding | Resolution and regression evidence |
 |---|---|---|
 | 127 | The spawn-window signal test created a temporary Claude stub without placing it on `PATH`, so it passed only on developer machines that already had Claude installed and returned 1 on a clean GitHub runner before sending the signal | The test now prepends its isolated stub directory to `PATH`, guaranteeing that every environment exercises the intended Popen/SIGTERM/process-group path; clean-runner CI regression |
+| 128 | The release gate required a formal review to reference the post-merge SHA even though GitHub reviews are attached to the final PR head, leaving a merged personal repository dependent on a special comment from another account | Normal review evidence is now bound to the final PR head. A repository intentionally configured for zero required approvals and no code-owner/last-push review rule also supports an explicit admin-author owner decision bound to the merge SHA with a non-empty reason; missing reason, non-admin author, and repositories requiring any review remain fail-closed |
 
-Generic `COMMENTED` reviews do not count as approval. Exact-SHA evidence is
-mandatory, so a review submitted before the final push cannot authorize a
-later revision.
+Generic `COMMENTED` reviews do not count as approval. Formal approval must
+reference the final PR head, so a review submitted before the final push cannot
+authorize a later revision. An owner release decision is not an independent
+review: it is available only when branch protection is explicitly configured
+for zero approvals with no code-owner or last-push review rule, must come from
+the admin PR author after merge, must bind the merged SHA, and must record why
+the owner is accepting release authority.
 
 ## 5. Engineering Loops
 
 | Layer | Contract | Implementation | Exit evidence |
 |---|---|---|---|
-| L1 | One Agent completes spec, dev, test, review, merge, deploy | current-state docs, localtest skill/script, release gate | focused/full tests, independent review, CI, merged PR, runtime smoke |
+| L1 | One Agent completes spec, dev, test, review, merge, deploy | current-state docs, localtest skill/script, release gate | focused/full tests, independent review or explicit owner release authority, CI, merged PR, runtime smoke |
 | L2 | Agents consume a dependency queue without duplicate ownership | external Taskline service, wrapper, component check, bridge, claims, leases, worktrees, stop reasons | Taskline bridge tests and this release task |
 | L3 | Real feedback creates only worthwhile accepted work | signal/proposal store, dedup, human acceptance, Taskline enqueue, post-release observation | iteration-loop tests and observation records |
 
@@ -350,9 +355,11 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2107 passed` for this candidate);
+- full local test result (`2115 passed` for this candidate);
 - public-repository hygiene and secret scan;
-- independent review and all comments resolved;
+- independent review, or an explicit admin-owner release decision where branch
+  policy intentionally requires zero approvals and no other review rule, and
+  all comments resolved;
 - required CI checks;
 - merged commit on protected `main`;
 - release-gated restart;
