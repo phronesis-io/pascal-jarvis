@@ -26,9 +26,17 @@ _INK = "var(--ink)"            # 主文字
 _INK_SOFT = "var(--ink-soft)"  # 次要文字
 
 
-def _tile(value: str, label: str, sub: str = "") -> None:
+def _tile(
+    value: str,
+    label: str,
+    sub: str = "",
+    *,
+    value_class: str = "",
+) -> None:
     with ui.element("div").classes("metric-cell flex-1 min-w-[130px]"):
-        ui.label(value).classes("metric-value")
+        ui.label(value).classes(
+            "metric-value" + (f" {value_class}" if value_class else "")
+        )
         ui.label(label).classes("metric-label")
         if sub:
             ui.label(sub).classes("text-xs text-gray-400")
@@ -66,7 +74,10 @@ def _heatmap_html(heat: list[list[int]], heat_max: int) -> str:
     if not heat_max:
         return f"<div style='color:{_INK_SOFT};font-size:13px'>暂无数据</div>"
     cell = "width:14px;height:14px;border-radius:2px;"
-    parts = ["<div style='display:flex;flex-direction:column;gap:2px'>"]
+    parts = [
+        "<div class='usage-heatmap' "
+        "style='display:flex;flex-direction:column;gap:2px'>"
+    ]
     # Hour header (every 3h)
     header = ["<div style='display:flex;gap:2px;margin-left:22px'>"]
     for h in range(24):
@@ -139,18 +150,22 @@ async def usage_page():
                 _tile(f"{agg['files']:,}", "对话记录文件数")
                 span = ""
                 if agg["first_ts"]:
-                    span = f"{agg['first_ts'][:10]} → {agg['last_ts'][:10]}"
-                _tile(span or "—", "覆盖区间")
+                    span = (
+                        f"{agg['first_ts'][:10]}\n→ {agg['last_ts'][:10]}"
+                    )
+                _tile(span or "—", "覆盖区间", value_class="is-range")
 
             with ui.row().classes("w-full gap-4 flex-wrap items-start"):
-                with ui.card().classes("p-3 flex-1 min-w-[320px]"):
+                with ui.card().classes("usage-chart-card"):
                     ui.label("每日输出 token（近 30 天）").classes(
                         "text-sm font-semibold mb-2")
                     ui.html(_daily_bars_html(agg["by_day"], 30))
-                with ui.card().classes("p-3 flex-1 min-w-[360px]"):
+                with ui.card().classes("usage-chart-card"):
                     ui.label("活跃热力图（小时 × 星期，本地时间）").classes(
                         "text-sm font-semibold mb-2")
-                    ui.html(_heatmap_html(agg["heat"], agg["heat_max"]))
+                    ui.html(_heatmap_html(
+                        agg["heat"], agg["heat_max"]
+                    )).classes("usage-heatmap-scroll")
 
             with ui.column().classes("w-full gap-2"):
                 ui.label("按模型").classes("text-sm font-semibold")

@@ -26,6 +26,8 @@ def test_parse_cursor():
     assert parse_cursor(_event([], "abc")) == "abc"
     assert parse_cursor("not json") == ""
     assert parse_cursor(json.dumps({"data": {}})) == ""
+    assert parse_cursor("null") == ""
+    assert parse_cursor(json.dumps({"data": None})) == ""
 
 
 def test_format_message():
@@ -34,6 +36,10 @@ def test_format_message():
     assert "Ada" in out and "hi" in out
     assert "Powered by EigenFlux" in out
     assert format_message(_event([])) == ""
+    assert format_message("null") == ""
+    assert format_message(json.dumps({"data": None})) == ""
+    mixed = _event([None, {"sender_name": "Ada", "content": "still here"}])
+    assert "still here" in format_message(mixed)
 
 
 def test_extract_metadata_and_detail():
@@ -42,12 +48,18 @@ def test_extract_metadata_and_detail():
     assert meta["conv_id"] == "c9" and meta["sender_id"] == "u1"
     detail = extract_detail(ev)
     assert detail[0]["item_id"] == "42" and detail[0]["conv_id"] == "c9"
+    assert extract_metadata("null") == {}
+    assert extract_detail("null") == []
+    mixed = _event([None, {"sender_name": "Ada", "item_id": "43"}])
+    assert extract_metadata(mixed)["sender_name"] == "Ada"
+    assert extract_detail(mixed)[0]["item_id"] == "43"
 
 
 # ── PM dedup ─────────────────────────────────────────────────────────
 
 def test_extract_item_ids_skips_empty():
     ev = _event([
+        None,
         {"item_id": "1", "content": "a"},
         {"item_id": "", "content": "b"},   # no id → skipped
         {"content": "c"},                   # missing id → skipped
@@ -55,6 +67,7 @@ def test_extract_item_ids_skips_empty():
     ])
     assert extract_item_ids(ev) == ["1", "2"]
     assert extract_item_ids("garbage") == []
+    assert extract_item_ids("null") == []
 
 
 def test_is_duplicate_event():

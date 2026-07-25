@@ -197,6 +197,25 @@ def test_repeated_pagination_cursor_fails_closed(tmp_path):
         messenger.list_friends()
 
 
+def test_zero_pagination_cursor_is_terminal(tmp_path):
+    def terminal_runner(command, **_kwargs):
+        assert command[1:3] == ["relation", "friends"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps({"friends": [], "next_cursor": "0"}),
+            stderr="",
+        )
+
+    messenger = EigenFluxMessenger(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        runner=terminal_runner,
+    )
+
+    assert messenger.list_friends() == []
+
+
 def test_numeric_model_supplied_id_is_rejected_before_cli_call(tmp_path):
     cli = FakeEigenFlux()
     with pytest.raises(RecipientNotFound, match="数字 agent ID"):

@@ -2213,6 +2213,28 @@ def test_standing_cron_suppresses_matching_prep(intent_db):
     assert preps == []
 
 
+def test_standing_cron_suppression_logs_once_per_day(intent_db, capsys):
+    from datetime import timedelta
+    from core.timeutil import now_local
+    import core.intentions as mod
+
+    mod.create_intent(
+        name="晨间康复 anchor", trigger_type="cron",
+        trigger_config={"expression": "45 8 * * *"},
+        prompt="晨间康复提醒", action_type="notify", source="conversation",
+    )
+    day = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    md = _cal_md(day, [("08:45-09:15", "晨间康复")])
+
+    mod.generate_calendar_intents(md)
+    first = capsys.readouterr()
+    mod.generate_calendar_intents(md)
+    second = capsys.readouterr()
+
+    assert "standing cron intent" in first.err
+    assert "standing cron intent" not in second.err
+
+
 def test_standing_cron_short_name_needs_exact_match(intent_db):
     """A 2-char cron intent ("周会") must not swallow preps for longer titles
     that merely contain it; unrelated events keep their prep."""

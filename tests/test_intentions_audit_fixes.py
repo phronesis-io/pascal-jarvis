@@ -287,6 +287,26 @@ def test_opted_in_blocks_on_no_appendable_product(monkeypatch, tmp_path, no_prod
     assert not target.exists()
 
 
+@pytest.mark.parametrize("status", ["已写入", "sent", "done"])
+def test_opted_in_status_accepts_verified_in_call_product(
+        monkeypatch, tmp_path, status):
+    """A status word is not proof by itself, but an existing current-hour
+    product on disk is deterministic evidence and must not trigger another
+    paid model attempt."""
+    executed, _ = _record_marks(monkeypatch)
+    target = _opt_in(monkeypatch, tmp_path)
+    target.parent.mkdir(parents=True)
+    original = "\n### 2026-07-08 15:02 小时报\n模型已经写好的小时报\n"
+    target.write_text(original, encoding="utf-8")
+
+    resolved = ip._apply_action(
+        "int_hb", response=status, action="silent", user_messages=[])
+
+    assert resolved is True
+    assert executed == ["int_hb"]
+    assert target.read_text(encoding="utf-8") == original
+
+
 @pytest.mark.parametrize("sentinel", [
     "HEARTBEAT_OK", "```\nHEARTBEAT_OK\n```", "`HEARTBEAT_OK`",
 ])

@@ -9,13 +9,25 @@ import json
 from pathlib import Path
 
 
+def _event_data(event_json) -> dict:
+    """Return a stream event's data object, or an empty object for keepalives."""
+    try:
+        event = (
+            json.loads(event_json)
+            if isinstance(event_json, str)
+            else event_json
+        )
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(event, dict):
+        return {}
+    data = event.get("data")
+    return data if isinstance(data, dict) else {}
+
+
 def parse_cursor(ndjson_line: str) -> str:
     """Extract next_cursor from a stream event for reconnect resume."""
-    try:
-        event = json.loads(ndjson_line)
-        return event.get("data", {}).get("next_cursor", "")
-    except (json.JSONDecodeError, TypeError):
-        return ""
+    return str(_event_data(ndjson_line).get("next_cursor") or "")
 
 
 def format_message(event_json: str) -> str:
@@ -23,38 +35,36 @@ def format_message(event_json: str) -> str:
 
     Returns formatted markdown string, or empty if no messages.
     """
-    try:
-        event = json.loads(event_json) if isinstance(event_json, str) else event_json
-        messages = event.get("data", {}).get("messages", [])
-        if not messages:
-            return ""
-        parts = []
-        for m in messages:
-            sender = m.get("sender_name", "Unknown agent")
-            content = m.get("content", "")
-            if content:
-                parts.append(f"💬 **{sender}**: {content}")
-        if parts:
-            return "\n".join(parts) + "\n\n📡 Powered by EigenFlux"
+    messages = _event_data(event_json).get("messages")
+    if not isinstance(messages, list):
         return ""
-    except (json.JSONDecodeError, TypeError):
-        return ""
+    parts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        sender = message.get("sender_name", "Unknown agent")
+        content = message.get("content", "")
+        if content:
+            parts.append(f"💬 **{sender}**: {content}")
+    if parts:
+        return "\n".join(parts) + "\n\n📡 Powered by EigenFlux"
+    return ""
 
 
 def extract_metadata(event_json: str) -> dict:
     """Extract conv_id, sender_id, sender_name from first message in event."""
-    try:
-        event = json.loads(event_json) if isinstance(event_json, str) else event_json
-        msgs = event.get("data", {}).get("messages", [])
-        if msgs:
-            m = msgs[0]
+    messages = _event_data(event_json).get("messages")
+    if isinstance(messages, list):
+        first = next(
+            (message for message in messages if isinstance(message, dict)),
+            None,
+        )
+        if first is not None:
             return {
-                "conv_id": m.get("conv_id", ""),
-                "sender_id": m.get("sender_id", ""),
-                "sender_name": m.get("sender_name", ""),
+                "conv_id": first.get("conv_id", ""),
+                "sender_id": first.get("sender_id", ""),
+                "sender_name": first.get("sender_name", ""),
             }
-    except (json.JSONDecodeError, TypeError):
-        pass
     return {}
 
 
@@ -69,17 +79,17 @@ SEEN_CAP = 200
 
 def extract_item_ids(event_json) -> list[str]:
     """Non-empty item_ids of all messages in an event, in order."""
-    try:
-        event = json.loads(event_json) if isinstance(event_json, str) else event_json
-        msgs = event.get("data", {}).get("messages", [])
-        ids = []
-        for m in msgs:
-            iid = str(m.get("item_id", "") or "")
-            if iid:
-                ids.append(iid)
-        return ids
-    except (json.JSONDecodeError, TypeError, AttributeError):
+    messages = _event_data(event_json).get("messages")
+    if not isinstance(messages, list):
         return []
+    ids = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        item_id = str(message.get("item_id", "") or "")
+        if item_id:
+            ids.append(item_id)
+    return ids
 
 
 def is_duplicate_event(item_ids, seen) -> bool:
@@ -127,21 +137,20 @@ def save_seen(path, seen_list) -> None:
 
 def extract_detail(event_json: str) -> list[dict]:
     """Extract detailed per-message info for Claude analysis."""
-    try:
-        event = json.loads(event_json) if isinstance(event_json, str) else event_json
-        messages = event.get("data", {}).get("messages", [])
-        return [
-            {
-                "sender": m.get("sender_name", "Unknown"),
-                "sender_id": m.get("sender_id", ""),
-                "content": m.get("content", ""),
-                "item_id": m.get("item_id", ""),
-                "conv_id": m.get("conv_id", ""),
-            }
-            for m in messages
-        ]
-    except (json.JSONDecodeError, TypeError):
+    messages = _event_data(event_json).get("messages")
+    if not isinstance(messages, list):
         return []
+    return [
+        {
+            "sender": message.get("sender_name", "Unknown"),
+            "sender_id": message.get("sender_id", ""),
+            "content": message.get("content", ""),
+            "item_id": message.get("item_id", ""),
+            "conv_id": message.get("conv_id", ""),
+        }
+        for message in messages
+        if isinstance(message, dict)
+    ]
 
 
 # ── Friend-request / relation events ─────────────────────────────────

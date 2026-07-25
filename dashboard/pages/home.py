@@ -119,6 +119,10 @@ def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
                 feed.append({"ts": ts, "epoch": epoch, "source": "留意",
                              "message": f"{task}：{skip_reason_label(reason)}"})
         elif ev.startswith("intent_"):
+            # Automatic retries are machinery, not a user-facing change.
+            # Final execution, expiry, breach and closure remain visible.
+            if ev == "intent_retry":
+                continue
             name = str(e.get("name", "") or task)
             if (ev in {"intent_fired", "intent_trigger"}
                     and any(x >= epoch for x in executed_at.get(name, ()))):

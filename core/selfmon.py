@@ -50,9 +50,9 @@ from pathlib import Path
 # costing Pascal proactive cards without earning replies.
 LOW_ENGAGEMENT_THRESHOLD = 0.15
 
-# same_intent_refires: an intent that fires/retries this many times or more
-# inside REFIRE_WINDOW_MIN is the "triple-nag" class (the int_6362ae1606 case
-# that retried 85× in the live log). Counted per intent id.
+# same_intent_refires: an intent that actually starts this many attempts or
+# more inside REFIRE_WINDOW_MIN is the "triple-nag" class. A retry marker
+# followed by intent_fired is one attempt, not two events.
 REFIRE_WINDOW_MIN = 30
 REFIRE_MIN_COUNT = 3
 
@@ -64,9 +64,8 @@ CLOSURE_OVERDUE_DAYS = 3
 # task_finish statuses that mean the cycle ran but the work did not succeed.
 CRASH_STATUSES = {"failed", "parse_failed", "timeout"}
 
-# Info-level failure fingerprints that hide inside an otherwise-"info" log line
-# (the silent-failure class — nothing trips a circuit, nothing alerts, but the
-# work quietly died). Mirrors the LOG_FAILURE_SIGNATURES idea.
+# Failure fingerprints that can hide inside a log message even when the
+# surrounding event does not carry a useful structured status.
 LOG_FAILURE_SIGNATURES = (
     "timed out (60s)",
     "JSON parse failed",
@@ -246,15 +245,17 @@ def noise_card_count(jarvis_dir: Path, since_epoch: float,
 # ── metric 2: same-intent re-fires (triple-nag class) ──────────────────────
 
 def same_intent_refires(jarvis_dir: Path, since_epoch: float) -> dict:
-    """Intents that fired/retried REFIRE_MIN_COUNT+ times within
-    REFIRE_WINDOW_MIN minutes — grouped by intent id.
+    """Intents that started REFIRE_MIN_COUNT+ attempts within the window.
 
-    Counts intent_fired and intent_retry (both are user-facing re-activations
-    of the same intent; the int_6362ae1606 cron storm showed up as a burst of
-    these). Uses a sliding window over the per-intent event timestamps.
+    A normal retry is logged twice: first as ``intent_retry`` when reconciliation
+    schedules it, then as ``intent_fired`` when the next attempt starts. Counting
+    both made one successful self-heal look like a triple fire. Prefer actual
+    ``intent_fired`` rows; retain retry-only rows as a compatibility fallback for
+    older or partial logs. Uses a sliding window over per-intent timestamps.
     """
     window_s = REFIRE_WINDOW_MIN * 60
-    per_intent: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    fired: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    retries: dict[str, list[tuple[float, str]]] = defaultdict(list)
     for e in _read_sched_events(jarvis_dir):
         ev = str(e.get("event", ""))
         if ev not in ("intent_fired", "intent_retry"):
@@ -263,10 +264,12 @@ def same_intent_refires(jarvis_dir: Path, since_epoch: float) -> dict:
         if ep is None or ep < since_epoch:
             continue
         iid = str(e.get("task", "") or e.get("name", "") or "?")
-        per_intent[iid].append((ep, str(e.get("name", "") or "")))
+        target = fired if ev == "intent_fired" else retries
+        target[iid].append((ep, str(e.get("name", "") or "")))
 
     offenders: dict[str, dict] = {}
-    for iid, events in per_intent.items():
+    for iid in fired.keys() | retries.keys():
+        events = fired.get(iid) or retries[iid]
         events.sort(key=lambda x: x[0])
         times = [t for t, _ in events]
         # Max number of events inside any REFIRE_WINDOW_MIN sliding window.
@@ -389,7 +392,12 @@ def silent_failures(jarvis_dir: Path, since_epoch: float) -> dict:
         # false-outage reading REQ-94/96 were written to stop.
         if e.get("expected") is True:
             continue
+        level = str(e.get("level", "")).lower()
         for sig in LOG_FAILURE_SIGNATURES:
+            # heartbeat records stderr from successful helper scripts at info
+            # level. Those lines are diagnostic transcripts, not failures.
+            if sig == "stderr:" and level == "info":
+                continue
             if sig in msg:
                 by_signature[sig] += 1
                 if sig not in samples:

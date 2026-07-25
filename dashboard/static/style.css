@@ -350,6 +350,11 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
     font-weight: 700;
     line-height: 1;
 }
+.metric-value.is-range {
+    font-size: 17px;
+    line-height: 1.3;
+    white-space: pre-line;
+}
 .metric-value.is-alert { color: var(--cinnabar); }
 .metric-label { margin-top: 12px; color: var(--ink-soft); font-size: 12px; }
 
@@ -648,6 +653,22 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
 .jarvis-table .q-table__top, .jarvis-table thead tr { background: var(--mist-soft); }
 .jarvis-table th { color: var(--ink-soft); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .jarvis-table td { color: var(--ink); font-size: 13px; }
+
+/* Usage charts keep their fixed-format detail without widening the phone. */
+.usage-chart-card {
+    width: 100%;
+    min-width: min(100%, 320px);
+    flex: 1 1 320px;
+    padding: 12px;
+}
+.usage-heatmap-scroll {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.usage-heatmap { width: 404px; }
 
 /* Status pill for liveness (home). */
 .status-pill {

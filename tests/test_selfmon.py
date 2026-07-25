@@ -134,7 +134,7 @@ def test_same_intent_refire_detection(jdir):
 
 
 def test_same_intent_refire_counts_retries(jdir):
-    """intent_retry counts toward the storm, not just intent_fired."""
+    """Retry-only legacy logs still surface a storm."""
     now = time.time()
     rows = [{"ts": _ts(now - 1800 + i * 60), "event": "intent_retry",
              "task": "int_cron", "name": "cron job", "kind": "cron"}
@@ -142,6 +142,23 @@ def test_same_intent_refire_counts_retries(jdir):
     _write_jsonl(jdir / "sched_events.jsonl", rows)
     res = selfmon.same_intent_refires(jdir, since_epoch=now - 24 * 3600)
     assert "int_cron" in res["offenders"]
+
+
+def test_same_intent_refire_does_not_double_count_retry_markers(jdir):
+    now = time.time()
+    rows = [
+        {"ts": _ts(now - 300), "event": "intent_fired",
+         "task": "int_healed", "name": "self heal", "attempt": 1},
+        {"ts": _ts(now - 240), "event": "intent_retry",
+         "task": "int_healed", "name": "self heal", "attempt": 1},
+        {"ts": _ts(now - 180), "event": "intent_fired",
+         "task": "int_healed", "name": "self heal", "attempt": 2},
+    ]
+    _write_jsonl(jdir / "sched_events.jsonl", rows)
+
+    res = selfmon.same_intent_refires(jdir, since_epoch=now - 24 * 3600)
+
+    assert "int_healed" not in res["offenders"]
 
 
 # ── metric 3: closure overdue (seeded DB, mode=ro) ──────────────────────────
@@ -231,6 +248,22 @@ def test_silent_failures_from_log(jdir):
     assert res["by_signature"]["timed out (60s)"] == 1
     assert res["by_signature"]["JSON parse failed"] == 1
     assert "exited with code 1" not in res["by_signature"]   # old one excluded
+
+
+def test_silent_failures_ignores_successful_script_stderr(jdir):
+    now = time.time()
+    rows = [
+        {"ts": _ts(now - 600, sep="T"), "level": "info", "component": "heartbeat",
+         "msg": "Script tasks/intentions_pre.sh stderr: routine skip notice"},
+        {"ts": _ts(now - 500, sep="T"), "level": "warn", "component": "heartbeat",
+         "msg": "Script tasks/intentions_pre.sh stderr: actual script failure"},
+    ]
+    _write_jsonl(jdir / "jarvis.log", rows)
+
+    res = selfmon.silent_failures(jdir, since_epoch=now - 24 * 3600)
+
+    assert res["total"] == 1
+    assert res["by_signature"]["stderr:"] == 1
 
 
 # ── liveness assertion ──────────────────────────────────────────────────────
