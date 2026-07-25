@@ -548,6 +548,87 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     white-space: pre-wrap;
 }
 .item-detail-body p { margin: 0 0 .75rem; }
+.signal-filter-row { flex-wrap: wrap; }
+.signal-search { flex: 1 1 300px; min-width: min(100%, 260px); }
+.signal-list,
+.agenda-list {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    border-top: 1px solid var(--mist);
+}
+.signal-row {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    width: 100%;
+    padding: 18px 2px;
+    border-bottom: 1px solid var(--mist);
+}
+.signal-title,
+.agenda-title {
+    color: var(--ink);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+.signal-body {
+    max-width: 780px;
+    color: var(--ink-soft);
+    font-size: 14px;
+    line-height: 1.7;
+}
+.signal-body p { margin: 0; }
+.agenda-row {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr) 38px;
+    gap: 16px;
+    align-items: start;
+    width: 100%;
+    padding: 17px 0;
+    border-bottom: 1px solid var(--mist);
+}
+.agenda-date {
+    display: flex;
+    flex-direction: column;
+    padding-top: 2px;
+}
+.agenda-day { color: var(--ink); font-size: 16px; font-weight: 700; }
+.agenda-time { color: var(--ink-muted); font-size: 12px; }
+.agenda-copy { min-width: 0; gap: 5px; }
+.agenda-kind { color: var(--ink-soft) !important; }
+.agenda-when { color: var(--accent); font-size: 12px; font-weight: 600; }
+.agenda-purpose {
+    overflow-wrap: anywhere;
+    color: var(--ink-soft);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.agenda-followup {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--mist);
+}
+.agenda-create {
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+    width: 100%;
+    padding: 18px 0 4px;
+}
+.agenda-create-row { flex-wrap: wrap; }
+.mobile-notification-status {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--mist);
+}
 .item-context {
     background: transparent !important;
     border-top: 1px solid var(--mist) !important;
@@ -596,7 +677,7 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
         bottom: 0;
         left: 0;
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(5, 1fr);
         padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
         background: color-mix(in srgb, var(--paper-raised) 94%, transparent);
         border-top: 1px solid var(--mist);

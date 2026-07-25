@@ -325,3 +325,32 @@ Guardrails:
 - making every notice a pending decision;
 - replacing Memorial's append-only audit history;
 - using Tailscale VPN as a daily mobile dependency.
+
+## 15. Visibility Correction
+
+The original convergence correctly reduced Lark interruptions but coupled two
+different decisions: "do not interrupt in chat" and "do not actively surface
+anywhere." A `web_only` ledger write satisfied transport acceptance even when
+the user had no named place to discover that source. Redirecting `/intentions`
+to `/items` also removed the only forward-looking view of Jarvis commitments.
+
+The corrected product contract keeps Lark sparse while restoring reach:
+
+1. `/signals` is a searchable, source-filterable projection over notice-class
+   Memorials. EigenFlux is a named source and mobile navigation destination.
+2. `/intentions` is Jarvis Calendar again. It sorts pending commitments by a
+   concrete next fire time and keeps cancellation, expiry recovery, closure,
+   and creation in the same lifecycle.
+3. Selected EigenFlux feed notices may request Web Push to a paired phone
+   through `core.delivery`, with quiet hours, durable retry, deduplication, and
+   a shared maximum of two per local day.
+4. No paired phone subscription is a clean reach skip. The durable Memorial
+   remains accepted and discoverable; optional Push cannot make storage fail.
+5. Notification permission always requires an explicit browser gesture.
+   Settings must show the current device's real subscription state and provide
+   a device-targeted test action.
+
+Acceptance now includes discoverability, source search, future-agenda
+visibility, current-device Push truth, quiet-hours behavior, and daily-cap
+tests. Delivery state alone is not evidence that useful information reached a
+person.

@@ -472,7 +472,12 @@ def register_api_routes():
     async def api_mobile_push_test(request: Request):
         from core.mobile_access import send_push
         data = await request.json()
-        return send_push("Jarvis 已连接", data.get("body", "手机通知通道工作正常。"))
+        device_id = request.headers.get("X-Jarvis-Device", "local")
+        return send_push(
+            "Jarvis 已连接",
+            data.get("body", "手机通知通道工作正常。"),
+            device_id=device_id,
+        )
 
     # ── Memorial-first Items and delivery state ─────────────────────
 

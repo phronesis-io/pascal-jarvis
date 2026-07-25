@@ -535,6 +535,40 @@ def test_intents_rearm_cron_single_update_sets_next_fire(server, intent_db):
     assert row["next_fire_at"] == body["next_fire"]
 
 
+def test_intents_rearm_interval_preserves_cadence(server, intent_db):
+    from datetime import datetime, timedelta
+    from core.intentions import create_intent, get_intent, update_intent
+    from core.timeutil import now_local
+    import core.intentions as intentions_mod
+
+    base, ctx = server
+    iid = create_intent(
+        name="dead interval",
+        trigger_type="interval",
+        trigger_config={"seconds": 3600},
+    )
+    update_intent(iid, status="expired")
+    db = intentions_mod._get_db()
+    stale = (now_local().replace(tzinfo=None)
+             - timedelta(hours=5)).isoformat(timespec="seconds")
+    db.execute(
+        "UPDATE intentions SET attempt=3,next_fire_at=? WHERE id=?",
+        (stale, iid),
+    )
+    db.commit()
+
+    body = _post_ok(f"{base}/api/intents/rearm", {"id": iid})
+    row = get_intent(iid)
+
+    assert json.loads(row["trigger_config"]) == {"seconds": 3600}
+    assert row["next_fire_at"] == body["next_fire"]
+    delta = (
+        datetime.fromisoformat(row["next_fire_at"])
+        - now_local().replace(tzinfo=None)
+    ).total_seconds()
+    assert 58 * 60 < delta < 62 * 60
+
+
 # ── EigenFlux status cache (REQ-48③) ──
 
 def test_eigenflux_status_cached_60s(server, monkeypatch):

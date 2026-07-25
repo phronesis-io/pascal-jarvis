@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pytest
@@ -231,6 +233,70 @@ def test_global_daily_cap(pipeline):
     assert len(sent) == 1
 
 
+def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
+    now = [datetime(2026, 7, 22, 23, 0).timestamp()]
+    path = tmp_path / "db.sqlite"
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=path,
+        transport=lambda _envelope, _channel: TransportResult(True),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    queued = [
+        DeliveryEnvelope(
+            source="signal",
+            payload={"text": f"queued {index}"},
+            requested_channel="lark",
+            throttle_key="signal:daily",
+            metadata={
+                "force_queue": True,
+                "metric_daily_cap": 2,
+                "source_daily_cap": 9,
+                "global_daily_cap": 9,
+            },
+        )
+        for index in range(2)
+    ]
+    assert [pipe.deliver(item).state for item in queued] == ["queued", "queued"]
+
+    now[0] = datetime(2026, 7, 23, 10, 0).timestamp()
+    prior = pipe.deliver(DeliveryEnvelope(
+        source="signal",
+        payload={"text": "already delivered today"},
+        requested_channel="lark",
+        throttle_key="signal:daily",
+        metadata={
+            "metric_daily_cap": 2,
+            "source_daily_cap": 9,
+            "global_daily_cap": 9,
+            "bypass_quiet": True,
+        },
+    ))
+    assert prior.state == "delivered"
+
+    ready = threading.Barrier(2)
+
+    def reserve(envelope):
+        with delivery.closing(delivery._connect(path)) as db:
+            ready.wait(timeout=5)
+            return pipe._reserve_attempt_cap(db, envelope, now[0])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(reserve, queued))
+
+    assert sorted(outcomes) == ["", "metric_daily_cap"]
+    with delivery.closing(delivery._connect(path)) as db:
+        reservations = db.execute(
+            "SELECT delivery_id FROM delivery_cap_reservations"
+        ).fetchall()
+    assert len(reservations) == 1
+    assert reservations[0]["delivery_id"] in {
+        queued[0].id,
+        queued[1].id,
+    }
+
+
 @pytest.mark.parametrize("text,reason", [
     ("HEARTBEAT_OK", "idle_sentinel"),
     ("You've hit your monthly spend limit", "error_surface"),
@@ -355,6 +421,10 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
     assert result.state == "queued"
     assert pipe.get(result.delivery_id)["attempts"] == 3
     assert pipe.get(result.delivery_id)["last_error"] == "adapter crashed"
+    with delivery.closing(delivery._connect(pipe.path)) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM delivery_cap_reservations"
+        ).fetchone()[0] == 0
 
 
 def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):

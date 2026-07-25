@@ -35,6 +35,35 @@ def test_quiet_hours_boundaries():
     assert not _in_quiet_hours(23 * 60 + 29)  # 23:29 — still open
 
 
+def test_quiet_hour_runtime_override_is_shared_by_heartbeat_delivery_and_ui(
+        monkeypatch):
+    from datetime import datetime
+
+    from core.delivery import _next_awake_epoch, _quiet_now
+    from dashboard.pages.settings import _quiet_hours
+
+    monkeypatch.setenv("JARVIS_QUIET_START", "12:15")
+    monkeypatch.setenv("JARVIS_QUIET_END", "13:45")
+    moment = datetime(2026, 7, 25, 12, 30)
+
+    assert _in_quiet_hours(12 * 60 + 30)
+    assert _quiet_now(moment)
+    assert _quiet_hours() == ("12:15", "13:45")
+    assert datetime.fromtimestamp(_next_awake_epoch(moment)).strftime(
+        "%H:%M") == "13:45"
+
+
+def test_invalid_quiet_hour_override_falls_back_for_every_surface(monkeypatch):
+    from core.attention_policy import quiet_window_labels
+
+    monkeypatch.setenv("JARVIS_QUIET_START", "99:99")
+    monkeypatch.setenv("JARVIS_QUIET_END", "not-a-time")
+
+    assert quiet_window_labels() == ("23:30", "09:30")
+    assert _in_quiet_hours(9 * 60 + 29)
+    assert not _in_quiet_hours(9 * 60 + 30)
+
+
 def test_urgent_source_parsing():
     assert _is_urgent("intention-check")
     assert _is_urgent("eigenflux-feed-triage, calendar-sync")

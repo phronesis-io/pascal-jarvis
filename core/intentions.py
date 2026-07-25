@@ -310,7 +310,7 @@ _NEW_COLS = [
     ("parent_intent_id",    "TEXT"),
     # ── v2 execution-axis columns (REQ-30/31/32/33) ──
     ("attempt",             "INTEGER NOT NULL DEFAULT 0"),  # execution attempts since last success
-    ("next_fire_at",        "TEXT"),                        # cron catch-up watermark
+    ("next_fire_at",        "TEXT"),                        # recurring catch-up watermark
     ("closed_at",           "TEXT"),                        # closure-axis terminal timestamp
     ("cancel_source",       "TEXT NOT NULL DEFAULT ''"),
     ("cancel_sources",      "TEXT NOT NULL DEFAULT '[]'"),
@@ -367,7 +367,10 @@ def _migrate():
             from dashboard.scheduler import cron_next
             for iid, cfg_raw in rows:
                 try:
-                    expr = (json.loads(cfg_raw) or {}).get("expression", "")
+                    config = json.loads(cfg_raw)
+                    if not isinstance(config, dict):
+                        continue
+                    expr = config.get("expression", "")
                     nxt = cron_next(expr) if expr else None
                     if nxt:
                         db.execute("UPDATE intentions SET next_fire_at = ? WHERE id = ?",
@@ -471,10 +474,24 @@ def create_intent(
                   f"dropped (recurring rows never spawn follow-ups)",
                   file=sys.stderr)
             closure_question = ""
+    elif trigger_type == "interval":
+        raw_seconds = (trigger_config or {}).get("seconds", 0)
+        try:
+            seconds = int(raw_seconds)
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds <= 0:
+            raise ValueError(
+                "interval intent needs positive trigger_config.seconds, "
+                f"got {raw_seconds!r}")
 
     db = _db or _get_db()
     iid = intent_id or f"int_{uuid.uuid4().hex[:10]}"
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
+    if trigger_type == "interval":
+        next_fire_at = (
+            datetime.fromisoformat(now) + timedelta(seconds=seconds)
+        ).isoformat(timespec="seconds")
 
     db.execute(
         """INSERT OR REPLACE INTO intentions
@@ -537,6 +554,100 @@ def get_intent(intent_id: str) -> dict | None:
     db = _get_db()
     row = db.execute("SELECT * FROM intentions WHERE id = ?", (intent_id,)).fetchone()
     return dict(row) if row else None
+
+
+def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
+    """Atomically restore one expired schedule without changing its cadence.
+
+    The status predicate is part of the update so a stale dashboard/admin
+    callback cannot overwrite a cancellation or another lifecycle transition.
+    Returns schedule details on success and ``None`` for a missing, stale, or
+    malformed row.
+    """
+    _init()
+    db = _get_db()
+    row = db.execute(
+        "SELECT status,trigger_type,trigger_config FROM intentions WHERE id=?",
+        (intent_id,),
+    ).fetchone()
+    if row is None or str(row["status"]) != "expired":
+        return None
+
+    trigger_type = str(row["trigger_type"] or "")
+    try:
+        config = (
+            json.loads(row["trigger_config"])
+            if isinstance(row["trigger_config"], str)
+            else row["trigger_config"]
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+
+    now = now_local()
+    local_now = now.replace(tzinfo=None)
+    reason = f"re-armed via {str(actor or 'core')}"
+
+    if trigger_type == "date":
+        next_fire = local_now + timedelta(minutes=10)
+        cursor = db.execute(
+            "UPDATE intentions SET status='pending',expires_at=NULL,"
+            "attempt=0,last_error=?,trigger_config=?,next_fire_at=NULL "
+            "WHERE id=? AND status='expired'",
+            (
+                reason,
+                json.dumps(
+                    {"datetime": next_fire.isoformat(timespec="seconds")},
+                    ensure_ascii=False,
+                ),
+                intent_id,
+            ),
+        )
+        label = "10分钟后触发"
+    elif trigger_type == "cron":
+        expression = str(config.get("expression") or "")
+        try:
+            from dashboard.scheduler import cron_next
+            next_fire = cron_next(expression, after=now)
+        except (TypeError, ValueError):
+            next_fire = None
+        if next_fire is None:
+            return None
+        cursor = db.execute(
+            "UPDATE intentions SET status='pending',expires_at=NULL,"
+            "attempt=0,last_error=?,next_fire_at=? "
+            "WHERE id=? AND status='expired'",
+            (reason, next_fire.isoformat(), intent_id),
+        )
+        label = f"下次触发: {next_fire.strftime('%m/%d %H:%M')}"
+    elif trigger_type == "interval":
+        try:
+            seconds = int(config.get("seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds <= 0:
+            return None
+        next_fire = local_now + timedelta(seconds=seconds)
+        cursor = db.execute(
+            "UPDATE intentions SET status='pending',expires_at=NULL,"
+            "attempt=0,last_error=?,next_fire_at=? "
+            "WHERE id=? AND status='expired'",
+            (reason, next_fire.isoformat(timespec="seconds"), intent_id),
+        )
+        label = "一个周期内触发"
+    else:
+        return None
+
+    db.commit()
+    if cursor.rowcount != 1:
+        return None
+    return {
+        "id": intent_id,
+        "trigger_type": trigger_type,
+        "next_fire": next_fire.isoformat(timespec="seconds"),
+        "label": label,
+    }
 
 
 def _cancel_sources(row) -> list[str]:
@@ -1113,6 +1224,8 @@ def get_due_intents() -> list[dict]:
             trigger_config = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
         except (json.JSONDecodeError, TypeError):
             trigger_config = {}
+        if not isinstance(trigger_config, dict):
+            trigger_config = {}
         try:
             conditions = json.loads(intent["conditions"]) if isinstance(intent["conditions"], str) else (intent["conditions"] or [])
         except (json.JSONDecodeError, TypeError):
@@ -1179,16 +1292,32 @@ def get_due_intents() -> list[dict]:
                 # Legacy row without next_fire_at: exact-minute match once,
                 # then mark_executed/backfill stamps next_fire_at.
                 from dashboard.scheduler import cron_matches
-                triggered = cron_matches(expr, now)
-                if triggered and intent.get("executed_at"):
-                    last = _coerce(datetime.fromisoformat(intent["executed_at"]))
-                    if (now - last).total_seconds() < 60:
-                        triggered = False
+                try:
+                    triggered = cron_matches(expr, now)
+                    if triggered and intent.get("executed_at"):
+                        last = _coerce(
+                            datetime.fromisoformat(intent["executed_at"]))
+                        if (now - last).total_seconds() < 60:
+                            triggered = False
+                except (TypeError, ValueError):
+                    triggered = False
 
         elif trigger_type == "interval":
-            seconds = trigger_config.get("seconds", 600)
-            created = _coerce(datetime.fromisoformat(intent["created_at"]))
-            triggered = (now - created).total_seconds() >= seconds
+            try:
+                seconds = int(trigger_config.get("seconds", 600))
+                if seconds <= 0:
+                    raise ValueError("non-positive interval")
+                raw_next = str(intent.get("next_fire_at") or "")
+                if raw_next:
+                    next_fire = _coerce(datetime.fromisoformat(raw_next))
+                else:
+                    # Legacy rows predate the shared recurring watermark.
+                    created = _coerce(
+                        datetime.fromisoformat(intent["created_at"]))
+                    next_fire = created + timedelta(seconds=seconds)
+                triggered = now >= next_fire
+            except (TypeError, ValueError):
+                triggered = False
 
         elif trigger_type == "event":
             # Event-based triggers are handled separately via event bus
@@ -1206,22 +1335,25 @@ def get_due_intents() -> list[dict]:
     return due
 
 
-def mark_triggered(intent_id: str):
-    """Mark an intent as triggered (being processed). Counts the attempt."""
+def mark_triggered(intent_id: str) -> bool:
+    """Atomically claim one pending intent and count the attempt."""
     _init()
     db = _get_db()
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
-    db.execute(
+    cursor = db.execute(
         "UPDATE intentions SET status = 'triggered', triggered_at = ?, "
-        "attempt = attempt + 1 WHERE id = ?",
+        "attempt = attempt + 1 WHERE id = ? AND status = 'pending'",
         (now, intent_id),
     )
     db.commit()
+    if cursor.rowcount != 1:
+        return False
     row = db.execute("SELECT attempt, name FROM intentions WHERE id = ?",
                      (intent_id,)).fetchone()
     _emit_intent("intent_fired", intent_id,
                  attempt=row["attempt"] if row else 1,
                  name=row["name"] if row else "")
+    return True
 
 
 def _trigger_dt(intent: dict) -> datetime | None:
@@ -1419,16 +1551,17 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
 reset_stale_triggered = lifecycle_sweep
 
 
-def mark_executed(intent_id: str, result: str = ""):
-    """Mark an intent as executed. Handle recurring (cron) reset and chains."""
+def mark_executed(intent_id: str, result: str = "") -> bool:
+    """Finish a claimed intent without reviving a concurrent cancellation."""
     _init()
     db = _get_db()
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
 
     intent = get_intent(intent_id)
     if not intent:
-        return
+        return False
 
+    recurring = intent["trigger_type"] in {"cron", "interval"}
     if intent["trigger_type"] == "cron":
         # Recurring: reset to pending for the next occurrence. attempt resets
         # (it counts tries of ONE occurrence) and next_fire_at advances —
@@ -1461,24 +1594,67 @@ def mark_executed(intent_id: str, result: str = ""):
         # store the run narration here ('小时报 11:30-12:21：Pascal 在深度
         # 投入…'), polluting every error scan and the funnel. Clear it on
         # success so a non-NULL last_error always means a real failure.
-        db.execute(
+        cursor = db.execute(
             "UPDATE intentions SET status = 'pending', executed_at = ?, last_error = NULL, "
-            "attempt = 0, next_fire_at = ? WHERE id = ?",
+            "attempt = 0, next_fire_at = ? "
+            "WHERE id = ? AND status = 'triggered'",
             (now, nxt.isoformat() if nxt else None, intent_id),
+        )
+    elif intent["trigger_type"] == "interval":
+        # Advance exactly one beat from the occurrence that fired, rather than
+        # from wall-clock completion time, so a delayed run catches up instead
+        # of silently skipping intervening beats. Keep created_at immutable:
+        # funnel/audit code relies on it being the real creation timestamp.
+        try:
+            cfg = (
+                json.loads(intent["trigger_config"])
+                if isinstance(intent["trigger_config"], str)
+                else intent["trigger_config"]
+            )
+            if not isinstance(cfg, dict):
+                raise ValueError("interval config must be an object")
+            seconds = int(cfg.get("seconds", 0))
+            if seconds <= 0:
+                raise ValueError("non-positive interval")
+            raw_next = str(intent.get("next_fire_at") or "")
+            if raw_next:
+                fired_at = datetime.fromisoformat(raw_next)
+            else:
+                fired_at = (
+                    datetime.fromisoformat(str(intent["created_at"]))
+                    + timedelta(seconds=seconds)
+                )
+            next_fire = fired_at + timedelta(seconds=seconds)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Legacy dirty rows remain recoverable. New rows are rejected by
+            # create_intent, but a historical malformed anchor must not leave
+            # a successfully handled occurrence stuck in triggered forever.
+            next_fire = (
+                now_local().replace(tzinfo=None)
+                + timedelta(seconds=600)
+            )
+        cursor = db.execute(
+            "UPDATE intentions SET status = 'pending', executed_at = ?, "
+            "last_error = NULL, attempt = 0, next_fire_at = ? "
+            "WHERE id = ? AND status = 'triggered'",
+            (now, next_fire.isoformat(timespec="seconds"), intent_id),
         )
     else:
         # One-shot: mark executed (attempt resets — execution succeeded)
-        db.execute(
+        cursor = db.execute(
             "UPDATE intentions SET status = 'executed', executed_at = ?, "
-            "last_error = ?, attempt = 0 WHERE id = ?",
+            "last_error = ?, attempt = 0 "
+            "WHERE id = ? AND status = 'triggered'",
             (now, result, intent_id),
         )
     db.commit()
+    if cursor.rowcount != 1:
+        return False
     _emit_intent("intent_executed", intent_id,
                  kind=intent["trigger_type"], name=intent.get("name", ""))
     _matter_intent_event(intent_id, "intent_executed",
                          intent.get("name", intent_id),
-                         status="pending" if intent["trigger_type"] == "cron" else "executed",
+                         status="pending" if recurring else "executed",
                          payload={"result": str(result)[:1000]})
 
     # Closure axis: spawn the follow-up for a closure-bearing one-shot moment.
@@ -1497,6 +1673,7 @@ def mark_executed(intent_id: str, result: str = ""):
             except Exception as e:
                 print(f"[intentions] chain_next spawn failed for {intent_id}: {e}",
                       file=sys.stderr)
+    return True
 
 
 def _on_moment_terminal(intent: dict, how: str) -> None:

@@ -950,50 +950,20 @@ def intents_overview(status: str = "") -> dict:
 
 
 def rearm_intent(intent_id: str) -> dict:
-    """Re-arm a dead intent: status→pending, attempt→0, fire in ~10 minutes.
-
-    For date/interval/event intents the trigger_config datetime is rewritten;
-    for cron intents the expression is preserved and next_fire_at is pulled
-    forward instead (overwriting a cron's trigger_config with a datetime would
-    destroy the schedule). expires_at is cleared so cleanup_expired does not
-    immediately re-kill the row it just revived.
-    """
-    from datetime import timedelta
+    """Re-arm one still-expired intent through the shared lifecycle rule."""
     from core import intentions
-    from core.timeutil import now_local
 
     intent = intentions.get_intent(intent_id)
     if not intent:
         return {"error": "intent not found"}
-    target = (now_local().replace(tzinfo=None) + timedelta(minutes=10)) \
-        .strftime("%Y-%m-%dT%H:%M:%S")
-    db = intentions._get_db()
-    tt = intent.get("trigger_type")
-    # ONE statement + ONE commit per branch (red-team fix): the cron path used
-    # to update_intent() [commit] then a second UPDATE [commit], leaving a
-    # cross-process window where a heartbeat could read pending + stale-past
-    # next_fire_at and fire/skip the occurrence unintentionally. Folding every
-    # column (status, expires_at=NULL, attempt=0, the schedule anchor,
-    # last_error=NULL) into a single atomic UPDATE closes that window.
-    # expires_at=NULL is mandatory: a past expires_at lets cleanup_expired()
-    # re-kill the row before it can fire.
-    if tt == "cron":
-        db.execute(
-            "UPDATE intentions SET status = 'pending', expires_at = NULL, "
-            "attempt = 0, next_fire_at = ?, last_error = NULL WHERE id = ?",
-            (target, intent_id))
-        db.commit()
-    else:
-        # date/interval/event: rewrite the trigger_config datetime in the same
-        # statement (json-encoded inline). Overwriting a cron's config with a
-        # datetime would destroy the schedule — hence the separate branch.
-        tc = json.dumps({"datetime": target}, ensure_ascii=False)
-        db.execute(
-            "UPDATE intentions SET status = 'pending', expires_at = NULL, "
-            "attempt = 0, trigger_config = ?, last_error = NULL WHERE id = ?",
-            (tc, intent_id))
-        db.commit()
-    return {"ok": True, "id": intent_id, "next_fire": target}
+    result = intentions.rearm_expired_intent(intent_id, actor="admin")
+    if result is None:
+        return {"error": "intent is no longer expired or schedule is invalid"}
+    return {
+        "ok": True,
+        "id": intent_id,
+        "next_fire": result["next_fire"],
+    }
 
 
 # ── RichView Renderer ────────────────────────────────────────────────

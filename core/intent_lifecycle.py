@@ -21,6 +21,7 @@ __all__ = [
     "mark_executed",
     "mark_failed",
     "mark_triggered",
+    "rearm_expired_intent",
     "restore_cancelled_intent",
     "snapshot_active_intents",
     "update_intent",
