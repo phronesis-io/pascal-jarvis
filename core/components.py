@@ -21,8 +21,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -225,6 +227,40 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
             f"age {age_h:.1f}h (max {max_h:.0f}h)")
 
 
+def _check_audit_age(comp: dict, root: Path) -> tuple[bool, str]:
+    p = root / comp.get("path", "")
+    max_h = float(comp.get("max_age_hours", 24))
+    if not p.is_file():
+        return False, "database missing"
+    try:
+        from core.conversation_audit import connect
+        db = connect(p)
+        row = db.execute(
+            "SELECT completed_at FROM audit_runs "
+            "WHERE completed_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return False, f"audit read failed ({type(exc).__name__})"
+    finally:
+        if "db" in locals():
+            db.close()
+    if row is None:
+        return False, "no completed audit run"
+    try:
+        completed = datetime.fromisoformat(str(row[0]))
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=timezone.utc)
+        age_h = (
+            datetime.now(timezone.utc) - completed.astimezone(timezone.utc)
+        ).total_seconds() / 3600
+    except (TypeError, ValueError, OverflowError):
+        return False, "invalid completed audit timestamp"
+    return (
+        0 <= age_h <= max_h,
+        f"completed age {age_h:.1f}h (max {max_h:.0f}h)",
+    )
+
+
 def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
     label = comp.get("label", "")
     try:
@@ -278,6 +314,7 @@ _CHECKS = {
     "pgrep": _check_pgrep,
     "http": _check_http,
     "file_age": _check_file_age,
+    "audit_age": _check_audit_age,
     "launchctl": _check_launchctl,
     "tailnet": _check_tailnet,
     "taskline": _check_taskline,

@@ -437,6 +437,111 @@ def test_conversation_observer_includes_open_findings_from_older_runs(
     ]
 
 
+def test_conversation_observer_migrates_legacy_completed_runs(tmp_path):
+    from datetime import datetime, timezone
+    import sqlite3
+
+    store = _store(tmp_path)
+    path = tmp_path / "data" / "conversation_audit.db"
+    path.parent.mkdir(parents=True)
+    completed = datetime.now(timezone.utc).isoformat()
+    db = sqlite3.connect(path)
+    db.execute(
+        """
+        CREATE TABLE audit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            since TEXT NOT NULL,
+            log_events INTEGER NOT NULL DEFAULT 0,
+            session_messages INTEGER NOT NULL DEFAULT 0,
+            issues INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO audit_runs(started_at,since) VALUES (?,?)",
+        (completed, completed),
+    )
+    db.commit()
+    db.close()
+
+    assert DailyObserver(store)._conversation_signals() == []
+
+    migrated = sqlite3.connect(path)
+    value = migrated.execute(
+        "SELECT completed_at FROM audit_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    migrated.close()
+    assert value == completed
+
+
+def test_conversation_observer_backfills_predecessor_schema_once(tmp_path):
+    from datetime import datetime, timezone
+    import sqlite3
+    from core.conversation_audit import connect
+
+    path = tmp_path / "data" / "conversation_audit.db"
+    path.parent.mkdir(parents=True)
+    completed = datetime.now(timezone.utc).isoformat()
+    db = sqlite3.connect(path)
+    db.execute(
+        """
+        CREATE TABLE audit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            since TEXT NOT NULL,
+            log_events INTEGER NOT NULL DEFAULT 0,
+            session_messages INTEGER NOT NULL DEFAULT 0,
+            issues INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO audit_runs(started_at,since) VALUES (?,?)",
+        (completed, completed),
+    )
+    db.commit()
+    db.close()
+
+    migrated_connection = connect(path)
+    migrated_connection.close()
+
+    migrated = sqlite3.connect(path)
+    value = migrated.execute(
+        "SELECT completed_at FROM audit_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    marker = migrated.execute(
+        "SELECT name FROM schema_migrations "
+        "WHERE name='audit_runs_completed_at_backfill_v1'"
+    ).fetchone()
+    migrated.close()
+    assert value == completed
+    assert marker == ("audit_runs_completed_at_backfill_v1",)
+
+
+def test_completed_run_migration_does_not_mask_later_interruption(tmp_path):
+    from datetime import datetime, timezone
+    from core.conversation_audit import connect
+
+    path = tmp_path / "data" / "conversation_audit.db"
+    db = connect(path)
+    started = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        "INSERT INTO audit_runs(started_at,since) VALUES (?,?)",
+        (started, started),
+    )
+    db.commit()
+    db.close()
+
+    reopened = connect(path)
+    value = reopened.execute(
+        "SELECT completed_at FROM audit_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()["completed_at"]
+    reopened.close()
+    assert value is None
+
+
 def test_truncated_conversation_findings_are_not_full_coverage(tmp_path):
     from datetime import datetime, timezone
     from core.conversation_audit import connect
