@@ -232,10 +232,12 @@ successful transport confirmation.
 
 `restart.sh` now:
 
-1. restarts the selected processes;
-2. waits for critical component health;
-3. requires the delivery smoke to pass within three seconds;
-4. verifies bot and heartbeat runtime versions.
+1. confirms no in-flight conversation before mutating any resident service;
+2. refreshes enabled launchd definitions transactionally and restarts daemon,
+   bot, Dashboard, and the mobile gateway for a full release;
+3. waits for critical component health;
+4. requires the delivery smoke to pass within three seconds;
+5. verifies every restarted runtime against the deployed commit.
 
 The source-controlled pre-commit hook reminds the developer to restart when
 runtime code is staged.

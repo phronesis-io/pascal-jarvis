@@ -181,7 +181,7 @@ gitignored 配置文件 + 中性默认。
 ```bash
 ./restart.sh           # 日常启动/重启（处理单实例锁、清字节码）
 ./restart.sh --status  # 三进程状态（daemon / bot / 事件监听器）
-./restart.sh --full    # 连守护进程一起重启（改过 daemon.py 后必须用这个）
+./restart.sh --full    # 同步并重启 daemon、bot、Dashboard、手机网关
 ./scripts/doctor.sh    # 任何时候的全面体检
 ```
 
@@ -192,6 +192,10 @@ gitignored 配置文件 + 中性默认。
 ```bash
 ./scripts/launchd/install.sh   # 幂等；输出每个服务 loaded 与否
 ```
+
+`restart.sh --full` 只同步这台机器上已经启用的 daemon、Dashboard 和手机
+网关定义，不会替新安装擅自启用可选服务。定义切换失败时安装器恢复旧 plist
+和原加载状态；launchd 状态无法可靠读取时发布会在停止 bot 前失败关闭。
 
 **首装后的健康告警预期**（转述给人类，避免虚惊）：
 - 没配置的可选功能（EigenFlux、sidecar、admin、launchd 服务）在体检里显示

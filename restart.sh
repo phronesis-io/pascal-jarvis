@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# restart.sh — Graceful restart of Jarvis bot (and optionally daemon).
+# restart.sh — Graceful restart of Jarvis runtime services.
 #
 # Usage:
 #   ./restart.sh          # Restart bot only (daemon stays alive, restarts bot)
-#   ./restart.sh --full   # Restart both daemon and bot
+#   ./restart.sh --full   # Restart daemon, bot, dashboard, and mobile gateway
 #   ./restart.sh --status # Just show current process status
 #
 set -euo pipefail
@@ -12,6 +12,8 @@ JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_PID_FILE="$JARVIS_DIR/.bot.pid"
 DAEMON_PID_FILE="$JARVIS_DIR/.daemon.pid"
 LOG="/tmp/jarvis_restart.log"
+FULL_RUNTIME_COMPONENTS=(daemon bot heartbeat-loop)
+RESTART_CONFIRMED=0
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -104,8 +106,12 @@ PY
   echo ""
 }
 
-kill_bot() {
-  # Check if user has an active conversation — warn before killing
+confirm_restart() {
+  if [ "$RESTART_CONFIRMED" -eq 1 ]; then
+    return 0
+  fi
+
+  # Confirm before any launchd definition refresh or process mutation.
   active_locks=$(find "$JARVIS_DIR" -maxdepth 1 -name '.session_lock_*' 2>/dev/null | wc -l | tr -d ' ')
   if [ "$active_locks" -gt 0 ] && [ "$ASSUME_YES" -ne 1 ]; then
     echo ""
@@ -125,6 +131,11 @@ kill_bot() {
       exit 0
     fi
   fi
+  RESTART_CONFIRMED=1
+}
+
+kill_bot() {
+  confirm_restart
 
   echo "Stopping bot.sh and children..."
 
@@ -313,6 +324,157 @@ restart_daemon() {
   start_daemon
 }
 
+refresh_launchd_definitions() {
+  local installer="$JARVIS_DIR/scripts/launchd/install.sh"
+  local labels=()
+  local label
+  local job
+  local plist
+  local probe_rc
+
+  if ! command -v launchctl >/dev/null 2>&1; then
+    dim "  launchd unavailable; definition refresh skipped."
+    return 0
+  fi
+
+  # Only refresh services already enabled on this installation. This keeps
+  # --full from silently enabling optional UI surfaces on a fresh clone while
+  # ensuring tracked ProgramArguments/environment changes reach launchd before
+  # their processes are restarted.
+  for label in \
+      "com.pascal.jarvis.daemon" \
+      "com.pascal.jarvis.dashboard" \
+      "com.pascal.jarvis.mobile-gateway"; do
+    job="gui/$UID/$label"
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    if launchd_job_state "$job"; then
+      if [ ! -f "$plist" ]; then
+        red "  $label is loaded without an installed plist; refusing an update that cannot roll back."
+        return 1
+      fi
+      labels+=("$label")
+    else
+      probe_rc=$?
+      if [ "$probe_rc" -eq 1 ] && [ -f "$plist" ]; then
+        labels+=("$label")
+      elif [ "$probe_rc" -eq 2 ]; then
+        red "  Cannot inspect $label: $LAUNCHD_PROBE_DETAIL"
+        return 1
+      fi
+    fi
+  done
+
+  if [ "${#labels[@]}" -eq 0 ]; then
+    dim "  launchd services: none installed; definition refresh skipped."
+    return 0
+  fi
+
+  echo "Refreshing installed launchd definitions..."
+  if ! "$installer" "${labels[@]}"; then
+    red "  Failed to refresh launchd definitions; bot was not stopped."
+    return 1
+  fi
+  green "  Installed launchd definitions are current."
+}
+
+LAUNCHD_PROBE_DETAIL=""
+launchd_job_state() {
+  local job="$1"
+  local detail
+  if detail=$(launchctl print "$job" 2>&1); then
+    LAUNCHD_PROBE_DETAIL=""
+    return 0
+  fi
+  case "$detail" in
+    *"Could not find service"*|*"could not find service"*|\
+    *"Service cannot be found"*|*"service cannot be found"*)
+      LAUNCHD_PROBE_DETAIL="$detail"
+      return 1
+      ;;
+    *)
+      LAUNCHD_PROBE_DETAIL="${detail:-launchctl print failed without details}"
+      return 2
+      ;;
+  esac
+}
+
+restart_launchd_surface() {
+  local label="$1"
+  local display_name="$2"
+  local runtime_component="$3"
+  local job="gui/$UID/$label"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  local action="restarted"
+  local probe_rc
+
+  if ! command -v launchctl >/dev/null 2>&1; then
+    dim "  $display_name: launchd unavailable; skipped."
+    return 0
+  fi
+
+  # A missing plist is an optional fresh-install state. An installed but
+  # unloaded job is a recoverable outage and must be bootstrapped.
+  if launchd_job_state "$job"; then
+    echo "Restarting $display_name via launchd..."
+    if ! launchctl kickstart -k "$job" 2>/dev/null; then
+      red "  $display_name restart failed: $label"
+      return 1
+    fi
+  else
+    probe_rc=$?
+    if [ "$probe_rc" -eq 2 ]; then
+      red "  $display_name state probe failed: $LAUNCHD_PROBE_DETAIL"
+      return 1
+    elif [ -f "$plist" ]; then
+      action="bootstrapped"
+      echo "Bootstrapping $display_name via launchd..."
+      if ! launchctl bootstrap "gui/$UID" "$plist" 2>/dev/null; then
+        red "  $display_name bootstrap failed: $plist"
+        return 1
+      fi
+    else
+      dim "  $display_name: launchd plist not installed; skipped."
+      return 0
+    fi
+  fi
+
+  FULL_RUNTIME_COMPONENTS+=("$runtime_component")
+  green "  $display_name $action (launchd)."
+}
+
+restart_user_surfaces() {
+  local failed=0
+  restart_launchd_surface \
+    "com.pascal.jarvis.dashboard" "Dashboard" "dashboard" || failed=1
+  restart_launchd_surface \
+    "com.pascal.jarvis.mobile-gateway" "Mobile gateway" \
+    "mobile-gateway" || failed=1
+  return "$failed"
+}
+
+verify_full_runtime() {
+  local verify_args=()
+  local component
+  if python3 -c \
+      'from core.config import Config; raise SystemExit(0 if Config().get("admin.enabled") else 1)' \
+      >/dev/null 2>&1; then
+    FULL_RUNTIME_COMPONENTS+=(admin)
+  fi
+  for component in "${FULL_RUNTIME_COMPONENTS[@]}"; do
+    verify_args+=(--require "$component")
+  done
+
+  echo "Verifying all resident runtime versions..."
+  if python3 -m core.deploy verify "${verify_args[@]}" >/dev/null; then
+    green "  All runtime versions match the deployed commit."
+    return 0
+  fi
+
+  red "  Full runtime version verification failed."
+  python3 -m core.deploy verify "${verify_args[@]}" || true
+  return 1
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 # --yes anywhere in argv skips the in-flight-conversation confirmation
@@ -353,10 +515,14 @@ case "${1:-}" in
     status
     ;;
   --full|-f)
-    echo "=== Full Restart (daemon + bot) ==="
+    echo "=== Full Restart (daemon + bot + user surfaces) ==="
     echo ""
     _verify_release_gate
     _set_deploy_guard
+    # Confirmation must precede definition refresh because installing a changed
+    # plist restarts that launchd job.
+    confirm_restart
+    refresh_launchd_definitions
     kill_bot
     echo ""
     # Fault-tolerant on purpose (2026-07-09 red-team [10]): under set -e a
@@ -366,7 +532,14 @@ case "${1:-}" in
     # survivable.
     restart_daemon || red "  DAEMON RESTART FAILED — starting bot anyway; check: tail -20 /tmp/jarvis-daemon-stderr.log"
     start_bot
+    surface_failed=0
+    restart_user_surfaces || surface_failed=1
     settle_bot
+    if [ "$surface_failed" -ne 0 ]; then
+      red "  One or more user surfaces failed to restart."
+      exit 1
+    fi
+    verify_full_runtime
     echo ""
     status
     ;;
@@ -374,7 +547,7 @@ case "${1:-}" in
     echo "Usage: ./restart.sh [--full|--status|--help] [--yes]"
     echo ""
     echo "  (no args)   Restart bot only (daemon auto-detects and stays)"
-    echo "  --full      Restart both daemon and bot"
+    echo "  --full      Restart daemon, bot, dashboard, and mobile gateway"
     echo "  --status    Show current process status"
     echo "  --yes, -y   Skip the in-flight-conversation confirmation"
     ;;
