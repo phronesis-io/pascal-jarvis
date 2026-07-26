@@ -678,7 +678,10 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             preview = await client.get(
                 f"/pair/{pair['code']}", allow_redirects=False)
             assert preview.status == 200
-            assert "确认连接这台设备" in await preview.text()
+            preview_body = await preview.text()
+            assert "确认连接这台设备" in preview_body
+            assert 'class="certificate-link"' in preview_body
+            assert ".certificate-link:focus-visible" in preview_body
             # Repeated GETs simulate message previews and must not consume the
             # one-time code before the owner explicitly confirms.
             second_preview = await client.get(

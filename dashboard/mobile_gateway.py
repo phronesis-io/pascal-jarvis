@@ -295,10 +295,14 @@ content="width=device-width,initial-scale=1"><title>Jarvis 设备配对</title>
 main{{max-width:420px;margin:15vh auto;padding:28px}}h1{{font:700 30px Songti SC,serif}}
 input,button{{box-sizing:border-box;width:100%;min-height:48px;margin-top:12px;border-radius:7px}}
 input{{padding:0 14px;border:1px solid #41545d;background:#17232a;color:#fff}}
-button{{border:0;background:#4aa78f;color:#07110e;font-weight:700}}.error{{color:#e98273}}</style>
+button{{border:0;background:#6bb29f;color:#07110e;font-weight:700;cursor:pointer}}
+.certificate-link{{display:inline-block;margin-top:8px;color:#86c9b7;text-underline-offset:4px}}
+.certificate-link:hover{{color:#a8ddcf}}
+.certificate-link:focus-visible{{outline:2px solid #86c9b7;outline-offset:4px;border-radius:2px}}
+.error{{color:#e98273}}</style>
 <main><h1>{heading}</h1>{error}<form method="post" action="/pair">
 {field}<button>{button}</button></form>
-<p><a href="/mobile-ca.cer">下载手机信任证书</a></p></main></html>"""
+<p><a class="certificate-link" href="/mobile-ca.cer">下载手机信任证书</a></p></main></html>"""
     return web.Response(
         text=page, content_type="text/html", status=status,
         headers={
