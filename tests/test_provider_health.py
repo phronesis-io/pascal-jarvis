@@ -246,3 +246,49 @@ def test_probe_failure_redacts_secret_shaped_error(tmp_path):
     assert result["status"] == "unhealthy"
     assert "do-not-store" not in result["detail"]
     assert "[redacted]" in result["detail"]
+
+
+def test_probe_failure_reports_the_api_error_not_an_incidental_stderr_notice(
+        tmp_path):
+    """A relay token makes the CLI print a connector notice on stderr even
+    though the real failure is the 403 in the JSON result. Reporting stderr
+    first sent an operator after the wrong thing during the v1.7.0 release
+    verification (backup relay was actually failing authentication).
+    """
+    _write_config(tmp_path)
+    spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[1]
+
+    def runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1,
+            stdout=json.dumps({
+                "is_error": True,
+                "api_error_status": 403,
+                "subtype": "success",
+                "result": "Failed to authenticate with the upstream relay",
+            }),
+            stderr=("⚠ claude.ai connectors are disabled because "
+                    "ANTHROPIC_API_KEY or another auth source is set"),
+        )
+
+    result = ph.probe_provider(spec, root=tmp_path, runner=runner)
+
+    assert result["status"] == "unhealthy"
+    assert "Failed to authenticate" in result["detail"]
+    assert "HTTP 403" in result["detail"]
+    assert "connectors are disabled" not in result["detail"]
+
+
+def test_probe_failure_still_falls_back_to_stderr_when_result_is_empty(tmp_path):
+    """A CLI that dies before producing JSON must still report why."""
+    _write_config(tmp_path)
+    spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[1]
+
+    def runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="relay connection reset")
+
+    result = ph.probe_provider(spec, root=tmp_path, runner=runner)
+
+    assert result["status"] == "unhealthy"
+    assert "relay connection reset" in result["detail"]
