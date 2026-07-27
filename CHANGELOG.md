@@ -8,6 +8,26 @@ prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
 shipped, superseded, or rejected, and requirements are traced to evidence in
 `docs/release_acceptance_2026-07-24.md`.
 
+## [1.7.1] — 2026-07-27 — provider canary reports the real failure
+
+Found by the v1.7.0 post-release provider canary, which is exactly the
+evidence step meant to catch this.
+
+- The Claude CLI writes advisory notices to stderr even when the real failure
+  is in its JSON result — a configured relay token legitimately produces
+  "claude.ai connectors are disabled". `probe_provider` reported stderr first,
+  so a backup relay failing authentication surfaced as a connector notice and
+  pointed the operator at the wrong thing. The reported reason is now the
+  run's own result, with the API status prefixed, and stderr only when the
+  result says nothing. Verified against the live relay: the message went from
+  "connectors are disabled" to `HTTP 403: Failed to authenticate. API Error:
+  403 无权访问 vip_1_max_cheap 分组`.
+
+Not a code defect, but now visible and needing an owner action: **backup
+relay 1 is down** — the relay account lacks access to the configured model
+group. The chain still has a healthy primary and a healthy tool-capable GPT
+final fallback; backup2 remains intentionally unconfigured.
+
 ## [1.7.0] — 2026-07-27 — verified delegation, one delivery pipeline, deploy-as-verify
 
 The largest release since the project started: 70 commits, 279 files,

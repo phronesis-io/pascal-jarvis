@@ -192,11 +192,15 @@ def _probe_claude(
     latency = round((time.monotonic() - started) * 1000)
     output = completed.stdout or ""
     actual_model = ""
+    api_status = ""
     if output.strip().startswith("{"):
         try:
             payload = json.loads(output)
             output = str(payload.get("result") or payload.get("output_text") or "")
             actual_model = str(payload.get("model") or "")
+            status_code = payload.get("api_error_status")
+            if payload.get("is_error") and status_code:
+                api_status = f"HTTP {status_code}"
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
     if completed.returncode == 0 and output.strip() == CANARY_MARKER:
@@ -207,7 +211,15 @@ def _probe_claude(
             "actual_model": actual_model or spec["model"],
             "model_source": "response" if actual_model else "requested",
         }
-    error = _safe_error(completed.stderr or output)
+    # The CLI writes advisory notices to stderr even when the real failure is
+    # in the JSON result — a relay token legitimately triggers "claude.ai
+    # connectors are disabled". Preferring stderr made a 403 authentication
+    # failure on the backup relay read as a connector notice, which points an
+    # operator at the wrong thing. The reported reason is the run's own result
+    # first; stderr only when the result says nothing.
+    error = _safe_error(output) or _safe_error(completed.stderr)
+    if api_status and not error.startswith(api_status):
+        error = f"{api_status}: {error}" if error else api_status
     return {
         "status": "unhealthy",
         "detail": error or f"canary exited {completed.returncode}",
