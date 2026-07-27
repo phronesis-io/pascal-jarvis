@@ -13,6 +13,8 @@
 #   file_age  — `path` mtime younger than `max_age_hours`
 #   launchctl — `label` loaded in the gui domain
 #   taskline  — CLI reports both server healthy and workspace registered
+#   heartbeat_tasks — heartbeat TASKS are succeeding, not merely the process
+#               being alive (reuses the daemon's brain_health.assess verdict)
 #
 # critical: true → daemon.py checks it every 30s (alert-only for components
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
@@ -50,6 +52,21 @@ components:
     owned_by_pidfile: .bot.pid
     critical: true
     note: resident scheduler inside bot.sh; bot watchdog restarts it
+
+  - name: heartbeat-tasks
+    check: heartbeat_tasks
+    path: heartbeat_state.json
+    critical: false          # daemon's brain-health path is the pager; this
+                             # entry exists so doctor.sh / restart.sh --status
+                             # / self-diagnostic / `python3 -m core.components`
+                             # can no longer read all-green through a stall
+    requires_file: heartbeat_state.json
+    note: |
+      Process liveness is not task health. 2026-07-27 05:58-09:59: the loop was
+      alive (pgrep green) while activity-log failed every run, intention-check
+      was wedged 11h, and memory-tidy/self-diagnostic had gone 16h/15h without
+      a success — this manifest reported 15/15 healthy throughout. Same verdict
+      the daemon pages on; honors the same post-wake grace; never writes state.
 
   - name: ef-stream
     check: pgrep

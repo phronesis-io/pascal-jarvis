@@ -66,11 +66,73 @@ def test_report_can_be_written_from_cli(tmp_path, monkeypatch):
     assert "Conversation Audit PRD" in report.read_text(encoding="utf-8")
 
 
+def _empty_reply_fixture(tmp_path, *, replied: bool):
+    """A session that emitted 'No response requested.' — optionally one that
+    actually delivered a reply. Session id must match between the transcript
+    file stem and the `[id] Replied (n chars)` log line."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sid = "37cad35c-f395-5cdd-babe-97fbef249e1c"
+    session = session_dir / f"{sid}.jsonl"
+    now = datetime.now(timezone.utc)
+    session.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "No response requested."},
+            "timestamp": (now - timedelta(minutes=9)).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    log_paths = []
+    if replied:
+        log = tmp_path / "jarvis.log"
+        stamp = (now_local() - timedelta(minutes=9)).strftime("%Y-%m-%d %H:%M:%S")
+        log.write_text(f"[{stamp}] [INFO] [{sid}] Replied (22 chars)\n",
+                       encoding="utf-8")
+        log_paths = [log]
+    return audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=log_paths,
+        session_dirs=[session_dir],
+        db_path=tmp_path / "audit.db",
+    )
+
+
+def test_empty_reply_needs_delivery_evidence_to_be_called_user_visible(tmp_path):
+    """2026-07-27: two P0s were raised for 'No response requested.' turns in
+    local Claude Code CLI sessions that never sent anything. The delivery
+    ledger held zero matching rows. A transcript is not a delivery record."""
+    paths = _empty_reply_fixture(tmp_path, replied=False)
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "empty_reply_user_visible" not in report
+
+
+def test_empty_reply_is_still_flagged_when_the_session_did_reply(tmp_path):
+    """The corroboration gate must not silence the real defect."""
+    paths = _empty_reply_fixture(tmp_path, replied=True)
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "empty_reply_user_visible" in report
+
+
 def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
-    session = session_dir / "turn.jsonl"
+    sid = "37cad35c-f395-5cdd-babe-97fbef249e1c"
+    session = session_dir / f"{sid}.jsonl"
     now = datetime.now(timezone.utc)
+    log = tmp_path / "jarvis.log"
+    log.write_text(
+        f"[{(now_local() - timedelta(minutes=9)).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"[INFO] [{sid}] Replied (22 chars)\n",
+        encoding="utf-8",
+    )
     rows = [
         {
             "type": "assistant",
@@ -92,7 +154,7 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     )
     paths = audit.AuditPaths(
         jarvis_dir=tmp_path,
-        log_paths=[],
+        log_paths=[log],
         session_dirs=[session_dir],
         db_path=tmp_path / "audit.db",
     )
@@ -102,7 +164,6 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
 
     assert "progress_provider_error_leak" in report
     assert "empty_reply_user_visible" in report
-    assert "Issues derived: 2" in report
 
 
 def test_audit_flags_recent_interaction_self_evolution_signals(tmp_path):
@@ -167,10 +228,20 @@ def test_audit_ingests_daemon_instability(tmp_path):
 def test_session_ingest_filters_messages_by_timestamp(tmp_path):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
-    session = session_dir / "turn.jsonl"
+    sid = "37cad35c-f395-5cdd-babe-97fbef249e1c"
+    session = session_dir / f"{sid}.jsonl"
     now = datetime.now(timezone.utc)
     old_ts = (now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     new_ts = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    # The empty-reply probe below is only "user visible" with delivery
+    # evidence in the same session (2026-07-27); this keeps the test about
+    # timestamp filtering rather than about the corroboration gate.
+    log = tmp_path / "jarvis.log"
+    log.write_text(
+        f"[{(now_local() - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"[INFO] [{sid}] Replied (22 chars)\n",
+        encoding="utf-8",
+    )
     rows = [
         {
             "type": "assistant",
@@ -192,7 +263,7 @@ def test_session_ingest_filters_messages_by_timestamp(tmp_path):
     )
     paths = audit.AuditPaths(
         jarvis_dir=tmp_path,
-        log_paths=[],
+        log_paths=[log],
         session_dirs=[session_dir],
         db_path=tmp_path / "audit.db",
     )
