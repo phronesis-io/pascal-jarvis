@@ -33,7 +33,12 @@ if ! python3 -m pytest \
   exit 1
 fi
 
-if git diff --cached --name-only | rg -q \
+# grep, not rg: ripgrep is not installed everywhere, and `rg: command not
+# found` exits 127, which an `if` reads as "no match" — the hook then printed
+# "Pre-commit checks passed" while the restart reminder never fired. The one
+# reminder that keeps code-on-disk from being mistaken for deployed code must
+# not depend on an optional tool.
+if git diff --cached --name-only | grep -Eq \
     '^(core/.*\.py|dashboard/.*\.py|admin\.py|daemon\.py|bot\.sh)$'; then
   echo "Reminder: runtime code changed; restart and run core.deploy verify."
 fi

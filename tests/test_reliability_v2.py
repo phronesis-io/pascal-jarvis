@@ -294,6 +294,26 @@ def test_diag_pre_resolves_work_and_memory_dirs_without_inherited_env():
         f"MEMORY_DIR {memory_dir!r} does not derive from JARVIS_DIR's slug")
 
 
+def test_pre_commit_hook_only_uses_tools_it_can_count_on():
+    """A hook step that needs an absent tool exits 127 and reads as "no match".
+
+    2026-07-27: the runtime-code restart reminder was piped into `rg`, which
+    is not installed everywhere; the hook printed "Pre-commit checks passed"
+    with the reminder silently skipped.
+    """
+    root = Path(__file__).parent.parent
+    hook = (root / "scripts" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    body = "\n".join(
+        ln for ln in hook.splitlines() if not ln.strip().startswith("#"))
+    optional = [tool for tool in ("rg", "fd", "jq", "yq", "ag")
+                if re.search(rf"(^|[|\s]){tool}\s", body)
+                and f'command -v {tool}' not in body]
+    assert not optional, (
+        f"pre-commit uses {optional} without a `command -v` guard — on a "
+        "machine without them the step silently no-ops and the hook still "
+        "reports success")
+
+
 def test_task_scripts_importing_core_put_repo_root_on_syspath():
     """Class guard for the 2026-07-27 outlier.
 
