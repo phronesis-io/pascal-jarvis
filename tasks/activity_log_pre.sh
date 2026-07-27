@@ -132,3 +132,11 @@ echo "Activity log window: $now_ts (last 45 minutes)"
 echo ""
 [ -n "$calendar_context" ] && echo "$calendar_context" && echo ""
 [ -n "$conversation_context" ] && echo "$conversation_context"
+
+# A script whose last command is `[ -n "$x" ] && echo …` exits 1 whenever x is
+# empty — so a window with a calendar event but no conversation printed a
+# perfectly good report and then reported failure. The scheduler recorded
+# `pre_nonzero`, and brain-health read the stale last_success as "activity-log
+# 最近一直在失败" (30 of 551 runs, and part of the 2026-07-27 morning alert).
+# Producing the output IS the success condition; say so explicitly.
+exit 0
