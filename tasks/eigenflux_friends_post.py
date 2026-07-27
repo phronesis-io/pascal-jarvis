@@ -19,6 +19,7 @@ from core.eigenflux_friends import (
     PATH_ENV,
     WELCOME_MESSAGE,
     execute_friend_action,
+    temporary_friend_policy_active,
 )
 from core.safety import looks_like_error, parse_json_response
 
@@ -180,13 +181,18 @@ def main() -> int:
             # Fail closed. The request remains pending and the next scheduled
             # run can retry after the server/CLI recovers.
             return 0
+        policy_active = temporary_friend_policy_active()
         canonical_actions = []
         for action in actions:
             canonical = _canonical_request(action, pending)
             if canonical is None:
                 continue
-            if canonical.get("decision") == "accept":
+            if canonical.get("decision") == "accept" and policy_active:
                 canonical_actions.append(canonical)
+            elif canonical.get("decision") == "accept":
+                canonical["risk_reason"] = (
+                    "临时自动通过策略当前未启用，请你确认是否通过。")
+                reviews.append(canonical)
             else:
                 canonical["risk_reason"] = (
                     "自动拒绝不被允许，请你确认是否拒绝。")

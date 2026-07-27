@@ -2,6 +2,8 @@
 # Pre-hook: collect system health data for self-diagnostic
 WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+_CODE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+_TO=(python3 "$_CODE_DIR/scripts/run_with_timeout.py" 30)
 _work_slug=$(python3 -c "from pathlib import Path; print(str(Path('${WORK_DIR:-$JARVIS_DIR}').resolve()).replace('/','-').replace('.','-'))")
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_work_slug/memory}"
 
@@ -68,7 +70,7 @@ fi
 if [ -n "$_LARK_UID" ] && command -v lark-cli >/dev/null 2>&1; then
   _probe_start=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   _probe_end=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-  if lark-cli calendar +agenda --as user --format json \
+  if "${_TO[@]}" lark-cli calendar +agenda --as user --format json \
        --start "$_probe_start" --end "$_probe_end" >/dev/null 2>&1; then
     echo "User-token probe: ✓"
   else
@@ -158,7 +160,7 @@ fi  # _HAS_EF
 #     card.action.trigger (larksuite/cli#1051) — callback buttons are disabled
 #     across the product. Flag loudly the moment an upgrade adds support so
 #     they can be re-enabled (PRD REQ-17).
-if lark-cli event list 2>/dev/null | grep -qi 'card'; then
+if "${_TO[@]}" lark-cli event list 2>/dev/null | grep -qi 'card'; then
   echo ""
   echo "🎉 lark-cli now lists card events — card callback buttons can be re-enabled!"
   echo "   (re-add the 收藏 button in tasks/content_recommend_post.py, add card.action.trigger consumption; see PRD REQ-17)"

@@ -1,6 +1,8 @@
 """Tests for the metrics_probe adapter (sources/README.md contract)."""
 
 import json
+import signal
+import subprocess
 import time
 from datetime import datetime
 
@@ -189,6 +191,40 @@ def test_timeout_error(tmp_path):
         _cfg(tmp_path, command="sleep 5", timeout=0.2), {})
     assert time.time() - start < 3
     assert signals == [] and state["error_type"] == "timeout"
+
+
+def test_timeout_escalates_when_process_ignores_term(monkeypatch):
+    signals = []
+
+    class StubbornProcess:
+        pid = 4242
+        returncode = None
+        waits = 0
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired("probe", timeout)
+
+        def wait(self, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("probe", timeout)
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+    process = StubbornProcess()
+    monkeypatch.setattr(metrics_probe.subprocess, "Popen", lambda *_a, **_k: process)
+    monkeypatch.setattr(
+        metrics_probe.os, "killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    payload, error = metrics_probe._run_command("ignored", 0.1)
+
+    assert payload is None and error == "timeout"
+    assert signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
 
 
 def test_missing_command_is_crash(tmp_path):

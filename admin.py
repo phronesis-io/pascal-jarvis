@@ -224,8 +224,12 @@ def search_sessions(query: str, session_id: str = "", max_results: int = 40) -> 
 
 def _find_session_file(session_id: str) -> Path | None:
     """Search known project dirs for a session file. Returns first match."""
+    if not session_id or ".." in session_id or "/" in session_id or "\\" in session_id:
+        return None
     for base in SESSION_SEARCH_PATHS:
         candidate = base / f"{session_id}.jsonl"
+        if not candidate.resolve().is_relative_to(base.resolve()):
+            continue
         if candidate.exists():
             return candidate
     return None

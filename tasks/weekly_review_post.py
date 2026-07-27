@@ -70,6 +70,14 @@ def main() -> int:
                 "date": now_local_str("%Y-%m-%d"),
             },
         ))
+
+    # Stamp this week so the pre-script skips on restart (dedup)
+    import datetime
+    jarvis_dir = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
+    stamp = jarvis_dir / "data" / ".weekly_review_stamp"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(datetime.date.today().strftime("%Y-W%V"), encoding="utf-8")
+
     return 0
 
 

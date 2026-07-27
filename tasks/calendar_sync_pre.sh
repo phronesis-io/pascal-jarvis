@@ -5,8 +5,12 @@
 # Runs every 30m to keep hot/calendar_today.md fresh.
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+_CODE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 RAW_CACHE="$MEMORY_DIR/system/.calendar_raw_output.txt"
+
+# Portable timeout runner; macOS does not ship GNU timeout(1).
+_TO=(python3 "$_CODE_DIR/scripts/run_with_timeout.py" 30)
 
 # Require lark-cli
 command -v lark-cli &>/dev/null || exit 0
@@ -50,7 +54,7 @@ mkdir -p "$JARVIS_DIR/tmp"
 for i in $(seq 0 29); do
   day_start="${BOUNDS[$i]}"
   day_end="${BOUNDS[$((i+1))]}"
-  day_data=$(lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>>"$_err_file") || _fetch_fail=1
+  day_data=$("${_TO[@]}" lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>>"$_err_file") || _fetch_fail=1
   export "DAY${i}_DATA=$day_data"
 done
 
@@ -218,12 +222,14 @@ if interests:
 
 # Save event mapping file for calendar write-back
 if all_events_map:
-    import pathlib
+    import pathlib, tempfile
     jarvis_dir = os.environ.get('JARVIS_DIR', '')
     if jarvis_dir:
         mf = pathlib.Path(jarvis_dir) / 'calendar_event_mapping.json'
         try:
-            mf.write_text(json.dumps(all_events_map, ensure_ascii=False, indent=2))
+            tmp = mf.with_suffix('.tmp')
+            tmp.write_text(json.dumps(all_events_map, ensure_ascii=False, indent=2))
+            tmp.replace(mf)
             print(f'[calendar] {len(all_events_map)} events mapped', file=sys.stderr)
         except Exception:
             pass

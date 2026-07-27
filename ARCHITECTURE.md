@@ -149,6 +149,9 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.
 - `dashboard/`: human and operator projections over the same durable state.
+- `views/`: JSON files for RichView interactive card payloads (created by
+  `core.richview`, consumed by mobile gateway and dashboard). Each file is a
+  `{view_id}.json` produced at card creation time.
 
 ## Durable State
 
@@ -166,6 +169,11 @@ the exact release commit or a healthy resident descendant that contains it.
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
 sources for the same state.
+
+`sched_events.jsonl` is an intentional exception: `core.sched_events.emit()`
+writes both the JSONL file (durable append-only audit trail) and a SQLite
+projection (indexed query surface). The JSONL file is authoritative; the
+SQLite table is a read-through projection rebuilt on demand.
 
 ## Reach Policy
 

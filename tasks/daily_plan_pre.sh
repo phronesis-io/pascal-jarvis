@@ -12,6 +12,12 @@ if [ "$hour" -lt 8 ] || [ "$hour" -ge 11 ]; then
   exit 0
 fi
 
+# Dedup: skip if already succeeded today (prevents double-fire on restart)
+_stamp="$JARVIS_DIR/data/.daily_plan_stamp"
+if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; then
+  exit 0
+fi
+
 echo "Daily plan for $(date '+%Y-%m-%d %A')"
 echo ""
 

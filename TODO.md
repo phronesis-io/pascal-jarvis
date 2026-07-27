@@ -1,8 +1,7 @@
 # Jarvis Roadmap
 
-> **Current release: v1.0.0 (2026-06-15)** — first formal tag. REQ-01~77 all
-> shipped & tested (779 passing). See `CHANGELOG.md` for the release summary and
-> `docs/prd_interaction_v3.md` for the latest wave.
+> **Current release: v1.6.0 (2026-07-15)** — see `CHANGELOG.md` for the full
+> release history. Active PRD cycle: v4 REQ-78+.
 
 ## Done (2026-06-15 wave — REQ-59~77, v1.0.0 — see docs/prd_interaction_v3.md)
 
@@ -21,7 +20,8 @@
   with borrow-headroom + truncation alarm (REQ-73)
 - Behavioral rules: no false truncation/blame, link self-check, continuation
   discipline, evidence-over-narrative (REQ-69/72/74)
-- Event-gated free-time-nudge / content-recommend (REQ-75)
+- Event-gated content-recommend; free-time-nudge later retired after the
+  low-engagement audit (REQ-75/89)
 - Graceful model fallback opus→sonnet→haiku on model/spend error (REQ-77)
 
 ## Done (recent)
@@ -43,7 +43,8 @@
 - Engagement analysis with self-tuning recommendations
 - Calendar read/write (create, update, delete Lark events from conversation)
 - Daily rhythm system (morning plan, activity log, evening reflect, free-time nudge)
-- EigenFlux two-stage pipeline (feed triage → deep research)
+- EigenFlux feed triage; the zero-execution deep-research poller was later
+  retired in favor of enriched feed data and the real-time message stream
 - Feed item enrichment (full content + URL fetched in pre-script)
 - Guardian daemon with stuck-process detection and auto-restart
 - Image message handling (download + read via Claude)

@@ -2,7 +2,7 @@
 
 Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI agent with continuous heartbeat, self-evolving memory, closed-loop proactive intents, and bidirectional IM integration.
 
-**Release: `v1.3.0` (2026-07-13)** — see [CHANGELOG.md](CHANGELOG.md). 1400+ tests passing.
+**Release: `v1.6.0` (2026-07-15)** — see [CHANGELOG.md](CHANGELOG.md). 2200+ tests passing.
 
 **Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -116,8 +116,8 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
-   - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with a two-stage pipeline: feed triage for quick scoring, plus deep research for high-value items.
-   - *Content recommend* and *watch-later* — curates content for you; saved items resurface later at calmer moments.
+   - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with feed triage, verified friend actions, private messaging, and a real-time stream.
+   - *Content recommend* and *watch-later* — curates content for you; saved items remain queryable without creating nagging reminder intents.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
@@ -127,7 +127,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 7. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source* — no new scripts. Signals are deduplicated across sources, buffered into memory (so the next Claude call "knows"), and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. A new source type = one `sources/<type>.py` adapter implementing `collect(cfg, state)`.
 
-8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). A daily harness-evolve task reviews accumulated feedback and lands hygiene improvements automatically. Cross-session sync imports context from parallel Claude Code projects.
+8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). The L3 iteration loop turns observed product and engineering signals into reviewed proposals instead of letting a background model edit behavior rules directly. Cross-session sync imports context from parallel Claude Code projects.
 
 9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
 
@@ -186,19 +186,18 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  ├── lark/                                                  │
 │  │   └── client.sh   — shell helpers sourced by bot.sh      │
 │  └── eigenflux/                                             │
-│      └── client.py   — HTTP client + local persistence      │
+│      └── client.sh   — CLI wrapper + runtime identity       │
 │                                                             │
 │  tasks/                           (pre/post hooks)          │
 │  ├── Daily rhythm:                                          │
 │  │   daily_plan, activity_log, daily_reflect                │
 │  ├── Calendar & Tasks:                                      │
-│  │   calendar_sync, calendar_write, task_triage,            │
-│  │   weekly_review                                          │
+│  │   calendar_sync, intention_check, weekly_review          │
 │  ├── Memory pipeline:                                       │
-│  │   memory_hourly → daily → weekly → monthly,              │
+│  │   memory_hourly → daily → weekly,                        │
 │  │   memory_consolidate, memory_tidy                        │
 │  ├── EigenFlux:                                             │
-│  │   feed, messages, publish, profile, research             │
+│  │   feed, friends, publish, profile, preinstall + stream   │
 │  ├── Content:                                               │
 │  │   content_recommend (reaction = one-tap watch-later)    │
 │  └── Monitoring & ops:                                      │
@@ -425,20 +424,19 @@ lark:
 
 📖 **Full docs: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)**
 
-[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Six heartbeat tasks plus a real-time stream integrate it:
+[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Five heartbeat tasks plus a real-time stream integrate it:
 
 | Task | Interval | What it does |
 |---|---|---|
 | `eigenflux-feed-triage` | 10m | Pull feed, score items, push actionable ones to you |
-| `eigenflux-research`    | 30m | Deep analysis of items flagged as "needs research" |
-| `eigenflux-messages`    | 10m | Fetch unread DMs, suggest responses (**priority**) |
 | `eigenflux-friends`     | 10m | Detect incoming friend requests (**priority**) |
 | `eigenflux-publish`     | 1h  | Auto-broadcast useful signals from your conversations |
 | `eigenflux-profile`     | 24h | Sync your EigenFlux bio with memory changes |
+| `eigenflux-preinstall`  | 24h | Sync and verify the installed EigenFlux capability set |
 
-`eigenflux-messages` and `eigenflux-friends` are **priority tasks** — they bypass the batch cap (max 4 regular tasks per cycle) so social signals are never delayed.
+`eigenflux-friends` is a **priority task** and bypasses the regular batch cap.
 
-Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers messages in real-time with background Claude analysis. The stream is managed exclusively by `ef_stream_loop.py` — the `openclaw-eigenflux` gateway plugin must be disabled to avoid "Connection replaced" conflicts.
+Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers private messages in real time with background analysis. This replaces the old polling message task. The stream is managed exclusively by `ef_stream_loop.py` — the `openclaw-eigenflux` gateway plugin must be disabled to avoid "Connection replaced" conflicts.
 
 **Enable** — add to `jarvis.yaml`:
 ```yaml

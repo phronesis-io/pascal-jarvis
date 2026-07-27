@@ -53,6 +53,12 @@ def main():
         "plan": message,
     }, keep_last=14)
 
+    # Stamp today so the pre-script skips on restart (dedup)
+    jarvis_dir = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
+    stamp = jarvis_dir / "data" / ".daily_plan_stamp"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(now_local_str("%Y-%m-%d"), encoding="utf-8")
+
     # No card output (REQ-84): daily-plan is a SILENT_TASK — anything printed
     # here would be built and then dropped by the heartbeat. Log only.
     print("daily-plan: plan logged to PLAN_LOG (card build removed, REQ-84)",

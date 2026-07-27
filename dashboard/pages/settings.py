@@ -317,7 +317,8 @@ def settings_page():
             def create_mobile_pair():
                 from core.config import Config
                 from core.mobile_access import create_pair_code
-                result = create_pair_code("Pascal 的手机", 15)
+                cfg = Config()
+                result = create_pair_code(f"{cfg.owner_name} 的手机", 15)
                 try:
                     gateway = json.loads(
                         (Config().jarvis_dir / "mobile_access.json").read_text(

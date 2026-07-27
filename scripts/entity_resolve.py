@@ -28,6 +28,7 @@ from pathlib import Path
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(JARVIS_DIR))
 from core.claude_projects import auto_memory_dir as _auto_mem
+from core.eigenflux_friends import temporary_friend_policy_active
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", str(_auto_mem())))
 
 CONTACTS_FILE = JARVIS_DIR / "data" / "contacts.jsonl"
@@ -255,6 +256,14 @@ def main():
             print(raw)
             sys.exit(0)
         data = {"messages": messages}
+
+    # Friend-request prompts run without personal memory because their greeting
+    # is untrusted. Expose only the one owner-controlled policy bit they need;
+    # never co-locate the full structured-facts file with external text.
+    if isinstance(data, dict) and "requests" in data:
+        data["friend_policy"] = {
+            "temporary_active": temporary_friend_policy_active(MEMORY_DIR),
+        }
 
     # Load contacts
     file_contacts = load_contacts()

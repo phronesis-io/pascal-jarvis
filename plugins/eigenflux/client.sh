@@ -10,6 +10,7 @@
 # Install the CLI: curl -fsSL https://www.eigenflux.ai/install.sh | sh
 
 export PATH="$HOME/.local/bin:$PATH"
+_EIGENFLUX_CODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ── Client identity (telemetry headers) ──────────────────────────────
 # The CLI stamps X-Client-Host / X-Client-Channel from these env vars
@@ -35,8 +36,17 @@ eigenflux_require() {
 # On auth_required, outputs AUTH_REQUIRED to stdout so callers can detect it.
 eigenflux_exec() {
   local output
-  output=$(eigenflux "$@" 2>>"${LOG_FILE:-/dev/null}")
+  output=$(python3 "$_EIGENFLUX_CODE_DIR/scripts/run_with_timeout.py" 60 \
+    eigenflux "$@" 2>>"${LOG_FILE:-/dev/null}")
   local rc=$?
+  if [ "$rc" -eq 124 ]; then
+    local op="${1:-unknown}"
+    if [ -n "${2:-}" ] && [[ "${2:-}" != -* ]]; then
+      op="$op ${2}"
+    fi
+    echo "[eigenflux] CLI timeout after 60s: eigenflux $op" >&2
+    return 1
+  fi
   if [ "$rc" -eq 4 ]; then
     echo "AUTH_REQUIRED"
     return 4

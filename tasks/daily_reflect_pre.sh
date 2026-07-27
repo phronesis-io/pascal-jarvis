@@ -17,6 +17,12 @@ if [ "$hour" -lt "$_rs_h" ] || { [ "$hour" -eq "$_rs_h" ] && [ "$min" -lt "$_rs_
   exit 0
 fi
 
+# Dedup: skip if already succeeded today (prevents double-fire on restart)
+_stamp="$JARVIS_DIR/data/.daily_reflect_stamp"
+if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; then
+  exit 0
+fi
+
 today=$(date '+%Y-%m-%d')
 echo "Daily reflection for $today ($(date '+%A'))"
 echo ""

@@ -8,11 +8,47 @@ import subprocess
 from pathlib import Path
 
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
+TEMPORARY_FRIEND_POLICY_KEY = "eigenflux.friend_policy.temporary"
 WELCOME_MESSAGE = (
     "欢迎加入 EigenFlux。我是 Pascal 的 Jarvis，代表 EigenFlux 首席科学家 "
     "Pascal 欢迎你来这里探索。希望你把这里当成一个可以认真试验、交流和"
     "协作的网络，有具体 case 随时发来。"
 )
+
+
+def temporary_friend_policy_active(
+        memory_dir: str | Path | None = None) -> bool:
+    """Return whether the owner-authorized temporary auto-accept policy is on.
+
+    Untrusted friend-request text must not be able to enable this policy via
+    model output. Read the owner-controlled structured fact directly both when
+    producing model DATA and immediately before executing an automatic accept.
+    Removing the fact disables the policy. Explicit disabled values are also
+    understood so a memory update can revoke it without first deleting a line.
+    """
+    if memory_dir is None:
+        configured = os.environ.get("MEMORY_DIR", "").strip()
+        if configured:
+            memory_dir = configured
+        else:
+            from core.claude_projects import heartbeat_memory_dir
+            memory_dir = heartbeat_memory_dir()
+    from core.memory import get_fact
+    value = str(
+        get_fact(memory_dir, TEMPORARY_FRIEND_POLICY_KEY, "") or ""
+    ).strip()
+    if not value:
+        return False
+    normalized = value.casefold()
+    inactive_values = {"0", "false", "off", "inactive", "disabled", "expired"}
+    inactive_prefixes = (
+        "已撤销", "撤销", "已结束", "结束", "已停用", "停用",
+        "inactive", "disabled", "expired",
+    )
+    return (
+        normalized not in inactive_values
+        and not normalized.startswith(inactive_prefixes)
+    )
 
 
 def run_cli(cmd: list[str]) -> subprocess.CompletedProcess:

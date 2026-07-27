@@ -148,3 +148,27 @@ def test_p2p_prompt_unchanged_by_group_param(tmp_path):
         chat_type="p2p",
     )
     assert "User is a developer" in prompt and "ACTION:" in prompt
+
+
+def test_external_p2p_uses_shared_context_not_personal_memory(tmp_path):
+    memory = tmp_path / "memory"
+    (memory / "hot").mkdir(parents=True)
+    (memory / "hot" / "profile.md").write_text(
+        "PRIVATE_OWNER_MEMORY", encoding="utf-8")
+    (memory / "hot" / "group_context.md").write_text(
+        "PUBLIC_COMPANY_CONTEXT", encoding="utf-8")
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(memory),
+        session_dir=str(tmp_path),
+        session_id="external",
+        conv_key="external-user",
+        now_ts="2026-07-27 12:00",
+        tracker_path=str(tmp_path / "tracker.json"),
+        chat_type="external_p2p",
+    )
+
+    assert "PUBLIC_COMPANY_CONTEXT" in prompt
+    assert "PRIVATE_OWNER_MEMORY" not in prompt
+    assert "Available Actions" not in prompt

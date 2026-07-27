@@ -69,23 +69,11 @@ if ! command -v eigenflux >/dev/null 2>&1 \
   exit 0
 fi
 
-# ── Bounded runner (macOS has no `timeout`) ───────────────────────────
-if command -v timeout >/dev/null 2>&1; then
-  bounded() { local s="$1"; shift; timeout "$s" "$@"; }
-elif command -v gtimeout >/dev/null 2>&1; then
-  bounded() { local s="$1"; shift; gtimeout "$s" "$@"; }
-else
-  bounded() {
-    local s="$1"; shift
-    "$@" & local pid=$!
-    # Escalate TERM -> (2s grace) -> KILL so a child that ignores SIGTERM
-    # (e.g. pytest) cannot hang past the cap and stall the 60s heartbeat.
-    ( sleep "$s"; kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null ) & local watcher=$!
-    wait "$pid" 2>/dev/null; local rc=$?
-    kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-    return "$rc"
-  }
-fi
+# ── Bounded runner (portable across macOS/Linux) ──────────────────────
+bounded() {
+  local s="$1"; shift
+  python3 "$SCRIPT_DIR/../scripts/run_with_timeout.py" "$s" "$@"
+}
 
 state_get() { python3 - "$STATE_FILE" "$1" 2>/dev/null <<'PY'
 import json,sys
@@ -269,8 +257,8 @@ if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
      "$JARVIS_DIR/tests/test_eigenflux_feed_search.py" \
      "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" \
      "$JARVIS_DIR/tests/test_ef_stream.py" \
-     "$JARVIS_DIR/tests/test_eigenflux_messages_post.py" >/tmp/ef_pi_pytest.out 2>&1; then
-  echo "    ✓ pytest (prompt + feed_search + publish_post + ef_stream + messages_post)"
+     "$JARVIS_DIR/tests/test_eigenflux_messages.py" >/tmp/ef_pi_pytest.out 2>&1; then
+  echo "    ✓ pytest (prompt + feed_search + publish_post + ef_stream + messages)"
 else
   echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"; fail+=("pytest failed")
 fi

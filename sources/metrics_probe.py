@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -83,18 +84,36 @@ def _append_history(path: Path, record: dict):
 def _run_command(command: str, timeout: float) -> tuple[dict | None, str | None]:
     """(parsed payload, error_type). Exactly one side is non-None."""
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["bash", "-c", command],
-            capture_output=True, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
             cwd=os.environ.get("JARVIS_DIR") or None)
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
+        try:
+            stdout, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return None, "timeout"
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            return None, "timeout"
     except Exception:
         return None, "crash"
     if proc.returncode != 0:
         return None, "network"
     try:
-        payload = json.loads(proc.stdout)
+        payload = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
         return None, "crash"
     if not isinstance(payload, dict) or not isinstance(payload.get("metrics"), dict):

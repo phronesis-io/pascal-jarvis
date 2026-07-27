@@ -1179,15 +1179,16 @@ def _maybe_rotate() -> None:
     except (OSError, ValueError):
         pass
     try:
-        marker.write_text(json.dumps({"month": month}), encoding="utf-8")
-    except OSError:
-        return
-    try:
         n = rotate_ledger()
         if n:
             print(f"memorial ledger rotated: {n} cards archived", file=sys.stderr)
-    except Exception as e:  # housekeeping must never block a card
+    except Exception as e:
         print(f"memorial ledger rotation failed: {e}", file=sys.stderr)
+        return
+    try:
+        marker.write_text(json.dumps({"month": month}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def create(source: str, title: str, body: str, options: list[dict] | None = None,

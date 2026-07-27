@@ -27,6 +27,11 @@ _PROTECTED_FILES = [
     ROOT / "eigenflux" / "credentials.json",
     ROOT / "eigenflux" / "feed_store.jsonl",
     ROOT / "eigenflux" / "seen_items.json",
+    ROOT / "engagement_log.jsonl",
+    ROOT / "heartbeat_outbox.jsonl",
+    ROOT / "memorials.jsonl",
+    ROOT / "sched_events.jsonl",
+    ROOT / "data" / "jarvis.db",
 ]
 
 # A subset of the protected files are *live runtime state* that the production
@@ -41,6 +46,11 @@ _LIVE_RUNTIME_FILES = {
     ROOT / "heartbeat_state.json",
     ROOT / "eigenflux" / "feed_store.jsonl",
     ROOT / "eigenflux" / "seen_items.json",
+    ROOT / "engagement_log.jsonl",
+    ROOT / "heartbeat_outbox.jsonl",
+    ROOT / "memorials.jsonl",
+    ROOT / "sched_events.jsonl",
+    ROOT / "data" / "jarvis.db",
 }
 
 
