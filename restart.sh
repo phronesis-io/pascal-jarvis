@@ -4,11 +4,15 @@
 # Usage:
 #   ./restart.sh          # Restart bot only (daemon stays alive, restarts bot)
 #   ./restart.sh --full   # Restart daemon, bot, dashboard, and mobile gateway
+#   ./restart.sh --runtime # Restart the already-deployed revision (config only)
 #   ./restart.sh --status # Just show current process status
 #
 set -euo pipefail
 
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+export JARVIS_DIR
+# shellcheck source=scripts/runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
 BOT_PID_FILE="$JARVIS_DIR/.bot.pid"
 DAEMON_PID_FILE="$JARVIS_DIR/.daemon.pid"
 LOG="/tmp/jarvis_restart.log"
@@ -510,6 +514,27 @@ _verify_release_gate() {
   fi
 }
 
+_verify_runtime_only_gate() {
+  local dirty
+  dirty=$(git -C "$JARVIS_DIR" status --porcelain --untracked-files=all)
+  if [ -n "$dirty" ]; then
+    red "  Runtime-only restart refused: source worktree is not clean."
+    echo "$dirty"
+    exit 1
+  fi
+  echo "Verifying the running bot already matches this revision..."
+  if python3 -m core.deploy verify \
+      --allow-config-changes \
+      --require bot --require heartbeat-loop >/tmp/jarvis_runtime_restart_gate.json; then
+    green "  Same-revision runtime gate passed."
+  else
+    red "  Runtime-only restart refused: code deployment is required."
+    cat /tmp/jarvis_runtime_restart_gate.json
+    echo "  Use the governed ./restart.sh path after merge, CI, and review."
+    exit 1
+  fi
+}
+
 case "${1:-}" in
   --status|-s)
     status
@@ -543,11 +568,25 @@ case "${1:-}" in
     echo ""
     status
     ;;
+  --runtime|-r)
+    echo "=== Same-Revision Runtime Restart ==="
+    echo ""
+    _verify_release_gate
+    _verify_runtime_only_gate
+    _set_deploy_guard
+    kill_bot
+    echo ""
+    start_bot
+    settle_bot
+    echo ""
+    status
+    ;;
   --help|-h)
-    echo "Usage: ./restart.sh [--full|--status|--help] [--yes]"
+    echo "Usage: ./restart.sh [--full|--runtime|--status|--help] [--yes]"
     echo ""
     echo "  (no args)   Restart bot only (daemon auto-detects and stays)"
     echo "  --full      Restart daemon, bot, dashboard, and mobile gateway"
+    echo "  --runtime   Restart config/state only when live code already matches HEAD"
     echo "  --status    Show current process status"
     echo "  --yes, -y   Skip the in-flight-conversation confirmation"
     ;;

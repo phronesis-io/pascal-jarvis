@@ -15,14 +15,21 @@
 
 set -u
 
-REPO_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
+REPO_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 WORK_DIR="${WORK_DIR:-$(cd "$REPO_DIR/../.." 2>/dev/null && pwd)}"
 BACKUP_BASE="${WORK_DIR}/session_backups"
 TODAY=$(date '+%Y-%m-%d')
 BACKUP_DIR="$BACKUP_BASE/$TODAY"
 FAILED=0
 
-_slug() { python3 -c "from pathlib import Path; print(str(Path('$1').resolve()).replace('/','-').replace('.','-'))"; }
+_slug() {
+  python3 - "$1" <<'PYEOF'
+import sys
+from pathlib import Path
+
+print(str(Path(sys.argv[1]).resolve()).replace("/", "-").replace(".", "-"))
+PYEOF
+}
 _SLUGS=$(_slug "$WORK_DIR")$'\n'$(_slug "$WORK_DIR/repos")$'\n'$(_slug "$REPO_DIR")
 _SLUGS=$(echo "$_SLUGS" | sort -u)
 
@@ -51,7 +58,15 @@ done <<< "$_SLUGS"
 # ── 3. SQLite DB — WAL-safe via .backup (a raw file copy would lose every
 #      transaction still in the -wal, currently larger than the db itself) ──
 if [ -f "$REPO_DIR/data/jarvis.db" ]; then
-  sqlite3 "$REPO_DIR/data/jarvis.db" ".backup '$BACKUP_DIR/jarvis.db'" || FAILED=1
+  python3 - "$REPO_DIR/data/jarvis.db" "$BACKUP_DIR/jarvis.db" <<'PYEOF' \
+    || FAILED=1
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as source:
+    with sqlite3.connect(sys.argv[2]) as destination:
+        source.backup(destination)
+PYEOF
 fi
 
 # ── 4. Runtime state + config ────────────────────────────────────────────
@@ -111,16 +126,21 @@ TRACKER="$REPO_DIR/active_sessions.json"
 
 active_ids=""
 if [ -f "$TRACKER" ]; then
-  active_ids=$(python3 -c "
+  active_ids=$(python3 - "$TRACKER" <<'PYEOF'
 import json
+import sys
+
 try:
-    tracker = json.load(open('$TRACKER'))
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        tracker = json.load(handle)
     for entry in tracker.values():
-        sid = entry.get('session_id', '')
+        sid = entry.get("session_id", "")
         if sid:
             print(sid)
-except: pass
-" 2>/dev/null)
+except Exception:
+    pass
+PYEOF
+)
 fi
 
 # Also skip any session modified in the last 7 days (might be resumed)

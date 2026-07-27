@@ -4,6 +4,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+JARVIS_DIR="$ROOT"
+export JARVIS_DIR
+# shellcheck source=runtime_env.sh
+source "$ROOT/scripts/runtime_env.sh"
 cd "$ROOT"
 
 runtime=0

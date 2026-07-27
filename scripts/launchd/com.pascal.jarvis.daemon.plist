@@ -6,7 +6,7 @@
     <string>com.pascal.jarvis.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>__PYTHON_BIN__</string>
         <string>__JARVIS_DIR__/daemon.py</string>
     </array>
     <key>WorkingDirectory</key>
@@ -18,7 +18,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>__PYTHON_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>__HOME__</string>
         <key>JARVIS_DIR</key>

@@ -6,14 +6,17 @@
     <string>com.jarvis.conversation-audit</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>__PYTHON_BIN__</string>
         <string>-c</string>
-        <string>import subprocess, sys; sys.exit(subprocess.call(['/bin/bash', '__JARVIS_DIR__/scripts/run_conversation_audit.sh']))</string>
+        <string>import subprocess, sys; sys.exit(subprocess.call(['/bin/bash', sys.argv[1]]))</string>
+        <string>__JARVIS_DIR__/scripts/run_conversation_audit.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>JARVIS_DIR</key>
         <string>__JARVIS_DIR__</string>
+        <key>PATH</key>
+        <string>__PYTHON_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>

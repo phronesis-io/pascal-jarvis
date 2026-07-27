@@ -23,6 +23,7 @@ RUNTIME_PATHS = (
     "jarvis.yaml",
     "HEARTBEAT.md",
 )
+CODE_PATHS = RUNTIME_PATHS[:-2]
 
 
 def _root(value: str | Path | None = None) -> Path:
@@ -106,8 +107,8 @@ def revision_contains(
     raise RuntimeError(detail[:300])
 
 
-def _runtime_files(root: Path):
-    for relative in RUNTIME_PATHS:
+def _runtime_files(root: Path, paths: tuple[str, ...] = RUNTIME_PATHS):
+    for relative in paths:
         path = root / relative
         if path.is_file():
             yield path
@@ -119,9 +120,14 @@ def _runtime_files(root: Path):
                     yield candidate
 
 
-def code_mtime(root: str | Path | None = None) -> float:
+def code_mtime(
+    root: str | Path | None = None,
+    *,
+    include_config: bool = True,
+) -> float:
     values = []
-    for path in _runtime_files(_root(root)):
+    paths = RUNTIME_PATHS if include_config else CODE_PATHS
+    for path in _runtime_files(_root(root), paths):
         try:
             values.append(path.stat().st_mtime)
         except OSError:
@@ -230,10 +236,13 @@ def verify_runtime(
     root: str | Path | None = None,
     db_path: str | Path | None = None,
     required: list[str] | tuple[str, ...] = (),
+    allow_config_changes: bool = False,
 ) -> dict:
     project = _root(root)
     current_head = git_head(project)
-    current_mtime = code_mtime(project)
+    current_mtime = code_mtime(
+        project, include_config=not allow_config_changes
+    )
     with _connect(_db_path(project, db_path)) as db:
         rows = [
             dict(row) for row in db.execute(
@@ -267,7 +276,7 @@ def verify_runtime(
         except (json.JSONDecodeError, TypeError):
             pass
         heartbeat_path = Path(str(metadata.get("heartbeat_path", "")))
-        if heartbeat_hash:
+        if heartbeat_hash and not allow_config_changes:
             if _digest(heartbeat_path) != heartbeat_hash:
                 status_issues.append("HEARTBEAT.md changed after process start")
             if not metadata.get("heartbeat_loaded"):
@@ -361,8 +370,16 @@ def main(argv: list[str] | None = None) -> int:
 
     verify = sub.add_parser("verify")
     verify.add_argument("--require", action="append", default=[])
+    verify.add_argument(
+        "--allow-config-changes",
+        action="store_true",
+        help="allow jarvis.yaml/HEARTBEAT.md changes while still verifying code",
+    )
     verify.set_defaults(func=lambda args: _print(
-        verify_runtime(required=args.require)))
+        verify_runtime(
+            required=args.require,
+            allow_config_changes=args.allow_config_changes,
+        )))
 
     smoke = sub.add_parser("smoke")
     smoke.add_argument("--timeout", type=float, default=3.0)

@@ -11,6 +11,9 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JARVIS_DIR="$(dirname "$SCRIPT_DIR")"
+export JARVIS_DIR
+# shellcheck source=../scripts/runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
 PIDFILE="$JARVIS_DIR/.dashboard.pid"
 PORT=3457
 
@@ -52,13 +55,8 @@ case "${1:-}" in
     ;;
 
   --install-launchd)
-    PLIST_SRC="$SCRIPT_DIR/launchd/com.jarvis.dashboard.plist"
-    PLIST_DST="$HOME/Library/LaunchAgents/com.jarvis.dashboard.plist"
-    cp "$PLIST_SRC" "$PLIST_DST"
-    launchctl unload "$PLIST_DST" 2>/dev/null || true
-    launchctl load "$PLIST_DST"
-    echo "Installed and loaded: $PLIST_DST"
-    echo "Dashboard will auto-start on login"
+    exec "$JARVIS_DIR/scripts/launchd/install.sh" \
+      com.pascal.jarvis.dashboard
     ;;
 
   --migrate)

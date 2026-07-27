@@ -6,7 +6,7 @@
     <string>com.pascal.jarvis.mobile-gateway</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>__PYTHON_BIN__</string>
         <string>-m</string>
         <string>dashboard.mobile_gateway</string>
     </array>
@@ -15,7 +15,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <string>__PYTHON_DIR__:__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>PYTHONPATH</key>
         <string>__JARVIS_DIR__</string>
         <key>TAILSCALE_SOCKET</key>

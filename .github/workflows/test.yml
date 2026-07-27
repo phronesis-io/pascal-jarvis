@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         # requirements.txt (not a hand-picked subset) — otherwise the dashboard
         # suite silently skips and broken dashboard PRs merge green.
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements-dev.txt
 
       - name: Syntax check
         run: bash -n bot.sh

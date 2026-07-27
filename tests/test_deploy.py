@@ -70,6 +70,56 @@ def test_verify_detects_code_and_heartbeat_changed_after_start(tmp_path):
     assert any("HEARTBEAT.md changed" in issue for issue in result["issues"])
 
 
+def test_verify_config_restart_allows_config_but_not_code_changes(tmp_path):
+    (tmp_path / "core").mkdir()
+    source = tmp_path / "core" / "worker.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    config = tmp_path / "jarvis.yaml"
+    config.write_text("admin:\n  enabled: false\n", encoding="utf-8")
+    heartbeat = tmp_path / "HEARTBEAT.md"
+    _heartbeat(heartbeat)
+    db_path = tmp_path / "jarvis.db"
+    register_runtime(
+        "heartbeat-loop",
+        pid=os.getpid(),
+        root=tmp_path,
+        db_path=db_path,
+        heartbeat_file=heartbeat,
+    )
+
+    future = time.time() + 2
+    config.write_text("admin:\n  enabled: true\n", encoding="utf-8")
+    heartbeat.write_text(heartbeat.read_text() + "\n", encoding="utf-8")
+    os.utime(config, (future, future))
+    os.utime(heartbeat, (future, future))
+
+    ordinary = verify_runtime(
+        root=tmp_path, db_path=db_path, required=["heartbeat-loop"]
+    )
+    config_restart = verify_runtime(
+        root=tmp_path,
+        db_path=db_path,
+        required=["heartbeat-loop"],
+        allow_config_changes=True,
+    )
+
+    assert ordinary["ok"] is False
+    assert config_restart["ok"] is True
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    os.utime(source, (future + 1, future + 1))
+    changed_code = verify_runtime(
+        root=tmp_path,
+        db_path=db_path,
+        required=["heartbeat-loop"],
+        allow_config_changes=True,
+    )
+    assert changed_code["ok"] is False
+    assert any(
+        "runtime code changed" in issue for issue in changed_code["issues"]
+    )
+
+
 def test_verify_requires_named_component(tmp_path):
     result = verify_runtime(
         root=tmp_path, db_path=tmp_path / "jarvis.db",

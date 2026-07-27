@@ -7,11 +7,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>__WORK_DIR__/repos/taskline/dist/taskline-server</string>
+        <string>__TASKLINE_DIR__/dist/taskline-server</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>__WORK_DIR__/repos/taskline</string>
+    <string>__TASKLINE_DIR__</string>
 
     <key>EnvironmentVariables</key>
     <dict>

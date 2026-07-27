@@ -8,6 +8,9 @@
 # Usage: ./scripts/doctor.sh
 
 JARVIS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export JARVIS_DIR
+# shellcheck source=runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
 cd "$JARVIS_DIR" || exit 1
 
 PASS=0; WARN=0; FAIL=0
@@ -26,6 +29,7 @@ if command -v python3 >/dev/null 2>&1; then
     3.1[0-9]|3.[2-9][0-9]) ok "python3 $_pyv" ;;
     *) bad "python3 $_pyv too old (need 3.10+)" "brew install python3 / apt install python3.11" ;;
   esac
+  ok "Jarvis interpreter: $JARVIS_PYTHON"
 else
   bad "python3 not found" "brew install python3 (macOS) / apt install python3 (Linux)"
 fi
@@ -34,9 +38,33 @@ command -v jq >/dev/null 2>&1 \
   && ok "jq $(jq --version 2>/dev/null)" \
   || bad "jq not found" "brew install jq / apt install jq"
 
-python3 -c "import yaml" 2>/dev/null \
-  && ok "python yaml module" \
-  || bad "pyyaml missing" "pip3 install pyyaml  (or: pip3 install --break-system-packages pyyaml)"
+_missing_modules=$(python3 - <<'PYEOF' 2>/dev/null || true
+import importlib
+
+required = (
+    "yaml", "nicegui", "pywebpush", "qrcode", "aiohttp", "fastapi",
+    "lark_oapi", "pytest",
+)
+missing = []
+for module in required:
+    try:
+        importlib.import_module(module)
+    except Exception:
+        missing.append(module)
+print(",".join(missing))
+PYEOF
+)
+if [ -z "$_missing_modules" ]; then
+  ok "all runtime/test Python modules import"
+else
+  bad "missing or broken Python modules: $_missing_modules" \
+      "./scripts/python.sh -m pip install -r requirements-dev.txt"
+fi
+if python3 -m pip check >/dev/null 2>&1; then
+  ok "Python dependency graph is consistent"
+else
+  bad "Python dependency conflicts detected" "./scripts/python.sh -m pip check"
+fi
 
 if command -v claude >/dev/null 2>&1; then
   ok "claude CLI $(claude --version 2>/dev/null | head -1)"
@@ -57,6 +85,11 @@ command -v node >/dev/null 2>&1 \
   || warn "node/npm not found — needed to install claude CLI and lark-cli" \
           "brew install node / apt install nodejs npm"
 
+command -v gh >/dev/null 2>&1 \
+  && ok "gh $(gh --version 2>/dev/null | head -1)" \
+  || warn "GitHub CLI missing — foreground/local operation works, governed restart.sh does not" \
+          "optional for production deploy: brew install gh && gh auth login"
+
 if [ -f "$JARVIS_DIR/scripts/run_with_timeout.py" ]; then
   ok "portable timeout runner available"
 else
@@ -64,7 +97,7 @@ else
       "restore scripts/run_with_timeout.py from the repository"
 fi
 
-# Gate for python-based checks below: without python3+pyyaml every probe in
+# Gate for config checks below: without python3+PyYAML every probe in
 # sections 2-3 would mislead (empty command substitutions read as PASS,
 # import errors read as 'broken YAML').
 PYCHECK_OK=1
@@ -76,7 +109,7 @@ fi
 section "2/6 Config files"
 
 if [ "$PYCHECK_OK" -ne 1 ]; then
-  warn "skipping config-file parsing checks" "fix the python3/pyyaml FAILs in section 1 first, then re-run"
+  warn "skipping config-file parsing checks" "fix the Python dependency FAILs in section 1 first, then re-run"
 elif [ -f jarvis.yaml ]; then
   ok "jarvis.yaml exists"
   _missing=$(python3 - <<'PYEOF'
@@ -105,7 +138,7 @@ else
 fi
 
 if [ "$PYCHECK_OK" -ne 1 ]; then
-  : # sources.yaml check also needs pyyaml — covered by the skip note above
+    : # sources.yaml also needs PyYAML — covered by the skip note above
 elif [ -f sources.yaml ]; then
   python3 -c "import yaml; yaml.safe_load(open('sources.yaml'))" 2>/dev/null \
     && ok "sources.yaml exists and parses (perception layer)" \
@@ -166,7 +199,7 @@ print(Config('jarvis.yaml').lark.get('event_backend', ''))" 2>/dev/null)
     else
       [ -z "$_secret" ] && bad "event_backend=sidecar but lark.app_secret missing" \
         "dev console (open.feishu.cn) → 凭证与基础信息 → copy App Secret into jarvis.yaml lark.app_secret"
-      python3 -c "import lark_oapi" 2>/dev/null || bad "lark_oapi not installed" "pip3 install lark-oapi"
+      python3 -c "import lark_oapi" 2>/dev/null || bad "lark_oapi not installed" "./scripts/python.sh -m pip install lark-oapi"
     fi
   else
     warn "card buttons disabled (event_backend not 'sidecar') — text/emoji fallbacks active" \
@@ -199,7 +232,7 @@ bash -n bot.sh 2>/dev/null && ok "bot.sh syntax OK" || bad "bot.sh syntax error"
 if python3 -m pytest tests/ -q -x --co >/dev/null 2>&1; then
   ok "test suite collects (run: python3 -m pytest tests/ -q)"
 else
-  warn "pytest missing or tests fail to collect" "pip3 install pytest && python3 -m pytest tests/ -q"
+  warn "pytest missing or tests fail to collect" "./scripts/python.sh -m pip install -r requirements-dev.txt && ./scripts/python.sh -m pytest tests/ -q"
 fi
 
 # ── 6. Runtime (only meaningful after first start) ───────────────────
@@ -215,8 +248,17 @@ if pgrep -f "bash.*$JARVIS_DIR/bot\.sh" >/dev/null 2>&1; then
   else
     warn "no heartbeat beat found yet" "wait ~30s after start, then: grep 'Beat sent' jarvis.log | tail -1"
   fi
+  _component_report=$(python3 -m core.components 2>&1) || _component_rc=$?
+  if [ "${_component_rc:-0}" -eq 0 ]; then
+    ok "all configured components healthy"
+  else
+    printf '%s\n' "$_component_report"
+    bad "one or more configured components are unhealthy" \
+        "./scripts/python.sh -m core.components"
+  fi
 else
-  warn "bot not running (fine if you haven't started it)" "./bot.sh  — or for daily use: ./restart.sh"
+  warn "bot not running (fine if you haven't started it)" \
+       "./bot.sh  — supervised macOS installs can use scripts/launchd/install.sh"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────
