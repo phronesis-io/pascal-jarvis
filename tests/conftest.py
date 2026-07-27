@@ -7,6 +7,7 @@ active_sessions.json (which happened before isolation was in place).
 """
 
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -98,8 +99,21 @@ def _isolate_runtime_database(monkeypatch, tmp_path):
     intentions._table_ready = False
 
 
+def _strict_guard() -> bool:
+    """True when the live-bot exemption is disabled (CI-equivalent strictness)."""
+    return str(os.environ.get("JARVIS_TEST_STRICT_GUARD") or "").strip() not in (
+        "", "0", "false", "False")
+
+
+# Mutations the live-bot exemption forgave, reported at the end of the run.
+# Silence here is how a local "all passed" hid a red CI (2026-07-27, PR #12):
+# the exemption is necessary on the production machine, but it must never be
+# invisible — a forgiven write locally is a hard failure on CI.
+_FORGIVEN: list[str] = []
+
+
 @pytest.fixture(autouse=True)
-def _guard_repo_files(_isolate_runtime_database):
+def _guard_repo_files(_isolate_runtime_database, request):
     bot_was_live = _bot_is_running()
     before = {p: _checksum(p) for p in _PROTECTED_FILES}
     yield
@@ -109,17 +123,37 @@ def _guard_repo_files(_isolate_runtime_database):
         if old == new:
             continue
         # A live runtime file changed. If the production bot is running it owns
-        # that write — not the test — so don't fail the suite for it.
-        if p in _LIVE_RUNTIME_FILES:
+        # that write — not the test — so don't fail the suite for it, unless
+        # strict mode asked for exactly the check CI performs.
+        if p in _LIVE_RUNTIME_FILES and not _strict_guard():
             if bot_live is None:
                 bot_live = bot_was_live or _bot_is_running()
             if bot_live:
+                _FORGIVEN.append(f"{p.name}  ({request.node.nodeid})")
                 continue
         raise AssertionError(
             f"PROTECTED FILE MODIFIED BY TEST: {p}\n"
             f"  before: {old}\n  after:  {new}\n"
             f"Check your fixtures — they must use tmp_path, not repo paths."
         )
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Never let a locally-forgiven mutation read as a clean run."""
+    if not _FORGIVEN:
+        return
+    terminalreporter.section("protected-file mutations forgiven", sep="!")
+    terminalreporter.write_line(
+        f"{len(_FORGIVEN)} write(s) to protected runtime files were forgiven "
+        "because the production bot is live on this machine.")
+    for entry in _FORGIVEN[:20]:
+        terminalreporter.write_line(f"  - {entry}")
+    if len(_FORGIVEN) > 20:
+        terminalreporter.write_line(f"  ... and {len(_FORGIVEN) - 20} more")
+    terminalreporter.write_line(
+        "CI has no live bot and applies this check strictly, so these may be "
+        "real failures there. Reproduce with JARVIS_TEST_STRICT_GUARD=1 "
+        "(stop the bot first) before quoting this run as evidence.")
 
 
 @pytest.fixture(autouse=True)
