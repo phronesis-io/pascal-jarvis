@@ -1216,3 +1216,44 @@ def test_parallel_required_steps_keep_parent_executing(tmp_path):
     clock[0] += 31
     assert store.release_expired_leases() == [expired["id"]]
     assert store.get(other["id"])["status"] == "executing"
+
+
+def test_negative_labels_do_not_count_as_connector_coverage(tmp_path):
+    """A declined classification is not a validated connector (2026-07-27).
+
+    `connector_classes` used to be derived from every labeled row, so the two
+    non-connector classifier outcomes — `discussion` and `life_expression` —
+    each counted toward the five-connector promotion gate. Phase 0 could then
+    graduate having exercised only three real connectors.
+    """
+    store = _store(tmp_path)
+
+    def labeled(operation, *, is_delegation):
+        row, _ = store.record_shadow_prediction(
+            principal_id="owner",
+            source="lark",
+            source_ref=f"shadow-{operation}-{is_delegation}",
+            title="shadow",
+            operation=operation,
+            predicted_is_delegation=is_delegation,
+            predicted_target_risk=2 if is_delegation else 0,
+            predicted_verifier="authoritative" if is_delegation else "",
+        )
+        store.label_shadow(
+            row["id"],
+            actual_is_delegation=is_delegation,
+            actual_target_risk=2 if is_delegation else 0,
+            actual_verifier="authoritative" if is_delegation else "",
+        )
+
+    for operation in ("message_send", "git_push", "calendar_upsert"):
+        labeled(operation, is_delegation=True)
+    for operation in ("discussion", "life_expression"):
+        labeled(operation, is_delegation=False)
+
+    metrics = store.shadow_metrics()
+    assert metrics["labeled"] == 5
+    assert metrics["connector_classes"] == [
+        "calendar_upsert", "git_push", "message_send"]
+    assert metrics["connector_class_count"] == 3, (
+        "declining to classify chit-chat must not count as connector coverage")

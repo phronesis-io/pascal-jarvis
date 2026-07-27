@@ -1998,6 +1998,31 @@ class DelegationStore:
                 },
             )
 
+    def unlabeled_shadow(self, *, limit: int = 20) -> list[Any]:
+        """Shadow candidates still awaiting a human label, oldest first.
+
+        Oldest-first matters for the gate: `observation_days` is measured
+        across labeled rows, so reviewing only the newest arrivals would keep
+        the observation window permanently short no matter how many labels
+        accumulate.
+        """
+        with closing(self._connect()) as db:
+            return list(
+                db.execute(
+                    """
+                    SELECT d.id,d.source,d.source_ref,d.operation,d.created_at,
+                           l.predicted_is_delegation,l.predicted_target_risk,
+                           l.predicted_verifier
+                      FROM delegation_shadow_labels l
+                      JOIN delegations d ON d.id=l.delegation_id
+                     WHERE l.actual_is_delegation IS NULL
+                     ORDER BY d.created_at ASC
+                     LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            )
+
     def shadow_metrics(self) -> dict[str, Any]:
         """Return measurable Phase-0 gates; unlabeled rows are kept separate."""
         with closing(self._connect()) as db:
@@ -2055,10 +2080,17 @@ class DelegationStore:
             if len(observed_times) >= 2
             else 0.0
         )
+        # Connector coverage counts only rows a human confirmed ARE
+        # delegations. Counting every labeled row let the two non-connector
+        # outcomes of the classifier — `discussion` and `life_expression` —
+        # each register as a "connector class", so promotion could be reached
+        # with three real connectors exercised instead of five. A negative
+        # label is evidence the classifier declined correctly; it is not
+        # evidence that a connector was validated.
         connector_classes = {
             str(row["operation"] or "")
             for row in rows
-            if str(row["operation"] or "")
+            if row["actual_is_delegation"] and str(row["operation"] or "")
         }
         return {
             "predictions": total_predictions,
