@@ -128,6 +128,123 @@ def capture(
     return prediction, str(row["id"]), created
 
 
+_OPERATION_ZH = {
+    "deploy": "部署",
+    "git_push": "提交/推送代码",
+    "document_update": "写/改文档",
+    "message_send": "替你发消息",
+    "friend_relationship": "处理好友申请",
+    "calendar_upsert": "改日程",
+    "code_change": "改代码",
+    "task_track": "跟踪待办",
+    "discussion": "只是讨论，不是委托",
+    "life_expression": "生活表达，不是委托",
+}
+
+
+def resolve_source_text(source_ref: str, *, root=None) -> str:
+    """Best-effort read-time lookup of what the user actually said.
+
+    Shadow rows deliberately store only a stable reference — the private
+    message body is never copied into the control-plane database. But a
+    reviewer cannot label a reference, and a rubber-stamped label is not
+    evidence. The text is therefore resolved at review time from the local
+    conversation-audit store, read-only, and never persisted anywhere new.
+    Returns "" when it cannot be resolved; the reference is still reviewable
+    by hand.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    root = Path(root) if root else Path(__file__).parent.parent
+    db = root / "data" / "conversation_audit.db"
+    if not source_ref or not db.is_file():
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return ""
+    try:
+        row = conn.execute(
+            "SELECT content FROM conversation_events "
+            "WHERE message_id=? AND content IS NOT NULL AND content!='' "
+            "ORDER BY id DESC LIMIT 1",
+            (source_ref,),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+    return str(row[0]) if row else ""
+
+
+def _predicted_label(row) -> str:
+    operation = str(row["operation"] or "")
+    zh = _OPERATION_ZH.get(operation, operation)
+    if not row["predicted_is_delegation"]:
+        return f"不是委托（{zh}）"
+    return (f"是委托 → {zh}"
+            f"，风险 R{row['predicted_target_risk']}"
+            f"，核验 {row['predicted_verifier'] or '无'}")
+
+
+def render_queue(rows, *, root=None, width: int = 100) -> str:
+    """Human review sheet: one candidate per block, prediction + real text."""
+    if not rows:
+        return "复核队列是空的 —— 所有影子候选都已标注。"
+    from datetime import datetime
+
+    out = []
+    for index, row in enumerate(rows, 1):
+        try:
+            when = datetime.fromtimestamp(
+                float(row["created_at"])).strftime("%m-%d %H:%M")
+        except (TypeError, ValueError):
+            when = "?"
+        text = resolve_source_text(str(row["source_ref"] or ""), root=root)
+        body = " ".join(text.split())
+        if len(body) > width:
+            body = body[:width] + "…"
+        out.append(
+            f"{index}. [{when}] {row['id']}\n"
+            f"   说的是：{body or '（无法解析，参考 ' + str(row['source_ref']) + '）'}\n"
+            f"   我判的：{_predicted_label(row)}"
+        )
+    out.append(
+        "\n判错了就改，判对了照抄：\n"
+        "  python3 -m core.delegation_shadow label --id <ID> "
+        "--is-delegation true|false --risk 0-4 --verifier <verifier|空>"
+    )
+    return "\n".join(out)
+
+
+def render_gate(metrics: dict) -> str:
+    """Distance to the Phase-0 promotion gate, in plain language."""
+    gaps = []
+    labeled = int(metrics.get("labeled") or 0)
+    if labeled < 50:
+        gaps.append(f"人工标注 {labeled}/50")
+    days = float(metrics.get("observation_days") or 0)
+    if days < 14:
+        gaps.append(f"标注跨度 {days:.1f}/14 天")
+    classes = int(metrics.get("connector_class_count") or 0)
+    if classes < 5:
+        covered = "、".join(metrics.get("connector_classes") or []) or "无"
+        gaps.append(f"连接器类 {classes}/5（已覆盖：{covered}）")
+    for key, name in (("precision", "捕获准确率"),
+                      ("high_risk_recall", "高风险召回"),
+                      ("verifier_accuracy", "核验策略准确率")):
+        value = metrics.get(key)
+        if value is not None and float(value) < 0.95:
+            gaps.append(f"{name} {float(value):.0%}/95%")
+    unlabeled = int(metrics.get("predictions") or 0) - labeled
+    head = (f"影子候选 {metrics.get('predictions')} 条，已标注 {labeled} 条，"
+            f"待复核 {unlabeled} 条。")
+    if metrics.get("phase1_ready"):
+        return head + "\n准出门槛已全部满足 —— 是否放行由 Pascal 决定。"
+    return head + "\n还差：" + "；".join(gaps or ["（无标注样本，无法评估）"])
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Delegation shadow capture")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -138,6 +255,9 @@ def _parser() -> argparse.ArgumentParser:
     capture_cmd.add_argument("--matter-id", default="")
     classify_cmd = sub.add_parser("classify")
     classify_cmd.add_argument("--text", default="")
+    queue_cmd = sub.add_parser("queue")
+    queue_cmd.add_argument("--limit", type=int, default=10)
+    sub.add_parser("gate")
     label = sub.add_parser("label")
     label.add_argument("--id", required=True)
     label.add_argument("--is-delegation", choices=("true", "false"), required=True)
@@ -173,6 +293,14 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+    if args.command == "queue":
+        print(render_queue(store.unlabeled_shadow(limit=args.limit)))
+        print()
+        print(render_gate(store.shadow_metrics()))
+        return 0
+    if args.command == "gate":
+        print(render_gate(store.shadow_metrics()))
         return 0
     if args.command == "label":
         store.label_shadow(

@@ -261,6 +261,72 @@ def _check_audit_age(comp: dict, root: Path) -> tuple[bool, str]:
     )
 
 
+def _check_heartbeat_tasks(comp: dict, root: Path) -> tuple[bool, str]:
+    """Task-level heartbeat health — a live process is not a working scheduler.
+
+    On 2026-07-27 between 05:58 and 09:59 the heartbeat process was alive, so
+    the `pgrep` check on heartbeat-loop reported healthy and this manifest read
+    15/15 green — while activity-log failed every run, intention-check had been
+    wedged 11h, and memory-tidy / self-diagnostic had gone 16h / 15h without a
+    success. The daemon's brain-health path did page correctly; the manifest,
+    which PRODUCT.md counts on for "silent component outage duration", did not
+    see it at all.
+
+    This is deliberately not a second detector: it calls the same pure
+    `brain_health.assess` the daemon pages on, with the same inputs, and honors
+    the same persisted post-wake grace so a laptop that just woke does not read
+    red here while the daemon deliberately holds. It never writes brain state —
+    the daemon remains the only owner of that ledger and the only pager.
+    """
+    import time
+    try:
+        from core import brain_health
+        from core.heartbeat import HeartbeatRunner, parse_heartbeat
+        from core.task_protocol import CircuitState
+    except Exception as exc:  # a partial install must not crash the report
+        return False, f"brain-health unavailable ({type(exc).__name__})"
+
+    def _read_json(path: Path) -> dict:
+        try:
+            return json.loads(path.read_text()) or {}
+        except (OSError, ValueError):
+            return {}
+
+    state = _read_json(root / comp.get("path", "heartbeat_state.json"))
+    if not state:
+        return False, "heartbeat state unreadable"
+    tasks = parse_heartbeat(root / "HEARTBEAT.md")
+    if not tasks:
+        return False, "HEARTBEAT.md unreadable"
+    overrides = _read_json(root / "interval_overrides.json")
+    brain = _read_json(root / ".daemon_brain_state.json")
+
+    now = time.time()
+    grace_until = float(brain.get("grace_until", 0) or 0)
+    if now < grace_until:
+        mins = int((grace_until - now) / 60)
+        return True, f"post-wake grace — task ages settle in {mins}min"
+
+    result = brain_health.assess(
+        state=state, tasks=tasks, overrides=overrides,
+        priority_tasks=HeartbeatRunner.PRIORITY_TASKS,
+        prev_samples=brain.get("samples", {}) or {},
+        now=now,
+        failure_threshold=CircuitState.FAILURE_THRESHOLD,
+    )
+    alerts = list(result.get("alerts") or [])
+    if not result.get("brain_dead"):
+        detail = f"{len(tasks)} tasks, none stalled"
+        if alerts:
+            # Sub-threshold starvation: real, but not yet systemic. Say so
+            # rather than printing a bare "none stalled" over the top of it.
+            detail = f"{len(tasks)} tasks, {len(alerts)} lagging (below alert threshold)"
+        return True, detail
+    shown = "；".join(alerts[:3])
+    more = f"（还有 {len(alerts) - 3} 个）" if len(alerts) > 3 else ""
+    return False, f"{len(alerts)} 个心跳任务停摆：{shown}{more}"[:400]
+
+
 def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
     label = comp.get("label", "")
     try:
@@ -315,6 +381,7 @@ _CHECKS = {
     "http": _check_http,
     "file_age": _check_file_age,
     "audit_age": _check_audit_age,
+    "heartbeat_tasks": _check_heartbeat_tasks,
     "launchctl": _check_launchctl,
     "tailnet": _check_tailnet,
     "taskline": _check_taskline,
