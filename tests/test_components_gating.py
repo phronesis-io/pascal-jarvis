@@ -290,7 +290,7 @@ def test_launchd_installer_skips_optional_taskline_before_bootstrap():
     guard = script.index(
         '[[ "$label" == "com.pascal.jarvis.taskline"'
     )
-    bootstrap = script.index("launchctl bootstrap")
+    bootstrap = script.index("bootstrap_launchd_job", guard)
 
     assert guard < bootstrap
     assert "optional Taskline binary not installed" in script

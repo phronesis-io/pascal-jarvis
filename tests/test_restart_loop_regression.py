@@ -171,6 +171,147 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
     assert "bootstrap " in calls
 
 
+def test_launchd_installer_retries_transient_bootstrap_eio(tmp_path):
+    """macOS can return EIO briefly after bootout; retry only that signature."""
+    home = tmp_path / "home"
+    destination = home / "Library" / "LaunchAgents"
+    destination.mkdir(parents=True)
+    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed.write_text("previous definition\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    state = tmp_path / "state"
+    state.write_text("loaded\n", encoding="utf-8")
+    bootstrap_count = tmp_path / "bootstrap-count"
+    launchctl = bin_dir / "launchctl"
+    launchctl.write_text(
+        """#!/bin/sh
+case "$1" in
+  print)
+    if grep -q '^loaded$' "$SERVICE_STATE"; then
+      echo 'state = running'
+      exit 0
+    fi
+    echo 'Could not find service' >&2
+    exit 1
+    ;;
+  bootout)
+    printf 'unloaded\n' > "$SERVICE_STATE"
+    ;;
+  bootstrap)
+    count=0
+    [ ! -f "$BOOTSTRAP_COUNT" ] || count=$(cat "$BOOTSTRAP_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$BOOTSTRAP_COUNT"
+    if [ "$count" -eq 1 ]; then
+      echo 'Bootstrap failed: 5: Input/output error' >&2
+      exit 5
+    fi
+    printf 'loaded\n' > "$SERVICE_STATE"
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SERVICE_STATE": str(state),
+        "BOOTSTRAP_COUNT": str(bootstrap_count),
+        "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_BOOTSTRAP_INTERVAL": "0",
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "launchd" / "install.sh"),
+            "com.pascal.jarvis.dashboard",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert bootstrap_count.read_text(encoding="utf-8").strip() == "2"
+    assert installed.read_text(encoding="utf-8") != "previous definition\n"
+    assert state.read_text(encoding="utf-8") == "loaded\n"
+
+
+def test_launchd_installer_does_not_retry_other_error_codes(tmp_path):
+    home = tmp_path / "home"
+    destination = home / "Library" / "LaunchAgents"
+    destination.mkdir(parents=True)
+    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed.write_text("previous definition\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    state = tmp_path / "state"
+    state.write_text("loaded\n", encoding="utf-8")
+    bootstrap_count = tmp_path / "bootstrap-count"
+    launchctl = bin_dir / "launchctl"
+    launchctl.write_text(
+        """#!/bin/sh
+case "$1" in
+  print)
+    grep -q '^loaded$' "$SERVICE_STATE" || exit 1
+    echo 'state = running'
+    ;;
+  bootout)
+    printf 'unloaded\n' > "$SERVICE_STATE"
+    ;;
+  bootstrap)
+    count=0
+    [ ! -f "$BOOTSTRAP_COUNT" ] || count=$(cat "$BOOTSTRAP_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$BOOTSTRAP_COUNT"
+    if [ "$count" -eq 1 ]; then
+      echo 'Bootstrap failed: 55: unsupported operation' >&2
+      exit 55
+    fi
+    printf 'loaded\n' > "$SERVICE_STATE"
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SERVICE_STATE": str(state),
+        "BOOTSTRAP_COUNT": str(bootstrap_count),
+        "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_BOOTSTRAP_INTERVAL": "0",
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "launchd" / "install.sh"),
+            "com.pascal.jarvis.dashboard",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert bootstrap_count.read_text(encoding="utf-8").strip() == "2"
+    assert installed.read_text(encoding="utf-8") == "previous definition\n"
+    assert state.read_text(encoding="utf-8") == "loaded\n"
+
+
 def test_launchd_installer_rejects_unknown_requested_definition(tmp_path):
     env = {**os.environ, "HOME": str(tmp_path)}
     result = subprocess.run(
@@ -301,6 +442,81 @@ esac
     assert "previous state restored" in result.stderr
     calls = launchctl_log.read_text(encoding="utf-8")
     assert calls.count("bootstrap ") == 2
+
+
+def test_launchd_installer_retries_transient_eio_during_rollback(tmp_path):
+    home = tmp_path / "home"
+    destination = home / "Library" / "LaunchAgents"
+    destination.mkdir(parents=True)
+    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed.write_text("previous definition\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    state = tmp_path / "state"
+    state.write_text("loaded\n", encoding="utf-8")
+    bootstrap_count = tmp_path / "bootstrap-count"
+    launchctl = bin_dir / "launchctl"
+    launchctl.write_text(
+        """#!/bin/sh
+case "$1" in
+  print)
+    grep -q '^loaded$' "$SERVICE_STATE" || exit 1
+    echo 'state = running'
+    ;;
+  bootout)
+    printf 'unloaded\n' > "$SERVICE_STATE"
+    ;;
+  bootstrap)
+    count=0
+    [ ! -f "$BOOTSTRAP_COUNT" ] || count=$(cat "$BOOTSTRAP_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$BOOTSTRAP_COUNT"
+    case "$count" in
+      1)
+        echo 'Bootstrap failed: 9: Operation not permitted' >&2
+        exit 9
+        ;;
+      2)
+        echo 'Bootstrap failed: 5: Input/output error' >&2
+        exit 5
+        ;;
+    esac
+    printf 'loaded\n' > "$SERVICE_STATE"
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SERVICE_STATE": str(state),
+        "BOOTSTRAP_COUNT": str(bootstrap_count),
+        "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_BOOTSTRAP_INTERVAL": "0",
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "launchd" / "install.sh"),
+            "com.pascal.jarvis.dashboard",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert bootstrap_count.read_text(encoding="utf-8").strip() == "3"
+    assert installed.read_text(encoding="utf-8") == "previous definition\n"
+    assert state.read_text(encoding="utf-8") == "loaded\n"
+    assert "previous state restored" in result.stderr
 
 
 def test_launchd_installer_reports_an_incomplete_file_recovery(tmp_path):
