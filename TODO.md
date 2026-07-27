@@ -1,7 +1,9 @@
 # Jarvis Roadmap
 
-> **Current release: v1.6.0 (2026-07-15)** — see `CHANGELOG.md` for the full
-> release history. Active PRD cycle: v4 REQ-78+.
+> **Current release: v1.7.0 (2026-07-27)** — see `CHANGELOG.md` for the full
+> release history. `docs/prd_portfolio.md` is the authority on which PRDs are
+> shipped, superseded, rejected, or active; `docs/release_acceptance_2026-07-24.md`
+> is the requirement-to-evidence ledger.
 
 ## Done (2026-06-15 wave — REQ-59~77, v1.0.0 — see docs/prd_interaction_v3.md)
 

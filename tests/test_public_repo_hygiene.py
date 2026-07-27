@@ -172,3 +172,31 @@ def test_no_personal_life_markers_in_tracked_files():
             if m in text:
                 offenders.append(f"{path.relative_to(ROOT)}: {m}")
     assert offenders == []
+
+
+def test_release_version_is_stated_consistently():
+    """VERSION, the newest CHANGELOG entry, and the README banner must agree.
+
+    Three files independently state the shipped version, and nothing checked
+    them against each other: at v1.7.0 prep the README still advertised
+    v1.6.0 with a rounded "2200+ tests" while 76 commits sat unreleased.
+    """
+    import re
+
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+        f"VERSION is not semver: {version!r}")
+
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    newest = re.search(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.M)
+    assert newest, "CHANGELOG.md has no versioned entry"
+    assert newest.group(1) == version, (
+        f"VERSION says {version} but the newest CHANGELOG entry is "
+        f"{newest.group(1)} — a release note was written without a bump, or "
+        "the other way around")
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    banner = re.search(r"\*\*Release: `v(\d+\.\d+\.\d+)`", readme)
+    assert banner, "README.md has no **Release: `vX.Y.Z`** banner"
+    assert banner.group(1) == version, (
+        f"VERSION says {version} but README advertises v{banner.group(1)}")
