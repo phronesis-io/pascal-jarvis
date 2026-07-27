@@ -149,8 +149,10 @@ def _archive_old_daily_entries(today_str: str) -> None:
     with DAILY_ARCHIVE.open("a", encoding="utf-8") as f:
         f.write("".join(archive))
 
-    # Rewrite daily_log with only recent entries
-    DAILY_LOG.write_text("".join(keep), encoding="utf-8")
+    # Rewrite daily_log with only recent entries (atomic)
+    tmp = DAILY_LOG.with_suffix(".tmp")
+    tmp.write_text("".join(keep), encoding="utf-8")
+    os.replace(tmp, DAILY_LOG)
     print(f"[memory] Archived {len(archive)} old entries from daily_log", file=sys.stderr)
 
 

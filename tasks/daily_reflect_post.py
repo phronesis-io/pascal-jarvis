@@ -74,6 +74,12 @@ def main():
     source="daily-reflect",
 ))
 
+    # Stamp today so the pre-script skips on restart (dedup)
+    jarvis_dir = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
+    stamp = jarvis_dir / "data" / ".daily_reflect_stamp"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(now_local_str("%Y-%m-%d"), encoding="utf-8")
+
 
 if __name__ == "__main__":
     main()

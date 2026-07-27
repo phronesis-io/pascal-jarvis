@@ -183,7 +183,10 @@ def log(level: str, msg: str):
             f.write(line)
         if LOG_FILE.stat().st_size > 200_000:
             lines = LOG_FILE.read_text().splitlines()
-            LOG_FILE.write_text("\n".join(lines[-500:]) + "\n")
+            trimmed = "\n".join(lines[-500:]) + "\n"
+            tmp = LOG_FILE.with_suffix(".tmp")
+            tmp.write_text(trimmed)
+            os.replace(tmp, LOG_FILE)
     except Exception:
         pass
 
@@ -1102,8 +1105,10 @@ def _check_diag_staleness():
                     + ("\n…（其余略）" if len(warnings) > 12 else "")
                     + "\n（同样的问题一天最多提醒一次）")
         try:
-            DIAG_ALERT_STAMP.write_text(json.dumps(
+            tmp = DIAG_ALERT_STAMP.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
                 {"ts": now, "lines": warnings[:20]}, ensure_ascii=False))
+            os.replace(tmp, DIAG_ALERT_STAMP)
         except OSError:
             pass
     except Exception as e:
@@ -1358,7 +1363,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
             return "shutdown during restart wait"
         time.sleep(1)
     post_check = check_health()
-    if post_check["healthy"]:
+    if post_check["healthy"] and "note" not in post_check:
         msg = f"Auto-restart successful (attempt {restart_count})"
         log("INFO", msg)
         notify_lark(f"✅ Jarvis was down. {msg}.\n\nOriginal issues:\n" +

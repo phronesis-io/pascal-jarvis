@@ -81,7 +81,8 @@ def _fetch_new(secret: dict, folder: str, since_uid: int,
     port = int(secret.get("imap_port", 993))
     try:
         M = imaplib.IMAP4_SSL(host, port,
-                              ssl_context=ssl.create_default_context())
+                              ssl_context=ssl.create_default_context(),
+                              timeout=_CONNECT_TIMEOUT)
         M.socket().settimeout(_CONNECT_TIMEOUT)
     except Exception:
         raise RuntimeError("connect")

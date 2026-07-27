@@ -27,17 +27,22 @@ def main() -> int:
     ts = now_local_str("%Y-%m-%d %H:%M")
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Backup previous digest
+    # Backup previous digest (atomic)
     if LONGTERM.exists() and LONGTERM.stat().st_size > 0:
-        LONGTERM_BAK.write_text(LONGTERM.read_text(encoding="utf-8"))
+        tmp_bak = LONGTERM_BAK.with_suffix(".tmp")
+        tmp_bak.write_text(LONGTERM.read_text(encoding="utf-8"), encoding="utf-8")
+        os.replace(tmp_bak, LONGTERM_BAK)
 
     # Archive daily log
     if DAILY_LOG.exists() and DAILY_LOG.stat().st_size > 0:
         with DAILY_ARCHIVE.open("a", encoding="utf-8") as f:
             f.write(f"\n# Archived {ts}\n{DAILY_LOG.read_text(encoding='utf-8')}\n")
 
-    # Write new digest
-    LONGTERM.write_text(f"# Long-term Digest\nLast updated: {ts}\n\n{summary}\n")
+    # Write new digest (atomic)
+    tmp_lt = LONGTERM.with_suffix(".tmp")
+    tmp_lt.write_text(f"# Long-term Digest\nLast updated: {ts}\n\n{summary}\n",
+                      encoding="utf-8")
+    os.replace(tmp_lt, LONGTERM)
     DAILY_LOG.write_text("")
     print("[memory] Weekly digest updated, daily archived + cleared.", file=sys.stderr)
     return 0

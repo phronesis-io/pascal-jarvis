@@ -134,12 +134,16 @@ def _mark_surfaced(now: float | None = None) -> None:
 
 
 def run_eigenflux(*args: str, stdin_data: str | None = None) -> dict:
-    result = subprocess.run(
-        ["eigenflux", *args, "-f", "json"],
-        capture_output=True, text=True,
-        env={**os.environ, "PATH": PATH},
-        input=stdin_data,
-    )
+    try:
+        result = subprocess.run(
+            ["eigenflux", *args, "-f", "json"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PATH": PATH},
+            input=stdin_data,
+        )
+    except subprocess.TimeoutExpired:
+        print("[eigenflux-feed] CLI timeout after 60s", file=LOG)
+        return {}
     if result.returncode != 0:
         print(f"[eigenflux-feed] CLI error: {result.stderr.strip()}", file=LOG)
         return {}
@@ -214,25 +218,6 @@ def main() -> int:
             except Exception:
                 print("[eigenflux-feed] feedback submission failed:", file=LOG)
                 traceback.print_exc(file=LOG)
-
-    # Queue items flagged for deep research
-    research_queue = JARVIS_DIR / "eigenflux" / "needs_research.jsonl"
-    research_queue.parent.mkdir(parents=True, exist_ok=True)
-    queued = 0
-    for item in fb:
-        if item.get("needs_research") and item.get("action") == "hold" and int(item.get("score", 0)) >= 1:
-            from datetime import datetime, timezone
-            entry = {
-                "item_id": str(item["item_id"]),
-                "queued_at": datetime.now(timezone.utc).isoformat(),
-                "score": int(item["score"]),
-                "reason": item.get("reason", ""),
-            }
-            with open(research_queue, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            queued += 1
-    if queued:
-        print(f"[eigenflux-feed] {queued} items queued for research", file=LOG)
 
     # Output user message as a Lark card. Render the FULL message inline (no
     # truncation) and link "阅读原文" to the public source — not a localhost

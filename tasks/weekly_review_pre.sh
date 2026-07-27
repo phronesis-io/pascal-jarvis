@@ -10,6 +10,13 @@ if [ "$dow" -ne 7 ] || [ "$hour" -lt 10 ] || [ "$hour" -ge 12 ]; then
   exit 0
 fi
 
+# Dedup: skip if already succeeded this week (prevents double-fire on restart)
+_stamp="$JARVIS_DIR/data/.weekly_review_stamp"
+_this_week=$(date +%Y-W%V)
+if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$_this_week" ]; then
+  exit 0
+fi
+
 echo "=== WEEKLY REVIEW: $(date '+%Y-%m-%d') ==="
 echo ""
 

@@ -551,7 +551,9 @@ def _process(raw: str) -> int:
     index_content = data.get("index_update", "")
     if index_content and len(index_content) > 50:
         index_content = _verify_index(index_content, INDEX_FILE.parent)
-        INDEX_FILE.write_text(index_content)
+        tmp = INDEX_FILE.with_suffix(".tmp")
+        tmp.write_text(index_content, encoding="utf-8")
+        os.replace(tmp, INDEX_FILE)
         print(f"[memory-tidy] Updated _index.md", file=sys.stderr)
 
     actions = data.get("actions_taken", [])

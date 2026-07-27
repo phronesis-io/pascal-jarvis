@@ -57,11 +57,11 @@ command -v node >/dev/null 2>&1 \
   || warn "node/npm not found — needed to install claude CLI and lark-cli" \
           "brew install node / apt install nodejs npm"
 
-if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
-  ok "coreutils timeout available"
+if [ -f "$JARVIS_DIR/scripts/run_with_timeout.py" ]; then
+  ok "portable timeout runner available"
 else
-  warn "no coreutils timeout (macOS default) — bash fallback will be used" \
-       "optional: brew install coreutils"
+  bad "portable timeout runner missing" \
+      "restore scripts/run_with_timeout.py from the repository"
 fi
 
 # Gate for python-based checks below: without python3+pyyaml every probe in

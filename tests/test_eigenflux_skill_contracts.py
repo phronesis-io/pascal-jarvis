@@ -6,6 +6,7 @@ docs are therefore runtime behavior, not passive README text.
 """
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -116,3 +117,15 @@ def test_skill_overlay_is_deterministic_and_replaces_old_copy():
 def test_skill_overlay_rejects_incomplete_existing_markers():
     with pytest.raises(ValueError, match="marker pair"):
         render(f"# Skill\n\n{BEGIN}\nold content\n", "new content")
+
+
+def test_preinstall_verifier_references_only_live_test_files():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+    references = re.findall(
+        r'\$JARVIS_DIR/tests/([A-Za-z0-9_./-]+\.py)', script)
+
+    assert references
+    missing = [name for name in references if not (ROOT / "tests" / name).is_file()]
+    assert missing == []
+    assert "test_eigenflux_messages.py" in references

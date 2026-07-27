@@ -118,8 +118,10 @@ def filter_anomalies(jarvis_dir: Path, records: list[dict]) -> list[dict]:
     if changed:
         try:
             mdir.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(state, ensure_ascii=False),
-                                  encoding="utf-8")
+            tmp = state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, state_path)
         except OSError:
             pass
     return kept
@@ -193,8 +195,10 @@ def detect_absences(jarvis_dir: Path, now: datetime) -> list[dict]:
     if absences:
         try:
             mdir.mkdir(parents=True, exist_ok=True)
-            marker_path.write_text(json.dumps(marker, ensure_ascii=False),
-                                   encoding="utf-8")
+            tmp = marker_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(marker, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, marker_path)
         except OSError:
             pass
     return absences

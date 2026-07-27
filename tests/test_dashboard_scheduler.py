@@ -396,6 +396,7 @@ class TestSpacedRepetitionLocalTime(SchedulerDBTest):
 class TestDbPathResolution:
     def test_jarvis_dir_honored_at_call_time(self, tmp_path, monkeypatch):
         monkeypatch.setattr(db_module, "DB_PATH", db_module._DEFAULT_DB_PATH)
+        monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
         monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
         assert db_module._db_path() == tmp_path / "data" / "jarvis.db"
 
@@ -418,6 +419,7 @@ class TestDbPathResolution:
 
     def test_get_db_creates_under_jarvis_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(db_module, "DB_PATH", db_module._DEFAULT_DB_PATH)
+        monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
         monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
         old_conn, db_module._connection = db_module._connection, None
         try:

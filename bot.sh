@@ -703,6 +703,12 @@ Job not found or not running: $cancel_id"
 
       job_output)
         local out_id="${action_params#id=}"
+        # Path traversal guard: job IDs are alphanumeric + dashes only
+        if [[ ! "$out_id" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+          log_warn "[action] Invalid job_output id: ${out_id:0:40}"
+          action_results="${action_results}
+Invalid job ID."
+        else
         local out_file="$JOBS_DIR/${out_id}/output.md"
         if [ -f "$out_file" ]; then
           local out_content
@@ -717,6 +723,7 @@ ${out_content}"
         else
           action_results="${action_results}
 No output found for job: $out_id"
+        fi
         fi
         ;;
 
@@ -746,8 +753,14 @@ No output found for job: $out_id"
 # Same-session messages serialize via the existing lock file mechanism.
 handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
-  local reaction_id="$5" chat_type="${6:-p2p}" sender_id="${7:-}"
+  local reaction_id="$5" chat_type="${6:-unknown}" sender_id="${7:-}"
   local _raw_user_content="$content"
+  local prompt_chat_type="$chat_type"
+  local is_owner_p2p=0
+  if [ "$chat_type" = "p2p" ] && [ -n "$sender_id" ] \
+      && [ "$sender_id" = "$USER_ID" ]; then
+    is_owner_p2p=1
+  fi
 
   # ── Group chat mode (REQ-100~102) ──────────────────────────────────
   # A group session is visible to and drivable by non-owners: it gets the
@@ -781,6 +794,19 @@ handle_message() {
     [ "$sender_id" = "$USER_ID" ] && speaker="${OWNER_NAME:-主人}（主人）"
     content="[发言人: $speaker]
 $content"
+  fi
+
+  # ── Non-owner p2p: same tool restriction as groups ──────────────────
+  # Anyone in the Lark org can DM the bot. Without this gate, a non-owner
+  # p2p message gets full Bash/file access via --dangerously-skip-permissions.
+  if [ "$chat_type" = "p2p" ] && [ "$is_owner_p2p" -eq 0 ]; then
+    # Keep direct-message delivery semantics, but build the same
+    # privacy-bounded prompt used for shared conversations.
+    is_group=1
+    prompt_chat_type="external_p2p"
+    claude_tool_flags=(--allowedTools "WebSearch" --disallowedTools "Bash,Edit,Write,NotebookEdit,Read,Glob,Grep,Agent,Skill,WebFetch,TaskCreate,TaskUpdate")
+    openai_fallback_flags=(--no-tools)
+    allow_actions=0
   fi
 
   # Delegation Phase-0 shadow capture: precision-first and side-effect free.
@@ -819,7 +845,7 @@ $content"
   fi
   local sys_prompt
   sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
-    JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$chat_type" \
+    JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
     JV_MEM_MAX="$_mem_budget" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
@@ -2076,6 +2102,14 @@ except:
       fi
 
       [ -z "$content" ] || [ -z "$message_id" ] && continue
+      if [ "$chat_type" = "p2p" ] && [ -z "$sender_id" ]; then
+        log_warn "P2P message missing sender_id — refusing private dispatch"
+        continue
+      fi
+      _owner_p2p=0
+      if [ "$chat_type" = "p2p" ] && [ "$sender_id" = "$USER_ID" ]; then
+        _owner_p2p=1
+      fi
 
       # ── Dedup: skip if same message_id seen within 10s (Lark sometimes delivers twice) ──
       _dedup_file="/tmp/jarvis-last-msg"
@@ -2436,7 +2470,7 @@ print(content)
       # where the memorial context is never injected (red-team 7/21).
       if { [ -n "$_root_id" ] && [ "$_root_id" != "null" ]; } || \
          { [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; }; then
-        if [ "$chat_type" = "p2p" ]; then
+        if [ "$_owner_p2p" -eq 1 ]; then
           _mem_route=$(JV_ROOT="$_root_id" JV_PARENT="$_parent_id" \
             JARVIS_DIR="$JARVIS_DIR" python3 -m core.memorial_thread route \
             2>>"$LOG_FILE")
@@ -2456,9 +2490,9 @@ print(content)
       # REQ-102: inline commands (broadcast confirm, stop/cancel) are
       # owner-only in groups — a non-owner's 「发」/「stop」 is just chat and
       # falls through to the LLM path.
-      _inline_cmd_ok=1
-      if [ "$chat_type" != "p2p" ] && [ -n "$chat_type" ] && [ "$sender_id" != "$USER_ID" ]; then
-        _inline_cmd_ok=0
+      _inline_cmd_ok=0
+      if [ -n "$sender_id" ] && [ "$sender_id" = "$USER_ID" ]; then
+        _inline_cmd_ok=1
       fi
 
       # Explicit Matter commands are deterministic and do not spend a model
@@ -2525,7 +2559,18 @@ except Exception:
         if [ -f "$_stop_lock" ]; then
           # Lock format is "<pid> <token>" — take the first field
           _stop_pid=$(awk '{print $1}' "$_stop_lock" 2>/dev/null)
-          if [ -n "$_stop_pid" ] && kill -0 "$_stop_pid" 2>/dev/null; then
+          # Validate PID is numeric and is a descendant of this bot.sh ($$)
+          # before killing — guards against PID reuse and corrupted lock files.
+          _stop_safe=0
+          if [ -n "$_stop_pid" ] && [[ "$_stop_pid" =~ ^[0-9]+$ ]] && kill -0 "$_stop_pid" 2>/dev/null; then
+            _walk_pid="$_stop_pid"
+            while [ "$_walk_pid" -gt 1 ] 2>/dev/null; do
+              [ "$_walk_pid" = "$$" ] && { _stop_safe=1; break; }
+              _walk_pid=$(ps -o ppid= -p "$_walk_pid" 2>/dev/null | tr -d ' ')
+              [ -z "$_walk_pid" ] && break
+            done
+          fi
+          if [ "$_stop_safe" -eq 1 ]; then
             pkill -TERM -P "$_stop_pid" 2>/dev/null || true
             kill "$_stop_pid" 2>/dev/null || true
             sleep 1
@@ -2534,6 +2579,8 @@ except Exception:
               kill -KILL "$_stop_pid" 2>/dev/null || true
             fi
             log_info "[$_stop_sid] Killed by user (PID $_stop_pid)"
+          else
+            log_warn "[$_stop_sid] Stale/foreign PID $_stop_pid in lock — refusing to kill"
           fi
           rm -f "$_stop_lock"
           lark_reply_text "$message_id" "Stopped. Session is free now." >/dev/null
@@ -2626,7 +2673,7 @@ if old_sid:
       # Groups excluded: a non-owner member's message must not be recorded as
       # the owner's response to the last proactive send — that would inflate
       # engagement scores and confuse the checkin cadence (red-team catch). ──
-      if [ "$chat_type" = "p2p" ]; then
+      if [ "$_owner_p2p" -eq 1 ]; then
         python3 -m core.engagement "$content" >/dev/null 2>>"$LOG_FILE" &
       fi
 

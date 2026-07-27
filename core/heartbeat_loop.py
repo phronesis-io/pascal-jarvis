@@ -18,6 +18,7 @@ The loop:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -968,6 +969,7 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
         sent_ids = list(_LAST_SENT_IDS[sent_id_start:])
         del _LAST_SENT_IDS[sent_id_start:]
         with open(jarvis_dir / "engagement_log.jsonl", "a", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
             for source in sorted({e.get("source", "memorial") for e in delivered}):
                 row = {"ts": ts, "source": source, "type": "sent",
                        "via": "memorial-card-queue", "epoch": epoch}
@@ -979,6 +981,7 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
                 if sent_ids:
                     row["message_ids"] = sent_ids
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fcntl.flock(f, fcntl.LOCK_UN)
         sched_emit(jarvis_dir, "batch_flush", count=len(delivered),
                    sources=sorted({e.get("source", "memorial") for e in delivered}),
                    carrier="memorial-card", deferred_len_cap=len(deferred), dropped=0)
@@ -1265,7 +1268,9 @@ def _write_outbox(output: str, jarvis_dir: Path):
         text_json = json.dumps(str(readable))
     entry = f'{{"role":"assistant","text":{text_json},"ts":"{ts}","source":"heartbeat"}}\n'
     with open(jarvis_dir / "heartbeat_outbox.jsonl", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(entry)
+        fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _record_engagement(jarvis_dir: Path):
@@ -1285,6 +1290,7 @@ def _record_engagement(jarvis_dir: Path):
 
     elog = jarvis_dir / "engagement_log.jsonl"
     with open(elog, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         for src in sources.split(","):
             src = src.strip()
             # Never log a "sent" for a SILENT source (REQ-61): in a MIXED cycle
@@ -1299,6 +1305,7 @@ def _record_engagement(jarvis_dir: Path):
                     # join key for read-receipt events (REQ-15)
                     entry["message_ids"] = sent_ids
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        fcntl.flock(f, fcntl.LOCK_UN)
 
     # Back-fill the intent card ledger (REQ-34B): intentions_post recorded
     # which intent ids this cycle's card covers; now that the real Lark
@@ -1383,7 +1390,6 @@ def _trim_file(path: Path, max_lines: int):
     window from the whole trim to nothing for flock-takers and ~ms for the
     unlocked jq appenders.
     """
-    import fcntl
     if not path.exists():
         return
     try:
@@ -1778,12 +1784,11 @@ if __name__ == "__main__":
     # double-process intents. An exclusive flock held for process lifetime
     # makes the second instance exit immediately — harmless no matter who
     # spawned it. The fd is intentionally leaked (kept open until exit).
-    import fcntl as _fcntl
     _lock_path = os.path.join(jarvis_dir, "data", ".heartbeat_loop.lock")
     try:
         os.makedirs(os.path.dirname(_lock_path), exist_ok=True)
         _lock_fd = open(_lock_path, "w")
-        _fcntl.flock(_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _lock_fd.write(str(os.getpid()))
         _lock_fd.flush()
     except OSError:

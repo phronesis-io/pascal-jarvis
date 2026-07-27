@@ -89,7 +89,11 @@ def publish(
 
 def get_view(view_id: str) -> dict | None:
     """Load a view by ID. Returns None if expired or missing."""
+    if not view_id or ".." in view_id or "/" in view_id or "\\" in view_id:
+        return None
     view_file = VIEWS_DIR / f"{view_id}.json"
+    if not view_file.resolve().is_relative_to(VIEWS_DIR.resolve()):
+        return None
     if not view_file.exists():
         return None
     view = json.loads(view_file.read_text())

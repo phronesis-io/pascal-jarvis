@@ -199,22 +199,198 @@ def test_eigenflux_cancel_publish_action(tmp_path):
 
 
 def test_intent_create(tmp_path):
-    """Intent create should not crash even without the DB (graceful error).
-
-    create_intent writes to the real intentions DB (dashboard.db is path-fixed),
-    so this test self-cleans the row it creates — otherwise every run leaves a
-    junk 'test' intent in live data.
-    """
-    import re as _re
-    from core import intentions as _mod
+    """Intent creation uses the test-isolated runtime database."""
     ap = _make_processor(tmp_path)
     reply = "[ACTION:intent_create|name=test|when=2026-01-01T09:00:00|type=date|prompt=hello]"
     result = ap.process(reply)
-    # Should produce either success or graceful error, not crash
-    assert "Intent" in result or "❌" in result
-    m = _re.search(r"id:\s*(int_\w+)", result)
-    if m:
-        _mod.delete_intent(m.group(1))
+    assert "Intent" in result
+    assert "❌" not in result
+
+
+class _CmdResult:
+    """Fake subprocess.CompletedProcess for monkeypatching subprocess.run."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _fake_primary_calendar(cmd, calendar_id="cal_primary_1"):
+    """Return a success Result for a `calendars primary` lookup, else None."""
+    if cmd[:4] == ["lark-cli", "calendar", "calendars", "primary"]:
+        return _CmdResult(0, stdout=json.dumps({
+            "data": {"calendars": [{"calendar": {"calendar_id": calendar_id}}]}
+        }))
+    return None
+
+
+def test_run_cmd_reports_failure_on_nonzero_exit_with_empty_stdout(monkeypatch):
+    """lark-cli's real failure shape: nonzero exit, empty stdout, error on
+    stderr. A caller that only checked stdout for the string FAILED would
+    treat this as success (this was the actual bug)."""
+    from core.actions import _run_cmd
+
+    monkeypatch.setattr(
+        "core.actions.subprocess.run",
+        lambda *a, **kw: _CmdResult(2, stdout="", stderr='{"error":"invalid_argument"}'),
+    )
+    result = _run_cmd(["lark-cli", "calendar", "events", "delete"])
+    assert result.startswith("FAILED")
+    assert "invalid_argument" in result
+
+
+def test_run_cmd_success_ignores_returncode_zero():
+    from core.actions import _run_cmd
+    import core.actions as actions_mod
+
+    result = actions_mod._run_cmd(["true"])
+    assert not result.startswith("FAILED")
+
+
+def test_calendar_delete_reports_failure_instead_of_false_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+
+    def fake_run(cmd, **kw):
+        r = _fake_primary_calendar(cmd)
+        if r is not None:
+            return r
+        assert cmd[:4] == ["lark-cli", "calendar", "events", "delete"]
+        return _CmdResult(2, stdout="", stderr='{"error":{"message":"invalid calendar_id"}}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_delete("event_id=evt1|title=Standup")
+    assert "❌" in result
+    assert "已删除" not in result
+
+
+def test_calendar_delete_passes_resolved_primary_calendar_id(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = _fake_primary_calendar(cmd)
+        if r is not None:
+            return r
+        return _CmdResult(0, stdout="{}")
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_delete("event_id=evt1|title=Standup")
+    assert result == "✅ 已删除日程: Standup"
+    delete_call = next(c for c in calls if "delete" in c)
+    assert "--calendar-id" in delete_call
+    assert delete_call[delete_call.index("--calendar-id") + 1] == "cal_primary_1"
+
+
+def test_calendar_delete_honors_explicit_calendar_id_param(monkeypatch, tmp_path):
+    """An optional calendar_id in the marker (e.g. a shared, non-primary
+    calendar) should be used as-is without resolving the primary calendar."""
+    ap = _make_processor(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _CmdResult(0, stdout="{}")
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    ap._do_calendar_delete("event_id=evt1|title=Standup|calendar_id=shared_cal_9")
+    assert len(calls) == 1  # no primary-calendar lookup needed
+    delete_call = calls[0]
+    assert delete_call[delete_call.index("--calendar-id") + 1] == "shared_cal_9"
+
+
+def test_calendar_update_reports_failure_instead_of_false_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+
+    def fake_run(cmd, **kw):
+        r = _fake_primary_calendar(cmd)
+        if r is not None:
+            return r
+        assert cmd[:4] == ["lark-cli", "calendar", "events", "patch"]
+        return _CmdResult(1, stdout="", stderr='{"error":"token expired"}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_update("event_id=evt1|field=summary|value=新标题")
+    assert "❌" in result
+    assert "已更新" not in result
+
+
+def test_calendar_update_passes_resolved_primary_calendar_id(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        r = _fake_primary_calendar(cmd)
+        if r is not None:
+            return r
+        return _CmdResult(0, stdout="{}")
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_update("event_id=evt1|field=summary|value=新标题")
+    assert result == "✅ 已更新日程: summary → 新标题"
+    patch_call = next(c for c in calls if "patch" in c)
+    assert "--calendar-id" in patch_call
+    assert patch_call[patch_call.index("--calendar-id") + 1] == "cal_primary_1"
+
+
+def test_primary_calendar_id_resolved_once_per_processor(monkeypatch, tmp_path):
+    """Two calendar actions in the same reply should only look up the
+    primary calendar once (instance-level cache)."""
+    ap = _make_processor(tmp_path)
+    primary_lookups = []
+
+    def fake_run(cmd, **kw):
+        r = _fake_primary_calendar(cmd)
+        if r is not None:
+            primary_lookups.append(cmd)
+            return r
+        return _CmdResult(0, stdout="{}")
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    ap._do_calendar_update("event_id=evt1|field=summary|value=x")
+    ap._do_calendar_delete("event_id=evt2|title=y")
+    assert len(primary_lookups) == 1
+
+
+def test_calendar_create_reports_failure_reason_instead_of_false_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["lark-cli", "calendar", "+freebusy"]:
+            return _CmdResult(0, stdout='{"busy": false}')
+        assert cmd[:3] == ["lark-cli", "calendar", "+create"]
+        return _CmdResult(3, stdout="", stderr='{"error":"quota exceeded"}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_create(
+        "title=评审会|start=2026-08-01T10:00:00|end=2026-08-01T11:00:00"
+    )
+    assert result.startswith("❌ 日程创建失败")
+    assert "quota exceeded" in result
+
+
+def test_task_create_reports_failure_instead_of_false_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    monkeypatch.setattr(
+        "core.actions.subprocess.run",
+        lambda *a, **kw: _CmdResult(1, stdout="", stderr='{"error":"unauthorized"}'),
+    )
+    result = ap._do_task_create("title=买菜")
+    assert result.startswith("❌ 任务创建失败")
+    assert "已创建" not in result
+
+
+def test_task_complete_reports_failure_instead_of_false_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    monkeypatch.setattr(
+        "core.actions.subprocess.run",
+        lambda *a, **kw: _CmdResult(1, stdout="", stderr='{"error":"not found"}'),
+    )
+    result = ap._do_task_complete("task_id=t1")
+    assert result.startswith("❌ 任务完成标记失败")
+    assert "已完成" not in result
 
 
 def test_auto_category():
@@ -323,3 +499,20 @@ def test_process_execute_false_no_markers_passthrough(tmp_path):
     from core.actions import ActionProcessor
     ap = ActionProcessor(str(tmp_path), str(tmp_path / "memory"), "jobs", "")
     assert ap.process("纯聊天回复", execute=False) == "纯聊天回复"
+
+
+def test_malformed_action_type_rejected(tmp_path):
+    """Action types with dots, slashes, or uppercase are silently ignored —
+    prevents getattr abuse via crafted markers. They pass through unhandled
+    (same as any unknown action) rather than being dispatched to a handler."""
+    ap = _make_processor(tmp_path)
+    # __class__ starts with underscore, ../../etc has dots/slashes,
+    # Normal_CaSe has uppercase — all fail the [a-z][a-z0-9_]{0,30} regex
+    reply = "test [ACTION:__class__|x=1] and [ACTION:../../etc|y=2] and [ACTION:Normal_CaSe|z=3]"
+    result = ap.process(reply)
+    # All three markers survive (none was handled by a _do_X method)
+    assert "[ACTION:__class__" in result
+    assert "[ACTION:../../etc" in result
+    assert "[ACTION:Normal_CaSe" in result
+    # Crucially: no handler was invoked (no side effects on disk)
+    assert not (tmp_path / "memory" / "system" / "tasks.jsonl").exists()

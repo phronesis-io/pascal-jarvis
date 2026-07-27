@@ -178,6 +178,33 @@ def test_feedback_numeric_item_id_coerced_to_string(tmp_path):
     assert items[0]["item_id"] == "320503928905007104"
 
 
+def test_legacy_hold_output_does_not_write_dead_research_queue(tmp_path):
+    payload = json.dumps({
+        "feedback": [{
+            "item_id": "320503928905007104",
+            "score": 2,
+            "action": "hold",
+            "needs_research": True,
+        }],
+        "user_messages": [],
+    })
+
+    _run_with_fake_cli(payload, tmp_path)
+
+    assert not (tmp_path / "eigenflux" / "needs_research.jsonl").exists()
+
+
+def test_heartbeat_contract_has_no_unconsumed_research_action():
+    heartbeat = (SCRIPT.parent.parent / "HEARTBEAT.md").read_text(
+        encoding="utf-8")
+    feed_task = heartbeat.split("### eigenflux-feed-triage", 1)[1].split(
+        "### eigenflux-publish", 1)[0]
+
+    assert '"action":"<push|fyi|silent>"' in feed_task
+    assert "needs_research" not in feed_task
+    assert '"hold"' not in feed_task
+
+
 def test_feedback_out_of_range_score_clamped(tmp_path):
     """The API silently SKIPS scores outside -1..2 (processed_count stays 0), so
     an out-of-range LLM score must be clamped client-side, not dropped."""

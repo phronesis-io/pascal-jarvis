@@ -742,7 +742,7 @@ def test_revoked_device_cannot_reenable_push(mobile_db):
 
 
 def test_proactive_runtime_root_cannot_read_production_push_subscriptions(
-        mobile_db, tmp_path):
+        mobile_db, tmp_path, monkeypatch):
     from core.mobile_access import push_subscription_status, register_push
     from core.proactive import maybe_push_signal
 
@@ -759,6 +759,9 @@ def test_proactive_runtime_root_cannot_read_production_push_subscriptions(
         "keys": {"p256dh": "prod-key", "auth": "prod-auth"},
     })
     assert push_subscription_status(paired_only=True)["count"] == 1
+    # The suite injects JARVIS_DB_PATH to protect the live repo database.
+    # Remove that process-wide override to exercise root-based isolation.
+    monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
 
     isolated_root = tmp_path / "isolated-runtime"
     result = maybe_push_signal(_signal(), root=isolated_root)

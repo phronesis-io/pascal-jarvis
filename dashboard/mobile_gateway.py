@@ -422,9 +422,12 @@ async def _proxy_websocket(request: web.Request, device: dict) -> web.StreamResp
     }
     if backend_cookies:
         ws_headers["Cookie"] = backend_cookies
-    async with session.ws_connect(target, heartbeat=25,
-                                  headers=ws_headers) as backend_ws:
-        await _relay_websockets(client_ws, backend_ws)
+    try:
+        async with session.ws_connect(target, heartbeat=25,
+                                      headers=ws_headers) as backend_ws:
+            await _relay_websockets(client_ws, backend_ws)
+    except (OSError, ClientConnectionResetError, ConnectionResetError):
+        await client_ws.close(code=1011, message=b"backend unreachable")
     audit_access(device["id"], _remote(request), "WS", request.path, 101)
     return client_ws
 

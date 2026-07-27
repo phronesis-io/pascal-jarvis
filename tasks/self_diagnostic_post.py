@@ -20,6 +20,7 @@ No LLM, no heuristics: if the pre printed ⚠️, Pascal hears about it.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -86,8 +87,10 @@ def should_alert(warnings: list[str], stamp: dict, now: float | None = None) -> 
 
 def _mark_alerted(lines: list[str]) -> None:
     try:
-        STAMP.write_text(json.dumps(
+        tmp = STAMP.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
             {"ts": time.time(), "lines": lines[:20]}, ensure_ascii=False))
+        os.replace(tmp, STAMP)
     except OSError:
         pass
 

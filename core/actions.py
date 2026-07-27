@@ -83,15 +83,28 @@ def _auto_category(tags_csv: str = "", name: str = "", prompt: str = "") -> str:
 
 
 def _run_cmd(cmd: list[str], timeout: int = 15, log_file: str = "") -> str:
-    """Run a shell command, return stdout. Errors → 'FAILED'."""
+    """Run a shell command, return stdout on success.
+
+    On failure — either a nonzero exit or a Python-level exception — return
+    "FAILED: <reason>". lark-cli writes its error envelope to stderr and
+    leaves stdout empty on most failures (auth expiry, bad IDs, validation),
+    so a caller that only inspected stdout for the literal string FAILED
+    would treat that empty-but-nonzero-exit result as success.
+    """
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            reason = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:200]
+            if log_file:
+                with open(log_file, "a") as f:
+                    f.write(f"[action] cmd failed (exit {r.returncode}): {cmd[0]}: {reason}\n")
+            return f"FAILED: {reason}"
         return r.stdout.strip()
     except Exception as e:
         if log_file:
             with open(log_file, "a") as f:
                 f.write(f"[action] cmd error: {cmd[0]}: {e}\n")
-        return "FAILED"
+        return f"FAILED: {e}"
 
 
 class ActionProcessor:
@@ -108,6 +121,7 @@ class ActionProcessor:
         self.heartbeat_trigger_path = Path(heartbeat_trigger_path)
         self.owner_authenticated = bool(owner_authenticated)
         self._tm = None  # lazy TaskManager
+        self._primary_calendar_id: str | None = None  # lazy, cached for this instance
 
     @property
     def tm(self):
@@ -154,6 +168,9 @@ class ActionProcessor:
             body = marker[8:-1]  # strip [ACTION: and ]
             action_type = body.split("|")[0]
             params_raw = body[len(action_type) + 1:] if "|" in body else ""
+
+            if not re.fullmatch(r'[a-z][a-z0-9_]{0,30}', action_type):
+                continue
 
             handler = getattr(self, f"_do_{action_type}", None)
             if handler:
@@ -473,6 +490,33 @@ class ActionProcessor:
 
     # ── Calendar ──
 
+    def _get_primary_calendar_id(self) -> str:
+        """Resolve the user's primary calendar ID, cached for this instance.
+
+        The [ACTION:calendar_update|...] / [ACTION:calendar_delete|...]
+        marker contract (core/prompt.py) only ever gives the model event_id —
+        it was never asked for calendar_id, so `events patch`/`events
+        delete` (unlike `+create`/`+update`, which default calendar-id to
+        "primary" internally) fail every call with "missing required path
+        parameter: calendar_id" unless we resolve it ourselves. Returns ""
+        on failure; callers must treat that as a failed action, not silently
+        omit the flag.
+        """
+        if self._primary_calendar_id is not None:
+            return self._primary_calendar_id
+        result = _run_cmd(["lark-cli", "calendar", "calendars", "primary",
+                           "--as", "user", "--format", "json"],
+                          log_file=self.log_file)
+        if result.startswith("FAILED"):
+            return ""
+        try:
+            calendars = json.loads(result).get("data", {}).get("calendars") or []
+            cal_id = str(calendars[0].get("calendar", {}).get("calendar_id", "")) if calendars else ""
+        except (ValueError, IndexError, AttributeError):
+            cal_id = ""
+        self._primary_calendar_id = cal_id
+        return cal_id
+
     def _do_calendar_create(self, raw: str) -> str:
         p = parse_params(raw)
         title, start, end = p.get("title", ""), p.get("start", ""), p.get("end", "")
@@ -485,7 +529,7 @@ class ActionProcessor:
         try:
             r = _run_cmd(["lark-cli", "calendar", "+freebusy",
                           "--as", "user", "--start", start, "--end", end])
-            if r != "FAILED":
+            if not r.startswith("FAILED"):
                 d = json.loads(r)
                 is_busy = "busy" if d.get("busy") else "free"
         except Exception:
@@ -501,8 +545,8 @@ class ActionProcessor:
             cmd.extend(["--description", desc])
         result = _run_cmd(cmd, timeout=15, log_file=self.log_file)
 
-        if "FAILED" in result:
-            return f"❌ 日程创建失败: {title}"
+        if result.startswith("FAILED"):
+            return f"❌ 日程创建失败: {title}（{result[8:].strip() or '未知错误'}）"
         return conflict_note + f"✅ 已创建日程: {title} ({start} → {end})"
 
     def _do_calendar_update(self, raw: str) -> str:
@@ -510,6 +554,12 @@ class ActionProcessor:
         event_id, field, value = p.get("event_id", ""), p.get("field", ""), p.get("value", "")
         if not (event_id and field and value):
             return ""
+        # Optional escape hatch for a non-primary calendar; the documented
+        # marker contract never asks the model for this, so it defaults to
+        # the resolved primary calendar (see _get_primary_calendar_id).
+        calendar_id = p.get("calendar_id", "") or self._get_primary_calendar_id()
+        if not calendar_id:
+            return f"❌ 日程更新失败: {event_id} ({field})（无法解析主日历 ID）"
 
         field_map = {
             "summary": {"summary": value},
@@ -519,12 +569,13 @@ class ActionProcessor:
         data = json.dumps(field_map.get(field, {"description": value}))
         result = _run_cmd([
             "lark-cli", "calendar", "events", "patch", "--as", "user",
+            "--calendar-id", calendar_id,
             "--params", json.dumps({"event_id": event_id}),
             "--data", data,
         ], log_file=self.log_file)
 
-        if "FAILED" in result:
-            return f"❌ 日程更新失败: {event_id} ({field})"
+        if result.startswith("FAILED"):
+            return f"❌ 日程更新失败: {event_id} ({field})（{result[8:].strip() or '未知错误'}）"
         return f"✅ 已更新日程: {field} → {value}"
 
     def _do_calendar_delete(self, raw: str) -> str:
@@ -533,11 +584,15 @@ class ActionProcessor:
         title = p.get("title", event_id)
         if not event_id:
             return ""
+        calendar_id = p.get("calendar_id", "") or self._get_primary_calendar_id()
+        if not calendar_id:
+            return f"❌ 日程删除失败: {title}（无法解析主日历 ID）"
         result = _run_cmd(["lark-cli", "calendar", "events", "delete",
-                           "--as", "user", "--event-id", event_id],
+                           "--as", "user", "--calendar-id", calendar_id,
+                           "--event-id", event_id],
                           log_file=self.log_file)
-        if "FAILED" in result:
-            return f"❌ 日程删除失败: {title}"
+        if result.startswith("FAILED"):
+            return f"❌ 日程删除失败: {title}（{result[8:].strip() or '未知错误'}）"
         return f"✅ 已删除日程: {title}"
 
     # ── Lark Tasks ──
@@ -551,8 +606,8 @@ class ActionProcessor:
         if due:
             cmd.extend(["--due", due])
         result = _run_cmd(cmd, log_file=self.log_file)
-        if "FAILED" in result:
-            return f"❌ 任务创建失败: {title}"
+        if result.startswith("FAILED"):
+            return f"❌ 任务创建失败: {title}（{result[8:].strip() or '未知错误'}）"
         return f"✅ 已创建任务: {title}"
 
     def _do_task_complete(self, raw: str) -> str:
@@ -562,8 +617,8 @@ class ActionProcessor:
             return ""
         result = _run_cmd(["lark-cli", "task", "+complete", "--as", "user",
                            "--task-id", task_id], log_file=self.log_file)
-        if "FAILED" in result:
-            return f"❌ 任务完成标记失败: {task_id}"
+        if result.startswith("FAILED"):
+            return f"❌ 任务完成标记失败: {task_id}（{result[8:].strip() or '未知错误'}）"
         return "✅ 任务已完成"
 
     # ── Local Task System ──

@@ -70,8 +70,10 @@ def _record_flagged(text: str):
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         if len(lines) > FLAGGED_LEDGER_MAX_LINES:
-            path.write_text("".join(lines[-FLAGGED_LEDGER_MAX_LINES:]),
-                            encoding="utf-8")
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(lines[-FLAGGED_LEDGER_MAX_LINES:]),
+                           encoding="utf-8")
+            os.replace(tmp, path)
     except OSError as e:
         print(f"[phronesis] flagged ledger append failed: {e}", file=sys.stderr)
 

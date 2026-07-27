@@ -16,6 +16,7 @@ import pytest
 # Make core/ and plugins/ importable from tests
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+_SUBPROCESS_RUN = subprocess.run
 
 # Files that MUST NOT be touched by any test run. If a test mutates any of
 # these, the guard below will fail and point at the culprit.
@@ -27,6 +28,11 @@ _PROTECTED_FILES = [
     ROOT / "eigenflux" / "credentials.json",
     ROOT / "eigenflux" / "feed_store.jsonl",
     ROOT / "eigenflux" / "seen_items.json",
+    ROOT / "engagement_log.jsonl",
+    ROOT / "heartbeat_outbox.jsonl",
+    ROOT / "memorials.jsonl",
+    ROOT / "sched_events.jsonl",
+    ROOT / "data" / "jarvis.db",
 ]
 
 # A subset of the protected files are *live runtime state* that the production
@@ -41,13 +47,18 @@ _LIVE_RUNTIME_FILES = {
     ROOT / "heartbeat_state.json",
     ROOT / "eigenflux" / "feed_store.jsonl",
     ROOT / "eigenflux" / "seen_items.json",
+    ROOT / "engagement_log.jsonl",
+    ROOT / "heartbeat_outbox.jsonl",
+    ROOT / "memorials.jsonl",
+    ROOT / "sched_events.jsonl",
+    ROOT / "data" / "jarvis.db",
 }
 
 
 def _bot_is_running() -> bool:
     """True if the production heartbeat loop is live (so it may write runtime files)."""
     try:
-        r = subprocess.run(
+        r = _SUBPROCESS_RUN(
             ["pgrep", "-f", "core.heartbeat_loop"],
             capture_output=True, timeout=5,
         )
@@ -63,7 +74,33 @@ def _checksum(path: Path) -> str | None:
 
 
 @pytest.fixture(autouse=True)
-def _guard_repo_files():
+def _isolate_runtime_database(monkeypatch, tmp_path):
+    """Route every test's default SQLite access to a private database.
+
+    Individual modules may still monkeypatch dashboard.db.DB_PATH when they
+    need a named database.  The environment override covers all other stores
+    that resolve JARVIS_DB_PATH directly and prevents CLI entry points from
+    silently falling back to the live repo database.
+    """
+    monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
+
+    import dashboard.db as db_module
+    import core.intentions as intentions
+
+    if db_module._connection is not None:
+        db_module._connection.close()
+    db_module._connection = None
+    intentions._table_ready = False
+    yield
+    if db_module._connection is not None:
+        db_module._connection.close()
+    db_module._connection = None
+    intentions._table_ready = False
+
+
+@pytest.fixture(autouse=True)
+def _guard_repo_files(_isolate_runtime_database):
+    bot_was_live = _bot_is_running()
     before = {p: _checksum(p) for p in _PROTECTED_FILES}
     yield
     bot_live = None  # computed lazily, only if a mismatch shows up
@@ -75,7 +112,7 @@ def _guard_repo_files():
         # that write — not the test — so don't fail the suite for it.
         if p in _LIVE_RUNTIME_FILES:
             if bot_live is None:
-                bot_live = _bot_is_running()
+                bot_live = bot_was_live or _bot_is_running()
             if bot_live:
                 continue
         raise AssertionError(

@@ -41,7 +41,7 @@ def main() -> int:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, capture_output=True, text=True, timeout=60,
             env={**os.environ, "PATH": PATH_ENV},
         )
         if result.returncode == 0:

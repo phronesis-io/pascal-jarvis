@@ -136,7 +136,9 @@ def test_explanatory_canary_output_does_not_clear_sticky_fallback(tmp_path):
     trip("spend_limit", tmp_path)
 
     def runner(command, **kwargs):
-        if kwargs["env"].get("ANTHROPIC_AUTH_TOKEN"):
+        # Backup1 gets base_url overridden to "https://backup.example";
+        # primary inherits the ambient env (which may have its own value).
+        if kwargs["env"].get("ANTHROPIC_BASE_URL") == "https://backup.example":
             output = ph.CANARY_MARKER
         else:
             output = f"Unable to return {ph.CANARY_MARKER}"
@@ -210,13 +212,13 @@ def test_spend_limit_canary_trips_shared_provider_gate(tmp_path):
     _write_config(tmp_path)
 
     def runner(cmd, **kwargs):
-        token = kwargs["env"].get("ANTHROPIC_AUTH_TOKEN", "")
-        if not token:
+        # Primary never gets base_url overridden to the backup endpoint.
+        if kwargs["env"].get("ANTHROPIC_BASE_URL") == "https://backup.example":
             return subprocess.CompletedProcess(
-                cmd, 1, stdout="", stderr="You've hit your monthly spend limit"
+                cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}), stderr=""
             )
         return subprocess.CompletedProcess(
-            cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}), stderr=""
+            cmd, 1, stdout="", stderr="You've hit your monthly spend limit"
         )
 
     ph.probe_all(

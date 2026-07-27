@@ -380,10 +380,14 @@ def main() -> int:
         # Nothing new — print nothing so the cycle stays cheap.
         return 0
     # Mark the batch as pending so post.py can record them all as triaged.
-    pending_path().write_text(
+    pending = pending_path()
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pending.with_suffix(".tmp")
+    tmp.write_text(
         json.dumps([{"event_id": e["event_id"], "sender": e["sender"],
                      "subject": e.get("subject", "")} for e in records],
                    ensure_ascii=False))
+    os.replace(tmp, pending)
     print(render(records))
     return 0
 

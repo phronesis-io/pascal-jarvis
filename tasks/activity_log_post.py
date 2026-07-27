@@ -40,6 +40,12 @@ def main():
 
     existing = read_jsonl(LOG_FILE)
 
+    # Dedup: skip entries with identical (date, time, activity) to what's already logged
+    existing_keys = {
+        (e.get("date", ""), e.get("time", ""), e.get("activity", ""))
+        for e in existing
+    }
+
     # Add new entries with today's date
     for entry in entries:
         record = {
@@ -49,8 +55,10 @@ def main():
             "source": entry.get("source", "inferred"),
             "energy": entry.get("energy_hint", entry.get("energy", "unknown")),
         }
-        if record["activity"]:
+        key = (record["date"], record["time"], record["activity"])
+        if record["activity"] and key not in existing_keys:
             existing.append(record)
+            existing_keys.add(key)
 
     # Trim to last 7 days
     cutoff = (now_local() - timedelta(days=MAX_DAYS)).strftime("%Y-%m-%d")

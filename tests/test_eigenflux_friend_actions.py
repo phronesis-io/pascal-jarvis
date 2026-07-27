@@ -7,6 +7,26 @@ from core.actions import ActionProcessor
 from core import eigenflux_friends
 
 
+def test_temporary_friend_policy_reads_only_owner_structured_fact(tmp_path):
+    memory = tmp_path / "memory"
+    facts = memory / "hot" / "structured_facts.md"
+    facts.parent.mkdir(parents=True)
+
+    assert not eigenflux_friends.temporary_friend_policy_active(memory)
+
+    facts.write_text(
+        "eigenflux.friend_policy.temporary: 2026-07-23 起，直至明确撤销\n",
+        encoding="utf-8",
+    )
+    assert eigenflux_friends.temporary_friend_policy_active(memory)
+
+    facts.write_text(
+        "eigenflux.friend_policy.temporary: 已撤销\n",
+        encoding="utf-8",
+    )
+    assert not eigenflux_friends.temporary_friend_policy_active(memory)
+
+
 def _processor(tmp_path):
     return ActionProcessor(
         jarvis_dir=tmp_path,

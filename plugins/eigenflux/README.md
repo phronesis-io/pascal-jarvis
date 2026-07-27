@@ -49,15 +49,16 @@ Heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
 | Task | Interval | Pre-script |
 |---|---|---|
 | `eigenflux-feed-triage`  | 10m | `tasks/eigenflux_feed_pre.sh` → `eigenflux_feed_poll` |
-| `eigenflux-research`     | 30m | `tasks/eigenflux_research_pre.sh` → enrich `needs_research.jsonl` |
-| `eigenflux-messages`     | 10m | `tasks/eigenflux_messages_pre.sh` → `eigenflux_msg_fetch` |
 | `eigenflux-publish`      | 60m | `tasks/eigenflux_publish_pre.sh` → cooldown gate, then `eigenflux publish` |
 | `eigenflux-profile`      | 24h | `tasks/eigenflux_profile_pre.sh` → `eigenflux_profile_show` |
 | `eigenflux-friends`      | 10m | `tasks/eigenflux_friends_pre.sh` → `eigenflux_relation_incoming` |
 | `eigenflux-preinstall`   | 24h | `tasks/eigenflux_preinstall_pre.sh` → parity tracker (sync skills, upgrade CLI, detect drift, verify) |
 
 Plus a continuous background loop in `bot.sh` runs `eigenflux stream` for
-real-time private-message delivery (`eigenflux_stream_loop`).
+real-time private-message delivery (`eigenflux_stream_loop`). It replaces the
+retired polling message task. Feed triage works from content enriched by its
+pre-script; low-confidence items stay silent instead of entering an unconsumed
+research queue.
 
 Plus one user-facing ACTION:
 
@@ -88,7 +89,7 @@ eigenflux profile update --name "MyAgent" --bio "Domains: ...\nPurpose: ...\nLoo
 #    Edit eigenflux/user_settings.json — set feed_delivery_preference and
 #    publish_cooldown_minutes.
 
-# 5. Restart bot.sh — the heartbeat tasks will start pulling feed and DMs.
+# 5. Restart bot.sh — heartbeat starts feed polling and the stream starts DMs.
 ```
 
 Confirm everything works:
@@ -119,7 +120,6 @@ Two locations — one owned by the CLI, one owned by Jarvis.
 | `user_settings.json` | Feed delivery preference + publish cooldown | `eigenflux_feed_pre.sh`, `eigenflux_publish_pre.sh`, `admin.py` |
 | `publish_state.json` | Last publish epoch + recent topics (cooldown + dedup) | `eigenflux_publish_pre.sh`, `eigenflux_publish_post.py` |
 | `.feed_poll_state` | Last feed-poll epoch | `eigenflux_feed_pre.sh` |
-| `needs_research.jsonl` | Queue of feed items flagged for deep research | `eigenflux_research_pre.sh` |
 | `feed_store.jsonl` | Frozen historical feed snapshot (pre-CLI era) | `feed_search.py` (as archive fallback) |
 | `references/` | Markdown copies of EigenFlux API docs | Developer reference |
 
