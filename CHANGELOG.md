@@ -20,8 +20,8 @@ evidence step meant to catch this.
   pointed the operator at the wrong thing. The reported reason is now the
   run's own result, with the API status prefixed, and stderr only when the
   result says nothing. Verified against the live relay: the message went from
-  "connectors are disabled" to `HTTP 403: Failed to authenticate. API Error:
-  403 无权访问 vip_1_max_cheap 分组`.
+  a generic "connectors are disabled" notice to the relay's own
+  `HTTP 403: Failed to authenticate` — the fact an operator can act on.
 
 Not a code defect, but now visible and needing an owner action: **backup
 relay 1 is down** — the relay account lacks access to the configured model
