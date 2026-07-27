@@ -128,7 +128,10 @@ def test_launchd_installer_refreshes_only_requested_definition(tmp_path):
     launchctl_log = tmp_path / "launchctl.log"
     launchctl = bin_dir / "launchctl"
     launchctl.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LAUNCHCTL_LOG\"\n",
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
+[ "$1" != "print" ] || echo 'state = running'
+""",
         encoding="utf-8",
     )
     launchctl.chmod(0o755)
@@ -138,6 +141,7 @@ def test_launchd_installer_refreshes_only_requested_definition(tmp_path):
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LAUNCHCTL_LOG": str(launchctl_log),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
 
     subprocess.run(
@@ -220,7 +224,7 @@ def test_launchd_installer_allows_an_empty_optional_selection(tmp_path):
 
     assert result.returncode == 0
     assert "optional Taskline binary not installed" in result.stdout
-    assert not stale.exists()
+    assert stale.exists()
 
 
 def test_launchd_installer_restores_loaded_job_after_bootstrap_failure(
@@ -244,7 +248,11 @@ def test_launchd_installer_restores_loaded_job_after_bootstrap_failure(
 printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 case "$1" in
   print)
-    grep -q '^loaded$' "$SERVICE_STATE"
+    if grep -q '^loaded$' "$SERVICE_STATE"; then
+      echo 'state = running'
+      exit 0
+    fi
+    exit 1
     ;;
   bootout)
     printf 'unloaded\n' > "$SERVICE_STATE"
@@ -272,6 +280,7 @@ esac
         "SERVICE_STATE": str(state),
         "BOOTSTRAP_COUNT": str(bootstrap_count),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
 
     result = subprocess.run(
@@ -312,7 +321,11 @@ def test_launchd_installer_reports_an_incomplete_file_recovery(tmp_path):
         """#!/bin/sh
 case "$1" in
   print)
-    grep -q '^loaded$' "$SERVICE_STATE"
+    if grep -q '^loaded$' "$SERVICE_STATE"; then
+      echo 'state = running'
+      exit 0
+    fi
+    exit 1
     ;;
   bootout)
     printf 'unloaded\n' > "$SERVICE_STATE"
@@ -354,6 +367,7 @@ exec /bin/mv "$@"
         "BOOTSTRAP_COUNT": str(bootstrap_count),
         "MOVE_COUNT": str(move_count),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
 
     result = subprocess.run(
@@ -454,7 +468,11 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 case "$1" in
   print)
     label=${2##*/}
-    grep -q '^loaded$' "$STATE_DIR/$label"
+    if grep -q '^loaded$' "$STATE_DIR/$label"; then
+      echo 'state = running'
+      exit 0
+    fi
+    exit 1
     ;;
   bootout)
     label=${2##*/}
@@ -482,6 +500,7 @@ esac
         "STATE_DIR": str(state_dir),
         "FAIL_MARKER": str(fail_marker),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
 
     result = subprocess.run(
@@ -542,7 +561,11 @@ def test_launchd_installer_rolls_back_after_plist_validation_failure(
 case "$1" in
   print)
     label=${2##*/}
-    grep -q '^loaded$' "$STATE_DIR/$label"
+    if grep -q '^loaded$' "$STATE_DIR/$label"; then
+      echo 'state = running'
+      exit 0
+    fi
+    exit 1
     ;;
   bootout)
     label=${2##*/}
@@ -578,6 +601,7 @@ exit 0
         "STATE_DIR": str(state_dir),
         "PLUTIL_COUNT": str(plutil_count),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
 
     result = subprocess.run(
@@ -622,6 +646,7 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 case "$1" in
   print)
     if grep -q '^loaded$' "$SERVICE_STATE"; then
+      echo 'state = running'
       exit 0
     fi
     echo 'Could not find service' >&2
@@ -645,6 +670,7 @@ esac
         "LAUNCHCTL_LOG": str(launchctl_log),
         "SERVICE_STATE": str(state),
         "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
     }
     command = [
         "bash",

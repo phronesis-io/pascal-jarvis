@@ -131,8 +131,9 @@ lark:
   event_backend: sidecar
 ```
 
-然后 `./restart.sh --runtime --yes`。它只允许重启当前已经部署的同一份代码，
-不会绕过代码发布门禁。**回滚**：删掉 `event_backend` 行再以同样命令重启，
+然后 `./restart.sh --runtime --yes`。它会重新校验发布授权，并且只允许重启当前
+已经部署的同一份代码，不会绕过代码发布门禁。**回滚**：删掉 `event_backend`
+行再以同样命令重启，
 即回到 lark-cli 模式。
 
 ⚠️ **绝对不要**让 sidecar 和 `lark-cli event` 同时各开一条连接——飞书把事件随机分发
@@ -183,7 +184,7 @@ gitignored 配置文件 + 中性默认。
 
 ```bash
 ./bot.sh               # 首次前台启动；Ctrl-C 退出
-./restart.sh --runtime # 日常配置/状态重启；要求 live code == clean HEAD
+./restart.sh --runtime # 日常配置/状态重启；要求已治理且 live code == clean HEAD
 ./restart.sh --status  # 三进程状态（daemon / bot / 事件监听器）
 ./restart.sh           # 代码发布：强制 main/PR/CI/review/branch protection
 ./restart.sh --full    # 受治理的完整发布：再同步 Dashboard、手机网关
@@ -192,15 +193,15 @@ gitignored 配置文件 + 中性默认。
 
 `restart.sh` 的默认和 `--full` 路径是**生产代码发布**，不是普通安装器。
 它需要 `gh` 已安装并登录，而且当前提交必须满足仓库的 PR、CI、审核和分支保护
-规则。普通配置变化使用 `--runtime`；该路径先证明正在运行的 bot/heartbeat
-已经是当前干净 `HEAD`，不一致时会拒绝并要求走正式发布。
+规则。普通配置变化使用 `--runtime`；该路径仍会验证当前提交的发布授权，再证明
+正在运行的 bot/heartbeat 已经是当前干净 `HEAD`；任何一项不满足都会拒绝。
 
 **（可选，macOS）launchd 常驻监督** —— 让守护进程/看板/备份在重启和崩溃后
 自动拉活。plist 是模板（`__JARVIS_DIR__` 等占位符），脚本安装时替换成本机
 真实路径，**不要手动拷贝 plist**：
 
 ```bash
-./scripts/launchd/install.sh   # 幂等；输出每个服务 loaded 与否
+./scripts/launchd/install.sh   # 幂等；常驻服务需连续稳定 running，否则事务回滚
 ```
 
 `restart.sh --full` 只同步这台机器上已经启用的 daemon、Dashboard 和手机

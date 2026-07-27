@@ -646,7 +646,7 @@ def test_restart_runs_release_gate_before_touching_deploy_guard():
     )
 
 
-def test_runtime_only_restart_cannot_deploy_changed_code():
+def test_runtime_only_restart_requires_governed_same_revision():
     script = (Path(__file__).parent.parent / "restart.sh").read_text(
         encoding="utf-8"
     )
@@ -661,9 +661,13 @@ def test_runtime_only_restart_cannot_deploy_changed_code():
 
     assert 'git -C "$JARVIS_DIR" status --porcelain --untracked-files=all' in gate
     assert "python3 -m core.deploy verify" in gate
+    assert "--allow-config-changes" in gate
     assert "--require bot --require heartbeat-loop" in gate
     assert "_verify_runtime_only_gate" in runtime
+    assert "_verify_release_gate" in runtime
+    assert runtime.index("_verify_release_gate") < runtime.index(
+        "_verify_runtime_only_gate"
+    )
     assert runtime.index("_verify_runtime_only_gate") < runtime.index(
         "_set_deploy_guard"
     )
-    assert "_verify_release_gate" not in runtime

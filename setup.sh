@@ -57,7 +57,15 @@ need_optional() {
 
 MISSING_REQUIRED=0
 
-need_cmd python3 "  brew install python3   # macOS"
+# Select first so an explicit JARVIS_PYTHON works even when python3 is absent
+# from PATH.
+# shellcheck source=scripts/runtime_env.sh
+if ! source "$JARVIS_DIR/scripts/runtime_env.sh"; then
+  err "No usable Python 3 interpreter found."
+  err "  Install Python 3.10+ or set JARVIS_PYTHON=/absolute/path/to/python3."
+  exit 1
+fi
+ok "python interpreter: $JARVIS_PYTHON"
 need_cmd jq      "  brew install jq        # macOS (apt install jq on Linux)"
 need_cmd claude  "  npm i -g @anthropic-ai/claude-code"
 need_optional lark-cli    "Lark plugin — install: npm i -g @larksuite/cli"
@@ -70,9 +78,6 @@ if [ "$MISSING_REQUIRED" -ne 0 ]; then
   exit 1
 fi
 
-# Use the same interpreter policy as bot/restart/doctor/launchd.
-# shellcheck source=scripts/runtime_env.sh
-source "$JARVIS_DIR/scripts/runtime_env.sh"
 if ! "$JARVIS_PYTHON" -c \
     'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
   err "Jarvis requires Python 3.10+; selected: $JARVIS_PYTHON"

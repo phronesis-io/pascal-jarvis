@@ -524,6 +524,7 @@ _verify_runtime_only_gate() {
   fi
   echo "Verifying the running bot already matches this revision..."
   if python3 -m core.deploy verify \
+      --allow-config-changes \
       --require bot --require heartbeat-loop >/tmp/jarvis_runtime_restart_gate.json; then
     green "  Same-revision runtime gate passed."
   else
@@ -570,6 +571,7 @@ case "${1:-}" in
   --runtime|-r)
     echo "=== Same-Revision Runtime Restart ==="
     echo ""
+    _verify_release_gate
     _verify_runtime_only_gate
     _set_deploy_guard
     kill_bot

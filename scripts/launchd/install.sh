@@ -77,6 +77,78 @@ launchd_job_state() {
   esac
 }
 
+plist_requires_resident_process() {
+  "$PYTHON_BIN" - "$1" <<'PYEOF'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    definition = plistlib.load(handle)
+raise SystemExit(0 if bool(definition.get("KeepAlive")) else 1)
+PYEOF
+}
+
+LAUNCHD_RUNTIME_DETAIL=""
+verify_launchd_runtime() {
+  local definition="$1"
+  local target="$2"
+  local attempts="${JARVIS_LAUNCHD_SETTLE_ATTEMPTS:-12}"
+  local interval="${JARVIS_LAUNCHD_SETTLE_INTERVAL:-0.25}"
+  local required=4
+  local consecutive=0
+  local seen_running=0
+  local unstable=0
+  local detail=""
+  local failure_detail=""
+  local i
+
+  if ! plist_requires_resident_process "$definition"; then
+    LAUNCHD_RUNTIME_DETAIL=""
+    return 0
+  fi
+  case "$attempts" in
+    ''|*[!0-9]*) attempts=12 ;;
+  esac
+  if [ "$attempts" -lt 8 ]; then
+    attempts=8
+  fi
+
+  for ((i=0; i < attempts; i++)); do
+    if detail=$(launchctl print "$target" 2>&1) \
+        && printf '%s\n' "$detail" \
+          | grep -Eq 'state[[:space:]]*=[[:space:]]*running'; then
+      seen_running=1
+      consecutive=$((consecutive + 1))
+    else
+      if [ "$seen_running" -eq 1 ]; then
+        unstable=1
+      fi
+      consecutive=0
+      failure_detail="$detail"
+    fi
+    if [ "$i" -lt $((attempts - 1)) ]; then
+      sleep "$interval"
+    fi
+  done
+
+  if [ "$unstable" -eq 0 ] && [ "$consecutive" -ge "$required" ]; then
+    LAUNCHD_RUNTIME_DETAIL=""
+    return 0
+  fi
+  if [ -n "$failure_detail" ]; then
+    detail="$failure_detail"
+  fi
+  case "$detail" in
+    *"last exit code = 78"*|*"last exit status = 78"*)
+      LAUNCHD_RUNTIME_DETAIL="resident process exited with status 78; macOS TCC denied runtime access. Grant the selected Python access to the repository or set JARVIS_PYTHON to an approved interpreter, then rerun setup"
+      ;;
+    *)
+      LAUNCHD_RUNTIME_DETAIL="resident process did not remain in launchd state=running after ${attempts} probes: ${detail:-no launchctl detail}"
+      ;;
+  esac
+  return 1
+}
+
 PLISTS=()
 if [ "$#" -gt 0 ]; then
   for requested in "$@"; do
@@ -102,12 +174,9 @@ FILTERED_PLISTS=()
 for plist in "${PLISTS[@]}"; do
   name=$(basename "$plist")
   label="${name%.plist}"
-  target="gui/$UID_N/$label"
   if [[ "$label" == "com.pascal.jarvis.taskline" \
         && ! -x "$TASKLINE_DIR/dist/taskline-server" ]]; then
-    launchctl bootout "$target" 2>/dev/null || true
-    rm -f "$DEST/$name" "$DEST/$name.tmp"
-    echo "skipped $name (optional Taskline binary not installed)"
+    echo "skipped $name (optional Taskline binary not installed; existing definition preserved)"
     continue
   fi
   FILTERED_PLISTS+=("$plist")
@@ -356,9 +425,15 @@ PYEOF
     rm -f "$DEST/$name.tmp"
     echo "up-to-date $name"
   fi
-  launchctl print "$target" >/dev/null 2>&1 \
-    && echo "  ✓ $label loaded" \
-    || echo "  ⚠️ $label NOT loaded"
+  if ! verify_launchd_runtime "$DEST/$name" "$target"; then
+    if rollback_updated_services; then
+      echo "failed to verify $label: $LAUNCHD_RUNTIME_DETAIL; previous state restored" >&2
+    else
+      echo "failed to verify $label: $LAUNCHD_RUNTIME_DETAIL; batch recovery was incomplete" >&2
+    fi
+    exit 1
+  fi
+  echo "  ✓ $label loaded and stable"
 done
 fi
 

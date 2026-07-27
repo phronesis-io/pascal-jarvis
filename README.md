@@ -87,10 +87,11 @@ Then apply the same-revision runtime restart: `./restart.sh --runtime`.
 
 For a foreground/local install, `./bot.sh` is the normal entrypoint. For a
 supervised install, launchd starts it automatically. Configuration-only
-restarts use the same-revision gate; code deployment remains governed:
+restarts revalidate release authority and the same-revision gate; code
+deployment remains governed:
 
 ```bash
-./restart.sh --runtime  # config/state restart; refuses if live code != clean HEAD
+./restart.sh --runtime  # config/state only; requires governed clean HEAD == live code
 ./restart.sh --status   # show daemon / bot / lark-cli process status
 ./restart.sh            # governed code deploy: main + PR + CI + release authority
 ./restart.sh --full     # governed deploy of daemon, bot, dashboard, mobile gateway
