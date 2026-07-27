@@ -149,6 +149,43 @@ verify_launchd_runtime() {
   return 1
 }
 
+LAUNCHD_BOOTSTRAP_DETAIL=""
+bootstrap_launchd_job() {
+  local domain="$1"
+  local definition="$2"
+  local attempts="${JARVIS_LAUNCHD_BOOTSTRAP_ATTEMPTS:-3}"
+  local interval="${JARVIS_LAUNCHD_BOOTSTRAP_INTERVAL:-1}"
+  local detail=""
+  local i
+
+  case "$attempts" in
+    ''|*[!0-9]*) attempts=3 ;;
+  esac
+  if [ "$attempts" -lt 1 ]; then
+    attempts=1
+  fi
+
+  for ((i=1; i <= attempts; i++)); do
+    if detail=$(launchctl bootstrap "$domain" "$definition" 2>&1); then
+      LAUNCHD_BOOTSTRAP_DETAIL=""
+      return 0
+    fi
+    case "$detail" in
+      *"Bootstrap failed: 5:"*|*"Input/output error"*) ;;
+      *)
+        LAUNCHD_BOOTSTRAP_DETAIL="${detail:-bootstrap failed}"
+        return 1
+        ;;
+    esac
+    if [ "$i" -lt "$attempts" ]; then
+      sleep "$interval"
+    fi
+  done
+
+  LAUNCHD_BOOTSTRAP_DETAIL="${detail:-bootstrap failed after retry}"
+  return 1
+}
+
 PLISTS=()
 if [ "$#" -gt 0 ]; then
   for requested in "$@"; do
@@ -196,7 +233,6 @@ UPDATED_ROLLBACKS=()
 
 rollback_updated_services() {
   local recovery_failed=0
-  local recovery_detail
   local restored_file
   local probe_rc
   local i
@@ -248,9 +284,8 @@ rollback_updated_services() {
     fi
 
     if [ "$was_loaded" -eq 1 ]; then
-      if ! recovery_detail=$(launchctl bootstrap \
-          "gui/$UID_N" "$DEST/$name" 2>&1); then
-        echo "recovery failed for $label: ${recovery_detail:-bootstrap failed}" >&2
+      if ! bootstrap_launchd_job "gui/$UID_N" "$DEST/$name"; then
+        echo "recovery failed for $label: $LAUNCHD_BOOTSTRAP_DETAIL" >&2
         recovery_failed=1
       elif ! launchctl print "$target" >/dev/null 2>&1; then
         echo "recovery failed for $label: previous definition is not loaded" >&2
@@ -405,8 +440,8 @@ PYEOF
     if [ "$was_loaded" -eq 1 ] \
         && ! launchctl bootout "$target" 2>/dev/null; then
       deploy_error="bootout failed"
-    elif ! deploy_detail=$(launchctl bootstrap "gui/$UID_N" "$DEST/$name" 2>&1); then
-      deploy_error="${deploy_detail:-bootstrap failed}"
+    elif ! bootstrap_launchd_job "gui/$UID_N" "$DEST/$name"; then
+      deploy_error="$LAUNCHD_BOOTSTRAP_DETAIL"
     elif ! launchctl print "$target" >/dev/null 2>&1; then
       deploy_error="service is not loaded after bootstrap"
     fi
