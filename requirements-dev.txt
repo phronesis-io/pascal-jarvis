@@ -1,0 +1,4 @@
+# Development and installation-verification dependencies.
+-r requirements.txt
+
+pytest>=8.0

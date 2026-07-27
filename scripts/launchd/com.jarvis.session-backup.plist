@@ -6,9 +6,10 @@
     <string>com.jarvis.session-backup</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>__PYTHON_BIN__</string>
         <string>-c</string>
-        <string>import subprocess, sys; sys.exit(subprocess.call(['/bin/bash', '__JARVIS_DIR__/scripts/backup_sessions.sh']))</string>
+        <string>import subprocess, sys; sys.exit(subprocess.call(['/bin/bash', sys.argv[1]]))</string>
+        <string>__JARVIS_DIR__/scripts/backup_sessions.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -16,6 +17,8 @@
         <string>__JARVIS_DIR__</string>
         <key>WORK_DIR</key>
         <string>__WORK_DIR__</string>
+        <key>PATH</key>
+        <string>__PYTHON_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>

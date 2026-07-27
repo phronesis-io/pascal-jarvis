@@ -140,7 +140,10 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
-  independent-review evidence before a production restart.
+  independent-review evidence before a production code restart. The separate
+  `restart.sh --runtime` path is configuration-only: it requires a clean
+  worktree and proves the running bot/heartbeat already match `HEAD`, so it
+  cannot deploy changed code or weaken the release gate.
 - `core.aux_model`: bounded Primary/Backup 1/Backup 2/GPT routing for
   background jobs and text-only auxiliary calls. Untrusted or derived text
   enters with all Claude/OpenAI tools disabled. Every configured provider

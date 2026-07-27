@@ -15,7 +15,7 @@
 
 set -u
 
-REPO_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
+REPO_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 WORK_DIR="${WORK_DIR:-$(cd "$REPO_DIR/../.." 2>/dev/null && pwd)}"
 BACKUP_BASE="${WORK_DIR}/session_backups"
 TODAY=$(date '+%Y-%m-%d')

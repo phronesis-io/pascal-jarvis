@@ -78,6 +78,11 @@ requires component health, deploy verification, and smoke checks. For
 resource-lifecycle changes, sample the live process more than once across real
 scheduler activity; a clean restart alone does not prove a leak is fixed.
 
+For configuration-only changes with no code deployment, use
+`./restart.sh --runtime --yes`. It requires a clean worktree and verifies that
+the resident bot and heartbeat already match `HEAD`; any revision drift fails
+closed and must return to the governed release path above.
+
 Do not perform a real message, calendar, document, or public mutation merely
 for smoke testing. Use a read-only preflight unless the owner explicitly
 authorized the test side effect.

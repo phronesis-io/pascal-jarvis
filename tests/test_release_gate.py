@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.release_gate import ReleaseGate, ReleaseGateError, _repo_name
@@ -642,3 +644,26 @@ def test_restart_runs_release_gate_before_touching_deploy_guard():
     assert script.index("_verify_release_gate", normal) < script.index(
         "_set_deploy_guard", normal
     )
+
+
+def test_runtime_only_restart_cannot_deploy_changed_code():
+    script = (Path(__file__).parent.parent / "restart.sh").read_text(
+        encoding="utf-8"
+    )
+    gate = script[
+        script.index("_verify_runtime_only_gate()"):
+        script.index('case "${1:-}" in')
+    ]
+    runtime = script[
+        script.index("--runtime|-r)"):
+        script.index("--help|-h)")
+    ]
+
+    assert 'git -C "$JARVIS_DIR" status --porcelain --untracked-files=all' in gate
+    assert "python3 -m core.deploy verify" in gate
+    assert "--require bot --require heartbeat-loop" in gate
+    assert "_verify_runtime_only_gate" in runtime
+    assert runtime.index("_verify_runtime_only_gate") < runtime.index(
+        "_set_deploy_guard"
+    )
+    assert "_verify_release_gate" not in runtime

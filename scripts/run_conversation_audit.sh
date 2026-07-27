@@ -17,11 +17,15 @@
 # --hours 25: one hour of overlap so a slightly-late launchd fire never
 # leaves an unaudited gap between consecutive daily runs.
 
-set -u
+set -euo pipefail
 
-REPO_DIR="${JARVIS_DIR:-/Users/pascal/Desktop/jarvis/repos/pascal-jarvis}"
+REPO_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+JARVIS_DIR="$REPO_DIR"
+export JARVIS_DIR
+# shellcheck source=runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
 cd "$REPO_DIR" || { echo "[conversation-audit] cannot cd $REPO_DIR" >&2; exit 1; }
 
-exec /opt/homebrew/bin/python3 -m core.conversation_audit \
+exec "$JARVIS_PYTHON" -m core.conversation_audit \
   --hours 25 \
   --report data/conversation_audit_daily.md

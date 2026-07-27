@@ -289,7 +289,7 @@ def main() -> int:
             P2CardActionTriggerResponse,
         )
     except ImportError as e:
-        print(f"lark_oapi missing/incompatible ({e}) — pip3 install -U lark-oapi",
+        print(f"lark_oapi missing/incompatible ({e}) — run ./scripts/python.sh -m pip install -U lark-oapi",
               file=sys.stderr)
         return 1
 

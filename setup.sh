@@ -4,9 +4,9 @@
 # Intended flow:
 #   1. A user clones the repo and asks their Claude Code to set it up.
 #   2. Claude runs this script, which:
-#        - Checks prerequisites (python3, jq, pip)
-#        - Installs Python deps (pyyaml) — with a friendly fallback if the
-#          system python is externally-managed (macOS/Debian modern behavior)
+#        - Checks prerequisites (python3, jq, Claude Code)
+#        - Installs every Python runtime/test dependency. If the selected
+#          interpreter is externally managed, creates ~/.jarvis/runtime-venv.
 #        - Makes all shell scripts executable
 #        - Creates jarvis.yaml from the example if missing
 #        - Seeds memory/ with example templates
@@ -17,9 +17,10 @@
 # This script NEVER writes secrets, NEVER pushes anything, NEVER edits
 # jarvis.yaml after creating it. All config is the user's job.
 
-set -uo pipefail
+set -euo pipefail
 
-JARVIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+JARVIS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+export JARVIS_DIR
 cd "$JARVIS_DIR"
 
 # ── Pretty printing ──────────────────────────────────────────────────
@@ -58,10 +59,10 @@ MISSING_REQUIRED=0
 
 need_cmd python3 "  brew install python3   # macOS"
 need_cmd jq      "  brew install jq        # macOS (apt install jq on Linux)"
-need_cmd pip3    "  usually bundled with python3"
-need_optional claude    "Claude Code CLI — install: npm i -g @anthropic-ai/claude-code"
+need_cmd claude  "  npm i -g @anthropic-ai/claude-code"
 need_optional lark-cli    "Lark plugin — install: npm i -g @larksuite/cli"
 need_optional eigenflux   "EigenFlux plugin — install: curl -fsSL https://www.eigenflux.ai/install.sh | sh"
+need_optional gh          "GitHub CLI — required only for governed production deploys"
 
 if [ "$MISSING_REQUIRED" -ne 0 ]; then
   err ""
@@ -69,29 +70,82 @@ if [ "$MISSING_REQUIRED" -ne 0 ]; then
   exit 1
 fi
 
+# Use the same interpreter policy as bot/restart/doctor/launchd.
+# shellcheck source=scripts/runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
+if ! "$JARVIS_PYTHON" -c \
+    'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+  err "Jarvis requires Python 3.10+; selected: $JARVIS_PYTHON"
+  exit 1
+fi
+
 # ── 2. Python deps ───────────────────────────────────────────────────
 step "Installing Python dependencies"
 
-if python3 -c "import yaml" 2>/dev/null; then
-  ok "pyyaml already installed"
+PIP_LOG="${TMPDIR:-/tmp}/jarvis-setup-pip.$$"
+trap 'rm -f "$PIP_LOG"' EXIT
+
+install_requirements() {
+  "$1" -m pip install -r requirements-dev.txt >"$PIP_LOG" 2>&1
+}
+
+if install_requirements "$JARVIS_PYTHON"; then
+  ok "runtime and verification dependencies installed with $JARVIS_PYTHON"
+elif [[ "$JARVIS_PYTHON" == "$JARVIS_VENV_DIR/"* ]]; then
+  cat "$PIP_LOG" >&2
+  err "dependency installation failed inside $JARVIS_VENV_DIR"
+  exit 1
 else
-  if pip3 install -r requirements.txt >/dev/null 2>&1; then
-    ok "pyyaml installed via pip"
-  elif pip3 install --break-system-packages -r requirements.txt >/dev/null 2>&1; then
-    ok "pyyaml installed via pip --break-system-packages (modern macOS/Debian)"
-  else
-    err "pip install failed. Try a virtualenv instead:"
-    err "    python3 -m venv .venv"
-    err "    .venv/bin/pip install -r requirements.txt"
-    err "    then run this script from within the venv"
+  warn "selected Python cannot install packages; creating $JARVIS_VENV_DIR"
+  mkdir -p "$(dirname "$JARVIS_VENV_DIR")"
+  "$JARVIS_PYTHON" -m venv "$JARVIS_VENV_DIR"
+  JARVIS_PYTHON="$JARVIS_VENV_DIR/bin/python3"
+  export JARVIS_PYTHON
+  # Re-select so PATH and the canonical interpreter path agree.
+  jarvis_select_python
+  if ! "$JARVIS_PYTHON" -m pip install --upgrade pip >"$PIP_LOG" 2>&1; then
+    cat "$PIP_LOG" >&2
+    err "failed to initialize pip in $JARVIS_VENV_DIR"
     exit 1
   fi
+  if ! install_requirements "$JARVIS_PYTHON"; then
+    cat "$PIP_LOG" >&2
+    err "dependency installation failed inside $JARVIS_VENV_DIR"
+    exit 1
+  fi
+  ok "runtime and verification dependencies installed in $JARVIS_VENV_DIR"
 fi
+
+if "$JARVIS_PYTHON" - <<'PYEOF'
+import importlib
+
+required = (
+    "yaml", "nicegui", "pywebpush", "qrcode", "aiohttp", "fastapi",
+    "lark_oapi", "pytest",
+)
+missing = []
+for module in required:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:
+        missing.append(f"{module} ({type(exc).__name__})")
+if missing:
+    raise SystemExit("missing or broken Python modules: " + ", ".join(missing))
+PYEOF
+then
+  ok "all required Python modules import successfully"
+else
+  err "Python dependency verification failed"
+  exit 1
+fi
+"$JARVIS_PYTHON" -m pip check
+ok "Python dependency graph is consistent"
 
 # ── 3. Executable bits ───────────────────────────────────────────────
 step "Making shell scripts executable"
-chmod +x bot.sh setup.sh restart.sh scripts/*.sh tasks/*.sh plugins/lark/client.sh 2>/dev/null || true
-ok "bot.sh, tasks/*.sh, plugins/lark/client.sh"
+chmod +x bot.sh setup.sh restart.sh scripts/*.sh tasks/*.sh plugins/lark/client.sh
+chmod -x scripts/config_env.sh scripts/runtime_env.sh
+ok "bot.sh, setup/restart, scripts/*.sh, tasks/*.sh, plugin clients"
 
 # ── 4. jarvis.yaml ───────────────────────────────────────────────────
 step "Checking configuration"
@@ -123,7 +177,7 @@ fi
 step "Seeding memory directory"
 
 # Figure out data_dir from the user's config
-DATA_DIR=$(python3 -c "
+DATA_DIR=$("$JARVIS_PYTHON" -c "
 import sys, os
 sys.path.insert(0, '.')
 try:
@@ -150,14 +204,11 @@ fi
 # ── 6. Test suite (sanity check) ─────────────────────────────────────
 step "Running test suite (sanity check)"
 
-if command -v pytest >/dev/null 2>&1 || python3 -c "import pytest" 2>/dev/null; then
-  if python3 -m pytest tests/ -q 2>&1 | tail -3; then
-    ok "tests passed"
-  else
-    warn "some tests failed — see above"
-  fi
+if [ "${JARVIS_SETUP_SKIP_TESTS:-0}" = "1" ]; then
+  warn "tests skipped because JARVIS_SETUP_SKIP_TESTS=1"
 else
-  warn "pytest not installed — skipping (install with: pip install pytest)"
+  "$JARVIS_PYTHON" -m pytest tests/ -q
+  ok "tests passed"
 fi
 
 # ── 7. Next steps ────────────────────────────────────────────────────
@@ -210,7 +261,7 @@ cat <<'EOF'
      # this step the bot only runs while your terminal session lives.
 
   7. Admin dashboard (optional, enable admin.enabled: true in jarvis.yaml):
-     python3 admin.py
+     ./scripts/python.sh admin.py
      # open http://localhost:3456
 
   Health-check behavior on a fresh install: optional features you have not

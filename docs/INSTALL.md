@@ -21,7 +21,8 @@
 | 组件 | 必需？ | 作用 | 人类要做的事 |
 |---|---|---|---|
 | Claude Code CLI | ✅ 必需 | Jarvis 的大脑（每次心跳/对话都是一次 claude 调用） | 登录一次（订阅或 API 计费） |
-| python3.10+ / jq / pyyaml | ✅ 必需 | 运行时 | 无 |
+| python3.10+ / jq / requirements-dev.txt | ✅ 必需 | 运行时与安装验收 | 无 |
+| GitHub CLI (`gh`) | 仅生产发布 | PR/CI/review 发布门禁 | 首次 `gh auth login` |
 | Lark/飞书插件 | 可选 | 手机上和 bot 双向聊天 | 浏览器创建应用 + 授权（约 5 分钟） |
 | 卡片按钮（sidecar） | 可选 | 卡片上的交互按钮 | 控制台开回调 + 复制 App Secret（约 5 分钟） |
 | EigenFlux 插件 | 可选 | Agent 广播网络 | 邮箱收一次 OTP |
@@ -57,7 +58,7 @@ Console API 计费账户。验证：`printf 'Say OK' | claude -p` 能返回即�
 ```bash
 git clone https://github.com/phronesis-io/pascal-jarvis
 cd pascal-jarvis
-./setup.sh            # 幂等：装 pyyaml、生成 jarvis.yaml + sources.yaml、跑测试
+./setup.sh            # 幂等：完整依赖、Python 验证、配置模板、记忆、全量测试
 ./scripts/doctor.sh   # ← 你的主反馈回路，从现在起每个阶段后都跑一次
 ```
 
@@ -113,7 +114,7 @@ curl -fsSL https://www.eigenflux.ai/install.sh | sh
 启用单连接 sidecar：
 
 ```bash
-pip3 install lark-oapi
+./scripts/python.sh -m pip install lark-oapi
 ```
 
 **🧑 NEEDS HUMAN — 飞书开发者后台两件事**（共约 5 分钟）：
@@ -130,7 +131,9 @@ lark:
   event_backend: sidecar
 ```
 
-然后 `./restart.sh --yes`。**回滚**：删掉 `event_backend` 行再重启，即回到 lark-cli 模式。
+然后 `./restart.sh --runtime --yes`。它只允许重启当前已经部署的同一份代码，
+不会绕过代码发布门禁。**回滚**：删掉 `event_backend` 行再以同样命令重启，
+即回到 lark-cli 模式。
 
 ⚠️ **绝对不要**让 sidecar 和 `lark-cli event` 同时各开一条连接——飞书把事件随机分发
 到同一应用的所有长连接，消息会被随机抢走。`event_backend` 开关保证只有一条连接。
@@ -179,11 +182,18 @@ gitignored 配置文件 + 中性默认。
 ## Phase 6 — 启动与日常运维
 
 ```bash
-./restart.sh           # 日常启动/重启（处理单实例锁、清字节码）
+./bot.sh               # 首次前台启动；Ctrl-C 退出
+./restart.sh --runtime # 日常配置/状态重启；要求 live code == clean HEAD
 ./restart.sh --status  # 三进程状态（daemon / bot / 事件监听器）
-./restart.sh --full    # 同步并重启 daemon、bot、Dashboard、手机网关
+./restart.sh           # 代码发布：强制 main/PR/CI/review/branch protection
+./restart.sh --full    # 受治理的完整发布：再同步 Dashboard、手机网关
 ./scripts/doctor.sh    # 任何时候的全面体检
 ```
+
+`restart.sh` 的默认和 `--full` 路径是**生产代码发布**，不是普通安装器。
+它需要 `gh` 已安装并登录，而且当前提交必须满足仓库的 PR、CI、审核和分支保护
+规则。普通配置变化使用 `--runtime`；该路径先证明正在运行的 bot/heartbeat
+已经是当前干净 `HEAD`，不一致时会拒绝并要求走正式发布。
 
 **（可选，macOS）launchd 常驻监督** —— 让守护进程/看板/备份在重启和崩溃后
 自动拉活。plist 是模板（`__JARVIS_DIR__` 等占位符），脚本安装时替换成本机
@@ -206,10 +216,11 @@ gitignored 配置文件 + 中性默认。
   时的日历 token 探针——按提示补授权即可。
 
 **最终验证清单**（agent 逐项确认）：
-1. `./restart.sh --status` 三行全绿
+1. `./scripts/python.sh -m core.components` 所有已配置组件全绿
 2. `grep 'Beat sent' jarvis.log | tail -1` 时间戳在 10 分钟内（心跳线程首拍后按 ≤1 条/10 分钟节流）
 3. （配了 Lark）人类从手机发一句话，收到回复
 4. （配了 sidecar）点一个卡片按钮，弹 toast
+5. （装了 Dashboard/手机端）`:3457` 本机可访问，`:3458` 配对后可访问；`:3456` 不经手机网关暴露
 
 **值得告诉人类的日常命令**（在 IM 里直接发给 bot）：`jobs` 列出后台任务、
 `cancel <id>` 取消、`stop` 中止当前回复；超过 ~2 分钟的请求会自动转后台，
@@ -219,7 +230,7 @@ gitignored 配置文件 + 中性默认。
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
-| `pip3 install` 报 externally-managed | 新 macOS/Debian 的 PEP 668 | 加 `--break-system-packages`（setup.sh 已自动处理） |
+| Python 报 externally-managed | 新 macOS/Debian 的 PEP 668 | 重跑 `./setup.sh`；它会自动创建并统一使用 `~/.jarvis/runtime-venv` |
 | 卡片按钮弹"出错了请稍后重试" | 回调配置没发版，或没启用 sidecar | Phase 4 完整走一遍，**别忘发版** |
 | 消息收不到但进程都在 | 两条事件连接互抢 | 确认只有一个监听器：`pgrep -fl 'lark-cli event|lark_event_sidecar'` 只应有一行 |
 | 改了 daemon.py 没生效/守护进程误报 | 常驻进程没重载 | `./restart.sh --full` |
@@ -231,4 +242,4 @@ gitignored 配置文件 + 中性默认。
 
 1. **每个阶段后跑 doctor**，按 fix 命令修，绿了再前进——不要凭感觉判断装没装好。
 2. **🧑 标记的步骤原样转述给人类**，等人类确认完成再继续；不要尝试绕过浏览器授权。
-3. **改运行中系统的配置后用 `./restart.sh --yes` 应用**（非交互环境必须带 `--yes`）。
+3. **改配置用 `./restart.sh --runtime --yes`；代码变化必须走受治理的 `./restart.sh` 发布路径**。

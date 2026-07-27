@@ -20,8 +20,10 @@ Two things make the agent-driven install smooth:
 
 The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It:
 
-1. Checks for `python3` / `jq` / `pip3` (prints install commands if missing)
-2. Installs `pyyaml` (with `--break-system-packages` fallback for modern macOS/Debian)
+1. Checks for `python3` / `jq` / Claude Code (prints install commands if missing)
+2. Installs and import-verifies every runtime/test dependency; when the selected
+   Python is externally managed it creates and consistently uses
+   `~/.jarvis/runtime-venv`
 3. Makes shell scripts executable
 4. Copies `jarvis.example.yaml → jarvis.yaml` and `sources.example.yaml → sources.yaml` if missing (never overwrites)
 5. Seeds the memory directory with example templates
@@ -51,7 +53,14 @@ Auth credentials stored in `~/.eigenflux/`. Jarvis-specific settings in `eigenfl
 
 ### Upgrading
 
-After `git pull`, run the memory migration script if your memory is still in flat layout:
+After `git pull`, re-run setup so dependency changes are applied with the same
+interpreter used by the resident services:
+
+```bash
+./setup.sh
+```
+
+Run the memory migration script if your memory is still in flat layout:
 
 ```bash
 ./scripts/migrate-memory.sh [YOUR_MEMORY_DIR]
@@ -65,7 +74,7 @@ Also clone the EigenFlux skills repo if not already present:
 git clone https://github.com/phronesis-io/openclaw-eigenflux ../openclaw-eigenflux
 ```
 
-Then restart jarvis.
+Then apply the same-revision runtime restart: `./restart.sh --runtime`.
 
 ### Start it up
 
@@ -76,16 +85,15 @@ Then restart jarvis.
 - With `lark.user_id` set → Lark bot live
 - Without → heartbeat-only mode (memory consolidation + EigenFlux still run)
 
-For day-to-day operation, use the helper instead of starting `bot.sh` by hand —
-it handles the single-instance lock, clears stale Python bytecode, and warns you
-before killing an in-flight conversation:
+For a foreground/local install, `./bot.sh` is the normal entrypoint. For a
+supervised install, launchd starts it automatically. Configuration-only
+restarts use the same-revision gate; code deployment remains governed:
 
 ```bash
-./restart.sh            # graceful restart of the bot (daemon stays up)
-./restart.sh --full     # refresh/restart daemon, bot, dashboard, and mobile gateway
+./restart.sh --runtime  # config/state restart; refuses if live code != clean HEAD
 ./restart.sh --status   # show daemon / bot / lark-cli process status
-./restart.sh --yes      # skip the in-flight-conversation confirmation
-                        # (required for non-interactive callers: cron, scripts)
+./restart.sh            # governed code deploy: main + PR + CI + release authority
+./restart.sh --full     # governed deploy of daemon, bot, dashboard, mobile gateway
 ```
 
 ---
@@ -218,9 +226,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
    claude   # follow the auth flow on first run
    ```
 
-2. **Python 3.10+** with PyYAML:
+2. **Python 3.10+**:
    ```bash
-   pip install pyyaml
+   python3 --version
    ```
 
 3. **jq** (for Lark message parsing):
@@ -244,24 +252,17 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 git clone https://github.com/phronesis-io/pascal-jarvis.git
 cd pascal-jarvis
 
-# Create your config
-cp jarvis.example.yaml jarvis.yaml
+# Install dependencies, create local config, seed memory, and run tests
+./setup.sh
+
 # Edit jarvis.yaml:
 #   - Set data_dir (where sessions/memory are stored)
 #   - Set work_dir (directory Claude can access — your project root)
 #   - (Optional) Set lark.user_id to your Lark open_id
 
-# Set up initial memory (tiered structure)
-mkdir -p ~/.jarvis/memory
-cp -R examples/memory/* ~/.jarvis/memory/
-# Edit the memory files to describe yourself
-
 # (Optional) Set up built-in plugins — see their dedicated READMEs for full setup
 #   Lark:      plugins/lark/README.md
 #   EigenFlux: plugins/eigenflux/README.md
-
-# Make scripts executable
-chmod +x bot.sh tasks/*.sh
 
 # Run
 ./bot.sh
@@ -273,29 +274,13 @@ If you don't set `lark.user_id` in `jarvis.yaml`, the bot runs in heartbeat-only
 
 ### Running as a background service (macOS)
 
-Create `~/Library/LaunchAgents/com.jarvis.daemon.plist` — point at `daemon.py` (not `bot.sh` directly), so the guardian can monitor and auto-restart the bot:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.jarvis.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/path/to/pascal-jarvis/daemon.py</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/jarvis-daemon-stdout.log</string>
-  <key>StandardErrorPath</key><string>/tmp/jarvis-daemon-stderr.log</string>
-</dict>
-</plist>
-```
+Use the canonical installer; it reads `work_dir` from `jarvis.yaml`, selects
+the same Python as setup, renders absolute paths, validates each plist, and
+rolls the batch back on failure:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.jarvis.daemon.plist
+./scripts/launchd/install.sh
+./scripts/python.sh -m core.components
 ```
 
 This auto-starts on login. The daemon manages `bot.sh` lifecycle — you can also run `./bot.sh` directly for development.

@@ -24,6 +24,12 @@ BOT_SH = (ROOT / "bot.sh").read_text()
 RESTART_SH = (ROOT / "restart.sh").read_text()
 
 
+def _existing_work_dir(tmp_path: Path) -> str:
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return str(work)
+
+
 def test_bot_anchors_cwd_to_jarvis_dir():
     """RC: bot.sh must cd into JARVIS_DIR so `python3 -m core.X` always resolves.
 
@@ -131,7 +137,7 @@ def test_launchd_installer_refreshes_only_requested_definition(tmp_path):
         "HOME": str(home),
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LAUNCHCTL_LOG": str(launchctl_log),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     subprocess.run(
@@ -196,7 +202,8 @@ def test_launchd_installer_allows_an_empty_optional_selection(tmp_path):
         **os.environ,
         "HOME": str(home),
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
+        "TASKLINE_DIR": str(tmp_path / "taskline-not-installed"),
     }
 
     result = subprocess.run(
@@ -264,7 +271,7 @@ esac
         "LAUNCHCTL_LOG": str(launchctl_log),
         "SERVICE_STATE": str(state),
         "BOOTSTRAP_COUNT": str(bootstrap_count),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     result = subprocess.run(
@@ -346,7 +353,7 @@ exec /bin/mv "$@"
         "SERVICE_STATE": str(state),
         "BOOTSTRAP_COUNT": str(bootstrap_count),
         "MOVE_COUNT": str(move_count),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     result = subprocess.run(
@@ -394,7 +401,7 @@ exit 1
         "HOME": str(home),
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LAUNCHCTL_LOG": str(launchctl_log),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     result = subprocess.run(
@@ -474,7 +481,7 @@ esac
         "LAUNCHCTL_LOG": str(launchctl_log),
         "STATE_DIR": str(state_dir),
         "FAIL_MARKER": str(fail_marker),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     result = subprocess.run(
@@ -506,10 +513,10 @@ esac
         assert len(bootstraps) == 2
 
 
-def test_launchd_installer_rolls_back_after_an_unexpected_command_failure(
+def test_launchd_installer_rolls_back_after_plist_validation_failure(
     tmp_path,
 ):
-    """set -e failures outside launchctl handling retain batch atomicity."""
+    """A later invalid rendered plist retains batch atomicity."""
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
@@ -550,27 +557,27 @@ esac
         encoding="utf-8",
     )
     launchctl.chmod(0o755)
-    sed_count = tmp_path / "sed-count"
-    sed_wrapper = bin_dir / "sed"
-    sed_wrapper.write_text(
+    plutil_count = tmp_path / "plutil-count"
+    plutil_wrapper = bin_dir / "plutil"
+    plutil_wrapper.write_text(
         """#!/bin/sh
 count=0
-[ ! -f "$SED_COUNT" ] || count=$(cat "$SED_COUNT")
+[ ! -f "$PLUTIL_COUNT" ] || count=$(cat "$PLUTIL_COUNT")
 count=$((count + 1))
-printf '%s\n' "$count" > "$SED_COUNT"
+printf '%s\n' "$count" > "$PLUTIL_COUNT"
 [ "$count" -lt 2 ] || exit 7
-exec /usr/bin/sed "$@"
+exit 0
 """,
         encoding="utf-8",
     )
-    sed_wrapper.chmod(0o755)
+    plutil_wrapper.chmod(0o755)
     env = {
         **os.environ,
         "HOME": str(home),
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "STATE_DIR": str(state_dir),
-        "SED_COUNT": str(sed_count),
-        "WORK_DIR": str(tmp_path / "work"),
+        "PLUTIL_COUNT": str(plutil_count),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
 
     result = subprocess.run(
@@ -585,7 +592,7 @@ exec /usr/bin/sed "$@"
         text=True,
     )
 
-    assert result.returncode == 7
+    assert result.returncode == 1
     assert "previous state restored" in result.stderr
     for label in labels:
         assert (destination / f"{label}.plist").read_text(
@@ -637,7 +644,7 @@ esac
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "LAUNCHCTL_LOG": str(launchctl_log),
         "SERVICE_STATE": str(state),
-        "WORK_DIR": str(tmp_path / "work"),
+        "WORK_DIR": _existing_work_dir(tmp_path),
     }
     command = [
         "bash",

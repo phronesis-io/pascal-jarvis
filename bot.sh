@@ -15,6 +15,8 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 JARVIS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 export JARVIS_DIR
+# shellcheck source=scripts/runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
 
 # Canonicalize argv before anything else (2026-07-08): every identity check
 # in the stack — the session-lock kill case-glob, restart.sh's pkill, and

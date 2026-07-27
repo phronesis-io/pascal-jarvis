@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Install/verify the launchd supervision config (REQ-40).
 #
-# The plist files in this directory are TEMPLATES with __JARVIS_DIR__,
-# __WORK_DIR__, and __HOME__ placeholders. This script substitutes them
-# with real paths at install time — no hardcoded user paths in tracked code.
+# The plist files in this directory are templates. This script renders the
+# selected Python, repo, work, Taskline, and home paths at install time.
 #
 # TCC hard constraints on this Mac (memory: jarvis-launchd-tcc-gotchas):
 #  1. StandardOut/ErrorPath must NOT point under ~/Desktop (launchd has no
 #     Desktop TCC permission → exit 78, zero logs). Use /tmp/jarvis-*.log.
-#  2. Interpreter must be /opt/homebrew/bin/python3 (system python lacks
-#     deps AND Homebrew python carries the Desktop TCC grant).
+#  2. Interpreter must be the exact Python validated by setup/doctor. On
+#     Pascal's Mac that is Homebrew Python because it carries the Desktop TCC
+#     grant; portable installs may use another absolute path or the managed
+#     ~/.jarvis/runtime-venv.
 #  3. bash scripts cannot be ProgramArguments directly (no Desktop TCC) —
 #     wrap with python3 -c 'subprocess.call(["/bin/bash", script])'.
 set -euo pipefail
@@ -18,7 +19,42 @@ DEST="$HOME/Library/LaunchAgents"
 UID_N=$(id -u)
 
 JARVIS_DIR="$(cd "$HERE/../.." && pwd)"
-WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/../.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
+export JARVIS_DIR
+# shellcheck source=../runtime_env.sh
+source "$JARVIS_DIR/scripts/runtime_env.sh"
+PYTHON_BIN="$JARVIS_PYTHON"
+PYTHON_DIR="$JARVIS_PYTHON_DIR"
+CONFIG_FILE="${JARVIS_CONFIG_FILE:-$JARVIS_DIR/jarvis.yaml}"
+
+mkdir -p "$DEST"
+
+if [ -z "${WORK_DIR:-}" ]; then
+  if [ -f "$CONFIG_FILE" ]; then
+    WORK_DIR=$(
+      "$PYTHON_BIN" - "$JARVIS_DIR" "$CONFIG_FILE" <<'PYEOF'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from core.config import Config
+
+print(Path(Config(sys.argv[2]).work_dir).expanduser().resolve())
+PYEOF
+    )
+  else
+    WORK_DIR="$JARVIS_DIR"
+  fi
+fi
+if [ ! -d "$WORK_DIR" ]; then
+  echo "configured work_dir does not exist: $WORK_DIR" >&2
+  exit 2
+fi
+WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+
+TASKLINE_DIR="${TASKLINE_DIR:-$JARVIS_DIR/../taskline}"
+if [ -d "$TASKLINE_DIR" ]; then
+  TASKLINE_DIR="$(cd "$TASKLINE_DIR" && pwd -P)"
+fi
 
 LAUNCHD_PROBE_DETAIL=""
 launchd_job_state() {
@@ -68,7 +104,7 @@ for plist in "${PLISTS[@]}"; do
   label="${name%.plist}"
   target="gui/$UID_N/$label"
   if [[ "$label" == "com.pascal.jarvis.taskline" \
-        && ! -x "$WORK_DIR/repos/taskline/dist/taskline-server" ]]; then
+        && ! -x "$TASKLINE_DIR/dist/taskline-server" ]]; then
     launchctl bootout "$target" 2>/dev/null || true
     rm -f "$DEST/$name" "$DEST/$name.tmp"
     echo "skipped $name (optional Taskline binary not installed)"
@@ -211,12 +247,40 @@ for plist in "${PLISTS[@]}"; do
   name=$(basename "$plist")
   label="${name%.plist}"
   target="gui/$UID_N/$label"
-  # Template substitution → installed copy
-  sed \
-    -e "s|__JARVIS_DIR__|$JARVIS_DIR|g" \
-    -e "s|__WORK_DIR__|$WORK_DIR|g" \
-    -e "s|__HOME__|$HOME|g" \
-    "$plist" > "$DEST/$name.tmp"
+  # Exact token replacement avoids sed metacharacter/path escaping bugs.
+  "$PYTHON_BIN" - "$plist" "$DEST/$name.tmp" \
+    "$JARVIS_DIR" "$WORK_DIR" "$HOME" "$PYTHON_BIN" "$PYTHON_DIR" \
+    "$TASKLINE_DIR" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+source, destination, jarvis, work, home, python, python_dir, taskline = sys.argv[1:]
+text = Path(source).read_text(encoding="utf-8")
+for token, value in {
+    "__JARVIS_DIR__": jarvis,
+    "__WORK_DIR__": work,
+    "__HOME__": home,
+    "__PYTHON_BIN__": python,
+    "__PYTHON_DIR__": python_dir,
+    "__TASKLINE_DIR__": taskline,
+}.items():
+    text = text.replace(token, escape(value))
+if re.search(r"__[A-Z0-9_]+__", text):
+    raise SystemExit(f"unrendered required placeholder in {source}")
+Path(destination).write_text(text, encoding="utf-8")
+PYEOF
+  if command -v plutil >/dev/null 2>&1 \
+      && ! plutil -lint "$DEST/$name.tmp" >/dev/null; then
+    rm -f "$DEST/$name.tmp"
+    if rollback_updated_services; then
+      echo "rendered plist is invalid: $name; previous state restored" >&2
+    else
+      echo "rendered plist is invalid: $name; batch recovery was incomplete" >&2
+    fi
+    exit 1
+  fi
 
   was_loaded=0
   if launchd_job_state "$target"; then
