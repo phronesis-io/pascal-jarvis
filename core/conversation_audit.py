@@ -452,6 +452,25 @@ def _provider_status_for_log(content: str) -> str:
     return "open"
 
 
+def _sessions_that_replied(conn: sqlite3.Connection, run_id: int) -> set[str]:
+    """Sessions that actually delivered at least one reply in this run.
+
+    `session_messages` is a transcript, not a delivery record. A Claude Code
+    CLI session, a heartbeat task session, or a background job all produce
+    assistant turns that were never sent to anyone. Corroborating against
+    `reply_sent` is the audit's own local evidence of what left the system.
+    """
+    return {
+        str(row["session_id"])
+        for row in conn.execute(
+            "SELECT DISTINCT session_id FROM conversation_events "
+            "WHERE run_id=? AND event_type='reply_sent' "
+            "AND session_id IS NOT NULL AND session_id!=''",
+            (run_id,),
+        )
+    }
+
+
 def _add_user_visible_provider_issue(
     conn: sqlite3.Connection,
     run_id: int,
@@ -542,9 +561,19 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
         """,
         (run_id,),
     ).fetchall()
+    # "Surfaced to the user" is a claim about delivery, so it needs delivery
+    # evidence. Until 2026-07-27 it was inferred from transcript text alone,
+    # and the two P0s raised that day were "No response requested." turns in
+    # local Claude Code CLI sessions that had zero reply_sent events and zero
+    # matching rows in the delivery ledger — nothing was ever sent to anyone.
+    # Residual, stated rather than hidden: a session that did reply and also
+    # emitted an internal no-op turn can still be flagged. Closing that needs
+    # per-message receipts, which the audit does not yet ingest.
+    replying_sessions = _sessions_that_replied(conn, run_id)
     direct_empty_rows = [
         row for row in candidate_empty
         if _is_direct_empty_surface(row["text"])
+        and str(row["session_id"]) in replying_sessions
     ]
     provider_issue_type = (
         "progress_provider_error_leak"
