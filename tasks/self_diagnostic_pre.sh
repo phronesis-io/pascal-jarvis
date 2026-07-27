@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Pre-hook: collect system health data for self-diagnostic
-WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
+# JARVIS_DIR must be resolved BEFORE WORK_DIR derives from it: the old order
+# expanded an unset $JARVIS_DIR, so `cd "/.."` succeeded into `/` and every
+# standalone run reported WORK_DIR=/ — an empty repo scan ($WORK_DIR/repos)
+# and a memory slug of "-" (0 hot / 0 warm / rules ✗). Exported by bot.sh in
+# production, which is why it only ever showed up on manual runs.
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+WORK_DIR="${WORK_DIR:-$(cd "$JARVIS_DIR/.." 2>/dev/null && pwd || echo "$JARVIS_DIR")}"
 _CODE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 _TO=(python3 "$_CODE_DIR/scripts/run_with_timeout.py" 30)
-_work_slug=$(python3 -c "from pathlib import Path; print(str(Path('${WORK_DIR:-$JARVIS_DIR}').resolve()).replace('/','-').replace('.','-'))")
-MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_work_slug/memory}"
+# The tiered memory belongs to the agent runtime directory, so its Claude
+# project slug derives from JARVIS_DIR — not from WORK_DIR, whose slug points
+# at a different (flat) memory directory.
+_mem_slug=$(python3 -c "from pathlib import Path; print(str(Path('$JARVIS_DIR').resolve()).replace('/','-').replace('.','-'))")
+MEMORY_DIR="${MEMORY_DIR:-$HOME/.claude/projects/$_mem_slug/memory}"
 
 # REQ-39: leave a copy of this report for the deterministic alert post-script
 # (tasks/self_diagnostic_post.py scans it for ⚠️ lines — detection and

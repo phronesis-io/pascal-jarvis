@@ -3,7 +3,100 @@
 All notable changes to Pascal Jarvis. This project tracks requirements as
 `REQ-NN` across PRD cycles in `docs/` (prd_interaction_quality v1, REQ-01~29;
 prd_system_iteration_v2, REQ-30~58; prd_interaction_v3, REQ-59~77;
-prd_interaction_v4, REQ-78~90).
+prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
+1.7.0 onward `docs/prd_portfolio.md` is the authority on which PRDs are
+shipped, superseded, or rejected, and requirements are traced to evidence in
+`docs/release_acceptance_2026-07-24.md`.
+
+## [1.7.0] — 2026-07-27 — verified delegation, one delivery pipeline, deploy-as-verify
+
+The largest release since the project started: 70 commits, 279 files,
++52.7k/−2.8k, 40 new `core/` modules and 38 new test files, none of which had
+ever been cut into a release. The through-line is **authority** — who is
+allowed to declare a piece of work finished. Before this release a model
+saying "done" was, in several paths, the only evidence that anything had
+happened. It no longer is anywhere.
+
+Requirement-to-evidence ledger: `docs/release_acceptance_2026-07-24.md`.
+PRD status map: `docs/prd_portfolio.md`.
+
+### Verified Delegation (VD-01~VD-10) — new subsystem
+- A Delegation is captured only from an accepted responsibility, binds a
+  stable target and principal before any mutation, and carries a risk class:
+  R2 confirms, R3 approves, R4 never leaves human hands.
+- Completion requires deterministic read-back from a named authority. Every
+  connector (Git, runtime, Delivery, EigenFlux, Lark, calendar, doc) registers
+  a verifier; model prose can no longer close anything.
+- Retries, callbacks, and handoffs are idempotent on an action key plus source
+  event key plus contract version, so a replayed callback cannot double-mutate.
+- Partial success stays partial: a required-step DAG aggregates rather than
+  rounding up. External waits are durable and resumable through a reconciler.
+- Linked objects are one-way projections of the Delegation, not competing
+  authorities. Automatic capture stays gated behind a Phase 0 threshold that
+  needs 50 reviewed samples across 14 days and 5 connector classes.
+
+### One delivery pipeline, one user inbox
+- `core/delivery.py` is now the single policy and state machine for replies,
+  proactive output, cards, web, and push. Producers no longer carry transport
+  policy; low-level transports are adapters.
+- Memorial-first Items: `/items` is the one inbox, Matter is the topic, Intent
+  is the timer, and the old inboxes redirect. Intent lifecycle, scheduling,
+  and closure moved to stable modules with the boundary enforced by tests.
+- Retry is bounded (cumulative budget 9) with a terminal `failed` state and a
+  dead letter only at terminal — a failed transport used to retry forever.
+
+### Deploy as verify
+- `core/release_gate.py` fails closed: a production restart is refused unless
+  the revision is merged, reviewed, and green, bound to the merged SHA. Where
+  branch policy intentionally requires zero approvals, an explicit admin-owner
+  decision may substitute only when it names the SHA and records a reason.
+- `core/deploy.py` adds `verify` and `smoke`. Code on disk is not deployed
+  until the live process is proven to run that revision.
+
+### Cross-device continuity and mobile access
+- Authenticated mobile gateway on `:3458` with device pairing, preview-safe
+  pairing links, VPN-free tailnet entry, and CA name constraints. It may proxy
+  the dashboard, never Admin.
+- Handoffs between surfaces are idempotent, claimable, and completable;
+  surface identity comes only from the authenticated gateway header.
+
+### Provider chain
+- `backup_model` field, a second independent relay slot, and a tool-capable
+  GPT agentic final fallback, with bounded canaries that record only provider
+  labels, model labels, timing, and sanitized categories — never tokens,
+  headers, or response content.
+
+### Dashboard `:3457`
+- Full design pass: unified visual system across 11 pages, dark-mode brand
+  colors fixed at the root, every red number made trustworthy, and a home view
+  that is directly actionable.
+
+### Memory
+- Root fix for chronic memory-tier truncation — the heartbeat had been losing
+  behavioral rules (PRD R1-R6). Index integrity is mechanically checked and
+  backups cover 6 previously missing state files, with a restore runbook.
+
+### Reliability fixes in this wave
+- The self-diagnostic alarm's Memorial path had been dead: the post-script was
+  the only one of 30 task scripts importing `core` without putting the repo
+  root on `sys.path`, so every real run silently degraded to plain text.
+- Its pre-script derived `WORK_DIR` from `$JARVIS_DIR` one line before
+  assigning it; standalone runs landed on `/` and reported 0 hot / 0 warm
+  memory files on a machine holding 8 and 42.
+- Two false-green gaps closed: protected-file mutations forgiven because the
+  live bot is running are now printed in the terminal summary (with
+  `JARVIS_TEST_STRICT_GUARD=1` to reproduce CI strictly), and
+  `scripts/localtest.sh` shellchecks the same set CI does. A PR in this cycle
+  had quoted a local pass while CI was red.
+- The pre-commit hook no longer pipes into `rg`; on a machine without ripgrep
+  the restart reminder silently never fired.
+
+### Notes
+- Minor, not major: the documented install and upgrade path is unchanged, old
+  routes redirect, and `scripts/migrate-memory.sh` covers the memory layout.
+- 7 heartbeat tasks that were superseded or produced no useful executions
+  during the observation window were retired into `tasks/_quarantine/`, with a
+  documented path back onto the roster.
 
 ## [1.6.0] — 2026-07-15 — input-channel connector layer + sentinel leak fix
 

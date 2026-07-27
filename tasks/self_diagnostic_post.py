@@ -27,7 +27,13 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent
+# The heartbeat runs this as a script, so sys.path[0] is tasks/ — not the repo
+# root. Without this insert `from core import memorial` raises
+# ModuleNotFoundError and the alarm silently degrades to the plain-text
+# emergency path (observed 2026-07-27). Every other task script that imports
+# core already does this; this one was the sole outlier.
+sys.path.insert(0, str(ROOT))
 STAMP = ROOT / ".diag_last_alert.json"
 DEDUP_WINDOW_S = 4 * 3600
 

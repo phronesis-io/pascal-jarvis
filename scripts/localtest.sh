@@ -19,8 +19,15 @@ while IFS= read -r script; do
 done < <(find tasks scripts -type f -name '*.sh' -print)
 
 if command -v shellcheck >/dev/null 2>&1; then
-  echo "[localtest] shellcheck bot.sh"
+  # Same set and severity CI enforces — a narrower local check is how a red CI
+  # gets quoted as a green local run.
+  echo "[localtest] shellcheck (CI parity: bot.sh, restart.sh, tasks/*.sh)"
   shellcheck -s bash -S error -e SC1090,SC1091 bot.sh
+  shellcheck -s bash -S error -e SC1090,SC1091 restart.sh
+  find tasks/ -name '*.sh' -not -path 'tasks/_quarantine/*' \
+    -exec shellcheck -s bash -S error -e SC1090,SC1091 {} +
+else
+  echo "[localtest] shellcheck NOT INSTALLED — CI still runs it; install it" >&2
 fi
 
 echo "[localtest] pytest"

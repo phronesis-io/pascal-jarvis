@@ -75,6 +75,11 @@ state.
   never read or write the real data dir — use `tmp_path` and monkeypatch
   (see existing tests for the pattern), and never depend on wall-clock time —
   pass `now=` explicitly (a wall-clock fixture once turned CI red for days).
+  On a machine running the production bot, the protected-file guard forgives
+  writes the live bot may have made, and prints a "mutations forgiven" summary
+  when it does. **A run with that summary is not release evidence** — stop the
+  bot and re-run with `JARVIS_TEST_STRICT_GUARD=1` to get CI's strictness
+  locally (2026-07-27: a PR quoted a local pass while CI was red).
 - Shell scripts must pass `bash -n` and `shellcheck -s bash -S error`
   (CI enforces this for `bot.sh`).
 - Task scripts follow the pre/post convention documented in README

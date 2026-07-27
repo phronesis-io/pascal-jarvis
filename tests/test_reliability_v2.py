@@ -7,6 +7,7 @@ failure feeding the circuit breaker, and the daemon deploy guard.
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -224,6 +225,116 @@ def test_diag_no_warnings_no_alert(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
     dp.main()
     assert sent == []
+
+
+def test_diag_post_imports_core_when_run_as_a_script(tmp_path):
+    """The heartbeat runs post-scripts as scripts, so sys.path[0] is tasks/.
+
+    2026-07-27: self_diagnostic_post.py never put the repo root on sys.path,
+    so `from core import memorial` raised ModuleNotFoundError on every real
+    run and the alarm silently degraded to the plain-text emergency path.
+    The existing tests could not see it because conftest already has the repo
+    root on sys.path — this one reproduces the runtime import context instead.
+    """
+    import subprocess
+    import sys as _sys
+
+    root = Path(__file__).parent.parent
+    probe = (
+        "import importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('diag', r'''"
+        f"{root / 'tasks' / 'self_diagnostic_post.py'}''')\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "from core import memorial\n"
+        "print('IMPORT_OK')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run(
+        [_sys.executable, "-c", probe],
+        cwd=tmp_path, capture_output=True, text=True, timeout=60, env=env)
+    assert "IMPORT_OK" in r.stdout, (
+        "self_diagnostic_post.py cannot reach `core` when executed the way "
+        f"the heartbeat executes it:\n{r.stderr}")
+
+
+def test_diag_pre_resolves_work_and_memory_dirs_without_inherited_env():
+    """WORK_DIR was derived from $JARVIS_DIR one line before it was assigned.
+
+    2026-07-27: with nothing inherited from bot.sh, the unset expansion made
+    `cd "/.."` land on `/`, so WORK_DIR=/ (empty `$WORK_DIR/repos` scan) and
+    the memory slug collapsed to "-" (0 hot / 0 warm / behavioral rules ✗ on
+    a machine that actually had 8 hot and 42 warm files).
+    """
+    import subprocess
+
+    root = Path(__file__).parent.parent
+    script = root / "tasks" / "self_diagnostic_pre.sh"
+    lines = script.read_text(encoding="utf-8").splitlines()
+    # Everything up to the point the script starts producing its report.
+    cut = next(i for i, ln in enumerate(lines) if ln.startswith("exec > >(tee"))
+    preamble = "\n".join(lines[:cut])
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("JARVIS_DIR", "WORK_DIR", "MEMORY_DIR")}
+    r = subprocess.run(
+        ["bash", "-c", preamble + '\nprintf "%s\\n%s\\n%s\\n" '
+         '"$JARVIS_DIR" "$WORK_DIR" "$MEMORY_DIR"', str(script)],
+        capture_output=True, text=True, timeout=60, env=env, cwd=str(root.parent))
+    assert r.returncode == 0, r.stderr
+    jarvis_dir, work_dir, memory_dir = r.stdout.strip().splitlines()[:3]
+
+    assert Path(jarvis_dir).resolve() == root.resolve()
+    assert work_dir not in ("/", ""), (
+        f"WORK_DIR collapsed to {work_dir!r} — the repo scan would find nothing")
+    assert Path(work_dir).resolve() == root.resolve().parent
+    # The tiered memory slug comes from the runtime dir, not its parent.
+    expected_slug = str(root.resolve()).replace("/", "-").replace(".", "-")
+    assert expected_slug in memory_dir, (
+        f"MEMORY_DIR {memory_dir!r} does not derive from JARVIS_DIR's slug")
+
+
+def test_pre_commit_hook_only_uses_tools_it_can_count_on():
+    """A hook step that needs an absent tool exits 127 and reads as "no match".
+
+    2026-07-27: the runtime-code restart reminder was piped into `rg`, which
+    is not installed everywhere; the hook printed "Pre-commit checks passed"
+    with the reminder silently skipped.
+    """
+    root = Path(__file__).parent.parent
+    hook = (root / "scripts" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    body = "\n".join(
+        ln for ln in hook.splitlines() if not ln.strip().startswith("#"))
+    optional = [tool for tool in ("rg", "fd", "jq", "yq", "ag")
+                if re.search(rf"(^|[|\s]){tool}\s", body)
+                and f'command -v {tool}' not in body]
+    assert not optional, (
+        f"pre-commit uses {optional} without a `command -v` guard — on a "
+        "machine without them the step silently no-ops and the hook still "
+        "reports success")
+
+
+def test_task_scripts_importing_core_put_repo_root_on_syspath():
+    """Class guard for the 2026-07-27 outlier.
+
+    A task script that imports `core` but never inserts the repo root on
+    sys.path works under pytest (conftest already inserted it) and fails in
+    production. Static check so the next one is caught at review time.
+    """
+    root = Path(__file__).parent.parent
+    offenders = []
+    for script in sorted((root / "tasks").glob("*.py")):
+        if "_quarantine" in script.parts:
+            continue
+        src = script.read_text(encoding="utf-8")
+        imports_core = re.search(r"^\s*(from core[. ]|import core\b)", src, re.M)
+        if not imports_core:
+            continue
+        if "sys.path.insert" not in src and "sys.path.append" not in src:
+            offenders.append(script.name)
+    assert not offenders, (
+        "these task scripts import `core` but never put the repo root on "
+        f"sys.path — they will ModuleNotFoundError in production: {offenders}")
 
 
 def test_silent_tasks_with_report_prompts_have_post_alert_path():
