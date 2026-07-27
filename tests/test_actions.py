@@ -199,22 +199,12 @@ def test_eigenflux_cancel_publish_action(tmp_path):
 
 
 def test_intent_create(tmp_path):
-    """Intent create should not crash even without the DB (graceful error).
-
-    create_intent writes to the real intentions DB (dashboard.db is path-fixed),
-    so this test self-cleans the row it creates — otherwise every run leaves a
-    junk 'test' intent in live data.
-    """
-    import re as _re
-    from core import intentions as _mod
+    """Intent creation uses the test-isolated runtime database."""
     ap = _make_processor(tmp_path)
     reply = "[ACTION:intent_create|name=test|when=2026-01-01T09:00:00|type=date|prompt=hello]"
     result = ap.process(reply)
-    # Should produce either success or graceful error, not crash
-    assert "Intent" in result or "❌" in result
-    m = _re.search(r"id:\s*(int_\w+)", result)
-    if m:
-        _mod.delete_intent(m.group(1))
+    assert "Intent" in result
+    assert "❌" not in result
 
 
 class _CmdResult:
