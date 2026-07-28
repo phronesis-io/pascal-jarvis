@@ -576,3 +576,126 @@ perception:
     report = rt.dry_run()
     assert "✓ 1 signal(s)" in report
     assert not hist.exists()
+
+
+# ── lark_chat adapter ────────────────────────────────────────────────
+
+
+def test_lark_chat_window_uses_colon_offset(monkeypatch):
+    """lark-cli rejects strftime's bare `%z` (+0800) with a validation error.
+
+    Regression: the shadow phronesis source shipped 2026-07-15 with `%z`
+    windows, so EVERY collection exited non-zero and was recorded as
+    error_type=network — 1154 consecutive failures over 13 days, with the
+    source still looking enabled and scheduled.
+    """
+    from sources import lark_chat
+    seen = {}
+
+    class _R:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "data": {"messages": []}})
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _R()
+
+    monkeypatch.setattr(lark_chat.subprocess, "run", fake_run)
+    lark_chat.collect({"chat_id": "oc_x"}, {})
+    cmd = seen["cmd"]
+    for flag in ("--start", "--end"):
+        stamp = cmd[cmd.index(flag) + 1]
+        offset = stamp[-6:]
+        assert offset[3] == ":", f"{flag}={stamp} must carry a colon offset"
+        assert offset[0] in "+-", f"{flag}={stamp} must carry a UTC offset"
+
+
+def test_lark_chat_collects_and_excludes_self(monkeypatch):
+    from sources import lark_chat
+
+    def msg(mid, sender, text, ts):
+        return {"message_id": mid, "create_time": str(int(ts * 1000)),
+                "sender": {"id": sender},
+                "body": {"content": json.dumps({"text": text})}}
+
+    class _R:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "data": {"messages": [
+            msg("m1", "ou_other", "有个决定要你拍", time.time()),
+            msg("m2", "ou_me", "我自己说的", time.time()),
+            msg("m3", "ou_other", "   ", time.time()),
+        ]}})
+        stderr = ""
+
+    monkeypatch.setattr(lark_chat.subprocess, "run", lambda *a, **k: _R())
+    signals, state = lark_chat.collect(
+        {"chat_id": "oc_x", "exclude_open_id": "ou_me"}, {})
+    assert [s["event_id"] for s in signals] == ["m1"]
+    assert state["error_type"] is None
+
+
+def test_lark_chat_nonzero_exit_reports_error(monkeypatch):
+    from sources import lark_chat
+
+    class _R:
+        returncode = 2
+        stdout = json.dumps({"ok": False, "error": {"type": "validation"}})
+        stderr = ""
+
+    monkeypatch.setattr(lark_chat.subprocess, "run", lambda *a, **k: _R())
+    signals, state = lark_chat.collect({"chat_id": "oc_x"}, {})
+    assert signals == []
+    assert state["error_type"]
+
+
+# ── stuck-source diagnostics ─────────────────────────────────────────
+
+
+def test_diag_flags_source_stuck_in_failure_streak(tmp_path):
+    rt = _runtime(tmp_path, """
+perception:
+  sources:
+    - id: chat
+      type: lark_chat
+      collect: {chat_id: oc_x}
+""")
+    (tmp_path / "perception_state.json").write_text(json.dumps(
+        {"chat": {"error_type": "network", "error_count": 1154}}))
+    report, healthy = rt.diag()
+    assert not healthy
+    assert "⚠️" in report and "chat" in report and "1154" in report
+
+
+def test_diag_ignores_blips_and_disabled_sources(tmp_path):
+    rt = _runtime(tmp_path, """
+perception:
+  sources:
+    - id: flaky
+      type: lark_chat
+      collect: {chat_id: oc_x}
+    - id: retired
+      type: lark_chat
+      enabled: false
+      collect: {chat_id: oc_y}
+""")
+    (tmp_path / "perception_state.json").write_text(json.dumps({
+        "flaky": {"error_type": "network", "error_count": 3},
+        "retired": {"error_type": "auth", "error_count": 900},
+    }))
+    report, healthy = rt.diag()
+    assert healthy
+    assert "⚠️" not in report
+    assert "retired" not in report
+
+
+def test_diag_healthy_when_no_state_yet(tmp_path):
+    rt = _runtime(tmp_path, """
+perception:
+  sources:
+    - id: chat
+      type: lark_chat
+      collect: {chat_id: oc_x}
+""")
+    report, healthy = rt.diag()
+    assert healthy and "1 个感知源" in report
