@@ -26,6 +26,28 @@
   low-engagement audit (REQ-75/89)
 - Graceful model fallback opus→sonnet→haiku on model/spend error (REQ-77)
 
+## Done (2026-07-28 wave — Town-inspired: 用户自建例程 / 注意力 ROI / 邮件草稿)
+
+- **Routines** — 用户在飞书一句话就能建长期例程（`core/routines.py`）：触发器复用
+  Intent 的 next_fire_at 追赶原语（不另起调度器）、证据由确定性代码先采集、
+  三档自主级别（observe/propose/act）由代码按**存量记录**闸死而非提示词、
+  每次运行落一条审计。`act` 只放行内部可逆动作白名单，外部变更仍归 Delegation。
+  面板 `/routines` 同时展示定义和审计流（observe 的产出只在这里可见）。
+- **注意力 ROI 治理**（`core/attention_roi.py`）—— 用奏折台账实测的回应率决定
+  某个来源还配不配占决策位；只降不升、不碰受保护来源、每次调整都发卡告知。
+  接上 log-maintenance Tier-0。上线当天按真实数据**一个都没降**（决策位健康），
+  只报告了 4 个已在最低档但基本没人看的来源 —— 这正是校准没有过激的证据。
+- **邮件回复草稿**（`core/mail_draft.py`）—— mail-triage 从"只读"升级到"给真需要
+  回的邮件备一版草稿"，语气来自 per-user 配置而非硬编码。**不含发信**：
+  Jarvis 没有发信通道，按钮措辞里不存在"已发送"这个状态。
+- 退役 `dashboard/heartbeat_bridge.py` + SQLite `scheduled_tasks` 动态任务路径：
+  唯一能跑的 `notify` 是 cron Intent 的劣化重复，生产零行数据。
+
+### 下一步（未做，需要单独设计）
+- 邮件**发送**闭环：需要 authority / 安全 / 回滚设计 + 权威读回验证，
+  按架构应走 Verified Delegation，不是给按钮加个 send。
+- routine 证据源目前 8 种，Pascal 真用起来后按缺口补，不预先造。
+
 ## Done (recent)
 
 - Intent closure acceleration — drained hard/external closures now generate

@@ -49,6 +49,24 @@ HEARTBEAT.md task
 The model authors content. Deterministic code owns scheduling, side effects,
 state transitions, retries, and completion.
 
+### Routines
+
+```text
+user sentence in Lark
+  -> core.routines definition (trigger + evidence + autonomy)
+  -> routine-run pre-hook: claim due, advance watermark, gather evidence
+  -> HeartbeatRunner batches model work
+  -> post-hook: authorize actions against the STORED autonomy level
+  -> Memorial (propose/act) or audit-only record (observe)
+  -> routine_runs audit row, always terminal
+```
+
+Routines reuse the Intent scheduler's `next_fire_at` catch-up primitive rather
+than adding a scheduler, and everything they show the user is an ordinary
+Memorial routed by `core.delivery`. `observe` output exists only in the audit
+trail. The `act` allow-list is internal and reversible; external mutation stays
+with Verified Delegation, which owns read-back evidence.
+
 ### Perception
 
 ```text
@@ -121,6 +139,20 @@ the exact release commit or a healthy resident descendant that contains it.
   request a paired-phone push for explicitly selected sources, but never owns
   storage, quiet hours, retries, or delivery state.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
+- `core.routines`: user-authored recurring work — definition, claim, autonomy
+  enforcement, action allow-list, and the per-run audit trail.
+  `core.routine_evidence` is its read-only, path-guarded, size-bounded
+  provider registry; it never mutates and never shells out except for a
+  bounded `git log`.
+- `core.attention_roi`: measures per-source engagement from the Memorial
+  ledger and may quiet a decision lane into a notice. It can only lower a
+  class, never raise or silence one, never touches a protected source, and
+  announces every change. It reads `memorial.natural_attention`, not
+  `_default_attention`, so its own overrides cannot become evidence for
+  themselves.
+- `core.mail_draft`: reply drafts and their per-user voice configuration.
+  Storage and rendering only — Jarvis has no mail send transport, and no
+  status in this module means "sent".
 - `core.matters`: durable topic identity and executor context.
 - `core.continuity`: device handoff leases and resume state. Each operation
   owns and closes its SQLite connection; active-handoff creation is atomic.

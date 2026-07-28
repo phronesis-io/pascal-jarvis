@@ -788,15 +788,76 @@ class ActionProcessor:
         except Exception:
             return "FAILED"
 
-    # ── Schedule ──
+    # ── Mail drafts ──
 
-    def _do_schedule_task(self, raw: str) -> str:
+    def _do_mail_draft_status(self, raw: str) -> str:
+        """Record what he decided about a reply draft.
+
+        Deliberately has no "send" outcome: Jarvis has no mail send transport,
+        and a button that implied one would be a false completion claim.
+        """
+        from core.mail_draft import get_draft, set_status
+        p = parse_params(raw)
+        did = str(p.get("id", "")).strip()
+        status = str(p.get("status", "")).strip()
+        if not did or not status:
+            return ""
+        row = get_draft(did)
+        if not row:
+            return f"❌ 没有这份草稿：{did}"
         try:
-            from dashboard.heartbeat_bridge import register_from_action
-            result = register_from_action(raw)
-            return f"✅ {result}" if result else "❌ 动态任务注册失败"
-        except Exception:
-            return "❌ 动态任务注册失败"
+            set_status(did, status)
+        except ValueError as exc:
+            return f"❌ {exc}"
+        return {
+            "used": "✅ 记下了，草稿归你去发",
+            "redo": "✅ 记下了，下轮重写一版",
+            "dropped": "✅ 这封不回，草稿已作废",
+        }.get(status, f"✅ 草稿 {did} → {status}")
+
+    # ── Routines ──
+
+    def _do_routine_create(self, raw: str) -> str:
+        """Register a user-authored Routine from conversation.
+
+        Replaces the old `schedule_task` marker, whose only working action type
+        was `notify` — a strictly worse duplicate of a cron Intent, with no
+        evidence, no autonomy contract, and no audit trail.
+        """
+        from core.routines import RoutineError, create_routine
+        p = parse_params(raw)
+        name = str(p.get("name", "")).strip()
+        expr = str(p.get("expr", p.get("when", ""))).strip()
+        try:
+            row = create_routine(
+                name=name,
+                trigger_type=str(p.get("type", "cron")).strip() or "cron",
+                trigger_expr=expr,
+                instruction=str(p.get("instruction", p.get("prompt", ""))).strip(),
+                autonomy=str(p.get("autonomy", "propose")).strip() or "propose",
+                evidence=str(p.get("evidence", "")).strip(),
+            )
+        except RoutineError as exc:
+            return f"❌ 例程没建成：{exc}"
+        except Exception as exc:
+            return f"❌ 例程没建成：{type(exc).__name__}: {exc}"
+        return (f"✅ 例程「{row['name']}」已建立（{row['id']}，{row['autonomy']} 级）"
+                f"，下次 {row['next_fire_at'] or '—'}")
+
+    def _do_routine_pause(self, raw: str) -> str:
+        from core.routines import STATUS_PAUSED, find_routine, set_status
+        p = parse_params(raw)
+        ref = str(p.get("id", p.get("name", ""))).strip()
+        if not ref:
+            return ""
+        row = find_routine(ref)
+        if not row:
+            return f"❌ 没找到例程：{ref}"
+        try:
+            set_status(row["id"], STATUS_PAUSED)
+        except Exception as exc:
+            return f"❌ 暂停失败：{exc}"
+        return f"✅ 例程「{row['name']}」已暂停，不会再发了（恢复：resume {row['id']}）"
 
     # ── Jobs (bg, jobs, job_cancel, job_output handled in bash — need & and wait) ──
     # These return empty so bash fallback handles them

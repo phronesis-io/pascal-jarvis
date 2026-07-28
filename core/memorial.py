@@ -182,7 +182,36 @@ def _default_attention(source: str, options: list[dict],
     inferred = _infer_attention(options, extra_buttons)
     if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
         return ATTENTION_ALERT
+    return _governed(str(source or ""), inferred)
+
+
+def natural_attention(source: str, options: list[dict],
+                      extra_buttons: list[dict]) -> str:
+    """The class a card would have with no engagement governor applied.
+
+    core.attention_roi measures against this so a demoted source's own
+    demotion cannot be read back as evidence about it.
+    """
+    if str(source or "") in WEB_FIRST_SOURCES:
+        return ATTENTION_NOTICE
+    inferred = _infer_attention(options, extra_buttons)
+    if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
+        return ATTENTION_ALERT
     return inferred
+
+
+def _governed(source: str, inferred: str) -> str:
+    """Let measured engagement quiet a decision lane nobody answers.
+
+    Only ever decision → notice, and never for a protected source (see
+    core.attention_roi). A failure here must not change routing, so the
+    ungoverned class is returned on any error.
+    """
+    try:
+        from core.attention_roi import class_for
+        return class_for(source, inferred)
+    except Exception:
+        return inferred
 
 
 def requires_decision(state: dict) -> bool:
@@ -1218,13 +1247,24 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     """
     _maybe_rotate()
     source, title, body = str(source), str(title), str(body)
-    # An OPTIONS line in the body wins over any preset: the emitter that wrote
-    # that line is stating what this specific card asks. Callers that pass
-    # explicit options have already decided, so their body is left alone.
-    if options is None:
-        body, inline_options = _extract_inline_options(body)
-        if inline_options:
-            options, preset = inline_options, None
+    # TITLE:/OPTIONS: are authoring directives for the model, never content.
+    # Stripping them is unconditional and lives HERE, at the one boundary every
+    # card passes through, because attaching it to a particular entry path is
+    # what leaked it four times (audit P0 #268/#276/#282/#285, 7/22–7/27):
+    #   - a caller passing explicit options skipped the OPTIONS strip entirely
+    #     (intentions closure cards shipped the raw line);
+    #   - adopt_card builds its body from card elements and never ran either
+    #     extractor, so directly-built rich cards (daily-reflect) shipped both.
+    # Whose buttons win is a SEPARATE decision from whether the residue is
+    # removed: an explicit caller still overrides the parsed line below.
+    body, inline_options = _extract_inline_options(body)
+    leading_title, stripped_body = _extract_title_line(body)
+    if leading_title:
+        body = stripped_body
+        if not str(title).strip():
+            title = leading_title
+    if options is None and inline_options:
+        options, preset = inline_options, None
     opts = _normalize_options(options, preset)
     native_buttons = _normalize_extra_buttons(extra_buttons)
     attention = str(
@@ -1372,20 +1412,34 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
 
     body = "\n\n".join(body_parts).strip()
     title = _clean_adopted_title(header, source)
+    # A task that builds its own rich card still writes TITLE:/OPTIONS: — they
+    # are model authoring directives, not content, and this path never ran the
+    # extractors, so both shipped verbatim (audit P0 #268/#282/#285,
+    # daily-reflect 7/22–7/27). The header of a directly-built card is a
+    # decorative source label ("🌙 回顾"); an explicit TITLE line is the one
+    # thing that says what THIS card is about, so it wins.
+    body, inline_options = _extract_inline_options(body)
+    explicit_title, rest = _extract_title_line(body)
+    if explicit_title:
+        title, body = explicit_title, rest
     if not body:
         body = title
     has_native_action = any("value" in button for button in native_buttons)
     # An existing callback already represents the card's decision options;
     # don't bury it under generic FYI buttons. URL-only cards are read-only,
     # so the common FYI choices remain useful.
-    options = [] if has_native_action else None
+    options = [] if has_native_action else (inline_options or None)
     fallback_preset = SOURCE_DEFAULT_PRESET.get(source or "heartbeat", "fyi")
     # 一张卡一件事 (REQ-117): a button-free legacy card that mechanically
     # merged several matters (the 7/21 日程变动 card carried three 改期 lines)
     # becomes one memorial per matter. Cards with native buttons are never
     # split — their buttons bind to the card as a whole and replicating a
     # callback across cards would multiply its action.
-    matters = [body] if native_buttons else split_matters(body)
+    # A card whose author wrote its own OPTIONS line designed ONE interactive
+    # ask — splitting it would replicate that ask across cards. Same rule the
+    # plain-text route already applies to inline options.
+    matters = ([body] if (native_buttons or inline_options)
+               else split_matters(body))
     if len(matters) > 1:
         print(f"memorial split: adopted {source or 'heartbeat'} card → "
               f"{len(matters)} cards (一张卡一件事)", file=sys.stderr)
@@ -1393,10 +1447,13 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     for matter in matters:
         mid, _ = create(
             source=source or "heartbeat", title=title, body=matter,
-            options=options, preset=None if has_native_action else fallback_preset,
+            options=options,
+            preset=None if (has_native_action or inline_options)
+            else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
             attention=(ATTENTION_ALERT if _looks_like_alert(f"{title}\n{matter}")
-                       and not has_native_action and fallback_preset == "fyi"
+                       and not has_native_action and not inline_options
+                       and fallback_preset == "fyi"
                        else ""),
         )
         state = get_memorial(mid) or {}

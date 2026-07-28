@@ -20,6 +20,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Lifelog | morning-anchor, exercise-week | yes (morning: one short line ~8:30; exercise: one Sunday-evening card) |
 | Calendar & Tasks | calendar-sync, weekly-review | calendar silent, weekly yes |
 | Intentions | intention-check | yes (when intent fires) |
+| Routines | routine-run | 看例程自己的自主级别：observe 只进审计，propose/act 出卡 |
 | Memory Pipeline | memory-hourly → daily → weekly, memory-consolidate, memory-tidy | silent |
 | EigenFlux | eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+friends yes, others silent |
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
@@ -339,8 +340,29 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
     Pascal would regret not seeing within hours (time-critical reply,
     security/billing emergency). Default false.
 
-    Return JSON: {"triage":[{"event_id":"<id>","decision":"push|silent","reason":"<brief>"}],"user_messages":[{"event_id":"<id>","title":"<short title>","body":"<markdown>"}],"urgent":false}
+    回复草稿（drafts）—— 只给真的需要他亲自回一句的那种邮件写：
+    真人写来的、在等他一个答复（约时间、问意向、要个确认、介绍认识）。
+    **不写**：任何自动发信、账单、安全告警、newsletter、平台通知、群发招聘——
+    这些没有"回"这个动作，写了就是在给他造工作。一封邮件最多一版草稿。
+    宁可不写：没有草稿的推送卡照常是干净的知会卡；硬写一版他要重改的，
+    比不写更费他时间。
+
+    草稿怎么写：
+    - 语气按 DATA 里给的 VOICE 段。VOICE 说"还没有设定语气"就照对方的语言、
+      写短、写直接，别套模板，也别模仿一个你并不知道的人。
+    - 用对方的语言（英文来信就英文回）。
+    - **不许替他承诺任何事**——时间、价格、参加与否、任何数字。要表态的地方
+      留成他填的空（比如"我这周 ___ 有空"），或者写成反问。这是硬规矩：
+      草稿是他署名发出去的，编一个承诺出去比不写草稿糟糕得多。
+    - 不确定的事实不要写进去。宁可短。
+    - "why" 一句话说清你为什么这么回，方便他一眼判断要不要改。
+
+    ⚠️ Jarvis 没有发信能力，草稿只是给他复制去用的文本。
+    正文里、"why" 里，都不许出现"已回复/已发送/帮你回了"这类说法。
+
+    Return JSON: {"triage":[{"event_id":"<id>","decision":"push|silent","reason":"<brief>"}],"user_messages":[{"event_id":"<id>","title":"<short title>","body":"<markdown>"}],"drafts":[{"event_id":"<id>","to":"<对方称呼>","subject":"<主题>","body":"<草稿正文>","why":"<一句话>"}],"urgent":false}
     Include EVERY email's event_id in "triage" (even silent ones) so they're not re-read.
+    "drafts" 可以为空数组——大多数轮次它就该是空的。
     If DATA is empty: HEARTBEAT_OK
 
 ## Check-in & Wellbeing
@@ -675,6 +697,41 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
     The envelope MUST cover EVERY intent id listed in DATA — use action "silent" for ids
     with nothing to say. NEVER reply HEARTBEAT_OK to this task: its pre-script only emits
     when due intents exist, so an idle reply is never legitimate and strands them.
+
+## Routines（用户自建例程）
+
+### routine-run
+- interval: 5m
+- pre: tasks/routine_run_pre.sh
+- post: tasks/routine_run_post.py
+- prompt: |
+    [ROUTINE RUN]
+    这些是 Pascal 自己建的例程（不是我写死的任务）。每条都自带：
+    「要产出」= 他当初的原话，「证据」= 已经由确定性代码采集好的真实状态。
+
+    对 DATA 里的每一个 [run <run_id>]：
+    1. 只用它自己那段证据写。证据里没有的事实不许出现在正文里——这些例程
+       就是为了"别凭记忆编"才先采证据的。证据显示 (unavailable: ...) 就明说
+       这块没读到，不要绕过去假装知道。
+    2. body 写人话、短（≤300字），一张卡只说这一件事。没有 SLA/HTTP 码/内部黑话。
+    3. title ≤20 字，一句话说清这次产出的结论，不要写成例程名的复读。
+    4. 证据确实什么都没发生（比如这周没提交、日程空）→ 照实说一句"本周无变化"，
+       不要为了凑内容硬写。真的完全无话可说才把 body 留空。
+
+    自主级别（DATA 里每条都标了，这是代码里的契约，不是建议）：
+    - observe：照常写，但它不会发给任何人，只进审计记录。别在正文里跟他说话。
+    - propose：写一张等他批红的卡。要动手的事写成建议，别写成"已完成"。
+    - act：可以在 actions 里请求内部动作，只有三种会被放行：
+        {"type":"create_intent","name":"...","when":"YYYY-MM-DD HH:MM","prompt":"..."}
+        {"type":"add_task","title":"..."}
+        {"type":"note","text":"..."}
+      其它类型（发邮件、改日历、调接口）一律会被代码拒绝并原样告诉他——
+      别请求，也别在正文里声称做了。
+
+    Return JSON: {"routines": {"<run_id>": {"title": "<≤20字>", "body": "<markdown>",
+      "actions": [ ... 仅 act 级例程且确有必要时 ... ]}}}
+    envelope 必须覆盖 DATA 里的每一个 run_id。这个任务的 pre-script 只在真有例程
+    到点时才输出，所以回 HEARTBEAT_OK 永远是错的——那会把这些 run 全判成无产出。
 
 ## System Maintenance
 

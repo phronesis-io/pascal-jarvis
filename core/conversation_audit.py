@@ -543,9 +543,19 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
         """,
         (run_id,),
     ).fetchall()
+    # Same delivery-evidence rule as the empty-reply detector below. The
+    # 2026-07-27 fix was applied to only one of the two symmetrical detectors,
+    # so this one kept raising P0s ("surfaced to the user") about transcripts
+    # from local Claude Code CLI sessions with zero reply_sent events — 5 open
+    # findings across runs 50-56, none of which ever reached anyone.
+    # Nothing goes dark: every detected provider error is still recorded by the
+    # `provider_fallback_exercised` P1 above, and anything that got past the
+    # safety boundary is a `provider_error_as_answer` P0 from suppressed_content.
+    replying_sessions = _sessions_that_replied(conn, run_id)
     direct_provider_rows = [
         row for row in candidate_provider
         if _is_direct_provider_surface(row["text"])
+        and str(row["session_id"]) in replying_sessions
     ]
 
     _empty_sql_filter = " OR ".join(
@@ -569,7 +579,6 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     # Residual, stated rather than hidden: a session that did reply and also
     # emitted an internal no-op turn can still be flagged. Closing that needs
     # per-message receipts, which the audit does not yet ingest.
-    replying_sessions = _sessions_that_replied(conn, run_id)
     direct_empty_rows = [
         row for row in candidate_empty
         if _is_direct_empty_surface(row["text"])

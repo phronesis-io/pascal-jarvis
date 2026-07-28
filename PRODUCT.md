@@ -32,6 +32,10 @@ Jarvis should let the user:
   inbox.
 - **Jarvis Calendar**: the next concrete fire time and closure state of
   existing Intents; it is not the engineering task-health calendar.
+- **Routines on phone/web**: the automations the user created by speaking,
+  with the evidence each one reads, how far it may act without asking, and a
+  run-by-run record of what it actually did. Adding a recurring behavior is a
+  sentence, not a release.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
 - **Claude Code and Codex**: deep execution environments attached to the same
@@ -55,6 +59,12 @@ Jarvis should let the user:
     code existence or elapsed time never promotes it.
 12. Quiet is not invisible: anything removed from an interrupting channel
     needs a named, searchable surface and a bounded way to regain attention.
+13. The user can add a recurring behavior without a release, and anything that
+    can act on its own carries a declared authority level and a readable
+    record of what it did.
+14. Where a source sits in the attention hierarchy is answered by measured
+    engagement, not by a hand-edited list nobody revisits — and every
+    adjustment is announced.
 
 ## Non-Goals
 

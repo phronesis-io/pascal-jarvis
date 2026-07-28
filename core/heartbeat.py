@@ -435,7 +435,18 @@ class HeartbeatRunner:
     # (HEARTBEAT_OK / empty / killed / unparseable envelope), the post is
     # still invoked with stdin='__NO_ENVELOPE__' so the manifest resolves
     # deterministically instead of stranding intents until they expire.
-    ACK_REQUIRED_TASKS = {"intention-check"}
+    # routine-run belongs here for the same reason: its pre-script claims due
+    # routines, advances their next_fire_at watermark, and opens `running`
+    # audit rows. A dead Claude call with no post would strand every claimed
+    # run until the 60-minute sweep, and the occurrence would already be spent.
+    ACK_REQUIRED_TASKS = {"intention-check", "routine-run"}
+
+    # Tasks that deliver their own content as memorials through core.delivery
+    # instead of returning it in the batch envelope. The combined user_message
+    # must not restate them — that is a card plus a paragraph saying the same
+    # thing, the exact duplication the has_card guard below exists to prevent
+    # (it only sees cards that travel *through* user_messages).
+    SELF_DELIVERING_TASKS = {"routine-run"}
 
     # Max tasks to batch into a single Claude call.
     # Prevents timeout when many tasks are due simultaneously (e.g. after restart).
@@ -1220,30 +1231,12 @@ You have access to the user's memory below. Use it to personalize your responses
             self._log(f"Idle-noise judge error (failing open): {e}")
             return False
 
-    def _check_dynamic_tasks(self) -> list[str]:
-        """Check SQLite-based dynamic tasks. Returns user-facing messages."""
-        try:
-            from dashboard.heartbeat_bridge import check_dynamic_tasks
-            result = check_dynamic_tasks()
-            if not result:
-                return []
-            import json as _json
-            data = _json.loads(result)
-            messages = []
-            for task in data.get("tasks", []):
-                action_type = task.get("action_type", "")
-                config = task.get("action_config", {})
-                if action_type == "notify":
-                    msg = config.get("message", "")
-                    if msg:
-                        messages.append(msg)
-                # Other action types handled by extensions
-            return messages
-        except ImportError:
-            return []
-        except Exception as e:
-            self._log(f"Dynamic task check error: {e}")
-            return []
+    # The SQLite `scheduled_tasks` dynamic-task path was retired here. Its only
+    # working action type was `notify`, which a cron Intent already does better
+    # (closure, breach, catch-up), and it shipped zero rows in production.
+    # User-authored recurring work now lives in core.routines, which carries the
+    # things that path never had: declared evidence, an autonomy contract, and
+    # a per-run audit trail.
 
     def run_cycle(self, force: bool = False, only_task: str = "",
                   lock_wait: float = 0):
@@ -1312,11 +1305,14 @@ You have access to the user's memory below. Use it to personalize your responses
                 circuit_tripped.append((task["name"], remaining))
                 # Event-log the skip only when the task was actually DUE —
                 # an open circuit is re-checked every tick (~10s) and a
-                # per-tick event would flood the replay log.
+                # per-tick event would flood the replay log.  Advance last_run
+                # after emitting so the event fires at most once per interval.
                 _itv = self._effective_interval(task, ts, interval_overrides)
                 if force or (now - last_run >= _itv):
                     self._event("task_skip", task=task["name"],
                                 reason="circuit_open", retry_in_s=remaining)
+                    ts.last_run = now
+                    state[task["name"]] = ts.to_dict()
                 continue
             # Apply cooldown even when forced, to prevent rapid repeats
             # (e.g. multiple Lark session rotations in quick succession).
@@ -1808,7 +1804,10 @@ You have access to the user's memory below. Use it to personalize your responses
                 # summary in that case — non-silent tasks still deliver through
                 # their own per-task slices above.
                 any_silent = any(t["name"] in self.SILENT_TASKS for t in runnable)
-                if top_msg and top_msg.strip() and not has_card and not any_silent:
+                any_self_delivering = any(
+                    t["name"] in self.SELF_DELIVERING_TASKS for t in runnable)
+                if (top_msg and top_msg.strip() and not has_card
+                        and not any_silent and not any_self_delivering):
                     user_messages.append(top_msg)
             else:
                 # NEVER dump raw JSON to user — log and treat as a FAILURE.
@@ -1886,10 +1885,6 @@ You have access to the user's memory below. Use it to personalize your responses
                         duration_s=round(time.time() - call_t0, 2))
         state.pop("__envelope_parse__", None)  # a clean parse clears the shared streak
         self.save_state(state)
-
-        # Also check dynamic tasks from SQLite scheduler
-        dynamic_msgs = self._check_dynamic_tasks()
-        user_messages.extend(dynamic_msgs)
 
         # Separate card JSON from plain text — they use different Lark send paths
         cards = [m for m in user_messages if m.strip().startswith('{"config":')]
