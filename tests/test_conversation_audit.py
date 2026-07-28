@@ -121,6 +121,62 @@ def test_empty_reply_is_still_flagged_when_the_session_did_reply(tmp_path):
     assert "empty_reply_user_visible" in report
 
 
+def _provider_error_fixture(tmp_path, *, replied: bool):
+    """A session whose transcript recorded a provider error, optionally one
+    that actually delivered a reply. Mirrors _empty_reply_fixture."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    sid = "443f9880-a592-400c-a2dd-e1d3544d22fd"
+    session = session_dir / f"{sid}.jsonl"
+    now = datetime.now(timezone.utc)
+    session.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": "API Error: 403 无权访问 vip_1_max_cheap 分组"},
+            "timestamp": (now - timedelta(minutes=9)).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    log_paths = []
+    if replied:
+        log = tmp_path / "jarvis.log"
+        stamp = (now_local() - timedelta(minutes=9)).strftime("%Y-%m-%d %H:%M:%S")
+        log.write_text(f"[{stamp}] [INFO] [{sid}] Replied (22 chars)\n",
+                       encoding="utf-8")
+        log_paths = [log]
+    return audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=log_paths,
+        session_dirs=[session_dir],
+        db_path=tmp_path / "audit.db",
+    )
+
+
+def test_provider_error_needs_delivery_evidence_to_be_called_user_visible(tmp_path):
+    """The 2026-07-27 corroboration fix was applied to the empty-reply detector
+    only, leaving its symmetrical twin raising P0s about local Claude Code CLI
+    transcripts that were never sent (open findings #261/#265/#274/#283 across
+    audit runs 50-56, every flagged session with reply_sent=0)."""
+    paths = _provider_error_fixture(tmp_path, replied=False)
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "provider_error_in_assistant_transcript" not in report
+
+
+def test_provider_error_is_still_flagged_when_the_session_did_reply(tmp_path):
+    """The gate must not silence a provider error in a session that answered."""
+    paths = _provider_error_fixture(tmp_path, replied=True)
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "provider_error_in_assistant_transcript" in report
+
+
 def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

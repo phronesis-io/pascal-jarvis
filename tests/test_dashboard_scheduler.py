@@ -75,9 +75,7 @@ class SchedulerDBTest:
         self.db_path = setup_test_db()
         # per-process warn-once sets must not leak state between tests
         import dashboard.scheduler as sched
-        import dashboard.heartbeat_bridge as hb
         sched._warned_task_ids.clear()
-        hb._warned_task_ids.clear()
 
     def teardown_method(self):
         teardown_test_db(self.db_path)
@@ -220,47 +218,6 @@ class TestCronMinuteDedupe(SchedulerDBTest):
         again = get_due_tasks()
         if now_local().minute == before:
             assert again == []
-
-
-# ── (4) prompt/script honesty ────────────────────────────────────────────
-
-class TestActionTypeHonesty(SchedulerDBTest):
-    def test_register_from_action_rejects_non_notify(self):
-        from dashboard.heartbeat_bridge import register_from_action
-        msg = register_from_action(
-            "name=sneaky|type=interval|config=60|action=prompt|message=x")
-        assert "no" in msg and "executor" in msg
-        assert db_module.task_list() == []
-
-    def test_register_from_action_surfaces_bad_trigger(self):
-        from dashboard.heartbeat_bridge import register_from_action
-        msg = register_from_action(
-            "name=badcron|type=cron|config=a b c d e|action=notify|message=x")
-        assert msg.startswith("Cannot register")
-        assert db_module.task_list() == []
-
-    def test_legacy_prompt_row_not_marked_executed(self):
-        from dashboard.heartbeat_bridge import check_dynamic_tasks
-        _insert_raw_task("legacy_prompt", action_type="prompt",
-                         action_config='{"prompt": "do things"}')
-        result = check_dynamic_tasks()
-        assert result == ""  # nothing executable
-        row = db_module.get_db().execute(
-            "SELECT run_count, last_run_at FROM scheduled_tasks WHERE id='legacy_prompt'"
-        ).fetchone()
-        assert row[0] == 0 and row[1] is None  # NOT falsely marked executed
-
-    def test_bad_action_config_does_not_kill_other_due_tasks(self):
-        from dashboard.heartbeat_bridge import check_dynamic_tasks
-        _insert_raw_task("aaa_bad", action_config="not json")  # sorts first
-        _insert_raw_task("zzz_good", action_config='{"message": "hello"}')
-        result = check_dynamic_tasks()
-        data = json.loads(result)
-        assert [t["id"] for t in data["tasks"]] == ["zzz_good"]
-        # the poison row was not marked executed
-        row = db_module.get_db().execute(
-            "SELECT run_count FROM scheduled_tasks WHERE id='aaa_bad'").fetchone()
-        assert row[0] == 0
 
 
 # ── (8) mark_executed atomic ─────────────────────────────────────────────

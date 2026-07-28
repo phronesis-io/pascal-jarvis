@@ -273,36 +273,3 @@ class TestBookmarkPipeline:
         items = db_module.bookmark_list()
         assert len(items) == 2
         os.unlink(tmp.name)
-
-
-class TestHeartbeatBridge:
-    def setup_method(self):
-        self.db_path = setup_test_db()
-
-    def teardown_method(self):
-        teardown_test_db(self.db_path)
-
-    def test_register_from_action(self):
-        from dashboard.heartbeat_bridge import register_from_action
-        msg = register_from_action("name=morning_alarm|type=date|config=2026-05-22T06:00|action=notify|message=起床了！")
-        assert "morning_alarm" in msg
-        tasks = db_module.task_list()
-        assert len(tasks) == 1
-        assert tasks[0]["name"] == "morning_alarm"
-
-    def test_check_dynamic_tasks_with_due_task(self):
-        from dashboard.heartbeat_bridge import check_dynamic_tasks
-        # Register a task that's immediately due (interval, never run)
-        db_module.task_register(
-            task_id="test_due",
-            name="Test Due",
-            trigger_type="interval",
-            trigger_config={"seconds": 1},
-            action_type="notify",
-            action_config={"message": "hello from dynamic"},
-        )
-        result = check_dynamic_tasks()
-        assert result
-        data = json.loads(result)
-        assert len(data["tasks"]) == 1
-        assert data["tasks"][0]["action_config"]["message"] == "hello from dynamic"

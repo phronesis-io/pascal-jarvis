@@ -80,6 +80,17 @@ def main() -> int:
     msg = str(data.get("user_message", "")).strip()
     urgent = bool(data.get("urgent", False))
 
+    # Reply drafts, keyed by the email they answer. One draft per email: a
+    # second card for the same message is nagging, not help.
+    drafts = {}
+    for item in data.get("drafts", []) or []:
+        if not isinstance(item, dict):
+            continue
+        eid = str(item.get("event_id", "")).strip()
+        body = str(item.get("body", "")).strip()
+        if eid and body:
+            drafts[eid] = item
+
     surface_items = []
     for item in data.get("user_messages", []) or []:
         if not isinstance(item, dict):
@@ -90,6 +101,7 @@ def main() -> int:
                 "title": str(item.get("title") or "邮件").strip() or "邮件",
                 "body": body,
                 "event_id": str(item.get("event_id", "")),
+                "draft": drafts.get(str(item.get("event_id", ""))),
             })
     # Backward compatibility while the model prompt rolls over.
     if not surface_items and msg:
@@ -111,11 +123,33 @@ def main() -> int:
                 )).joinpath(".urgent_send").touch()
             except OSError:
                 pass
+        from core import mail_draft
         for item in surface_items:
+            body, options, preset, draft_id = item["body"], None, "fyi", ""
+            draft = item.get("draft")
+            if draft and not mail_draft.has_draft_for(item["event_id"]):
+                try:
+                    draft_id = mail_draft.save_draft(
+                        event_id=item["event_id"],
+                        to_name=str(draft.get("to", "")),
+                        subject=str(draft.get("subject", "")),
+                        body=str(draft.get("body", "")),
+                        rationale=str(draft.get("why", "")))
+                    body += mail_draft.card_section(draft_id,
+                                                    str(draft.get("body", "")))
+                    options, preset = mail_draft.options_for(draft_id), None
+                except Exception as exc:
+                    # A draft that fails to persist must not take the email
+                    # card down with it — the mail itself still matters.
+                    print(f"[mail-triage] draft save failed: {exc}",
+                          file=sys.stderr)
             mem_id, _ = memorial.create(
-                source="mail", title=item["title"], body=item["body"],
-                preset="fyi", send=False,
-                attention=("alert" if urgent else "notice"),
+                source="mail", title=item["title"], body=body,
+                preset=preset, options=options, send=False,
+                # A draft turns the card into an ask, so it earns a decision
+                # lane; a plain surfaced email stays a notice.
+                attention=("alert" if urgent
+                           else ("decision" if draft_id else "notice")),
                 context=(f"mail event_id={item['event_id']}"
                          if item["event_id"] else ""),
             )

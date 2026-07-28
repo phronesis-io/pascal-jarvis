@@ -8,6 +8,95 @@ prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
 shipped, superseded, or rejected, and requirements are traced to evidence in
 `docs/release_acceptance_2026-07-24.md`.
 
+## [Unreleased] — 用户自建例程、注意力 ROI 治理、邮件草稿
+
+三项都来自对 Town（a16z 2026-06 领投的个人 AI 助理）的产品拆解：它的内核是
+用户自建 Routines + 三档自主级别 + 全量审计 + 按你的语气起草。对照下来
+Jarvis 最大的结构差距是"加一个自动化 = 发一次版"。
+
+### Added
+
+- **Routines** (`core/routines.py`, `core/routine_evidence.py`)：用户一句话就能
+  建的长期例程。触发器复用 Intent 的 `next_fire_at` 追赶原语，不新增调度器；
+  每次触发前由确定性代码采集声明好的只读证据，模型不许凭记忆写。
+  三档自主级别 `observe` / `propose` / `act` 由代码按**数据库里存的那条记录**
+  裁决 —— 模型在返回里声称自己是 act 不会改变任何事。`act` 的白名单只有
+  建 intent / 记任务 / 写笔记三种内部可逆动作；发邮件、改日历、调外部接口
+  一律拒绝并原样告诉用户。每次运行都落一条审计，包括模型漏掉的（记为
+  `no_output`），不存在永远 `running` 的行。
+  证据 provider 有路径护栏（越界、凭证文件、二进制一律拒读）、单源和总量
+  双重截断，且截断会明说。
+  面板 `/routines` 展示定义 + 审计流；`observe` 级例程的产出只在这里出现。
+- **注意力 ROI 治理** (`core/attention_roi.py`)：`WEB_FIRST_SOURCES` 一直是人工
+  编辑的常量 —— 有人审计一次、改一行、然后再没人回头看。现在按台账实测的
+  回应率来判：某来源占着决策位却长期没人回（样本 ≥8 且 <25%），就降到知会位，
+  它仍在事项/信号里、只是不再声称需要决策；回应率回到 ≥50% 再升回去。
+  只降不升、绝不静音、绝不碰受保护来源（日历/告警/委派/意图/邮件/签到），
+  每次调整发一张卡说清改了什么、东西去哪了。
+- **邮件回复草稿** (`core/mail_draft.py`)：mail-triage 读了每封信却从不落笔，
+  回信成本全在人身上。现在真需要回的信会附一版草稿，语气取自 per-user 配置
+  （`jarvis.yaml mail.voice` 或 memory `warm/mail_voice.md`），仓库里不硬编码
+  任何人的语气。提示词硬约束：不许替他承诺时间/价格/参加与否。
+  **不含发信**——Jarvis 没有发信通道，所以按钮里根本不存在"已发送"这个状态，
+  措辞是"就用这版，我去发"。真要发信要单独做 authority/回滚设计并走 Delegation。
+
+### Removed
+
+- `dashboard/heartbeat_bridge.py` 和 SQLite `scheduled_tasks` 动态任务路径。
+  它唯一能执行的 `action_type` 是 `notify`，而那是 cron Intent 的劣化重复
+  （没有闭环、没有 breach、没有追赶），生产环境零行数据。用户自建的循环工作
+  现在归 Routines，带着这条路径从来没有的东西：证据、授权契约、审计。
+
+### Fixed（收口其他 session 留下的未完成 bug）
+
+审计台账 `data/conversation_audit.db` 里挂了 21 条 open finding（14 P0 / 7 P1），
+逐条查到源头后收敛为 4 个根因；21 → 1（剩下那条要 Pascal 拍板，见下）。
+
+- **`TITLE:`/`OPTIONS:` 指令行漏进用户卡片**（P0 ×4，7/22–7/27，最近一次昨天）。
+  根因是剥离逻辑挂在单条入口上而不是挂在 body 上：`create()` 在调用方传了显式
+  options 时整段跳过剥离（intentions 闭环卡原样发出），`adopt_card()` 两个提取器
+  都没跑（daily-reflect 自建富卡片，TITLE 和 OPTIONS 一起发出去）。现在剥离在
+  `create()` 里无条件执行——**"去掉残留"和"谁的按钮生效"是两个决定**，调用方的
+  按钮仍然优先；`adopt_card` 另补精确提取，且显式 TITLE 优先于装饰性表头
+  （"🌙 回顾" 命名的是来源，TITLE 命名的才是这张卡）。带自己 OPTIONS 的卡片不再
+  被一卡一事拆分（拆了会把同一个 ask 复制多份）。
+- **审计自己在报假 P0**（P0 ×5 + P0 ×4）。2026-07-27 给 `empty_reply` 加的
+  "必须有 delivery 证据"闸没同时加到对称的 `provider_error` 检测器上，于是它一直
+  拿本机 Claude Code 会话的转录当"发给用户的内容"报 P0——实测涉事 session 全部
+  `reply_sent=0`，从没发出过任何东西。已补上同一道闸。真实情况不会变暗：
+  `provider_fallback_exercised` P1 仍记录每一次探测到的 provider 错误，越过安全
+  边界的仍是 `provider_error_as_answer` P0。
+- **provider-canary 因为"干成了本职"而被熔断**。`core.provider_health probe` 在
+  有 rung 不健康时 exit 1——对人是对的 CLI 语义，对心跳是错的信号（非零 = 任务
+  失败 → 熔断）。真实的 backup1 故障（HTTP 402 余额耗尽）把探针自己的熔断打开，
+  一天跳过 3843 次、**32 小时没再探测过**——监控恰恰在有东西要监控的时候变瞎。
+  已在 pre-hook 这个心跳契约边界上把"发现问题"和"没能去看"分开：探针跑通并产出
+  报告就 exit 0，只有崩溃/无输出/输出不可解析才算任务失败。
+- **`routine-run` 的 pre-hook 没有执行位**（本轮自引入，且已经在线上）。
+  编辑器和工具默认写 0644，常驻 bot exec 失败，5/5 记成 `pre_error`，功能一次都
+  没跑成就熔断了。新增 `tests/test_heartbeat_hook_manifest.py`：HEARTBEAT.md 声明的
+  每个 pre-hook 都必须存在、可执行、`bash -n` 通过——覆盖整类，对所有任务永久生效。
+
+已确认**不是** bug、只是台账没收口的：`activity-log 一直在失败`（PR#18 a552dc4
+已修，实测健康）、7/27–7/28 凌晨的一批 brain-dead 告警（provider 链故障，已自愈）。
+
+### Fixed（本轮自查抓到的自引入缺陷）
+
+- 两个新功能的卡片按钮最初写成了 CLI 的 `type:k=v` 字符串形式，而
+  `_execute_action` 取的是 `{"type", "params"}` 字典 —— 按钮会渲染、能点、
+  然后在回调线程里抛异常什么都不做。已改为字典形式，并为两处各加了一条
+  "按钮必须是执行器能派发的形状"的回归测试。
+- `routine-run` 的 pre 脚本会消费 occurrence（推进水位线、开审计行），
+  原本不在 `ACK_REQUIRED_TASKS` 里：Claude 调用一死，这些 run 就悬到
+  60 分钟后的巡检才收尾。已加入，post 也识别 `__NO_ENVELOPE__`。
+- routine 卡片走 `core.delivery` 自投递，不经过 `user_messages`，所以批次
+  envelope 的 `has_card` 守卫看不见它们，合并摘要会把同一件事再说一遍。
+  新增 `SELF_DELIVERING_TASKS` 抑制。
+- 注意力治理最初读 `_default_attention` 来度量，那会把自己的降级读回来当作
+  支持降级的证据；且升级判据看的是降级后已经没有数据的决策位，会导致每 6
+  小时反复降级/升级。改为度量 `natural_attention`、升级判据看降级后实际所在
+  的知会位。两条都有专门的回归测试。
+
 ## [1.7.1] — 2026-07-27 — provider canary reports the real failure
 
 Found by the v1.7.0 post-release provider canary, which is exactly the

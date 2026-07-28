@@ -19,6 +19,7 @@ _NAV = [
     ("信号", "/signals"),
     ("日历", "/intentions"),
     ("任务", "/tasks"),
+    ("例程", "/routines"),
     ("收藏", "/bookmarks"),
     ("运行", "/ops"),
     ("更多", "/settings"),

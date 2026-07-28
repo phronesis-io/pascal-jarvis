@@ -26,6 +26,24 @@ question.
 Invariant: the model may author the prompt, but only lifecycle code changes
 trigger, execution, breach, and closure state.
 
+### Routine
+
+A recurring body of work the *user* defined, carrying four things: a trigger, a
+declared set of read-only evidence sources gathered before any model call, an
+autonomy level, and an audit run per firing.
+
+Autonomy is a three-level contract — `observe` (records, reaches nobody),
+`propose` (one Item, consequences need 批红), `act` (propose plus a fixed
+allow-list of internal, reversible actions). External mutations are never on
+that list; those are Verified External Actions.
+
+Invariant: the autonomy level is enforced by code against the stored Routine.
+A model may request anything and is granted only what its Routine already
+holds. Every claimed run reaches a terminal audit row.
+
+Distinguished from Intent: an Intent is one promise at one future moment. A
+Routine is a standing rhythm that gathers its own evidence each time.
+
 ### Delivery
 
 A durable contract to place output on a surface. It moves through queued,

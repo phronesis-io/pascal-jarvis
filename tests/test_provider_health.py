@@ -292,3 +292,68 @@ def test_probe_failure_still_falls_back_to_stderr_when_result_is_empty(tmp_path)
 
     assert result["status"] == "unhealthy"
     assert "relay connection reset" in result["detail"]
+
+
+# ── heartbeat contract (tasks/provider_canary_pre.sh) ────────────────────
+# The CLI exits 1 when a rung is unhealthy — correct for a human asking "is
+# the chain OK?". The heartbeat reads a nonzero pre-script as "this task
+# failed" and trips its circuit. Conflating the two took the canary dark for
+# 32h during a real backup-relay outage (~3.8k circuit_open skips in a day),
+# so the pre-hook must separate "found a problem" from "could not look".
+
+import os
+import subprocess as _sp
+from pathlib import Path as _Path
+
+_HOOK = _Path(__file__).resolve().parent.parent / "tasks" / "provider_canary_pre.sh"
+
+
+def _run_hook(tmp_path, probe_stdout: str, probe_rc: int):
+    """Run the real hook with a stub `python3 -m core.provider_health probe`."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "python3"
+    payload = probe_stdout.replace("\\", "\\\\").replace("'", "'\\''")
+    # The hook also pipes JSON through a real `python3 -c`. Forward those to
+    # the ABSOLUTE interpreter — `env python3` would re-resolve through PATH,
+    # find this stub again, and recurse forever.
+    import sys as _sys
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'if [ "$1" = "-c" ]; then exec {_sys.executable} "$@"; fi\n'
+        f"printf '%s' '{payload}'\n"
+        f"exit {probe_rc}\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
+               JARVIS_DIR=str(_Path(_HOOK).parent.parent))
+    return _sp.run(["bash", str(_HOOK)], capture_output=True, text=True, env=env)
+
+
+def test_unhealthy_rung_is_a_finding_not_a_task_failure(tmp_path):
+    out = _run_hook(
+        tmp_path,
+        '{"providers":[{"id":"backup1","status":"unhealthy",'
+        '"detail":"HTTP 402: no active subscription plan"}]}', 1)
+    assert out.returncode == 0, out.stderr
+    assert "backup1" in out.stdout          # the finding still surfaces
+
+
+def test_all_healthy_exits_zero(tmp_path):
+    out = _run_hook(tmp_path, '{"providers":[{"id":"primary","status":"healthy"}]}', 0)
+    assert out.returncode == 0
+    assert "primary" in out.stdout
+
+
+def test_probe_that_could_not_run_is_a_real_failure(tmp_path):
+    assert _run_hook(tmp_path, "", 1).returncode == 1
+
+
+def test_unparseable_probe_output_is_a_real_failure(tmp_path):
+    out = _run_hook(tmp_path, "Traceback (most recent call last):", 1)
+    assert out.returncode == 1
+
+
+def test_json_without_providers_is_a_real_failure(tmp_path):
+    """An empty report means the probe learned nothing — not a clean run."""
+    assert _run_hook(tmp_path, '{"version":1,"providers":[]}', 0).returncode == 1
