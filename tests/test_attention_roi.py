@@ -167,3 +167,48 @@ class TestAnnouncement:
                                                 "noisy_notices": []})
         assert attention_roi.refresh() == []
         assert sent == []
+
+
+class TestCacheFreshness:
+    """Caught by CI, not locally: the TTL check must not depend on where
+    time.monotonic()'s arbitrary origin happens to sit.
+
+    Invalidation used to set _cache_at = 0.0 and rely on
+    `monotonic() - 0 > TTL` to force a reload. True on a host up for days;
+    false in a fresh container and for the first five minutes after a reboot,
+    where the empty cache read as fresh and the governor applied nothing.
+    """
+
+    def test_overrides_load_when_monotonic_is_near_zero(self, roi_db, monkeypatch):
+        attention_roi.apply(attention_roi.evaluate(
+            _stats(**{f"noisy|{ATTENTION_DECISION}": (20, 1)})))
+        attention_roi._invalidate()
+        monkeypatch.setattr(attention_roi.time, "monotonic", lambda: 12.0)
+        assert attention_roi.overrides() == {"noisy": ATTENTION_NOTICE}
+
+    def test_class_for_applies_overrides_right_after_a_reboot(
+            self, roi_db, monkeypatch):
+        monkeypatch.setattr(attention_roi.time, "monotonic", lambda: 3.0)
+        attention_roi.apply(attention_roi.evaluate(
+            _stats(**{f"noisy|{ATTENTION_DECISION}": (20, 1)})))
+        assert attention_roi.class_for("noisy", ATTENTION_DECISION) == ATTENTION_NOTICE
+
+    def test_cache_is_still_reused_within_the_ttl(self, roi_db, monkeypatch):
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(attention_roi.time, "monotonic", lambda: clock["t"])
+        attention_roi._invalidate()
+        attention_roi.overrides()                       # populates at t=1000
+        calls = {"n": 0}
+        real = attention_roi._get_db
+
+        def counting():
+            calls["n"] += 1
+            return real()
+
+        monkeypatch.setattr(attention_roi, "_get_db", counting)
+        clock["t"] = 1000.0 + attention_roi.CACHE_TTL_S - 1
+        attention_roi.overrides()
+        assert calls["n"] == 0, "cache should still be warm inside the TTL"
+        clock["t"] = 1000.0 + attention_roi.CACHE_TTL_S + 1
+        attention_roi.overrides()
+        assert calls["n"] > 0, "cache should reload past the TTL"

@@ -64,7 +64,13 @@ PROTECTED_SOURCES = frozenset({
 })
 
 _sys_path_added = False
-_cache: dict[str, str] = {}
+# None means "never loaded". A sentinel, not a timestamp: invalidation used to
+# set _cache_at = 0.0 and rely on `monotonic() - 0 > TTL` to force a reload,
+# which is only true when the clock's arbitrary origin is already past the TTL.
+# On a host up for days that holds; in a fresh container (CI) or for the first
+# five minutes after a reboot, monotonic() < TTL and the empty cache read as
+# fresh — the governor would silently apply no overrides at all.
+_cache: dict[str, str] | None = None
 _cache_at = 0.0
 
 
@@ -216,15 +222,15 @@ def apply(decision: dict) -> list[str]:
 
 
 def _invalidate() -> None:
-    global _cache_at
-    _cache_at = 0.0
+    global _cache
+    _cache = None
 
 
 def overrides() -> dict[str, str]:
     """Current override map, cached briefly — this is on the delivery path."""
     global _cache, _cache_at
     now = time.monotonic()
-    if now - _cache_at < CACHE_TTL_S:
+    if _cache is not None and (now - _cache_at) < CACHE_TTL_S:
         return _cache
     try:
         _init()
