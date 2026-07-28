@@ -112,7 +112,12 @@ def test_repos_sync_worker_standalone_finds_sibling_repos(tmp_path):
     demo_repo.mkdir(parents=True)
     subprocess.run(["git", "init"], cwd=demo_repo, check=True, capture_output=True)
 
+    # WORK_DIR must NOT leak in from the caller: the heartbeat exports it, so
+    # under a heartbeat-spawned pytest the worker would scan the 13 real repos
+    # and network-fetch them — a 10s timeout instead of a verdict on the
+    # standalone fallback this test exists to check.
     env = {**os.environ, "JARVIS_DIR": str(jarvis_dir)}
+    env.pop("WORK_DIR", None)
     result = subprocess.run(
         ["bash", str(WORKER)],
         capture_output=True,
