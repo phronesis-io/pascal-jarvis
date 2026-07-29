@@ -107,6 +107,21 @@ _TIMELINE_SKIP = {
 # this is per-file, not tier-wide. Keys = section header lines.
 _TAIL_KEEP_SECTIONS = {"## System: todos"}
 
+# Which system files are append-only (newest at the BOTTOM) and so must be
+# tail-kept when their per-file cap bites. Everything else is curated and is
+# head-kept, mirroring the tier-level rule above.
+# This became load-bearing the moment EVERY system file got a cap: with the
+# tail-keep default, open_threads would have kept its 「已归档」 tail and cut
+# the live threads at the top — precisely inverting the file's own priority
+# order, and silently undoing the 7/29 rescue of 11 still-live items.
+_SYSTEM_TAIL_KEEP_FILES = {
+    "todos.md",
+    "inbox_ops.md",
+    "inbox_private_mail.md",
+    "inbox_team.md",
+    "heartbeat_tasks_hourly_selflog.md",
+}
+
 # Load-time caps (chars, tail-keep) for the bulky perception inbox buffers.
 # INBOX_MAX_LINES=500 lets each buffer reach ~40KB — the two of them alone
 # exceed SYSTEM_BUDGET, so they were evicting cross_session_digest /
@@ -117,10 +132,45 @@ _TAIL_KEEP_SECTIONS = {"## System: todos"}
 # retention of these buffers — perception._trim_inbox imports it, so what's
 # kept on disk ≈ what the loader injects (the old 500-line disk retention kept
 # ~35k chars of which only the tail 12k was ever loaded — pure dark matter).
+# EVERY system file is capped, and the caps are required to sum under
+# SYSTEM_BUDGET (enforced by tests/test_memory.py).
+#
+# 2026-07-29, third recurrence of the same incident. Twice before, the tier
+# overflowed and the fix was to raise the budget (40k → 56k → 60k) and cap the
+# files that were being DROPPED. That treats the victim, not the cause: only
+# inbox_ops and inbox_private_mail had caps, while open_threads (18.4k),
+# todos (13.7k) and engineering_roadmap (11.0k) had none. Those three grew to
+# 43.1k — 72% of the budget — before the loader even reached the inboxes, so
+# every inbox file was ARITHMETICALLY guaranteed to be cut on every single
+# cycle: the heartbeat could not see Pascal's private mail or team inbox at
+# all. A budget with unbounded members is not a budget.
+#
+# A cap trims a file's TAIL, so a capped file must be ordered
+# most-important-first. Both offenders violated that and were restructured the
+# same day: open_threads had 11 still-live items (4 of them blocking on
+# Pascal) appended UNDER its 「已归档」 heading, and todos kept its 已完成
+# section mid-file while the freshest auto-update entries sat at the very end,
+# i.e. exactly what a naive cap would have deleted first.
+_SYSTEM_FILE_DEFAULT_CAP = 2500
 _SYSTEM_FILE_CAPS = {
-    "inbox_ops.md": 8000,
-    "inbox_private_mail.md": 8000,
+    # todos is TAIL-keep (newest auto-update blocks at the bottom), so its cap
+    # must be large enough to also hold the curated 「进行中」 head above them —
+    # an 8k cap would have kept the appended log and cut the current work.
+    "todos.md": 13000,
+    "open_threads.md": 9000,       # head-keep: live threads first, 已归档 tail
+    "inbox_private_mail.md": 7000,  # the tail this whole fix exists to save
+    "inbox_ops.md": 5000,
+    "engineering_roadmap.md": 5000,
+    "inbox_team.md": 3500,
+    "engagement_insights.md": 3000,
+    "cross_session_digest.md": 3000,
+    "heartbeat_tasks_hourly_selflog.md": 2000,
+    "pending_updates.md": 1500,
+    "engagement_content_mix.md": 1500,
 }
+# Headroom for files nobody has declared yet, at the default cap. Without it a
+# newly-added system file would silently re-open exactly this hole.
+_SYSTEM_UNDECLARED_ALLOWANCE = 2 * _SYSTEM_FILE_DEFAULT_CAP
 
 # Per-tier timestamp of the last structured truncation warn — heartbeat calls
 # the loader every cycle, and 400+ identical warns/day buried the signal (the
@@ -325,7 +375,10 @@ def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
                                       or f.name.startswith("inbox_secret")):
             continue
         _append_file(parts, f, f"System: {f.stem}",
-                     cap=_SYSTEM_FILE_CAPS.get(f.name))
+                     cap=_SYSTEM_FILE_CAPS.get(f.name,
+                                               _SYSTEM_FILE_DEFAULT_CAP),
+                     keep=("tail" if f.name in _SYSTEM_TAIL_KEEP_FILES
+                           else "head"))
     return parts
 
 
@@ -520,13 +573,19 @@ def _append_file(parts: list[str], path: Path, title: str, cap: int | None = Non
             else:
                 tail = content[-cap:]
                 # Snap forward to the next entry boundary so the injected view
-                # never opens mid-entry (capped files are `### `-delimited
-                # perception buffers; raw slice when no boundary is found).
-                snap = tail.find("\n### ")
+                # never opens mid-entry. Perception buffers are `### `-
+                # delimited; todos-style files delimit with an auto-update
+                # comment. Once every system file is capped here, this path
+                # must know BOTH boundaries the tier-level cut knew, or
+                # capping todos would start it mid-entry (raw slice when
+                # neither boundary is in range).
+                snap = min((s for s in (tail.find("\n### "),
+                                        tail.find("\n<!-- auto-update"))
+                            if s != -1), default=-1)
                 if snap != -1:
                     tail = tail[snap + 1:]
                 content = (
-                    f"[capped — oldest {len(content) - len(tail)} chars omitted; "
+                    f"[capped — oldest ~{len(content) - len(tail)} chars omitted; "
                     f"full file on disk: {path.name}]\n" + tail
                 )
         # Stale calendar detection

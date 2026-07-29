@@ -216,11 +216,16 @@ def test_missing_sources_yaml_is_noop(tmp_path):
 
 def test_inbox_retention_trim(tmp_path):
     # An UNCAPPED buffer (not in core.memory._SYSTEM_FILE_CAPS) keeps the
-    # legacy 500-line retention rule.
+    # legacy 500-line retention rule. inbox_team used to be the example; it
+    # gained an explicit char cap on 2026-07-29 when every system file did, so
+    # this now uses a name nobody has declared. Note the residual asymmetry:
+    # an undeclared buffer is bounded at LOAD by _SYSTEM_FILE_DEFAULT_CAP but
+    # still retained by line count on disk. No live buffer takes this path —
+    # all three inboxes are declared — so it is a fallback, not dark matter.
     rt = _runtime(tmp_path, "perception: {sources: []}")
-    inbox = rt.system_dir / "inbox_team.md"
+    inbox = rt.system_dir / "inbox_undeclared_example.md"
     inbox.write_text("\n".join(f"line{i}" for i in range(600)) + "\n")
-    rt._trim_inbox("inbox_team.md")
+    rt._trim_inbox("inbox_undeclared_example.md")
     kept = inbox.read_text().splitlines()
     assert len(kept) == 500 and kept[0] == "line100"
     # Overflow must land in warm/archive/ (loader skips it) — NOT top-level

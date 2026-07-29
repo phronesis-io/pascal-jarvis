@@ -8,6 +8,44 @@ prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
 shipped, superseded, or rejected, and requirements are traced to evidence in
 `docs/release_acceptance_2026-07-24.md`.
 
+## [1.8.2] — 2026-07-29 — 心跳终于能看见你的私人邮件
+
+例行体检发现 `tier_truncated` 每拍都在报，而且在恶化（早上丢 9,504 字 → 下午
+14,270，多丢一整段 `inbox_team`）。**这是同一个事故的第三次复发**。
+
+### Fixed
+
+- **system 记忆层：预算的成员没有上界，那就不是预算。** 组装 74,270 字 / 预算
+  60,000，尾部三个 inbox 文件**每一拍都被算术性地切光**——心跳根本看不见私人邮件
+  和团队收件箱。根因和前两次修复的假设相反：**只有受害者被 cap 了**
+  （inbox_ops / inbox_private_mail 各 8k），而 `open_threads`(18.4k)、
+  `todos`(13.7k)、`engineering_roadmap`(11.0k) **一个都没 cap**，三个加起来
+  43.1k = 预算的 72%，加载器还没走到 inbox 就没额度了。
+  7/14 和 7/21 两次都在提预算（40k→56k→60k）+ cap 被丢的文件，所以无 cap 的文件
+  一涨就复发。现在**每个文件都有 cap**，未声明文件走默认 cap 并预留额度，
+  `tests/test_memory.py` 断言 `sum(caps) + 预留 ≤ SYSTEM_BUDGET`——把"不太可能"
+  变成"算术上不可能"。
+- **顺带修掉 cap 会踩的两个坑（都是本轮自查抓到的）**：
+  ① cap 切的是**尾部**，而 `_collect_system` 没传 `keep`，全吃默认的 tail —— 那会让
+  `open_threads` 保住「已归档」尾巴、切掉顶部的活线，正好颠倒它自己的优先级。
+  已按文件区分 head/tail 保留。
+  ② todos 是 tail-keep（新条目在底），8k 的 cap 会切掉它头部的「进行中」——
+  也就是你当前在做的事。已给到 13k 容下整个文件。
+  ③ per-file 的尾部对齐只认 `### ` 边界，不认 todos 的 `<!-- auto-update` 边界，
+  尾部会从半条开始。已补齐，与 tier 级逻辑一致。
+- **`tasks/memory_tidy_post.TODOS_MAX_CHARS` 20000 → 13000**，与装载 cap 对齐：
+  原本磁盘留 20k 而加载器最多注入 13k，中间 7k 是**任何提示词都读不到的暗物质**
+  （REQ-92 为 inbox 消除过同一问题）。仍是归档不删除。
+
+### Fixed（记忆内容本身，非代码）
+
+- **`open_threads.md` 里 11 条仍在活的条目被埋在「已归档（不再主动跟进）」标题之下**，
+  其中 4 条明确卡在 Pascal 身上（高德 key、Tailscale 登录、输出信道 PRD 等拍板、
+  EF onboarding 等批红）。它们是被逐条追加进去的，落在了那个标题后面，于是心跳
+  **从来不会主动提起**。已提升回活线区并注明来历；7 条明确写着「此线关闭/✅」的
+  搬进 `open_threads_archive.md`（不进上下文）。
+- `todos.md` 的 `## 已完成` 段搬进归档文件，让 cap 切尾部时切的是死内容。
+
 ## [1.8.1] — 2026-07-29 — 不允许有死路
 
 Pascal：「死路让我用不了这个产品了」。死路 = **界面点名了一个去处，或者花掉了你

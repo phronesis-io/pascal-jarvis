@@ -40,7 +40,11 @@ HEARTBEAT_MEMORY = _hb_mem()
 # system reserve, so cross_session_digest / pending_updates / the inboxes were
 # dropped from EVERY prompt for days. Tidy is the maintenance path, so it owns
 # the cap. Archive-not-delete, per the file's own 维护规则.
-TODOS_MAX_CHARS = 20000
+# Aligned with core.memory._SYSTEM_FILE_CAPS["todos.md"] (2026-07-29): keeping
+# 20k on disk while the loader injected at most 13k left 7k that no prompt ever
+# saw — the same dark matter REQ-92 removed for the inbox buffers. Archive-not-
+# delete still applies, so the trimmed blocks stay recallable on disk.
+TODOS_MAX_CHARS = 13000
 _AUTO_UPDATE_PREFIX = "<!-- auto-update"
 
 # An auto-update block as the memory post-scripts write it: marker line plus
