@@ -109,22 +109,34 @@ def _init() -> None:
 
 
 def _engaged(state: dict) -> bool:
-    """A card earned its lane if Pascal acted on it at all.
+    """A card earned its lane only if PASCAL acted on it: a tap or a chat.
 
-    留中 (lapsed) is the exact opposite of engagement: the escrow sweep filed
-    it BECAUSE nobody ever answered. Letting a non-pending status imply "acted"
-    would have scored every auto-archived card as engaged, pushing the noisiest
-    sources toward a ~100% rate and permanently blocking the demotion this
-    module exists to perform.
+    Stated positively on purpose. The old test — "any status that isn't
+    pending counts" — quietly scored three things as attention that were not:
+
+      lapsed        the escrow sweep files 留中 precisely BECAUSE nobody
+                    answered; counting it would have pushed the noisiest
+                    sources toward ~100% and frozen the demotion this module
+                    exists to perform.
+      __external__  upstream truth, not attention. eigenflux-friends measured
+                    13/13 = 100% engaged on decision cards Pascal had tapped
+                    exactly ZERO times — every one was resolved by EigenFlux
+                    itself. That single inversion is why the governor never
+                    demoted the worst-performing decision source in the ledger.
+
+    And it read `chat_started_at`, a field no writer in this codebase has ever
+    produced (the ledger fold sets `chat_ts`), so 「聊聊这个」 — the one signal
+    that a card started a real conversation — never counted at all.
     """
     from core.memorial import STATUS_LAPSED
 
     status = str(state.get("status", ""))
     if status == STATUS_LAPSED:
         return False
-    if status not in ("", "pending"):
+    if str(state.get("chat_ts", "")):
         return True
-    return bool(state.get("chat_started_at") or state.get("decided_ts"))
+    decided_opt = str(state.get("decided_opt", ""))
+    return bool(decided_opt) and decided_opt != "__external__"
 
 
 def compute_stats(window_days: int = WINDOW_DAYS) -> dict[tuple[str, str], dict]:
