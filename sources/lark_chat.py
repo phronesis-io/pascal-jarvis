@@ -17,7 +17,19 @@ FIRST_RUN_LOOKBACK_MIN = 15
 
 
 def _iso(ts: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
+    """ISO 8601 with a COLON in the UTC offset (2026-01-01T15:04:05+08:00).
+
+    These strings are passed to `lark-cli --start/--end`, whose parser rejects
+    strftime's bare `%z` form (`+0800`) with a validation error. That rejection
+    surfaced only as a non-zero exit code, which this adapter classified as
+    `error_type=network` — so the shadow source failed 1154 consecutive times
+    (2026-07-15 → 07-28) while looking merely flaky, and the "parity window" it
+    was supposed to establish measured nothing at all.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
+    if len(stamp) >= 5 and stamp[-5] in "+-":
+        stamp = f"{stamp[:-2]}:{stamp[-2:]}"
+    return stamp
 
 
 def _extract_text(msg: dict) -> str:

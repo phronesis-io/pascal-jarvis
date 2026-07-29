@@ -128,6 +128,20 @@ log_err()  { log ERROR "$@"; }
 log_warn() { log WARN  "$@"; }
 log_info() { log INFO  "$@"; }
 
+# ── Locked append to engagement_log (multi-writer safety) ──────────
+_append_elog() {
+  # Usage: echo '{"json":"row"}' | _append_elog
+  # Flock on the DATA FILE itself (same target as Python writers and _trim_file).
+  local _elog="$JARVIS_DIR/engagement_log.jsonl"
+  python3 -c '
+import sys, fcntl
+elog = sys.argv[1]
+with open(elog, "a") as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    f.write(sys.stdin.read())
+' "$_elog" 2>/dev/null || true
+}
+
 # ── Portable timeout (macOS has no 'timeout' by default) ─────────────
 if command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD="timeout"
@@ -759,6 +773,10 @@ handle_message() {
   local _raw_user_content="$content"
   local prompt_chat_type="$chat_type"
   local is_owner_p2p=0
+
+  # Ensure Typing reaction is removed on ANY exit (kill, error, normal)
+  trap '[ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id" 2>/dev/null; trap - EXIT' EXIT TERM INT
+
   if [ "$chat_type" = "p2p" ] && [ -n "$sender_id" ] \
       && [ "$sender_id" = "$USER_ID" ]; then
     is_owner_p2p=1
@@ -932,8 +950,14 @@ $(load_memory "$_mem_budget")"
       if [ "$((waited % 30))" -eq 0 ] && [ "$waited" -gt 0 ]; then
         log_info "[$session_id] Session busy, waiting... (${waited}s)"
         if [ "$_busy_notice_sent" -eq 0 ]; then
-          _busy_notice_sent=1
-          lark_reply_text "$message_id" "前一条还在处理，我已把这条排队；轮到它时会继续，不需要重发。" >/dev/null 2>&1 || true
+          # Only send if lock is genuinely contended — a short sleep after the
+          # check avoids the "notice then instant reply" glitch when the holder
+          # releases in the same 5s window we hit the 30s boundary.
+          sleep 2
+          if [ -f "$LOCK_FILE" ]; then
+            _busy_notice_sent=1
+            lark_reply_text "$message_id" "前一条还在处理，我已把这条排队；轮到它时会继续，不需要重发。" >/dev/null 2>&1 || true
+          fi
         fi
       fi
       sleep 5
@@ -955,6 +979,27 @@ except Exception:
       rm -f "$LOCK_FILE"
       session_id="$_cur_sid"
       LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
+      # Rebuild system prompt with the new session's recent turns
+      sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+        JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
+        JV_MEM_MAX="$_mem_budget" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.prompt import build_system_prompt
+from core.timeutil import now_local_str
+mc = os.environ.get('JV_MEM_MAX', '')
+print(build_system_prompt(
+    jarvis_dir=os.environ['JARVIS_DIR'],
+    memory_dir=os.environ['MEMORY_DIR'],
+    session_dir=os.environ.get('JV_SDIR', ''),
+    session_id=os.environ.get('JV_SID', ''),
+    conv_key=os.environ.get('JV_KEY', ''),
+    now_ts=now_local_str('%Y-%m-%d %H:%M %A'),
+    tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
+    chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
+    max_memory_chars=int(mc) if mc else None,
+))
+" 2>>"$LOG_FILE") || true
+      [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
       continue
     fi
     break
@@ -1329,6 +1374,28 @@ except Exception:
         # on opus" even when haiku was the model that actually failed.
         log_warn "[$session_id] Primary Claude exhausted on $_cur_model → trying Claude Code backup provider"
         _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
+        # Rebuild system prompt with backup memory budget to avoid oversized context
+        _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
+        sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+          JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
+          JV_MEM_MAX="$_mem_budget" python3 -c "
+import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
+from core.prompt import build_system_prompt
+from core.timeutil import now_local_str
+mc = os.environ.get('JV_MEM_MAX', '')
+print(build_system_prompt(
+    jarvis_dir=os.environ['JARVIS_DIR'],
+    memory_dir=os.environ['MEMORY_DIR'],
+    session_dir=os.environ.get('JV_SDIR', ''),
+    session_id=os.environ.get('JV_SID', ''),
+    conv_key=os.environ.get('JV_KEY', ''),
+    now_ts=now_local_str('%Y-%m-%d %H:%M %A'),
+    tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
+    chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
+    max_memory_chars=int(mc) if mc else None,
+))
+" 2>>"$LOG_FILE") || true
+        [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
       elif [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
         && [ "$_claude_backup2_tried" -eq 0 ] \
         && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
@@ -1949,7 +2016,7 @@ run_lark_listener_once() {
           jq -cn --arg ts "$(date '+%Y-%m-%d %H:%M')" \
             --argjson ids "${_read_ids:-[]}" --argjson epoch "$(date +%s)" \
             '{ts:$ts,type:"read",message_ids:$ids,epoch:$epoch}' \
-            >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
+            | _append_elog
           printf '%s' "${_read_ids:-[]}" \
             | python3 -m core.delivery confirm-read --stdin \
               >/dev/null 2>>"$LOG_FILE" || true
@@ -1971,7 +2038,7 @@ run_lark_listener_once() {
             jq -cn --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg mid "$_re_mid" \
               --arg emoji "$_re_emoji" --argjson epoch "$(date +%s)" \
               '{ts:$ts,type:"reaction",message_id:$mid,emoji:$emoji,epoch:$epoch}' \
-              >> "$JARVIS_DIR/engagement_log.jsonl" 2>/dev/null || true
+              | _append_elog
             log_info "[engagement] reaction $_re_emoji on ${_re_mid:0:20}"
             # ── One-tap watch-later (一键收藏, asked 5/06): reacting with ANY
             # emoji on one of OUR url-bearing messages saves it. This is the
@@ -2036,7 +2103,7 @@ run_lark_listener_once() {
           jq -cn --arg ts "$_fb_ts" --arg source "$_fb_source" --arg rating "$_fb_rating" \
             --argjson epoch "$(date +%s)" \
             '{ts:$ts,source:$source,type:"feedback",rating:$rating,epoch:$epoch}' \
-            >> "$JARVIS_DIR/engagement_log.jsonl"
+            | _append_elog
           log_info "[feedback] $_fb_source: $_fb_rating"
         fi
         continue
@@ -2113,14 +2180,15 @@ except:
         _owner_p2p=1
       fi
 
-      # ── Dedup: skip if same message_id seen within 10s (Lark sometimes delivers twice) ──
-      _dedup_file="/tmp/jarvis-last-msg"
-      _dedup_key="${message_id}"
-      if [ -f "$_dedup_file" ] && [ "$(cat "$_dedup_file" 2>/dev/null)" = "$_dedup_key" ]; then
+      # ── Dedup: skip if message_id seen recently (Lark replays on late ACK) ──
+      _dedup_file="/tmp/jarvis-msg-dedup"
+      if [ -f "$_dedup_file" ] && grep -qFx "$message_id" "$_dedup_file" 2>/dev/null; then
         log_info "Duplicate message skipped: $message_id"
         continue
       fi
-      printf '%s' "$_dedup_key" > "$_dedup_file"
+      # Ring buffer: keep last 20 message_ids
+      { echo "$message_id"; head -19 "$_dedup_file" 2>/dev/null; } > "${_dedup_file}.tmp" \
+        && mv "${_dedup_file}.tmp" "$_dedup_file"
 
       # Journal capture (PRD P1, 每日复盘 check-in): if this message quotes the
       # daily-reflect card, save Pascal's OWN words ("我怎么看一些事") into his

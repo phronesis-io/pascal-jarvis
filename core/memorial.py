@@ -56,7 +56,7 @@ from pathlib import Path
 from core.card import build_card, extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
-from core.timeutil import now_local_str
+from core.timeutil import now_local, now_local_str
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
                                  Path(__file__).resolve().parent.parent))
@@ -123,6 +123,38 @@ _FYI_KEYS = {"read", "watch"}
 ATTENTION_DECISION = "decision"
 ATTENTION_NOTICE = "notice"
 ATTENTION_ALERT = "alert"
+
+# ── 缴回制度 (escrow) ────────────────────────────────────────────────────
+# A card sent once and never tapped used to scroll out of Lark and vanish:
+# 314 of 600 memorials sat pending forever, 110 of them older than a week,
+# 47 of those decision-class — real asks silently lost, indistinguishable from
+# noise nobody ever intended to answer. Nothing swept pending cards at all.
+#
+# Deadlines are measured, not guessed (7/29, over memorials decided since 7/01):
+#   decision  median 2.1h, 75% inside 24h, 90% inside 48h, only 3% ever later
+#   alert     median 0.2h, 78% inside 24h — a stale alert has no salvage value
+#   notice    24h/48h/72h response is FLAT at 48% while the median lands at
+#             75h: Pascal taps some the same day and sweeps the rest days
+#             later. 7d clears the dead tail without stealing from that sweep.
+ESCROW_DEADLINE_H = {
+    ATTENTION_ALERT: 24,
+    ATTENTION_NOTICE: 24 * 7,
+    ATTENTION_DECISION: 48,
+}
+# A decision past its deadline is NOT archived — it is re-surfaced in the daily
+# 匣子 docket. But 批红 that never comes is itself an answer: past this hard
+# ceiling it is filed as 留中 so the docket cannot nag forever. Nothing in the
+# measured window was ever decided this late (p95 = 128h, max = 179h).
+ESCROW_HARD_LAPSE_H = 24 * 14
+# 御门听政: the docket goes out once a day, in the morning, as ONE card, and
+# groups by source. Re-pushing stale cards individually is the card storm this
+# system was already burned by (7/22) — the emperor gets a docket, not the pile.
+# Grouping is what makes the backlog legible: the first real docket was 37 rows
+# but only 5 sources, 14 of them one repeating broken flow.
+ESCROW_DIGEST_HOURS = range(8, 12)
+ESCROW_DIGEST_SOURCE = "memorial-escrow"
+ESCROW_DIGEST_MAX_GROUPS = 6
+STATUS_LAPSED = "lapsed"
 
 REVIEW_LARK = "lark"
 REVIEW_PHONE = "phone"
@@ -407,6 +439,7 @@ def _append_line(path: Path, entry: dict) -> None:
                 f.write(line)
         return
     with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line)
 
 
@@ -462,6 +495,8 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "chat_id": str(e.get("chat_id", "")),
                 "matter_id": str(e.get("matter_id", "")),
                 "status": "pending",
+                "lapsed_ts": "",
+                "lapse_reason": "",
                 "decided_opt": "",
                 "decided_label": "",
                 "decided_ts": "",
@@ -475,8 +510,14 @@ def _fold(events: list[dict]) -> dict[str, dict]:
             }
         elif ev == "decide":
             st = states.get(mid)
-            if st is not None and st["status"] == "pending":
+            # A 留中 card stays tappable: scrolling back in Lark and answering
+            # an archived ask must revive it, not silently no-op. Events are
+            # chronological, so a later lapse cannot overwrite a real 批红
+            # (the lapse branch only fires on pending).
+            if st is not None and st["status"] in ("pending", STATUS_LAPSED):
                 st["status"] = "decided"
+                st["lapsed_ts"] = ""
+                st["lapse_reason"] = ""
                 st["decided_opt"] = str(e.get("opt", ""))
                 st["decided_label"] = str(e.get("label", ""))
                 st["decided_ts"] = str(e.get("ts", ""))
@@ -501,6 +542,15 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 st["action_result"] = str(e.get("result", ""))
                 st["resolved_label"] = str(e.get("label", "已处理"))
                 st["resolved_ts"] = str(e.get("ts", ""))
+        elif ev == "lapse":
+            # 留中: the deadline passed with no 批红. A terminal state that is
+            # explicitly NOT a decision — never fold it into decided_*, or the
+            # ledger would claim Pascal answered something he never saw.
+            st = states.get(mid)
+            if st is not None and st["status"] == "pending":
+                st["status"] = STATUS_LAPSED
+                st["lapsed_ts"] = str(e.get("ts", ""))
+                st["lapse_reason"] = str(e.get("reason", ""))
         elif ev == "chat":
             st = states.get(mid)
             if st is not None:
@@ -525,6 +575,116 @@ def list_memorials(pending_only: bool = False) -> list[dict]:
     if pending_only:
         states = [s for s in states if s["status"] == "pending"]
     return states
+
+
+# ── 缴回制度: sweep pending cards to a terminal state ─────────────────────
+
+
+def lapse(memorial_id: str, reason: str = "") -> bool:
+    """File a never-answered memorial as 留中. Returns True if it moved.
+
+    Deliberately does NOT re-sync the Lark card. The bulk sweep archives
+    hundreds of rows on its first run; that many card edits would be a rate
+    limit incident, and the original card has long scrolled out of the chat
+    anyway. The ledger and the web desk are the durable surface.
+    """
+    st = get_memorial(memorial_id)
+    if st is None or st["status"] != "pending":
+        return False
+    _append_line(_ledger_path(), {
+        "ev": "lapse",
+        "id": memorial_id,
+        "ts": now_local_str(),
+        "reason": str(reason or ""),
+    })
+    _complete_surface_handoffs(memorial_id)
+    return True
+
+
+def _age_hours(state: dict, now: datetime) -> float | None:
+    """Hours since creation, or None if the row has no parsable timestamp.
+
+    Ledger timestamps are naive LOCAL time while now_local() is tz-aware;
+    stamping the parsed value with now's tzinfo is what makes the subtraction
+    both legal and correct. An unparsable ts must never be treated as age 0
+    (silently immortal) or age ∞ (silently archived) — it is skipped.
+    """
+    try:
+        created = datetime.strptime(str(state["ts"]), "%Y-%m-%d %H:%M")
+    except (ValueError, KeyError, TypeError):
+        return None
+    if now.tzinfo is not None:
+        created = created.replace(tzinfo=now.tzinfo)
+    return (now - created).total_seconds() / 3600.0
+
+
+def escrow_scan(now: datetime | None = None,
+                states: list[dict] | None = None) -> dict:
+    """Classify every pending memorial against its deadline. Pure — no writes.
+
+    Returns ``{"lapse": [(state, reason)], "overdue": [state]}``:
+      lapse    — terminal, archive as 留中 (alert/notice past deadline, or a
+                 decision past the hard ceiling nobody will ever answer)
+      overdue  — decision past its deadline but still answerable: it belongs
+                 in the docket, NOT the archive.
+    Cards still inside their deadline appear in neither list.
+    """
+    now = now or now_local()
+    rows = list_memorials() if states is None else states
+    out: dict = {"lapse": [], "overdue": []}
+    for st in rows:
+        if st.get("status") != "pending":
+            continue
+        # The docket itself is a memorial. Sweeping it into its own next
+        # docket would make the backlog grow by one card a day forever.
+        if str(st.get("source", "")) == ESCROW_DIGEST_SOURCE:
+            continue
+        age = _age_hours(st, now)
+        if age is None:
+            continue
+        attention = str(st.get("attention", "")) or ATTENTION_NOTICE
+        if attention == ATTENTION_DECISION:
+            if age > ESCROW_HARD_LAPSE_H:
+                out["lapse"].append((st, f"逾期未批 {age / 24:.0f} 天"))
+            elif age > ESCROW_DEADLINE_H[ATTENTION_DECISION]:
+                out["overdue"].append(st)
+            continue
+        deadline = ESCROW_DEADLINE_H.get(attention, ESCROW_DEADLINE_H[ATTENTION_NOTICE])
+        if age > deadline:
+            out["lapse"].append((st, f"未读满 {age / 24:.0f} 天"))
+    return out
+
+
+def escrow_docket(overdue: list[dict],
+                  now: datetime | None = None) -> tuple[str, str]:
+    """Render the daily docket as ``(title, body)``, grouped by source.
+
+    37 raw rows read as 37 unanswered asks. Grouped, the same backlog read as
+    "eigenflux-publish has 14 stuck" — a broken flow, not 14 decisions. The
+    docket exists to make that distinction visible at a glance.
+    """
+    now = now or now_local()
+    groups: dict[str, list[tuple[float, dict]]] = {}
+    for st in overdue:
+        age = _age_hours(st, now)
+        groups.setdefault(str(st.get("source", "?")), []).append((age or 0.0, st))
+    ranked = sorted(groups.items(), key=lambda kv: -max(a for a, _ in kv[1]))
+    oldest = max((a for rows in groups.values() for a, _ in rows), default=0.0)
+    title = f"待批 {len(overdue)} 件，最久 {oldest / 24:.0f} 天"
+    lines = []
+    for source, rows in ranked[:ESCROW_DIGEST_MAX_GROUPS]:
+        top = max(a for a, _ in rows)
+        label = SOURCE_TITLE.get(source, source)
+        sample = sorted(rows, key=lambda r: -r[0])[0][1].get("title", "")
+        detail = f"· **{label}** {len(rows)} 件 · 最久 {top / 24:.0f} 天"
+        if len(rows) == 1 and sample:
+            detail += f"\n  {sample[:38]}"
+        lines.append(detail)
+    rest = ranked[ESCROW_DIGEST_MAX_GROUPS:]
+    if rest:
+        lines.append(f"· 另有 {sum(len(r) for _, r in rest)} 件，来自 {len(rest)} 个来源")
+    lines.append("\n未处理的会在 14 天后自动留中归档。")
+    return title, "\n".join(lines)
 
 
 # ── card rendering ──────────────────────────────────────────────────────
@@ -577,6 +737,13 @@ def _display_body(body: str) -> str:
             if sep in cut[CARD_BODY_MAX_CHARS // 2:]:
                 cut = cut.rsplit(sep, 1)[0]
                 break
+        # If we still landed inside a markdown link, back up further.
+        last_open = cut.rfind("[")
+        if last_open != -1:
+            after = cut[last_open:]
+            close_b = after.find("]")
+            if close_b == -1 or after.find(")", close_b) == -1:
+                cut = cut[:last_open].rstrip()
         text = cut.rstrip()
         clipped = True
     if clipped:
@@ -1712,6 +1879,40 @@ def resolve(memorial_id: str, label: str,
     return True
 
 
+def _finish_decide_side_effects(
+        st: dict, memorial_id: str, opt_key: str, opt: dict,
+        action_result: str, action_failed: bool,
+) -> None:
+    """Post-decision bookkeeping (matter link, context queue, card update).
+
+    Safe to call from a background thread — no return value needed.
+    When action_failed, re-syncs the Lark card to show the error state.
+    """
+    if st.get("matter_id"):
+        try:
+            from core.matters import add_event, link_entity
+            link_entity(
+                st["matter_id"], "memorial", memorial_id, provider="jarvis",
+                title=st.get("title", ""),
+                metadata={"source": st.get("source", ""), "status": "decided",
+                          "decision": opt.get("label", ""),
+                          "review_surface": review_surface(st)},
+                actor="memorial",
+            )
+            add_event(st["matter_id"], "memorial_decided",
+                      opt.get("label", ""), actor="user",
+                      payload={"memorial_id": memorial_id, "option": opt_key,
+                               "action_result": action_result})
+        except Exception as e:
+            print(f"memorial {memorial_id}: matter decision link failed: {e}",
+                  file=sys.stderr)
+    if opt.get("reply") or opt_key not in _FYI_KEYS:
+        _queue_decision_context(st, opt.get("label", ""), action_result,
+                                is_reply=bool(opt.get("reply")))
+    if action_failed:
+        _sync_lark_card(memorial_id, _decided_card(st))
+
+
 def decide(
         memorial_id: str,
         opt_key: str,
@@ -1753,44 +1954,65 @@ def decide(
     _record_engagement({"source": st.get("source", "memorial"),
                         "type": "feedback", "rating": opt_key})
 
+    # Actions (eigenflux_publish ~30s, calendar_create ~15s) can exceed the
+    # 3-second Lark card-callback ACK deadline.  Run in a thread; join with a
+    # short budget — if the action finishes in time, include the result on the
+    # returned card.  Otherwise return immediately and let the thread finish +
+    # re-sync the Lark card asynchronously.
+    _ACTION_BUDGET_S = 2.0
+    has_action = bool(opt.get("action"))
     action_result, action_failed = "", False
-    if opt.get("action"):
-        try:
-            action_result = _execute_action(
-                opt["action"],
-                owner_authenticated=owner_authenticated,
-            )
-        except Exception as e:
-            action_result = f"FAILED: {e}"
-            action_failed = True
-        _append_line(_ledger_path(), {"ev": "action_result", "id": memorial_id,
-                                      "ts": now_local_str(),
-                                      "result": action_result})
+
+    if has_action:
+        result_box: list = []
+
+        def _run_action():
+            try:
+                r = _execute_action(
+                    opt["action"],
+                    owner_authenticated=owner_authenticated,
+                )
+                result_box.append((r, False))
+            except Exception as e:
+                result_box.append((f"FAILED: {e}", True))
+
+        t = threading.Thread(
+            target=_run_action, daemon=True,
+            name=f"memorial-action-{memorial_id[:8]}")
+        t.start()
+        t.join(timeout=_ACTION_BUDGET_S)
+
+        if result_box:
+            action_result, action_failed = result_box[0]
+            _append_line(_ledger_path(), {"ev": "action_result",
+                                          "id": memorial_id,
+                                          "ts": now_local_str(),
+                                          "result": action_result})
+        else:
+            # Action still running — fire-and-forget; thread will log + sync.
+            def _await_and_sync():
+                t.join()
+                if not result_box:
+                    return
+                res, failed = result_box[0]
+                _append_line(_ledger_path(), {"ev": "action_result",
+                                              "id": memorial_id,
+                                              "ts": now_local_str(),
+                                              "result": res})
+                st.update(action_result=res)
+                _finish_decide_side_effects(
+                    st, memorial_id, opt_key, opt, res, failed)
+            threading.Thread(
+                target=_await_and_sync, daemon=True,
+                name=f"memorial-await-{memorial_id[:8]}").start()
 
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
-    if st.get("matter_id"):
-        try:
-            from core.matters import add_event, link_entity
-            link_entity(
-                st["matter_id"], "memorial", memorial_id, provider="jarvis",
-                title=st.get("title", ""),
-                metadata={"source": st.get("source", ""), "status": "decided",
-                          "decision": opt.get("label", ""),
-                          "review_surface": review_surface(st)},
-                actor="memorial",
-            )
-            add_event(st["matter_id"], "memorial_decided",
-                      opt.get("label", ""), actor="user",
-                      payload={"memorial_id": memorial_id, "option": opt_key,
-                               "action_result": action_result})
-        except Exception as e:
-            print(f"memorial {memorial_id}: matter decision link failed: {e}",
-                  file=sys.stderr)
-    if opt.get("reply") or opt_key not in _FYI_KEYS:
-        _queue_decision_context(st, opt.get("label", ""), action_result,
-                                is_reply=bool(opt.get("reply")))
+    if not (has_action and not result_box):
+        _finish_decide_side_effects(
+            st, memorial_id, opt_key, opt, action_result, action_failed)
+
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
     elif opt.get("reply"):
@@ -1953,7 +2175,7 @@ def chat(memorial_id: str) -> dict:
               "直接说你想追问什么，或告诉我你的倾向。")
     _send_opener_async(opener, st.get("chat_id", ""))
 
-    return {"toast": {"type": "success", "content": "已带上背景，正在打开飞书"},
+    return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
             "deep_link": conversation_deep_link(st),
             "card": {"type": "raw", "data": _chatting_card(st, ts)}}
 

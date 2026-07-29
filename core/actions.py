@@ -466,6 +466,28 @@ class ActionProcessor:
             raise RuntimeError(f"改进项没有关闭：{exc}") from exc
         return "已记录：这个改进项不进入研发队列。"
 
+    # ── 缴回制度 ──
+
+    def _do_memorial_lapse_all(self, raw: str) -> str:
+        """留中 every overdue decision currently in the docket.
+
+        The set is recomputed at tap time rather than read from the card: a
+        card can sit unread for hours, and anything Pascal answered (or that
+        resolved itself upstream) in the meantime must not be archived as
+        unanswered. Bulk-archiving the owner's decision queue is owner-only.
+        """
+        from core import memorial
+
+        self._require_owner_callback()
+        overdue = memorial.escrow_scan()["overdue"]
+        if not overdue:
+            return "没有逾期待批的事项了。"
+        archived = sum(
+            1 for state in overdue
+            if memorial.lapse(state["id"], "全部留中")
+        )
+        return f"已留中 {archived} 件，可在「事项」里翻回。"
+
     # ── Heartbeat ──
 
     def _do_heartbeat(self, raw: str) -> str:

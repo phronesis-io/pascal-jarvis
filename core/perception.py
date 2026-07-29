@@ -134,6 +134,11 @@ def split_entries_for_cap(text: str, cap: int,
     return keep, overflow
 DEDUP_CLUSTER_WINDOW = 2 * 3600  # ±2h content_hash clustering (§8.0)
 DEFAULT_INTERVAL = 900
+# Consecutive failed collections after which a source counts as a dead
+# channel rather than a flaky one (see PerceptionRuntime.diag). Ten passes is
+# under two hours for the fastest source and over a day for the slowest, so it
+# never fires on an upstream blip and always fires on a broken config.
+STUCK_ERROR_STREAK = 10
 
 
 def content_hash(title: str, body: str) -> str:
@@ -450,6 +455,43 @@ class PerceptionRuntime:
         return " ".join(parts)
 
 
+    # ── diagnostics (silent-failure watch) ───────────────────────────
+
+    def diag(self, threshold: int = STUCK_ERROR_STREAK) -> tuple[str, bool]:
+        """Report perception sources stuck in a failure streak.
+
+        Nothing in the system read `error_count` before this: the phronesis
+        lark_chat source failed 1154 consecutive collections (2026-07-15 →
+        07-28, a malformed timestamp lark-cli rejected) while every surface
+        showed it as "enabled and running". Its shadow-parity window therefore
+        measured nothing at all. A source that is configured, enabled, and
+        failing every pass for days is not a blip — it is a dead channel, and
+        it belongs on the same ⚠️ alert path as a dead component.
+
+        Returns (report, healthy). Enabled sources only: a disabled source
+        keeps whatever error state it died with and must not page anyone.
+        """
+        _, sources = self.load_sources()
+        state = self._load_state()
+        enabled = [s.get("id") for s in sources
+                   if s.get("id") and s.get("enabled", True)]
+        lines = ["--- Perception Sources ---"]
+        stuck = []
+        for sid in enabled:
+            src_state = state.get(sid) or {}
+            count = src_state.get("error_count") or 0
+            if count >= threshold:
+                stuck.append((sid, count, src_state.get("error_type") or "?"))
+        for sid, count, err in stuck:
+            lines.append(
+                f"⚠️ 感知源 {sid} 连续 {count} 次采集失败（error_type={err}）"
+                f" — 这条信道实际上是死的，用 python3 -m core.perception"
+                f" --dry-run --source {sid} 看具体报错")
+        if not stuck:
+            lines.append(f"✓ {len(enabled)} 个感知源无连续失败"
+                         f"（阈值 {threshold} 次）")
+        return "\n".join(lines), not stuck
+
     # ── dry run (connector setup aid) ────────────────────────────────
 
     def dry_run(self, source_id: str | None = None) -> str:
@@ -520,12 +562,20 @@ if __name__ == "__main__":
                     "validate/trial sources without persisting anything")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--source", help="dry-run a single source id")
+    parser.add_argument("--diag", action="store_true",
+                        help="report sources stuck in a failure streak "
+                             "(exit 1 if any) — feeds the self-diagnostic "
+                             "⚠️ alert path")
     args = parser.parse_args()
     jarvis_dir = os.environ.get("JARVIS_DIR", ".")
     memory_dir = os.environ.get("MEMORY_DIR", str(Path(jarvis_dir) / "memory"))
     sys.path.insert(0, jarvis_dir)
     rt = PerceptionRuntime(jarvis_dir, memory_dir)
-    if args.dry_run or args.source:
+    if args.diag:
+        report, healthy = rt.diag()
+        print(report)
+        sys.exit(0 if healthy else 1)
+    elif args.dry_run or args.source:
         print(rt.dry_run(args.source))
     else:
         print(rt.run_collect())

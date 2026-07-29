@@ -8,12 +8,14 @@ Config-driven dashboard backed by jarvis.yaml. Run standalone:
 Or enable `admin.enabled: true` in jarvis.yaml (reserved for future auto-start).
 """
 
+import fcntl
 import http.server
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -152,6 +154,7 @@ SESSION_SEARCH_PATHS = [
 # Admin is read-only and called on every page navigation; cache heavy
 # session-meta scans by (path, newest-mtime) tuple.
 _CACHE_TTL_SECONDS = 5
+_cache_lock = threading.Lock()
 _sessions_meta_cache: dict = {"key": None, "data": [], "time": 0.0}
 _lark_chats_cache: dict = {"key": None, "data": [], "time": 0.0}
 
@@ -200,11 +203,13 @@ def sessions_meta() -> list:
     """Session metadata for the primary project dir — cached by (mtime, count)."""
     key = _dir_fingerprint(PROJECT_DIR)
     now = time.time()
-    if (_sessions_meta_cache["key"] == key
-            and now - _sessions_meta_cache["time"] < _CACHE_TTL_SECONDS):
-        return _sessions_meta_cache["data"]
+    with _cache_lock:
+        if (_sessions_meta_cache["key"] == key
+                and now - _sessions_meta_cache["time"] < _CACHE_TTL_SECONDS):
+            return _sessions_meta_cache["data"]
     data = core_search.sessions_meta(PROJECT_DIR)
-    _sessions_meta_cache.update(key=key, data=data, time=now)
+    with _cache_lock:
+        _sessions_meta_cache.update(key=key, data=data, time=now)
     return data
 
 
@@ -270,9 +275,10 @@ def lark_chats() -> list:
         _dir_fingerprint(PROJECT_DIR),
     )
     now = time.time()
-    if (_lark_chats_cache["key"] == key
-            and now - _lark_chats_cache["time"] < _CACHE_TTL_SECONDS):
-        return _lark_chats_cache["data"]
+    with _cache_lock:
+        if (_lark_chats_cache["key"] == key
+                and now - _lark_chats_cache["time"] < _CACHE_TTL_SECONDS):
+            return _lark_chats_cache["data"]
 
     try:
         tracker = json.loads(SESSION_TRACKER.read_text())
@@ -320,7 +326,8 @@ def lark_chats() -> list:
     # Put the p2p chats first, then groups — users usually care about 1-on-1
     chats.sort(key=lambda c: (c["kind"] != "p2p", c["conv_key"]))
 
-    _lark_chats_cache.update(key=key, data=chats, time=now)
+    with _cache_lock:
+        _lark_chats_cache.update(key=key, data=chats, time=now)
     return chats
 
 
@@ -689,54 +696,58 @@ def save_heartbeat_task(name: str, interval_str: str, pre: str, post: str,
     if not m or int(m.group(1)) <= 0:
         return {"error": f"invalid interval {interval_str!r} — expected <N><s|m|h|d>, e.g. 90s / 10m / 2h / 1d"}
 
-    if expected_mtime is not None:
-        try:
-            expected = float(expected_mtime)
-        except (TypeError, ValueError):
-            return {"error": f"invalid mtime {expected_mtime!r}"}
-        disk_mtime = heartbeat_path.stat().st_mtime
-        if abs(disk_mtime - expected) > 1e-4:
-            return {"error": "HEARTBEAT.md changed on disk since you loaded it — reload before saving",
-                    "conflict": True, "disk_mtime": disk_mtime}
+    lock_path = heartbeat_path.with_suffix(".md.lock")
+    with open(lock_path, "a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
 
-    text = heartbeat_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+        if expected_mtime is not None:
+            try:
+                expected = float(expected_mtime)
+            except (TypeError, ValueError):
+                return {"error": f"invalid mtime {expected_mtime!r}"}
+            disk_mtime = heartbeat_path.stat().st_mtime
+            if abs(disk_mtime - expected) > 1e-4:
+                return {"error": "HEARTBEAT.md changed on disk since you loaded it — reload before saving",
+                        "conflict": True, "disk_mtime": disk_mtime}
 
-    # Find the task section by "### <name>"
-    header = f"### {name}"
-    start_idx = None
-    end_idx = None
-    for i, line in enumerate(lines):
-        if line.strip() == header:
-            start_idx = i
-        elif start_idx is not None and line.startswith("### ") and i > start_idx:
-            end_idx = i
-            break
-    if start_idx is None:
-        return {"error": f"task '{name}' not found in HEARTBEAT.md"}
-    if end_idx is None:
-        end_idx = len(lines)
+        text = heartbeat_path.read_text(encoding="utf-8")
+        lines = text.splitlines()
 
-    # Build the new task block
-    new_block = [header]
-    new_block.append(f"- interval: {interval_str}")
-    if pre:
-        new_block.append(f"- pre: {pre}")
-    if post:
-        new_block.append(f"- post: {post}")
-    new_block.append("- prompt: |")
-    for pline in prompt.strip().splitlines():
-        new_block.append(f"    {pline}")
-    new_block.append("")  # blank line after task
+        # Find the task section by "### <name>"
+        header = f"### {name}"
+        start_idx = None
+        end_idx = None
+        for i, line in enumerate(lines):
+            if line.strip() == header:
+                start_idx = i
+            elif start_idx is not None and line.startswith("### ") and i > start_idx:
+                end_idx = i
+                break
+        if start_idx is None:
+            return {"error": f"task '{name}' not found in HEARTBEAT.md"}
+        if end_idx is None:
+            end_idx = len(lines)
 
-    # Replace the section
-    new_lines = lines[:start_idx] + new_block + lines[end_idx:]
-    new_text = "\n".join(new_lines)
+        # Build the new task block
+        new_block = [header]
+        new_block.append(f"- interval: {interval_str}")
+        if pre:
+            new_block.append(f"- pre: {pre}")
+        if post:
+            new_block.append(f"- post: {post}")
+        new_block.append("- prompt: |")
+        for pline in prompt.strip().splitlines():
+            new_block.append(f"    {pline}")
+        new_block.append("")  # blank line after task
 
-    # Atomic write
-    tmp = heartbeat_path.with_suffix(".md.tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    os.replace(tmp, heartbeat_path)
+        # Replace the section
+        new_lines = lines[:start_idx] + new_block + lines[end_idx:]
+        new_text = "\n".join(new_lines)
+
+        # Atomic write
+        tmp = heartbeat_path.with_suffix(".md.tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, heartbeat_path)
 
     return {"ok": True, "mtime": heartbeat_path.stat().st_mtime}
 

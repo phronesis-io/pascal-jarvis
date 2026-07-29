@@ -109,8 +109,20 @@ def _init() -> None:
 
 
 def _engaged(state: dict) -> bool:
-    """A card earned its lane if Pascal acted on it at all."""
-    if str(state.get("status", "")) not in ("", "pending"):
+    """A card earned its lane if Pascal acted on it at all.
+
+    留中 (lapsed) is the exact opposite of engagement: the escrow sweep filed
+    it BECAUSE nobody ever answered. Letting a non-pending status imply "acted"
+    would have scored every auto-archived card as engaged, pushing the noisiest
+    sources toward a ~100% rate and permanently blocking the demotion this
+    module exists to perform.
+    """
+    from core.memorial import STATUS_LAPSED
+
+    status = str(state.get("status", ""))
+    if status == STATUS_LAPSED:
+        return False
+    if status not in ("", "pending"):
         return True
     return bool(state.get("chat_started_at") or state.get("decided_ts"))
 

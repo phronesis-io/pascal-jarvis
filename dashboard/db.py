@@ -430,7 +430,7 @@ def get_db() -> sqlite3.Connection:
         # the container is cleared BEFORE the data fn runs and only TypeError is
         # caught, so a bare OperationalError('database is locked') escapes after
         # the clear → blank tick. Block up to 3s for the writer instead.
-        _connection.execute("PRAGMA busy_timeout=3000")
+        _connection.execute("PRAGMA busy_timeout=5000")
         _run_migrations(_connection)
     return _connection
 

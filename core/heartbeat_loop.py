@@ -1164,6 +1164,7 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
         with open(
             jarvis_dir / "engagement_log.jsonl", "a", encoding="utf-8"
         ) as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
             for source in sorted({e.get("source", "heartbeat") for e in included}):
                 row = {"ts": ts, "source": source, "type": "sent",
                        "via": "night-digest", "epoch": epoch}
@@ -1175,6 +1176,7 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
                 if digest_ids:
                     row["message_ids"] = digest_ids
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fcntl.flock(f, fcntl.LOCK_UN)
         log("heartbeat", f"Flushed night queue ({len(included)} entries"
             + (f", {len(len_dropped)} deferred" if len_dropped else "") + ")")
         sched_emit(jarvis_dir, "batch_flush", count=len(included),

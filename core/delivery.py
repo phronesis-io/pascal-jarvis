@@ -1077,6 +1077,16 @@ class DeliveryPipeline:
         results = []
         for row in rows:
             envelope = envelope_from_row(row)
+            expires = float(envelope.metadata.get("expires_epoch") or 0)
+            if expires and now > expires:
+                with closing(_connect(self.path)) as db, db:
+                    self._set_state(
+                        db, envelope.id, "suppressed", "expired_ttl",
+                        last_error="expired_ttl")
+                results.append(DeliveryResult(
+                    envelope.id, True, "suppressed",
+                    str(row["route_channel"]), reason="expired_ttl"))
+                continue
             moment = datetime.fromtimestamp(now, tz=now_local().tzinfo)
             if (_quiet_now(moment) and not envelope.urgent
                     and not envelope.conversation_bound

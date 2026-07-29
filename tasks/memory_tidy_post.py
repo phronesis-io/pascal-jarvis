@@ -94,8 +94,11 @@ def _sync_warm_auto_to_heartbeat():
         else:
             src_content = src.read_text(encoding="utf-8")
 
-        dst.write_text(src_content, encoding="utf-8")
-        _copy_mtime(src, dst)
+        lock_path = dst.with_suffix(".md.lock")
+        with open(lock_path, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            dst.write_text(src_content, encoding="utf-8")
+            _copy_mtime(src, dst)
         synced.append(src.name)
 
     if synced:
@@ -206,8 +209,11 @@ def _sync_root_feedback_auto_to_heartbeat():
                       f"overwriting would destroy them. Reconcile "
                       f"heartbeat→auto manually.", file=sys.stderr)
                 continue
-        dst.write_text(content, encoding="utf-8")
-        _copy_mtime(src, dst)
+        lock_path = dst.with_suffix(".md.lock")
+        with open(lock_path, "a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            dst.write_text(content, encoding="utf-8")
+            _copy_mtime(src, dst)
         synced.append(src.name)
     if synced:
         print(f"[memory-tidy] synced auto→heartbeat root feedback: {', '.join(synced)}",
@@ -237,8 +243,11 @@ def _sync_open_threads_auto_to_heartbeat():
         if dst.read_text(encoding="utf-8") == src_content:
             return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(src_content, encoding="utf-8")
-    _copy_mtime(src, dst)
+    lock_path = dst.with_suffix(".md.lock")
+    with open(lock_path, "a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        dst.write_text(src_content, encoding="utf-8")
+        _copy_mtime(src, dst)
     print("[memory-tidy] synced auto→heartbeat: open_threads.md", file=sys.stderr)
 
 

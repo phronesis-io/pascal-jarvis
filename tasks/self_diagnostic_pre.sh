@@ -223,6 +223,16 @@ echo "--- Skipped Occurrences (24h) ---"
 (cd "$JARVIS_DIR" && python3 -m core.skip_digest --diag 2>/dev/null) \
   || echo "⚠️ skip-digest 检查本身失败（python3 -m core.skip_digest --diag 非零退出）"
 
+# 7e. Perception source health: a source can be enabled, scheduled, and
+#     failing EVERY pass without anything noticing — the phronesis lark_chat
+#     shadow failed 1154 consecutive collections over 13 days while its
+#     "parity window" was believed to be running. Non-zero exit prints the
+#     ⚠️ lines itself; `|| true` keeps set -e-free shells from swallowing them.
+echo ""
+(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" MEMORY_DIR="$MEMORY_DIR" \
+  python3 -m core.perception --diag 2>/dev/null) \
+  || true  # non-zero exit = stuck sources; the ⚠️ lines carry the signal
+
 # 8. CLI versions
 echo ""
 echo "--- CLI Versions ---"
