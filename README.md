@@ -2,7 +2,7 @@
 
 Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI agent with continuous heartbeat, self-evolving memory, closed-loop proactive intents, and bidirectional IM integration.
 
-**Release: `v1.7.1` (2026-07-27)** — see [CHANGELOG.md](CHANGELOG.md). 2229 tests passing.
+**Release: `v1.8.0` (2026-07-29)** — see [CHANGELOG.md](CHANGELOG.md). 2501 tests passing.
 
 **Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
