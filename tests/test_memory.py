@@ -224,6 +224,57 @@ def test_tier_budgets_sum_to_max(tmp_path):
     assert WARM_BUDGET > 0
 
 
+def test_system_caps_cannot_overflow_their_budget():
+    """A budget whose members are unbounded is not a budget.
+
+    Three times (7/14, 7/21, 7/29) the system tier overflowed and the tail —
+    always the inbox buffers, i.e. ALL of mail-triage's output — was cut on
+    every single cycle. Twice the fix raised the budget and capped the files
+    being dropped; both times an uncapped file (open_threads, todos,
+    engineering_roadmap) grew back into the gap. This asserts the arithmetic
+    that makes the failure impossible rather than merely unlikely.
+    """
+    from core.memory import (_SYSTEM_FILE_CAPS, _SYSTEM_FILE_DEFAULT_CAP,
+                             _SYSTEM_UNDECLARED_ALLOWANCE)
+
+    declared = sum(_SYSTEM_FILE_CAPS.values())
+    assert declared + _SYSTEM_UNDECLARED_ALLOWANCE <= SYSTEM_BUDGET, (
+        f"system caps {declared:,} + undeclared allowance "
+        f"{_SYSTEM_UNDECLARED_ALLOWANCE:,} exceed SYSTEM_BUDGET "
+        f"{SYSTEM_BUDGET:,} — the tail would be dropped every cycle"
+    )
+    # Room for files nobody has declared yet, at the default cap.
+    assert _SYSTEM_UNDECLARED_ALLOWANCE >= _SYSTEM_FILE_DEFAULT_CAP
+
+
+def test_every_system_file_is_capped(tmp_path):
+    """An undeclared system file must still be bounded, not unbounded."""
+    from core.memory import _SYSTEM_FILE_DEFAULT_CAP
+
+    sys_dir = tmp_path / "system"
+    sys_dir.mkdir(parents=True)
+    (sys_dir / "a_brand_new_buffer.md").write_text(
+        "HEAD\n" + ("z" * (_SYSTEM_FILE_DEFAULT_CAP * 4)), encoding="utf-8")
+    out = load_tiered_memory(tmp_path)
+    body = out.split("## System: a_brand_new_buffer", 1)[1]
+    assert len(body) <= _SYSTEM_FILE_DEFAULT_CAP + 200
+
+
+def test_mail_inbox_survives_a_fat_open_threads(tmp_path):
+    """The exact production shape on 7/29: load-bearing files big enough to
+    eat the whole budget, with the mail buffer last in priority order."""
+    sys_dir = tmp_path / "system"
+    sys_dir.mkdir(parents=True)
+    for name in ("open_threads.md", "todos.md", "engineering_roadmap.md"):
+        (sys_dir / name).write_text("x" * 40000, encoding="utf-8")
+    (sys_dir / "inbox_private_mail.md").write_text(
+        "OLD\n" + ("m" * 30000) + "\nNEWEST_MAIL_MARKER", encoding="utf-8")
+    out = load_tiered_memory(tmp_path)
+    assert "## System: inbox_private_mail" in out
+    # inbox buffers are tail-keep: the newest mail is what must survive.
+    assert "NEWEST_MAIL_MARKER" in out
+
+
 def test_digest_prioritized_within_timeline(tmp_path):
     """When the GLOBAL payload exceeds MAX (so tier budgeting kicks in), the
     longterm_digest survives over the bulkier hourly log within the timeline
@@ -281,10 +332,10 @@ def test_todos_hard_cut_keeps_tail(tmp_path):
     assert "APRIL_HEAD_MARKER" not in output
     assert "## System: todos" in output          # header survives the cut
     # Head-omission note: right after the header, above the kept tail.
-    assert "[oldest ~" in output
+    assert "oldest ~" in output
     assert "full file on disk: todos.md" in output
-    assert output.index("## System: todos") < output.index("[oldest ~")
-    assert output.index("[oldest ~") < output.index("JULY_TAIL_MARKER")
+    assert output.index("## System: todos") < output.index("oldest ~")
+    assert output.index("oldest ~") < output.index("JULY_TAIL_MARKER")
     # No trailing "memory truncated" marker after the newest entries — that
     # was the inverted-semantics bug.
     assert "[system memory truncated" not in output
@@ -525,16 +576,25 @@ def test_set_fact_atomic_and_dedups(tmp_path):
 
 
 def test_system_budget_covers_named_caps():
-    """The 2026-07-14 audit found the per-file caps summed past SYSTEM_BUDGET,
-    so the tier tail (all of inbox_private_mail) was arithmetically guaranteed
-    to be invisible every cycle. Anyone raising a cap must raise the budget.
-    The 20k slack term covers the uncapped working set (open_threads, digest,
-    insights, roadmap, live issue files) at its measured 2026-07 size."""
+    """Superseded model, kept as a named guard against regressing to it.
+
+    The 2026-07-14 version summed TODOS_MAX_CHARS + the two named caps + a 20k
+    slack term standing in for the UNCAPPED working set. That slack term was
+    the bug: open_threads/todos/roadmap grew straight through it and the tier
+    overflowed again on 7/21 and 7/29. Now every file is capped, so the
+    arithmetic is exact and lives in test_system_caps_cannot_overflow_their
+    _budget. What remains worth asserting here is that tidy's ON-DISK
+    retention for todos never exceeds what the loader will actually inject —
+    the "dark matter" REQ-92 named: bytes kept on disk that no prompt ever
+    sees.
+    """
     import core.memory as m
     from tasks.memory_tidy_post import TODOS_MAX_CHARS
-    uncapped_working_set_allowance = 20000
-    assert (TODOS_MAX_CHARS + sum(m._SYSTEM_FILE_CAPS.values())
-            + uncapped_working_set_allowance) <= m.SYSTEM_BUDGET
+    assert TODOS_MAX_CHARS <= m._SYSTEM_FILE_CAPS["todos.md"], (
+        f"tidy keeps {TODOS_MAX_CHARS:,} chars of todos on disk but the loader "
+        f"injects at most {m._SYSTEM_FILE_CAPS['todos.md']:,} — the difference "
+        f"is never read by anything"
+    )
 
 
 # ── 2026-07-21 记忆瘦身 PRD: protected band / warm cap / demote exemption ──
