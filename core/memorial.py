@@ -407,6 +407,7 @@ def _append_line(path: Path, entry: dict) -> None:
                 f.write(line)
         return
     with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line)
 
 
@@ -577,6 +578,13 @@ def _display_body(body: str) -> str:
             if sep in cut[CARD_BODY_MAX_CHARS // 2:]:
                 cut = cut.rsplit(sep, 1)[0]
                 break
+        # If we still landed inside a markdown link, back up further.
+        last_open = cut.rfind("[")
+        if last_open != -1:
+            after = cut[last_open:]
+            close_b = after.find("]")
+            if close_b == -1 or after.find(")", close_b) == -1:
+                cut = cut[:last_open].rstrip()
         text = cut.rstrip()
         clipped = True
     if clipped:
@@ -1712,6 +1720,40 @@ def resolve(memorial_id: str, label: str,
     return True
 
 
+def _finish_decide_side_effects(
+        st: dict, memorial_id: str, opt_key: str, opt: dict,
+        action_result: str, action_failed: bool,
+) -> None:
+    """Post-decision bookkeeping (matter link, context queue, card update).
+
+    Safe to call from a background thread — no return value needed.
+    When action_failed, re-syncs the Lark card to show the error state.
+    """
+    if st.get("matter_id"):
+        try:
+            from core.matters import add_event, link_entity
+            link_entity(
+                st["matter_id"], "memorial", memorial_id, provider="jarvis",
+                title=st.get("title", ""),
+                metadata={"source": st.get("source", ""), "status": "decided",
+                          "decision": opt.get("label", ""),
+                          "review_surface": review_surface(st)},
+                actor="memorial",
+            )
+            add_event(st["matter_id"], "memorial_decided",
+                      opt.get("label", ""), actor="user",
+                      payload={"memorial_id": memorial_id, "option": opt_key,
+                               "action_result": action_result})
+        except Exception as e:
+            print(f"memorial {memorial_id}: matter decision link failed: {e}",
+                  file=sys.stderr)
+    if opt.get("reply") or opt_key not in _FYI_KEYS:
+        _queue_decision_context(st, opt.get("label", ""), action_result,
+                                is_reply=bool(opt.get("reply")))
+    if action_failed:
+        _sync_lark_card(memorial_id, _decided_card(st))
+
+
 def decide(
         memorial_id: str,
         opt_key: str,
@@ -1753,44 +1795,65 @@ def decide(
     _record_engagement({"source": st.get("source", "memorial"),
                         "type": "feedback", "rating": opt_key})
 
+    # Actions (eigenflux_publish ~30s, calendar_create ~15s) can exceed the
+    # 3-second Lark card-callback ACK deadline.  Run in a thread; join with a
+    # short budget — if the action finishes in time, include the result on the
+    # returned card.  Otherwise return immediately and let the thread finish +
+    # re-sync the Lark card asynchronously.
+    _ACTION_BUDGET_S = 2.0
+    has_action = bool(opt.get("action"))
     action_result, action_failed = "", False
-    if opt.get("action"):
-        try:
-            action_result = _execute_action(
-                opt["action"],
-                owner_authenticated=owner_authenticated,
-            )
-        except Exception as e:
-            action_result = f"FAILED: {e}"
-            action_failed = True
-        _append_line(_ledger_path(), {"ev": "action_result", "id": memorial_id,
-                                      "ts": now_local_str(),
-                                      "result": action_result})
+
+    if has_action:
+        result_box: list = []
+
+        def _run_action():
+            try:
+                r = _execute_action(
+                    opt["action"],
+                    owner_authenticated=owner_authenticated,
+                )
+                result_box.append((r, False))
+            except Exception as e:
+                result_box.append((f"FAILED: {e}", True))
+
+        t = threading.Thread(
+            target=_run_action, daemon=True,
+            name=f"memorial-action-{memorial_id[:8]}")
+        t.start()
+        t.join(timeout=_ACTION_BUDGET_S)
+
+        if result_box:
+            action_result, action_failed = result_box[0]
+            _append_line(_ledger_path(), {"ev": "action_result",
+                                          "id": memorial_id,
+                                          "ts": now_local_str(),
+                                          "result": action_result})
+        else:
+            # Action still running — fire-and-forget; thread will log + sync.
+            def _await_and_sync():
+                t.join()
+                if not result_box:
+                    return
+                res, failed = result_box[0]
+                _append_line(_ledger_path(), {"ev": "action_result",
+                                              "id": memorial_id,
+                                              "ts": now_local_str(),
+                                              "result": res})
+                st.update(action_result=res)
+                _finish_decide_side_effects(
+                    st, memorial_id, opt_key, opt, res, failed)
+            threading.Thread(
+                target=_await_and_sync, daemon=True,
+                name=f"memorial-await-{memorial_id[:8]}").start()
 
     st.update(status="decided", decided_opt=opt_key,
               decided_label=opt.get("label", ""), decided_ts=ts,
               action_result=action_result)
-    if st.get("matter_id"):
-        try:
-            from core.matters import add_event, link_entity
-            link_entity(
-                st["matter_id"], "memorial", memorial_id, provider="jarvis",
-                title=st.get("title", ""),
-                metadata={"source": st.get("source", ""), "status": "decided",
-                          "decision": opt.get("label", ""),
-                          "review_surface": review_surface(st)},
-                actor="memorial",
-            )
-            add_event(st["matter_id"], "memorial_decided",
-                      opt.get("label", ""), actor="user",
-                      payload={"memorial_id": memorial_id, "option": opt_key,
-                               "action_result": action_result})
-        except Exception as e:
-            print(f"memorial {memorial_id}: matter decision link failed: {e}",
-                  file=sys.stderr)
-    if opt.get("reply") or opt_key not in _FYI_KEYS:
-        _queue_decision_context(st, opt.get("label", ""), action_result,
-                                is_reply=bool(opt.get("reply")))
+    if not (has_action and not result_box):
+        _finish_decide_side_effects(
+            st, memorial_id, opt_key, opt, action_result, action_failed)
+
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
     elif opt.get("reply"):
@@ -1953,7 +2016,7 @@ def chat(memorial_id: str) -> dict:
               "直接说你想追问什么，或告诉我你的倾向。")
     _send_opener_async(opener, st.get("chat_id", ""))
 
-    return {"toast": {"type": "success", "content": "已带上背景，正在打开飞书"},
+    return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
             "deep_link": conversation_deep_link(st),
             "card": {"type": "raw", "data": _chatting_card(st, ts)}}
 

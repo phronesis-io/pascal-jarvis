@@ -14,8 +14,15 @@ from urllib.parse import urlparse
 # Markdown link already in [text](url) form — leave these untouched.
 _MD_LINK_RE = re.compile(r"\[[^\]]*\]\(https?://[^\s)]+\)")
 # A bare URL not preceded by "(", "]" or "<" (i.e. not already part of a
-# markdown link or autolink). Stops at whitespace and bracket chars.
-_BARE_URL_RE = re.compile(r"(?<![(\[<])\bhttps?://[^\s<>()\[\]]+")
+# markdown link or autolink). Allows balanced parentheses inside the URL
+# (Wikipedia-style) and matches after CJK characters without a space.
+# URL chars: ASCII printable minus whitespace, <>, [], and CJK ranges.
+_URL_CHAR = r"[^\s<>\[\]⺀-鿿豈-﫿︰-﹏]"
+_BARE_URL_RE = re.compile(
+    r"(?<![(\]<])"
+    r"(?<!\]\()"
+    rf"https?://{_URL_CHAR}*(?:\({_URL_CHAR}*\){_URL_CHAR}*)*"
+)
 # Trailing punctuation that shouldn't be swallowed into the link target.
 _TRAIL_PUNCT = ".,;:!?，。、）)"
 
@@ -25,6 +32,36 @@ _LOCAL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1", ""}
 # Lark interactive card content cap is ~8000 chars; stay under it for JSON
 # overhead and the header.
 _CARD_BODY_LIMIT = 7000
+# Lark truncates long button captions on phone; keep them short everywhere.
+_MAX_BUTTON_TEXT = 14
+# Lark header display truncates at ~40 chars on mobile; the assembled header
+# includes emoji prefix (📜 🎯 title), so allow enough for prefix + content.
+_MAX_HEADER_CHARS = 60
+
+
+def _safe_truncate(text: str, limit: int, suffix: str = "\n\n…（已截断）") -> str:
+    """Truncate *text* to *limit* chars without breaking markdown links.
+
+    A naive cut can land inside ``[label](url)``, leaving the card with
+    visible broken syntax. This finds a safe boundary by backing up past
+    any open markdown link at the cut point.
+    """
+    if len(text) <= limit:
+        return text
+    budget = limit - len(suffix)
+    cut = text[:budget]
+    # If we landed inside a markdown link, back up to before its opening [.
+    last_open = cut.rfind("[")
+    if last_open != -1:
+        # Check if this [ is still unclosed (no matching ] after it, or
+        # ] exists but the ](url) is incomplete).
+        after_open = cut[last_open:]
+        close_bracket = after_open.find("]")
+        if close_bracket == -1:
+            cut = cut[:last_open].rstrip()
+        elif after_open.find(")", close_bracket) == -1:
+            cut = cut[:last_open].rstrip()
+    return cut.rstrip() + suffix
 
 
 def linkify_bare_urls(text: str) -> str:
@@ -34,8 +71,8 @@ def linkify_bare_urls(text: str) -> str:
     plain text the user has to copy-paste. URLs already in markdown-link form
     are left untouched. Label is the URL's host so the tap target reads well.
     """
-    if not text or "http" not in text:
-        return text
+    if not isinstance(text, str) or not text or "http" not in text:
+        return str(text) if text is not None else ""
 
     # Mask existing markdown links so we don't double-wrap them.
     saved: list[str] = []
@@ -87,9 +124,15 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     from core.safety import sentinel_present
     if sentinel_present(header) or sentinel_present(body):
         return ""
+    header = str(header or "").strip()
+    body = str(body or "").strip()
+    if header and len(header) > _MAX_HEADER_CHARS:
+        header = header[:_MAX_HEADER_CHARS]
     elements = []
     if body:
         body = linkify_bare_urls(body)
+        if len(body) > _CARD_BODY_LIMIT:
+            body = _safe_truncate(body, _CARD_BODY_LIMIT)
         elements.append({"tag": "div", "text": {"content": body, "tag": "lark_md"}})
     if buttons and button_groups:
         raise ValueError("use buttons or button_groups, not both")
@@ -99,18 +142,27 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
             continue
         actions = []
         for i, btn in enumerate(group):
+            btn_text = str(btn.get("text") or "").strip()
+            if not btn_text:
+                continue
+            if len(btn_text) > _MAX_BUTTON_TEXT:
+                btn_text = btn_text[:_MAX_BUTTON_TEXT]
             action = {
                 "tag": "button",
-                "text": {"content": btn["text"], "tag": "plain_text"},
+                "text": {"content": btn_text, "tag": "plain_text"},
                 "type": btn.get(
                     "type", "primary" if group_index == 0 and i == 0 else "default"),
             }
             if "url" in btn:
                 action["url"] = btn["url"]
             if "value" in btn:
-                action["value"] = btn["value"]
+                val = btn["value"]
+                if not isinstance(val, dict):
+                    val = {"v": val}
+                action["value"] = val
             actions.append(action)
-        elements.append({"tag": "action", "actions": actions})
+        if actions:
+            elements.append({"tag": "action", "actions": actions})
 
     # Feedback note — Lark card interactive buttons don't work with WebSocket
     # subscription (no HTTP callback URL). Instead, show a subtle note.
@@ -217,7 +269,7 @@ def build_rich_card(
     # can read everything in the card, and drop the dead "查看完整内容" link.
     body = _sections_to_markdown(sections) or summary
     if len(body) > _CARD_BODY_LIMIT:
-        body = body[:_CARD_BODY_LIMIT].rstrip() + "\n\n…（内容较长，已截断）"
+        body = _safe_truncate(body, _CARD_BODY_LIMIT, "\n\n…（内容较长，已截断）")
     return build_card(
         header=header,
         body=body,

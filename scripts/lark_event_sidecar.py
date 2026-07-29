@@ -25,6 +25,7 @@ Rollback: unset JARVIS_EVENT_BACKEND, restart — lark-cli path is untouched.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
@@ -157,6 +158,7 @@ def _record_feedback(value: dict):
              "source": str(value.get("source", "")), "type": "feedback",
              "rating": str(value.get("rating", "")), "epoch": int(time.time())}
     with open(JARVIS_DIR / "engagement_log.jsonl", "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 

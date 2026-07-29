@@ -8,6 +8,31 @@ cd "$REPO_DIR"
 
 echo "Running pre-commit checks..."
 
+# ── Multi-agent collision guard ──────────────────────────────────────
+# Detect if another AI agent (Codex, another Claude session) has uncommitted
+# changes in-flight. The lock file is created by bot.sh when dispatching to
+# an agent and cleared on completion. If it exists with a live PID, warn.
+AGENT_LOCK="$REPO_DIR/.agent_commit.lock"
+if [ -f "$AGENT_LOCK" ]; then
+  LOCK_PID=$(head -1 "$AGENT_LOCK" 2>/dev/null || echo "")
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "WARNING: another agent (PID $LOCK_PID) appears to be editing this repo."
+    echo "         Committing now risks including their partial changes."
+    echo "         If you're sure, delete $AGENT_LOCK and retry."
+    exit 1
+  else
+    rm -f "$AGENT_LOCK"
+  fi
+fi
+
+# Snapshot staged file mtimes — if any change between now and commit-end,
+# another process touched them concurrently.
+MTIME_SNAP=$(mktemp)
+git diff --cached --name-only | while IFS= read -r f; do
+  [ -f "$f" ] && stat -f "%m %N" "$f" >> "$MTIME_SNAP" 2>/dev/null
+done
+trap 'rm -f "$MTIME_SNAP"' EXIT
+
 if ! bash -n bot.sh 2>/dev/null; then
   echo "bot.sh has syntax errors"
   exit 1
@@ -41,6 +66,26 @@ fi
 if git diff --cached --name-only | grep -Eq \
     '^(core/.*\.py|dashboard/.*\.py|admin\.py|daemon\.py|bot\.sh)$'; then
   echo "Reminder: runtime code changed; restart and run core.deploy verify."
+fi
+
+# Verify no staged files were modified by another process during checks
+if [ -s "$MTIME_SNAP" ]; then
+  CHANGED=0
+  while IFS= read -r line; do
+    mtime="${line%% *}"
+    fname="${line#* }"
+    if [ -f "$fname" ]; then
+      current=$(stat -f "%m" "$fname" 2>/dev/null || echo "")
+      if [ -n "$current" ] && [ "$current" != "$mtime" ]; then
+        echo "CONFLICT: $fname was modified during pre-commit (another agent?)"
+        CHANGED=1
+      fi
+    fi
+  done < "$MTIME_SNAP"
+  if [ "$CHANGED" -ne 0 ]; then
+    echo "Aborting commit — staged files changed mid-flight. Re-stage and retry."
+    exit 1
+  fi
 fi
 
 echo "Pre-commit checks passed"
