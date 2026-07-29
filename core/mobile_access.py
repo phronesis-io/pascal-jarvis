@@ -383,6 +383,35 @@ def unregister_push(endpoint: str, device_id: str = "") -> bool:
     return bool(changed)
 
 
+def web_desk_url(path: str = "/items") -> str:
+    """Absolute, phone-reachable URL for a web-desk page — or "" if there is none.
+
+    A Lark card cannot follow a relative path and cannot reach localhost from a
+    phone, so a card button that wants to send the user to the web desk needs
+    this. Resolved at runtime from the tailnet entry, never hardcoded: the
+    hostname is per-install personal infrastructure.
+
+    Returning "" is a real answer and callers must honour it by rendering NO
+    button at all. A button that goes nowhere is worse than an absent one —
+    it spends the user's tap and their trust to tell them nothing.
+    """
+    path = "/" + str(path or "").lstrip("/")
+    try:
+        from core.tailnet import tailnet_status
+        base = str(tailnet_status().get("url", "") or "").rstrip("/")
+    except Exception:
+        base = ""
+    if not base:
+        try:
+            from core.config import Config
+            base = str(Config().get("mobile.public_url", "") or "").rstrip("/")
+        except Exception:
+            base = ""
+    if not base.startswith("https://"):
+        return ""
+    return base + path
+
+
 def send_push(title: str, body: str, url: str = "/items",
               matter_id: str = "", device_id: str = "",
               endpoint: str = "",

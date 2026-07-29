@@ -834,20 +834,24 @@ def _replacement_card(rendered: str, state: dict) -> dict:
                 return card
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
+    # Telling the user to "go to 事项" from a Lark card that carries no way to
+    # get there is a dead end: on a phone the web desk is not reachable by
+    # typing. Ship the link when there is one, and drop the instruction when
+    # there is not — never name a destination the card cannot reach.
+    buttons = [{
+        "text": CHAT_BUTTON_LABEL,
+        "type": "default",
+        "value": {"action": "memorial", "id": state["id"],
+                  "opt": CHAT_OPT_KEY},
+    }]
+    desk = _web_desk_url(f"/items/{state['id']}")
+    if desk:
+        buttons.insert(0, {"text": "打开事项", "url": desk})
     fallback = build_card(
         "Jarvis · 事项",
-        "状态已更新。请在 Jarvis「事项」中查看完整记录。",
-        button_groups=[[
-            {
-                "text": CHAT_BUTTON_LABEL,
-                "type": "default",
-                "value": {
-                    "action": "memorial",
-                    "id": state["id"],
-                    "opt": CHAT_OPT_KEY,
-                },
-            }
-        ]],
+        ("状态已更新。完整记录在下面的「打开事项」里。" if desk
+         else "状态已更新。完整记录已存档，随时可以问我。"),
+        button_groups=[buttons],
     )
     return json.loads(fallback)
 
@@ -1610,6 +1614,19 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     if should_push_to_lark(state):
         return mid, _deliver_existing(state, urgent=urgent)
     return mid, _deliver_existing(state, urgent=urgent)
+
+
+def _web_desk_url(path: str = "/items") -> str:
+    """Absolute web-desk URL, or "" when this install has no public entry.
+
+    Wrapped so a card-render path can never be broken by the mobile layer:
+    an unreachable desk means "render no link", not "raise".
+    """
+    try:
+        from core.mobile_access import web_desk_url
+        return web_desk_url(path)
+    except Exception:
+        return ""
 
 
 def _card_memorial_id(card: dict) -> str:

@@ -241,6 +241,19 @@ def memorial_visible_options(state: dict) -> list[dict]:
     return []
 
 
+def chat_started_notice(payload: dict) -> str:
+    """What to tell the user when 聊聊这个 worked but Lark cannot be opened.
+
+    memorial.chat() has already injected the context and sent the opener by
+    the time it returns — the conversation IS started. Every surface used to
+    report 「飞书入口暂不可用」 here, which told the user their tap had failed
+    when it had worked and left them with nowhere to go. Prefer chat()'s own
+    honest toast over anything a page invents.
+    """
+    toast = payload.get("toast") if isinstance(payload.get("toast"), dict) else {}
+    return str(toast.get("content") or "已加载背景——去飞书对话里回我就行")
+
+
 def memorial_lapsed_note(state: dict) -> str:
     """留中 badge text, or "" for any other state.
 

@@ -67,19 +67,24 @@ def run(now=None, send: bool = True) -> dict:
         return summary
 
     title, body = memorial.escrow_docket(overdue, now=now)
+    # 去看看 must actually GO somewhere. A record-only option would spend the
+    # tap, mark the docket 已批 and move the user nowhere — the docket points
+    # at the web desk, it is never a second inbox. When no reachable web-desk
+    # URL exists the button is OMITTED rather than shipped dead.
+    from core.mobile_access import web_desk_url
+    desk = web_desk_url("/items")
+    extra_buttons = [{"text": "去事项处理", "url": desk}] if desk else []
     mid, accepted = memorial.create(
         source=memorial.ESCROW_DIGEST_SOURCE,
         title=title,
         body=body,
         # 全部留中 is the escape hatch that keeps this from nagging forever:
-        # the emperor may decline the whole docket in one tap. 去看看 routes to
-        # the web desk, where the items are actually answerable one by one —
-        # the docket points, it is never a second inbox.
+        # the emperor may decline the whole docket in one tap.
         options=[
-            {"key": "review", "label": "去看看", "action": None},
             {"key": "lapse_all", "label": "全部留中",
              "action": {"type": "memorial_lapse_all", "params": {}}},
         ],
+        extra_buttons=extra_buttons,
         attention=memorial.ATTENTION_DECISION,
         dedup_key=f"escrow-docket-{today}",
         send=send,
