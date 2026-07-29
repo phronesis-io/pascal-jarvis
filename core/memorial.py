@@ -336,6 +336,21 @@ _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
 # 「Intent」in 11 days, burying e.g. the weekly 首席科学家发声 candidates
 # under a header nobody opens.
 _TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
+
+# 票拟 — the Grand Secretariat's proposed rescript, attached to the memorial so
+# the emperor's job is 依议 or 驳, not drafting the answer himself. A decision
+# card that only lists options makes Pascal do the Secretariat's work: measured
+# 7/29, decision cards answered inside 48h ran 90%, but the ones that stalled
+# were disproportionately the ones with no stated preference behind them.
+#
+#     RECOMMEND: 同意 — 三个信源已复现，回滚成本一条命令
+#
+# label matches an option; everything after the dash is the WHY. A card may not
+# recommend without a reason: an unexplained recommendation is an order.
+_RECOMMEND_LINE_RE = re.compile(
+    r"^\s*(?:RECOMMEND|建议)\s*[:：]\s*(.+?)\s*$", re.I)
+_RECOMMEND_SPLIT_RE = re.compile(r"\s*(?:—+|--+|－+|·)\s*")
+MAX_RECOMMEND_WHY_CHARS = 60
 MAX_TITLE_CHARS = 40
 MAX_INLINE_OPTIONS = 4
 # Lark truncates long button captions on a phone; clip rather than reject, so
@@ -484,6 +499,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "body": str(e.get("body", "")),
                 "options": options,
                 "extra_buttons": extra_buttons,
+                "recommend": e.get("recommend") or None,
                 "attention": str(
                     e.get("attention") or
                     _default_attention(str(e.get("source", "")),
@@ -706,9 +722,15 @@ def _button_groups(state: dict, include_options: bool = True,
     """
     groups: list[list[dict]] = []
     if include_options and state.get("options"):
+        # The primary button is 依议 — the 票拟'd option when there is one.
+        # Falling back to position means "first listed", which is an authoring
+        # accident, not a recommendation.
+        recommended = str((state.get("recommend") or {}).get("key", ""))
+        keys = [str(o.get("key", "")) for o in state["options"]]
+        primary = keys.index(recommended) if recommended in keys else 0
         groups.append([
             {"text": o.get("label", o.get("key", "")),
-             "type": "primary" if i == 0 else "default",
+             "type": "primary" if i == primary else "default",
              "value": {"action": "memorial", "id": state["id"],
                        "opt": o.get("key", "")}}
             for i, o in enumerate(state["options"])
@@ -755,6 +777,11 @@ def _render_card(state: dict, *, body: str | None = None,
                  status_line: str = "", include_options: bool = True,
                  include_chat: bool = True) -> str:
     content = _display_body(state["body"] if body is None else body)
+    # 票拟 sits directly above the buttons it is about, and only while the card
+    # is still open — after 批红 it would read as advice on a settled matter.
+    rec = state.get("recommend") or {}
+    if include_options and rec.get("label") and rec.get("why"):
+        content += f"\n\n**建议：{rec['label']}** — {rec['why']}"
     if not status_line and state.get("status") == "pending":
         if (requires_decision(state)
                 and review_surface(state) == REVIEW_LARK):
@@ -1083,6 +1110,58 @@ def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
     return text, None
 
 
+def _extract_recommendation(text: str) -> tuple[str, dict | None]:
+    """Split a ``RECOMMEND: <label> — <why>`` line off LLM-authored prose.
+
+    Scans the trailing few lines so it works whether the author wrote it above
+    or below OPTIONS. Returns ``(body_without_the_line, {"label", "why"})``.
+    A RECOMMEND with no reason is dropped, not rendered: a recommendation the
+    user cannot audit is just an instruction wearing a suggestion's clothes.
+    """
+    lines = str(text or "").splitlines()
+    seen = 0
+    for idx in range(len(lines) - 1, -1, -1):
+        if not lines[idx].strip():
+            continue
+        seen += 1
+        match = _RECOMMEND_LINE_RE.match(lines[idx])
+        if match:
+            parts = _RECOMMEND_SPLIT_RE.split(match.group(1), maxsplit=1)
+            label = parts[0].strip().strip("「」\"'")
+            why = parts[1].strip() if len(parts) > 1 else ""
+            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
+            if not label or not why:
+                return body, None
+            return body, {"label": label[:MAX_OPTION_LABEL_CHARS],
+                          "why": why[:MAX_RECOMMEND_WHY_CHARS]}
+        if seen >= 3:
+            break
+    return text, None
+
+
+def _normalize_recommendation(recommend: dict | None,
+                              options: list[dict]) -> dict | None:
+    """Bind a 票拟 to a real option key, or drop it.
+
+    A recommendation naming a button that does not exist would render advice
+    the user cannot act on, so it is discarded rather than shown. Matching is
+    by label first (that is what the author wrote) and key second.
+    """
+    if not isinstance(recommend, dict):
+        return None
+    label = str(recommend.get("label", "")).strip()
+    why = str(recommend.get("why", "")).strip()
+    if not label or not why:
+        return None
+    for option in options:
+        if label in (str(option.get("label", "")).strip(),
+                     str(option.get("key", "")).strip()):
+            return {"key": str(option.get("key", "")),
+                    "label": str(option.get("label", "")),
+                    "why": why[:MAX_RECOMMEND_WHY_CHARS]}
+    return None
+
+
 def _normalize_options(options: list[dict] | None, preset: str | None) -> list[dict]:
     if options is not None:
         normalized = []
@@ -1395,7 +1474,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            matter_id: str = "",
            dedup_key: str = "",
            attention: str = "",
-           review_at: str = "") -> tuple[str, bool]:
+           review_at: str = "",
+           recommend: dict | None = None) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and route it.
 
     Returns ``(memorial_id, accepted)``. Accepted means the memorial is either
@@ -1424,6 +1504,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     #     extractor, so directly-built rich cards (daily-reflect) shipped both.
     # Whose buttons win is a SEPARATE decision from whether the residue is
     # removed: an explicit caller still overrides the parsed line below.
+    # 票拟 comes off first: it may sit either side of OPTIONS, and the OPTIONS
+    # parser only inspects the LAST non-empty line — a trailing RECOMMEND would
+    # otherwise cost the card its authored buttons.
+    body, parsed_recommend = _extract_recommendation(body)
     body, inline_options = _extract_inline_options(body)
     leading_title, stripped_body = _extract_title_line(body)
     if leading_title:
@@ -1488,6 +1572,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context),
           "attention": attention, "review_surface": review_at}
+    # An explicit caller outranks the parsed line, same precedence the options
+    # and title directives already follow.
+    final_recommend = _normalize_recommendation(recommend or parsed_recommend, opts)
+    if final_recommend:
+        ev["recommend"] = final_recommend
     if dedup_key:
         ev["dedup_key"] = str(dedup_key)
     if chat_id:
@@ -1585,6 +1674,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # daily-reflect 7/22–7/27). The header of a directly-built card is a
     # decorative source label ("🌙 回顾"); an explicit TITLE line is the one
     # thing that says what THIS card is about, so it wins.
+    body, adopted_recommend = _extract_recommendation(body)
     body, inline_options = _extract_inline_options(body)
     explicit_title, rest = _extract_title_line(body)
     if explicit_title:
@@ -1614,7 +1704,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     for matter in matters:
         mid, _ = create(
             source=source or "heartbeat", title=title, body=matter,
-            options=options,
+            options=options, recommend=adopted_recommend,
             preset=None if (has_native_action or inline_options)
             else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
@@ -1657,6 +1747,34 @@ def _extract_title_line(text: str) -> tuple[str, str]:
     return full[:MAX_TITLE_CHARS], rest
 
 
+# Clause boundaries a Chinese/English headline may legitimately end on. Order
+# matters: prefer the widest complete thought that still fits the header.
+_HEADLINE_BREAKS = "。！？!?；;，,、"
+
+
+def _headline_from_prose(first_line: str) -> str:
+    """Cut a card headline out of an ordinary prose opening, or "" if hopeless.
+
+    A single-paragraph card has no short first line to promote, so it used to
+    fall all the way through to the per-source label — the reason cards read
+    「Intent」/「heartbeat」while their own opening sentence said exactly what
+    had happened. Clipping mid-word would be worse than a generic label, so
+    this only fires when the text breaks cleanly inside the header budget.
+    """
+    text = str(first_line or "").replace("**", "").lstrip("#").strip()
+    if len(text) < 8:
+        return ""
+    if len(text) <= MAX_TITLE_CHARS:
+        return text
+    window = text[:MAX_TITLE_CHARS]
+    cut = max(window.rfind(ch) for ch in _HEADLINE_BREAKS)
+    # Require the break to land in the back half: an early comma would title
+    # the card with a fragment that says less than the module label did.
+    if cut < MAX_TITLE_CHARS // 2:
+        return ""
+    return window[:cut].strip()
+
+
 def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
     """Derive a content title for one card; returns (title, body).
 
@@ -1665,6 +1783,16 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
     as a markdown heading, to avoid saying it twice). Anything else keeps the
     per-source generic label.
     """
+    # An explicit TITLE: directive is the author's own 事由 and outranks every
+    # heuristic below. Measuring the RAW line instead was a two-sided bug: the
+    # literal「TITLE: 」prefix either leaked into the card header, or its 7
+    # characters pushed a perfectly good headline past MAX_TITLE_CHARS and the
+    # card fell back to a module label. 79 cards shipped headed literally
+    # 「Intent」while their own one-line summary sat unused in the body.
+    declared, remainder = _extract_title_line(chunk)
+    if declared:
+        return declared[:MAX_TITLE_CHARS], remainder
+
     lines = chunk.splitlines()
     stripped = [ln.strip() for ln in lines if ln.strip()]
     if len(stripped) >= 2:
@@ -1684,6 +1812,9 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
                 if body:
                     return clean, body
             return clean, chunk
+    headline = _headline_from_prose(stripped[0] if stripped else "")
+    if headline:
+        return headline, chunk
     return SOURCE_TITLE.get(source, source or "一件事"), chunk
 
 
