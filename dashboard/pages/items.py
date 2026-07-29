@@ -29,6 +29,7 @@ from ..uiutil import (
     memorial_attention_rank,
     memorial_display_body,
     memorial_display_title,
+    chat_started_notice,
     memorial_is_notice,
     memorial_is_pending,
     memorial_lapsed_note,
@@ -413,7 +414,11 @@ def items_page():
                 if deep_link:
                     ui.navigate.to(deep_link)
                 else:
-                    ui.notify("飞书入口暂不可用", type="warning")
+                    # chat() already injected the context and sent the opener —
+                    # the conversation IS started. Reporting "入口暂不可用" told
+                    # the user their tap failed when it had worked, and left
+                    # them with nowhere to go. Report what actually happened.
+                    ui.notify(chat_started_notice(payload), type="positive")
 
             async def handoff(state: dict):
                 result = await _send_handoff(state, surface, actor)
@@ -574,7 +579,11 @@ def item_detail_page(memorial_id: str):
                 if deep_link:
                     ui.navigate.to(deep_link)
                 else:
-                    ui.notify("飞书入口暂不可用", type="warning")
+                    # chat() already injected the context and sent the opener —
+                    # the conversation IS started. Reporting "入口暂不可用" told
+                    # the user their tap failed when it had worked, and left
+                    # them with nowhere to go. Report what actually happened.
+                    ui.notify(chat_started_notice(payload), type="positive")
 
             async def handoff():
                 result = await _send_handoff(state, surface, actor)

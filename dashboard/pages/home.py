@@ -16,7 +16,7 @@ from nicegui import ui
 from ..db import engagement_stats
 from ..telemetry import (memorial_states, parse_ts_epoch, read_jsonl_tail,
                          read_sched_events)
-from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
+from ..uiutil import (chat_started_notice, ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
                       add_dashboard_head, dashboard_header,
                       finish_status_label, guarded_refresh_timer,
                       intent_event_label, memorial_attention_rank,
@@ -235,7 +235,10 @@ def _memorial_preview(state: dict, refresh) -> None:
         if deep_link:
             ui.navigate.to(deep_link)
         else:
-            ui.notify("飞书入口暂不可用", type="warning")
+            # chat() already loaded the context and sent the opener — the
+            # conversation IS started. Never report a completed action as a
+            # failure, and never strand the user with no next step.
+            ui.notify(chat_started_notice(payload), type="positive")
 
     with ui.card().classes("memorial-card"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
