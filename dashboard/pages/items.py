@@ -31,6 +31,7 @@ from ..uiutil import (
     memorial_display_title,
     memorial_is_notice,
     memorial_is_pending,
+    memorial_lapsed_note,
     memorial_option_label,
     memorial_review_surface,
     memorial_surface_label,
@@ -459,6 +460,9 @@ def items_page():
                                 "已批 · " + memorial_option_label(
                                     state.get("decided_label", ""))
                             ).classes("section-note")
+                        elif memorial_lapsed_note(state):
+                            ui.label(memorial_lapsed_note(state)).classes(
+                                "section-note")
                         with ui.row().classes("memorial-actions"):
                             if not decided_state:
                                 for index, option in enumerate(
@@ -612,6 +616,9 @@ def item_detail_page(memorial_id: str):
                         "已批 · " + memorial_option_label(
                             state.get("decided_label", ""))
                     ).classes("item-decision-result")
+                elif memorial_lapsed_note(state):
+                    ui.label(memorial_lapsed_note(state)).classes(
+                        "item-decision-result")
                 with ui.row().classes("memorial-actions item-detail-actions"):
                     if not decided_state:
                         for index, option in enumerate(

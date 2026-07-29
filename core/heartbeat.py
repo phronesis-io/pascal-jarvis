@@ -416,6 +416,7 @@ class HeartbeatRunner:
         "delegation-reconcile",
         "iteration-observe",
         "log-maintenance",
+        "memorial-escrow",
         "provider-canary",
     }  # deterministic pre/post work; no model call
 

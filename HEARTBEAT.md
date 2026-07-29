@@ -1024,6 +1024,17 @@ Intent，把首席科学家发声候选整个埋掉）。在正文**第一行**�
     only after launchd has closed the owning service's append descriptors;
     the same installed plist is then bootstrapped before success is recorded.
 
+### memorial-escrow
+- interval: 2h
+- pre: tasks/memorial_escrow_pre.sh
+- prompt: |
+    Deterministic Tier-0 缴回制度. Every pending Item is measured against the
+    deadline for its attention class. Alerts and notices past that deadline,
+    and decisions nobody answered inside the hard ceiling, are filed 留中 —
+    a terminal state that explicitly does NOT claim the user decided anything.
+    Decisions still answerable are grouped by source into one morning docket
+    card; individual stale cards are never re-pushed.
+
 ### provider-canary
 - interval: 12h
 - pre: tasks/provider_canary_pre.sh

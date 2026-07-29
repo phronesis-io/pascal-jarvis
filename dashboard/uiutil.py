@@ -241,6 +241,21 @@ def memorial_visible_options(state: dict) -> list[dict]:
     return []
 
 
+def memorial_lapsed_note(state: dict) -> str:
+    """留中 badge text, or "" for any other state.
+
+    A lapsed Item is terminal but still tappable, so the row keeps its
+    buttons. Without this badge it renders identically to a live ask and the
+    「全部」view would present hundreds of archived rows as open work.
+    """
+    from core.memorial import STATUS_LAPSED
+
+    if str(state.get("status", "")) != STATUS_LAPSED:
+        return ""
+    reason = str(state.get("lapse_reason", "")).strip()
+    return f"留中 · {reason}" if reason else "留中"
+
+
 def memorial_is_pending(state: dict) -> bool:
     """Only explicit choices belong in the user's pending-decision queue."""
     from core.memorial import requires_decision
