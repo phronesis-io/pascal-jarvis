@@ -1188,11 +1188,12 @@ def test_required_mobile_push_without_subscriber_remains_retryable(
 
 def test_pwa_shell_and_page_use_the_same_fresh_stylesheet_version():
     root = Path(__file__).parent.parent
-    version = "20260725-proactivity"
+    version = "20260731-network"
     uiutil = (root / "dashboard" / "uiutil.py").read_text(encoding="utf-8")
     worker = (root / "dashboard" / "static" / "sw.js").read_text(
         encoding="utf-8")
 
     assert f"style.css?v={version}" in uiutil
     assert f"style.css?v={version}" in worker
-    assert "jarvis-shell-v8" in worker
+    assert "jarvis-shell-v9" in worker
+    assert 'updateViaCache:"none"' in uiutil

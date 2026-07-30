@@ -80,6 +80,8 @@ def test_runtime_env_honors_explicit_python_before_path_fallback(tmp_path):
 def test_setup_installs_and_verifies_the_complete_dependency_set():
     script = (ROOT / "setup.sh").read_text(encoding="utf-8")
     requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    runtime_requirements = (ROOT / "requirements.txt").read_text(
+        encoding="utf-8")
 
     assert "pip install -r requirements-dev.txt" in script
     assert 'if python3 -c "import yaml"' not in script
@@ -90,6 +92,7 @@ def test_setup_installs_and_verifies_the_complete_dependency_set():
     assert "pip check" in script
     assert "sys.version_info >= (3, 10)" in script
     assert "pytest>=8.0" in requirements
+    assert "nicegui==3.15.0" in runtime_requirements
     assert "chmod -x scripts/config_env.sh scripts/runtime_env.sh" in script
     assert "need_cmd python3" not in script
 

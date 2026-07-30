@@ -52,6 +52,8 @@ def main() -> int:
     # broadcast younger than 48h still awaits the user's 发/取消, drop this
     # draft instead of stacking one more card on the unanswered pile.
     now_epoch = time.time()
+    from core.eigenflux_publish import reconcile_pending_drafts
+    reconcile_pending_drafts(JARVIS_DIR, now=now_epoch)
     backlog = [f for f in pending_dir.glob("*.json")
                if now_epoch - f.stat().st_mtime <= 48 * 3600]
     if backlog:
@@ -102,6 +104,10 @@ def main() -> int:
         body=preview, options=options, send=False,
         context=f"pending_publish id={pending_id}",
     )
+    # Make the draft and its approval card one lifecycle. The pre-hook uses
+    # this link to file the card as 留中 when an unanswered draft expires.
+    pending_data["memorial_id"] = mem_id
+    atomic_write(pending_file, json.dumps(pending_data, ensure_ascii=False))
     print(memorial.card_json(mem_id))
     print(f"[eigenflux-publish] Pending approval: {pending_id} — {content[:80]}", file=sys.stderr)
 

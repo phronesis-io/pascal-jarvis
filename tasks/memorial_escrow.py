@@ -90,7 +90,9 @@ def run(now=None, send: bool = True) -> dict:
         send=send,
     )
     summary["docket_sent"] = bool(accepted)
-    summary["docket_id"] = mid
+    # create() returns the existing memorial id when its dedup gate rejects a
+    # duplicate. Only report an id for work this sweep actually created.
+    summary["docket_id"] = mid if accepted else ""
     return summary
 
 

@@ -55,7 +55,7 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/items", "/items/missing", "/signals", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
+PAGES = ["/", "/items", "/items/missing", "/signals", "/eigenflux", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
          "/thinking", "/agent-calendar", "/engagement", "/ops"]
 
 
@@ -89,9 +89,9 @@ def test_db(tmp_path, monkeypatch):
 @pytest.fixture
 def jarvis_tmp(tmp_path, monkeypatch):
     """Point every page module's JARVIS_DIR at tmp_path (no repo reads)."""
-    from dashboard.pages import (home, items, signals, memorials, tasks, settings,
+    from dashboard.pages import (home, items, signals, eigenflux, memorials, tasks, settings,
                                  agent_calendar, engagement, ops)
-    for mod in (home, items, signals, memorials, tasks, settings,
+    for mod in (home, items, signals, eigenflux, memorials, tasks, settings,
                 agent_calendar, engagement, ops):
         monkeypatch.setattr(mod, "JARVIS_DIR", tmp_path)
     # engagement_stats reads $JARVIS_DIR/engagement_log.jsonl

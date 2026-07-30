@@ -7,7 +7,11 @@ are still banned. All broadcasts go through a confirmation card before publishin
 import subprocess
 import sys
 import json
+import os
+import time
 from pathlib import Path
+
+from core.jsonl import read_jsonl
 
 SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "eigenflux_publish_post.py"
 
@@ -67,7 +71,6 @@ def test_should_publish_false_no_card(tmp_path):
 # ── Backlog gate (7/22): unanswered pending broadcast blocks new drafts ──
 
 def _seed_pending(tmp_path, name: str, age_seconds: int = 0):
-    import os, time
     pending = tmp_path / "eigenflux" / "pending_publish"
     pending.mkdir(parents=True, exist_ok=True)
     f = pending / name
@@ -106,7 +109,8 @@ def _run_pre(tmp_path) -> subprocess.CompletedProcess:
     fake.chmod(0o755)
     env = {"JARVIS_DIR": str(tmp_path),
            "PATH": f"{bindir}:/usr/bin:/bin",
-           "HOME": str(tmp_path)}
+           "HOME": str(tmp_path),
+           "JARVIS_PYTHON": sys.executable}
     return subprocess.run(["bash", str(PRE_SCRIPT)],
                           capture_output=True, text=True, env=env)
 
@@ -127,3 +131,21 @@ def test_pre_hook_expires_stale_pending_and_proceeds(tmp_path):
     expired = tmp_path / "eigenflux" / "pending_publish" / "expired" / "1000_1.json"
     assert expired.exists()
     assert "Ready to publish" in r.stdout
+
+
+def test_expired_draft_lapses_its_approval_card(tmp_path):
+    _run(_mk("insight"), tmp_path)
+    draft = next((tmp_path / "eigenflux" / "pending_publish").glob("*.json"))
+    payload = json.loads(draft.read_text())
+    assert payload["memorial_id"]
+    old = time.time() - 49 * 3600
+    os.utime(draft, (old, old))
+
+    result = _run_pre(tmp_path)
+
+    assert result.returncode == 0
+    from core.memorial import _fold
+    states = _fold(read_jsonl(tmp_path / "memorials.jsonl"))
+    card = states[payload["memorial_id"]]
+    assert card["status"] == "lapsed"
+    assert "48 小时" in card["lapse_reason"]

@@ -109,6 +109,13 @@ def signals_page():
         "信号",
         "Jarvis 从外部网络和后台观察中带回来的新信息。",
     ):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            ui.label("这里是收到的信号；对外广播和网络状态在网络台。").classes(
+                "section-note")
+            with ui.link(target="/eigenflux").classes("item-detail-link"):
+                ui.icon("hub", size="16px")
+                ui.label("打开 EigenFlux 网络台")
+
         def change(key: str, value: str):
             filters[key] = value
             filters["limit"] = 16

@@ -1,6 +1,6 @@
-const CACHE_NAME = 'jarvis-shell-v8';
+const CACHE_NAME = 'jarvis-shell-v9';
 const SHELL = [
-  '/static/style.css?v=20260725-proactivity',
+  '/static/style.css?v=20260731-network',
   '/static/manifest.webmanifest',
   '/static/app-icon.svg',
   '/static/app-icon-192.png',

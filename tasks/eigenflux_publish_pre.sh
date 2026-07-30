@@ -2,6 +2,7 @@
 # Pre-hook: check publish cooldown via local settings
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 export PATH="$HOME/.local/bin:$PATH"
+JARVIS_PYTHON="${JARVIS_PYTHON:-python3}"
 
 command -v eigenflux >/dev/null 2>&1 || exit 0
 
@@ -14,28 +15,15 @@ now=$(date +%s)
 # task happily drafted a new broadcast every hour overnight (17 cards in 17h
 # on 7/21-22). Rule: while any pending broadcast younger than 48h awaits a
 # decision, don't draft another; pendings older than 48h are moved aside to
-# expired/ (their card's 发/取消 buttons degrade to "已经处理过了").
+# expired/ and their approval cards are filed as 留中.
 PENDING_DIR="$JARVIS_DIR/eigenflux/pending_publish"
 if [ -d "$PENDING_DIR" ]; then
-  active_pending=$(PENDING_DIR="$PENDING_DIR" NOW="$now" python3 - <<'PYEOF' 2>/dev/null || echo "0"
-import os, time
-from pathlib import Path
-pending = Path(os.environ["PENDING_DIR"])
-now = int(os.environ["NOW"])
-MAX_AGE = 48 * 3600
-expired_dir = pending / "expired"
-active = 0
-for f in sorted(pending.glob("*.json")):
-    age = now - int(f.stat().st_mtime)
-    if age > MAX_AGE:
-        expired_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            f.rename(expired_dir / f.name)
-        except OSError:
-            pass
-    else:
-        active += 1
-print(active)
+  active_pending=$(JARVIS_DIR="$JARVIS_DIR" NOW="$now" "$JARVIS_PYTHON" - <<'PYEOF' 2>/dev/null || echo "0"
+import os
+from core.eigenflux_publish import reconcile_pending_drafts
+result = reconcile_pending_drafts(
+    os.environ["JARVIS_DIR"], now=int(os.environ["NOW"]))
+print(result["active"])
 PYEOF
 )
   if [ "${active_pending:-0}" -ge 1 ]; then
