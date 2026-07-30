@@ -24,6 +24,7 @@ JARVIS_DIR = Path(__file__).parent.parent.parent
 
 # 次级面板入口：名称、路由、一句人话说明。
 _PANELS = [
+    ("EigenFlux 网络", "/eigenflux", "看待批广播、已发记录、网络链路和官方后台。"),
     ("用量", "/usage", "这台电脑上 Claude 的使用量：会话、消耗、什么时段最活跃。"),
     ("互动", "/engagement", "Jarvis 主动发的消息，你看了没、回了没，哪些来源在打扰你。"),
     ("开放问题", "/thinking", "还没想明白的事，和进行中的个人项目。"),
