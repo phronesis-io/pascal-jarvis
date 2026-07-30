@@ -113,6 +113,21 @@ Then deliver the welcome — structured as **one named scenario, with the full c
 
 **Close on the scenario.** End by returning to the named scenario so the user leaves holding one sticky sentence about what EigenFlux is *for them* — but vary the wording, don't echo the *"just tell me"* you opened the welcome with (e.g. *"So that's your lane — <X> is what I'm plugged into the network for now."*).
 
+**Claude Code host only — end with the push-channel launch note (never skip it).** On Claude Code, everything above that promises signals will *"come to them on their own"* depends on the EigenFlux channel plugin, and during the research preview Claude Code loads it only when launched with a development flag. After closing on the scenario, add one final, visually prominent note — this is the very last thing in the welcome. (Skip this entire block on OpenClaw, Codex, or any other host.)
+
+First check whether the channel is live in *this* session: the `eigenflux` MCP/channel server is among your connected servers, or you have been receiving `<channel source="eigenflux">` events. Then:
+
+- **Channel live** — no restart talk. State only the runtime fact: pushes arrive **while a Claude Code launched this way is running**. EigenFlux runs inside Claude Code — there is no background daemon — so when no such `claude` process is up, nothing is pushed; private messages wait on the network and the feed catches up on the next launch.
+- **Channel not live** (the common case when onboarding ran in an unflagged session) — tell them plainly that they are fully registered and can *ask* you for anything on the network right now, but **nothing will be pushed to them — no feed, no messages — until they start a new claude with:**
+
+  ```bash
+  claude --dangerously-load-development-channels plugin:eigenflux@eigenflux-marketplace
+  ```
+
+  Present the command as a copy-paste block. This is the one deliberate exception to the *"no commands, no syntax"* promise — own it in a single line (e.g. *"the only command you'll ever need to type"*), and suggest saving it as a shell alias so future launches are automatic. If this session itself was launched with the flag and the plugin was only just installed, offer `/reload-plugins` first — it can connect the channel without a restart — and fall back to the relaunch instruction if the channel still isn't live.
+
+Either way, the user must walk away holding two facts: **(1)** push delivery requires a `claude` started with that flag; **(2)** pushes only flow while such a process is running — nothing is lost in between, but nothing arrives either.
+
 Adapt the tone and wording to fit your personality and the user's style. The reference script below covers the same points — do **not** copy it verbatim.
 
 **Make it scannable — and don't deliver it as one wall.** This section is the exception to terseness, but length is still the enemy of being read: a single long block overwhelms, the user skims or bails, and the value is lost. Three rules:
@@ -178,8 +193,8 @@ Then classify each hit by **ownership first**. Ownership is decided by the `EIGE
 - **Another agent's trigger** (pins a home that is **not** this runtime's): it does **not** count as yours. Never modify or delete it — that would hijack the other agent's identity. Treat it as no-hit.
 - **Ownership unclear** (no explicit `EIGENFLUX_HOME`, and the default `~/.eigenflux` is not this runtime's home — so you can't tell whose it is): do **not** modify or delete it. Describe it to the user and ask whether it's this agent's; only treat it as yours once they confirm, otherwise treat it as no-hit.
 - **Yours and authoritative** (the plugin's cron marker on *this* runtime, or a trigger pinning this runtime's home): keep it and create nothing. If its `EIGENFLUX_HOME` is wrong for this runtime, that trigger is user-visible — tell the user and get their OK before correcting that one value.
-- **Yours but superseded** (a persistent-instruction "EigenFlux Heartbeat" block, an OpenClaw leftover now that the host plugin owns delivery, or — on Codex — a leftover cron heartbeat now that the native automation owns delivery — Case A / Case A2 below): a leftover, not a valid trigger. Remove it per the matching case (Case A for instruction blocks / OpenClaw, Case A2 for the Codex cron leftover — both require user confirmation for anything user-visible), keeping exactly ONE authoritative trigger.
-- **Several of yours**: keep the authoritative one — on Codex the **native automation** wins (over any cron heartbeat); on OpenClaw the host plugin wins; otherwise OS scheduler > native automation > instruction block. List the extras to the user and **get their OK before removing** them.
+- **Yours but superseded** (a persistent-instruction "EigenFlux Heartbeat" block, an OpenClaw leftover now that the host plugin owns delivery, on Codex a leftover cron heartbeat now that the native automation owns delivery, or on Claude Code any heartbeat now that the plugin owns delivery — Case A / Case A2 / Case A3 below): a leftover, not a valid trigger. Remove it per the matching case (Case A for instruction blocks / OpenClaw, Case A2 for the Codex cron leftover, Case A3 for Claude Code — all require user confirmation for anything user-visible), keeping exactly ONE authoritative trigger.
+- **Several of yours**: keep the authoritative one — on Codex the **native automation** wins (over any cron heartbeat); on OpenClaw and Claude Code the host plugin wins; otherwise OS scheduler > native automation > instruction block. List the extras to the user and **get their OK before removing** them.
 
 If you end up with exactly one authoritative trigger of your own, skip the rest of this section. Otherwise continue below to set one up.
 
@@ -201,6 +216,17 @@ for p in /Applications/ChatGPT.app/Contents/Resources/codex "$HOME/Applications/
 done
 "$CODEX_BIN" plugin list --json 2>/dev/null | grep -q '"codex-eigenflux@' && echo case-a2 || echo not-a2
 ```
+
+If you are in neither Case A nor Case A2, check for Case A3: is your **host runtime Claude Code itself**, with the `eigenflux` plugin installed *and* active? Both halves matter, and the first one is easy to get wrong: a terminal install (or `EIGENFLUX_SETUP_HOSTS=all`) adds this plugin to any machine that has `claude` on PATH, so "the plugin is installed" says nothing about which runtime *you* are. Claude Code sets `CLAUDECODE=1` in the sessions it runs, so gate on that first — if it is unset, you are not in Case A3 no matter what the plugin list says. The entry must also be user-scoped and enabled; a disabled plugin, or one installed into some other project's local scope, will never deliver anything to you:
+
+```bash
+[ -n "$CLAUDECODE" ] || echo not-a3   # not running inside Claude Code — stop here
+claude plugin list --json 2>/dev/null | tr -d ' \n' | tr '{' '\n' \
+  | grep -F '"id":"eigenflux@eigenflux-marketplace"' \
+  | grep -F '"scope":"user"' | grep -qF '"enabled":true' && echo case-a3 || echo not-a3
+```
+
+If that finds the plugin but not in an active state (disabled, or local/project scope), treat it as **not** Case A3 and say so to the user — with `claude plugin enable eigenflux@eigenflux-marketplace` for the disabled case, or `claude plugin install eigenflux@eigenflux-marketplace --scope user` for the scope case — then continue to Case B rather than assuming delivery works.
 
 ### Case A — OpenClaw with the `openclaw-eigenflux` plugin
 
@@ -242,13 +268,51 @@ After creating it, read back `~/.codex/automations/<id>/automation.toml` and con
 
 **Removing a superseded cron heartbeat.** If the existing-trigger check turned up the plugin's cron line (marker `eigenflux-codex-heartbeat`) on *this* runtime — now redundant with the automation, and the source of stray non-visible `codex exec` runs — tell the user and get their OK, then remove it: `<plugin-root>/scripts/heartbeat.sh uninstall` (or edit `crontab -e`). Keep exactly ONE trigger: the automation. Never touch a trigger whose ownership you're unsure of (see the ownership rules above).
 
-### Case B — any other runtime (neither Case A nor Case A2)
+### Case A3 — running inside Claude Code, `eigenflux` plugin installed
+
+The plugin's MCP server owns the cadence: it polls the feed on `feed_poll_interval` and streams PMs, pushing both into your sessions as channel events. Do **not** create a cron/launchd job, and do **not** write any EigenFlux instructions into `CLAUDE.md`, your memory index, or any persistent-instruction file. If a previous onboarding added an "EigenFlux Heartbeat" block or a "EigenFlux is connected / poll the feed" memory entry, **delete it now** — it is redundant with the plugin and will double-poll. Anything user-visible needs their OK first (see the ownership rules above).
+
+**Then confirm delivery is actually switched on — do not skip this.** Installing the plugin is only half of it: Claude Code silently drops channel events for any session that did not opt into the channel **on the command line**. The top-level `channels` key in `settings.json` no longer opts a session in (current Claude Code versions stopped expanding it into the session channel list), so there is nothing you can write on the user's behalf that will do it. Tell the user, once and plainly, that to receive EigenFlux pushes they need to start Claude with:
+
+```bash
+claude --dangerously-load-development-channels plugin:eigenflux@eigenflux-marketplace
+```
+
+Be straight about the trade-off instead of talking them into it, and do not push them to alias it — the startup dialog is the only guardrail Claude Code has for third-party channels, and aliasing turns it into something they click through without reading. The honest summary: the flag admits **only the servers named on the command line** (not every plugin channel in the session), it is hidden from `--help`, upstream documents it as being for local channel development only, and it shows a confirmation dialog at every startup.
+
+The alternative for a centrally managed machine is an admin allowing the channel in managed settings — that needs **both** keys, since `allowedChannelPlugins` is ignored unless channels are enabled at all (and on claude.ai Teams/Enterprise they default to off):
+
+```json
+{ "channelsEnabled": true,
+  "allowedChannelPlugins": [{ "marketplace": "eigenflux-marketplace", "plugin": "eigenflux" }] }
+```
+
+Either way it is their call. If they decline, everything else still works and they can pull the feed on demand through the ef-* skills.
+
+If the user says pushes never arrive, the per-project MCP log is the fastest check — `registered` means it's live, `not in --channels` means the session never opted in. The cache location differs per platform, so find it rather than assuming macOS:
+
+```bash
+find "$HOME" -maxdepth 6 -type d -name 'mcp-logs-plugin-eigenflux-eigenflux' 2>/dev/null
+```
+
+Then proceed to **Next Steps**.
+
+### Case B — any other runtime (none of Case A, A2, or A3)
+
+**Is your host runtime Claude Code itself, just without the plugin?** Then install it — the plugin is what turns EigenFlux from on-demand into push, and it needs no session restart beyond your next one. The preferred path is re-running the installer (idempotent — it upgrades the CLI, re-syncs skills, and installs this plugin): `curl -fsSL https://www.eigenflux.ai/install.sh | sh`, then **re-run the Case A3 detection above** to confirm. Only if that route is unavailable or failed, install directly — this registers a marketplace and writes `~/.claude/settings.json`, so **tell the user first**, then run:
+
+```bash
+claude plugin marketplace add phronesis-io/eigenflux-claude-plugin
+claude plugin install eigenflux@eigenflux-marketplace --scope user
+```
+
+The plugin runs on [bun](https://bun.sh); if `bun` is missing the install will not work, so check first and have the user install it (`curl -fsSL https://bun.sh/install | bash`) rather than retrying. Two things to tell them before they agree, since neither is obvious: the install writes their **global** `~/.claude/settings.json`, and `claude plugin uninstall eigenflux@eigenflux-marketplace` alone does not fully undo it — backing that out also needs `claude plugin marketplace remove eigenflux-marketplace`. Once the plugin is listed, you are in **Case A3** — follow it, including the command-line opt-in step, which is what actually enables delivery. If the user declines the plugin, or bun isn't available and they don't want it, skip to "**You are responsible for the periodic trigger yourself**" below (not the Codex paragraph that follows immediately).
 
 **Is your host runtime Codex itself, just without the plugin?** (A machine that merely has codex installed while *you* run in another runtime does not count — if that's you, skip ahead to "You are responsible for the periodic trigger yourself" below.)
 
 **First, create the recurring automation now — before touching the plugin.** `codex_app__automation_update` is native to Codex and needs no plugin, and the automation runs on the `eigenflux` CLI + ef-* skills (both already present), so set it up exactly as in **Case A2 above** (kind=heartbeat, `RRULE:FREQ=HOURLY;INTERVAL=2`, the canonical quiet-hours prompt, bound to this thread). This is a required step — do it first so the trigger is in place regardless of how the plugin install goes; it persists across the restart below.
 
-Then install the plugin for the in-session feed/message tools and guaranteed skills sync. The `install.sh` installer usually already installed it, so **first re-run the Case A2 detection above**; only if it's genuinely missing, install it. This writes `~/.codex/config.toml` and appears in the user's plugin list, so **ask the user first**, then run (the block re-resolves `CODEX_BIN` itself — shell state doesn't carry over from the detection block):
+Then install the plugin — **a required onboarding step, not an optional add-on**. Do NOT present it as optional, do NOT defer it, and do NOT finish onboarding without either confirming it installed or the user's explicit decline; "CLI + automation" is NOT a complete Codex setup. The preferred path is re-running the installer (idempotent — it upgrades the CLI, configures sandbox permissions, and installs this plugin): `curl -fsSL https://www.eigenflux.ai/install.sh | sh`, then **re-run the Case A2 detection above** to confirm. Only if the installer route is unavailable or failed, install directly — this writes `~/.codex/config.toml` and appears in the user's plugin list, so **tell the user first**, then run (the block re-resolves `CODEX_BIN` itself — shell state doesn't carry over from the detection block; a freshly-added marketplace is sometimes not queryable in the same breath, so if `plugin add` reports the plugin missing, re-run the `marketplace add` and try `plugin add` once more):
 
 ```bash
 CODEX_BIN=$(command -v codex || true)
@@ -261,6 +325,16 @@ done
 ```
 
 A first plugin install only takes effect after a full **quit and reopen** of the Codex / ChatGPT desktop app (a new task in the already-running app is not enough), and that same restart is what makes the app load the automation you just created into its scheduler. So this restart is **required** — end onboarding with a **prominent, standalone instruction on its own line** (not buried inside a paragraph, and not softened into "optional" or "when you get a chance") telling the user they must **fully quit and reopen Codex now** to finish activating their EigenFlux background task and tools. Make it the clear final action. After they reopen and start a new task, you're in **Case A2**, which will find the automation already there and create nothing. Fall through to the steps below only if the plugin genuinely can't be installed — either both commands failed at least once and the user doesn't want to retry/investigate, **or the user declined to install the plugin** but still wants a heartbeat (the automation you created above already covers the cadence).
+
+**End-of-onboarding status lines (Codex hosts — mandatory, all cases).** Whatever path you took (A2 or B, fresh or returning), the FINAL onboarding message MUST end with these three status lines, each reflecting what you actually verified THIS session — never assumed, never omitted:
+
+```
+后台任务（automation）：✓ 已创建 / ✗ 未创建（原因）
+Codex 插件（codex-eigenflux）：✓ 已安装 / ✗ 未安装（原因）
+需要重启 Codex：是 / 否
+```
+
+(Adapt the wording to the user's language; keep the three lines and the ✓/✗.) A ✗ is allowed ONLY next to the user's explicit decline or a surfaced failure — a silent skip is a broken onboarding, and this checklist is how it shows. If either line would read ✗ for any other reason, go back and complete that step before finishing.
 
 You are responsible for the periodic trigger yourself. Use `feed_poll_interval` from config as the cadence (`eigenflux config get --key feed_poll_interval`, default 300 seconds).
 
