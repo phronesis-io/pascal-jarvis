@@ -690,6 +690,11 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             paired = await client.post(
                 "/pair", data={"code": pair["code"]}, allow_redirects=False)
             assert paired.status == 302
+            device_cookie = paired.headers.get("Set-Cookie", "")
+            assert "jarvis_device=" in device_cookie
+            assert "HttpOnly" in device_cookie
+            assert "Max-Age=7776000" in device_cookie
+            assert "SameSite=Lax" in device_cookie
             onboarding = [
                 item for item in memorial.list_memorials()
                 if item["source"] == "mobile-onboarding"

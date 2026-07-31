@@ -341,8 +341,11 @@ async def _complete_pair(request: web.Request, code: str) -> web.Response:
         print(f"mobile onboarding card failed: {exc}", file=sys.stderr)
     response = web.HTTPFound("/")
     secure = request.headers.get("X-Forwarded-Proto") == "https" or request.secure
+    # Lax keeps the token out of cross-site subrequests and unsafe requests,
+    # while allowing a top-level link opened from Lark or Codex to carry the
+    # existing device credential. Strict made every such entry look unpaired.
     response.set_cookie(COOKIE, result["token"], httponly=True, secure=secure,
-                        samesite="Strict", max_age=60 * 60 * 24 * 90, path="/")
+                        samesite="Lax", max_age=60 * 60 * 24 * 90, path="/")
     audit_access(result["device_id"], remote, request.method,
                  "/pair/[redacted]", 302, {"event": "paired"})
     raise response
