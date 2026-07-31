@@ -14,6 +14,7 @@ from ..uiutil import (
     add_dashboard_head,
     client_surface,
     dashboard_header,
+    guarded_refresh_timer,
     notify_safely,
 )
 
@@ -166,11 +167,10 @@ def delegation_list_page():
                     "text-sm text-grey-6"
                 )
             for row in active:
-                with ui.element("article").classes(
-                    "w-full border-b border-grey-3 py-4 cursor-pointer"
-                ).on("click", lambda item=row: ui.navigate.to(
-                    f"/delegations/{item['id']}"
-                )):
+                with ui.link(target=f"/delegations/{row['id']}").classes(
+                    "delegation-row-link block w-full border-b border-grey-3 "
+                    "py-4 cursor-pointer"
+                ):
                     with ui.row().classes(
                         "w-full items-start justify-between gap-3 no-wrap"
                     ):
@@ -195,17 +195,16 @@ def delegation_list_page():
                 ui.separator().classes("my-3")
                 ui.label("最近结果").classes("section-title")
                 for row in recent:
-                    with ui.row().classes(
-                        "w-full items-center justify-between border-b "
-                        "border-grey-2 py-3 cursor-pointer"
-                    ).on("click", lambda item=row: ui.navigate.to(
-                        f"/delegations/{item['id']}"
-                    )):
+                    with ui.link(target=f"/delegations/{row['id']}").classes(
+                        "delegation-row-link flex w-full items-center "
+                        "justify-between border-b border-grey-2 py-3 "
+                        "cursor-pointer"
+                    ):
                         ui.label(row["title"]).classes("text-sm")
                         _status_badge(row["status"])
 
         body()
-        ui.timer(15, body.refresh)
+        guarded_refresh_timer(15, body.refresh)
 
 
 @ui.page("/delegations/{delegation_id}")
@@ -338,7 +337,7 @@ def delegation_detail_page(delegation_id: str):
                     )
 
         body()
-        ui.timer(10, body.refresh)
+        guarded_refresh_timer(10, body.refresh)
 
 
 def json_compact(value) -> str:

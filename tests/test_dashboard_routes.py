@@ -18,6 +18,7 @@ data/jarvis.db — and page-module JARVIS_DIR globals to tmp_path so no repo
 state file is read or written.
 """
 
+import ast
 import json
 import sys
 import time
@@ -55,8 +56,12 @@ if not nicegui_app.config.has_run_config:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-PAGES = ["/", "/items", "/items/missing", "/signals", "/eigenflux", "/matters", "/memorials", "/tasks", "/bookmarks", "/settings", "/intentions",
-         "/thinking", "/agent-calendar", "/engagement", "/ops"]
+PAGES = [
+    "/", "/items", "/items/missing", "/signals", "/eigenflux", "/matters",
+    "/memorials", "/delegations", "/delegations/missing", "/tasks",
+    "/bookmarks", "/settings", "/intentions", "/thinking",
+    "/agent-calendar", "/engagement", "/ops",
+]
 
 
 def test_notify_safely_ignores_deleted_page_slot(monkeypatch):
@@ -68,6 +73,73 @@ def test_notify_safely_ignores_deleted_page_slot(monkeypatch):
 
     monkeypatch.setattr(uiutil.ui, "notify", deleted_slot)
     assert uiutil.notify_safely("done", type="positive") is False
+
+
+def test_dashboard_head_loads_plain_navigation_guard(monkeypatch):
+    from dashboard import uiutil
+
+    fragments = []
+    monkeypatch.setattr(uiutil.ui, "colors", lambda **_kwargs: None)
+    monkeypatch.setattr(uiutil.ui, "add_head_html", fragments.append)
+
+    uiutil.add_dashboard_head()
+
+    head = "".join(fragments)
+    assert "/static/style.css?v=20260731-navguard" in head
+    assert "/static/navigation.js?v=20260731-navguard2" in head
+    assert "type=\"module\"" not in head
+
+
+def test_guarded_refresh_timer_supports_one_shot(monkeypatch):
+    from dashboard import uiutil
+
+    captured = {}
+
+    def fake_timer(interval, callback, **kwargs):
+        captured.update(
+            interval=interval,
+            callback=callback,
+            kwargs=kwargs,
+        )
+        return "timer"
+
+    monkeypatch.setattr(uiutil, "_ClientBoundTimer", fake_timer)
+
+    assert uiutil.guarded_refresh_timer(
+        0.2, lambda: None, once=True
+    ) == "timer"
+    assert captured["interval"] == 0.2
+    assert captured["kwargs"] == {"once": True}
+
+
+def test_all_dashboard_timers_are_client_bound():
+    pages = ROOT / "dashboard" / "pages"
+    offenders = []
+    for path in pages.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ui"
+            and node.func.attr == "timer"
+            for node in ast.walk(tree)
+        ):
+            offenders.append(path.name)
+    assert offenders == []
+
+
+def test_navigation_guard_blocks_overlapping_same_origin_routes():
+    script = (
+        ROOT / "dashboard" / "static" / "navigation.js"
+    ).read_text(encoding="utf-8")
+
+    assert "if (navigating)" in script
+    assert "data-jarvis-navigation-guard" in script
+    assert "event.stopImmediatePropagation()" in script
+    assert "destination.origin !== window.location.origin" in script
+    assert "destination.pathname === window.location.pathname" in script
+    assert "window.setTimeout(releaseNavigation, 8000)" in script
 
 
 @pytest.fixture

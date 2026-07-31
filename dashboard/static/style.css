@@ -33,6 +33,11 @@ a:focus-visible, button:focus-visible, .q-btn:focus-visible {
     outline-offset: 3px;
 }
 
+.delegation-row-link {
+    color: inherit;
+    text-decoration: none;
+}
+
 .jarvis-page {
     width: min(1120px, calc(100% - 32px));
     margin: 0 auto;
@@ -813,4 +818,25 @@ a.metric-cell:hover, .metric-cell.is-clickable:hover { border-color: #b9c8cc; }
     .jarvis-table, .jarvis-table .q-table__top, .jarvis-table thead tr {
         background: var(--paper-raised);
     }
+}
+html.jarvis-navigating .jarvis-nav,
+html.jarvis-navigating .mobile-dock {
+    pointer-events: none;
+}
+
+html.jarvis-navigating::after {
+    content: "";
+    position: fixed;
+    z-index: 9999;
+    top: 0;
+    left: 0;
+    width: 42%;
+    height: 3px;
+    background: var(--jade, #2b7a68);
+    animation: jarvis-navigation-progress 0.9s ease-in-out infinite;
+}
+
+@keyframes jarvis-navigation-progress {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(340%); }
 }

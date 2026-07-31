@@ -316,7 +316,7 @@ def add_dashboard_head() -> None:
     ui.colors(primary="#152833", secondary="#2b7a68", accent="#9a7135",
               positive="#2b7a68", negative="#b8473a", warning="#9a7135")
     ui.add_head_html(
-        '<link rel="stylesheet" href="/static/style.css?v=20260731-network">'
+        '<link rel="stylesheet" href="/static/style.css?v=20260731-navguard">'
         # use-credentials: the browser's manifest fetch defaults to
         # credentials-omit, so behind the authenticated mobile gateway it 401s
         # and the PWA never gets its manifest.
@@ -331,6 +331,7 @@ def add_dashboard_head() -> None:
         'media="(prefers-color-scheme: light)">'
         '<meta name="theme-color" content="#10181d" '
         'media="(prefers-color-scheme: dark)">'
+        '<script src="/static/navigation.js?v=20260731-navguard2" defer></script>'
         '<script>if ("serviceWorker" in navigator) {'
         'let jarvisReloaded=false;'
         'navigator.serviceWorker.addEventListener("controllerchange",()=>{'
@@ -413,8 +414,13 @@ class _ClientBoundTimer(ui.timer):
             return nullcontext()
 
 
-def guarded_refresh_timer(interval: float, refresh) -> ui.timer:
-    """Periodic refresh timer for dashboard pages, safe on pruned clients.
+def guarded_refresh_timer(
+    interval: float,
+    refresh,
+    *,
+    once: bool = False,
+) -> ui.timer:
+    """Refresh timer for dashboard pages, safe on pruned clients.
 
     `refresh` may be sync (refreshable.refresh) or an async callable. The
     in-callback guard below covers slot-deletion raised *during* a refresh
@@ -434,5 +440,5 @@ def guarded_refresh_timer(interval: float, refresh) -> ui.timer:
                     timer.cancel()
             else:
                 raise
-    timer = _ClientBoundTimer(interval, _tick)
+    timer = _ClientBoundTimer(interval, _tick, once=once)
     return timer
