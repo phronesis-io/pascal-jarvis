@@ -28,6 +28,7 @@ from core.mobile_access import audit_access, consume_pair_code, validate_device_
 
 BACKEND = "http://127.0.0.1:3457"
 COOKIE = "jarvis_device"
+DEVICE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 SESSION_KEY = web.AppKey("session", ClientSession)
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -212,6 +213,40 @@ def _token(request: web.Request) -> str:
     return request.cookies.get(COOKIE, "")
 
 
+def _request_is_secure(request: web.Request) -> bool:
+    return (
+        request.headers.get("X-Forwarded-Proto") == "https"
+        or request.secure
+    )
+
+
+def _set_device_cookie(
+    response: web.StreamResponse,
+    token: str,
+    *,
+    secure: bool,
+) -> None:
+    response.set_cookie(
+        COOKIE,
+        token,
+        httponly=True,
+        secure=secure,
+        samesite="Lax",
+        max_age=DEVICE_COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
+def _is_page_navigation(request: web.Request) -> bool:
+    return (
+        request.method == "GET"
+        and (
+            request.headers.get("Sec-Fetch-Mode", "").lower() == "navigate"
+            or "text/html" in request.headers.get("Accept", "").lower()
+        )
+    )
+
+
 def _same_origin(request: web.Request) -> bool:
     origin = request.headers.get("Origin", "")
     if not origin:
@@ -340,12 +375,12 @@ async def _complete_pair(request: web.Request, code: str) -> web.Response:
     except Exception as exc:
         print(f"mobile onboarding card failed: {exc}", file=sys.stderr)
     response = web.HTTPFound("/")
-    secure = request.headers.get("X-Forwarded-Proto") == "https" or request.secure
     # Lax keeps the token out of cross-site subrequests and unsafe requests,
     # while allowing a top-level link opened from Lark or Codex to carry the
     # existing device credential. Strict made every such entry look unpaired.
-    response.set_cookie(COOKIE, result["token"], httponly=True, secure=secure,
-                        samesite="Lax", max_age=60 * 60 * 24 * 90, path="/")
+    _set_device_cookie(
+        response, result["token"], secure=_request_is_secure(request)
+    )
     audit_access(result["device_id"], remote, request.method,
                  "/pair/[redacted]", 302, {"event": "paired"})
     raise response
@@ -477,6 +512,16 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                                     headers=response_headers)
             for cookie in upstream.headers.getall("Set-Cookie", []):
                 response.headers.add("Set-Cookie", cookie)
+            # Browsers cap persistent cookie lifetimes, so an authenticated
+            # page visit renews the device for another year. The server-side
+            # device remains valid until explicitly revoked.
+            device_token = request.cookies.get(COOKIE, "")
+            if device_token and _is_page_navigation(request):
+                _set_device_cookie(
+                    response,
+                    device_token,
+                    secure=_request_is_secure(request),
+                )
             status = upstream.status
     except Exception as exc:
         response = web.Response(text="Jarvis dashboard is unavailable", status=502)

@@ -693,7 +693,7 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             device_cookie = paired.headers.get("Set-Cookie", "")
             assert "jarvis_device=" in device_cookie
             assert "HttpOnly" in device_cookie
-            assert "Max-Age=7776000" in device_cookie
+            assert "Max-Age=31536000" in device_cookie
             assert "SameSite=Lax" in device_cookie
             onboarding = [
                 item for item in memorial.list_memorials()
@@ -701,8 +701,14 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
             ]
             assert len(onboarding) == 1
             assert onboarding[0]["delivery_status"] == "web_only"
-            allowed = await client.get("/matters")
+            allowed = await client.get(
+                "/matters", headers={"Accept": "text/html"})
             assert allowed.status == 200
+            renewed_cookie = allowed.headers.get("Set-Cookie", "")
+            assert "jarvis_device=" in renewed_cookie
+            assert "HttpOnly" in renewed_cookie
+            assert "Max-Age=31536000" in renewed_cookie
+            assert "SameSite=Lax" in renewed_cookie
             payload = await allowed.json()
             assert payload["path"] == "/matters"
             assert payload["device"].startswith("dev_")
