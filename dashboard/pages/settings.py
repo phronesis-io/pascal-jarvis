@@ -18,7 +18,12 @@ from pathlib import Path
 
 from nicegui import run, ui
 
-from ..uiutil import client_surface, jarvis_page, notify_safely
+from ..uiutil import (
+    client_surface,
+    guarded_refresh_timer,
+    jarvis_page,
+    notify_safely,
+)
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 
@@ -553,8 +558,10 @@ def settings_page():
                 mobile_panel.refresh()
 
             mobile_panel()
-            ui.timer(0.2, reconcile_notifications, once=True)
-            ui.timer(10, mobile_panel.refresh)
+            guarded_refresh_timer(
+                0.2, reconcile_notifications, once=True
+            )
+            guarded_refresh_timer(10, mobile_panel.refresh)
 
         # ── 数据操作（真实动作，保留） ──
         with ui.column().classes("w-full gap-3"):
