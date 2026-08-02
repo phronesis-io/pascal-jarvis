@@ -212,6 +212,38 @@ def test_batch_cap_staleness_sort(tmp_path, monkeypatch):
     assert "task-5" not in prompt
 
 
+def test_routine_run_survives_batch_cap(tmp_path, monkeypatch):
+    """routine-run must never be starved by the batch cap (2026-08-02).
+
+    Observed in production: routine-run appeared in the deferred list of 18 of
+    21 capped cycles (86%) — the most starved task in the system — while a
+    user's hourly Routine sat due and unfired. The damage is not a late run:
+    routine_run_pre.sh CLAIMS due routines and advances their next_fire_at
+    watermark, so a deferred cycle spends an occurrence the user never sees.
+    Same failure and same fix as intention-check (REQ-32).
+    """
+    tasks_md = "\n\n".join(
+        [f"### task-{i}\n- interval: 1h\n- prompt: do {i}" for i in range(8)]
+        + ["### routine-run\n- interval: 5m\n- prompt: [ROUTINE RUN]"]
+    )
+    runner = _make_runner(tmp_path, tasks_md)
+
+    called_prompts = []
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p: called_prompts.append(p) or "HEARTBEAT_OK")
+
+    runner.run_cycle(force=True)
+
+    prompt = called_prompts[0]
+    assert "routine-run" in prompt, (
+        "routine-run was deferred by the batch cap — a claimed Routine "
+        "occurrence would be spent without ever reaching the user"
+    )
+    # The exemption must not silently raise the cap for everyone else.
+    regular = prompt.count("=== TASK: task-")
+    assert regular <= HeartbeatRunner.MAX_BATCH_SIZE
+
+
 def test_deferred_tasks_stay_due_next_cycle(tmp_path, monkeypatch):
     """Tasks deferred by batch cap should remain due in the next cycle."""
     tasks_md = "\n\n".join(
