@@ -271,3 +271,29 @@ THEMES: 概念1, 概念2[, 概念3, 概念4]
 be honest and general; if the true theme matches a past checkin's theme,
 don't send at all. The line is stripped before the card reaches the user.
 EOF
+
+# ── companion budget (2026-08-02) ────────────────────────────────────────────
+# Cadence is decided by deterministic code, not by the prompt. Leaving "how
+# often should I speak" to the model produced both the 7/22 card storm and the
+# 10-day silence that followed the 7/21 rewrite: the same instruction ("stay
+# quiet unless it's worth it") swung to both extremes because nothing measured
+# the result. core.companion allocates a per-kind daily budget from the
+# ledger's own evidence and, after FLOOR_HOURS of muteness, states that a card
+# is owed. The model chooses WHAT to say; it no longer chooses whether silence
+# is acceptable.
+python3 -m core.companion brief 2>/dev/null || true
+
+cat <<'EOF'
+
+Mandatory structured output — KIND line:
+If you send a checkin, include a line:
+KIND: followup|standing|notice|guide
+  followup — 他自己留下的线头，有具体下一步（他说要做的事 / 搁置的问题 / 在等的结果）
+  standing — 他明确要求过的固定提醒（康复打卡这类）
+  notice   — 对他节奏/状态/模式的一句观察，朋友式的注意到，不带议程
+  guide    — 往前推一步的建议
+Pick the one that honestly describes the card; the budget above is spent
+against that kind, and「这类不必」teaches the system about that kind. Do not
+label a notice as a followup to get around a spent budget — that corrupts the
+only signal Pascal has. The line is stripped before the card reaches him.
+EOF

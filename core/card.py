@@ -101,7 +101,8 @@ def linkify_bare_urls(text: str) -> str:
 
 def build_card(header: str, body: str, buttons: list[dict] | None = None,
                source: str = "",
-               button_groups: list[list[dict]] | None = None) -> str:
+               button_groups: list[list[dict]] | None = None,
+               context: str = "") -> str:
     """Build a Lark interactive card JSON string (single line).
 
     Args:
@@ -113,6 +114,12 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
             choices, source links, and a conversation affordance should not be
             squeezed into one four-or-five-button row. Mutually exclusive with
             ``buttons``.
+        context: Structured context carried through to the memorial this card
+            becomes, via the ``__jarvis_context`` marker that
+            ``core.memorial.adopt_card`` pops (same convention as
+            ``__jarvis_source``). A task post-hook owns only stdout, so this is
+            its only channel for attaching machine-readable state — e.g.
+            checkin's KIND, which per-kind learning depends on.
 
     Returns:
         Single-line JSON string starting with {"config":...}, or "" when the
@@ -174,6 +181,8 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
         "header": {"title": {"content": header, "tag": "plain_text"}},
         "elements": elements,
     }
+    if context:
+        card["__jarvis_context"] = str(context)
     return json.dumps(card, ensure_ascii=False)
 
 
