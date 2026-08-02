@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import dashboard.db as db_module
 import pytest
 
@@ -12,6 +14,22 @@ from core.matters import (
     open_followups,
     unlink_entity,
 )
+
+
+def _future_trigger() -> dict:
+    """A date trigger that is always in the future.
+
+    These tests assert that a linked intent stays `pending` — a claim about
+    projection, not about time. A hard-coded calendar date silently converts
+    that into a claim about the wall clock: on 2026-08-02 the literal
+    "2026-08-01T10:00:00+08:00" used here went into the past, intentions
+    auto-expired it, and `test_duplicate_receipt_reopens_legacy_terminal_
+    projections` began failing `assert 'expired' == 'pending'` on every
+    branch — turning the repo's required `test` check red and blocking every
+    merge. The date must be relative or the test rots again.
+    """
+    when = datetime.now(timezone(timedelta(hours=8))) + timedelta(days=30)
+    return {"datetime": when.replace(microsecond=0).isoformat()}
 
 
 @pytest.fixture(autouse=True)
@@ -119,7 +137,7 @@ def test_terminal_delegation_closes_linked_intent_and_handoff(tmp_path):
     intent_id = intentions.create_intent(
         name="等待委托结果",
         trigger_type="date",
-        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        trigger_config=_future_trigger(),
         matter_id=matter["id"],
     )
     store.link(delegation["id"], "intent", intent_id)
@@ -154,7 +172,7 @@ def test_failed_attempt_keeps_linked_intent_and_handoff_open(tmp_path):
     intent_id = intentions.create_intent(
         name="等待重试结果",
         trigger_type="date",
-        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        trigger_config=_future_trigger(),
         matter_id=matter["id"],
     )
     store.link(delegation["id"], "intent", intent_id)
@@ -240,7 +258,7 @@ def test_terminal_projection_failure_is_durably_retried(
     intent_id = intentions.create_intent(
         name="等待终态",
         trigger_type="date",
-        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        trigger_config=_future_trigger(),
         matter_id=matter["id"],
     )
     store.link(delegation["id"], "intent", intent_id)
@@ -321,7 +339,7 @@ def test_duplicate_receipt_reopens_legacy_terminal_projections(tmp_path):
     intent_id = intentions.create_intent(
         name="等待消息送达",
         trigger_type="date",
-        trigger_config={"datetime": "2026-08-01T10:00:00+08:00"},
+        trigger_config=_future_trigger(),
     )
     store.link(delegation["id"], "intent", intent_id)
     handoff = create_handoff(
