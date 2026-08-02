@@ -404,8 +404,16 @@ class HeartbeatRunner:
     # user-facing commitments; batch-cap starvation was losing whole cron
     # occurrences (configured 60s, observed median gap 31min). Its pre is a
     # sub-second sqlite pass (296/304 runs empty), so exemption costs nothing.
+    # routine-run (2026-08-02): same failure, same profile. It was the most
+    # starved task in the system — deferred in 18 of 21 capped cycles (86%),
+    # present in every deferral list observed — while a user's hourly Routine
+    # silently lost occurrences it had already claimed. Its pre is the same
+    # sub-second sqlite pass (`core.routines due`, empty whenever nothing is
+    # due, and an empty pre skips the task before any model call), and like
+    # intention-check it advances a stateful next_fire_at watermark, so a
+    # deferred cycle spends an occurrence that never reaches the user.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "intention-check"}
+                       "eigenflux-friends", "intention-check", "routine-run"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output
