@@ -269,6 +269,8 @@ def _handle_card_action(
             payload = (
                 memorial.chat(mem_id)
                 if opt == "chat"
+                else memorial.confused(mem_id)
+                if opt == "confused"
                 else memorial.decide(
                     mem_id,
                     opt,

@@ -92,12 +92,12 @@ def test_create_card_structure_and_button_value_round_trip(env):
     # Role line first (8/3): the card opens by saying what it wants of him.
     assert card["elements"][0]["text"]["content"] == "🎯 等你拍一个\n\n正文"
     rows = _action_rows(card)
-    assert [len(row) for row in rows] == [3, 1]  # choices, then full-row Chat
+    assert [len(row) for row in rows] == [3, 2]  # choices, then Chat+看不懂
     actions = _actions(card)
-    assert len(actions) == 4
+    assert len(actions) == 5
     assert actions[0]["type"] == "primary"
-    assert actions[-1]["text"]["content"] == "💬 聊聊这个"
-    for a, opt in zip(actions, ("approve", "defer", "reject", "chat")):
+    assert actions[-1]["text"]["content"] == "🤔 看不懂"
+    for a, opt in zip(actions, ("approve", "defer", "reject", "chat", "confused")):
         # the value dict must round-trip exactly as the sidecar will see it
         v = json.loads(json.dumps(a["value"]))
         assert v == {"action": "memorial", "id": mid, "opt": opt}
@@ -228,7 +228,7 @@ def test_decide_records_and_replaces_card(env):
     body = card["elements"][0]["text"]["content"]
     assert "正文" in body and "✅ 已批：同意" in body
     # The decision choices are removed, but Chat remains available.
-    assert [a["text"]["content"] for a in _actions(card)] == ["💬 聊聊这个"]
+    assert [a["text"]["content"] for a in _actions(card)] == ["💬 聊聊这个", "🤔 看不懂"]
     st = memorial.get_memorial(mid)
     assert st["status"] == "decided" and st["decided_opt"] == "approve"
     decision = next(json.loads(line) for line in
@@ -512,7 +512,7 @@ def test_adopt_readonly_card_preserves_link_and_adds_fyi_chat(env):
     adopted = json.loads(memorial.adopt_card("eigenflux-feed-triage", legacy))
     rows = _action_rows(adopted)
     assert [[a["text"]["content"] for a in row] for row in rows] == [
-        ["已阅", "标为重点"], ["阅读原文"], ["💬 聊聊这个"]]
+        ["已阅", "标为重点"], ["阅读原文"], ["💬 聊聊这个", "🤔 看不懂"]]
     actions = _actions(adopted)
     assert next(a for a in actions if a["text"]["content"] == "阅读原文")["url"] == "https://example.com/a"
 
@@ -524,7 +524,7 @@ def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
             "action": "intent_close", "id": "int_1", "outcome": "done"}}])
     adopted = json.loads(memorial.adopt_card("intention-check", legacy))
     actions = _actions(adopted)
-    assert [a["text"]["content"] for a in actions] == ["做了", "💬 聊聊这个"]
+    assert [a["text"]["content"] for a in actions] == ["做了", "💬 聊聊这个", "🤔 看不懂"]
     assert actions[0]["value"]["action"] == "intent_close"
 
 
@@ -547,7 +547,7 @@ def test_memorialize_output_routes_ordinary_choices_to_phone(env):
     state = memorial.list_memorials()[-1]
     card = json.loads(memorial.card_json(state["id"]))
     assert [action["text"]["content"] for action in _actions(card)] == [
-        "路径 A", "路径 B", "💬 聊聊这个"]
+        "路径 A", "路径 B", "💬 聊聊这个", "🤔 看不懂"]
     assert state["attention"] == "decision"
     assert memorial.review_surface(state) == "phone"
 
@@ -935,7 +935,7 @@ def test_inline_options_become_buttons_and_leave_the_body(env):
 
     card = json.loads(memorial.card_json(mid))
     assert [a["text"]["content"] for a in _actions(card)] == [
-        "加钱", "限流到月底", "让它自然停", "💬 聊聊这个"]
+        "加钱", "限流到月底", "让它自然停", "💬 聊聊这个", "🤔 看不懂"]
 
 
 def test_inline_options_accept_chinese_label_and_fullwidth_separators(env):

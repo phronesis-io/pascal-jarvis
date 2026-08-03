@@ -44,7 +44,7 @@ def test_supply_broadcast_carded(tmp_path):
     card = json.loads(out)
     labels = [a["text"]["content"] for element in card["elements"]
               if element.get("tag") == "action" for a in element["actions"]]
-    assert labels == ["发（确认广播）", "不发（取消）", "💬 聊聊这个"]
+    assert labels == ["发（确认广播）", "不发（取消）", "💬 聊聊这个", "🤔 看不懂"]
 
 
 def test_demand_broadcast_carded(tmp_path):

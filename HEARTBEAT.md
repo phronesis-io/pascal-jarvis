@@ -379,6 +379,18 @@ OPTIONS 行的**下一行**写：
 
 ## Check-in & Wellbeing
 
+### explain-card
+- interval: 2m
+- pre: tasks/explain_card_pre.sh
+- post: tasks/explain_card_post.py
+- prompt: |
+    [EXPLAIN CARD — 看不懂重讲]
+    用户在 DATA 里那张卡上点了「看不懂」。用大白话重讲一遍：
+    1. 第一行以 [explain <id>] 开头（原样保留 DATA 里的那行 id 标记）。
+    2. 然后 60 字内说清：这是件什么事 / 跟他有什么关系 / 要不要他做什么
+       （不需要就写「不用你做什么」）。
+    3. 禁术语。禁复读原文。像跟朋友解释一样。
+
 ### checkin
 - interval: 30m
 - pre: tasks/checkin_pre.sh
