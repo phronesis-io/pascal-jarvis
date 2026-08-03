@@ -70,10 +70,15 @@ have results; the failures above are the real ones.
 
 ### C2 — Every tap yields an honest, visible outcome
 
-- A no-op or failed action result (`Intent not found…`, `没有找到这条待广播…`,
-  `广播失败…`, `FAILED…`) must NOT produce a success toast. The toast says
-  what actually happened; the decided card already carries the result line.
-- Genuinely-successful taps keep the ✓.
+- The behavioural rule: **a no-op or failed action must not produce a success
+  toast.** The toast says what actually happened; the decided card already
+  carries the result line. Genuinely-successful taps keep the ✓.
+- The current detection (`_ACTION_NOOP_RE` matching handler prose) is a
+  **temporary bridge, not the contract** — handlers destroy the ok/no-op
+  boolean into strings (`core/actions.py` `_do_intent_close`) and the regex
+  re-derives it downstream. The right fix is a structured
+  `ActionResult(status, message)` from `_execute_action`; the prose patterns
+  must not be treated as canonical or grown.
 
 ### C3 — An explicit approval is durable until executed or explicitly dead
 

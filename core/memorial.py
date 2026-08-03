@@ -207,13 +207,30 @@ AMBIENT_SOURCES = WEB_FIRST_SOURCES | {
     "repos-sync",
 }
 
-
-def _desk_reachable() -> bool:
-    """Seam for routing decisions; patchable in tests."""
-    from core.proactive import desk_reachable
-    return desk_reachable()
 ALERT_SOURCES = {
     "calendar-sync",
+}
+# Sources whose cards are notices BY DESIGN, whatever buttons they carry.
+# A checkin's buttons are feedback (知道了/这类不必/聊聊), not an ask — but the
+# 8/3 09:17 card proved inference can't be trusted here: the model imitated
+# historical cards, emitted its own OPTIONS line, and the r1/r2 keys flipped
+# the card to decision-class (48h escrow deadline, decision ROI lane, phone
+# review surface). A companion's voice must not be able to accidentally
+# promote itself into a demand for a decision.
+NOTICE_SOURCES = {
+    "checkin",
+}
+# Sources whose natural class is a notice, whatever their buttons say — the
+# single set both attention classifiers test (they were two hand-synced
+# inline unions before).
+NATURAL_NOTICE_SOURCES = WEB_FIRST_SOURCES | NOTICE_SOURCES
+# Sources that may not author their own buttons: the preset is the contract.
+# Enforced in create() — the one boundary every card passes through — because
+# stripping at a particular entry path is exactly what the directive-strip
+# comment below warns leaked four times. checkin's OPTIONS line (8/3) shipped
+# a card WITHOUT「这类不必」, the signal its learning loop depends on.
+PRESET_LOCKED_SOURCES = {
+    "checkin",
 }
 # Calendar choices expire with the clock; unlike ordinary planning decisions,
 # delaying them can create a real conflict. They retain the immediate lane.
@@ -236,6 +253,12 @@ SOURCE_DEFAULT_PRESET = {
 }
 
 
+def _desk_reachable() -> bool:
+    """Seam for routing decisions; patchable in tests."""
+    from core.proactive import desk_reachable
+    return desk_reachable()
+
+
 def _infer_attention(options: list[dict], extra_buttons: list[dict]) -> str:
     """Infer whether a legacy card asks for a decision or merely informs."""
     if any(str(option.get("key", "")) not in _FYI_KEYS for option in options):
@@ -247,12 +270,13 @@ def _infer_attention(options: list[dict], extra_buttons: list[dict]) -> str:
 
 def _default_attention(source: str, options: list[dict],
                        extra_buttons: list[dict]) -> str:
-    if str(source or "") in WEB_FIRST_SOURCES:
-        return ATTENTION_NOTICE
-    inferred = _infer_attention(options, extra_buttons)
-    if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
-        return ATTENTION_ALERT
-    return _governed(str(source or ""), inferred)
+    # The governed class IS the natural class run through the engagement
+    # governor — stated as composition so the two can never drift (they were
+    # duplicated bodies before, and the 8/3 NOTICE_SOURCES fix had to be
+    # applied to both by hand). _governed only ever demotes decision → notice,
+    # so notice and alert pass through it unchanged.
+    return _governed(str(source or ""),
+                     natural_attention(source, options, extra_buttons))
 
 
 def natural_attention(source: str, options: list[dict],
@@ -262,7 +286,7 @@ def natural_attention(source: str, options: list[dict],
     core.attention_roi measures against this so a demoted source's own
     demotion cannot be read back as evidence about it.
     """
-    if str(source or "") in WEB_FIRST_SOURCES:
+    if str(source or "") in NATURAL_NOTICE_SOURCES:
         return ATTENTION_NOTICE
     inferred = _infer_attention(options, extra_buttons)
     if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
@@ -1578,7 +1602,12 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         body = stripped_body
         if not str(title).strip():
             title = leading_title
-    if options is None and inline_options:
+    if source in PRESET_LOCKED_SOURCES:
+        # The model imitating historical cards must not displace the preset
+        # (8/3: an OPTIONS line cost checkin its「这类不必」button on every
+        # entry path this lock now covers).
+        options, preset = None, SOURCE_DEFAULT_PRESET.get(source, preset)
+    elif options is None and inline_options:
         options, preset = inline_options, None
     opts = _normalize_options(options, preset)
     native_buttons = _normalize_extra_buttons(extra_buttons)

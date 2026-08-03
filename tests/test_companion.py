@@ -255,3 +255,61 @@ def test_checkin_preset_offers_the_negative_option():
         "checkin must offer an in-band way to say 「这类不必」; without it the "
         "only channel for 乱联系 is complaining to a developer"
     )
+
+
+def test_checkin_is_a_notice_whatever_buttons_it_carries():
+    """8/3 09:17: the model imitated historical cards, emitted its own
+    OPTIONS line, and the r1/r2 keys flipped the checkin to decision-class
+    (48h escrow, decision ROI lane, phone review surface). A companion's
+    voice must not be able to promote itself into a demand for a decision."""
+    from core.memorial import (ATTENTION_NOTICE, _default_attention,
+                               natural_attention)
+    weird = [{"key": "r1", "label": "说说这个", "action": None, "reply": True},
+             {"key": "r2", "label": "知道了", "action": None, "reply": True}]
+    assert _default_attention("checkin", weird, []) == ATTENTION_NOTICE
+    assert natural_attention("checkin", weird, []) == ATTENTION_NOTICE
+
+
+def test_checkin_post_strips_model_authored_options_line(tmp_path):
+    """The companion preset is the contract; an ad-hoc OPTIONS line would
+    displace「这类不必」— the signal the learning loop depends on."""
+    env = {
+        **dict(__import__("os").environ),
+        "JARVIS_DIR": str(tmp_path),
+        "MEMORY_DIR": str(tmp_path / "memory"),
+        "PYTHONPATH": str(ROOT),
+    }
+    (tmp_path / "memory" / "system").mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tasks" / "checkin_post.py")],
+        input="昨晚那条线你自己收了尾。\nOPTIONS: 说说这个 | 知道了\nKIND: notice\nTHEMES: 收尾",
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0
+    card = json.dumps(json.loads(proc.stdout.strip()), ensure_ascii=False)
+    assert "OPTIONS" not in card and "说说这个" not in card
+    assert "收了尾" in card
+
+
+def test_preset_lock_is_enforced_at_create_for_every_entry_path(tmp_path, monkeypatch):
+    """The 8/3 button failure, fixed at the chokepoint: even a caller passing
+    explicit options for a preset-locked source gets the companion preset.
+    The task-script strip only covers checkin's own stdout; create() covers
+    adopt_card, the heartbeat prose route, and any future emitter."""
+    from core import memorial
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
+
+    mid, _ = memorial.create(
+        source="checkin", title="t", body="正文",
+        options=[{"key": "r1", "label": "说说这个", "action": None},
+                 {"key": "r2", "label": "知道了", "action": None}],
+        send=False,
+    )
+    st = memorial.get_memorial(mid)
+    keys = {o["key"] for o in st["options"]}
+    assert keys == {"ack", "not_this_kind"}, (
+        "model/caller-authored options displaced the companion preset — "
+        "the「这类不必」signal is gone again"
+    )
+    assert st["attention"] == memorial.ATTENTION_NOTICE

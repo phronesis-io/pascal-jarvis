@@ -167,12 +167,11 @@ def extract_kind(message: str) -> tuple[str, str]:
     (followup / standing / notice / guide) cannot be told apart, which is why
     nothing could be learned from 23 cards' worth of taps.
     """
-    m = re.search(r"\n?\s*KIND[:：]\s*([A-Za-z_]+)\s*(?:\n|$)", message)
+    pattern = re.compile(r"^\s*KIND[:：]\s*([A-Za-z_]+)\s*$", re.M)
+    m = pattern.search(message)
     if not m:
         return message, companion.DEFAULT_KIND
-    kind = companion.normalize_kind(m.group(1))
-    return (message[:m.start()].rstrip() + "\n"
-            + message[m.end():].lstrip()).strip(), kind
+    return pattern.sub("", message).strip(), companion.normalize_kind(m.group(1))
 
 
 def main() -> int:
@@ -209,6 +208,20 @@ def main() -> int:
     message = strip_task_framing(message)
     if not message:
         return silent("nothing left after stripping prompt framing")
+
+    # The model must not author this card's buttons (8/3: an imitated
+    # 「OPTIONS: 说说这个|知道了」line displaced the companion preset and cost
+    # the card its「这类不必」button). The REAL enforcement is central —
+    # memorial.PRESET_LOCKED_SOURCES at create(), covering every entry path —
+    # this local strip is belt-and-braces for the stdout body, and reuses
+    # memorial's own pattern so the producer of the bug and the guard against
+    # it cannot drift apart.
+    from core.memorial import _OPTIONS_LINE_RE
+    message = "\n".join(
+        line for line in message.splitlines()
+        if not _OPTIONS_LINE_RE.match(line)).strip()
+    if not message:
+        return silent("nothing left after stripping an OPTIONS line")
 
     # KIND must come off before THEMES/DIET: like them it is a trailing
     # contract line, and leaving it in would put "KIND: notice" on the card.

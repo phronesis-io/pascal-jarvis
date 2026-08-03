@@ -95,7 +95,8 @@ def _read_guarded(path: Path, root: Path, label: str) -> str:
 
 
 def _p_calendar(arg: str) -> str:
-    path = _memory_dir() / "hot" / "calendar_today.md"
+    from core.lifelog import calendar_today_path
+    path = calendar_today_path()
     text = _read_guarded(path, _memory_dir(), "calendar")
     # A stale snapshot read confidently is worse than none: with MEMORY_DIR
     # unset this falls back to ~/.jarvis/memory, which on a machine whose

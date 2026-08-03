@@ -16,7 +16,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 
@@ -260,9 +259,12 @@ class ActionProcessor:
         onto the draft so 「保留待重试」 is finally true: reconcile retries it
         deterministically on every eigenflux-publish cycle.
         """
-        from core.eigenflux_publish import (mark_approved_failure,
+        from core.eigenflux_publish import (APPROVED_MAX_ATTEMPTS,
+                                            mark_approved_failure,
                                             publish_draft,
                                             stamp_publish_state)
+        RETRY_NOTE = (f"广播失败，已进重试队列"
+                      f"（自动重试，最多 {APPROVED_MAX_ATTEMPTS} 次）：")
         path = self._pending_broadcast_path(parse_params(raw).get("id", ""))
         if path is None or not path.exists():
             return "没有找到这条待广播内容（可能已经处理过了）"
@@ -274,12 +276,12 @@ class ActionProcessor:
             ok, error = publish_draft(data, cwd=self.jarvis_dir)
             if not ok:
                 mark_approved_failure(path, data, error)
-                return f"广播失败，已进重试队列（自动重试，最多 5 次）：{error[:120]}"
+                return f"{RETRY_NOTE}{error[:120]}"
             path.unlink(missing_ok=True)
             stamp_publish_state(self.jarvis_dir, content, data.get("notes") or {})
             return "✅ 已广播"
         except Exception as e:
-            return f"广播失败，已进重试队列（自动重试，最多 5 次）：{e}"
+            return f"{RETRY_NOTE}{e}"
 
     def _do_eigenflux_cancel_publish(self, raw: str) -> str:
         """Cancel one specifically selected pending broadcast."""

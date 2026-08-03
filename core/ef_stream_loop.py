@@ -395,8 +395,11 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
             except OSError:
                 pass
 
-    # Check eigenflux CLI
-    if not shutil.which("eigenflux"):
+    # Check eigenflux CLI — resolved against the shared launchd-safe PATH
+    # (same [Errno 2] family as the 7/24 broadcast approval failure).
+    from core.eigenflux_publish import resolve_eigenflux_bin
+    eigenflux_bin = resolve_eigenflux_bin()
+    if not eigenflux_bin:
         log("ef-stream", "eigenflux CLI not installed, skipping")
         return
 
@@ -462,7 +465,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     quiet_streak = 0
 
     while not stop.is_set():
-        cmd = ["eigenflux", "stream", "-f", "json"]
+        cmd = [eigenflux_bin, "stream", "-f", "json"]
         cursor = ""
         if cursor_file.exists():
             cursor = cursor_file.read_text().strip()

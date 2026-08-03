@@ -32,14 +32,11 @@ def resolve_eigenflux_bin() -> str:
     The card-callback process runs under launchd, whose PATH does not include
     ~/.local/bin (the standing launchd gotcha). Resolving by bare name there
     turned an explicit user approval into `[Errno 2] ... 'eigenflux'`.
+    Searches the same augmented PATH the sibling eigenflux callers already
+    share (core.eigenflux_friends.PATH_ENV) instead of a private fallback.
     """
-    found = shutil.which("eigenflux")
-    if found:
-        return found
-    candidate = Path.home() / ".local" / "bin" / "eigenflux"
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return str(candidate)
-    return ""
+    from core.eigenflux_friends import PATH_ENV
+    return shutil.which("eigenflux", path=PATH_ENV) or ""
 
 
 def stamp_publish_state(jarvis_dir: str | Path, content: str, notes: dict) -> None:
@@ -91,8 +88,9 @@ def publish_draft(data: dict, *, cwd: str | Path) -> tuple[bool, str]:
 
 
 def mark_approved_failure(path: Path, data: dict, error: str,
-                          *, now: float | None = None) -> dict:
-    """Stamp an approval + failure onto the draft so the retrier owns it."""
+                          *, now: float | None = None) -> None:
+    """Stamp an approval + failure onto the draft (in place) so the retrier
+    owns it."""
     current = time.time() if now is None else float(now)
     data.setdefault("approved_epoch", int(current))
     data["attempts"] = int(data.get("attempts", 0)) + 1
@@ -101,7 +99,6 @@ def mark_approved_failure(path: Path, data: dict, error: str,
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except OSError as e:
         print(f"[eigenflux_publish] approval stamp failed: {e}", file=sys.stderr)
-    return data
 
 
 def _draft_id(path: Path, data: dict) -> str:
@@ -117,23 +114,18 @@ def _load_draft(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _lapse_matching_memorial(
-    jarvis_dir: Path,
-    *,
-    pending_id: str,
-    memorial_id: str = "",
-    reason: str = "",
-) -> bool:
-    """Close the approval card that belongs to an expired draft.
+def _find_approval_card(jarvis_dir: Path, *, pending_id: str,
+                        memorial_id: str = "") -> tuple[str, dict | None]:
+    """Locate a draft's approval card in the caller's ledger root.
 
-    Older drafts predate the explicit ``memorial_id`` field, so context is the
-    compatibility key. Reading and writing the caller's root keeps tests and
-    secondary installs isolated from the live ledger.
+    Older drafts predate the explicit ``memorial_id`` field, so the
+    ``pending_publish id=…`` context marker (written by
+    tasks/eigenflux_publish_post.py) is the compatibility key. Shared by the
+    lapse and resolve paths so the marker format has exactly one reader.
     """
     from core import memorial
 
-    ledger = jarvis_dir / "memorials.jsonl"
-    states = memorial._fold(read_jsonl(ledger))
+    states = memorial._fold(read_jsonl(jarvis_dir / "memorials.jsonl"))
     target = str(memorial_id or "").strip()
     if not target:
         marker = f"pending_publish id={pending_id}"
@@ -144,11 +136,25 @@ def _lapse_matching_memorial(
             ):
                 target = str(state.get("id") or "")
                 break
-    state = states.get(target)
+    return target, states.get(target)
+
+
+def _lapse_matching_memorial(
+    jarvis_dir: Path,
+    *,
+    pending_id: str,
+    memorial_id: str = "",
+    reason: str = "",
+) -> bool:
+    """Close the approval card that belongs to an expired draft."""
+    from core import memorial
+
+    target, state = _find_approval_card(
+        jarvis_dir, pending_id=pending_id, memorial_id=memorial_id)
     if not state or state.get("status") != "pending":
         return False
     memorial._append_line(
-        ledger,
+        jarvis_dir / "memorials.jsonl",
         {
             "ev": "lapse",
             "id": target,
@@ -169,27 +175,27 @@ def _resolve_matching_memorial(
     """Converge the approval card after a deterministic retry succeeded.
 
     Without this the card would sit 已批 with 「广播失败」as its last visible
-    outcome even though the retry later went through — the exact
-    said-one-thing-did-another gap C2 exists to close.
+    outcome even though the retry later went through. On the live root this
+    goes through memorial.resolve(), which also re-renders every delivered
+    Lark copy and completes surface handoffs — a bare ledger append would
+    flip the state while the user keeps seeing 广播失败. A foreign root
+    (tests, secondary installs) gets the ledger append only: memorial's
+    module-level paths point at the live install, not the caller's root.
     """
     from core import memorial
 
-    ledger = jarvis_dir / "memorials.jsonl"
-    states = memorial._fold(read_jsonl(ledger))
-    target = str(memorial_id or "").strip()
-    if not target:
-        marker = f"pending_publish id={pending_id}"
-        for state in states.values():
-            if (
-                state.get("source") == "eigenflux-publish"
-                and marker in str(state.get("context") or "")
-            ):
-                target = str(state.get("id") or "")
-                break
-    if not target or target not in states:
+    target, state = _find_approval_card(
+        jarvis_dir, pending_id=pending_id, memorial_id=memorial_id)
+    if not target or state is None:
         return False
+    try:
+        live_root = Path(jarvis_dir).resolve() == memorial.JARVIS_DIR.resolve()
+    except OSError:
+        live_root = False
+    if live_root:
+        return memorial.resolve(target, label, action_result=label)
     memorial._append_line(
-        ledger,
+        jarvis_dir / "memorials.jsonl",
         {
             "ev": "resolve",
             "id": target,
@@ -206,7 +212,7 @@ def reconcile_pending_drafts(
     *,
     now: float | None = None,
     max_age_s: int = DRAFT_MAX_AGE_S,
-    publisher=None,
+    publisher=publish_draft,
 ) -> dict:
     """Archive stale drafts and converge their approval cards.
 
@@ -255,8 +261,15 @@ def reconcile_pending_drafts(
                     attempts=attempts,
                     error=str(data.get("last_error") or "")[:120]))
                 continue
+            if retried >= 1:
+                # One CLI attempt (timeout 30s) per pass: this runs inside a
+                # pre-script whose own budget is 60s, and nothing bounds how
+                # many approved drafts exist. The rest stay active and the
+                # next cycle takes the next one.
+                active += 1
+                continue
             retried += 1
-            ok, error = (publisher or publish_draft)(data, cwd=root)
+            ok, error = publisher(data, cwd=root)
             if ok:
                 published += 1
                 try:

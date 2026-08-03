@@ -478,6 +478,12 @@ class HeartbeatRunner:
     # let an API outage falsely trigger the clamp. The 3600s cap sits far
     # below the 6h cron-staleness window, so backoff can never rot an
     # occurrence into a stale-skip.
+    # Max regular pre-scripts probed per cycle while filling the batch.
+    # 3x the batch size: generous enough that a normal empty-heavy mix still
+    # fills all four slots, small enough that a backlogged cycle cannot spend
+    # tens of seconds of serial subprocess work probing everything due.
+    PRE_PROBE_LIMIT = 3 * MAX_BATCH_SIZE
+
     SHARED_FAIL_THRESHOLD = 3   # consecutive failed shared calls before backoff
     SHARED_BACKOFF_BASE = 300   # first backoff: 5 min
     SHARED_BACKOFF_MAX = 3600   # cap: 60 min (<< 6h CRON_STALENESS)
@@ -1396,25 +1402,54 @@ You have access to the user's memory below. Use it to personalize your responses
         priority = [t for t in due_tasks if t["name"] in self.PRIORITY_TASKS]
         regular = [t for t in due_tasks if t["name"] not in self.PRIORITY_TASKS]
 
-        # Cap batch size BEFORE pre-scripts to avoid side-effect waste.
-        # Sort by staleness (longest since last run first) to prevent starvation.
-        deferred = []
-        if len(regular) > self.MAX_BATCH_SIZE:
-            regular.sort(key=lambda t: state.get(t["name"], {}).get("last_run", 0))
-            deferred = regular[self.MAX_BATCH_SIZE:]
-            regular = regular[:self.MAX_BATCH_SIZE]
-            self._log(f"Batch capped at {self.MAX_BATCH_SIZE}, "
-                      f"deferred {len(deferred)}: {[t['name'] for t in deferred]}")
-            for t in deferred:
-                self._event("task_skip", task=t["name"], reason="batch_deferred")
+        # Fair queue (2026-08-03). Two scheduling defects starved short-cycle
+        # tasks for weeks (selfmon: 17 STARVED, checkin dead 2.2 days):
+        #
+        # 1. Sorting by raw last_run let long-interval tasks monopolize the
+        #    batch: after any sleep, a daily task 26h stale (ratio 1.08) beat
+        #    a 10-minute task 3h stale (ratio 18) — every cycle, until the
+        #    daily backlog drained hours later. Sort by staleness RELATIVE to
+        #    each task's own cadence instead.
+        # 2. The cap was applied before pre-scripts ran, so mostly-empty tasks
+        #    burned model slots on nothing while tasks with real content were
+        #    deferred. Now the cap counts tasks that actually HAVE content:
+        #    pres run in fairness order until MAX_BATCH_SIZE non-empty tasks
+        #    are collected, and only then does deferral start. A deferred
+        #    task's pre never runs, so no claimed state is spent (the same
+        #    guarantee the old cap-before-pre order existed to give).
+        #
+        # Measured before changing: steady-state demand ~37 regular runs/h
+        # against ~80 slots/h — capacity was never the problem, fairness was.
+        def _overdue_ratio(t):
+            ts = TaskState.from_dict(state.get(t["name"], {}))
+            interval = self._effective_interval(t, ts, interval_overrides)
+            return (now - ts.last_run) / max(interval, 1)
 
-        due_tasks = priority + regular
+        regular.sort(key=_overdue_ratio, reverse=True)
 
-        # Run pre-scripts (record failures in circuit breaker)
+        # Run pre-scripts (record failures in circuit breaker). Priority
+        # tasks always run; regular tasks run until the model batch is full.
         task_data = {}
         runnable = []
         skipped = []
-        for task in due_tasks:
+        deferred = []
+        regular_used = 0
+        regular_probed = 0
+        for task in priority + regular:
+            is_regular = task["name"] not in self.PRIORITY_TASKS
+            if is_regular:
+                # Batch full, or probe budget spent. The probe budget bounds
+                # the serial pre-script work a single backlogged cycle may do:
+                # without it, a post-sleep cycle with 25 due-but-mostly-empty
+                # tasks would run every pre before giving up on filling the
+                # batch, blocking the tick for tens of seconds. Tasks past
+                # either bound defer with their pre UNRUN — no claimed state
+                # is spent — and roll to the next tick.
+                if (regular_used >= self.MAX_BATCH_SIZE
+                        or regular_probed >= self.PRE_PROBE_LIMIT):
+                    deferred.append(task)
+                    continue
+                regular_probed += 1
             if task["pre"]:
                 data = self.run_script(task["pre"])
                 outcome = getattr(self, "_last_script_outcome", "ok")
@@ -1460,6 +1495,14 @@ You have access to the user's memory below. Use it to personalize your responses
             else:
                 task_data[task["name"]] = ""
             runnable.append(task)
+            if is_regular:
+                regular_used += 1
+
+        if deferred:
+            self._log(f"Batch capped at {self.MAX_BATCH_SIZE}, "
+                      f"deferred {len(deferred)}: {[t['name'] for t in deferred]}")
+            for t in deferred:
+                self._event("task_skip", task=t["name"], reason="batch_deferred")
 
         if not runnable:
             if force:

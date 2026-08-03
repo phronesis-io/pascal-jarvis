@@ -61,3 +61,22 @@ def append_jsonl(path, entry, *, keep_last: int | None = None) -> None:
     if keep_last is not None:
         entries = entries[-keep_last:]
     write_jsonl(path, entries)
+
+
+def append_jsonl_locked(path, entry: dict) -> None:
+    """O_APPEND one compact JSON line under flock, for logs with CONCURRENT
+    writers (the plain append_jsonl above is read-modify-write and says so).
+
+    Third copy of this idiom consolidated here — core.memorial._append_line
+    and core.lifelog._append_line predate it; core.companion's voice log is
+    written from both the checkin post-hook and the Lark card-callback
+    thread, so it is the copy that actually races.
+    """
+    import fcntl
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with open(p, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line)
