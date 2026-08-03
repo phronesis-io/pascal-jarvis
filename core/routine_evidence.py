@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -94,8 +95,22 @@ def _read_guarded(path: Path, root: Path, label: str) -> str:
 
 
 def _p_calendar(arg: str) -> str:
-    return _read_guarded(_memory_dir() / "hot" / "calendar_today.md",
-                         _memory_dir(), "calendar")
+    path = _memory_dir() / "hot" / "calendar_today.md"
+    text = _read_guarded(path, _memory_dir(), "calendar")
+    # A stale snapshot read confidently is worse than none: with MEMORY_DIR
+    # unset this falls back to ~/.jarvis/memory, which on a machine whose
+    # production bot uses a different memory root is a legacy copy nobody
+    # updates (observed 2026-08-02: four-day-old calendar served as "today").
+    # The model can weigh a dated snapshot; it cannot weigh one it believes
+    # is current.
+    try:
+        age_h = (time.time() - path.stat().st_mtime) / 3600
+    except OSError:
+        return text
+    if age_h > 24:
+        return (f"（⚠️ 这份日历快照已 {age_h / 24:.1f} 天没有更新，"
+                f"下面的内容不能当作今天的日程）\n{text}")
+    return text
 
 
 def _p_memory(arg: str) -> str:

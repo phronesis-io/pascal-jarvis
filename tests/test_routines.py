@@ -442,3 +442,26 @@ class TestEmitBlock:
         db.commit()
         routines.emit_due_block()
         assert routines.list_runs(r["id"])[0]["evidence_sources"] == ["calendar"]
+
+
+def test_calendar_evidence_flags_a_stale_snapshot(tmp_path, monkeypatch):
+    """2026-08-02: with MEMORY_DIR unset the calendar provider fell back to a
+    legacy dir whose snapshot was four days old and served it as "today". A
+    dated snapshot must announce its age; the model cannot discount staleness
+    it cannot see."""
+    import os
+    import time as _time
+    from core import routine_evidence
+
+    memory = tmp_path / "memory"
+    (memory / "hot").mkdir(parents=True)
+    cal = memory / "hot" / "calendar_today.md"
+    cal.write_text("# Calendar (synced long ago)\n08:00 旧日程\n")
+    os.utime(cal, (_time.time() - 4 * 86400, _time.time() - 4 * 86400))
+    monkeypatch.setenv("MEMORY_DIR", str(memory))
+
+    text = routine_evidence._p_calendar("")
+    assert "没有更新" in text and "4.0 天" in text
+
+    os.utime(cal, None)  # fresh again
+    assert "没有更新" not in routine_evidence._p_calendar("")
