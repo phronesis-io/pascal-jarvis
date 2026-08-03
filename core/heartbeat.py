@@ -1630,6 +1630,17 @@ You have access to the user's memory below. Use it to personalize your responses
         variants = {}
         parts = [f"[HEARTBEAT — {n} task{'s' if n > 1 else ''} due]"]
         parts.append("Process each task below. For each, return the requested format.")
+        # 奏折文风契约 (2026-08-03, owner's words: 「原文应该简洁明了…很多东西
+        # 都说不明白」「我不知道怎么办」). Injected into EVERY batch because
+        # style rules scattered per-task drift and rot; this is the one
+        # assembly point every user-facing sentence passes through.
+        parts.append(
+            "所有会到用户面前的文字，遵守奏折文风：\n"
+            "1. 第一句就是结论。背景放后面，或者不放。\n"
+            "2. 短句，人话，一张卡三行内说清：什么事 / 为什么现在说 / 要他做什么。\n"
+            "3. 不需要他做什么的，明确写出来（例如「知道就行」），不许留悬念。\n"
+            "4. 禁术语禁黑话（SLA/T0/HTTP码这类一律翻成人话）。\n"
+            "5. OPTIONS 按钮必须是明确的动作动词，≤6 字，点了会发生什么要可预期。")
         if ack_present:
             # Contract fix (REQ-30d): the old wording instructed exactly the
             # reply that stranded intents. When an ACK task has data, a bare

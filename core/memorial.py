@@ -765,7 +765,8 @@ def escrow_scan(now: datetime | None = None,
 
 
 def escrow_docket(overdue: list[dict],
-                  now: datetime | None = None) -> tuple[str, str]:
+                  now: datetime | None = None,
+                  unread_signals: int = 0) -> tuple[str, str]:
     """Render the daily docket as ``(title, body)``, grouped by source.
 
     37 raw rows read as 37 unanswered asks. Grouped, the same backlog read as
@@ -792,6 +793,11 @@ def escrow_docket(overdue: list[dict],
     rest = ranked[ESCROW_DIGEST_MAX_GROUPS:]
     if rest:
         lines.append(f"· 另有 {sum(len(r) for _, r in rest)} 件，来自 {len(rest)} 个来源")
+    if unread_signals >= 5:
+        # Owner (8/3): 「信号…攒的比较多，你可以提醒我去看一眼」— one line in
+        # the morning docket, not another card. Threshold keeps it from
+        # nagging over one or two unread briefs.
+        lines.append(f"\n📡 信号攒了 {unread_signals} 条没看，得空扫一眼。")
     lines.append("\n未处理的会在 14 天后自动留中归档。")
     return title, "\n".join(lines)
 
@@ -875,12 +881,20 @@ def _render_card(state: dict, *, body: str | None = None,
     rec = state.get("recommend") or {}
     if include_options and rec.get("label") and rec.get("why"):
         content += f"\n\n**建议：{rec['label']}** — {rec['why']}"
-    if not status_line and state.get("status") == "pending":
-        if (requires_decision(state)
-                and review_surface(state) == REVIEW_LARK):
-            status_line = "⚡ 请在飞书即时批"
-        elif str(state.get("attention", "")) == ATTENTION_ALERT:
-            status_line = "⚡ 即时提醒 · 无需批"
+    # Role line FIRST (2026-08-03, owner: 「每一个东西我不知道怎么办」). The
+    # very first thing a card says is what it wants from him — nothing, a
+    # decision, or immediate attention — so no card ever leaves him guessing.
+    # Replaces the old bottom-of-card status pair, which only covered two of
+    # the three classes and sat below the fold.
+    if state.get("status") == "pending":
+        attention = str(state.get("attention", ""))
+        if attention == ATTENTION_ALERT:
+            role = "⚡ 即时提醒 · 不用批"
+        elif requires_decision(state):
+            role = "🎯 等你拍一个"
+        else:
+            role = "ℹ️ 知道就行"
+        content = f"{role}\n\n{content}"
     if status_line:
         content += "\n\n" + status_line
     return build_card(

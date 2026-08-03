@@ -276,3 +276,29 @@ def test_curated_signals_reach_lark_when_desk_unreachable(monkeypatch):
     assert memorial.should_push_to_lark(st) is True
     assert "eigenflux-feed-triage" not in memorial.AMBIENT_SOURCES
     assert "cross-session-sync" in memorial.AMBIENT_SOURCES
+
+
+# ── 8/3 card clarity: every card opens by saying what it wants ───────────────
+
+
+def test_notice_card_opens_with_zhidaojiuxing(tmp_path, monkeypatch):
+    """Owner: 「每一个东西我不知道怎么办」— a card that needs nothing must SAY
+    so, first line, so no card ever leaves him guessing."""
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
+    mid, _ = memorial.create(
+        source="eigenflux-feed-triage", title="信号", body="一条简报",
+        preset="fyi", send=False)
+    card = json.loads(memorial.card_json(mid))
+    assert card["elements"][0]["text"]["content"].startswith("ℹ️ 知道就行")
+
+
+def test_docket_mentions_accumulated_unread_signals():
+    """Owner: 「信号…攒的比较多，你可以提醒我去看一眼」— one line in the
+    morning docket, threshold 5 so one unread brief doesn't nag."""
+    overdue = [{"source": "intention-check", "title": "t",
+                "ts": "2026-08-01 09:00", "epoch": 1785600000}]
+    _, body_quiet = memorial.escrow_docket(overdue, unread_signals=2)
+    assert "信号攒了" not in body_quiet
+    _, body_loud = memorial.escrow_docket(overdue, unread_signals=7)
+    assert "信号攒了 7 条" in body_loud

@@ -66,7 +66,12 @@ def run(now=None, send: bool = True) -> dict:
     if _already_sent_today(states, today):
         return summary
 
-    title, body = memorial.escrow_docket(overdue, now=now)
+    unread_signals = sum(
+        1 for st in states
+        if st.get("source") == "eigenflux-feed-triage"
+        and st.get("status") == "pending")
+    title, body = memorial.escrow_docket(
+        overdue, now=now, unread_signals=unread_signals)
     # 去看看 must actually GO somewhere. A record-only option would spend the
     # tap, mark the docket 已批 and move the user nowhere — the docket points
     # at the web desk, it is never a second inbox. When no reachable web-desk
