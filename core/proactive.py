@@ -29,6 +29,40 @@ def _has_paired_phone_subscription(
         push_subscription_status(paired_only=True, root=root)["enabled"])
 
 
+_DESK_CACHE_TTL_S = 30.0
+_desk_cache: tuple[float, bool] | None = None
+
+
+def desk_reachable(root: str | Path | None = None) -> bool:
+    """Can the phone/web desk actually reach the user right now?
+
+    The 7/23 routing change sent decisions to a phone desk and notices to a
+    web archive — correct only if that surface can ring the user. It never
+    could: no phone ever paired, so Lark dropped from ~60 cards/day to 1-7
+    while `phone_ready` cards notified nobody (2026-08-03 audit). Routing must
+    ask this question, not assume the answer.
+
+    Fails CLOSED to unreachable: if the check itself errors, cards route to
+    Lark. Delivering to a chat the user reads is the safe failure; delivering
+    to a desk that may not exist is the 死路 this exists to prevent. Cached
+    briefly because delivery paths call it per card.
+    """
+    global _desk_cache
+    import time as _time
+    now = _time.monotonic()
+    if root is None and _desk_cache is not None:
+        stamped, value = _desk_cache
+        if now - stamped < _DESK_CACHE_TTL_S:
+            return value
+    try:
+        value = _has_paired_phone_subscription(root)
+    except Exception:
+        value = False
+    if root is None:
+        _desk_cache = (now, value)
+    return value
+
+
 def maybe_push_signal(
     state: dict,
     *,

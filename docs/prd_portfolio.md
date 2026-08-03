@@ -36,6 +36,8 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `prd_matter_workspace_mobile.md` | Current, shipped | Canonical cross-entry topic and mobile workspace contract. |
 | `prd_unified_delivery_items.md` | Current, shipped | Canonical Item, attention routing, and delivery contract. |
 | `prd_cross_device_continuity.md` | Current, shipped | Canonical device handoff and pairing contract. |
+| `prd_companion_checkin.md` | Current, shipped 2026-08-03 | Checkin as a self-improving companion: tap gradient (「这类不必」), per-kind budget with floor/ceiling, silence as a recorded+alarmable state, conversation feedback into the prompt. |
+| `prd_card_delivery_closure.md` | Current, shipped 2026-08-03 | Reachable-surface routing (desk gate), honest tap outcomes (no-op ≠ ✓), durable broadcast approvals (deterministic retry). Root cause of the 7/24 Lark near-silence. |
 | `prd_verified_delegation.md` | Current, implementation complete; production graduation gated | The generic control plane, deterministic verifiers, projections, reconciler, shadow evaluation, and connector receipts are implemented. Automatic promotion remains fail-closed until the production shadow sample meets the PRD thresholds. |
 
 ## 3. Active Work

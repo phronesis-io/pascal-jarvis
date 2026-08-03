@@ -251,59 +251,35 @@ class ActionProcessor:
         return self.jarvis_dir / "eigenflux" / "pending_publish" / f"{pending_id}.json"
 
     def _do_eigenflux_publish(self, raw: str) -> str:
-        """Publish one specifically approved pending EigenFlux broadcast."""
+        """Publish one specifically approved pending EigenFlux broadcast.
+
+        Shares core.eigenflux_publish's machinery with the reconcile retrier:
+        the binary is resolved absolutely (the card-callback runs under
+        launchd, whose PATH lacks ~/.local/bin — a bare "eigenflux" turned the
+        7/24 approval into `[Errno 2]`), and a failure stamps the approval
+        onto the draft so 「保留待重试」 is finally true: reconcile retries it
+        deterministically on every eigenflux-publish cycle.
+        """
+        from core.eigenflux_publish import (mark_approved_failure,
+                                            publish_draft,
+                                            stamp_publish_state)
         path = self._pending_broadcast_path(parse_params(raw).get("id", ""))
         if path is None or not path.exists():
             return "没有找到这条待广播内容（可能已经处理过了）"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             content = str(data.get("content", "")).strip()
-            notes = json.dumps(data.get("notes") or {}, ensure_ascii=False)
             if not content:
                 return "广播内容为空，未发送"
-            cmd = ["eigenflux", "publish", "--content", content,
-                   "--notes", notes, "--accept-reply", "-f", "json"]
-            if data.get("url"):
-                cmd.extend(["--url", str(data["url"])])
-            result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=30, cwd=str(self.jarvis_dir))
-            if result.returncode != 0:
-                return f"广播失败，内容仍保留待重试：{(result.stderr or '').strip()[:160]}"
+            ok, error = publish_draft(data, cwd=self.jarvis_dir)
+            if not ok:
+                mark_approved_failure(path, data, error)
+                return f"广播失败，已进重试队列（自动重试，最多 5 次）：{error[:120]}"
             path.unlink(missing_ok=True)
-            self._stamp_publish_state(content, data.get("notes") or {})
+            stamp_publish_state(self.jarvis_dir, content, data.get("notes") or {})
             return "✅ 已广播"
         except Exception as e:
-            return f"广播失败，内容仍保留待重试：{e}"
-
-    def _stamp_publish_state(self, content: str, notes: dict) -> None:
-        """Record a successful publish in publish_state.json.
-
-        Nothing has stamped this file since the confirmation flow replaced
-        direct publishing (last stamp 5/29) — so the 2h drafting cooldown in
-        eigenflux_publish_pre.sh always passed and the "recent topics, do NOT
-        repeat" list went stale. Best-effort: a stamp failure never fails the
-        publish itself.
-        """
-        state_file = self.jarvis_dir / "eigenflux" / "publish_state.json"
-        if not isinstance(notes, dict):
-            notes = {}
-        try:
-            state = {}
-            if state_file.exists():
-                state = json.loads(state_file.read_text(encoding="utf-8"))
-            now = int(time.time())
-            state["last_publish_epoch"] = now
-            recent = state.get("recent", [])
-            recent.append({
-                "epoch": now,
-                "summary": str((notes or {}).get("summary", ""))[:160],
-                "content_preview": content[:120],
-            })
-            state["recent"] = recent[-30:]
-            from core.safety import atomic_write
-            atomic_write(state_file, json.dumps(state, ensure_ascii=False))
-        except Exception as e:
-            print(f"[actions] publish_state stamp failed: {e}", file=sys.stderr)
+            return f"广播失败，已进重试队列（自动重试，最多 5 次）：{e}"
 
     def _do_eigenflux_cancel_publish(self, raw: str) -> str:
         """Cancel one specifically selected pending broadcast."""

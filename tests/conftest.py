@@ -19,6 +19,24 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 _SUBPROCESS_RUN = subprocess.run
 
+
+@pytest.fixture(autouse=True)
+def _desk_reachable_pinned(request, monkeypatch):
+    """Pin the phone/web desk as reachable for every test by default.
+
+    core.memorial._desk_reachable (2026-08-03, C1 routing) consults the LIVE
+    mobile-access pairing state. Unpinned, the whole routing suite's outcome
+    depends on whether the machine running the tests happens to have a paired
+    phone — hermeticity, not policy. Tests that exercise the unreachable-desk
+    degrade (tests/test_card_delivery_closure.py) patch it explicitly and win
+    because their patch is applied after this one.
+    """
+    try:
+        import core.memorial as _memorial
+    except Exception:
+        return
+    monkeypatch.setattr(_memorial, "_desk_reachable", lambda: True)
+
 # Files that MUST NOT be touched by any test run. If a test mutates any of
 # these, the guard below will fail and point at the culprit.
 _PROTECTED_FILES = [
