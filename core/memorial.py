@@ -64,6 +64,12 @@ JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
 CHAT_OPT_KEY = "chat"
+# 「看不懂」(2026-08-03, owner: 「很多东西我都看不懂他在说什么」). Not a 批红:
+# the card stays pending — he hasn't answered it, he couldn't parse it. The
+# tap is (1) an honest style-failure signal on the ledger, (2) a request for
+# an immediate plain-language retelling (explain queue → heartbeat), and
+# (3) a negative example future card-writing prompts are shown.
+CONFUSED_OPT_KEY = "confused"
 CHAT_BUTTON_LABEL = "💬 聊聊这个"
 
 # Same retry profile as core.heartbeat_loop (REQ-11).
@@ -613,6 +619,7 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "resolved_label": "",
                 "resolved_ts": "",
                 "chat_ts": "",
+                "confused_ts": "",
                 "chat_epoch": 0,
                 "delivery_status": "not_sent",
                 "delivery_ts": "",
@@ -651,6 +658,10 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 st["action_result"] = str(e.get("result", ""))
                 st["resolved_label"] = str(e.get("label", "已处理"))
                 st["resolved_ts"] = str(e.get("ts", ""))
+        elif ev == "confused":
+            st = states.get(mid)
+            if st is not None:
+                st["confused_ts"] = str(e.get("ts", ""))
         elif ev == "lapse":
             # 留中: the deadline passed with no 批红. A terminal state that is
             # explicitly NOT a decision — never fold it into decided_*, or the
@@ -838,9 +849,14 @@ def _button_groups(state: dict, include_options: bool = True,
         groups.append([{**dict(button), "type": "default"}
                        for button in state["extra_buttons"]])
     if include_chat:
-        groups.append([{"text": CHAT_BUTTON_LABEL, "type": "default",
-                        "value": {"action": "memorial", "id": state["id"],
-                                  "opt": CHAT_OPT_KEY}}])
+        groups.append([
+            {"text": CHAT_BUTTON_LABEL, "type": "default",
+             "value": {"action": "memorial", "id": state["id"],
+                       "opt": CHAT_OPT_KEY}},
+            {"text": "🤔 看不懂", "type": "default",
+             "value": {"action": "memorial", "id": state["id"],
+                       "opt": CONFUSED_OPT_KEY}},
+        ])
     return groups
 
 
@@ -1282,8 +1298,8 @@ def _normalize_options(options: list[dict] | None, preset: str | None) -> list[d
             label = str(o.get("label", "")).strip()
             if not label:
                 raise ValueError(f"option #{i} has no label")
-            if key == CHAT_OPT_KEY:
-                raise ValueError(f"option key '{CHAT_OPT_KEY}' is reserved")
+            if key in (CHAT_OPT_KEY, CONFUSED_OPT_KEY):
+                raise ValueError(f"option key '{key}' is reserved")
             if key in seen:
                 raise ValueError(f"duplicate option key: {key}")
             seen.add(key)
@@ -2406,6 +2422,85 @@ def conversation_deep_link(state: dict) -> str:
     if user_id:
         return f"https://applink.feishu.cn/client/chat/open?openId={user_id}"
     return ""
+
+
+EXPLAIN_QUEUE_FILE = "explain_queue.jsonl"
+EXPLAIN_RETAKE_S = 600  # a claimed request older than this is retaken
+
+
+def _explain_queue_path() -> Path:
+    return JARVIS_DIR / "data" / EXPLAIN_QUEUE_FILE
+
+
+def confused(memorial_id: str) -> dict:
+    """「看不懂」tap: record the style failure and promise a plain retelling.
+
+    The card stays PENDING — confusion is not an answer. The heartbeat's
+    explain-card task picks the request up (trigger touched so the next
+    cycle comes fast) and sends a plain-language retelling as an ordinary
+    message.
+    """
+    st = get_memorial(memorial_id)
+    if st is None:
+        return {"toast": {"type": "info",
+                          "content": "这张卡对应的事项找不到了，直接在对话里问我"}}
+    ts = now_local_str()
+    _append_line(_ledger_path(), {"ev": "confused", "id": memorial_id,
+                                  "ts": ts, "epoch": int(time.time())})
+    _record_engagement({"source": st.get("source", "memorial"),
+                        "type": "feedback", "rating": "confused"})
+    from core.jsonl import append_jsonl_locked
+    try:
+        append_jsonl_locked(_explain_queue_path(), {
+            "memorial_id": memorial_id, "ts": ts, "taken_at": 0})
+    except OSError as exc:
+        print(f"memorial confused: queue write failed: {exc}", file=sys.stderr)
+    try:  # hasten the next heartbeat cycle — best-effort
+        Path("/tmp/jarvis-heartbeat-trigger").touch()
+    except OSError:
+        pass
+    st = get_memorial(memorial_id) or st
+    banner = "🤔 已记下「看不懂」——大白话版本马上单独发给你，这张卡先不用管"
+    card = json.loads(_render_card(st, status_line=banner))
+    return {"toast": {"type": "success", "content": "收到，马上用大白话重讲一遍"},
+            "card": {"type": "raw", "data": card}}
+
+
+def explain_claim(now_epoch: int | None = None) -> dict | None:
+    """Claim the oldest unexplained request (pre-script side).
+
+    Claiming stamps taken_at instead of deleting: a dead model call must not
+    eat the request — he tapped, an unanswered tap is a dead end. Requests
+    claimed longer than EXPLAIN_RETAKE_S ago are retaken.
+    """
+    from core.jsonl import read_jsonl, write_jsonl
+
+    now_e = int(time.time()) if now_epoch is None else int(now_epoch)
+    rows = read_jsonl(_explain_queue_path())
+    for row in rows:
+        if int(row.get("taken_at") or 0) > now_e - EXPLAIN_RETAKE_S:
+            continue
+        row["taken_at"] = now_e
+        write_jsonl(_explain_queue_path(), rows)
+        return dict(row)
+    return None
+
+
+def explain_complete(memorial_id: str) -> None:
+    """Drop a fulfilled request (post-script side)."""
+    from core.jsonl import read_jsonl, write_jsonl
+
+    rows = [r for r in read_jsonl(_explain_queue_path())
+            if str(r.get("memorial_id")) != str(memorial_id)]
+    write_jsonl(_explain_queue_path(), rows)
+
+
+def recent_confused(limit: int = 3) -> list[dict]:
+    """The last cards he could not parse — negative examples for the style
+    contract, newest first."""
+    out = [st for st in list_memorials() if str(st.get("confused_ts", ""))]
+    out.sort(key=lambda s: str(s.get("confused_ts", "")), reverse=True)
+    return out[:limit]
 
 
 def chat(memorial_id: str) -> dict:

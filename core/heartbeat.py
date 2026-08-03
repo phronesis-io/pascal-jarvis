@@ -1641,6 +1641,22 @@ You have access to the user's memory below. Use it to personalize your responses
             "3. 不需要他做什么的，明确写出来（例如「知道就行」），不许留悬念。\n"
             "4. 禁术语禁黑话（SLA/T0/HTTP码这类一律翻成人话）。\n"
             "5. OPTIONS 按钮必须是明确的动作动词，≤6 字，点了会发生什么要可预期。")
+        try:
+            from core.memorial import recent_confused
+            confused_cards = recent_confused()
+        except Exception:
+            confused_cards = []
+        if confused_cards:
+            # The user's own 「看不懂」taps are the strongest style signal we
+            # have — show the offending prose as negative examples instead of
+            # hoping abstract rules generalize.
+            examples = "\n".join(
+                f"- 「{str(c.get('title', ''))[:30]}」: "
+                f"{str(c.get('body', ''))[:60]}…"
+                for c in confused_cards)
+            parts.append(
+                "以下是用户最近点了「看不懂」的卡——这种写法读不懂，引以为戒：\n"
+                + examples)
         if ack_present:
             # Contract fix (REQ-30d): the old wording instructed exactly the
             # reply that stranded intents. When an ACK task has data, a bare
