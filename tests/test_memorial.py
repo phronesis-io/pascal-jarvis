@@ -89,7 +89,8 @@ def test_create_card_structure_and_button_value_round_trip(env):
     card = json.loads(memorial.card_json(mid))
 
     assert card["header"]["title"]["content"] == "📜 📬 标题"
-    assert card["elements"][0]["text"]["content"] == "正文"
+    # Role line first (8/3): the card opens by saying what it wants of him.
+    assert card["elements"][0]["text"]["content"] == "🎯 等你拍一个\n\n正文"
     rows = _action_rows(card)
     assert [len(row) for row in rows] == [3, 1]  # choices, then full-row Chat
     actions = _actions(card)
@@ -135,9 +136,11 @@ def test_review_surface_matrix_preserves_attention_budget(env):
     assert memorial.review_surface(alert) == "none"
     assert alert["attention"] == "alert"
     assert len(env.cards) == 3
-    assert "请在飞书即时批" in env.cards[0][0]
-    assert "请在飞书即时批" in env.cards[1][0]
-    assert "即时提醒 · 无需批" in env.cards[2][0]
+    # 8/3: the ask moved to a role line at the TOP of every card (the old
+    # bottom status pair only covered two classes and sat below the fold).
+    assert "🎯 等你拍一个" in env.cards[0][0]
+    assert "🎯 等你拍一个" in env.cards[1][0]
+    assert "⚡ 即时提醒 · 不用批" in env.cards[2][0]
 
 
 def test_old_delivered_decision_truthfully_stays_lark_routed():
@@ -567,7 +570,8 @@ def test_explicit_title_line_becomes_card_header(env):
     card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
     assert card["header"]["title"]["content"] == "📜 🎯 发声候选已备好，挑一个"
     body = card["elements"][0]["text"]["content"]
-    assert "TITLE" not in body and body.startswith("三个候选")
+    assert body.startswith("🎯 等你拍一个")
+    assert "TITLE" not in body and "三个候选" in body
 
 
 def test_short_first_line_promoted_to_title(env):
@@ -586,7 +590,8 @@ def test_title_only_output_still_makes_a_card(env):
     assert out == ""
     card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
     assert card["header"]["title"]["content"] == "📜 🎯 今晚 EF 增长破千，值得看一眼"
-    assert card["elements"][0]["text"]["content"] == "今晚 EF 增长破千，值得看一眼"
+    assert card["elements"][0]["text"]["content"] == (
+        "🎯 等你拍一个\n\n今晚 EF 增长破千，值得看一眼")
 
 
 def test_overlong_explicit_title_clipped_but_body_keeps_full_line(env):
