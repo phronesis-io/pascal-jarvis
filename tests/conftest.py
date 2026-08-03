@@ -34,6 +34,14 @@ _PROTECTED_FILES = [
     ROOT / "memorials.jsonl",
     ROOT / "sched_events.jsonl",
     ROOT / "data" / "jarvis.db",
+    # core.companion (2026-08-02). Added the same day the module landed: its
+    # first test run wrote 51 rows of junk into the real ledger and stamped
+    # data/companion_last_spoke — the exact file components.yaml now watches
+    # for the silence alarm — because tests/test_checkin_post.py isolated
+    # MEMORY_DIR but not JARVIS_DIR. The guard missed it only because these
+    # paths were not listed here.
+    ROOT / "data" / "companion_voice.jsonl",
+    ROOT / "data" / "companion_last_spoke",
 ]
 
 # A subset of the protected files are *live runtime state* that the production
@@ -53,6 +61,8 @@ _LIVE_RUNTIME_FILES = {
     ROOT / "memorials.jsonl",
     ROOT / "sched_events.jsonl",
     ROOT / "data" / "jarvis.db",
+    ROOT / "data" / "companion_voice.jsonl",
+    ROOT / "data" / "companion_last_spoke",
 }
 
 

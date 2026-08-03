@@ -147,3 +147,16 @@ components:
     critical: false
     requires_file: ~/Library/LaunchAgents/com.jarvis.conversation-audit.plist
     note: latest completed audit must stay fresh; launchd com.jarvis.conversation-audit runs daily at 04:20
+
+  - name: companion-voice
+    check: file_age
+    path: data/companion_last_spoke
+    max_age_hours: 48
+    critical: false
+    requires_file: data/companion_last_spoke
+    note: >-
+      checkin 是产品本身，不是 36 个任务里的一个。2026-08-02 发现它整整 10 天
+      一句话没说（上一张卡 7/23），而任务状态一路 last_status=ok、708 次运行全绿：
+      沉默从来没有被当成一个状态。core.companion 每次真发出卡片就 touch 这个文件，
+      所以「不说话」现在会像别的组件死掉一样亮红。requires_file 让它在从没开口过的
+      全新安装上跳过，而不是对着一个还不存在的文件报警。

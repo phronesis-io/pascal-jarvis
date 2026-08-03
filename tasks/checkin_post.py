@@ -10,6 +10,7 @@ Stdin: the check-in message Claude generated (markdown).
 Stdout: same message if passes dedup, empty if blocked.
 """
 
+import json
 import os
 import re
 import sys
@@ -17,6 +18,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core import companion
 from core.card import build_card
 from core.safety import (looks_like_error, parse_json_response,
                          strip_task_framing)
@@ -141,17 +143,51 @@ def is_duplicate(new_topics: str, entries: list[dict]) -> bool:
     return False
 
 
+def silent(reason: str) -> int:
+    """Exit without a card, on the record.
+
+    Every path out of this script that produces no card runs through here.
+    Before 2026-08-02 they all just `return 0`, the heartbeat scored the run a
+    success, and checkin went 10 days without saying a word while reporting
+    `last_status: ok` across 708 runs. A decision to stay quiet is a decision;
+    it has to leave a trace or nothing can ever notice it repeating.
+    """
+    try:
+        companion.record_silence(reason)
+    except Exception as exc:  # bookkeeping must never break the task
+        print(f"[checkin] silence bookkeeping failed: {exc}", file=sys.stderr)
+    return 0
+
+
+def extract_kind(message: str) -> tuple[str, str]:
+    """Pull the `KIND: <one of core.companion.KINDS>` line off the message.
+
+    The kind is the unit of learning — without it every card lands in the
+    ledger as an undifferentiated `source=checkin` and the four registers
+    (followup / standing / notice / guide) cannot be told apart, which is why
+    nothing could be learned from 23 cards' worth of taps.
+    """
+    m = re.search(r"\n?\s*KIND[:：]\s*([A-Za-z_]+)\s*(?:\n|$)", message)
+    if not m:
+        return message, companion.DEFAULT_KIND
+    kind = companion.normalize_kind(m.group(1))
+    return (message[:m.start()].rstrip() + "\n"
+            + message[m.end():].lstrip()).strip(), kind
+
+
 def main() -> int:
     message = sys.stdin.read().strip()
     # Suppress on the silence sentinel even if the model wrapped it with a header
     # line and/or trailing reasoning. A real check-in never contains this token,
     # so a substring check is safe — and far more robust than an exact match,
     # which leaked "🌿 关怀 / HEARTBEAT_OK + internal reasoning" cards to the user.
-    if not message or "HEARTBEAT_OK" in message:
-        return 0
+    if not message:
+        return silent("empty model output")
+    if "HEARTBEAT_OK" in message:
+        return silent("model chose silence (HEARTBEAT_OK)")
     if looks_like_error(message):
         print("[checkin] skipping — looks like error output", file=sys.stderr)
-        return 0
+        return silent("output looked like an error")
 
     # Unwrap a JSON envelope. The checkin prompt asks for plain markdown, but
     # the model sometimes reuses the intention-check response shape
@@ -163,16 +199,22 @@ def main() -> int:
         action = str(parsed.get("action", "notify")).lower()
         if action in ("silent", "skip", "none"):
             print(f"[checkin] model chose action={action} — no card", file=sys.stderr)
-            return 0
+            return silent(f"model chose action={action}")
         message = parsed["response"].strip()
         if not message:
-            return 0
+            return silent("JSON envelope carried an empty response")
 
     # Echoed prompt framing ("[CHECKIN]", "=== TASK: checkin ===",
     # "[2026-07-19 09:16] checkin") reached cards verbatim through 7/20.
     message = strip_task_framing(message)
     if not message:
-        return 0
+        return silent("nothing left after stripping prompt framing")
+
+    # KIND must come off before THEMES/DIET: like them it is a trailing
+    # contract line, and leaving it in would put "KIND: notice" on the card.
+    message, kind = extract_kind(message)
+    if not message:
+        return silent("nothing left after stripping KIND")
 
     # THEMES contract (7/21 乱联系根修 RC2): the prompt asks the model to end
     # with "THEMES: 概念1, 概念2" — 2-4 meaning-level tags used for dedup by
@@ -185,7 +227,7 @@ def main() -> int:
         themes = m.group(1).strip()
         message = message[:m.start()].rstrip()
         if not message:
-            return 0
+            return silent("nothing left after stripping THEMES")
 
     # REQ-114 diet capture: the checkin prompt may end with an OPTIONAL
     # structured line — "DIET: 午|牛肉面、青菜" — emitted ONLY when the user
@@ -202,7 +244,7 @@ def main() -> int:
         except Exception as e:
             print(f"[checkin] diet log failed: {e}", file=sys.stderr)
     if not message:
-        return 0
+        return silent("nothing left after stripping DIET")
 
     # Read existing entries
     entries = read_jsonl(LOG_FILE)
@@ -213,7 +255,7 @@ def main() -> int:
     # Mechanical dedup gate
     if is_duplicate(topics, entries):
         print(f"[checkin] BLOCKED duplicate — topics: {topics}", file=sys.stderr)
-        return 0  # empty stdout → no message sent to user
+        return silent(f"blocked as duplicate of a recent theme: {topics}")
 
     # Append new entry with topics
     entries.append({
@@ -230,8 +272,17 @@ def main() -> int:
     is_wellbeing = has_question or any(kw in message for kw in wellbeing_keywords)
     header = "🌿 关怀" if is_wellbeing else "💡 联系"
 
-    # Output as Lark card (single line)
-    print(build_card(header, message, source="checkin"))
+    # Output as Lark card (single line). The KIND rides along in the context
+    # marker so the ledger can score this card against its own register later.
+    card = build_card(header, message, source="checkin",
+                      context=json.dumps({"kind": kind}, ensure_ascii=False))
+    if not card:
+        return silent("card builder suppressed the output")
+    print(card)
+    try:
+        companion.record_spoke(kind, topics)
+    except Exception as e:
+        print(f"[checkin] spoke bookkeeping failed: {e}", file=sys.stderr)
     return 0
 
 

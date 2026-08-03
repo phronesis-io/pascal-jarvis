@@ -24,7 +24,11 @@ def _run(stdin: str, memory_dir: Path) -> subprocess.CompletedProcess:
         input=stdin,
         capture_output=True,
         text=True,
-        env={**os.environ, "MEMORY_DIR": str(memory_dir)},
+        env={**os.environ, "MEMORY_DIR": str(memory_dir),
+             # JARVIS_DIR too: checkin_post writes companion voice
+             # state under data/, and without this the run appends to
+             # the production ledger (2026-08-02).
+             "JARVIS_DIR": str(memory_dir.parent)},
     )
 
 

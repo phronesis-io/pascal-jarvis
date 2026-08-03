@@ -113,13 +113,31 @@ PRESETS: dict[str, list[dict]] = {
         {"key": "later", "label": "还没做", "action": None},
         {"key": "stop", "label": "这次跳过", "action": None},
     ],
+    # Companion checkin (2026-08-02). The positive end of the gradient is the
+    # 「聊聊这个」button adopt_card already adds to every card, so this preset
+    # supplies only the neutral and the NEGATIVE — the one that was missing.
+    #
+    # Until now a checkin offered「已阅／标为重点」, and 22 of 23 cards ever sent
+    # were acknowledged. That number taught nothing: 「已阅」is emitted both by
+    # "that was good" and by "noted, go away". Pascal's only way to say the
+    # second was to complain out of band, which he did four times, after which
+    # a human overcorrected the prompt into ten days of total silence.
+    #
+    #「这类不必」names the card's KIND rather than the card, so one tap costs no
+    # more than dismissing it but teaches something general. core.companion
+    # turns it into a smaller daily allowance for that kind — never zero, since
+    # a mute kind can never earn its way back.
+    "companion": [
+        {"key": "ack", "label": "知道了", "action": None},
+        {"key": "not_this_kind", "label": "这类不必", "action": None},
+    ],
 }
 
 # A tap on a REPLY option means "Pascal said this sentence". The label is the
 # suggested reply itself, so it is carried into the next conversation turn
 # first-person (see _queue_decision_context) instead of being filed away as a
 # generic 批红 rating. FYI keys are the only taps that stay purely analytic.
-_FYI_KEYS = {"read", "watch"}
+_FYI_KEYS = {"read", "watch", "ack", "not_this_kind"}
 ATTENTION_DECISION = "decision"
 ATTENTION_NOTICE = "notice"
 ATTENTION_ALERT = "alert"
@@ -188,6 +206,7 @@ LARK_REVIEW_SOURCES = {
 # fall back to「已阅／标为重点」. Only consulted when the emitter did not author
 # its own options (see _extract_inline_options).
 SOURCE_DEFAULT_PRESET = {
+    "checkin": "companion",
     "intention-check": "followup",
     "intentions": "followup",
     "intent": "followup",
@@ -1663,6 +1682,13 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     """
     card = json.loads(legacy_card_json)
     source = str(card.pop("__jarvis_source", "") or source).strip()
+    # Same marker convention as __jarvis_source: an emitter that only owns
+    # stdout (a task post-hook printing a card) has no other way to attach
+    # structured context to the memorial it will become. core.companion uses
+    # it to carry the checkin's KIND into the ledger, which is what makes
+    # per-kind learning possible at all — before this every checkin was logged
+    # as an undifferentiated `source=checkin`.
+    context = str(card.pop("__jarvis_context", "") or context)
     if _card_memorial_id(card):
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
 
@@ -2317,6 +2343,19 @@ def chat(memorial_id: str) -> dict:
                                   "epoch": int(time.time())})
     _record_engagement({"source": st.get("source", "memorial"),
                         "type": "feedback", "rating": "chat"})
+
+    # A card that started a conversation is the richest signal this system
+    # gets, and until now it was spent entirely on a boolean. Record WHAT he
+    # engaged with, against its kind, so the next prompt can be shown the
+    # register that actually reaches him instead of re-deriving it from taps.
+    if str(st.get("source", "")) == "checkin":
+        try:
+            from core import companion
+            companion.record_engaged(st.get("context", ""),
+                                     str(st.get("title", "")))
+        except Exception as exc:
+            print(f"memorial chat: companion capture failed: {exc}",
+                  file=sys.stderr)
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
     opener = (f"📜 已带上「{st['title']}」的背景。"
