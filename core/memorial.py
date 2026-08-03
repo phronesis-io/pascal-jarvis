@@ -201,7 +201,16 @@ WEB_FIRST_SOURCES = {
 # re-surfaced by the morning escrow docket. Interactive, personal voices
 # (checkin, routines, intention-check, daily-reflect, heartbeat prose) are
 # deliberately NOT here: those going invisible is exactly the 7/24 regression.
-AMBIENT_SOURCES = WEB_FIRST_SOURCES | {
+#
+# eigenflux-feed-triage is web-first but NOT ambient (2026-08-03). Its cards
+# are curated signal — ~2/day, each a one-line brief already contextualized
+# to the user — not exhaust. Routing them to the desk buried them completely:
+# the owner reported he simply does not open the web on his phone (measured
+# why: 5.2s TTFB through the funnel relay vs 39ms local), so "web-first
+# signal" meant "no signal". Content of this volume and quality earns the
+# chat.
+AMBIENT_SOURCES = {
+    "cross-session-sync",
     "metrics-digest",
     "phronesis-monitor",
     "repos-sync",
