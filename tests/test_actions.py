@@ -153,11 +153,16 @@ def test_eigenflux_publish_action_sends_selected_pending(monkeypatch, tmp_path):
         stdout = "{}"
         stderr = ""
 
-    monkeypatch.setattr("core.actions.subprocess.run",
+    monkeypatch.setattr("core.eigenflux_publish.subprocess.run",
                         lambda cmd, **kw: calls.append(cmd) or Result())
+    monkeypatch.setattr("core.eigenflux_publish.resolve_eigenflux_bin",
+                        lambda: "/resolved/bin/eigenflux")
     result = ap._do_eigenflux_publish("id=123_456")
     assert result == "✅ 已广播"
-    assert calls[0][:2] == ["eigenflux", "publish"]
+    # ABSOLUTE path, not the bare name: the card callback runs under launchd
+    # whose PATH lacks ~/.local/bin — bare "eigenflux" turned the 7/24
+    # approval into `[Errno 2] No such file or directory: 'eigenflux'`.
+    assert calls[0][:2] == ["/resolved/bin/eigenflux", "publish"]
     assert not pending.exists()
 
 
@@ -170,7 +175,10 @@ def test_eigenflux_publish_stamps_publish_state(monkeypatch, tmp_path):
         stdout = "{}"
         stderr = ""
 
-    monkeypatch.setattr("core.actions.subprocess.run", lambda *a, **kw: Result())
+    monkeypatch.setattr("core.eigenflux_publish.subprocess.run",
+                        lambda *a, **kw: Result())
+    monkeypatch.setattr("core.eigenflux_publish.resolve_eigenflux_bin",
+                        lambda: "/resolved/bin/eigenflux")
     ap._do_eigenflux_publish("id=123_456")
     state = json.loads((tmp_path / "eigenflux" / "publish_state.json").read_text())
     assert state["last_publish_epoch"] > 0
@@ -186,9 +194,18 @@ def test_eigenflux_publish_failure_keeps_pending(monkeypatch, tmp_path):
         stdout = ""
         stderr = "offline"
 
-    monkeypatch.setattr("core.actions.subprocess.run", lambda *a, **kw: Result())
-    assert "仍保留" in ap._do_eigenflux_publish("id=123_456")
+    monkeypatch.setattr("core.eigenflux_publish.subprocess.run",
+                        lambda *a, **kw: Result())
+    monkeypatch.setattr("core.eigenflux_publish.resolve_eigenflux_bin",
+                        lambda: "/resolved/bin/eigenflux")
+    assert "重试" in ap._do_eigenflux_publish("id=123_456")
     assert pending.exists()
+    # 「重试」is now a promise something keeps: the failure stamps the approval
+    # onto the draft so reconcile_pending_drafts retries it deterministically.
+    stamped = json.loads(pending.read_text())
+    assert stamped["approved_epoch"] > 0
+    assert stamped["attempts"] == 1
+    assert "offline" in stamped["last_error"]
 
 
 def test_eigenflux_cancel_publish_action(tmp_path):

@@ -193,6 +193,25 @@ WEB_FIRST_SOURCES = {
     "cross-session-sync",
     "eigenflux-feed-triage",
 }
+
+# Monitoring exhaust that stays web-first even when the phone/web desk cannot
+# reach the user. When the desk is unreachable every OTHER notice degrades to
+# Lark (C1, docs/prd_card_delivery_closure.md) — but pushing these would
+# recreate the 7/22 card storm, and anything in them that needs a human is
+# re-surfaced by the morning escrow docket. Interactive, personal voices
+# (checkin, routines, intention-check, daily-reflect, heartbeat prose) are
+# deliberately NOT here: those going invisible is exactly the 7/24 regression.
+AMBIENT_SOURCES = WEB_FIRST_SOURCES | {
+    "metrics-digest",
+    "phronesis-monitor",
+    "repos-sync",
+}
+
+
+def _desk_reachable() -> bool:
+    """Seam for routing decisions; patchable in tests."""
+    from core.proactive import desk_reachable
+    return desk_reachable()
 ALERT_SOURCES = {
     "calendar-sync",
 }
@@ -296,6 +315,13 @@ def _infer_review_surface(source: str, attention: str,
     if (urgent or str(chat_id or "").strip() or has_lark_native_action
             or str(source or "") in LARK_REVIEW_SOURCES):
         return REVIEW_LARK
+    # A decision may only be parked on the phone desk if the desk can ring the
+    # user. It could not — no phone ever paired — and for 10 days every
+    # non-urgent decision (broadcast approvals included) waited on a surface
+    # that notified nobody (C1, docs/prd_card_delivery_closure.md). When a
+    # phone pairs, this degrade disappears with no code change.
+    if not _desk_reachable():
+        return REVIEW_LARK
     return REVIEW_PHONE
 
 
@@ -323,11 +349,26 @@ def delivery_accepted(state: dict) -> bool:
 
 
 def should_push_to_lark(state: dict) -> bool:
-    """Lark receives sparse alerts and only Lark-routed decisions."""
+    """Lark receives alerts, Lark-routed decisions — and, while the phone/web
+    desk cannot reach the user, every non-ambient notice.
+
+    The 7/23 design (sparse Lark, notices to the web archive) assumed the desk
+    was a real surface. It was not, and Lark fell from ~60 cards/day to 1-7
+    while the product's own voice (checkin, routines, daily-reflect) went to a
+    page that never rings and often does not open. Ambient monitoring exhaust
+    stays web-first regardless — the escrow docket re-surfaces what matters —
+    so this cannot recreate the 7/22 card storm.
+    """
     attention = str(state.get("attention", "") or "")
     if attention == ATTENTION_ALERT:
         return True
-    return requires_decision(state) and review_surface(state) == REVIEW_LARK
+    if requires_decision(state):
+        return review_surface(state) == REVIEW_LARK
+    if (attention == ATTENTION_NOTICE
+            and str(state.get("source", "")) not in AMBIENT_SOURCES
+            and not _desk_reachable()):
+        return True
+    return False
 
 
 _ALERT_RE = re.compile(
@@ -2087,6 +2128,20 @@ def _finish_decide_side_effects(
         _sync_lark_card(memorial_id, _decided_card(st))
 
 
+# Action-handler returns that mean "nothing actually happened". Handlers
+# report no-ops as prose (they predate any structured contract), so the
+# honest-toast check has to recognize the prose. Kept deliberately narrow:
+# every pattern here is a string a `_do_*` handler in core/actions.py really
+# returns today — widen only with the handler in hand.
+_ACTION_NOOP_RE = re.compile(
+    r"^FAILED|not found|already closed|already done"
+    r"|没有找到|已经处理过|未发送|广播失败|找不到")
+
+
+def _action_result_is_noop(action_result: str) -> bool:
+    return bool(_ACTION_NOOP_RE.search(str(action_result or "")))
+
+
 def decide(
         memorial_id: str,
         opt_key: str,
@@ -2189,6 +2244,14 @@ def decide(
 
     if action_failed:
         toast = {"type": "info", "content": "已批，但动作执行出错了——直接在对话里告诉我"}
+    elif has_action and _action_result_is_noop(action_result):
+        # 2026-08-03 audit: 「Intent not found or already closed」was toasted
+        # as 「已批：✓」 five separate times — the user tapped 做了, nothing
+        # happened, and the system claimed success. A no-op is not an error
+        # (the tap IS recorded) but ✓ on a nothing is a lie the user can only
+        # discover by noticing the thing he closed asking again later.
+        toast = {"type": "info",
+                 "content": f"已记下，但动作没有执行：{action_result[:60]}"}
     elif opt.get("reply"):
         toast = {"type": "success", "content": "收到——下条消息我接着这个说"}
     else:
