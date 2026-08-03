@@ -262,3 +262,17 @@ def test_retry_success_converges_the_card_via_memorial_resolve(tmp_path, monkeyp
     st = memorial.get_memorial(mid)
     assert st["status"] == "decided"
     assert "已广播" in st.get("resolved_label", "")
+
+
+def test_curated_signals_reach_lark_when_desk_unreachable(monkeypatch):
+    """eigenflux-feed-triage is web-first but not ambient (2026-08-03): ~2
+    curated, pre-contextualized signal briefs a day were routed to a desk the
+    owner measurably never opens (5.2s TTFB through the funnel relay). Signal
+    of that volume and quality earns the chat; monitoring exhaust stays out."""
+    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+    st = {"source": "eigenflux-feed-triage",
+          "attention": memorial.ATTENTION_NOTICE,
+          "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(st) is True
+    assert "eigenflux-feed-triage" not in memorial.AMBIENT_SOURCES
+    assert "cross-session-sync" in memorial.AMBIENT_SOURCES
