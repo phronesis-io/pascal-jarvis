@@ -326,3 +326,128 @@ def test_batch_cap_before_prescripts(tmp_path, monkeypatch):
     # Only MAX_BATCH_SIZE pre-scripts should have run
     pre_scripts = [s for s in scripts_called if "pre_" in s]
     assert len(pre_scripts) <= HeartbeatRunner.MAX_BATCH_SIZE
+
+
+# ── Fair queue (2026-08-03): empty pres must not burn batch slots ──────
+
+
+def test_empty_pres_do_not_burn_batch_slots(tmp_path, monkeypatch):
+    """Six due tasks; the four stalest have nothing to say, the two freshest
+    have real content. The old cap-before-pre order selected the four empty
+    ones, skipped them all, deferred the two with content, and called the
+    model with NOTHING — a full cycle spent delivering zero work while the
+    contentful tasks starved. Observed live for weeks as cycles full of
+    「(empty)」lines next to a 12-23 task deferral list."""
+    tasks_md = "\n\n".join(
+        f"### task-{i}\n- interval: 1h\n- pre: tasks/pre_{i}.sh\n- prompt: do {i}"
+        for i in range(6)
+    )
+    runner = _make_runner(tmp_path, tasks_md)
+    now = int(time.time())
+    # task-0..3 are the stalest (would win a staleness sort) but empty;
+    # task-4/5 are fresher but have content.
+    state = {f"task-{i}": {"last_run": now - 7200 - (5 - i) * 600}
+             for i in range(6)}
+    runner.save_state(state)
+
+    def fake_run_script(path, stdin_data=""):
+        runner._last_script_outcome = "ok"
+        idx = int(path.split("_")[-1].split(".")[0])
+        return "real content" if idx >= 4 else ""
+
+    called_prompts = []
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p: called_prompts.append(p) or "HEARTBEAT_OK")
+
+    runner.run_cycle(force=True)
+
+    assert called_prompts, "cycle made no model call despite real content"
+    prompt = called_prompts[0]
+    assert "task-4" in prompt and "task-5" in prompt, (
+        "tasks with real content were deferred while empty tasks "
+        "burned the batch slots"
+    )
+
+
+def test_batch_fairness_is_relative_to_each_tasks_cadence(tmp_path, monkeypatch):
+    """A 10-minute task 3h overdue (18x its cadence) must outrank a daily
+    task 26h stale (1.08x). The old absolute-last_run sort inverted this:
+    after any sleep, the daily backlog monopolized every batch for hours
+    while short-cycle tasks — the interactive ones — waited behind it."""
+    tasks_md = (
+        "### fast-task\n- interval: 10m\n- prompt: fast\n\n"
+        + "\n\n".join(
+            f"### daily-{i}\n- interval: 24h\n- prompt: daily {i}"
+            for i in range(5)
+        )
+    )
+    runner = _make_runner(tmp_path, tasks_md)
+    now = int(time.time())
+    state = {"fast-task": {"last_run": now - 3 * 3600}}       # 18x overdue
+    for i in range(5):
+        state[f"daily-{i}"] = {"last_run": now - 26 * 3600}   # 1.08x overdue
+    runner.save_state(state)
+
+    called_prompts = []
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p: called_prompts.append(p) or "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+
+    assert called_prompts
+    assert "fast-task" in called_prompts[0], (
+        "the most-overdue-relative-to-cadence task was deferred behind "
+        "absolutely-staler daily tasks"
+    )
+
+
+def test_model_batch_still_capped_with_abundant_content(tmp_path, monkeypatch):
+    """Fair queueing must not silently raise the model-call size: with 8
+    contentful tasks due, exactly MAX_BATCH_SIZE reach the prompt and the
+    rest defer with their pres unrun."""
+    tasks_md = "\n\n".join(
+        f"### task-{i}\n- interval: 1h\n- pre: tasks/pre_{i}.sh\n- prompt: do {i}"
+        for i in range(8)
+    )
+    runner = _make_runner(tmp_path, tasks_md)
+
+    pres_run = []
+
+    def fake_run_script(path, stdin_data=""):
+        runner._last_script_outcome = "ok"
+        pres_run.append(path)
+        return "content"
+
+    called_prompts = []
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    monkeypatch.setattr(runner, "claude_call",
+                        lambda p: called_prompts.append(p) or "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+
+    assert called_prompts[0].count("=== TASK:") == HeartbeatRunner.MAX_BATCH_SIZE
+    # Deferred tasks' pres never ran — no claimed state was spent.
+    assert len(pres_run) == HeartbeatRunner.MAX_BATCH_SIZE
+
+
+def test_probe_budget_bounds_prescript_work_per_cycle(tmp_path, monkeypatch):
+    """Fair queueing must not turn a backlogged cycle into an unbounded
+    serial pre-script sweep: with 20 due tasks all coming back empty, the
+    cycle probes at most PRE_PROBE_LIMIT pres and defers the rest unrun."""
+    tasks_md = "\n\n".join(
+        f"### task-{i}\n- interval: 1h\n- pre: tasks/pre_{i}.sh\n- prompt: do {i}"
+        for i in range(20)
+    )
+    runner = _make_runner(tmp_path, tasks_md)
+
+    pres_run = []
+
+    def fake_run_script(path, stdin_data=""):
+        runner._last_script_outcome = "ok"
+        pres_run.append(path)
+        return ""  # everything is empty — the worst probing regime
+
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    monkeypatch.setattr(runner, "claude_call", lambda p: "HEARTBEAT_OK")
+    runner.run_cycle(force=True)
+
+    assert len(pres_run) == HeartbeatRunner.PRE_PROBE_LIMIT

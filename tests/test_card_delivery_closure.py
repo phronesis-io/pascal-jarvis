@@ -209,13 +209,56 @@ def test_unapproved_draft_still_expires_at_48h(tmp_path):
     assert not path.exists()
 
 
-def test_resolve_eigenflux_bin_falls_back_to_local_bin(monkeypatch, tmp_path):
+def test_resolve_eigenflux_bin_searches_the_shared_launchd_path(monkeypatch):
+    """The resolver must consult PATH_ENV — the family-wide augmented PATH
+    (system PATH + ~/.local/bin) that the sibling eigenflux callers already
+    share — so all eigenflux subprocess sites agree on where the binary is."""
     from core import eigenflux_publish as ep
-    monkeypatch.setattr(ep.shutil, "which", lambda name: None)
-    fake_home = tmp_path / "home"
-    binary = fake_home / ".local" / "bin" / "eigenflux"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
-    monkeypatch.setattr(ep.Path, "home", staticmethod(lambda: fake_home))
-    assert ep.resolve_eigenflux_bin() == str(binary)
+    from core.eigenflux_friends import PATH_ENV
+
+    seen = {}
+
+    def fake_which(name, path=None):
+        seen["name"], seen["path"] = name, path
+        return "/resolved/eigenflux"
+
+    monkeypatch.setattr(ep.shutil, "which", fake_which)
+    assert ep.resolve_eigenflux_bin() == "/resolved/eigenflux"
+    assert seen["name"] == "eigenflux"
+    assert seen["path"] == PATH_ENV
+    assert "/.local/bin" in seen["path"]
+
+
+def test_retry_success_converges_the_card_via_memorial_resolve(tmp_path, monkeypatch):
+    """On the live root, a successful retry must go through memorial.resolve()
+    — which re-renders the delivered Lark copies and completes handoffs — not
+    a bare ledger append that flips state while the user keeps seeing
+    「广播失败」on the card (the said-one-thing-did-another gap C2 closes)."""
+    from core import memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+
+    mid, _ = memorial.create(
+        source="eigenflux-publish", title="广播批准", body="内容",
+        context="pending_publish id=1_1", send=False,
+    )
+    resolved = []
+    real_resolve = memorial.resolve
+    monkeypatch.setattr(
+        memorial, "resolve",
+        lambda *a, **k: resolved.append((a, k)) or real_resolve(*a, **k))
+
+    path = _draft(tmp_path)
+    mark_approved_failure(path, json.loads(path.read_text()), "offline")
+    result = reconcile_pending_drafts(
+        tmp_path, publisher=lambda d, cwd: (True, ""))
+
+    assert result["published"] == 1
+    assert resolved, (
+        "live-root retry success bypassed memorial.resolve() — the ledger "
+        "flips but the delivered card still shows 广播失败"
+    )
+    st = memorial.get_memorial(mid)
+    assert st["status"] == "decided"
+    assert "已广播" in st.get("resolved_label", "")

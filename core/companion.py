@@ -87,9 +87,10 @@ DEFAULT_KIND = KIND_NOTICE
 
 WINDOW_DAYS = 14
 
-# Below this a rate is noise, not evidence. Same reasoning as
-# core.attention_roi.MIN_SAMPLE, deliberately the same number: a kind that has
-# spoken 3 times has not earned a verdict either way.
+# Below this a rate is noise, not evidence — same reasoning as
+# core.attention_roi.MIN_SAMPLE (which is 8), deliberately smaller here:
+# checkin speaks a few times a day at most, and waiting 8 samples per KIND
+# would leave the governor inert for weeks.
 MIN_SAMPLE = 6
 
 # Per-kind daily allowance. FLOOR is the point of the whole module: a kind that
@@ -145,11 +146,11 @@ def last_spoke_path() -> Path:
 
 
 def _append(row: dict) -> None:
-    path = voice_log_path()
+    # flock matters here: the log is written from both the checkin post-hook
+    # and the Lark card-callback thread (record_engaged).
+    from core.jsonl import append_jsonl_locked
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        append_jsonl_locked(voice_log_path(), row)
     except OSError as exc:  # never let bookkeeping kill a checkin
         print(f"[companion] voice log write failed: {exc}", file=sys.stderr)
 
@@ -198,42 +199,24 @@ def recent_wins(limit: int = 3, rows: list[dict] | None = None) -> list[dict]:
 
 
 def read_voice_log(limit: int = 500) -> list[dict]:
-    rows: list[dict] = []
-    try:
-        with voice_log_path().open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        return []
-    return rows[-limit:]
+    from core.jsonl import read_jsonl
+    return read_jsonl(voice_log_path())[-limit:]
 
 
 def hours_since_spoke() -> float | None:
-    """Hours since the last card shipped. None when it has never spoken."""
-    from datetime import datetime
-    raw = ""
+    """Hours since the last card shipped. None when it has never spoken.
+
+    Read from the stamp file's mtime — the very fact components.yaml's
+    file_age check supervises — so the silence alarm and the budget floor can
+    never disagree about the same outage. A missing stamp reads as
+    never-spoken, which makes the floor owe a card, which recreates the
+    stamp: self-healing in the direction of speaking.
+    """
+    import time as _time
     try:
-        raw = last_spoke_path().read_text(encoding="utf-8").strip()
+        return (_time.time() - last_spoke_path().stat().st_mtime) / 3600.0
     except OSError:
-        raw = ""
-    if not raw:
-        for row in reversed(read_voice_log()):
-            if row.get("ev") == "spoke":
-                raw = str(row.get("ts", ""))
-                break
-    if not raw:
         return None
-    try:
-        when = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-    except ValueError:
-        return None
-    return (now_local().replace(tzinfo=None) - when).total_seconds() / 3600.0
 
 
 def normalize_kind(kind: object) -> str:
@@ -255,11 +238,6 @@ def _kind_from_context(context: object) -> str:
     if isinstance(parsed, dict):
         return normalize_kind(parsed.get("kind"))
     return DEFAULT_KIND
-
-
-def _card_kind(state: dict) -> str:
-    """The kind a card declared, read back from its stored context."""
-    return _kind_from_context(state.get("context", ""))
 
 
 def kind_stats(window_days: int = WINDOW_DAYS,
@@ -285,7 +263,7 @@ def kind_stats(window_days: int = WINDOW_DAYS,
             continue
         if str(state.get("ts", "")) < cutoff:
             continue
-        row = stats[_card_kind(state)]
+        row = stats[_kind_from_context(state.get("context", ""))]
         row["n"] += 1
         opt = str(state.get("decided_opt", ""))
         if str(state.get("chat_ts", "")):
@@ -321,14 +299,13 @@ def allowances(stats: dict[str, dict] | None = None) -> dict[str, int]:
             continue
         score = row["score"]
         if score >= 0.60:
-            value = ALLOWANCE_CEILING
+            out[kind] = ALLOWANCE_CEILING
         elif score >= 0.30:
-            value = ALLOWANCE_BASE + 1
+            out[kind] = ALLOWANCE_BASE + 1
         elif score >= 0.05:
-            value = ALLOWANCE_BASE
+            out[kind] = ALLOWANCE_BASE
         else:
-            value = ALLOWANCE_FLOOR
-        out[kind] = max(ALLOWANCE_FLOOR, min(ALLOWANCE_CEILING, value))
+            out[kind] = ALLOWANCE_FLOOR
     return out
 
 
@@ -366,7 +343,9 @@ def plan(stats: dict[str, dict] | None = None,
 
     hours = hours_since_spoke() if silent_hours is None else silent_hours
     owed = ""
-    if day_left > 0 and (hours is None or hours >= FLOOR_HOURS):
+    # No day_left check: a spent day zeroes every `remaining` entry above,
+    # so `ranked` comes back empty on its own.
+    if hours is None or hours >= FLOOR_HOURS:
         ranked = sorted(
             (k for k in KINDS if remaining[k] > 0),
             key=lambda k: (-(stats.get(k) or {}).get("score", 0.0), k),
@@ -423,6 +402,15 @@ def brief(state: dict | None = None) -> str:
         lines.append("最近真的聊起来的（这些 register 是够到他的，照着这个方向找）：")
         for win in wins:
             lines.append(f"  [{win.get('kind', '?')}] {win.get('title', '')}")
+
+    lines.append("")
+    lines.append("发卡时必须带一行 KIND: followup|standing|notice|guide —")
+    for kind in KINDS:
+        lines.append(f"  {kind:9} {KIND_HELP[kind]}")
+    lines.append(
+        "按卡片的真实性质选，预算按它扣，「这类不必」教的也是它——"
+        "别为绕开用完的预算把 notice 标成 followup，那会污染 Pascal 唯一的信号。"
+        "这一行送出前会被剥掉。")
 
     lines.append("")
     if state["owed"]:
