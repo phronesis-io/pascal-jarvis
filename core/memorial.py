@@ -2192,6 +2192,10 @@ def _finish_decide_side_effects(
     if opt.get("reply") or opt_key not in _FYI_KEYS:
         _queue_decision_context(st, opt.get("label", ""), action_result,
                                 is_reply=bool(opt.get("reply")))
+    # A reply tap with no bound action gets a PROACTIVE follow-up turn; a tap
+    # whose real action already ran needs no second responder.
+    if opt.get("reply") and not opt.get("action"):
+        _queue_reply_followup(st, opt_key, opt.get("label", ""))
     if action_failed:
         _sync_lark_card(memorial_id, _decided_card(st))
 
@@ -2321,7 +2325,9 @@ def decide(
         toast = {"type": "info",
                  "content": f"已记下，但动作没有执行：{action_result[:60]}"}
     elif opt.get("reply"):
-        toast = {"type": "success", "content": "收到——下条消息我接着这个说"}
+        # Honest promise: the reply-followup task answers proactively — the
+        # old「下条消息我接着这个说」meant HE had to speak first (dead end).
+        toast = {"type": "success", "content": "收到——我马上接手，稍后回你"}
     else:
         toast = {"type": "success", "content": f"已批：{opt.get('label', '')} ✓"}
     decided_card = _decided_card(st)
@@ -2493,6 +2499,90 @@ def explain_complete(memorial_id: str) -> None:
     rows = [r for r in read_jsonl(_explain_queue_path())
             if str(r.get("memorial_id")) != str(memorial_id)]
     write_jsonl(_explain_queue_path(), rows)
+
+
+REPLY_FOLLOWUP_QUEUE_FILE = "reply_followup_queue.jsonl"
+REPLY_FOLLOWUP_RETAKE_S = 600  # a claimed request older than this is retaken
+
+
+def _reply_followup_queue_path() -> Path:
+    return JARVIS_DIR / "data" / REPLY_FOLLOWUP_QUEUE_FILE
+
+
+def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
+    """A suggested-reply tap is a spoken sentence, not a filed preference.
+
+    Before this queue existed the tap only wrote a pending-merge injection
+    that waits for Pascal's NEXT message — so a button labeled with an action
+    verb (「现在授权」) sat inert until he typed something himself, which is
+    the dead end he called out on 2026-08-07. Queueing here lets the
+    reply-followup heartbeat task answer proactively, exactly like
+    explain-card answers a 「看不懂」tap.
+    """
+    from core.jsonl import append_jsonl_locked
+    try:
+        append_jsonl_locked(_reply_followup_queue_path(), {
+            "memorial_id": st["id"], "opt_key": opt_key, "label": label,
+            "ts": now_local_str(), "taken_at": 0})
+    except OSError as exc:
+        print(f"memorial reply followup: queue write failed: {exc}",
+              file=sys.stderr)
+        return
+    try:  # hasten the next heartbeat cycle — best-effort
+        Path("/tmp/jarvis-heartbeat-trigger").touch()
+    except OSError:
+        pass
+
+
+def reply_followup_claim(now_epoch: int | None = None) -> dict | None:
+    """Claim the oldest unanswered reply-tap (pre-script side).
+
+    Claiming stamps taken_at instead of deleting: a dead model call must not
+    eat the request — he tapped, an unanswered tap is a dead end. Requests
+    claimed longer than REPLY_FOLLOWUP_RETAKE_S ago are retaken.
+    """
+    from core.jsonl import read_jsonl, write_jsonl
+
+    now_e = int(time.time()) if now_epoch is None else int(now_epoch)
+    rows = read_jsonl(_reply_followup_queue_path())
+    for row in rows:
+        if int(row.get("taken_at") or 0) > now_e - REPLY_FOLLOWUP_RETAKE_S:
+            continue
+        row["taken_at"] = now_e
+        write_jsonl(_reply_followup_queue_path(), rows)
+        return dict(row)
+    return None
+
+
+def reply_followup_complete(memorial_id: str) -> None:
+    """Drop a fulfilled request (post-script side)."""
+    from core.jsonl import read_jsonl, write_jsonl
+
+    rows = [r for r in read_jsonl(_reply_followup_queue_path())
+            if str(r.get("memorial_id")) != str(memorial_id)]
+    write_jsonl(_reply_followup_queue_path(), rows)
+
+
+def settle_decision_context(memorial_id: str, handled_note: str) -> None:
+    """Rewrite the still-pending decision injection after a proactive answer.
+
+    The reply-followup task already acted on the tap, but the pending-merge
+    injection still says「照它行动」— left as-is, Pascal's next real message
+    would make the conversational session act a SECOND time. The conversation
+    must still learn the decision, so the entry is rewritten, not removed.
+    """
+    from core.jsonl import read_jsonl, write_jsonl
+
+    path = _pending_merge_path()
+    rows = read_jsonl(path)
+    job_id = f"memorial-decision:{memorial_id}"
+    changed = False
+    for row in rows:
+        if row.get("job_id") == job_id:
+            row["summary"] = handled_note
+            changed = True
+    if changed:
+        write_jsonl(path, rows)
 
 
 def recent_confused(limit: int = 3) -> list[dict]:

@@ -379,6 +379,23 @@ OPTIONS 行的**下一行**写：
 
 ## Check-in & Wellbeing
 
+### reply-followup
+- interval: 2m
+- pre: tasks/reply_followup_pre.sh
+- post: tasks/reply_followup_post.py
+- prompt: |
+    [REPLY FOLLOWUP — 他点了建议回复，现在就接手]
+    Pascal 在 DATA 里那张卡上点了一个建议回复按钮。那句话当作他刚亲口说的，
+    你的输出会直接作为消息发给他。规矩：
+    1. 第一行以 [reply-followup <id>] 开头（原样保留 DATA 里的那行 id 标记）。
+    2. 能直接做的事**现在就做完再回话**（你有工具权限）：查状态、跑命令、
+       改配置都行。飞书授权掉线类（他点了「现在授权」这种）：直接跑
+       `python3 -m core.lark_auth start`，它会把授权链接发到他飞书并后台
+       轮询，你只汇报"链接已发"。
+    3. 做不了的，给他能直接用的具体下一步（一条命令/一个链接），
+       **绝不反问**"你想怎么办/怎么授权"——他点按钮就是已经说了要干什么。
+    4. 汇报≤3行，人话，无术语。做了什么、结果如何、还差什么（没有就不写）。
+
 ### explain-card
 - interval: 2m
 - pre: tasks/explain_card_pre.sh
