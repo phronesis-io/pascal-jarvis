@@ -72,6 +72,15 @@ def test_empty_lines_yield_no_bodies():
     assert change_card_bodies([]) == []
 
 
+def test_long_change_batch_merges_into_one_card():
+    """2026-08-07: a 15:14 sync pushed 7 日程变动 cards in one beat; Pascal
+    tapped none and asked to merge. Past 3 changes the batch is ONE matter."""
+    lines = [f"新增：8/1{i}(周三) 1{i}:00 会议{i}" for i in range(5)]
+    bodies = change_card_bodies(lines)
+    assert len(bodies) == 1
+    assert all(ln in bodies[0] for ln in lines)  # nothing dropped
+
+
 def _fixed_now():
     return datetime(2026, 7, 21, 14, 0)
 

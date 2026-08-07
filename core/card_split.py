@@ -11,9 +11,11 @@ Conservative by design — false splits are worse than occasional misses, so a
 body is only split when its structure is unambiguously a list of independent
 matters:
 
-1. Change-list bodies: ≥2 lines matching the 改期/新增/取消 pattern and
+1. Change-list bodies: 2–3 lines matching the 改期/新增/取消 pattern and
    NOTHING else (except the …另有 N 项 overflow counter, which rides on the
-   last matter). A change line embedded in analytical prose never splits.
+   last matter). A change line embedded in analytical prose never splits, and
+   a list longer than MERGE_CHANGE_LIST_ABOVE stays merged — past that length
+   it is a batch of calendar churn, not N matters worth N buzzes.
 2. Bold-section bodies: the body starts with a standalone ``**heading**``
    line and contains ≥2 such headings, none of which is a generic
    sub-section word (背景/建议/下一步…) — those mark ONE matter's internal
@@ -52,6 +54,13 @@ _GENERIC_SECTION_WORDS = {
 # this many matters the remainder is kept together in the final card.
 MAX_SPLIT_CARDS = 6
 
+# A change list stops being "one matter each" once it is long enough to read
+# as a batch. Pascal, 2026-07-21: three shifted meetings should be three
+# cards. Pascal, 2026-08-07 (after 9 日程变动 cards in 24h, 4 taps total):
+# "有些可以合并的可以". Both hold at once — split a short list, merge a long
+# one, because a long one IS one matter ("your calendar moved a lot today").
+MERGE_CHANGE_LIST_ABOVE = 3
+
 
 def _cap(chunks: list[str]) -> list[str]:
     if len(chunks) <= MAX_SPLIT_CARDS:
@@ -76,6 +85,9 @@ def _split_change_lines(body: str) -> list[str] | None:
             # Any other prose means this is a composed narrative — leave it.
             return None
     if len(matters) < 2:
+        return None
+    if len(matters) > MERGE_CHANGE_LIST_ABOVE:
+        # A batch, not N independent matters — one card carrying every line.
         return None
     if overflow:
         matters[-1] = matters[-1] + "\n" + "\n".join(overflow)

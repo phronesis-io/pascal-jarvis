@@ -7,8 +7,8 @@ Design principle: SILENT by default.
 - Only notify the user when there's a STRUCTURAL change worth their attention:
   new events added, events cancelled, or time conflicts detected.
 - When notifying, use ONE natural sentence — not a table.
-- One card per change (一张卡一件事, REQ-117): N events changed → N cards,
-  never one merged card.
+- One card per change (一张卡一件事, REQ-117) while the batch is small
+  (≤3 changes); a longer batch of churn ships as ONE card (2026-08-07).
 
 UX first principle: the user's calendar is always available in memory for
 the main conversation to reference. The heartbeat's job is NOT to repeat
@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
+from core.card_split import split_matters
 from core.safety import looks_like_error
 from core.timeutil import now_local_str
 
@@ -149,22 +150,19 @@ def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
 
 
 def change_card_bodies(lines: list[str]) -> list[str]:
-    """One card body per change — 一张卡一件事 (Pascal's 7/10 decree, REQ-117).
+    """Card bodies for a batch of calendar changes.
 
-    On 7/21 three 改期 lines went out merged into ONE card; Pascal explicitly
-    prefers three cards for three shifted meetings over one merged card. Each
-    改期/新增/取消 line is already one matter (a moved event's remove+add pair
-    was collapsed into a single 改期 line upstream), so: one line = one card.
-    The …另有 N 项 overflow counter is not a matter of its own — it rides on
-    the last card instead of buzzing the phone with a context-free stub.
+    Delegates to core.card_split so this hook and the memorial backstop apply
+    ONE rule: 2–3 changes are 一张卡一件事 (Pascal's 7/10 decree, REQ-117 —
+    on 7/21 he explicitly wanted three cards for three shifted meetings); a
+    longer list stays on one card (2026-08-07, after 9 日程变动 cards in a day
+    drew 0 taps). The …另有 N 项 overflow counter is never a matter of its
+    own — it rides on the last card instead of buzzing a context-free stub.
     """
-    matters = [ln for ln in lines if not ln.startswith("…另有")]
-    overflow = [ln for ln in lines if ln.startswith("…另有")]
-    if not matters:
-        return ["\n".join(lines)] if lines else []
-    if overflow:
-        matters[-1] = matters[-1] + "\n" + "\n".join(overflow)
-    return matters
+    body = "\n".join(lines).strip()
+    if not body:
+        return []
+    return split_matters(body)
 
 
 def main() -> int:
