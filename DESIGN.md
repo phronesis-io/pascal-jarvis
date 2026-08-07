@@ -14,6 +14,21 @@ It routes based on the human attention cost.
 
 ## Surface Responsibilities
 
+Surface reality check (owner verdict, 2026-08-07): every real interaction —
+taps, replies, reads — happens in Lark; recorded web-dashboard traffic is
+zero and the phone desk was never successfully paired. Therefore:
+
+- **Lark is the product.** A user-facing feature counts as delivered only
+  when its full loop (see it, decide it, see the outcome) works inside
+  Lark. Web visibility is not delivery.
+- **Lark arrival volume is the product's pulse.** `core.presence` pages
+  selfmon when it falls below floor; treat that page as a P0, not a metric.
+- **Web dashboard and the mobile gateway are frozen**: archive + ops
+  reference only. No new feature investment lands there; content that only
+  reaches the archive gets its one shot via the morning-anchor batch line.
+- Routines is frozen pending fold-into-Lark or retirement (five days live,
+  zero uses).
+
 ### Lark
 
 - Short, immediate, conversational.

@@ -48,6 +48,19 @@ def main() -> int:
         return 0
     morning_anchor_mark()
 
+    # Deterministic footer, not part of the model's one-line contract: cards
+    # that only reached the web archive (zero recorded traffic) get their one
+    # batched shot at being seen here (style contract 攒批≥5条晨匣提一行).
+    try:
+        from core.presence import morning_digest_line
+        digest = morning_digest_line()
+    except Exception as exc:
+        print(f"[morning-anchor] presence digest failed: {exc}",
+              file=sys.stderr)
+        digest = ""
+    if digest:
+        message = f"{message}\n{digest}"
+
     print(build_card("🌅 晨间锚点", message, source="morning-anchor"))
     return 0
 
