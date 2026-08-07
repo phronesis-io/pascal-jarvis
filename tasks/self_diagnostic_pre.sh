@@ -176,6 +176,12 @@ if "${_TO[@]}" lark-cli event list 2>/dev/null | grep -qi 'card'; then
   echo "   (re-add the 收藏 button in tasks/content_recommend_post.py, add card.action.trigger consumption; see PRD REQ-17)"
 fi
 
+# 6b. Presence floor (2026-08-07) — the 7/24 cliff ran ten days with every
+#     check green because cards were "delivered" to surfaces nobody opens.
+#     Feishu arrival volume is the product's pulse; below floor = page.
+echo ""
+(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" python3 -m core.presence check 2>/dev/null) || true
+
 # 7. Channel watermarks (REQ-12) — flags starved tasks / open circuits /
 #    delivery failures so dead channels are caught here, not by the user.
 echo ""
