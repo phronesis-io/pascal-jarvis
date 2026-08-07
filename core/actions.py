@@ -158,6 +158,11 @@ class ActionProcessor:
             "delegation_retry",
             "iteration_approve",
             "iteration_reject",
+            # State-changing auth flow: the chat-reply marker path must not
+            # let injected text mint auth links. Card taps and the
+            # reply-followup post-hook call the handler directly and are
+            # unaffected.
+            "lark_auth_login",
         }
         receipt_actions = owner_actions | {
             "eigenflux_friend",
@@ -490,6 +495,16 @@ class ActionProcessor:
         with self.heartbeat_trigger_path.open("a") as f:
             f.write(task + "\n")
         return ""
+
+    def _do_lark_auth_login(self, raw: str) -> str:
+        # 「现在授权」card button: start the hands-free device flow (link DM
+        # + detached poller + receipt). Raising here would only reach stderr;
+        # the FAILED string is what decide()'s honest-toast path understands.
+        from core.lark_auth import start_device_flow
+        try:
+            return start_device_flow()
+        except Exception as e:
+            return f"FAILED: {e}"
 
     # ── Calendar ──
 

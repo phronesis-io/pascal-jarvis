@@ -80,3 +80,41 @@ def append_jsonl_locked(path, entry: dict) -> None:
     with open(p, "a", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line)
+
+
+def rewrite_jsonl_locked(path, transform) -> list[dict]:
+    """Read-transform-write IN PLACE under the same flock the appenders take.
+
+    ``transform(entries) -> entries`` gets the parsed rows and returns the
+    rows to keep. In-place truncate+write (no tmp+rename) is deliberate: a
+    rename swaps the inode, so a concurrent ``append_jsonl_locked`` blocked
+    on the old inode's flock would wake up and write its line into an
+    orphaned file — the append would be silently lost. Truncating the locked
+    handle keeps every writer on one inode. The cost is that an UNLOCKED
+    reader may glimpse a torn file; read_jsonl skips malformed lines, and
+    the queues using this helper are only read by their own locked claim
+    path. Returns the rows written.
+    """
+    import fcntl
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        entries = []
+        for line in f.read().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        entries = transform(entries)
+        body = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries)
+        f.seek(0)
+        f.truncate()
+        f.write(body + "\n" if body else "")
+        f.flush()
+    return entries

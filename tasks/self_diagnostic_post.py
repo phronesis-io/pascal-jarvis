@@ -101,12 +101,34 @@ def _mark_alerted(lines: list[str]) -> None:
         pass
 
 
+# Warning line emitted by self_diagnostic_pre.sh when the lark-cli user
+# token is gone. Seeing it means the card can offer a REAL fix button —
+# 「现在授权」runs the device flow instead of asking Pascal to open a
+# terminal (2026-08-07: the reply-only version of this button was a dead
+# end he had to talk his way out of).
+_USER_TOKEN_MARKER = "user token 探针失败"
+
+_AUTH_OPTIONS = [
+    {"key": "auth", "label": "现在授权",
+     "action": {"type": "lark_auth_login", "params": {}}},
+    {"key": "read", "label": "已阅", "action": None},
+]
+
+
+def _options_for(text: str) -> list[dict] | None:
+    """Real fix buttons for warnings that have a hands-free fix."""
+    if _USER_TOKEN_MARKER in text:
+        return [dict(o) for o in _AUTH_OPTIONS]
+    return None
+
+
 def _send(text: str, user_id: str) -> bool:
     try:
         from core import memorial
         mid, _ = memorial.create(
             source="selfmon", title="自诊断发现问题", body=text,
-            preset="fyi", urgent=True, attention="alert")
+            options=_options_for(text), preset="fyi", urgent=True,
+            attention="alert")
         state = memorial.get_memorial(mid) or {}
         if state.get("delivery_status") in {
                 "delivered", "queued", "retry_queued"}:

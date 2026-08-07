@@ -26,13 +26,17 @@ def main() -> int:
         text = text.replace(m.group(0), "").strip()
         memorial.explain_complete(mid)
     else:
-        # No id echoed — still deliver, settle the oldest claimed request so
-        # the queue cannot wedge on a model that dropped the marker.
+        # No id echoed — still deliver, settle the MOST RECENTLY claimed
+        # request so the queue cannot wedge on a model that dropped the
+        # marker. The oldest claimed row could be a dead earlier claim
+        # awaiting retake — settling that one would swallow its tap and
+        # leave this one queued for a duplicate retelling.
         from core.jsonl import read_jsonl
         claimed = [r for r in read_jsonl(memorial._explain_queue_path())
                    if int(r.get("taken_at") or 0)]
         if claimed:
-            memorial.explain_complete(str(claimed[0].get("memorial_id")))
+            newest = max(claimed, key=lambda r: int(r.get("taken_at") or 0))
+            memorial.explain_complete(str(newest.get("memorial_id")))
     print(f"🤔 你说看不懂的那张，大白话重讲：\n\n{text}")
     return 0
 

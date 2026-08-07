@@ -2192,7 +2192,14 @@ def _finish_decide_side_effects(
     if opt.get("reply") or opt_key not in _FYI_KEYS:
         _queue_decision_context(st, opt.get("label", ""), action_result,
                                 is_reply=bool(opt.get("reply")))
-    if action_failed:
+    # A reply tap with no bound action gets a PROACTIVE follow-up turn; a tap
+    # whose real action already ran needs no second responder.
+    if opt.get("reply") and not opt.get("action"):
+        _queue_reply_followup(st, opt_key, opt.get("label", ""))
+    # Re-sync on FAILED/no-op too: an action that outlives decide()'s 2s
+    # budget resolves on this async path AFTER the ✓ toast already went out —
+    # the card is then the only surface that can tell him it didn't happen.
+    if action_failed or _action_result_is_noop(action_result):
         _sync_lark_card(memorial_id, _decided_card(st))
 
 
@@ -2321,7 +2328,9 @@ def decide(
         toast = {"type": "info",
                  "content": f"已记下，但动作没有执行：{action_result[:60]}"}
     elif opt.get("reply"):
-        toast = {"type": "success", "content": "收到——下条消息我接着这个说"}
+        # Honest promise: the reply-followup task answers proactively — the
+        # old「下条消息我接着这个说」meant HE had to speak first (dead end).
+        toast = {"type": "success", "content": "收到——我马上接手，稍后回你"}
     else:
         toast = {"type": "success", "content": f"已批：{opt.get('label', '')} ✓"}
     decided_card = _decided_card(st)
@@ -2493,6 +2502,117 @@ def explain_complete(memorial_id: str) -> None:
     rows = [r for r in read_jsonl(_explain_queue_path())
             if str(r.get("memorial_id")) != str(memorial_id)]
     write_jsonl(_explain_queue_path(), rows)
+
+
+REPLY_FOLLOWUP_QUEUE_FILE = "reply_followup_queue.jsonl"
+REPLY_FOLLOWUP_RETAKE_S = 600  # a claimed request older than this is retaken
+REPLY_FOLLOWUP_MAX_ATTEMPTS = 3  # then drop loudly — no infinite retake loop
+
+_TRIGGER_PATH = Path("/tmp/jarvis-heartbeat-trigger")
+
+
+def _reply_followup_queue_path() -> Path:
+    return JARVIS_DIR / "data" / REPLY_FOLLOWUP_QUEUE_FILE
+
+
+def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
+    """A suggested-reply tap is a spoken sentence, not a filed preference.
+
+    Before this queue existed the tap only wrote a pending-merge injection
+    that waits for Pascal's NEXT message — so a button labeled with an action
+    verb (「现在授权」) sat inert until he typed something himself, which is
+    the dead end he called out on 2026-08-07. Queueing here lets the
+    reply-followup heartbeat task answer proactively, exactly like
+    explain-card answers a 「看不懂」tap.
+    """
+    from core.jsonl import append_jsonl_locked
+    try:
+        append_jsonl_locked(_reply_followup_queue_path(), {
+            "memorial_id": st["id"], "opt_key": opt_key, "label": label,
+            "ts": now_local_str(), "taken_at": 0, "attempts": 0})
+    except OSError as exc:
+        print(f"memorial reply followup: queue write failed: {exc}",
+              file=sys.stderr)
+        return
+    try:  # hasten the next heartbeat cycle — best-effort
+        _TRIGGER_PATH.touch()
+    except OSError:
+        pass
+
+
+def reply_followup_claim(now_epoch: int | None = None) -> dict | None:
+    """Claim the oldest unanswered reply-tap (pre-script side).
+
+    Claiming stamps taken_at instead of deleting: a dead model call must not
+    eat the request — he tapped, an unanswered tap is a dead end. Requests
+    claimed longer than REPLY_FOLLOWUP_RETAKE_S ago are retaken, at most
+    REPLY_FOLLOWUP_MAX_ATTEMPTS times: an entry that keeps dying is dropped
+    with a stderr trace instead of retrying forever (its answer may be
+    tripping looks_like_error every round).
+
+    Locked rewrite: the sidecar's decide() appends concurrently under the
+    same flock — an unlocked read-modify-write here could clobber a tap
+    that landed mid-rewrite, silently and unrecoverably.
+    """
+    from core.jsonl import rewrite_jsonl_locked
+
+    now_e = int(time.time()) if now_epoch is None else int(now_epoch)
+    claimed: list[dict] = []
+
+    def _take(rows: list[dict]) -> list[dict]:
+        kept = []
+        for row in rows:
+            if int(row.get("attempts") or 0) >= REPLY_FOLLOWUP_MAX_ATTEMPTS:
+                print("memorial reply followup: dropping after "
+                      f"{REPLY_FOLLOWUP_MAX_ATTEMPTS} attempts: {row}",
+                      file=sys.stderr)
+                continue
+            if not claimed and int(row.get("taken_at") or 0) <= (
+                    now_e - REPLY_FOLLOWUP_RETAKE_S):
+                row = dict(row, taken_at=now_e,
+                           attempts=int(row.get("attempts") or 0) + 1)
+                claimed.append(row)
+            kept.append(row)
+        return kept
+
+    rewrite_jsonl_locked(_reply_followup_queue_path(), _take)
+    return dict(claimed[0]) if claimed else None
+
+
+def reply_followup_complete(memorial_id: str) -> None:
+    """Drop a fulfilled request (post-script side)."""
+    from core.jsonl import rewrite_jsonl_locked
+
+    rewrite_jsonl_locked(
+        _reply_followup_queue_path(),
+        lambda rows: [r for r in rows
+                      if str(r.get("memorial_id")) != str(memorial_id)])
+
+
+def settle_decision_context(memorial_id: str, handled_note: str) -> None:
+    """Rewrite the still-pending decision injection after a proactive answer.
+
+    The reply-followup task already acted on the tap, but the pending-merge
+    injection still says「照它行动」— left as-is, Pascal's next real message
+    would make the conversational session act a SECOND time. The conversation
+    must still learn the decision, so the entry is rewritten, not removed.
+
+    Locked rewrite serializes against every Python appender (flocked
+    O_APPEND). bot.sh's consumer still does an unlocked tmp+replace — that
+    pre-existing window degrades to a duplicate/lost merge and is documented
+    as acceptable in bot.sh itself.
+    """
+    from core.jsonl import rewrite_jsonl_locked
+
+    job_id = f"memorial-decision:{memorial_id}"
+
+    def _rewrite(rows: list[dict]) -> list[dict]:
+        for row in rows:
+            if row.get("job_id") == job_id:
+                row["summary"] = handled_note
+        return rows
+
+    rewrite_jsonl_locked(_pending_merge_path(), _rewrite)
 
 
 def recent_confused(limit: int = 3) -> list[dict]:

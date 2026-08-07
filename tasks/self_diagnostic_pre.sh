@@ -82,7 +82,9 @@ if [ -n "$_LARK_UID" ] && command -v lark-cli >/dev/null 2>&1; then
        --start "$_probe_start" --end "$_probe_end" >/dev/null 2>&1; then
     echo "User-token probe: ✓"
   else
-    echo "⚠️ 日历 user token 探针失败 — calendar-sync 只能用旧快照兜底，需要跑 lark-cli auth login 重新授权"
+    # Keep the "user token 探针失败" marker verbatim: self_diagnostic_post
+    # keys the「现在授权」action button off it.
+    echo "⚠️ 日历 user token 探针失败 — 日历/邮件等信道只能用旧快照兜底，点「现在授权」我发你授权链接一键修复"
   fi
 fi
 
