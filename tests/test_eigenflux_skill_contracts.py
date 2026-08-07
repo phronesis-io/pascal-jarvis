@@ -30,12 +30,19 @@ def test_broadcast_contract_mirrors_feed_runtime_triggers():
     # upstream, which is free to reword — assert the ban itself, not one
     # sentence (the 7/6 upstream sync compressed contract.md's phrasing and
     # broke the exact-string version of this check).
-    auto_login_ban = ("Do NOT mint a one-time auto-login link",
-                      "never a one-time auto-login link")
+    # v0.10.2 reworded it again ("never a bare URL or one-time auto-login
+    # link" / "never … mint a one-time auto-login link") — anchor on the
+    # ban's object plus a negation in the same sentence, not any exact string.
+    def _bans_auto_login(text: str) -> bool:
+        return any(
+            "one-time auto-login link" in sentence
+            and any(neg in sentence.lower() for neg in ("never", "do not"))
+            for sentence in text.replace("\n", " ").split(". "))
+
     for text in (contract, feed):
         assert "feed_delivery_preference" in text
         assert "https://www.eigenflux.ai/dashboard" in text
-        assert any(marker in text for marker in auto_login_ban)
+        assert _bans_auto_login(text)
         assert "profile_calibration_remaining" in text
         assert "profile_followup_last" in text
         assert "📡 Powered by EigenFlux" in text
