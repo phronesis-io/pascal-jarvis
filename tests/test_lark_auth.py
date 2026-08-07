@@ -121,3 +121,26 @@ def test_poll_timeout_is_a_quiet_failure(monkeypatch, tmp_path):
         raise subprocess.TimeoutExpired(argv, 1)
 
     assert lark_auth.poll("dc_test123", run=run) == 1
+
+
+def test_json_parse_survives_noise_around_the_envelope():
+    noisy = ('lark-cli 1.0.84 available, run: lark-cli update\n'
+             '{"_notice": {"update": {"message": "..."}}}\n'
+             + STATUS_READY + '\ntrailing prose')
+    parsed = lark_auth._parse_json_output(noisy)
+    assert parsed["identities"]["user"]["status"] == "ready"
+    with pytest.raises(ValueError):
+        lark_auth._parse_json_output("no json here at all")
+
+
+def test_poller_spawn_failure_raises_before_the_link_is_promised():
+    """DM'ing a link nobody polls would let him authorize into the void —
+    the poller must be up before anything is promised."""
+    run = Runner([(_is_login_start, 0, FLOW_JSON), (_is_dm, 0, "{}")])
+
+    def popen(argv, **kwargs):
+        raise OSError("spawn failed")
+
+    with pytest.raises(OSError):
+        lark_auth.start_device_flow(run=run, popen=popen)
+    assert not any(_is_dm(argv) for argv in run.calls)

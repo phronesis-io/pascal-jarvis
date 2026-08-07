@@ -158,6 +158,11 @@ class ActionProcessor:
             "delegation_retry",
             "iteration_approve",
             "iteration_reject",
+            # State-changing auth flow: the chat-reply marker path must not
+            # let injected text mint auth links. Card taps and the
+            # reply-followup post-hook call the handler directly and are
+            # unaffected.
+            "lark_auth_login",
         }
         receipt_actions = owner_actions | {
             "eigenflux_friend",

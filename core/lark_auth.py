@@ -70,11 +70,42 @@ def _send_dm(text: str, run=subprocess.run) -> bool:
         return False
 
 
+def _parse_json_output(stdout: str) -> dict:
+    """Parse lark-cli JSON output that may carry non-JSON noise around it.
+
+    The no-notifier env vars silence update/skills notices, but other
+    freeform lines can still precede or trail the envelope. Whole-string
+    parse first; then a brace-scan for the last complete top-level object.
+    """
+    try:
+        return json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    decoder = json.JSONDecoder()
+    last: dict | None = None
+    idx = 0
+    while True:
+        brace = stdout.find("{", idx)
+        if brace < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(stdout, brace)
+            if isinstance(obj, dict):
+                last = obj
+            idx = brace + max(end - brace, 1)
+        except (json.JSONDecodeError, ValueError):
+            idx = brace + 1
+    if last is None:
+        raise ValueError("no JSON object in lark-cli output")
+    return last
+
+
 def _user_token_ready(run=subprocess.run) -> bool:
     try:
         r = run(["lark-cli", "auth", "status", "--json", "--verify"],
                 capture_output=True, text=True, timeout=30, env=_cli_env())
-        user = json.loads(r.stdout).get("identities", {}).get("user", {})
+        user = _parse_json_output(r.stdout).get(
+            "identities", {}).get("user", {})
         return str(user.get("status", "")) == "ready"
     except Exception:
         return False
@@ -94,18 +125,21 @@ def start_device_flow(run=subprocess.run, popen=subprocess.Popen) -> str:
         raise RuntimeError(
             (r.stderr or r.stdout or "lark-cli auth login failed").strip()[:300])
     try:
-        data = json.loads(r.stdout)
-    except json.JSONDecodeError as exc:
+        data = _parse_json_output(r.stdout)
+    except ValueError as exc:
         raise RuntimeError(f"device flow response not JSON: {exc}") from exc
     url = str(data.get("verification_url", "")).strip()
     code = str(data.get("device_code", "")).strip()
     if not url or not code:
         raise RuntimeError("device flow response missing verification_url/device_code")
 
-    sent = _send_dm(_LINK_DM.format(url=url), run=run)
+    # Poller BEFORE the DM: a link he can click with nobody polling would
+    # authorize into the void. If the spawn fails we raise before anything
+    # was promised to him.
     popen([sys.executable, "-m", "core.lark_auth", "poll", code],
           cwd=str(JARVIS_DIR), stdout=subprocess.DEVNULL,
           stderr=subprocess.DEVNULL, start_new_session=True)
+    sent = _send_dm(_LINK_DM.format(url=url), run=run)
     if sent:
         return ("已把授权链接发到你的飞书私聊（10 分钟内有效），"
                 "点开确认即可；完成后我会自动回执。")
