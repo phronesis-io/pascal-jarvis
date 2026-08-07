@@ -379,6 +379,13 @@ OPTIONS 行的**下一行**写：
 
 ## Check-in & Wellbeing
 
+### self-improve-cycle
+- interval: 12h
+- pre: tasks/self_improve_cycle_pre.sh
+- prompt: |
+    此任务的 pre 永远输出为空（真正的 3 天闸与分离拉起都在 pre 里），模型
+    永远不该收到这个提示词；收到即为 bug，回 HEARTBEAT_OK。
+
 ### reply-followup
 - interval: 2m
 - pre: tasks/reply_followup_pre.sh
