@@ -73,12 +73,21 @@ def test_multiple_bold_title_sections_split():
     assert chunks[1].startswith("**知会 · agent")
 
 
-def test_split_is_capped_against_card_storms():
+def test_long_change_list_stays_one_card():
+    """2026-08-07: 9 日程变动 cards in 24h drew 0 taps. Past
+    MERGE_CHANGE_LIST_ABOVE a change list is calendar churn — one batch, one
+    card — while 2–3 changes still split (test above)."""
     body = "\n".join(f"新增：7/2{i % 8}(周一) 1{i}:00 会议{i}" for i in range(10))
+    chunks = split_matters(body)
+    assert chunks == [body]  # merged, and nothing dropped
+
+
+def test_bold_section_split_is_capped_against_card_storms():
+    body = "\n\n".join(f"**知会 · 第{i}件**\n正文{i}" for i in range(10))
     chunks = split_matters(body)
     assert len(chunks) == MAX_SPLIT_CARDS
     # remainder is kept together, never dropped
-    assert sum(c.count("新增") for c in chunks) == 10
+    assert sum(c.count("知会") for c in chunks) == 10
 
 
 # ── split_matters: what must NOT split (over-split protection) ───────────
