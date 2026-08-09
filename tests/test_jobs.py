@@ -263,3 +263,33 @@ def test_description_truncation(tmp_path):
     job_id = jm.create_job("user-1", long_desc)
     job = jm.get_job(job_id)
     assert len(job["description"]) == 200
+
+
+# ── promoted-job closure contract (bot.sh, static) ──────────────────────
+# j-1786098762 (2026-08-07): an auto-promoted job did its work, but nothing
+# was ever written to the output_file the registry advertises, and the empty-
+# answer paths ended in deliberate silence — after the promotion message had
+# promised 「做完我会把结果发回来」. Silence is the right policy for an
+# interactive turn (the user can resend); for a promoted job it is a broken
+# promise. These contracts pin the receipt + persisted-output behavior.
+
+def _bot_source():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "bot.sh").read_text(
+        encoding="utf-8")
+
+
+def test_promoted_job_persists_its_result_where_the_registry_points():
+    source = _bot_source()
+    assert 'printf \'%s\\n\' "$reply" > "$JOBS_DIR/$_promoted_job/output.md"' \
+        in source
+    assert "任务失败：模型未产出结果" in source
+
+
+def test_promoted_job_never_ends_in_silence():
+    source = _bot_source()
+    assert "被外部中断，没有产出结果" in source
+    assert "没能产出可交付的结果" in source
+    # Both receipts reply to the ORIGINAL message the promotion notice
+    # answered, so the user finds them in the thread they were waiting in.
+    assert source.count('lark_reply_text "$message_id" \\\n            "后台任务 \\`$_promoted_job\\`') == 2
