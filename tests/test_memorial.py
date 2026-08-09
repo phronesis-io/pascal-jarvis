@@ -884,6 +884,26 @@ def test_direct_delivery_writes_engagement_sent_row(env):
     assert isinstance(sent[0]["epoch"], int)
 
 
+def test_direct_delivery_sent_row_carries_message_ids(env):
+    """engagement-analyze's delivery-ack attribution only counts sends with
+    message_ids — without them every direct-sent card (all routines) read
+    as "sent N, read 0" forever (2026-08-09 finding: 47 routine cards, zero
+    attributable reads, while the id sat unused in result.message_id)."""
+    memorial.create(source="routine:demo", title="t", body="b", urgent=True)
+    sent = [r for r in _engagement_rows(env.dir) if r["type"] == "sent"]
+    assert sent[0]["message_ids"] == ["om_test_fixture"]
+
+
+def test_unparsed_send_placeholder_never_becomes_a_message_id(env, monkeypatch):
+    """_send returns the literal "sent" when Lark's reply parses but carries
+    no id; that placeholder must not pollute read-receipt joins."""
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "sent")
+    memorial.create(source="release", title="t", body="b", urgent=True)
+    sent = [r for r in _engagement_rows(env.dir) if r["type"] == "sent"]
+    assert len(sent) == 1
+    assert "message_ids" not in sent[0]
+
+
 def test_failed_delivery_writes_no_sent_row(env):
     env.send_ok = False
     memorial.create(source="release", title="t", body="b")

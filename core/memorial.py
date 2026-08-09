@@ -1102,7 +1102,8 @@ def _record_engagement(row: dict) -> None:
         print(f"memorial engagement log failed: {e}", file=sys.stderr)
 
 
-def _record_delivery(memorial_id: str, status: str, source: str = "") -> None:
+def _record_delivery(memorial_id: str, status: str, source: str = "",
+                     message_id: str = "") -> None:
     _append_line(_ledger_path(), {
         "ev": "delivery", "id": memorial_id, "status": status,
         "ts": now_local_str(),
@@ -1112,8 +1113,15 @@ def _record_delivery(memorial_id: str, status: str, source: str = "") -> None:
     # like a CLI-sent release card stop reading as zero-output to
     # engagement-analyze.
     if status == "delivered" and source:
-        _record_engagement({"source": source, "type": "sent",
-                            "via": "memorial-direct"})
+        row = {"source": source, "type": "sent", "via": "memorial-direct"}
+        # engagement-analyze's delivery-ack attribution only counts sends
+        # carrying message_ids; without this every direct-sent card (all
+        # routines included) is invisible to read-receipt joins and shows
+        # up as "sent N, read 0". "sent" is _send's unparsed placeholder,
+        # never a real Lark id.
+        if message_id and message_id != "sent":
+            row["message_ids"] = [message_id]
+        _record_engagement(row)
 
 
 def _quiet_hours_now() -> bool:
@@ -1438,7 +1446,8 @@ def _deliver_existing(
 
     if result.state == "delivered":
         _record_delivery(
-            mid, "delivered", source=state.get("source", "memorial"))
+            mid, "delivered", source=state.get("source", "memorial"),
+            message_id=str(result.message_id or ""))
         if result.message_id:
             # REQ-118 奏折专属对话: remember the delivered card's Lark
             # message_id so a reply in its thread routes to a per-card session.
