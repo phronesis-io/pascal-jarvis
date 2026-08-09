@@ -1489,6 +1489,11 @@ print(build_system_prompt(
   # (it rotated away at promotion time and hasn't seen this answer).
   if [ -n "$_promoted_job" ]; then
     if [ -n "$reply" ]; then
+      # Persist the result where the registry already points: auto-promoted
+      # jobs never wrote output.md, so「job output <id>」answered "No output
+      # found" even for completed work (j-1786098762, 2026-08-07 — the user
+      # was told the result would come back, then had nowhere to read it).
+      printf '%s\n' "$reply" > "$JOBS_DIR/$_promoted_job/output.md" 2>>"$LOG_FILE" || true
       JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$_promoted_job" completed \
         2>>"$LOG_FILE" || true
       jq -cn --arg key "$conv_key" --arg job "$_promoted_job" \
@@ -1497,6 +1502,8 @@ print(build_system_prompt(
         >> "$JOBS_DIR/pending_merge.jsonl" 2>>"$LOG_FILE" || true
       log_info "[$session_id] Promoted job $_promoted_job completed (${#reply} chars)"
     else
+      printf '（任务失败：模型未产出结果 @ %s）\n' "$(date '+%Y-%m-%d %H:%M')" \
+        > "$JOBS_DIR/$_promoted_job/output.md" 2>>"$LOG_FILE" || true
       JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$_promoted_job" failed \
         2>>"$LOG_FILE" || true
       log_warn "[$session_id] Promoted job $_promoted_job finished empty/error"
@@ -1527,14 +1534,32 @@ print(build_system_prompt(
         # the bug that produced the restart-loop nag: 「继续」 re-runs whatever
         # was interrupted (often the very restart). Stay silent — the post-restart
         # startup path already notifies "重启中断了，请重发" from the message queue.
-        log_warn "[$session_id] exit=143 without watchdog marker — restart/external kill, staying silent"
+        # EXCEPT for a promoted job: the promotion message promised 「做完我会
+        # 把结果发回来」, so ending in silence is a broken promise, not calm.
+        if [ -n "$_promoted_job" ]; then
+          lark_reply_text "$message_id" \
+            "后台任务 \`$_promoted_job\` 被外部中断，没有产出结果。要接着做的话把任务再说一遍，我重新起一个。" >/dev/null
+          log_warn "[$session_id] exit=143 without watchdog marker — promoted job $_promoted_job, receipt sent"
+        else
+          log_warn "[$session_id] exit=143 without watchdog marker — restart/external kill, staying silent"
+        fi
       else
         # Transient empty response (API blip). We already retried silently up to
         # 4x with backoff above. Nagging "请稍后重试" just forces the user to tell
         # us to retry by hand — exactly the boring loop they asked us to remove.
         # Stay silent: the reaction is cleared above so the turn visibly ends,
         # and the user can resend if they were actually waiting on a reply.
-        log_warn "[$session_id] Empty after $_attempt attempts — staying silent (user opted out of the retry nag)"
+        # EXCEPT for a promoted job (no retries happen after promotion — the
+        # first empty answer lands here): the user was told a result would
+        # come back, and a job that ends in silence leaves them waiting on
+        # nothing (j-1786098762 class, 2026-08-07).
+        if [ -n "$_promoted_job" ]; then
+          lark_reply_text "$message_id" \
+            "后台任务 \`$_promoted_job\` 结束了，但没能产出可交付的结果，已记为失败。要重跑的话把任务再说一遍。" >/dev/null
+          log_warn "[$session_id] Promoted job $_promoted_job ended empty — receipt sent"
+        else
+          log_warn "[$session_id] Empty after $_attempt attempts — staying silent (user opted out of the retry nag)"
+        fi
       fi
     else
       # looks_like_error suppresses provider/auth/CLI failures; it is not a
