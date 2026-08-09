@@ -1,4 +1,4 @@
-self improve —— 这是三天一次的例行自进化轮（由 heartbeat 的 self-improve-cycle 任务分离拉起，无人值守）。
+self improve —— 这是每天一次的例行自进化轮（由 heartbeat 的 self-improve-cycle 任务分离拉起，无人值守）。
 
 授权与边界（Pascal 2026-08-07 亲口定的，MEMORY.md 里有对应记忆）：
 - 题目必须来自**真实价值数据**，不许拍脑袋：批阅率与噪声源（memorials.jsonl / engagement_log.jsonl，哪类卡发得多批得少）、死路按钮、presence 哨兵与投递断流、heartbeat 饥饿、以及上一轮 self-improve 记忆里挂的账。
