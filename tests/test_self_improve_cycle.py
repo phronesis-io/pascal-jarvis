@@ -1,4 +1,4 @@
-"""The 3-day self-improve cycle: gate discipline and spawn hygiene.
+"""The daily self-improve cycle: gate discipline and spawn hygiene.
 
 Owner authorization 2026-08-07:「你可以自己定时每几天根据你给我提供的价值，
 进行进步」. The heartbeat only hosts the schedule — these tests pin that the

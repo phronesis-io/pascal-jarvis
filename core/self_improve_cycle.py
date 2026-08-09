@@ -1,13 +1,14 @@
-"""Standing self-improvement cycle — value-driven, quiet, every three days.
+"""Standing self-improvement cycle — value-driven, quiet, every day.
 
 Owner authorization (2026-08-07): 「你可以自己定时每几天根据你给我提供的价值，
-进行进步」, on top of「有些自进化不用打扰我哦」. So: every ~3 days a detached
-Claude Code session runs one full self-improve round, mining its topics from
-the real value ledgers (批阅率, noise sources, dead ends, presence) and
-shipping internal reversible improvements without pinging Pascal; only
-directional or irreversible choices surface as a card.
+进行进步」, on top of「有些自进化不用打扰我哦」; tightened to DAILY on
+2026-08-09 by 「你就应该每天都想办法去自我进化一下，找时间去自我检修」. So:
+every ~24h a detached Claude Code session runs one full self-improve round,
+mining its topics from the real value ledgers (批阅率, noise sources, dead
+ends, presence) and shipping internal reversible improvements without pinging
+Pascal; only directional or irreversible choices surface as a card.
 
-The heartbeat hosts the SCHEDULE only: the pre-hook gates on a 3-day stamp,
+The heartbeat hosts the SCHEDULE only: the pre-hook gates on a daily stamp,
 spawns the detached session, and prints nothing — so the cycle consumes zero
 heartbeat model budget and cannot starve other tasks.
 """
@@ -29,7 +30,7 @@ JARVIS_DIR = Path(os.environ.get(
 WORK_DIR = Path(os.environ.get(
     "JV_SELF_IMPROVE_CWD", Path.home() / "Desktop" / "jarvis" / "repos"))
 
-CYCLE_S = 3 * 86400
+CYCLE_S = 86400
 PROMPT_FILE = "scripts/self_improve_prompt.md"
 LOG_FILE = "/tmp/jarvis-self-improve.log"
 
