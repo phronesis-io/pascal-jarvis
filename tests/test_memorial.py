@@ -114,6 +114,68 @@ def test_create_defaults_to_fyi_preset(env):
     assert env.cards == []
 
 
+def _routine_options(routine_id: str = "rt_test") -> list[dict]:
+    # Exact shape core.routines._card_options emits: ack plus the pause mute.
+    return [
+        {"key": "ack", "label": "知道了", "action": None},
+        {"key": "pause", "label": "这条以后别发了",
+         "action": {"type": "routine_pause", "params": {"id": routine_id}}},
+    ]
+
+
+def test_routine_card_is_notice_not_pending_decision(env):
+    # 8/3–8/10: the pause key promoted all 51 起来动动 rehab cards to
+    # decision class, so each carried a 48h 待批 deadline and 54 clogged the
+    # escrow docket — against the rule that rehab never becomes a demand.
+    mid, _ = memorial.create("routine:起来动动", "起来动动·肩胛",
+                             "把肩胛骨往后收几下。",
+                             options=_routine_options())
+    st = memorial.get_memorial(mid)
+    assert st["attention"] == "notice"
+    assert memorial.requires_decision(st) is False
+
+    from datetime import datetime, timedelta
+    created = datetime.strptime(st["ts"], "%Y-%m-%d %H:%M")
+    # Past the decision deadline it must NOT surface as 待批 …
+    scan = memorial.escrow_scan(now=created + timedelta(hours=72))
+    assert scan["overdue"] == [] and scan["lapse"] == []
+    # … and past the notice deadline it lapses quietly instead.
+    scan = memorial.escrow_scan(now=created + timedelta(days=8))
+    assert scan["overdue"] == []
+    assert [s["id"] for s, _ in scan["lapse"]] == [mid]
+
+
+def test_routine_notice_still_reaches_lark_when_desk_cannot_ring(env,
+                                                                 monkeypatch):
+    # The downgrade must not make the product's own voice invisible (the 7/24
+    # regression): with no desk, a routine notice rings Lark like checkin does.
+    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+    _, sent = memorial.create("routine:起来动动", "起来动动·眼睛",
+                              "看远处 20 秒。", options=_routine_options())
+    assert sent is True
+    assert len(env.cards) == 1
+
+
+def test_pause_mute_neither_promotes_nor_speaks_but_still_acts(env,
+                                                               monkeypatch):
+    # 「这条以后别发了」 silences a source: it is not an ask (no decision
+    # class on any source using it), its label is not a sentence Pascal said
+    # (no injected context), yet the bound routine_pause action still runs.
+    assert memorial._infer_attention(
+        [{"key": "ack"}, {"key": "pause"}], []) == memorial.ATTENTION_NOTICE
+
+    ran = []
+    monkeypatch.setattr(memorial, "_execute_action",
+                        lambda action, **kw: ran.append(action) or "已暂停")
+    mid, _ = memorial.create("mail", "t", "b", options=_routine_options())
+    memorial.decide(mid, "pause")
+
+    assert ran and ran[0]["type"] == "routine_pause"
+    pm = env.dir / "jobs" / "pending_merge.jsonl"
+    lines = pm.read_text().splitlines() if pm.exists() else []
+    assert not any("memorial-decision" in l for l in lines)
+
+
 def test_review_surface_matrix_preserves_attention_budget(env):
     phone_id, _ = memorial.create("project", "方案", "选一个", preset="decision")
     lark_id, _ = memorial.create(
