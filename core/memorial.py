@@ -143,7 +143,10 @@ PRESETS: dict[str, list[dict]] = {
 # suggested reply itself, so it is carried into the next conversation turn
 # first-person (see _queue_decision_context) instead of being filed away as a
 # generic 批红 rating. FYI keys are the only taps that stay purely analytic.
-_FYI_KEYS = {"read", "watch", "ack", "not_this_kind"}
+# "pause" is the routines mute control (「这条以后别发了」) — like
+# "not_this_kind" it silences a source rather than answering an ask, so it
+# must not promote the card to decision class or speak first-person.
+_FYI_KEYS = {"read", "watch", "ack", "not_this_kind", "pause"}
 ATTENTION_DECISION = "decision"
 ATTENTION_NOTICE = "notice"
 ATTENTION_ALERT = "alert"
@@ -239,6 +242,15 @@ NOTICE_SOURCES = {
 # single set both attention classifiers test (they were two hand-synced
 # inline unions before).
 NATURAL_NOTICE_SOURCES = WEB_FIRST_SOURCES | NOTICE_SOURCES
+# Routine cards are notices by design, same contract as checkin: their only
+# buttons are 「知道了」 and the routine_pause mute, and a propose-level
+# routine's real approvals travel through conversation, never card options
+# (core.routines refuses ungranted actions in prose). The pause key still
+# promoted every routine card to decision class — 51 起来动动 rehab cards in
+# 7 days each carrying a 48h 待批 deadline, against the standing rule that
+# rehab never becomes a demand. Prefix match because routine sources are
+# user-named (`routine:<name>`), not a fixed set.
+ROUTINE_SOURCE_PREFIX = "routine:"
 # Sources that may not author their own buttons: the preset is the contract.
 # Enforced in create() — the one boundary every card passes through — because
 # stripping at a particular entry path is exactly what the directive-strip
@@ -301,10 +313,11 @@ def natural_attention(source: str, options: list[dict],
     core.attention_roi measures against this so a demoted source's own
     demotion cannot be read back as evidence about it.
     """
-    if str(source or "") in NATURAL_NOTICE_SOURCES:
+    src = str(source or "")
+    if src in NATURAL_NOTICE_SOURCES or src.startswith(ROUTINE_SOURCE_PREFIX):
         return ATTENTION_NOTICE
     inferred = _infer_attention(options, extra_buttons)
-    if str(source or "") in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
+    if src in ALERT_SOURCES and inferred == ATTENTION_NOTICE:
         return ATTENTION_ALERT
     return inferred
 
