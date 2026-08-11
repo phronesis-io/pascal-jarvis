@@ -66,7 +66,8 @@ def test_restart_sh_settles_before_clearing_deploy_guard():
 def test_full_restart_refreshes_user_surfaces_and_verifies_all_runtimes():
     """A full release cannot leave independently supervised UI on old code."""
     assert "com.pascal.jarvis.dashboard" in RESTART_SH
-    assert "com.pascal.jarvis.mobile-gateway" in RESTART_SH
+    # Mobile gateway retired 2026-08-11 (REQ-120); it must stay gone.
+    assert "com.pascal.jarvis.mobile-gateway" not in RESTART_SH
     assert "restart_user_surfaces()" in RESTART_SH
     assert "verify_full_runtime()" in RESTART_SH
     assert "refresh_launchd_definitions()" in RESTART_SH
@@ -163,7 +164,7 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
     assert str(ROOT) in installed
     assert not (destination / "com.pascal.jarvis.daemon.plist").exists()
     assert not (
-        destination / "com.pascal.jarvis.mobile-gateway.plist"
+        destination / "com.pascal.jarvis.caffeinate.plist"
     ).exists()
     calls = launchctl_log.read_text(encoding="utf-8")
     assert "bootout " in calls
@@ -661,7 +662,7 @@ def test_launchd_installer_rolls_back_the_entire_selected_batch(tmp_path):
     destination.mkdir(parents=True)
     labels = (
         "com.pascal.jarvis.dashboard",
-        "com.pascal.jarvis.mobile-gateway",
+        "com.pascal.jarvis.daemon",
     )
     for label in labels:
         (destination / f"{label}.plist").write_text(
@@ -675,7 +676,7 @@ def test_launchd_installer_rolls_back_the_entire_selected_batch(tmp_path):
     state_dir.mkdir()
     for label in labels:
         (state_dir / label).write_text("loaded\n", encoding="utf-8")
-    fail_marker = tmp_path / "mobile-failed-once"
+    fail_marker = tmp_path / "daemon-failed-once"
     launchctl_log = tmp_path / "launchctl.log"
     launchctl = bin_dir / "launchctl"
     launchctl.write_text(
@@ -696,7 +697,7 @@ case "$1" in
     ;;
   bootstrap)
     label=$(basename "$3" .plist)
-    if [ "$label" = "com.pascal.jarvis.mobile-gateway" ] \
+    if [ "$label" = "com.pascal.jarvis.daemon" ] \
         && [ ! -f "$FAIL_MARKER" ]; then
       : > "$FAIL_MARKER"
       exit 5
@@ -733,7 +734,7 @@ esac
 
     assert result.returncode == 1
     assert "previous state restored" in result.stderr
-    assert "failed to install com.pascal.jarvis.mobile-gateway" in result.stderr
+    assert "failed to install com.pascal.jarvis.daemon" in result.stderr
     for label in labels:
         assert (destination / f"{label}.plist").read_text(
             encoding="utf-8"
@@ -757,7 +758,7 @@ def test_launchd_installer_rolls_back_after_plist_validation_failure(
     destination.mkdir(parents=True)
     labels = (
         "com.pascal.jarvis.dashboard",
-        "com.pascal.jarvis.mobile-gateway",
+        "com.pascal.jarvis.daemon",
     )
     for label in labels:
         (destination / f"{label}.plist").write_text(

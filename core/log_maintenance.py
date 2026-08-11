@@ -34,10 +34,6 @@ def managed_logs() -> tuple[ManagedLog, ...]:
             (Path("/tmp/jarvis-dashboard.log"),),
         ),
         ManagedLog(
-            "com.pascal.jarvis.mobile-gateway",
-            (Path("/tmp/jarvis-mobile-gateway.log"),),
-        ),
-        ManagedLog(
             "com.pascal.jarvis.taskline",
             (Path("/tmp/jarvis-taskline.log"),),
             optional=True,
