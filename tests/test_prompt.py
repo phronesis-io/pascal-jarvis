@@ -50,6 +50,29 @@ def test_build_system_prompt_with_compact(tmp_path):
     assert "discussed X" in prompt
 
 
+def test_owner_prompt_includes_bounded_cross_provider_context(tmp_path):
+    from core.matter_bridge import record_turn
+
+    (tmp_path / "memory").mkdir()
+    record_turn(
+        "owner-key", "assistant", "Codex just finished the implementation",
+        message_id="om_codex", provider="Codex", model="gpt-test")
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="claude-session",
+        conv_key="owner-key",
+        now_ts="2026-08-11 20:00",
+        tracker_path=str(tmp_path / "tracker.json"),
+    )
+
+    assert "Recent Cross-Provider Turns" in prompt
+    assert "Codex just finished the implementation" in prompt
+    assert "untrusted conversation history" in prompt
+
+
 def test_actions_doc_complete():
     """All action types should be documented."""
     actions = [
@@ -111,6 +134,17 @@ def test_group_prompt_never_loads_personal_memory(tmp_path):
     # The ACTIONS_DOC (which teaches marker syntax) must be absent — the
     # etiquette text mentioning [ACTION:...] as forbidden is fine.
     assert "Available Actions" not in prompt
+
+
+def test_group_prompt_does_not_load_provider_neutral_private_projection(tmp_path):
+    from core.matter_bridge import record_turn
+
+    (tmp_path / "memory").mkdir()
+    record_turn(
+        "oc_group1", "assistant", "PRIVATE_PROVIDER_TURN",
+        message_id="om_private", provider="Codex", model="gpt-test")
+
+    assert "PRIVATE_PROVIDER_TURN" not in _group_prompt(tmp_path)
 
 
 def test_group_prompt_uses_curated_group_context(tmp_path):

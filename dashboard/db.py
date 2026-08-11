@@ -410,6 +410,40 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_delivery_cap_reservation_day
         ON delivery_cap_reservations(day_start_epoch, source, throttle_key);
     """,
+    # v10: Per-conversation provider preference and persistent Codex thread.
+    """
+    CREATE TABLE IF NOT EXISTS conversation_provider_preferences (
+        conv_key TEXT PRIMARY KEY,
+        preference TEXT NOT NULL DEFAULT 'auto'
+            CHECK(preference IN ('auto', 'codex')),
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS codex_conversation_sessions (
+        conv_key TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        work_dir TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conv_key TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        text TEXT NOT NULL,
+        message_id TEXT NOT NULL DEFAULT '',
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_recent
+        ON conversation_turns(conv_key, id DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_message_role
+        ON conversation_turns(conv_key, role, message_id)
+        WHERE message_id <> '';
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

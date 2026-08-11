@@ -45,6 +45,14 @@ _DEFAULTS = {
         "timeout": 120,
         "max_output_tokens": 4096,
     },
+    "codex": {
+        # Uses the local Codex CLI and existing ChatGPT login. If the binary
+        # is absent, the route fails quickly and the API fallback remains next.
+        "fallback_enabled": True,
+        "fallback_model": "gpt-5.5",
+        "binary": "",
+        "timeout": 300,
+    },
     "memory": {
         "dir": "memory",
         "hourly_min_entries": 3,
@@ -134,6 +142,10 @@ class Config:
     @property
     def openai(self) -> dict:
         return self._raw.get("openai", {})
+
+    @property
+    def codex(self) -> dict:
+        return self._raw.get("codex", {})
 
     @property
     def memory(self) -> dict:

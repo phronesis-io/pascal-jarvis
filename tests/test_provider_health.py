@@ -15,6 +15,8 @@ claude:
   backup_base_url: https://backup.example
   backup_model: relay-opus
   backup2_enabled: false
+codex:
+  fallback_enabled: false
 openai:
   fallback_enabled: true
   fallback_model: gpt-test
@@ -35,6 +37,7 @@ def test_snapshot_distinguishes_configured_disabled_and_unverified(tmp_path):
     assert rows["backup1"]["status"] == "not_run"
     assert rows["backup1"]["requested_model"] == "relay-opus"
     assert rows["backup2"]["status"] == "disabled"
+    assert rows["codex"]["status"] == "disabled"
     assert rows["openai"]["status"] == "not_run"
     assert "secret" not in json.dumps(state)
 
@@ -180,6 +183,7 @@ def test_probe_all_persists_redacted_results(tmp_path):
         "healthy",
         "healthy",
         "disabled",
+        "disabled",
         "healthy",
     ]
     serialized = json.dumps(saved)
@@ -206,6 +210,78 @@ def test_probe_all_runs_independent_claude_routes_concurrently(tmp_path):
     rows = {row["id"]: row for row in state["providers"]}
     assert rows["primary"]["status"] == "healthy"
     assert rows["backup1"]["status"] == "healthy"
+
+
+def test_codex_probe_is_ephemeral_read_only_and_exact(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    config_path = tmp_path / "jarvis.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "codex:\n  fallback_enabled: false",
+            "codex:\n  fallback_enabled: true\n  fallback_model: gpt-test\n"
+            "  binary: /opt/codex",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ph, "resolve_codex_bin", lambda configured="": "/opt/codex")
+    spec = next(
+        row for row in ph.provider_specs(ph.Config(config_path))
+        if row["id"] == "codex"
+    )
+    seen = {}
+
+    def runner(command, **kwargs):
+        seen["command"] = command
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="\n".join([
+                json.dumps({"type": "thread.started", "thread_id": "ignored"}),
+                json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": ph.CANARY_MARKER},
+                }),
+            ]),
+            stderr="",
+        )
+
+    result = ph.probe_provider(spec, root=tmp_path, runner=runner)
+
+    assert result["status"] == "healthy"
+    assert result["actual_model"] == "gpt-test"
+    assert "--ephemeral" in seen["command"]
+    assert seen["command"][seen["command"].index("--sandbox") + 1] == "read-only"
+    assert "--approve-for-me" not in seen["command"]
+
+
+def test_codex_probe_rejects_explanatory_marker(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    spec = {
+        "id": "codex", "label": "Codex fallback", "kind": "codex",
+        "enabled": True, "configured": True, "model": "gpt-test",
+        "binary": "/opt/codex",
+    }
+    monkeypatch.setattr(ph, "resolve_codex_bin", lambda configured="": "/opt/codex")
+
+    result = ph.probe_provider(
+        spec,
+        root=tmp_path,
+        runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": f"Unable to return {ph.CANARY_MARKER}",
+                },
+            }),
+            stderr="",
+        ),
+    )
+
+    assert result["status"] == "unhealthy"
 
 
 def test_spend_limit_canary_trips_shared_provider_gate(tmp_path):

@@ -81,9 +81,23 @@ claude:
   backup2_model: ""
 
 
+# ── Codex CLI fallback settings ───────────────────────────────────
+# Main owner-to-Jarvis Lark conversations can switch to the local Codex CLI
+# after Claude-compatible routes fail. This reuses `codex login` / ChatGPT
+# authentication; no API key is needed. Codex keeps one thread per Lark
+# conversation. Group and non-owner conversations never receive this local
+# tool-capable route.
+
+codex:
+  fallback_enabled: true
+  fallback_model: "gpt-5.5"
+  # Empty = auto-discover PATH, common install locations, or ChatGPT.app.
+  binary: ""
+  timeout: 300
+
+
 # ── OpenAI fallback settings ───────────────────────────────────────
-# Used only when the main Claude Code conversation path fails with a model /
-# account limit and the Claude opus→sonnet→haiku chain is exhausted.
+# Used only when the Claude-compatible and Codex CLI routes are exhausted.
 # Requires OPENAI_API_KEY in the bot environment. Main-chat fallback is
 # agentic: GPT can use the constrained bash/file_read/file_write tool loop.
 # Heartbeat fallback remains text-only because heartbeat tasks have their own

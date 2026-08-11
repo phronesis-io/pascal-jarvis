@@ -140,7 +140,7 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
 
-10. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced on the dashboard, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, the bot degrades through the configured Claude chain and two optional Claude Code-compatible backup providers, then can use an OpenAI fallback. Main Lark conversations get a bounded local tool loop; heartbeat fallback remains text-only so unattended prompts cannot gain local execution.
+10. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced on the dashboard, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, owner Lark conversations route through the configured Claude chain, local Codex CLI, then the OpenAI API fallback. Send `切到 Codex` or `切回 Claude` in the private chat to change the preferred executor; `/model` reports the route that actually answered. Heartbeat and untrusted conversations do not receive the local Codex tool route.
 
 11. **Items, Topics & Continuity** — A Memorial is the only user-facing Item, Matter is an optional topic and handoff context, and Intent appears only as a timed-reminder attribute. Lark is the sole delivery and decision surface; the dashboard is a frozen archive and operator reference. A durable Matter connects Lark, Claude/Codex sessions, jobs, and artifacts under the surface, so `电脑继续` can move work into an executor without forking the object or its completion state. All Memorial, heartbeat, bot-reply, and Guardian output crosses one SQLite-backed delivery state machine with global sanitization, 6-hour deduplication, throttling, quiet hours, retry, dead-letter, and delivered/read/acted confirmation. The authenticated mobile gateway on `:3458` and its Tailscale Funnel are retired (2026-08-11, REQ-120); Lark is the mobile surface. See [the cross-device continuity PRD](docs/prd_cross_device_continuity.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
 
@@ -226,6 +226,11 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
    npm install -g @anthropic-ai/claude-code
    claude   # follow the auth flow on first run
    ```
+
+   **Optional Codex fallback** — install/authenticate Codex (or use the binary
+   bundled with ChatGPT for macOS), then verify `codex login status`. Jarvis
+   auto-discovers it and reuses the ChatGPT login; no OpenAI API key is needed
+   for this rung.
 
 2. **Python 3.10+**:
    ```bash
@@ -387,7 +392,7 @@ Chat with your agent from Lark/Feishu on any device. The plugin:
 - Subscribes to incoming messages (`im.message.receive_v1`)
 - Handles all message types: text, rich text, images, files, audio (with Whisper transcription), video, stickers, interactive cards, locations, contact/chat shares, merged forwards
 - Supports quote replies — fetches the quoted message and passes it as context
-- Maps each conversation (`conv_key`) to a stable Claude Code session
+- Maps each conversation (`conv_key`) to stable Claude Code and Codex sessions
 - Auto-rotates sessions when they cross `claude.max_session_size`
 - Auto-retries on empty Claude responses (4 attempts, escalating backoff)
 - Shows transient `Thinking...` indicators during Claude calls
@@ -556,14 +561,18 @@ its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
 **Claude Code is rate-limited**
 - Configure `claude.backup_auth_token` + `claude.backup_base_url` for the first
   Claude Code-compatible relay. An optional `claude.backup2_*` block provides
-  another independent relay before GPT.
-- Configure `openai.api_key` or `OPENAI_API_KEY` for the final GPT fallback.
+  another independent relay.
+- Keep `codex.fallback_enabled: true` to use the local Codex CLI next. It
+  reuses `codex login` and keeps one Codex thread per private Lark conversation.
+  Send `切到 Codex`, `切回 Claude`, or `/model` in that private chat.
+- Configure `openai.api_key` or `OPENAI_API_KEY` for the final API fallback.
   Main-chat fallback can use the bounded `bash`, `file_read`, and `file_write`
   loop in `core.openai_fallback`; pass `--no-tools` for text-only operation.
   Owner background jobs retain the tool loop. Group conversations, heartbeat,
   EigenFlux analysis, progress narration, and session compaction use text-only
-  paths by design. These auxiliary paths share the same four-stage provider
-  order through `core.aux_model`.
+  paths by design. Auxiliary paths retain their own Claude/relay/API order
+  through `core.aux_model`; only the owner's live Lark conversation uses the
+  local Codex CLI rung.
 
 **Heartbeat not running tasks**
 - Check `heartbeat_state.json` for last-run timestamps

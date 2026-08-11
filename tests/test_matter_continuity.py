@@ -18,6 +18,7 @@ from core.matter_bridge import (
     get_binding,
     handle_lark_command,
     lark_deep_link,
+    recent_provider_context,
     record_turn,
 )
 from core.matter_context import build_context_bundle, render_context_markdown
@@ -88,6 +89,55 @@ def test_model_command_reports_last_actual_provider_and_model():
                 model="gpt-test", session_id="sid-1")
     reply = handle_lark_command("当前模型", "ou_owner")["reply"]
     assert "GPT fallback / gpt-test" in reply
+
+
+def test_owner_can_switch_runtime_preference_between_codex_and_claude():
+    switched = handle_lark_command(
+        "切到 Codex", "ou_owner", "ou_owner", chat_type="p2p")
+    assert switched["handled"] is True
+    assert "Codex 优先" in switched["reply"]
+    status = handle_lark_command("/model", "ou_owner")["reply"]
+    assert "Codex 优先" in status
+
+    restored = handle_lark_command(
+        "切回 Claude", "ou_owner", "ou_owner", chat_type="p2p")
+    assert restored["handled"] is True
+    assert "Claude 优先" in restored["reply"]
+    assert "Claude 优先" in handle_lark_command("/model", "ou_owner")["reply"]
+
+
+def test_group_cannot_enable_codex_local_executor():
+    result = handle_lark_command(
+        "/model codex", "oc_group", "oc_group", chat_type="group")
+
+    assert result["handled"] is True
+    assert "仅支持在私聊" in result["reply"]
+
+
+def test_unbound_conversation_keeps_bounded_cross_provider_turns():
+    assert record_turn(
+        "ou_unbound", "user", "先研究方案", message_id="om_user") is True
+    assert record_turn(
+        "ou_unbound", "assistant", "Claude 的结论", message_id="om_reply_1",
+        provider="Claude primary", model="opus") is True
+    assert record_turn(
+        "ou_unbound", "assistant", "Codex 接着实现", message_id="om_reply_2",
+        provider="Codex", model="gpt-test") is True
+
+    context = recent_provider_context("ou_unbound")
+    assert "先研究方案" in context
+    assert "Claude primary / opus" in context
+    assert "Codex / gpt-test" in context
+    assert recent_provider_context("ou_other") == ""
+
+
+def test_cross_provider_turn_deduplicates_replayed_lark_message():
+    record_turn("ou_owner", "user", "只记一次", message_id="om_same")
+    record_turn("ou_owner", "user", "重放不覆盖", message_id="om_same")
+
+    context = recent_provider_context("ou_owner")
+    assert context.count("User:") == 1
+    assert "重放不覆盖" not in context
 
 
 def test_intent_link_blocks_close_until_cancelled():
