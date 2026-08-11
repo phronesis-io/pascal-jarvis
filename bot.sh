@@ -2754,6 +2754,24 @@ print(content)
         fi
       fi
 
+      # A clipped memorial explicitly promises that these exact replies will
+      # deliver the rest. Keep this deterministic, owner-private, and let the
+      # message fall through normally when no continuation is pending.
+      if [ "$_owner_p2p" -eq 1 ] && \
+         { [ "$content" = "继续发" ] || [ "$content" = "继续发送" ] || \
+           [ "$content" = "发剩下的" ]; }; then
+        _memorial_continue=$(python3 -m core.memorial continue \
+          --conv-key "$conv_key" 2>>"$LOG_FILE" || echo '{"handled":false}')
+        if [ "$(echo "$_memorial_continue" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
+          _continue_reply=$(echo "$_memorial_continue" | jq -r '.reply // empty' 2>/dev/null)
+          if [ -n "$_continue_reply" ]; then
+            lark_reply_text "$message_id" "$_continue_reply" >/dev/null 2>&1 || true
+          fi
+          log_info "Memorial continuation delivered: conv_key=$conv_key"
+          continue
+        fi
+      fi
+
       # "发" — confirm pending EigenFlux broadcast; "不发" — cancel it
       if [ "$_inline_cmd_ok" -eq 1 ] && { [ "$content" = "发" ] || [ "$content" = "不发" ]; }; then
         _pending_dir="$JARVIS_DIR/eigenflux/pending_publish"

@@ -95,6 +95,9 @@ CARD_BODY_MAX_LINES = 14
 # (2026-08-11: Pascal — "我只能看到一堆截断". Tapping the button used to load
 # context for the MODEL and tell HIM nothing he hadn't already seen.)
 FULL_TEXT_MAX_CHARS = 4000
+# Follow-up chunks leave room for the title and an honest remaining/done note
+# inside one Lark text message.
+CONTINUATION_CHUNK_CHARS = 3500
 # The 背景 section rides after the full body with its own budget, so a long
 # body can never silently amputate it.
 CHAT_OPENER_CONTEXT_MAX = 1000
@@ -2747,6 +2750,72 @@ def recent_confused(limit: int = 3) -> list[dict]:
     return out[:limit]
 
 
+def _latest_chat_continuation(conv_key: str) -> dict | None:
+    key = str(conv_key or "").strip()
+    if not key:
+        return None
+    for event in reversed(read_jsonl(_ledger_path())):
+        if (event.get("ev") == "chat_continuation"
+                and str(event.get("conv_key") or "") == key):
+            return event
+    return None
+
+
+def continue_chat_body(conv_key: str) -> dict:
+    """Return the next promised body chunk for one private conversation."""
+    key = str(conv_key or "").strip()
+    continuation = _latest_chat_continuation(key)
+    if not continuation or continuation.get("done"):
+        return {"handled": False, "reply": ""}
+    memorial_id = str(continuation.get("id") or "")
+    st = get_memorial(memorial_id)
+    if st is None:
+        return {"handled": False, "reply": ""}
+    full = str(st.get("body") or "").strip()
+    start = max(0, min(int(continuation.get("offset") or 0), len(full)))
+    while start < len(full) and full[start].isspace():
+        start += 1
+    remaining_text = full[start:]
+    if not remaining_text:
+        _append_line(_ledger_path(), {
+            "ev": "chat_continuation", "id": memorial_id,
+            "conv_key": key, "offset": len(full), "done": True,
+            "ts": now_local_str(), "epoch": int(time.time()),
+        })
+        return {"handled": False, "reply": ""}
+
+    chunk = _cut_at_boundary(remaining_text, CONTINUATION_CHUNK_CHARS)
+    if not chunk:
+        chunk = remaining_text[:CONTINUATION_CHUNK_CHARS]
+    next_offset = start + len(chunk)
+    while next_offset < len(full) and full[next_offset].isspace():
+        next_offset += 1
+    rest = max(len(full) - next_offset, 0)
+    done = rest == 0
+    _append_line(_ledger_path(), {
+        "ev": "chat_continuation", "id": memorial_id,
+        "conv_key": key, "offset": next_offset, "done": done,
+        "ts": now_local_str(), "epoch": int(time.time()),
+    })
+    # Keep the model's next real turn aligned with what Pascal has now read.
+    _append_line(_pending_merge_path(), {
+        "conv_key": key,
+        "job_id": f"memorial-continuation:{memorial_id}:{next_offset}",
+        "ts": now_local_str(),
+        "summary": f"[卡片续文：{st['title']}]\n{chunk}",
+    })
+    tail = (
+        f"（原文还有约 {rest} 字，再回一句「继续发」）"
+        if rest else "（原文已发完）"
+    )
+    return {
+        "handled": True,
+        "reply": f"📜 「{st['title']}」续文：\n\n{chunk}\n\n{tail}",
+        "remaining_chars": rest,
+        "memorial_id": memorial_id,
+    }
+
+
 def chat(memorial_id: str) -> dict:
     """「聊聊这个」: inject the memorial's full context into bot.sh's
     pending-merge channel (so Pascal's next message arrives with the topic
@@ -2817,6 +2886,8 @@ def chat(memorial_id: str) -> dict:
     #    only loaded context for the model and told him "已带上背景".
     full = str(st.get("body", "")).strip()
     extra = str(st.get("context", "")).strip()
+    continuation_offset = len(full)
+    continuation_done = True
     if body_was_clipped(full):
         body_part = full
         if len(body_part) > FULL_TEXT_MAX_CHARS:
@@ -2825,6 +2896,8 @@ def chat(memorial_id: str) -> dict:
             # and offer the follow-up (the ledger keeps the full body, so
             # a reply of「继续发」can deliver the rest in-conversation).
             body_part = _cut_at_boundary(body_part, FULL_TEXT_MAX_CHARS)
+            continuation_offset = len(body_part)
+            continuation_done = False
             rest = len(full) - len(body_part)
             body_part += (f"\n\n（一条消息只放得下这么多——原文还有约 {rest} 字，"
                           "回一句「继续发」我把剩下的发来）")
@@ -2835,6 +2908,14 @@ def chat(memorial_id: str) -> dict:
     else:
         opener = (f"📜 已带上「{st['title']}」的背景。"
                   "直接说你想追问什么，或告诉我你的倾向。")
+    if conv_key:
+        # Every new chat tap supersedes any older continuation in this
+        # conversation, including a short card that has nothing left to send.
+        _append_line(_ledger_path(), {
+            "ev": "chat_continuation", "id": memorial_id,
+            "conv_key": conv_key, "offset": continuation_offset,
+            "done": continuation_done, "ts": ts, "epoch": int(time.time()),
+        })
     _send_opener_async(opener, st.get("chat_id", ""))
 
     return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
@@ -2908,6 +2989,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=0,
                     help="creation window in days (default 0 = whole ledger)")
 
+    cp = sub.add_parser("continue", help="send the next promised body chunk")
+    cp.add_argument("--conv-key", required=True)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -2950,6 +3034,10 @@ def main(argv: list[str] | None = None) -> int:
         window = args.days if args.days > 0 else None
         acct = ledger_accounting(window_days=window)
         print(json.dumps(acct, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "continue":
+        print(json.dumps(continue_chat_body(args.conv_key), ensure_ascii=False))
         return 0
 
     parser.print_usage(sys.stderr)

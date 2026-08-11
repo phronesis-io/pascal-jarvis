@@ -486,7 +486,7 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
     # ("sent" = REQ-118 thread-lookup event appended after delivery)
     assert [e["ev"] for e in _ledger_events(env.dir)] == [
-        "create", "delivery", "sent", "chat"
+        "create", "delivery", "sent", "chat", "chat_continuation"
     ]
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
@@ -539,6 +539,58 @@ def test_clipped_opener_announces_the_cut_and_keeps_the_background(env):
     # honest bound: body part capped, plus the announcement and background
     assert len(opener) <= (memorial.FULL_TEXT_MAX_CHARS
                            + memorial.CHAT_OPENER_CONTEXT_MAX + 200)
+
+
+def test_clipped_opener_continues_until_the_full_body_is_delivered(env):
+    body = "\n".join(f"段{i:03d}:" + (chr(65 + i % 26) * 90)
+                     for i in range(120))
+    mid, _ = memorial.create("mail", "需要续传的长文", body, preset="fyi")
+
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "段000:" in opener and "继续发" in opener
+
+    replies = []
+    for _ in range(10):
+        result = memorial.continue_chat_body("ou_test")
+        if not result["handled"]:
+            break
+        replies.append(result)
+        if result["remaining_chars"] == 0:
+            break
+
+    assert replies
+    assert replies[-1]["remaining_chars"] == 0
+    assert "原文已发完" in replies[-1]["reply"]
+    assert "段119:" in replies[-1]["reply"]
+    assert memorial.continue_chat_body("ou_test")["handled"] is False
+
+    continuation_events = [e for e in _ledger_events(env.dir)
+                           if e["ev"] == "chat_continuation"]
+    offsets = [e["offset"] for e in continuation_events]
+    assert offsets == sorted(set(offsets))
+    assert continuation_events[-1]["done"] is True
+
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    continuation_jobs = [row for row in pending
+                         if row["job_id"].startswith("memorial-continuation:")]
+    assert len(continuation_jobs) == len(replies)
+    assert len({row["job_id"] for row in continuation_jobs}) == len(replies)
+
+
+def test_new_short_chat_supersedes_an_old_continuation(env):
+    long_body = "\n".join(f"旧文{i}:" + "很长" * 80 for i in range(80))
+    old_mid, _ = memorial.create("mail", "旧长文", long_body, preset="fyi")
+    memorial.chat(old_mid)
+    assert memorial._latest_chat_continuation("ou_test")["done"] is False
+
+    new_mid, _ = memorial.create("mail", "新短文", "已经说完", preset="fyi")
+    memorial.chat(new_mid)
+
+    latest = memorial._latest_chat_continuation("ou_test")
+    assert latest["id"] == new_mid and latest["done"] is True
+    assert memorial.continue_chat_body("ou_test")["handled"] is False
 
 
 def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):

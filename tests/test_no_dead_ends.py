@@ -15,6 +15,7 @@ Four were shipped and are pinned here:
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,15 @@ def test_chat_notice_still_says_something_useful_without_a_toast():
     from dashboard.uiutil import chat_started_notice
     notice = chat_started_notice({})
     assert notice and "不可用" not in notice
+
+
+def test_clipped_memorial_continue_promise_is_wired_to_private_lark_chat():
+    root = Path(__file__).resolve().parent.parent
+    bot = (root / "bot.sh").read_text(encoding="utf-8")
+    assert "python3 -m core.memorial continue" in bot
+    assert '[ "$_owner_p2p" -eq 1 ]' in bot
+    for phrase in ("继续发", "继续发送", "发剩下的"):
+        assert f'[ "$content" = "{phrase}" ]' in bot
 
 
 def test_no_surface_reports_the_lark_entrance_as_unavailable():
