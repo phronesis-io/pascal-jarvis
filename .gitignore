@@ -111,7 +111,6 @@ session_compacts/
 /data/
 /dashboard.log
 /views/
-/.mobile-gateway.pid
 /mobile_access.json
 
 # Dashboard Python bytecode (covered by __pycache__/ above, listed for clarity)

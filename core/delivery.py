@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -113,7 +112,9 @@ class DeliveryEnvelope:
             self.id = f"dlv_{uuid.uuid4().hex}"
         # "web" is deliberately NOT a kind: the web surface is retired
         # (REQ-119) and its transport used to fake success unconditionally.
-        if self.kind not in {"text", "card", "reply", "push"}:
+        # "push" is not a kind either: the mobile gateway and Web Push are
+        # retired (REQ-120) — Lark is the only delivery surface.
+        if self.kind not in {"text", "card", "reply"}:
             raise ValueError(f"unsupported delivery kind: {self.kind}")
         if self.attention not in {"decision", "notice", "alert", "reply"}:
             raise ValueError(f"unsupported attention: {self.attention}")
@@ -262,77 +263,13 @@ def _extract_message_id(stdout: str) -> str:
         or message.get("message_id") or "")
 
 
-def _default_transport(
-    root: Path,
-    db_path: str | Path | None = None,
-) -> Transport:
+def _default_transport(root: Path) -> Transport:
     def send(envelope: DeliveryEnvelope, channel: str) -> TransportResult:
         # No "web" branch on purpose (REQ-119): it returned unconditional
         # success for a surface with 1.8% read rate — a fake ledger of
-        # "delivered" cards nobody saw. An unknown channel is refused below;
-        # a defensive branch may not fabricate a receipt.
-        if channel == "push":
-            try:
-                from core.mobile_access import send_push
-                push_kwargs = {
-                    "url": str(envelope.payload.get("url") or "/items"),
-                    "matter_id": str(
-                        envelope.payload.get("matter_id")
-                        or envelope.matter_id
-                        or envelope.memorial_id
-                        or ""),
-                    "root": root,
-                }
-                if db_path is not None:
-                    push_kwargs["db_path"] = db_path
-                if envelope.metadata.get("paired_only"):
-                    push_kwargs["paired_only"] = True
-                # send_push is an established in-process transport seam. Keep
-                # older four-argument adapters usable while passing runtime
-                # scope to the production implementation.
-                try:
-                    signature = inspect.signature(send_push)
-                    accepts_kwargs = any(
-                        parameter.kind == inspect.Parameter.VAR_KEYWORD
-                        for parameter in signature.parameters.values()
-                    )
-                    if not accepts_kwargs:
-                        push_kwargs = {
-                            key: value
-                            for key, value in push_kwargs.items()
-                            if key in signature.parameters
-                        }
-                except (TypeError, ValueError):
-                    pass
-                result = send_push(
-                    str(envelope.payload.get("title") or "Jarvis"),
-                    str(envelope.payload.get("text") or "有一项新内容"),
-                    **push_kwargs,
-                )
-                ok = int(result.get("sent", 0) or 0) > 0
-                failed = int(result.get("failed", 0) or 0)
-                if ok:
-                    return TransportResult(True)
-                if (
-                    failed == 0
-                    and envelope.metadata.get("optional_no_subscriber")
-                ):
-                    return TransportResult(
-                        False,
-                        error=str(result.get("reason") or "no push subscriber"),
-                        suppressed_reason="no_paired_phone_subscription",
-                    )
-                return TransportResult(
-                    False,
-                    error=str(
-                        result.get("error")
-                        or result.get("reason")
-                        or "push transport failed"
-                    ),
-                )
-            except Exception as exc:
-                return TransportResult(False, error=str(exc))
-
+        # "delivered" cards nobody saw. No "push" branch either: the mobile
+        # gateway and Web Push are retired (REQ-120). An unknown channel is
+        # refused below; a defensive branch may not fabricate a receipt.
         if channel not in {"lark", "lark_reply"}:
             return TransportResult(False, error=f"unknown channel: {channel}")
         user_id = _resolve_user_id(root)
@@ -496,17 +433,14 @@ def _content_hash(envelope: DeliveryEnvelope) -> str:
 def _route(envelope: DeliveryEnvelope) -> str:
     requested = envelope.requested_channel
     if requested != "auto":
-        # An explicit "web"/"phone"/"none" request passes through unmapped and
-        # is refused by the transport (REQ-119): the web desk is retired, and
-        # silently rerouting an explicit request would hide the dead caller.
-        aliases = {
-            "lark_card": "lark", "reply": "lark_reply", "mobile": "push",
-        }
+        # An explicit "web"/"phone"/"push"/"mobile"/"none" request passes
+        # through unmapped and is refused by the transport (REQ-119/REQ-120):
+        # the web desk and the phone push surface are retired, and silently
+        # rerouting an explicit request would hide the dead caller.
+        aliases = {"lark_card": "lark", "reply": "lark_reply"}
         return aliases.get(requested, requested)
     if envelope.kind == "reply" or envelope.reply_to:
         return "lark_reply"
-    if envelope.kind == "push":
-        return "push"
     # Lark is the only delivery surface (REQ-119). Producers that want no
     # realtime delivery stay out of the pipeline (memorial ledger-only cards).
     return "lark"
@@ -532,8 +466,7 @@ class DeliveryPipeline:
     ):
         self.root = _root(root)
         self.path = _db_path(self.root, db_path)
-        self.transport = transport or _default_transport(
-            self.root, self.path)
+        self.transport = transport or _default_transport(self.root)
         self.clock = clock
         self.sleeper = sleeper
 
@@ -1085,17 +1018,19 @@ class DeliveryPipeline:
                     envelope.id, True, "suppressed",
                     str(row["route_channel"]), reason="expired_ttl"))
                 continue
-            if str(row["route_channel"]) == "web":
-                # Legacy rows queued for the retired web surface (REQ-119):
-                # attempting them would only churn retries into dead letters,
-                # and marking them delivered would resurrect the fake ledger.
+            if str(row["route_channel"]) in {"web", "push"}:
+                # Legacy rows queued for the retired web surface (REQ-119) or
+                # the retired phone push surface (REQ-120): attempting them
+                # would only churn retries into dead letters, and marking them
+                # delivered would resurrect the fake ledger.
+                reason = f"{row['route_channel']}_surface_retired"
                 with closing(_connect(self.path)) as db, db:
                     self._set_state(
-                        db, envelope.id, "suppressed", "web_surface_retired",
-                        last_error="web_surface_retired")
+                        db, envelope.id, "suppressed", reason,
+                        last_error=reason)
                 results.append(DeliveryResult(
-                    envelope.id, True, "suppressed", "web",
-                    reason="web_surface_retired"))
+                    envelope.id, True, "suppressed",
+                    str(row["route_channel"]), reason=reason))
                 continue
             moment = datetime.fromtimestamp(now, tz=now_local().tzinfo)
             if (_quiet_now(moment) and not envelope.urgent
@@ -1323,9 +1258,10 @@ def main(argv: list[str] | None = None) -> int:
     send = sub.add_parser("send")
     send.add_argument("--source", required=True)
     send.add_argument(
-        # No "web": the web surface is retired (REQ-119) and the kind is
-        # rejected by DeliveryEnvelope.normalized() — don't offer it here.
-        "--kind", default="text", choices=["text", "card", "push"]
+        # No "web" (REQ-119) and no "push" (REQ-120): both surfaces are
+        # retired and the kinds are rejected by DeliveryEnvelope.normalized()
+        # — don't offer them here.
+        "--kind", default="text", choices=["text", "card"]
     )
     send.add_argument("--attention", default="notice",
                       choices=["decision", "notice", "alert", "reply"])

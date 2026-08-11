@@ -1,8 +1,10 @@
-"""Cross-device handoff state and exact Push routing."""
+"""Cross-device handoff state.
+
+The phone push that used to accompany a mobile-bound handoff is retired with
+the mobile gateway (REQ-120): a handoff is a silent, durable row now.
+"""
 
 from __future__ import annotations
-
-import types
 
 import pytest
 
@@ -17,7 +19,6 @@ from core.continuity import (
     list_handoffs,
     reopen_entity_handoffs,
 )
-from core.delivery import DeliveryEnvelope, DeliveryPipeline
 from dashboard.pages.items import surface_from_headers
 
 
@@ -47,12 +48,12 @@ def test_handoff_is_idempotent_claimable_and_completable():
     entity_id = memorial.list_memorials()[0]["id"]
     first = create_handoff(
         "memorial", entity_id, from_surface="mobile",
-        to_surface="desktop", title="继续实现", notify=False,
+        to_surface="desktop", title="继续实现",
         clock=lambda: 100.0,
     )
     duplicate = create_handoff(
         "memorial", entity_id, from_surface="mobile",
-        to_surface="desktop", title="另一种说法", notify=False,
+        to_surface="desktop", title="另一种说法",
         clock=lambda: 101.0,
     )
     assert first["created"] is True
@@ -88,7 +89,7 @@ def test_every_handoff_connection_is_closed(monkeypatch):
         "test", "连接生命周期", "每次操作都应关闭", preset="fyi", send=False)
     handoff = create_handoff(
         "memorial", memorial_id, from_surface="mobile",
-        to_surface="desktop", notify=False)
+        to_surface="desktop")
     assert get_handoff(handoff["id"])
     assert list_handoffs(target_surface="desktop")
     assert claim_handoff(handoff["id"], surface="desktop")["status"] == "claimed"
@@ -106,10 +107,10 @@ def test_completing_entity_closes_every_direction():
     entity_id = memorial.list_memorials()[0]["id"]
     desktop = create_handoff(
         "memorial", entity_id, from_surface="mobile",
-        to_surface="desktop", notify=False)
+        to_surface="desktop")
     mobile = create_handoff(
         "memorial", entity_id, from_surface="desktop",
-        to_surface="mobile", notify=False)
+        to_surface="mobile")
 
     assert complete_entity_handoffs("memorial", entity_id) == 2
     assert get_handoff(desktop["id"])["status"] == "completed"
@@ -122,10 +123,10 @@ def test_projection_owned_handoffs_reopen_to_their_previous_states():
     entity_id = memorial.list_memorials()[0]["id"]
     desktop = create_handoff(
         "memorial", entity_id, from_surface="mobile",
-        to_surface="desktop", notify=False)
+        to_surface="desktop")
     mobile = create_handoff(
         "memorial", entity_id, from_surface="desktop",
-        to_surface="mobile", notify=False)
+        to_surface="mobile")
     claim_handoff(desktop["id"], surface="desktop")
 
     source = f"delegation:{entity_id}:completed"
@@ -159,13 +160,13 @@ def test_reopen_chooses_latest_handoff_per_target_surface():
     source = f"delegation:{entity_id}:completed"
     older = create_handoff(
         "memorial", entity_id, from_surface="desktop",
-        to_surface="mobile", notify=False, clock=lambda: 100.0)
+        to_surface="mobile", clock=lambda: 100.0)
     complete_entity_handoffs(
         "memorial", entity_id,
         completion_source=source, clock=lambda: 101.0)
     newer = create_handoff(
         "memorial", entity_id, from_surface="desktop",
-        to_surface="mobile", notify=False, clock=lambda: 102.0)
+        to_surface="mobile", clock=lambda: 102.0)
     complete_entity_handoffs(
         "memorial", entity_id,
         completion_source=source, clock=lambda: 103.0)
@@ -187,80 +188,40 @@ def test_invalid_handoff_does_not_create_state():
     with pytest.raises(ValueError):
         create_handoff(
             "memorial", entity_id, from_surface="mobile",
-            to_surface="mobile", notify=False)
+            to_surface="mobile")
     with pytest.raises(ValueError):
         create_handoff(
             "unknown", "mem_x", from_surface="mobile",
-            to_surface="desktop", notify=False)
+            to_surface="desktop")
     with pytest.raises(KeyError):
         create_handoff(
             "memorial", "mem_missing", from_surface="mobile",
-            to_surface="desktop", notify=False)
+            to_surface="desktop")
     assert list_handoffs() == []
 
 
-def test_push_transport_preserves_exact_target_url(tmp_path, monkeypatch):
-    captured = {}
+def test_mobile_handoff_is_a_silent_durable_row(monkeypatch):
+    """REQ-120: no push accompanies a mobile-bound handoff anymore.
 
-    def fake_push(title, body, url="/items", matter_id="", **scope):
-        captured.update(
-            title=title, body=body, url=url, matter_id=matter_id,
-            scope=scope)
-        return {"sent": 1, "failed": 0, "disabled": 0}
+    The row itself must still land durably in the 接力区 — and the create
+    path must not touch the delivery pipeline at all.
+    """
+    import core.delivery as delivery
 
-    monkeypatch.setattr("core.mobile_access.send_push", fake_push)
-    pipeline = DeliveryPipeline(
-        tmp_path, db_path=tmp_path / "delivery.db",
-        sleeper=lambda _seconds: None,
-    )
-    result = pipeline.deliver(DeliveryEnvelope(
-        source="handoff-test",
-        kind="push",
-        payload={
-            "title": "发到手机",
-            "text": "完整事项",
-            "url": "/items/mem_exact",
-        },
-        attention="reply",
-        requested_channel="push",
-        memorial_id="mem_exact",
-        metadata={
-            "bypass_quiet": True,
-            "bypass_throttle": True,
-            "bypass_dedup": True,
-        },
-    ))
-
-    assert result.state == "delivered"
-    assert captured == {
-        "title": "发到手机",
-        "body": "完整事项",
-        "url": "/items/mem_exact",
-        "matter_id": "mem_exact",
-        "scope": {
-            "root": tmp_path,
-            "db_path": tmp_path / "delivery.db",
-        },
-    }
-
-
-def test_push_exception_keeps_durable_mobile_handoff(monkeypatch):
-    from core import continuity
-
-    memorial_id, _ = memorial.create(
-        "test", "通知降级", "仍要留在手机接力区", preset="fyi", send=False)
     monkeypatch.setattr(
-        continuity, "_notify_mobile",
-        lambda _item: (_ for _ in ()).throw(RuntimeError("push offline")),
+        delivery, "deliver",
+        lambda *a, **k: pytest.fail(
+            "a handoff must not enter the delivery pipeline (REQ-120)"),
     )
+    memorial_id, _ = memorial.create(
+        "test", "静默接力", "仍要留在手机接力区", preset="fyi", send=False)
 
     result = create_handoff(
         "memorial", memorial_id, from_surface="desktop",
         to_surface="mobile")
 
     assert result["created"] is True
-    assert result["delivery_state"] == "failed"
-    assert "push offline" in result["delivery_reason"]
+    assert "delivery_state" not in result
     assert list_handoffs(target_surface="mobile")[0]["id"] == result["id"]
 
 
@@ -269,24 +230,16 @@ def test_memorial_decision_completes_active_handoff():
         "test", "跨端决定", "选一个", preset="decision", send=False)
     handoff = create_handoff(
         "memorial", memorial_id, from_surface="mobile",
-        to_surface="desktop", notify=False)
+        to_surface="desktop")
 
     memorial.decide(memorial_id, "approve")
 
     assert get_handoff(handoff["id"])["status"] == "completed"
 
 
-def test_matter_handoff_uses_exact_route_and_closes_on_terminal(
-        monkeypatch, tmp_path):
+def test_matter_handoff_closes_on_terminal_status():
     from core.matters import create_matter, update_matter
 
-    captured = {}
-
-    def fake_push(title, body, url="/items", matter_id="", **scope):
-        captured.update(url=url, matter_id=matter_id, scope=scope)
-        return {"sent": 1, "failed": 0, "disabled": 0}
-
-    monkeypatch.setattr("core.mobile_access.send_push", fake_push)
     matter = create_matter("跨设备项目", next_action="继续实现")
     handoff = create_handoff(
         "matter",
@@ -296,16 +249,7 @@ def test_matter_handoff_uses_exact_route_and_closes_on_terminal(
         title=matter["title"],
     )
 
-    assert handoff["delivery_state"] == "delivered"
-    assert captured == {
-        "url": f"/matters/{matter['id']}",
-        "matter_id": matter["id"],
-        "scope": {
-            "root": tmp_path,
-            "db_path": tmp_path / "jarvis.db",
-            "paired_only": True,
-        },
-    }
+    assert handoff["created"] is True
 
     update_matter(matter["id"], status="done")
     assert get_handoff(handoff["id"])["status"] == "completed"

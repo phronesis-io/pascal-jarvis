@@ -28,7 +28,13 @@ _NAV = [
 
 
 def surface_from_headers(headers) -> tuple[str, str]:
-    """Map an authenticated gateway request to its product surface."""
+    """Map a request to its product surface.
+
+    The mobile gateway that used to stamp ``X-Jarvis-Device`` is retired
+    (REQ-120, 2026-08-11), so live traffic always resolves to desktop; the
+    header path remains only so legacy callers and tests keep an explicit,
+    single seam for surface identity.
+    """
     device_id = str((headers or {}).get("X-Jarvis-Device", "") or "").strip()
     return ("mobile", device_id) if device_id else ("desktop", "local")
 

@@ -189,10 +189,6 @@ class JobManager:
                     link_entity(matter_id, "artifact", job["output_file"],
                                 provider="file", title=f"{job_id} 输出",
                                 metadata={"job_id": job_id}, actor="job")
-                from core.mobile_access import send_push
-                push_title = "后台任务已结束" if status == "completed" else f"后台任务：{status}"
-                send_push(push_title, output[:240] or job.get("description", ""),
-                          url=f"/matters/{matter_id}", matter_id=matter_id)
             except Exception:
                 pass
 

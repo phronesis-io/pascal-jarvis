@@ -1165,10 +1165,19 @@ class TestRoutes:
 
     @staticmethod
     def owner_headers():
-        from core.mobile_access import consume_pair_code, create_pair_code
-        paired = consume_pair_code(create_pair_code("owner test device")["code"])
-        assert paired is not None
-        return {"Authorization": f"Bearer {paired['token']}"}
+        # Pairing is retired (REQ-120); _owner_guard still honors a legacy
+        # mobile_devices credential, so mint one the way pairing used to.
+        import hashlib
+        db = db_module.get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO mobile_devices "
+            "(id,label,token_hash,created_at,last_seen_at) VALUES (?,?,?,?,?)",
+            ("dev_owner_test", "owner test device",
+             hashlib.sha256(b"owner-secret").hexdigest(),
+             "2026-08-11T10:00:00", "2026-08-11T10:00:00"),
+        )
+        db.commit()
+        return {"Authorization": "Bearer dev_owner_test.owner-secret"}
 
     @pytest.mark.parametrize("path", PAGES)
     def test_page_renders_200(self, client, path):
@@ -1309,33 +1318,13 @@ class TestRoutes:
         })
         assert forced.status_code == 200 and forced.json()["status"] == "done"
 
-    def test_api_mobile_pairing_and_revocation(self, client):
+    def test_api_mobile_routes_are_gone(self, client):
+        """REQ-120: the /api/mobile/* surface is retired, not just guarded."""
+        assert client.get("/api/mobile/status").status_code == 404
         assert client.post(
-            "/api/mobile/pair", json={"ttl": "bad"}
-        ).status_code == 401
-        headers = self.owner_headers()
-        assert client.post(
-            "/api/mobile/pair", json={"ttl": "bad"}, headers=headers
-        ).status_code == 400
-        paired = client.post(
-            "/api/mobile/pair",
-            json={"label": "test phone", "ttl": 5},
-            headers=headers,
-        )
-        assert paired.status_code == 200
-        from core.mobile_access import consume_pair_code
-        device = consume_pair_code(paired.json()["code"])
-        assert device is not None
-        status = client.get("/api/mobile/status")
-        assert status.status_code == 200
-        assert "test phone" in {
-            item["label"] for item in status.json()["devices"]
-        }
-        revoked = client.delete(
-            f"/api/mobile/devices/{device['device_id']}",
-            headers=headers,
-        )
-        assert revoked.status_code == 200
+            "/api/mobile/pair", json={"label": "x"},
+            headers=self.owner_headers(),
+        ).status_code == 404
 
     def test_api_items_decision_and_delivery_confirmation(
             self, client, jarvis_tmp, monkeypatch):
@@ -1734,26 +1723,3 @@ class TestRoutes:
         assert response.json()["providers"][0]["status"] == "healthy"
         assert "token" not in response.text.lower()
 
-    def test_push_test_targets_the_authenticated_device(
-            self, client, monkeypatch):
-        from core import mobile_access
-
-        headers = self.owner_headers()
-        token = headers["Authorization"].split(" ", 1)[1]
-        device_id = token.split(".", 1)[0]
-        headers["X-Jarvis-Device"] = device_id
-        captured = {}
-
-        def fake_send_push(*_args, **kwargs):
-            captured.update(kwargs)
-            return {"sent": 1, "failed": 0, "disabled": 0}
-
-        monkeypatch.setattr(mobile_access, "send_push", fake_send_push)
-        response = client.post(
-            "/api/mobile/push-test",
-            json={"body": "test"},
-            headers=headers,
-        )
-
-        assert response.status_code == 200
-        assert captured["device_id"] == device_id

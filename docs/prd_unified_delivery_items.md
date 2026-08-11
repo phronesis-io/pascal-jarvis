@@ -278,7 +278,7 @@ and no historical Memorial event is deleted.
 
 - The pipeline stores payloads locally in the existing Jarvis database.
 - Secrets are never added to delivery metadata.
-- The mobile gateway still exposes only authenticated `:3458`; neither
+- The mobile gateway (`:3458`) is retired (REQ-120, 2026-08-11); neither
   `:3456` nor `:3457` is public.
 - Pair links are preview-safe and one-time codes are consumed only by POST.
 - Cross-origin dashboard writes require JSON and reject foreign origins.

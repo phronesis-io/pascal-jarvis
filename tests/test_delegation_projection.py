@@ -146,7 +146,6 @@ def test_terminal_delegation_closes_linked_intent_and_handoff(tmp_path):
         delegation["id"],
         from_surface="desktop",
         to_surface="mobile",
-        notify=False,
     )
 
     store.terminal(
@@ -181,7 +180,6 @@ def test_failed_attempt_keeps_linked_intent_and_handoff_open(tmp_path):
         delegation["id"],
         from_surface="desktop",
         to_surface="mobile",
-        notify=False,
     )
     step = store.add_step(
         delegation["id"],
@@ -267,7 +265,6 @@ def test_terminal_projection_failure_is_durably_retried(
         delegation["id"],
         from_surface="desktop",
         to_surface="mobile",
-        notify=False,
     )
     real_sync = projection_module.sync_projection
     monkeypatch.setattr(
@@ -347,7 +344,6 @@ def test_duplicate_receipt_reopens_legacy_terminal_projections(tmp_path):
         delegation["id"],
         from_surface="desktop",
         to_surface="mobile",
-        notify=False,
     )
     store.claim_step(
         delegation["id"],

@@ -3,12 +3,16 @@
 A handoff moves the next interaction between desktop and phone. It never
 copies the Memorial, Matter, or Delegation it points at; those stores remain
 authoritative.
+
+The phone push notification that used to accompany a mobile-bound handoff is
+retired with the mobile gateway (REQ-120, 2026-08-11): a handoff row is now a
+silent, durable affordance surfaced by the dashboard's 接力区, and Lark is the
+only interrupting channel.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import time
@@ -123,60 +127,6 @@ def _require_entity(entity_type: str, entity_id: str) -> None:
         raise KeyError(entity_id)
 
 
-def _notify_mobile(handoff: dict) -> dict:
-    from core.delivery import DeliveryEnvelope, DeliveryPipeline
-
-    entity_id = str(handoff["entity_id"])
-    title = str(handoff.get("title") or "有一项工作等你接着处理")
-    root = Path(
-        os.environ.get("JARVIS_DIR")
-        or Path(__file__).resolve().parent.parent
-    )
-    pipeline = DeliveryPipeline(root, db_path=_database_path())
-    is_matter = handoff["entity_type"] == "matter"
-    is_delegation = handoff["entity_type"] == "delegation"
-    matter_id = str(handoff.get("matter_id") or (
-        entity_id if is_matter else ""))
-    result = pipeline.deliver(DeliveryEnvelope(
-        source="surface-handoff",
-        kind="push",
-        payload={
-            "title": "Jarvis · 发到手机",
-            "text": title,
-            "url": (
-                f"/matters/{entity_id}"
-                if is_matter
-                else (
-                    f"/delegations/{entity_id}"
-                    if is_delegation
-                    else f"/items/{entity_id}"
-                )
-            ),
-            "matter_id": matter_id,
-        },
-        attention="reply",
-        requested_channel="push",
-        urgent=True,
-        conversation_bound=True,
-        memorial_id=entity_id if handoff["entity_type"] == "memorial" else "",
-        matter_id=matter_id,
-        dedup_key=f"surface-handoff:{handoff['id']}",
-        metadata={
-            "bypass_quiet": True,
-            "bypass_throttle": True,
-            "paired_only": True,
-            "suppress_dead_letter": True,
-            "from_surface": handoff["from_surface"],
-            "to_surface": handoff["to_surface"],
-        },
-    ))
-    return {
-        "delivery_id": result.delivery_id,
-        "delivery_state": result.state,
-        "delivery_reason": result.reason,
-    }
-
-
 def create_handoff(
     entity_type: str,
     entity_id: str,
@@ -188,7 +138,6 @@ def create_handoff(
     note: str = "",
     created_by: str = "local",
     metadata: dict | None = None,
-    notify: bool = True,
     clock=time.time,
 ) -> dict:
     """Create or reuse one active handoff for an entity and target surface."""
@@ -247,24 +196,7 @@ def create_handoff(
             db.rollback()
             raise
 
-    item = {**_decode(row), "created": True}
-    if to_surface == "mobile" and notify:
-        try:
-            delivery = _notify_mobile(item)
-        except Exception as exc:
-            delivery = {
-                "delivery_id": "",
-                "delivery_state": "failed",
-                "delivery_reason": str(exc)[:300],
-            }
-        if delivery["delivery_id"]:
-            with closing(_connect()) as db, db:
-                db.execute(
-                    "UPDATE surface_handoffs SET delivery_id=? WHERE id=?",
-                    (delivery["delivery_id"], handoff_id),
-                )
-        item.update(delivery)
-    return item
+    return {**_decode(row), "created": True}
 
 
 def list_handoffs(

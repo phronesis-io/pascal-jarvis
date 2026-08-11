@@ -339,16 +339,6 @@ def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
         return False, f"launchctl error: {e}"
 
 
-def _check_tailnet(comp: dict, root: Path) -> tuple[bool, str]:
-    try:
-        from core.tailnet import tailnet_status
-        status = tailnet_status(
-            int(comp.get("port", 3458)), mode=comp.get("mode"))
-    except Exception as e:
-        return False, f"tailnet check failed: {e}"
-    return bool(status.get("ready")), str(status.get("detail") or "not served")
-
-
 def _check_taskline(comp: dict, root: Path) -> tuple[bool, str]:
     try:
         result = subprocess.run(
@@ -383,7 +373,6 @@ _CHECKS = {
     "audit_age": _check_audit_age,
     "heartbeat_tasks": _check_heartbeat_tasks,
     "launchctl": _check_launchctl,
-    "tailnet": _check_tailnet,
     "taskline": _check_taskline,
 }
 
