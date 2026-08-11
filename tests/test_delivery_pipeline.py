@@ -18,10 +18,25 @@ from core.delivery import (
 )
 
 
+def _local_ts(*args) -> float:
+    """Epoch for a wall-clock moment in the pipeline's own local timezone.
+
+    core.delivery resolves quiet hours and day boundaries via
+    core.timeutil.now_local() (reads /etc/localtime, ignores the TZ env).
+    A naive datetime().timestamp() is interpreted under the TZ env instead,
+    so on a machine where the two disagree (CI at UTC, a dev shell with
+    TZ=UTC) a "14:00" clock silently lands inside quiet hours or on the
+    wrong day. Pinning tzinfo makes injected clocks mean what they say
+    everywhere (2026-08-11 CI incident: three tests red only at UTC 05:11).
+    """
+    from core.timeutil import now_local
+    return datetime(*args, tzinfo=now_local().tzinfo).timestamp()
+
+
 @pytest.fixture
 def pipeline(tmp_path):
     sent = []
-    now = [datetime(2026, 7, 23, 14, 0).timestamp()]
+    now = [_local_ts(2026, 7, 23, 14, 0)]
 
     def transport(envelope, channel):
         sent.append((envelope, channel))
@@ -64,6 +79,7 @@ def test_every_delivery_connection_is_closed(monkeypatch, tmp_path):
         tmp_path,
         db_path=tmp_path / "jarvis.db",
         transport=lambda _envelope, _channel: TransportResult(True, "msg-ok"),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),  # daytime: no quiet queue
         sleeper=lambda _seconds: None,
     )
     assert pipe.deliver(
@@ -141,6 +157,7 @@ def test_explicit_web_request_is_refused_not_faked(tmp_path):
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "jarvis.db",
         transport=delivery._default_transport(tmp_path),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),  # daytime: reach transport
         sleeper=lambda _seconds: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -187,7 +204,7 @@ def test_reply_bypasses_quiet_and_uses_reply_channel(tmp_path, monkeypatch):
 
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite", transport=transport,
-        clock=lambda: datetime(2026, 7, 23, 3, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 3, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -221,7 +238,7 @@ def test_reply_can_return_user_requested_json(tmp_path):
 def test_quiet_hours_queue_then_flush(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_QUIET_START", "23:30")
     monkeypatch.setenv("JARVIS_QUIET_END", "10:00")
-    now = [datetime(2026, 7, 23, 23, 45).timestamp()]
+    now = [_local_ts(2026, 7, 23, 23, 45)]
     sent = []
 
     def transport(envelope, channel):
@@ -239,7 +256,7 @@ def test_quiet_hours_queue_then_flush(tmp_path, monkeypatch):
     assert result.state == "queued"
     assert result.reason == "quiet_hours"
     assert not sent
-    now[0] = datetime(2026, 7, 24, 10, 1).timestamp()
+    now[0] = _local_ts(2026, 7, 24, 10, 1)
     flushed = pipe.flush_due()
     assert flushed[0].state == "delivered"
     assert sent == ["lark"]
@@ -303,7 +320,7 @@ def test_global_daily_cap(pipeline):
 
 
 def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
-    now = [datetime(2026, 7, 22, 23, 0).timestamp()]
+    now = [_local_ts(2026, 7, 22, 23, 0)]
     path = tmp_path / "db.sqlite"
     pipe = DeliveryPipeline(
         tmp_path,
@@ -329,7 +346,7 @@ def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
     ]
     assert [pipe.deliver(item).state for item in queued] == ["queued", "queued"]
 
-    now[0] = datetime(2026, 7, 23, 10, 0).timestamp()
+    now[0] = _local_ts(2026, 7, 23, 10, 0)
     prior = pipe.deliver(DeliveryEnvelope(
         source="signal",
         payload={"text": "already delivered today"},
@@ -444,7 +461,7 @@ def test_retry_then_delivery_records_attempts(tmp_path):
 
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite", transport=transport,
-        clock=lambda: datetime(2026, 7, 23, 14, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -481,7 +498,7 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
         tmp_path, db_path=tmp_path / "db.sqlite",
         transport=lambda _e, _c: (_ for _ in ()).throw(
             RuntimeError("adapter crashed")),
-        clock=lambda: datetime(2026, 7, 23, 14, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -497,7 +514,7 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
 
 
 def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
-    now = [datetime(2026, 7, 23, 14, 0).timestamp()]
+    now = [_local_ts(2026, 7, 23, 14, 0)]
     calls = []
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite",

@@ -1377,7 +1377,11 @@ class TestRoutes:
             kind="text",
             payload={"text": "delivery state"},
             requested_channel="lark",
-            metadata={"bypass_throttle": True, "bypass_dedup": True},
+            # bypass_quiet: this test asserts a delivered row exists; without
+            # it a CI run inside quiet hours (UTC 05:11, 2026-08-11) parks
+            # the envelope in the night queue and the assertion goes red.
+            metadata={"bypass_throttle": True, "bypass_dedup": True,
+                      "bypass_quiet": True},
         ))
         deliveries = client.get("/api/deliveries?state=delivered")
         assert deliveries.status_code == 200
