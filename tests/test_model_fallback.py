@@ -259,6 +259,9 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "--limit-reason" in bot             # session/spend limit reason preserved
     assert '"$_cur_model"' in bot              # main path uses degradable model
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
+    assert "core.codex_fallback" in bot        # ChatGPT-login Codex escape hatch
+    assert bot.count("run_codex_locked") == 3  # definition + preferred + fallback
+    assert '"$_codex_pid" "$_lock_token" > "$_lock_file"' in bot
     assert "openai_fallback_flags=(--no-tools)" in bot
     assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
@@ -268,7 +271,41 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     # primary.
     assert "Model: ${_answer_provider}" not in bot
     assert "（备用通道）" in bot
+    assert "（Codex 接手）" in bot
     assert "（GPT 兜底）" in bot
+
+
+def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
+    import os
+    import signal
+    import subprocess
+    from pathlib import Path
+
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+    start = bot.index("run_codex_locked() {")
+    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
+    function = bot[start:end]
+    lock = tmp_path / "session.lock"
+    lock.write_text("acquiring test-token", encoding="utf-8")
+    script = tmp_path / "codex-lock-test.sh"
+    script.write_text(
+        "python3() { exec sleep 30; }\n" + function + "\n" +
+        'run_codex_locked "hello" "conv" "system" "model" "30" ' +
+        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(["bash", str(script)])
+    child_pid = None
+    for _ in range(100):
+        first = lock.read_text(encoding="utf-8").split()[0]
+        if first.isdigit():
+            child_pid = int(first)
+            break
+        time.sleep(0.02)
+    assert child_pid is not None
+    os.kill(child_pid, signal.SIGTERM)
+    lock.unlink(missing_ok=True)
+    assert process.wait(timeout=5) == 143
 
 
 def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
@@ -284,6 +321,9 @@ def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
         "CLAUDE_BACKUP2_MODEL",
         "BACKUP_MAX_SESSION_SIZE",
         "BACKUP_MAX_MEMORY_CHARS",
+        "CODEX_FALLBACK_ENABLED",
+        "CODEX_FALLBACK_MODEL",
+        "CODEX_FALLBACK_TIMEOUT",
     ):
         assert re.search(rf"^export [^\n]*\b{name}\b", bot, re.MULTILINE)
     assert "回复被安全过滤器拦截" not in bot
@@ -341,7 +381,8 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert '[ "$_claude_backup_tried" -eq 1 ]' in bot
     assert '[ "$_claude_backup2_tried" -eq 1 ]' in bot
     assert '&& [ "$_attempt" -ge 2 ]' in bot
-    assert "for _attempt in 1 2 3 4 5; do" in bot
+    assert 'local _attempt_sequence="1 2 3 4 5"' in bot
+    assert "for _attempt in $_attempt_sequence; do" in bot
     fallback_call = bot.index(
         '_fallback=$(printf \'%s\' "$_model_error_text"'
     )

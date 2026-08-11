@@ -80,6 +80,24 @@ else
   bad "claude CLI not found" "install Claude Code: https://claude.com/claude-code then run 'claude' and /login"
 fi
 
+_codex_bin=$(python3 - <<'PYEOF' 2>/dev/null || true
+from core.codex_fallback import resolve_codex_bin
+print(resolve_codex_bin())
+PYEOF
+)
+if [ -n "$_codex_bin" ]; then
+  ok "Codex CLI $($_codex_bin --version 2>/dev/null | head -1)"
+  if $_codex_bin login status >/dev/null 2>&1; then
+    ok "Codex CLI is authenticated (ChatGPT login available)"
+  else
+    warn "Codex CLI found but not authenticated — Claude outage cannot switch to Codex" \
+         "run: codex login   (or use the ChatGPT-bundled Codex login)"
+  fi
+else
+  warn "Codex CLI not found — Claude still works, but local Codex fallback is unavailable" \
+       "install Codex or ChatGPT for macOS, run 'codex login', or set codex.binary in jarvis.yaml"
+fi
+
 command -v node >/dev/null 2>&1 \
   && ok "node $(node --version 2>/dev/null)" \
   || warn "node/npm not found — needed to install claude CLI and lark-cli" \
