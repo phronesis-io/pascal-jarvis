@@ -106,6 +106,7 @@ class JobManager:
             "status": "running",
             "pid": None,
             "session_id": f"bg-{job_id}",
+            "session_ids": [],
             "started_at": now_local_str("%Y-%m-%d %H:%M:%S"),
             "finished_at": None,
             "output_file": str(job_dir / "output.md"),
@@ -130,8 +131,8 @@ class JobManager:
                 pass
         return job_id
 
-    def update_job(self, job_id: str, **kwargs) -> None:
-        """Update fields on a job entry."""
+    def update_job(self, job_id: str, **kwargs) -> bool:
+        """Update fields on a job entry and report whether it existed."""
         if kwargs.get("pid"):
             # Capture identity alongside the PID (covers the set-pid CLI
             # arm) so cancel/sweep can detect reuse. Done before taking
@@ -140,9 +141,37 @@ class JobManager:
         with _locked(self.registry_path):
             registry = self._read_registry()
             if job_id not in registry:
-                return
+                return False
             registry[job_id].update(kwargs)
+            session_id = str(kwargs.get("session_id") or "")
+            if session_id:
+                session_ids = registry[job_id].get("session_ids")
+                if not isinstance(session_ids, list):
+                    session_ids = []
+                if session_id not in session_ids:
+                    session_ids.append(session_id)
+                registry[job_id]["session_ids"] = session_ids
             _atomic_write_json(self.registry_path, registry)
+        return True
+
+    def add_session_id(self, job_id: str, session_id: str) -> bool:
+        """Register another provider session without changing the primary ID."""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return False
+        with _locked(self.registry_path):
+            registry = self._read_registry()
+            job = registry.get(job_id)
+            if not isinstance(job, dict):
+                return False
+            session_ids = job.get("session_ids")
+            if not isinstance(session_ids, list):
+                session_ids = []
+            if session_id not in session_ids:
+                session_ids.append(session_id)
+            job["session_ids"] = session_ids
+            _atomic_write_json(self.registry_path, registry)
+        return True
 
     def finish_job(self, job_id: str, status: str = "completed") -> None:
         """Mark a job as finished (completed or failed).
@@ -435,6 +464,16 @@ if __name__ == "__main__":
         job_id = sys.argv[2]
         pid = int(sys.argv[3])
         jm.update_job(job_id, pid=pid)
+
+    elif cmd == "set-session":
+        job_id = sys.argv[2]
+        session_id = sys.argv[3]
+        print("updated" if jm.update_job(job_id, session_id=session_id) else "not_found")
+
+    elif cmd == "add-session":
+        job_id = sys.argv[2]
+        session_id = sys.argv[3]
+        print("updated" if jm.add_session_id(job_id, session_id) else "not_found")
 
     elif cmd == "finish":
         job_id = sys.argv[2]

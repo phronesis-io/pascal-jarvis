@@ -32,6 +32,7 @@ from core.safety import looks_like_error
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+SessionRegistrar = Callable[[str], bool]
 
 
 @dataclass(frozen=True)
@@ -183,14 +184,19 @@ def _invoke(
 def _session_args(
     base: tuple[str, ...],
     attempt_index: int,
+    session_registrar: SessionRegistrar | None = None,
 ) -> list[str]:
     if not base:
         return ["--no-session-persistence"]
-    if "--resume" in base:
-        return list(base)
-    if "--session-id" in base and attempt_index:
-        return ["--session-id", str(uuid.uuid4())]
-    return list(base)
+    values = list(base)
+    if "--session-id" not in values or not attempt_index:
+        return values
+    retry_session_id = str(uuid.uuid4())
+    if session_registrar is not None and not session_registrar(retry_session_id):
+        raise RuntimeError("refusing unregistered provider retry session")
+    session_index = values.index("--session-id") + 1
+    values[session_index] = retry_session_id
+    return values
 
 
 def _openai_result(
@@ -266,6 +272,7 @@ def run_auxiliary_model(
     timeout: int = 120,
     allow_tools: bool = False,
     session_args: tuple[str, ...] = (),
+    session_registrar: SessionRegistrar | None = None,
     runner: Runner | None = None,
     process_holder: dict[str, Any] | None = None,
     process_key: str = "model",
@@ -332,7 +339,11 @@ def run_auxiliary_model(
                 ]
                 if prompt_file:
                     command.extend(["--append-system-prompt-file", prompt_file])
-                command.extend(_session_args(session_args, attempt_index))
+                command.extend(_session_args(
+                    session_args,
+                    attempt_index,
+                    session_registrar,
+                ))
                 if allow_tools:
                     command.append("--dangerously-skip-permissions")
                 else:
@@ -468,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", default="")
     parser.add_argument("--fork-session", action="store_true")
     parser.add_argument("--metadata-file", default="")
+    parser.add_argument("--managed-job-id", default="")
+    parser.add_argument("--jobs-dir", default=os.environ.get("JV_JOBS_DIR", ""))
     args = parser.parse_args(argv)
 
     root = args.root or Path(__file__).resolve().parent.parent
@@ -476,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
         values = ["--resume", args.resume]
         if args.fork_session:
             values.append("--fork-session")
+        if args.session_id:
+            values.extend(("--session-id", args.session_id))
         session = tuple(values)
     elif args.session_id:
         session = ("--session-id", args.session_id)
@@ -486,6 +501,18 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.system_prompt_file).unlink()
         except OSError:
             pass
+
+    session_registrar = None
+    if args.managed_job_id:
+        from core.jobs import JobManager
+
+        jobs_dir = args.jobs_dir or str(Path(root) / "jobs")
+        manager = JobManager(jobs_dir)
+
+        def register_session(session_id: str) -> bool:
+            return manager.add_session_id(args.managed_job_id, session_id)
+
+        session_registrar = register_session
 
     process_holder: dict[str, Any] = {
         "model": None,
@@ -511,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             allow_tools=args.allow_tools,
             session_args=session,
+            session_registrar=session_registrar,
             process_holder=process_holder,
             cancelled=lambda: bool(termination_signal[0]),
         )

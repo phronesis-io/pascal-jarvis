@@ -1836,6 +1836,18 @@ run_background_job() {
   local bg_session_id
   bg_session_id="$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z')"
   [ -z "$bg_session_id" ] && bg_session_id="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+  # Persist the actual provider session before Claude starts. Cross-session
+  # continuity reads this registry to exclude Jarvis-owned background work;
+  # without the real UUID a fork could be mistaken for an interactive session.
+  local _session_marked
+  _session_marked=$(JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" \
+    set-session "$job_id" "$bg_session_id" 2>>"$LOG_FILE" || true)
+  if [ "$_session_marked" != "updated" ]; then
+    log_warn "[bg:$job_id] Could not register provider session — refusing untracked launch"
+    JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$job_id" failed \
+      2>>"$LOG_FILE" || true
+    return
+  fi
   local output_file="$JOBS_DIR/${job_id}/output.md"
   local log_file_job="$JOBS_DIR/${job_id}/log.txt"
 
@@ -1890,7 +1902,8 @@ except Exception:
       --system-prompt-file "$sys_prompt_file" \
       --consume-system-prompt-file \
       --metadata-file "$provider_file" \
-      --resume "$_main_sid" --fork-session \
+      --managed-job-id "$job_id" --jobs-dir "$JOBS_DIR" \
+      --resume "$_main_sid" --fork-session --session-id "$bg_session_id" \
       2>>"$log_file_job" > "$output_file") &
   else
     (cd "$WORK_DIR" && printf '%s' "$content" | python3 -m core.aux_model \
@@ -1898,6 +1911,7 @@ except Exception:
       --system-prompt-file "$sys_prompt_file" \
       --consume-system-prompt-file \
       --metadata-file "$provider_file" \
+      --managed-job-id "$job_id" --jobs-dir "$JOBS_DIR" \
       --session-id "$bg_session_id" \
       2>>"$log_file_job" > "$output_file") &
   fi
