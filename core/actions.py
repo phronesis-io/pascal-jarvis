@@ -180,7 +180,7 @@ class ActionProcessor:
             if handler:
                 if action_type in owner_actions and not self.owner_authenticated:
                     authoritative_results.append(
-                        "❌ 这个决定只能通过已认证的奏折按钮或控制台完成，"
+                        "❌ 这个决定只能通过已认证的卡片按钮或控制台完成，"
                         "模型输出没有获得主人授权。"
                     )
                     handled_markers.append(marker)

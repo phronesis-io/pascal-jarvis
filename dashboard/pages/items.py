@@ -503,7 +503,7 @@ def item_detail_page(memorial_id: str):
     with ui.column().classes("jarvis-page"):
         dashboard_header(
             "/items", "事项详情",
-            "在这里读完整背景；批示、飞书和另一台设备共享同一状态。",
+            "在这里读完整背景；在飞书或别的设备点过什么，这里同步。",
         )
 
         @ui.refreshable

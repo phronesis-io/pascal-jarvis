@@ -70,7 +70,8 @@ CHAT_OPT_KEY = "chat"
 # an immediate plain-language retelling (explain queue → heartbeat), and
 # (3) a negative example future card-writing prompts are shown.
 CONFUSED_OPT_KEY = "confused"
-CHAT_BUTTON_LABEL = "💬 聊聊这个"
+CHAT_BUTTON_TEXT = "聊聊这个"
+CHAT_BUTTON_LABEL = f"💬 {CHAT_BUTTON_TEXT}"
 
 # Same retry profile as core.heartbeat_loop (REQ-11).
 SEND_RETRY_DELAYS = (2, 5)
@@ -86,7 +87,6 @@ CHAT_RETAP_THROTTLE_S = 120
 # old wall-of-text experience while「聊聊这个」still receives richer context.
 CARD_BODY_MAX_CHARS = 900
 CARD_BODY_MAX_LINES = 14
-CHAT_CONTEXT_MAX_CHARS = 3000
 
 # When the card had to clip, 「聊聊这个」sends the untruncated source text as a
 # chat message. Bounding it keeps a runaway emitter from pasting a novel into
@@ -95,9 +95,18 @@ CHAT_CONTEXT_MAX_CHARS = 3000
 # (2026-08-11: Pascal — "我只能看到一堆截断". Tapping the button used to load
 # context for the MODEL and tell HIM nothing he hadn't already seen.)
 FULL_TEXT_MAX_CHARS = 4000
+# The 背景 section rides after the full body with its own budget, so a long
+# body can never silently amputate it.
+CHAT_OPENER_CONTEXT_MAX = 1000
+
+# The model's injected chat context must cover at least everything the opener
+# just showed Pascal (FULL_TEXT_MAX_CHARS of body) — if he quotes the tail of
+# the「全文」he was sent and the model never saw it, the model confabulates in
+# the very conversation whose point was giving both sides the same record.
+CHAT_CONTEXT_MAX_CHARS = 6000
 
 # Says what the button DOES, not that context exists somewhere.
-CLIP_NOTICE = f"…还有下半段，点「{CHAT_BUTTON_LABEL[2:]}」我把全文发给你"
+CLIP_NOTICE = f"…还有下半段，点「{CHAT_BUTTON_TEXT}」我把全文发给你"
 
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
@@ -983,6 +992,24 @@ def _button_groups(state: dict, include_options: bool = True,
     return groups
 
 
+def _cut_at_boundary(text: str, limit: int) -> str:
+    """Cut to ≤``limit`` chars on a line/space boundary, never inside a
+    markdown link (a broken `[label](https://…` fragment renders as noise)."""
+    cut = text[:limit]
+    for sep in ("\n", " "):
+        if sep in cut[limit // 2:]:
+            cut = cut.rsplit(sep, 1)[0]
+            break
+    # If we still landed inside a markdown link, back up further.
+    last_open = cut.rfind("[")
+    if last_open != -1:
+        after = cut[last_open:]
+        close_b = after.find("]")
+        if close_b == -1 or after.find(")", close_b) == -1:
+            cut = cut[:last_open].rstrip()
+    return cut.rstrip()
+
+
 def _display_body(body: str) -> str:
     """Compact card copy while preserving the full ledger/chat context."""
     raw = str(body or "").strip()
@@ -990,21 +1017,7 @@ def _display_body(body: str) -> str:
     clipped = len(lines) > CARD_BODY_MAX_LINES
     text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
     if len(text) > CARD_BODY_MAX_CHARS:
-        cut = text[:CARD_BODY_MAX_CHARS]
-        # Clip on a line/space boundary so the cut can't land inside a
-        # markdown link and leave a broken `[label](https://…` fragment.
-        for sep in ("\n", " "):
-            if sep in cut[CARD_BODY_MAX_CHARS // 2:]:
-                cut = cut.rsplit(sep, 1)[0]
-                break
-        # If we still landed inside a markdown link, back up further.
-        last_open = cut.rfind("[")
-        if last_open != -1:
-            after = cut[last_open:]
-            close_b = after.find("]")
-            if close_b == -1 or after.find(")", close_b) == -1:
-                cut = cut[:last_open].rstrip()
-        text = cut.rstrip()
+        text = _cut_at_boundary(text, CARD_BODY_MAX_CHARS)
         clipped = True
     if clipped:
         text += "\n\n" + CLIP_NOTICE
@@ -1014,14 +1027,12 @@ def _display_body(body: str) -> str:
 def body_was_clipped(body: str) -> bool:
     """True when _display_body had to drop part of the source text.
 
-    Mirrors _display_body's two clip triggers exactly. Kept separate (rather
-    than returning a flag) so the many _display_body callers stay untouched.
+    Derived from the rendered output rather than restating the clip triggers,
+    so it can never drift from what the card actually showed. (A body that
+    itself ends with CLIP_NOTICE false-positives — benign: the full text gets
+    sent anyway.)
     """
-    raw = str(body or "").strip()
-    lines = raw.splitlines()
-    if len(lines) > CARD_BODY_MAX_LINES:
-        return True
-    return len("\n".join(lines).strip()) > CARD_BODY_MAX_CHARS
+    return _display_body(body).endswith(CLIP_NOTICE)
 
 
 def _render_card(state: dict, *, body: str | None = None,
@@ -1143,7 +1154,10 @@ def _chatting_card(state: dict, ts: str) -> dict:
         _render_card(
             state, status_line=status,
             include_options=state["status"] == "pending",
-            include_chat=False,
+            # A clipped body keeps the button: its CLIP_NOTICE names it, and
+            # if the opener send failed this is the only retry surface — a
+            # rendered pointer to a missing button would be a dead end.
+            include_chat=body_was_clipped(str(state.get("body", ""))),
         ),
         state,
     )
@@ -1329,7 +1343,13 @@ def _deliver_opener(text: str, chat_id: str) -> None:
                 requested_channel="lark",
                 conversation_bound=True,
                 chat_id=chat_id,
+                # bypass_dedup: every opener is user-tap-triggered, and for a
+                # clipped card it IS the payload — a re-tap an hour later must
+                # resend, not get eaten by the 6h dedup window while the toast
+                # claims success. Double-taps are already caught upstream by
+                # CHAT_RETAP_THROTTLE_S.
                 metadata={"bypass_throttle": True,
+                          "bypass_dedup": True,
                           "dedup_text": f"{chat_id}\0{text}"},
             ),
             root=JARVIS_DIR,
@@ -2469,7 +2489,9 @@ def _bounded_chat_context(st: dict) -> str:
     budget = max(CHAT_CONTEXT_MAX_CHARS - len("\n".join(fixed)) - 32, 200)
     body = str(st.get("body", "")).strip()
     context = str(st.get("context", "")).strip()
-    body_budget = min(2000, int(budget * 0.7))
+    # Cover at least the FULL_TEXT_MAX_CHARS of body the opener may have just
+    # shown Pascal; the model must never know less than he does.
+    body_budget = min(FULL_TEXT_MAX_CHARS, int(budget * 0.7))
     body = body[:body_budget].rstrip()
     context = context[:max(budget - len(body), 0)].rstrip()
     variable = [f"正文: {body}"]
@@ -2796,10 +2818,20 @@ def chat(memorial_id: str) -> dict:
     full = str(st.get("body", "")).strip()
     extra = str(st.get("context", "")).strip()
     if body_was_clipped(full):
-        parts = [f"📜 「{st['title']}」全文：", "", full]
+        body_part = full
+        if len(body_part) > FULL_TEXT_MAX_CHARS:
+            # Never a silent cut: the whole point of this opener is that a
+            # silent cut is what he complained about. Announce the remainder
+            # and offer the follow-up (the ledger keeps the full body, so
+            # a reply of「继续发」can deliver the rest in-conversation).
+            body_part = _cut_at_boundary(body_part, FULL_TEXT_MAX_CHARS)
+            rest = len(full) - len(body_part)
+            body_part += (f"\n\n（一条消息只放得下这么多——原文还有约 {rest} 字，"
+                          "回一句「继续发」我把剩下的发来）")
+        parts = [f"📜 「{st['title']}」全文：", "", body_part]
         if extra:
-            parts += ["", "—— 背景 ——", extra]
-        opener = "\n".join(parts)[:FULL_TEXT_MAX_CHARS]
+            parts += ["", "—— 背景 ——", extra[:CHAT_OPENER_CONTEXT_MAX]]
+        opener = "\n".join(parts)
     else:
         opener = (f"📜 已带上「{st['title']}」的背景。"
                   "直接说你想追问什么，或告诉我你的倾向。")

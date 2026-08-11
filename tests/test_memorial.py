@@ -523,6 +523,36 @@ def test_chat_on_a_short_card_keeps_the_concise_opener(env):
     assert "一句话就说完了" not in opener
 
 
+def test_clipped_opener_announces_the_cut_and_keeps_the_background(env):
+    """A message headed「全文」must never be silently cut — a silent cut IS
+    the 2026-08-11 complaint. Over FULL_TEXT_MAX_CHARS the remainder is
+    announced with a follow-up offer, and 背景 still rides along (it has its
+    own budget instead of being appended last and amputated first)."""
+    body = "\n".join(f"第{i}段，" + "内容细节" * 20 for i in range(80))
+    assert len(body) > memorial.FULL_TEXT_MAX_CHARS
+    mid, _ = memorial.create("mail", "超长邮件", body, preset="fyi",
+                             context="来自晨间台账")
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "原文还有约" in opener and "继续发" in opener
+    assert "—— 背景 ——" in opener and "来自晨间台账" in opener
+    # honest bound: body part capped, plus the announcement and background
+    assert len(opener) <= (memorial.FULL_TEXT_MAX_CHARS
+                           + memorial.CHAT_OPENER_CONTEXT_MAX + 200)
+
+
+def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):
+    """The clipped card's CLIP_NOTICE names the 聊聊 button, and a failed
+    opener send has no other retry surface — removing the button while the
+    body still points at it would be a rendered dead end."""
+    body = "\n".join(f"第{i}件事，细节在这里" for i in range(30))
+    mid, _ = memorial.create("mail", "长卡", body, preset="fyi")
+    payload = memorial.chat(mid)
+    card = payload["card"]["data"]
+    labels = [a["text"]["content"] for a in _actions(card)]
+    assert memorial.CHAT_BUTTON_LABEL in labels
+
+
 def test_chat_context_keeps_state_when_body_and_background_are_huge(env):
     mid, _ = memorial.create("mail", "很长的上下文", "正文" * 2000,
                              preset="fyi", context="背景" * 2000)
