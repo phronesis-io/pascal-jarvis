@@ -2713,6 +2713,8 @@ print(content)
       # the reply is publicly visible while the per-card session carries the
       # owner's private memory, and prompt.py would take the group path
       # where the memorial context is never injected (red-team 7/21).
+      _mem_id=""
+      _mem_title=""
       if { [ -n "$_root_id" ] && [ "$_root_id" != "null" ]; } || \
          { [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; }; then
         if [ "$_owner_p2p" -eq 1 ]; then
@@ -2755,13 +2757,16 @@ print(content)
       fi
 
       # A clipped memorial explicitly promises that these exact replies will
-      # deliver the rest. Keep this deterministic, owner-private, and let the
-      # message fall through normally when no continuation is pending.
-      if [ "$_owner_p2p" -eq 1 ] && \
+      # deliver the rest. Keep this deterministic and owner-only; group cards
+      # promise the same continuation, so the owner may fulfill it there too.
+      # The lookup keys cover direct chat ids and per-card thread routing.
+      if [ "$_inline_cmd_ok" -eq 1 ] && \
          { [ "$content" = "继续发" ] || [ "$content" = "继续发送" ] || \
            [ "$content" = "发剩下的" ]; }; then
         _memorial_continue=$(python3 -m core.memorial continue \
-          --conv-key "$conv_key" 2>>"$LOG_FILE" || echo '{"handled":false}')
+          --conv-key "$conv_key" --lookup-key "$chat_id" \
+          --memorial-id "${_mem_id:-}" \
+          2>>"$LOG_FILE" || echo '{"handled":false}')
         if [ "$(echo "$_memorial_continue" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _continue_reply=$(echo "$_memorial_continue" | jq -r '.reply // empty' 2>/dev/null)
           if [ -n "$_continue_reply" ]; then

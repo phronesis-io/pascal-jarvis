@@ -583,14 +583,31 @@ def test_new_short_chat_supersedes_an_old_continuation(env):
     long_body = "\n".join(f"旧文{i}:" + "很长" * 80 for i in range(80))
     old_mid, _ = memorial.create("mail", "旧长文", long_body, preset="fyi")
     memorial.chat(old_mid)
-    assert memorial._latest_chat_continuation("ou_test")["done"] is False
+    assert memorial._latest_chat_continuation(["ou_test"])["done"] is False
 
     new_mid, _ = memorial.create("mail", "新短文", "已经说完", preset="fyi")
     memorial.chat(new_mid)
 
-    latest = memorial._latest_chat_continuation("ou_test")
+    latest = memorial._latest_chat_continuation(["ou_test"])
     assert latest["id"] == new_mid and latest["done"] is True
     assert memorial.continue_chat_body("ou_test")["handled"] is False
+
+
+def test_continuation_survives_lark_chat_and_thread_routing_keys(env):
+    body = "\n".join(f"线程正文{i}:" + "内容" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "线程长文", body, preset="fyi",
+                             chat_id="oc_direct_chat")
+    memorial.chat(mid)
+
+    result = memorial.continue_chat_body(
+        f"memorial:{mid}", lookup_keys=["oc_direct_chat"], memorial_id=mid)
+
+    assert result["handled"] is True
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    continuation = [row for row in pending
+                    if row["job_id"].startswith("memorial-continuation:")]
+    assert continuation[-1]["conv_key"] == f"memorial:{mid}"
 
 
 def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):

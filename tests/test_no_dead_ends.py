@@ -87,11 +87,13 @@ def test_chat_notice_still_says_something_useful_without_a_toast():
     assert notice and "不可用" not in notice
 
 
-def test_clipped_memorial_continue_promise_is_wired_to_private_lark_chat():
+def test_clipped_memorial_continue_promise_is_wired_for_owner_lark_chat():
     root = Path(__file__).resolve().parent.parent
     bot = (root / "bot.sh").read_text(encoding="utf-8")
     assert "python3 -m core.memorial continue" in bot
-    assert '[ "$_owner_p2p" -eq 1 ]' in bot
+    assert '[ "$_inline_cmd_ok" -eq 1 ]' in bot
+    assert '--lookup-key "$chat_id"' in bot
+    assert '--memorial-id "${_mem_id:-}"' in bot
     for phrase in ("继续发", "继续发送", "发剩下的"):
         assert f'[ "$content" = "{phrase}" ]' in bot
 

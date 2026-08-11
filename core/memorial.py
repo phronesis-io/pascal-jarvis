@@ -2750,21 +2750,28 @@ def recent_confused(limit: int = 3) -> list[dict]:
     return out[:limit]
 
 
-def _latest_chat_continuation(conv_key: str) -> dict | None:
-    key = str(conv_key or "").strip()
-    if not key:
+def _latest_chat_continuation(conv_keys: list[str],
+                              memorial_id: str = "") -> dict | None:
+    keys = {str(key or "").strip() for key in conv_keys if str(key or "").strip()}
+    mid = str(memorial_id or "").strip()
+    if not keys and not mid:
         return None
     for event in reversed(read_jsonl(_ledger_path())):
-        if (event.get("ev") == "chat_continuation"
-                and str(event.get("conv_key") or "") == key):
+        if event.get("ev") != "chat_continuation":
+            continue
+        if mid and str(event.get("id") or "") == mid:
+            return event
+        if not mid and str(event.get("conv_key") or "") in keys:
             return event
     return None
 
 
-def continue_chat_body(conv_key: str) -> dict:
+def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
+                       memorial_id: str = "") -> dict:
     """Return the next promised body chunk for one private conversation."""
     key = str(conv_key or "").strip()
-    continuation = _latest_chat_continuation(key)
+    continuation = _latest_chat_continuation(
+        [key, *(lookup_keys or [])], memorial_id=memorial_id)
     if not continuation or continuation.get("done"):
         return {"handled": False, "reply": ""}
     memorial_id = str(continuation.get("id") or "")
@@ -2792,9 +2799,10 @@ def continue_chat_body(conv_key: str) -> dict:
         next_offset += 1
     rest = max(len(full) - next_offset, 0)
     done = rest == 0
+    state_key = str(continuation.get("conv_key") or key)
     _append_line(_ledger_path(), {
         "ev": "chat_continuation", "id": memorial_id,
-        "conv_key": key, "offset": next_offset, "done": done,
+        "conv_key": state_key, "offset": next_offset, "done": done,
         "ts": now_local_str(), "epoch": int(time.time()),
     })
     # Keep the model's next real turn aligned with what Pascal has now read.
@@ -2991,6 +2999,8 @@ def main(argv: list[str] | None = None) -> int:
 
     cp = sub.add_parser("continue", help="send the next promised body chunk")
     cp.add_argument("--conv-key", required=True)
+    cp.add_argument("--lookup-key", action="append", default=[])
+    cp.add_argument("--memorial-id", default="")
 
     args = parser.parse_args(argv)
 
@@ -3037,7 +3047,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "continue":
-        print(json.dumps(continue_chat_body(args.conv_key), ensure_ascii=False))
+        print(json.dumps(continue_chat_body(
+            args.conv_key, lookup_keys=args.lookup_key,
+            memorial_id=args.memorial_id), ensure_ascii=False))
         return 0
 
     parser.print_usage(sys.stderr)
