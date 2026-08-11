@@ -28,7 +28,10 @@ survives as a durable digest after native provider sessions age out.
 4. Inject a bounded recent projection only into the owner's private prompt.
    Group and external conversations never receive it.
 5. Keep the existing heartbeat digest, upgraded to both providers and an
-   atomic per-file watermark. Unchanged sessions emit nothing.
+   atomic per-file watermark. Unchanged sessions emit nothing, and watermark
+   entries outside the same scan window are pruned. If an old transcript later
+   becomes active again, a bounded global scan cursor must baseline its
+   historical turns so only newly appended turns are emitted.
 6. Treat transcript text as untrusted historical context. Mutable facts such
    as PR, deploy, task, or calendar state still require authoritative checks.
 7. Provider transcript formats may fail independently; a bad or drifting file
@@ -40,6 +43,8 @@ survives as a durable digest after native provider sessions age out.
 - A new Codex Desktop/CLI turn appears through the same contract.
 - A second unchanged scan emits nothing; an appended turn emits only the new
   turn plus a marked context tail.
+- A transcript can age out of the watermark state and later reactivate without
+  replaying its historical turns; its newly appended turn is still emitted.
 - Managed Claude sessions, Codex fallback/canary `exec` sessions, and Codex
   subagents never appear.
 - Secret fixtures are replaced with `[redacted]`.

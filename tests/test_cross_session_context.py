@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import datetime
 
 from core import cross_session
 from core.cross_session import (
@@ -213,6 +214,106 @@ def test_incremental_codex_watermark_and_context_tail(tmp_path):
     assert "最后决定今天发布" in third
     for line in third.splitlines():
         if "已经实现并完成验证" in line:
+            assert line.startswith("[context] ")
+
+
+def test_incremental_prunes_watermarks_outside_scan_window_without_replay(
+    tmp_path, monkeypatch,
+):
+    now = 10_000
+    codex_root = tmp_path / "codex"
+    active = codex_root / "active.jsonl"
+    stale = codex_root / "stale.jsonl"
+    _codex(active, session_id="active")
+    _codex(stale, session_id="stale")
+    os.utime(active, (now - 10, now - 10))
+    os.utime(stale, (now - 7200, now - 7200))
+    state = tmp_path / "seen.json"
+    state.write_text(json.dumps({
+        "version": 2,
+        "files": {
+            str(stale): {
+                "provider": "codex",
+                "session_id": "stale",
+                "size": stale.stat().st_size,
+                "fingerprints": ["old"],
+            },
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr("core.cross_session.time.time", lambda: now)
+
+    first = collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    )
+    saved = json.loads(state.read_text(encoding="utf-8"))
+
+    assert "把 Codex 结论同步给主 Agent" in first
+    assert set(saved["files"]) == {str(active)}
+    assert collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    ) == ""
+
+
+def test_incremental_reactivation_after_pruning_emits_only_new_turn(
+    tmp_path, monkeypatch,
+):
+    base = datetime.fromisoformat("2026-08-11T12:00:00+00:00").timestamp()
+    codex_root = tmp_path / "codex"
+    path = codex_root / "reactivated.jsonl"
+    _codex(path, session_id="reactivated")
+    state = tmp_path / "seen.json"
+    clock = {"now": base}
+    monkeypatch.setattr("core.cross_session.time.time", lambda: clock["now"])
+
+    first = collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    )
+    assert "把 Codex 结论同步给主 Agent" in first
+
+    clock["now"] = base + 7200
+    os.utime(path, (base, base))
+    assert collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    ) == ""
+    assert json.loads(state.read_text(encoding="utf-8"))["files"] == {}
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "event_msg",
+            "timestamp": "2026-08-11T15:00:00Z",
+            "payload": {"type": "user_message", "message": "重新激活后的新决定"},
+        }, ensure_ascii=False) + "\n")
+    os.utime(path, (base + 10800, base + 10800))
+    clock["now"] = base + 10801
+    reactivated = collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    )
+
+    assert "重新激活后的新决定" in reactivated
+    lines = reactivated.splitlines()
+    assert len([line for line in lines if not line.startswith("[context] ")]) == 1
+    for line in lines:
+        if "把 Codex 结论同步给主 Agent" in line or "已经实现并完成验证" in line:
             assert line.startswith("[context] ")
 
 

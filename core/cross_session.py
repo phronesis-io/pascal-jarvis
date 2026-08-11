@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -481,6 +482,26 @@ def _short_ts(value: str) -> str:
         return value[:16].replace("T", " ")
 
 
+def _timestamp_epoch(value: str) -> float | None:
+    """Parse a provider timestamp for replay-safe watermark recovery."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.timestamp()
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+
+
+def _first_turn_after(turns: tuple[Turn, ...], cutoff: float) -> int:
+    """Baseline historical turns when a per-file watermark was pruned."""
+    for index, turn in enumerate(turns):
+        timestamp = _timestamp_epoch(turn.timestamp)
+        if timestamp is not None and timestamp > cutoff:
+            return index
+    return len(turns)
+
+
 def _format_turn(session: SessionTail, turn: Turn) -> str:
     prefix = f"[{session.provider}:{_project_label(session)}]"
     stamp = _short_ts(turn.timestamp) or _short_ts(session.updated_at)
@@ -518,12 +539,21 @@ def collect_incremental(
     window_hours: int = DEFAULT_WINDOW_HOURS,
 ) -> str:
     """Return unseen provider turns and atomically advance per-file watermarks."""
+    scan_started = time.time()
     if state_file is None:
         memory_dir = Path(os.environ.get("MEMORY_DIR") or Path.home() / ".jarvis" / "memory")
         state_file = memory_dir / DEFAULT_STATE_FILE
     state_file = Path(state_file)
     seen = _load_state(state_file)
     files_state = seen.get("files") if isinstance(seen.get("files"), dict) else {}
+    try:
+        previous_scan_at = float(seen.get("last_scan_at") or 0)
+    except (TypeError, ValueError):
+        previous_scan_at = 0
+    if not math.isfinite(previous_scan_at) or previous_scan_at <= 0:
+        previous_scan_at = 0
+    else:
+        previous_scan_at = min(previous_scan_at, scan_started)
     output: list[str] = []
     sessions = discover_interactive_sessions(
         claude_root=claude_root,
@@ -546,14 +576,25 @@ def collect_incremental(
         old_fingerprints = previous.get("fingerprints")
         old_fingerprints = old_fingerprints if isinstance(old_fingerprints, list) else []
 
-        if previous and not old_fingerprints and current_size <= previous_size:
+        if not previous and previous_scan_at:
+            # A previously idle file may re-enter the scan after its per-file
+            # watermark was pruned. Provider timestamps let us emit only turns
+            # created since the last completed scan instead of replaying its
+            # historical tail. Missing timestamps fail closed by baselining it.
+            start = _first_turn_after(session.turns, previous_scan_at)
+        elif previous and not old_fingerprints and current_size <= previous_size:
             # Migration from the legacy turn-count watermark: baseline an
             # unchanged file instead of replaying a day of old conversation.
             start = len(current)
         elif current_size < previous_size:
+            # A known file was deliberately truncated or rotated. Its current
+            # content is the new authoritative tail, even when fixture or
+            # provider timestamps are older than the local scan clock.
             start = 0
         else:
             start = _overlap_start(old_fingerprints, current)
+            if old_fingerprints and start == 0 and previous_scan_at:
+                start = _first_turn_after(session.turns, previous_scan_at)
 
         new_turns = list(_recent_with_user(
             session.turns[start:], MAX_NEW_TURNS_PER_SESSION))
@@ -569,9 +610,15 @@ def collect_incremental(
             "fingerprints": current[-MAX_TURNS_PER_SESSION:],
         }
 
-    files_state = {
-        path: value for path, value in files_state.items() if Path(path).is_file()
-    }
+    state_cutoff = scan_started - max(1, int(window_hours)) * 3600
+    retained_state = {}
+    for path, value in files_state.items():
+        try:
+            if Path(path).stat().st_mtime >= state_cutoff:
+                retained_state[path] = value
+        except OSError:
+            continue
+    files_state = retained_state
     combined = "\n".join(output)
     if len(combined) > MAX_INCREMENTAL_CHARS:
         lines = combined.splitlines()
@@ -582,7 +629,11 @@ def collect_incremental(
         if combined.strip() else ""
     if emitted_sha and emitted_sha == seen.get("last_emitted_sha"):
         combined = ""
-    new_state = {"version": 2, "files": files_state}
+    new_state = {
+        "version": 3,
+        "last_scan_at": scan_started,
+        "files": files_state,
+    }
     if emitted_sha:
         new_state["last_emitted_sha"] = emitted_sha
     elif seen.get("last_emitted_sha"):
