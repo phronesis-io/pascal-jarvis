@@ -2769,7 +2769,9 @@ print(content)
           2>>"$LOG_FILE" || echo '{"handled":false}')
         if [ "$(echo "$_memorial_continue" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _continue_reply=$(echo "$_memorial_continue" | jq -r '.reply // empty' 2>/dev/null)
-          if [ -n "$_continue_reply" ] && \
+          if [ "$(echo "$_memorial_continue" | jq -r '.awaiting_opener // false' 2>/dev/null)" = "true" ]; then
+            delivery_reply_reliable "$message_id" "$_continue_reply" || true
+          elif [ -n "$_continue_reply" ] && \
              delivery_reply_reliable "$message_id" "$_continue_reply"; then
             _continue_mid=$(echo "$_memorial_continue" | jq -r '.memorial_id // empty')
             _continue_state_key=$(echo "$_memorial_continue" | jq -r '.state_conv_key // empty')

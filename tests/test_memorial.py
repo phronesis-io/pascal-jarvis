@@ -44,7 +44,8 @@ def env(tmp_path, monkeypatch):
     # Most tests care about chat semantics, not thread scheduling. Keep them
     # deterministic; the dedicated async test below covers non-blocking send.
     monkeypatch.setattr(memorial, "_send_opener_async",
-                        lambda text, chat_id: memorial._deliver_opener(text, chat_id))
+                        lambda text, chat_id, continuation=None:
+                        memorial._deliver_opener(text, chat_id, continuation))
     return rec
 
 
@@ -639,6 +640,39 @@ def test_continuation_does_not_advance_before_delivery_commit(env):
     assert memorial.commit_chat_continuation(
         "ou_test", first["state_conv_key"], mid,
         first["expected_offset"], first["next_offset"]) is False
+
+
+def test_failed_opener_restarts_continuation_from_the_beginning(env, monkeypatch):
+    body = "\n".join(f"首段{i}:" + "正文" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "首段也不能丢", body, preset="fyi")
+    monkeypatch.setattr(memorial, "_send_opener_async",
+                        lambda text, chat_id, continuation=None:
+                        memorial._finish_opener_continuation(
+                            continuation or {}, delivered=False))
+
+    memorial.chat(mid)
+    state = memorial._latest_chat_continuation(["ou_test"])
+    assert state["offset"] == 0
+    assert state["done"] is False
+    assert state["awaiting_opener"] is False
+    retry = memorial.continue_chat_body("ou_test")
+    assert "首段0:" in retry["reply"]
+
+
+def test_continue_while_opener_is_in_flight_does_not_advance(env, monkeypatch):
+    body = "\n".join(f"等待{i}:" + "正文" * 100 for i in range(80))
+    monkeypatch.setattr(memorial, "_send_opener_async",
+                        lambda *_args, **_kwargs: None)
+    mid, _ = memorial.create("mail", "正在发送", body, preset="fyi")
+    memorial.chat(mid)
+
+    waiting = memorial.continue_chat_body("ou_test")
+
+    assert waiting["handled"] is True
+    assert waiting["awaiting_opener"] is True
+    assert "还在发送" in waiting["reply"]
+    state = memorial._latest_chat_continuation(["ou_test"])
+    assert state["offset"] == 0 and state["awaiting_opener"] is True
 
 
 def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):

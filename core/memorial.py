@@ -1327,7 +1327,29 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
 _opener_thread: threading.Thread | None = None
 
 
-def _deliver_opener(text: str, chat_id: str) -> None:
+def _finish_opener_continuation(meta: dict, delivered: bool) -> bool:
+    """Publish the first safe offset after the opener attempt finishes."""
+    if not meta:
+        return False
+    conv_key = str(meta.get("conv_key") or "")
+    memorial_id = str(meta.get("memorial_id") or "")
+    token = str(meta.get("token") or "")
+    latest = _latest_chat_continuation([conv_key], memorial_id=memorial_id)
+    if (not latest or str(latest.get("activation_token") or "") != token
+            or not latest.get("awaiting_opener")):
+        return False
+    offset = int(meta.get("delivered_offset") or 0) if delivered else 0
+    _append_line(_ledger_path(), {
+        "ev": "chat_continuation", "id": memorial_id,
+        "conv_key": conv_key, "offset": offset, "done": False,
+        "awaiting_opener": False, "activation_token": token,
+        "ts": now_local_str(), "epoch": int(time.time()),
+    })
+    return True
+
+
+def _deliver_opener(text: str, chat_id: str,
+                    continuation: dict | None = None) -> None:
     try:
         from core.delivery import (DeliveryEnvelope, TransportResult,
                                    deliver as deliver_envelope)
@@ -1360,14 +1382,22 @@ def _deliver_opener(text: str, chat_id: str) -> None:
         )
         if result.state == "delivered":
             _write_outbox(text)
+            _finish_opener_continuation(continuation or {}, delivered=True)
+        else:
+            # A later 「继续发」must restart at zero, never skip an opener the
+            # delivery authority could not confirm.
+            _finish_opener_continuation(continuation or {}, delivered=False)
     except Exception as e:
+        _finish_opener_continuation(continuation or {}, delivered=False)
         print(f"memorial opener send failed: {e}", file=sys.stderr)
 
 
-def _send_opener_async(text: str, chat_id: str) -> None:
+def _send_opener_async(text: str, chat_id: str,
+                       continuation: dict | None = None) -> None:
     global _opener_thread
     _opener_thread = threading.Thread(target=_deliver_opener,
-                                      args=(text, chat_id), daemon=True)
+                                      args=(text, chat_id, continuation),
+                                      daemon=True)
     _opener_thread.start()
 
 
@@ -2772,6 +2802,12 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
     key = str(conv_key or "").strip()
     continuation = _latest_chat_continuation(
         [key, *(lookup_keys or [])], memorial_id=memorial_id)
+    if continuation and continuation.get("awaiting_opener"):
+        return {
+            "handled": True,
+            "awaiting_opener": True,
+            "reply": "全文还在发送，稍等一下再回「继续发」。",
+        }
     if not continuation or continuation.get("done"):
         return {"handled": False, "reply": ""}
     memorial_id = str(continuation.get("id") or "")
@@ -2923,6 +2959,7 @@ def chat(memorial_id: str) -> dict:
     extra = str(st.get("context", "")).strip()
     continuation_offset = len(full)
     continuation_done = True
+    continuation_meta = None
     if body_was_clipped(full):
         body_part = full
         if len(body_part) > FULL_TEXT_MAX_CHARS:
@@ -2944,14 +2981,26 @@ def chat(memorial_id: str) -> dict:
         opener = (f"📜 已带上「{st['title']}」的背景。"
                   "直接说你想追问什么，或告诉我你的倾向。")
     if conv_key:
-        # Every new chat tap supersedes any older continuation in this
-        # conversation, including a short card that has nothing left to send.
+        # Tombstone every older continuation immediately. For a long opener,
+        # the async delivery thread publishes either the confirmed first-chunk
+        # offset or zero on failure; it never assumes the opener arrived.
+        activation_token = f"{time.time_ns()}:{os.getpid()}"
         _append_line(_ledger_path(), {
             "ev": "chat_continuation", "id": memorial_id,
-            "conv_key": conv_key, "offset": continuation_offset,
-            "done": continuation_done, "ts": ts, "epoch": int(time.time()),
+            "conv_key": conv_key,
+            "offset": 0 if not continuation_done else continuation_offset,
+            "done": continuation_done,
+            "awaiting_opener": not continuation_done,
+            "activation_token": activation_token,
+            "ts": ts, "epoch": int(time.time()),
         })
-    _send_opener_async(opener, st.get("chat_id", ""))
+        if not continuation_done:
+            continuation_meta = {
+                "conv_key": conv_key, "memorial_id": memorial_id,
+                "token": activation_token,
+                "delivered_offset": continuation_offset,
+            }
+    _send_opener_async(opener, st.get("chat_id", ""), continuation_meta)
 
     return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
             "deep_link": conversation_deep_link(st),
