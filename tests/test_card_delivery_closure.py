@@ -296,9 +296,12 @@ def test_notice_card_opens_with_zhidaojiuxing(tmp_path, monkeypatch):
 def test_docket_mentions_accumulated_unread_signals():
     """Owner: 「信号…攒的比较多，你可以提醒我去看一眼」— one line in the
     morning docket, threshold 5 so one unread brief doesn't nag."""
-    overdue = [{"source": "intention-check", "title": "t",
-                "ts": "2026-08-01 09:00", "epoch": 1785600000}]
-    _, body_quiet = memorial.escrow_docket(overdue, unread_signals=2)
+    from datetime import datetime
+    states = [{"source": "intention-check", "title": "t", "status": "pending",
+               "attention": memorial.ATTENTION_DECISION,
+               "ts": "2026-08-01 09:00", "epoch": 1785600000}]
+    now = datetime(2026, 8, 4, 9, 0)
+    _, body_quiet = memorial.escrow_docket(states, now=now, unread_signals=2)
     assert "信号攒了" not in body_quiet
-    _, body_loud = memorial.escrow_docket(overdue, unread_signals=7)
+    _, body_loud = memorial.escrow_docket(states, now=now, unread_signals=7)
     assert "信号攒了 7 条" in body_loud

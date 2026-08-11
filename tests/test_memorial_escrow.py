@@ -148,16 +148,20 @@ def test_lapsed_cards_do_not_count_as_engagement(env, monkeypatch):
 # ── the docket ───────────────────────────────────────────────────────────
 
 
-def test_docket_groups_by_source_instead_of_listing_every_row(env):
+def test_docket_names_the_urgent_few_and_sums_the_rest(env):
+    """奏折铁律 rewrite (REQ-122): conclusion first, 2-3 named asks, one line
+    for the remainder — not a per-source accounting table."""
     for _ in range(14):
         _make(env, "eigenflux-publish", memorial.ATTENTION_DECISION, age_h=24 * 7)
     _make(env, "pgc-improvement", memorial.ATTENTION_DECISION, age_h=72)
-    overdue = memorial.escrow_scan(now=NOW)["overdue"]
-    title, body = memorial.escrow_docket(overdue, now=NOW)
-    assert "15" in title and "7" in title
-    # 14 stuck cards from one source read as one broken flow, not 14 asks.
-    assert "14 件" in body
-    assert body.count("·") <= memorial.ESCROW_DIGEST_MAX_GROUPS + 1
+    title, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
+    assert title == "15 件事等你拍板"
+    first = body.splitlines()[0]
+    assert first.startswith("有 15 件事等你拍板，最急的是")
+    assert "等了 7 天" in first
+    # Named bullets stay few; the other 12 are one honest line, not a pile.
+    assert body.count("·") == 2
+    assert "其余 12 件" in body
 
 
 def test_run_archives_and_sends_one_docket(env):

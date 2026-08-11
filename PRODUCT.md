@@ -12,8 +12,9 @@ agency.
 Jarvis should let the user:
 
 - speak naturally in Lark and receive a concise, context-aware response;
-- batch ordinary decisions on phone or desktop without cluttering chat;
-- continue one body of work across Lark, phone, Claude Code, and Codex;
+- batch ordinary decisions inside Lark — one morning docket card, not a
+  card storm and not a second inbox;
+- continue one body of work across Lark, Claude Code, and Codex;
 - delegate an external action and know whether it was truly completed;
 - see which provider/model actually handled a request and whether each fallback
   is currently usable, without exposing credentials;
@@ -23,25 +24,32 @@ Jarvis should let the user:
 
 ## Product Surfaces
 
-- **Lark conversation**: immediate dialogue, clarification, urgent or
-  conversation-bound decisions.
-- **Items on phone/web**: canonical batch-review surface for notices and
-  decisions.
-- **Signals on phone/web**: searchable notice projection for EigenFlux and
-  other proactive observations; it reads the Item ledger and is not another
-  inbox.
+Ruling (2026-08-07, reaffirmed 2026-08-11): **Lark is the product.** A
+feature counts as delivered only when the user can complete it inside Lark —
+see it, decide, see the result. Web pages are archives and operator
+references, never delivery. Measured basis: over 14 days to 2026-08-11, Lark
+cards were read 95.7% while web cards were read 1.8%.
+
+- **Lark conversation**: the sole delivery surface — dialogue, cards,
+  decisions, alerts, and the daily docket. Anything that leaves Lark leaves
+  the product.
+- **Item ledger + morning digest**: ambient and archival content is recorded
+  in the Item ledger without a card; the morning anchor batches accumulated
+  entries into one line (threshold ≥5). This is the current implementation of
+  principle 12 — quiet is not invisible.
 - **Jarvis Calendar**: the next concrete fire time and closure state of
   existing Intents; it is not the engineering task-health calendar.
-- **Routines on phone/web**: the automations the user created by speaking,
-  with the evidence each one reads, how far it may act without asking, and a
-  run-by-run record of what it actually did. Adding a recurring behavior is a
-  sentence, not a release.
+- **Dashboard (`:3457`)** — frozen: archive + ops reference. No new features
+  land here.
+- **Mobile gateway (`:3458`)** — retired (2026-08-11, REQ-120); the
+  Tailscale funnel no longer runs.
+- **Routines** — frozen: pending merge into Lark interaction or retirement.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
 - **Claude Code and Codex**: deep execution environments attached to the same
   Matter.
-- **Admin and Ops**: operator-only diagnosis and recovery, never a daily user
-  workflow.
+- **Admin and Ops (`:3456`)**: operator-only diagnosis and recovery, never a
+  daily user workflow.
 
 ## Product Principles
 

@@ -173,14 +173,11 @@ ESCROW_DEADLINE_H = {
 # ceiling it is filed as 留中 so the docket cannot nag forever. Nothing in the
 # measured window was ever decided this late (p95 = 128h, max = 179h).
 ESCROW_HARD_LAPSE_H = 24 * 14
-# 御门听政: the docket goes out once a day, in the morning, as ONE card, and
-# groups by source. Re-pushing stale cards individually is the card storm this
-# system was already burned by (7/22) — the emperor gets a docket, not the pile.
-# Grouping is what makes the backlog legible: the first real docket was 37 rows
-# but only 5 sources, 14 of them one repeating broken flow.
+# 御门听政: the docket goes out once a day, in the morning, as ONE card.
+# Re-pushing stale cards individually is the card storm this system was
+# already burned by (7/22) — the emperor gets a docket, not the pile.
 ESCROW_DIGEST_HOURS = range(8, 12)
 ESCROW_DIGEST_SOURCE = "memorial-escrow"
-ESCROW_DIGEST_MAX_GROUPS = 6
 STATUS_LAPSED = "lapsed"
 
 REVIEW_LARK = "lark"
@@ -788,41 +785,141 @@ def escrow_scan(now: datetime | None = None,
     return out
 
 
-def escrow_docket(overdue: list[dict],
-                  now: datetime | None = None,
-                  unread_signals: int = 0) -> tuple[str, str]:
-    """Render the daily docket as ``(title, body)``, grouped by source.
+def ledger_accounting(window_days: int | None = None,
+                      now: datetime | None = None,
+                      states: list[dict] | None = None) -> dict:
+    """统一闭环口径 (REQ-122): the ONE way to count where cards stand.
 
-    37 raw rows read as 37 unanswered asks. Grouped, the same backlog read as
-    "eigenflux-publish has 14 stuck" — a broken flow, not 14 decisions. The
-    docket exists to make that distinction visible at a glance.
+    8/11 数字分裂实录: a ledger query counted 106 张未闭环 while the same
+    morning's escrow docket announced 「待批 14 件」 — the docket only counted
+    overdue decisions, leaving notices and not-yet-due pending rows invisible.
+    Both numbers were "correct", so neither was trusted. From now on every
+    reporter folds ``memorials.jsonl`` into exactly three buckets:
+
+      pending  待批 — folded status ``pending``, regardless of attention
+               class or whether any deadline has passed
+      decided  已办 — 批红 or an upstream resolve (both fold to ``decided``)
+      lapsed   留中 — archived by the sweep without ever being answered
+
+    Every counted row lands in exactly one bucket, so the identity
+    ``pending + decided + lapsed == created`` is asserted — a new folded
+    status silently leaking out of the arithmetic is precisely the kind of
+    口径分裂 this function exists to end.
+
+    ``window_days`` filters by creation time (None = the whole ledger).
+    Rows with an unparsable ``ts`` are excluded from every bucket — the same
+    contract as escrow_scan: never guess an age.
     """
     now = now or now_local()
-    groups: dict[str, list[tuple[float, dict]]] = {}
-    for st in overdue:
+    rows = list_memorials() if states is None else states
+    out = {
+        "window_days": window_days,
+        "created": 0,
+        "pending": 0,
+        "decided": 0,
+        "lapsed": 0,
+        "pending_decision": 0,
+        "pending_notice": 0,
+        "pending_alert": 0,
+    }
+    for st in rows:
         age = _age_hours(st, now)
-        groups.setdefault(str(st.get("source", "?")), []).append((age or 0.0, st))
-    ranked = sorted(groups.items(), key=lambda kv: -max(a for a, _ in kv[1]))
-    oldest = max((a for rows in groups.values() for a, _ in rows), default=0.0)
-    title = f"待批 {len(overdue)} 件，最久 {oldest / 24:.0f} 天"
-    lines = []
-    for source, rows in ranked[:ESCROW_DIGEST_MAX_GROUPS]:
-        top = max(a for a, _ in rows)
-        label = SOURCE_TITLE.get(source, source)
-        sample = sorted(rows, key=lambda r: -r[0])[0][1].get("title", "")
-        detail = f"· **{label}** {len(rows)} 件 · 最久 {top / 24:.0f} 天"
-        if len(rows) == 1 and sample:
-            detail += f"\n  {sample[:38]}"
-        lines.append(detail)
-    rest = ranked[ESCROW_DIGEST_MAX_GROUPS:]
-    if rest:
-        lines.append(f"· 另有 {sum(len(r) for _, r in rest)} 件，来自 {len(rest)} 个来源")
+        if age is None:
+            continue
+        if window_days is not None and age > window_days * 24:
+            continue
+        out["created"] += 1
+        status = str(st.get("status", ""))
+        if status == "pending":
+            out["pending"] += 1
+            attention = str(st.get("attention", "")) or ATTENTION_NOTICE
+            if attention not in (ATTENTION_DECISION, ATTENTION_ALERT):
+                attention = ATTENTION_NOTICE
+            out[f"pending_{attention}"] += 1
+        elif status == "decided":
+            out["decided"] += 1
+        elif status == STATUS_LAPSED:
+            out["lapsed"] += 1
+        # Any other status falls through uncounted and fails the identity.
+    assert out["pending"] + out["decided"] + out["lapsed"] == out["created"], (
+        f"ledger accounting identity broken: {out}")
+    return out
+
+
+def _wait_cn(age_h: float) -> str:
+    """「等了 3 天」— human wait time, never a rounded-to-zero 「0 天」."""
+    days = int(age_h // 24)
+    return f"等了 {days} 天" if days >= 1 else "今天刚来"
+
+
+def escrow_docket(states: list[dict],
+                  now: datetime | None = None,
+                  unread_signals: int = 0) -> tuple[str, str]:
+    """Render the daily docket as ``(title, body)``.
+
+    Two contracts, both bought with production feedback:
+
+    数字口径 (REQ-122): every number on the card face comes from
+    ledger_accounting() over the very states passed in. The 8/11 docket said
+    「待批 14 件」 the same morning the ledger counted 106 open, because the
+    card ran its own private arithmetic. It no longer has any.
+
+    文风 (奏折铁律): the 8/11 docket is one of only two cards Pascal ever
+    tapped 「看不懂」 on. So: first sentence is the conclusion, the most
+    urgent asks are named by title, the rest is one line, zero asks is said
+    out loud (「知道就行」), and bookkeeping jargon (待批/留中/escrow/
+    pending) never reaches the card face — 「等你拍板」「自动归档」 are the
+    words a human would use.
+
+    The docket's own previous cards are excluded from the arithmetic —
+    counting yesterday's docket as "a thing waiting for you" would grow the
+    number by one every day forever.
+    """
+    now = now or now_local()
+    rows = [st for st in states
+            if str(st.get("source", "")) != ESCROW_DIGEST_SOURCE]
+    acct = ledger_accounting(states=rows, now=now)
+    aged: list[tuple[float, dict]] = []
+    for st in rows:
+        if str(st.get("status", "")) != "pending":
+            continue
+        age = _age_hours(st, now)
+        if age is None:
+            continue
+        aged.append((age, st))
+    decisions = sorted(
+        (row for row in aged
+         if str(row[1].get("attention", "")) == ATTENTION_DECISION),
+        key=lambda r: -r[0])
+    # 机械一致: the headline number IS the accounting number, by assertion.
+    assert len(decisions) == acct["pending_decision"]
+    others = acct["pending"] - acct["pending_decision"]
+    lines: list[str] = []
+    if decisions:
+        n = len(decisions)
+        top_age, top = decisions[0]
+        headline = (str(top.get("title", "")) or "一件事")[:38]
+        title = f"{n} 件事等你拍板"
+        lines.append(
+            f"有 {n} 件事等你拍板，最急的是「{headline}」（{_wait_cn(top_age)}）。")
+        for age, st in decisions[1:3]:
+            lines.append(
+                f"· {(str(st.get('title', '')) or '一件事')[:38]}（{_wait_cn(age)}）")
+        rest = n - min(n, 3)
+        if rest:
+            lines.append(f"其余 {rest} 件不那么急；一直不动的会自动归档，不用专门清。")
+        else:
+            lines.append("一直不动的会自动归档，不用专门清。")
+    else:
+        title = "没有等你拍板的事"
+        lines.append("没有等你拍板的事，知道就行。")
+    if others:
+        lines.append(f"另有 {others} 条只是说给你听的，不用动手；没看的过几天自动归档。")
     if unread_signals >= 5:
         # Owner (8/3): 「信号…攒的比较多，你可以提醒我去看一眼」— one line in
         # the morning docket, not another card. Threshold keeps it from
         # nagging over one or two unread briefs.
         lines.append(f"\n📡 信号攒了 {unread_signals} 条没看，得空扫一眼。")
-    lines.append("\n未处理的会在 14 天后自动留中归档。")
     return title, "\n".join(lines)
 
 
@@ -2777,6 +2874,12 @@ def main(argv: list[str] | None = None) -> int:
     lp = sub.add_parser("list", help="print folded ledger states (JSON lines)")
     lp.add_argument("--pending", action="store_true")
 
+    ap = sub.add_parser(
+        "accounting",
+        help="闭环三分类 (REQ-122): 待批/已办/留中，加总恒等于创建数")
+    ap.add_argument("--days", type=int, default=14,
+                    help="creation window in days (0 = the whole ledger)")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -2807,6 +2910,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "list":
         for st in list_memorials(pending_only=args.pending):
             print(json.dumps(st, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "accounting":
+        window = args.days if args.days > 0 else None
+        acct = ledger_accounting(window_days=window)
+        print(json.dumps(acct, ensure_ascii=False))
         return 0
 
     parser.print_usage(sys.stderr)
