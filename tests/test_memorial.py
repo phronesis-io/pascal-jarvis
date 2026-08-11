@@ -244,7 +244,7 @@ def test_card_compacts_long_body_but_ledger_keeps_full_context(env):
     mid, _ = memorial.create("mail", "长邮件", body, preset="fyi")
     card_body = json.loads(memorial.card_json(mid))["elements"][0]["text"]["content"]
     assert len(card_body) < len(body)
-    assert "完整背景可点「聊聊这个」" in card_body
+    assert memorial.CLIP_NOTICE in card_body
     assert memorial.get_memorial(mid)["body"] == body
 
 
@@ -481,7 +481,7 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert "邮件标题" in entry["summary"]
     assert "来自 alice" in entry["summary"]
     assert "待批" in entry["summary"]
-    assert len(entry["summary"]) <= 1500
+    assert len(entry["summary"]) <= memorial.CHAT_CONTEXT_MAX_CHARS
 
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
     # ("sent" = REQ-118 thread-lookup event appended after delivery)
@@ -493,6 +493,34 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert "💬 聊天中" in body
     labels = [a["text"]["content"] for a in _actions(card)]
     assert labels == ["已阅", "标为重点"]  # no 聊聊这个 button
+
+
+def test_chat_on_a_clipped_card_sends_the_full_text(env):
+    """He taps 聊聊这个 BECAUSE the card was cut. The opener must carry the
+    missing text — loading context for the model alone told him nothing
+    (2026-08-11: "我只能看到一堆截断")."""
+    body = "\n".join(f"第{i}件事，细节在这里" for i in range(30))
+    mid, _ = memorial.create("memorial-escrow", "待批 14 件", body,
+                             preset="fyi", context="来自晨间台账")
+    card_body = json.loads(memorial.card_json(mid))["elements"][0]["text"]["content"]
+    assert memorial.CLIP_NOTICE in card_body      # precondition: it WAS clipped
+    assert "第29件事" not in card_body
+
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "全文" in opener
+    assert "第0件事" in opener and "第29件事" in opener   # nothing dropped
+    assert "来自晨间台账" in opener                       # background too
+    assert len(opener) <= memorial.FULL_TEXT_MAX_CHARS
+
+
+def test_chat_on_a_short_card_keeps_the_concise_opener(env):
+    """Un-clipped cards must not have their body pasted back at him."""
+    mid, _ = memorial.create("mail", "短卡", "一句话就说完了", preset="fyi")
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert opener.startswith("📜 已带上「短卡」的背景")
+    assert "一句话就说完了" not in opener
 
 
 def test_chat_context_keeps_state_when_body_and_background_are_huge(env):
@@ -1001,9 +1029,9 @@ def test_display_body_never_cuts_through_a_markdown_link():
     link = "[官方公告](https://example.com/a-very-long-path-that-straddles-the-limit)"
     body = filler + " " + link
     out = memorial._display_body(body)
-    assert "…完整背景可点「聊聊这个」" in out
+    assert memorial.CLIP_NOTICE in out
     # every link opener that survived the clip must still have its closer
-    core_text = out.split("…完整背景可点")[0]
+    core_text = out.split(memorial.CLIP_NOTICE)[0]
     assert core_text.count("](") == core_text.count(")") or "](" not in core_text
 
 

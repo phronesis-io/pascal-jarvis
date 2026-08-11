@@ -85,8 +85,19 @@ CHAT_RETAP_THROTTLE_S = 120
 # the archive.  This bound prevents an emitter regression from recreating the
 # old wall-of-text experience while「聊聊这个」still receives richer context.
 CARD_BODY_MAX_CHARS = 900
-CARD_BODY_MAX_LINES = 8
-CHAT_CONTEXT_MAX_CHARS = 1500
+CARD_BODY_MAX_LINES = 14
+CHAT_CONTEXT_MAX_CHARS = 3000
+
+# When the card had to clip, 「聊聊这个」sends the untruncated source text as a
+# chat message. Bounding it keeps a runaway emitter from pasting a novel into
+# the conversation, but it sits far above the card bound: the card is the
+# decision surface, the chat is where the full record is allowed to land.
+# (2026-08-11: Pascal — "我只能看到一堆截断". Tapping the button used to load
+# context for the MODEL and tell HIM nothing he hadn't already seen.)
+FULL_TEXT_MAX_CHARS = 4000
+
+# Says what the button DOES, not that context exists somewhere.
+CLIP_NOTICE = f"…还有下半段，点「{CHAT_BUTTON_LABEL[2:]}」我把全文发给你"
 
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
@@ -996,8 +1007,21 @@ def _display_body(body: str) -> str:
         text = cut.rstrip()
         clipped = True
     if clipped:
-        text += "\n\n…完整背景可点「聊聊这个」"
+        text += "\n\n" + CLIP_NOTICE
     return text
+
+
+def body_was_clipped(body: str) -> bool:
+    """True when _display_body had to drop part of the source text.
+
+    Mirrors _display_body's two clip triggers exactly. Kept separate (rather
+    than returning a flag) so the many _display_body callers stay untouched.
+    """
+    raw = str(body or "").strip()
+    lines = raw.splitlines()
+    if len(lines) > CARD_BODY_MAX_LINES:
+        return True
+    return len("\n".join(lines).strip()) > CARD_BODY_MAX_CHARS
 
 
 def _render_card(state: dict, *, body: str | None = None,
@@ -1561,7 +1585,7 @@ def _deliver_existing(
                 record_sent(mid, result.message_id)
             except Exception as e:
                 print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
-        _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
+        _write_outbox(readable + f"\n\n（卡片 {mid} 已发出，等你回）")
         return True
 
     if result.state == "suppressed":
@@ -2445,7 +2469,7 @@ def _bounded_chat_context(st: dict) -> str:
     budget = max(CHAT_CONTEXT_MAX_CHARS - len("\n".join(fixed)) - 32, 200)
     body = str(st.get("body", "")).strip()
     context = str(st.get("context", "")).strip()
-    body_budget = min(900, int(budget * 0.7))
+    body_budget = min(2000, int(budget * 0.7))
     body = body[:body_budget].rstrip()
     context = context[:max(budget - len(body), 0)].rstrip()
     variable = [f"正文: {body}"]
@@ -2766,8 +2790,19 @@ def chat(memorial_id: str) -> dict:
                   file=sys.stderr)
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
-    opener = (f"📜 已带上「{st['title']}」的背景。"
-              "直接说你想追问什么，或告诉我你的倾向。")
+    #    When the card was clipped, the opener IS the payload: he taps the
+    #    button precisely because he cannot see the rest, and until now this
+    #    only loaded context for the model and told him "已带上背景".
+    full = str(st.get("body", "")).strip()
+    extra = str(st.get("context", "")).strip()
+    if body_was_clipped(full):
+        parts = [f"📜 「{st['title']}」全文：", "", full]
+        if extra:
+            parts += ["", "—— 背景 ——", extra]
+        opener = "\n".join(parts)[:FULL_TEXT_MAX_CHARS]
+    else:
+        opener = (f"📜 已带上「{st['title']}」的背景。"
+                  "直接说你想追问什么，或告诉我你的倾向。")
     _send_opener_async(opener, st.get("chat_id", ""))
 
     return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},

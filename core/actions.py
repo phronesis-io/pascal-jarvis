@@ -476,12 +476,12 @@ class ActionProcessor:
             return "没有等你拍板的事了。"
         archived = sum(
             1 for state in waiting
-            if memorial.lapse(state["id"], "全部留中")
+            if memorial.lapse(state["id"], "先都放着")
         )
         # Names the filter tab, not a destination: actionable if the reader is
         # already on the items page, and still informative from a Lark card.
         # 「去事项看」 would be a dead end for whoever is standing on it.
-        return f"已留中 {archived} 件——切到「全部」还能翻回来重新批。"
+        return f"已收起 {archived} 件——切到「全部」还能翻回来。"
 
     # ── Heartbeat ──
 

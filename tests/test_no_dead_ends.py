@@ -148,7 +148,7 @@ def test_lapse_all_notice_names_a_filter_not_a_destination(env, monkeypatch):
                          jobs_dir=str(env.dir), log_file="",
                          owner_authenticated=True)
     message = ap._do_memorial_lapse_all("")
-    assert "已留中 1 件" in message
+    assert "已收起 1 件" in message
     # 「去事项看」 is a dead end for whoever is already on the items page.
     assert "「事项」里翻回" not in message
     assert "「全部」" in message

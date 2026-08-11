@@ -282,7 +282,7 @@ def memorial_lapsed_note(state: dict) -> str:
     if str(state.get("status", "")) != STATUS_LAPSED:
         return ""
     reason = str(state.get("lapse_reason", "")).strip()
-    return f"留中 · {reason}" if reason else "留中"
+    return f"已收起 · {reason}" if reason else "已收起"
 
 
 def memorial_is_pending(state: dict) -> bool:

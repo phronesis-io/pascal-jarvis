@@ -80,10 +80,11 @@ def run(now=None, send: bool = True) -> dict:
         source=memorial.ESCROW_DIGEST_SOURCE,
         title=title,
         body=body,
-        # 全部留中 is the escape hatch that keeps this from nagging forever:
-        # the emperor may decline the whole docket in one tap.
+        # 「先都放着」 is the escape hatch that keeps this from nagging forever:
+        # the whole docket can be declined in one tap. Plain wording, not
+        # court jargon (owner 2026-08-11: 「以后别说黑话了」).
         options=[
-            {"key": "lapse_all", "label": "全部留中",
+            {"key": "lapse_all", "label": "先都放着",
              "action": {"type": "memorial_lapse_all", "params": {}}},
         ],
         attention=memorial.ATTENTION_DECISION,

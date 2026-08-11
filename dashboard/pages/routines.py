@@ -27,7 +27,7 @@ _STATUS_STYLE = {
 
 _AUTONOMY_STYLE = {
     "observe": ("只看不说", "bg-sky-900 text-sky-200"),
-    "propose": ("提方案等批红", "bg-emerald-900 text-emerald-200"),
+    "propose": ("提方案等你点头", "bg-emerald-900 text-emerald-200"),
     "act": ("可自己动手", "bg-amber-900 text-amber-200"),
 }
 

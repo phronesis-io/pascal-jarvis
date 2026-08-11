@@ -751,7 +751,7 @@ def _append_memorial_queue_entry(jarvis_dir: Path, memorial_id: str,
     entry = {
         "ts": now_local_str("%Y-%m-%d %H:%M"),
         "epoch": int(time.time()),
-        "text": extract_card_text(card_json) or f"📜 奏折 {memorial_id}",
+        "text": extract_card_text(card_json) or f"📜 卡片 {memorial_id}",
         "source": source or "memorial",
         "memorial_id": memorial_id,
         "card_json": card_json,
