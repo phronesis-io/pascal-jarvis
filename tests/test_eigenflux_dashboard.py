@@ -99,6 +99,84 @@ def test_network_overview_marks_stale_success_unhealthy(tmp_path):
     assert task["detail"] == "超过应有周期未成功"
 
 
+def test_network_overview_uses_effective_intervals_and_idle_success(tmp_path):
+    root = tmp_path / "jarvis"
+    now = 500_000
+    _write(
+        root / "heartbeat_state.json",
+        {
+            "eigenflux-feed-triage": {
+                "last_status": "empty_pre",
+                "last_success": now - 31 * 60,
+                "circuit": {"disabled_until": 0},
+            },
+            "eigenflux-preinstall": {
+                "last_status": "idle",
+                "last_success": now - 40 * 3600,
+                "circuit": {"disabled_until": 0},
+            },
+            "eigenflux-friends": {
+                "last_status": "ok",
+                "last_success": now - 31 * 60,
+                "effective_interval": 40 * 60,
+                "circuit": {"disabled_until": 0},
+            },
+        },
+    )
+    _write(
+        root / "interval_overrides.json",
+        {
+            "eigenflux-feed-triage": 40 * 60,
+            "eigenflux-preinstall": 48 * 3600,
+        },
+    )
+    telemetry.reset_cache()
+
+    overview = load_network_overview(root, now_epoch=now)
+    task_by_id = {item["id"]: item for item in overview["tasks"]}
+
+    assert task_by_id["eigenflux-feed-triage"]["healthy"] is True
+    assert task_by_id["eigenflux-preinstall"]["healthy"] is True
+    assert task_by_id["eigenflux-preinstall"]["detail"] == "正常"
+    assert task_by_id["eigenflux-friends"]["healthy"] is True
+
+    stale = load_network_overview(root, now_epoch=now + 50 * 60)
+    stale_by_id = {item["id"]: item for item in stale["tasks"]}
+    assert stale_by_id["eigenflux-feed-triage"]["healthy"] is False
+    assert stale_by_id["eigenflux-friends"]["healthy"] is False
+
+
+def test_network_overview_rejects_entire_invalid_override_sidecar(tmp_path):
+    root = tmp_path / "jarvis"
+    _write(
+        root / "heartbeat_state.json",
+        {
+            "eigenflux-feed-triage": {
+                "last_status": "ok",
+                "last_success": 100,
+                "circuit": {"disabled_until": 0},
+            },
+        },
+    )
+    _write(
+        root / "interval_overrides.json",
+        {
+            "eigenflux-feed-triage": 40 * 60,
+            "unrelated-broken-task": "soon",
+        },
+    )
+    telemetry.reset_cache()
+
+    overview = load_network_overview(root, now_epoch=100 + 31 * 60)
+    task = next(
+        item for item in overview["tasks"]
+        if item["id"] == "eigenflux-feed-triage"
+    )
+
+    assert task["healthy"] is False
+    assert task["detail"] == "超过应有周期未成功"
+
+
 def test_dashboard_link_accepts_json_or_plain_output(monkeypatch):
     result = subprocess.CompletedProcess(
         args=[],

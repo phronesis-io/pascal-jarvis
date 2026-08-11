@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 from .claude_bin import resolve_claude_bin
+from .interval_config import parse_interval_overrides
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
@@ -781,7 +782,7 @@ class HeartbeatRunner:
         f = self.jarvis_dir / "interval_overrides.json"
         try:
             data = json.loads(f.read_text())
-            return {k: int(v) for k, v in data.items() if int(v) > 0}
+            return parse_interval_overrides(data)
         except (OSError, ValueError, TypeError):
             return {}
 
