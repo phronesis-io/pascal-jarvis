@@ -214,8 +214,6 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
 
     def transport(envelope, channel):
         ids_before = len(_LAST_SENT_IDS)
-        if channel == "web":
-            return TransportResult(True)
         if envelope.kind == "card":
             ok = _lark_send_card(
                 str(envelope.payload.get("card_json") or ""),

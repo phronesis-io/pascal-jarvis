@@ -12,12 +12,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
-from core.lifelog import morning_anchor_fired, morning_anchor_mark
+from core.lifelog import (morning_anchor_fired, morning_anchor_last_text,
+                          morning_anchor_mark)
 from core.safety import looks_like_error, parse_json_response, strip_task_framing
 
 # One short line — hard-clip anything longer so a rambling model can't turn
 # the anchor into a wall of text.
 MAX_CHARS = 120
+
+
+def _normalized(text: str) -> str:
+    """Whitespace-insensitive comparison key for the anchor line."""
+    return " ".join(str(text or "").split())
 
 
 def main() -> int:
@@ -46,11 +52,11 @@ def main() -> int:
         print("[morning-anchor] already sent today — dropping duplicate",
               file=sys.stderr)
         return 0
-    morning_anchor_mark()
 
-    # Deterministic footer, not part of the model's one-line contract: cards
-    # that only reached the web archive (zero recorded traffic) get their one
-    # batched shot at being seen here (style contract 攒批≥5条晨匣提一行).
+    # Deterministic footer, not part of the model's one-line contract:
+    # ledger-only cards (ambient exhaust that never reaches Feishu, REQ-119)
+    # get their one batched shot at being seen here (style contract
+    # 攒批≥5条晨匣提一行).
     try:
         from core.presence import morning_digest_line
         digest = morning_digest_line()
@@ -58,6 +64,19 @@ def main() -> int:
         print(f"[morning-anchor] presence digest failed: {exc}",
               file=sys.stderr)
         digest = ""
+
+    # REQ-121: a line substantively identical to yesterday's carries no new
+    # information — skip the resend and consume today's window. The digest
+    # footer overrides the skip: its counts/titles are fresh content, and it
+    # has no other surface (dropping it would silence the ledger-only bin).
+    if not digest and _normalized(message) == _normalized(
+            morning_anchor_last_text()):
+        print("[morning-anchor] same line as yesterday, no digest — "
+              "skipping resend", file=sys.stderr)
+        morning_anchor_mark()  # keeps yesterday's remembered text
+        return 0
+    morning_anchor_mark(text=message)
+
     if digest:
         message = f"{message}\n{digest}"
 

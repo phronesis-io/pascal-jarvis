@@ -5,9 +5,12 @@
 Every user-facing output declares one attention class:
 
 - `reply`: stay in the active Lark conversation;
-- `decision`: wait in phone/web Items unless urgent or conversation-bound;
+- `decision`: a Lark card awaiting 批红 (REQ-119: the phone/web review desk
+  is retired — Lark is the only surface a decision can wait on);
 - `alert`: interrupt only when time or safety materially requires it;
-- `notice`: remain available without demanding action.
+- `notice`: a Lark card that demands nothing — except ambient monitoring
+  exhaust (`AMBIENT_SOURCES`), which stays ledger-only and reaches the user
+  as one batched morning-anchor line.
 
 The system must not route content based on what a transport happens to support.
 It routes based on the human attention cost.

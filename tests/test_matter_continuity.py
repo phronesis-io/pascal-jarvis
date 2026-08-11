@@ -56,6 +56,11 @@ def isolated_state(tmp_path, monkeypatch):
     db_module._connection = None
     intentions._table_ready = False
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    # REQ-119: notices now deliver to Lark; keep the transport mocked so no
+    # test can touch the real lark-cli.
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
+    monkeypatch.setattr(memorial, "_send_text", lambda *a, **k: "om_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
     yield
     if db_module._connection is not None:
         db_module._connection.close()
@@ -700,7 +705,8 @@ def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkey
                 if item["source"] == "mobile-onboarding"
             ]
             assert len(onboarding) == 1
-            assert onboarding[0]["delivery_status"] == "web_only"
+            # REQ-119: the onboarding confirmation is a Lark card now.
+            assert onboarding[0]["delivery_status"] == "delivered"
             allowed = await client.get(
                 "/matters", headers={"Accept": "text/html"})
             assert allowed.status == 200

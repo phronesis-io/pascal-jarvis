@@ -9,9 +9,14 @@ traffic. Feishu arrival volume IS the product's pulse, so:
 - ``check``: a floor sentinel for selfmon — fewer than SENT_FLOOR_24H cards
   actually reaching Feishu in 24h is a red flag regardless of how healthy
   the pipeline claims to be.
-- ``morning-digest``: web-only cards batched into the morning anchor (the
+- ``morning-digest``: ledger-only cards batched into the morning anchor (the
   style contract's 「攒批≥5条晨匣提一行」clause, PR #36 — never implemented
   until now), instead of silently rotting in an archive nobody opens.
+
+Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
+reached Feishu (ledger ``sent`` event) or stayed ledger-only (ambient
+exhaust, ``delivery_status=ledger_only``). The digest line is the batched
+surface for the latter.
 """
 
 from __future__ import annotations
@@ -60,11 +65,14 @@ def sent_count(hours: float = 24, now: datetime | None = None) -> int:
                if e.get("ev") == "sent" and _in_window(e, cutoff))
 
 
-def web_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
+def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
     """Cards created in the window that never got a Feishu send.
 
-    These are the archive-only rows — real content that, with zero web
-    traffic, no one will ever see unless a batch surface carries it.
+    Under REQ-119 these are the ledger-only rows (ambient exhaust plus any
+    card whose send never succeeded) — real content that no one will ever
+    see unless a batch surface carries it. Counted from the ledger itself
+    (create with no ``sent`` event), not from any per-row status field, so
+    legacy ``web_only`` rows and failed sends are covered identically.
     """
     events = _events()
     sent_ids = {str(e.get("id")) for e in events if e.get("ev") == "sent"}
@@ -93,7 +101,7 @@ def morning_digest_line(now: datetime | None = None) -> str:
     Data formatting is code's job — the anchor's LLM contract stays ONE
     hand-written line; this rides below it.
     """
-    rows = web_only(24, now=now)
+    rows = ledger_only(24, now=now)
     if len(rows) < DIGEST_MIN:
         return ""
     titles = "／".join(

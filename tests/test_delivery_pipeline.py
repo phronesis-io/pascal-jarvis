@@ -95,16 +95,87 @@ def test_delivery_schema_is_initialized_once_per_database(
     assert calls == [1]
 
 
-def test_notice_and_phone_decision_route_to_web(pipeline):
+def test_notices_and_decisions_route_to_lark(pipeline):
+    """REQ-119: Lark is the only surface — auto-routing never lands on the
+    retired web channel, whatever legacy review_surface metadata says."""
     pipe, sent, _ = pipeline
     notice = pipe.deliver(DeliveryEnvelope(
         source="digest", payload={"text": "今天没有异常"}))
     decision = pipe.deliver(DeliveryEnvelope(
         source="mail", payload={"text": "是否回复"},
         attention="decision", metadata={"review_surface": "phone"}))
-    assert notice.channel == "web"
-    assert decision.channel == "web"
-    assert [channel for _, channel in sent] == ["web", "web"]
+    assert notice.channel == "lark"
+    assert decision.channel == "lark"
+    assert [channel for _, channel in sent] == ["lark", "lark"]
+
+
+def test_no_path_creates_a_web_envelope(pipeline):
+    """Regression guard for the fake web transport: every route the pipeline
+    can pick must be a real channel; no new row may carry route_channel=web."""
+    pipe, sent, _ = pipeline
+    for envelope in (
+        DeliveryEnvelope(source="a", payload={"text": "notice"}),
+        DeliveryEnvelope(source="b", payload={"text": "alert"},
+                         attention="alert"),
+        DeliveryEnvelope(source="c", payload={"text": "decision"},
+                         attention="decision"),
+        DeliveryEnvelope(source="d", payload={"text": "legacy phone"},
+                         metadata={"review_surface": "phone"}),
+        DeliveryEnvelope(source="e", payload={"text": "legacy none"},
+                         metadata={"review_surface": "none"}),
+        DeliveryEnvelope(source="f", payload={"text": "legacy web meta"},
+                         metadata={"review_surface": "web"}),
+    ):
+        pipe.deliver(envelope)
+    assert sent, "envelopes must actually reach the transport"
+    assert all(channel != "web" for _, channel in sent)
+    rows = pipe.list(limit=500)
+    assert rows and all(row["route_channel"] != "web" for row in rows)
+
+
+def test_explicit_web_request_is_refused_not_faked(pipeline):
+    """An explicit requested_channel=web must fail loudly — the old transport
+    returned unconditional success for it (the 1.8%-read fake ledger)."""
+    pipe, sent, _ = pipeline
+
+    real_transport = pipe.transport
+
+    def strict(envelope, channel):
+        # Mirror the production default transport's refusal contract.
+        if channel not in {"lark", "lark_reply", "push"}:
+            return TransportResult(False, error=f"unknown channel: {channel}")
+        return real_transport(envelope, channel)
+
+    pipe.transport = strict
+    result = pipe.deliver(DeliveryEnvelope(
+        source="legacy-web-caller", payload={"text": "老调用点"},
+        requested_channel="web"))
+    assert result.state != "delivered"
+
+
+def test_web_kind_is_rejected():
+    with pytest.raises(ValueError):
+        DeliveryEnvelope(source="x", kind="web",
+                         payload={"text": "t"}).normalized()
+
+
+def test_flush_sweeps_legacy_web_rows_as_suppressed(pipeline):
+    """Rows queued for the retired web surface before REQ-119 must neither
+    fake-deliver nor churn into dead letters — they suppress, honestly."""
+    pipe, sent, _ = pipeline
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        db.execute(
+            "INSERT INTO delivery_envelopes (id,source,kind,attention,"
+            "requested_channel,route_channel,state,content_hash,payload,"
+            "metadata,created_epoch,updated_epoch) "
+            "VALUES ('dlv_legacy','old-source','text','notice','auto','web',"
+            "'queued','h','{\"text\":\"老网页卡\"}','{}',1,1)")
+    results = pipe.flush_due()
+    legacy = [r for r in results if r.delivery_id == "dlv_legacy"]
+    assert legacy and legacy[0].state == "suppressed"
+    assert legacy[0].reason == "web_surface_retired"
+    assert all(channel != "web" for _, channel in sent)
+    assert pipe.get("dlv_legacy")["state"] == "suppressed"
 
 
 def test_reply_bypasses_quiet_and_uses_reply_channel(tmp_path, monkeypatch):

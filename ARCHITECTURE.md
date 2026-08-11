@@ -212,17 +212,21 @@ SQLite table is a read-through projection rebuilt on demand.
 
 ## Reach Policy
 
+Lark is the only delivery surface (REQ-119, 2026-08-11). A card either goes
+to Lark or stays ledger-only; no envelope may route to the retired web
+channel, whose transport used to fake success unconditionally.
+
 | Attention | Durable surface | Interrupting reach |
 |---|---|---|
 | conversation reply | Lark thread | immediate Lark reply |
-| urgent/conversation-bound decision | Item | immediate Lark card |
-| ordinary decision | Item | phone/web batch review |
-| selected proactive signal | Item + Signals projection | paired-phone Push, quiet hours, max 2/day |
-| ordinary notice | Item + Signals projection | none |
+| decision | Item | Lark card |
+| alert | Item | Lark card (quiet-hours bypass) |
+| ordinary notice | Item | Lark card |
+| ambient exhaust (`AMBIENT_SOURCES`) | Item, `delivery_status=ledger_only` | none — batched into the morning anchor digest line (`core.presence`) |
 
-`web_only` means durable placement, not verified human reach. A source may be
-web-first only when it has a named navigation entry or source filter, text
-search, a documented reach rule, and deterministic discovery tests.
+`ledger_only` means durable placement, not verified human reach; the morning
+digest line is its one batched reach. `web_only`/`phone_ready` survive only
+as legacy ledger values from the pre-REQ-119 era.
 
 ## Authority Matrix
 

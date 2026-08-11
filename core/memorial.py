@@ -1,11 +1,11 @@
 """Memorial (奏折) cards — the unified "ask Pascal" surface.
 
 Every proactive output that needs Pascal's eyes (mail triage, decisions,
-follow-ups, heartbeat asks…) becomes one durable memorial.  The ledger records
-where Pascal should act: ordinary, batchable decisions go to the phone desk;
-only urgent, conversation-bound, or Lark-native decisions interrupt Lark.
-Alerts may reach Lark but are explicitly not approvals, and routine notices
-stay in the web feed. Tapping an option = 批红: it is recorded (and optionally
+follow-ups, heartbeat asks…) becomes one durable memorial.  Lark is the only
+delivery surface (REQ-119, 2026-08-11): alerts, decisions, and notices all go
+to the chat, while ambient monitoring exhaust (AMBIENT_SOURCES) stays
+ledger-only and is batched into the morning anchor's digest line.
+Tapping an option = 批红: it is recorded (and optionally
 executes an action through ActionProcessor). Tapping「聊聊这个」injects the
 memorial's full context into the p2p conversation via bot.sh's existing
 pending-merge channel, so Pascal's NEXT message lands with the topic loaded.
@@ -189,35 +189,41 @@ REVIEW_NONE = "none"
 REVIEW_SURFACES = {REVIEW_LARK, REVIEW_PHONE, REVIEW_NONE}
 
 # Successful handoff means either an interrupting Lark delivery or a durable
-# placement on the phone/web desk. Callers that ingest external events use this
-# contract to mark upstream input seen without falling back to another channel.
+# ledger placement (ambient exhaust, REQ-119). Callers that ingest external
+# events use this contract to mark upstream input seen without falling back to
+# another channel. "phone_ready"/"web_only" survive only as legacy ledger
+# values from the era when a phone/web desk was a delivery surface — no new
+# row gets them.
 ACCEPTED_DELIVERY_STATUSES = {
-    "delivered", "queued", "retry_queued", "phone_ready", "web_only",
+    "delivered", "queued", "retry_queued", "ledger_only",
+    "phone_ready", "web_only",
 }
 
 # These are synchronization/ambient-signal producers, not user-facing owners
-# of a decision. Their output stays web-first even when an LLM helpfully invents
-# reply options; a real decision should be promoted by a dedicated source.
+# of a decision. Their cards stay notice-class even when an LLM helpfully
+# invents reply options; a real decision should be promoted by a dedicated
+# source. (Historic name: they were "web-first" when a web desk existed.)
 WEB_FIRST_SOURCES = {
     "cross-session-sync",
     "eigenflux-feed-triage",
 }
 
-# Monitoring exhaust that stays web-first even when the phone/web desk cannot
-# reach the user. When the desk is unreachable every OTHER notice degrades to
-# Lark (C1, docs/prd_card_delivery_closure.md) — but pushing these would
-# recreate the 7/22 card storm, and anything in them that needs a human is
-# re-surfaced by the morning escrow docket. Interactive, personal voices
-# (checkin, routines, intention-check, daily-reflect, heartbeat prose) are
-# deliberately NOT here: those going invisible is exactly the 7/24 regression.
+# Monitoring exhaust whose notices are LEDGER-ONLY (REQ-119, 2026-08-11):
+# create() records them in memorials.jsonl — where the morning anchor's
+# 攒批 digest line (core.presence) is their one batched shot at being seen —
+# but they get no delivery envelope and never enter the delivery pipeline.
+# Rationale, measured 14d to 8/11: Lark cards were read 95.7% (235 cards),
+# web cards 1.8% (170 cards) — the web desk was a fake surface whose
+# transport unconditionally reported success. Pushing this exhaust to Lark
+# instead would recreate the 7/22 card storm, so it stays out of every
+# realtime channel. Alerts from these sources still page (attention wins).
+# Interactive, personal voices (checkin, routines, intention-check,
+# daily-reflect, heartbeat prose) are deliberately NOT here: those going
+# invisible is exactly the 7/24 regression.
 #
-# eigenflux-feed-triage is web-first but NOT ambient (2026-08-03). Its cards
-# are curated signal — ~2/day, each a one-line brief already contextualized
-# to the user — not exhaust. Routing them to the desk buried them completely:
-# the owner reported he simply does not open the web on his phone (measured
-# why: 5.2s TTFB through the funnel relay vs 39ms local), so "web-first
-# signal" meant "no signal". Content of this volume and quality earns the
-# chat.
+# eigenflux-feed-triage is NOT ambient (2026-08-03). Its cards are curated
+# signal — ~2/day, each a one-line brief already contextualized to the user
+# — not exhaust. Content of this volume and quality earns the chat.
 AMBIENT_SOURCES = {
     "cross-session-sync",
     "metrics-digest",
@@ -259,12 +265,6 @@ ROUTINE_SOURCE_PREFIX = "routine:"
 PRESET_LOCKED_SOURCES = {
     "checkin",
 }
-# Calendar choices expire with the clock; unlike ordinary planning decisions,
-# delaying them can create a real conflict. They retain the immediate lane.
-LARK_REVIEW_SOURCES = {
-    "calendar-sync",
-}
-
 # Prose cards whose source is inherently a decision/follow-up ask should not
 # fall back to「已阅／标为重点」. Only consulted when the emitter did not author
 # its own options (see _extract_inline_options).
@@ -278,12 +278,6 @@ SOURCE_DEFAULT_PRESET = {
     "selfmon": "decision",
     "eigenflux-publish": "decision",
 }
-
-
-def _desk_reachable() -> bool:
-    """Seam for routing decisions; patchable in tests."""
-    from core.proactive import desk_reachable
-    return desk_reachable()
 
 
 def _infer_attention(options: list[dict], extra_buttons: list[dict]) -> str:
@@ -352,29 +346,20 @@ def _infer_review_surface(source: str, attention: str,
                           extra_buttons: list[dict],
                           *, urgent: bool = False,
                           chat_id: str = "") -> str:
-    """Choose where a human decision should happen.
+    """Choose where a human decision should happen: Lark, always.
 
-    Phone is the humane default for real decisions: it supports deliberate,
-    batched review without turning every ask into an interruption. Lark is
-    reserved for decisions whose delay matters, asks already scoped to a live
-    conversation, and legacy callbacks the web surface cannot execute.
+    The phone/web review desk is retired (REQ-119, 2026-08-11 拍板: 飞书=
+    唯一投递面). Measured 14d: web-surface cards were read 1.8% vs 95.7% on
+    Lark — a decision parked anywhere but the chat is a decision nobody sees.
+    REVIEW_PHONE survives only as a legacy ledger value for old rows.
+
+    The unused keyword parameters are kept so existing call sites (and the
+    CLI) need no change; every input now maps to the same answer.
     """
+    del source, extra_buttons, urgent, chat_id  # every decision reviews on Lark
     if attention != ATTENTION_DECISION:
         return REVIEW_NONE
-    has_lark_native_action = any(
-        isinstance(button.get("value"), dict) for button in extra_buttons
-    )
-    if (urgent or str(chat_id or "").strip() or has_lark_native_action
-            or str(source or "") in LARK_REVIEW_SOURCES):
-        return REVIEW_LARK
-    # A decision may only be parked on the phone desk if the desk can ring the
-    # user. It could not — no phone ever paired — and for 10 days every
-    # non-urgent decision (broadcast approvals included) waited on a surface
-    # that notified nobody (C1, docs/prd_card_delivery_closure.md). When a
-    # phone pairs, this degrade disappears with no code change.
-    if not _desk_reachable():
-        return REVIEW_LARK
-    return REVIEW_PHONE
+    return REVIEW_LARK
 
 
 def review_surface(state: dict) -> str:
@@ -401,26 +386,21 @@ def delivery_accepted(state: dict) -> bool:
 
 
 def should_push_to_lark(state: dict) -> bool:
-    """Lark receives alerts, Lark-routed decisions — and, while the phone/web
-    desk cannot reach the user, every non-ambient notice.
+    """Lark is the ONLY delivery surface (REQ-119, 2026-08-11 拍板).
 
-    The 7/23 design (sparse Lark, notices to the web archive) assumed the desk
-    was a real surface. It was not, and Lark fell from ~60 cards/day to 1-7
-    while the product's own voice (checkin, routines, daily-reflect) went to a
-    page that never rings and often does not open. Ambient monitoring exhaust
-    stays web-first regardless — the escrow docket re-surfaces what matters —
-    so this cannot recreate the 7/22 card storm.
+    A card either goes to Lark or stays ledger-only. Ambient monitoring
+    exhaust (AMBIENT_SOURCES) is ledger-only — the morning anchor's 攒批
+    digest line re-surfaces it — so this cannot recreate the 7/22 card
+    storm. Everything else (alerts, decisions, the product's own voice)
+    goes to the chat: the 14d读卡数据 (Lark 95.7% vs web 1.8%) settled
+    that any other surface is a place cards go to die. An alert always
+    pushes, even from an ambient source — anomaly pages must ring.
     """
-    attention = str(state.get("attention", "") or "")
-    if attention == ATTENTION_ALERT:
+    if str(state.get("attention", "") or "") == ATTENTION_ALERT:
         return True
-    if requires_decision(state):
-        return review_surface(state) == REVIEW_LARK
-    if (attention == ATTENTION_NOTICE
-            and str(state.get("source", "")) not in AMBIENT_SOURCES
-            and not _desk_reachable()):
-        return True
-    return False
+    if str(state.get("source", "")) in AMBIENT_SOURCES:
+        return False
+    return True
 
 
 _ALERT_RE = re.compile(
@@ -719,7 +699,7 @@ def lapse(memorial_id: str, reason: str = "") -> bool:
     Deliberately does NOT re-sync the Lark card. The bulk sweep archives
     hundreds of rows on its first run; that many card edits would be a rate
     limit incident, and the original card has long scrolled out of the chat
-    anyway. The ledger and the web desk are the durable surface.
+    anyway. The ledger is the durable record.
     """
     st = get_memorial(memorial_id)
     if st is None or st["status"] != "pending":
@@ -1193,8 +1173,6 @@ def _deliver_opener(text: str, chat_id: str) -> None:
                                    deliver as deliver_envelope)
 
         def transport(envelope, channel):
-            if channel == "web":
-                return TransportResult(True)
             sent = _send_text(str(envelope.payload.get("text") or ""), chat_id)
             message_id = "" if sent is True else str(sent or "")
             return TransportResult(bool(sent), message_id)
@@ -1389,24 +1367,26 @@ def _find_recent_duplicate(source: str, title: str, body: str,
 def _deliver_existing(
     state: dict,
     urgent: bool = False,
-    *,
-    proactive_reach: bool = True,
 ) -> bool:
-    """Hand an already-ledgered memorial to the unified delivery pipeline."""
+    """Hand an already-ledgered memorial to the unified delivery pipeline.
+
+    Ledger-only cards (REQ-119: ambient exhaust) never get an envelope —
+    the append-only ledger IS their durable surface, and the morning
+    anchor's digest line is their batched shot at being seen.
+    """
     from core.delivery import (DeliveryEnvelope, TransportResult,
                                deliver as deliver_envelope)
 
     mid = state["id"]
+    if not should_push_to_lark(state):
+        _record_delivery(mid, "ledger_only")
+        return True
+
     cj = _render_card(state)
     review_at = review_surface(state)
-    push_lark = should_push_to_lark(state)
-    force_queue = (
-        push_lark and not urgent and _quiet_hours_now()
-    )
+    force_queue = not urgent and _quiet_hours_now()
 
     def transport(envelope, channel):
-        if channel == "web":
-            return TransportResult(True)
         sent = _send_card(
             str(envelope.payload.get("card_json") or ""),
             state.get("chat_id", ""),
@@ -1423,7 +1403,7 @@ def _deliver_existing(
             kind="card",
             payload={"card_json": cj, "text": readable},
             attention=str(state.get("attention") or ATTENTION_NOTICE),
-            requested_channel=REVIEW_LARK if push_lark else review_at,
+            requested_channel=REVIEW_LARK,
             urgent=urgent,
             conversation_bound=bool(state.get("chat_id")),
             chat_id=state.get("chat_id", ""),
@@ -1449,13 +1429,6 @@ def _deliver_existing(
         root=JARVIS_DIR,
         transport=transport,
     )
-
-    if not push_lark:
-        status = "phone_ready" if requires_decision(state) else "web_only"
-        _record_delivery(mid, status)
-        if status == "web_only" and proactive_reach:
-            _request_proactive_reach(state)
-        return result.accepted
 
     if result.state == "delivered":
         _record_delivery(
@@ -1489,20 +1462,6 @@ def _deliver_existing(
     _record_delivery(mid, "failed")
     _record_delivery(mid, "retry_queued")
     return False
-
-
-def _request_proactive_reach(state: dict) -> None:
-    """Best-effort phone reach after a notice is durably in Memorial."""
-    try:
-        from core.proactive import maybe_push_signal
-        maybe_push_signal(state, root=JARVIS_DIR)
-    except Exception as exc:
-        # The durable Memorial is the primary handoff. Optional reach must
-        # never turn a stored signal into a failed delivery.
-        print(
-            f"memorial {state.get('id', '')}: proactive reach skipped: {exc}",
-            file=sys.stderr,
-        )
 
 
 ROTATE_AFTER_DAYS = 45
@@ -1627,13 +1586,13 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            recommend: dict | None = None) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and route it.
 
-    Returns ``(memorial_id, accepted)``. Accepted means the memorial is either
-    visible on its durable phone/web surface or accepted by the Lark delivery
-    path. The ledger write happens before either route.
+    Returns ``(memorial_id, accepted)``. Accepted means the memorial is
+    either accepted by the Lark delivery path or durably ledger-only
+    (ambient exhaust, REQ-119). The ledger write happens before either.
 
     send=False skips outbound delivery (no direct send, no outbox mirror) for
-    emitters that own a transport. Phone/web-routed rows are still marked ready
-    because the ledger itself is their durable surface.
+    emitters that own a transport. Ledger-only rows are still marked, because
+    the ledger itself is their surface and no caller transports them.
 
     Direct sends respect the delivery layer's gates: an identical pending
     memorial within 6h is not re-created, and an explicit ``dedup_key`` stays
@@ -1711,13 +1670,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         if not send:
             if (not should_push_to_lark(dup)
                     and not delivery_accepted(dup)):
-                return dup["id"], _deliver_existing(
-                    dup, urgent=urgent, proactive_reach=False)
+                return dup["id"], _deliver_existing(dup, urgent=urgent)
             return dup["id"], False
         if delivery_accepted(dup):
             return dup["id"], True
-        if should_push_to_lark(dup):
-            return dup["id"], _deliver_existing(dup, urgent=urgent)
         return dup["id"], _deliver_existing(dup, urgent=urgent)
 
     mid = _new_id()
@@ -1755,14 +1711,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
             print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
 
     state = _fold([ev])[mid]
-    cj = _render_card(state)
     if not send:
         if not should_push_to_lark(state):
-            return mid, _deliver_existing(
-                state, urgent=urgent, proactive_reach=False)
+            # Ledger-only cards have no other transport: record it now.
+            return mid, _deliver_existing(state, urgent=urgent)
         return mid, False
-    if should_push_to_lark(state):
-        return mid, _deliver_existing(state, urgent=urgent)
     return mid, _deliver_existing(state, urgent=urgent)
 
 
@@ -1799,8 +1752,7 @@ def _clean_adopted_title(header: str, source: str) -> str:
 
 def adopt_card(source: str, legacy_card_json: str, context: str = "",
                suppress_accepted: bool = False,
-               route_notices_to_web: bool = False,
-               proactive_reach: bool = False) -> str:
+               skip_ledger_only: bool = False) -> str:
     """Adopt an existing Lark card into the memorial interaction surface.
 
     Task-native actions/links are preserved. Cards that already offer a real
@@ -1888,9 +1840,8 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
                        else ""),
         )
         state = get_memorial(mid) or {}
-        if route_notices_to_web and not should_push_to_lark(state):
-            if proactive_reach:
-                _request_proactive_reach(state)
+        if skip_ledger_only and not should_push_to_lark(state):
+            # REQ-119: ambient exhaust stays in the ledger; nothing renders.
             continue
         if suppress_accepted:
             if delivery_accepted(state):
@@ -1996,8 +1947,8 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
     """Convert proactive heartbeat output to one memorial card per event.
 
     Existing decision cards pass through. Legacy cards are adopted while
-    preserving their native actions. Prose without explicit choices is stored
-    as a web notice instead of being pushed into Lark as another pending card.
+    preserving their native actions. Ambient-source output stays ledger-only
+    (REQ-119) instead of being pushed into Lark as another pending card.
     Raw internal JSON remains blocked.
     """
     source_names = [s.strip() for s in str(source).split(",") if s.strip()]
@@ -2052,8 +2003,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                                        else ""))
             state = get_memorial(mid) or {}
             if not should_push_to_lark(state):
-                _request_proactive_reach(state)
-                continue
+                continue  # ledger-only (REQ-119)
             if delivery_accepted(state):
                 continue
             rendered.append(card_json(mid))
@@ -2078,13 +2028,11 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                     adopted = json.dumps(
                         card, ensure_ascii=False, separators=(",", ":"))
                 else:
-                    _request_proactive_reach(state)
-                    adopted = ""
+                    adopted = ""  # ledger-only (REQ-119)
             else:
                 adopted = adopt_card(
                     single_source, card_raw, suppress_accepted=True,
-                    route_notices_to_web=True,
-                    proactive_reach=True,
+                    skip_ledger_only=True,
                 )
             if adopted:
                 rendered.append(adopted)

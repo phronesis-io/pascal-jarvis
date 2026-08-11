@@ -1343,12 +1343,14 @@ class TestRoutes:
         from core.delivery import DeliveryEnvelope, DeliveryPipeline
 
         monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
+        # REQ-119: decisions deliver to Lark; mock the transport.
+        monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
+        monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
         memorial_id, accepted = memorial.create(
             "test-items-api",
             "选择下一步",
-            "请在手机上集中处理。",
+            "请集中处理。",
             preset="decision",
-            review_at="phone",
         )
         assert accepted is True
 
@@ -1364,12 +1366,17 @@ class TestRoutes:
         assert decided.status_code == 200
         assert memorial.get_memorial(memorial_id)["status"] == "decided"
 
-        pipeline = DeliveryPipeline(jarvis_tmp)
+        from core.delivery import TransportResult
+        pipeline = DeliveryPipeline(
+            jarvis_tmp,
+            transport=lambda envelope, channel: TransportResult(
+                True, "om_api_test"),
+        )
         sent = pipeline.deliver(DeliveryEnvelope(
             source="api-test",
-            kind="web",
+            kind="text",
             payload={"text": "delivery state"},
-            requested_channel="web",
+            requested_channel="lark",
             metadata={"bypass_throttle": True, "bypass_dedup": True},
         ))
         deliveries = client.get("/api/deliveries?state=delivered")

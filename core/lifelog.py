@@ -551,12 +551,27 @@ def morning_anchor_fired(now: datetime | None = None) -> bool:
         _now(now).strftime("%Y-%m-%d")
 
 
-def morning_anchor_mark(now: datetime | None = None) -> None:
+def morning_anchor_mark(now: datetime | None = None, text: str = "") -> None:
+    """Stamp today's anchor as handled, remembering the line that went out.
+
+    ``text`` is the model's one-line anchor body — the post-hook compares
+    tomorrow's line against it and skips a resend when nothing substantive
+    changed (REQ-121). An empty text keeps yesterday's remembered line, so a
+    consumed-but-skipped day does not erase the comparison baseline.
+    """
     now = _now(now)
+    state = {"date": now.strftime("%Y-%m-%d"), "ts": now.strftime(_TS_FMT)}
+    remembered = str(text or "").strip() or \
+        str(_read_state(anchor_state_path()).get("text") or "")
+    if remembered:
+        state["text"] = remembered
     atomic_write(anchor_state_path(),
-                 json.dumps({"date": now.strftime("%Y-%m-%d"),
-                             "ts": now.strftime(_TS_FMT)},
-                            ensure_ascii=False) + "\n")
+                 json.dumps(state, ensure_ascii=False) + "\n")
+
+
+def morning_anchor_last_text() -> str:
+    """The most recent anchor line that actually went out ("" if none)."""
+    return str(_read_state(anchor_state_path()).get("text") or "")
 
 
 # ── weekly exercise card state (REQ-116) ─────────────────────────────────

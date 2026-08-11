@@ -61,7 +61,7 @@ def test_docket_review_button_actually_navigates(env, monkeypatch):
         lines.append(json.dumps(e, ensure_ascii=False))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    summary = memorial_escrow.run(now=now, send=False)
+    summary = memorial_escrow.run(now=now, send=True)
     docket = memorial.get_memorial(summary["docket_id"])
     urls = [b.get("url") for b in docket["extra_buttons"] if b.get("url")]
     assert urls == ["https://desk.example/items"]
@@ -89,7 +89,7 @@ def test_docket_omits_the_button_when_there_is_nowhere_to_go(env, monkeypatch):
         lines.append(json.dumps(e, ensure_ascii=False))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    summary = memorial_escrow.run(now=now, send=False)
+    summary = memorial_escrow.run(now=now, send=True)
     docket = memorial.get_memorial(summary["docket_id"])
     assert docket["extra_buttons"] == []
     assert [o["key"] for o in docket["options"]] == ["lapse_all"]

@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from core.delivery import DeliveryEnvelope, DeliveryPipeline
+from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
 
 RUNTIME_PATHS = (
     "core",
@@ -313,17 +313,28 @@ def smoke_delivery(
     db_path: str | Path | None = None,
     timeout: float = 3.0,
 ) -> dict:
-    """Exercise the full policy/state machine without interrupting the owner."""
+    """Exercise the full policy/state machine without interrupting the owner.
+
+    Uses an injected no-op transport (the pipeline's supported test seam)
+    instead of a real Lark send: the point is proving sanitize→dedup→
+    throttle→route→state transitions work on this install, not messaging
+    the owner on every deploy. The retired web channel (REQ-119) is NOT
+    used — it existed only as an unconditional fake success.
+    """
     project = _root(root)
     started = time.monotonic()
-    pipeline = DeliveryPipeline(project, db_path=db_path)
+    pipeline = DeliveryPipeline(
+        project, db_path=db_path,
+        transport=lambda envelope, channel: TransportResult(
+            True, "deploy-smoke"),
+    )
     smoke_id = f"deploy-smoke:{int(time.time() * 1000)}:{os.getpid()}"
     result = pipeline.deliver(DeliveryEnvelope(
         source="deploy-smoke",
-        kind="web",
+        kind="text",
         payload={"text": "Jarvis deploy smoke delivery"},
         attention="notice",
-        requested_channel="web",
+        requested_channel="lark",
         memorial_id=smoke_id,
         dedup_key=smoke_id,
         metadata={

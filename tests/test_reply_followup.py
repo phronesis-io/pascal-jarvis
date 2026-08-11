@@ -28,7 +28,6 @@ from core.jsonl import read_jsonl  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
     monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
     monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
     # Never touch the live heartbeat trigger from a test on the prod machine.

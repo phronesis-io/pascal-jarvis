@@ -67,21 +67,23 @@ def _actions(card: dict) -> list[dict]:
 # ── create ───────────────────────────────────────────────────────────────
 
 
-def test_create_routes_ordinary_decision_to_phone_without_lark_noise(env):
+def test_create_routes_ordinary_decision_to_lark(env):
+    """REQ-119: Lark is the only delivery surface — an ordinary decision is a
+    real Lark card, not a row parked on a desk that never rang (7/24)."""
     mid, sent = memorial.create("mail", "测试标题", "正文内容", preset="decision")
 
     assert mid.startswith("mem_")
     assert sent is True
     events = _ledger_events(env.dir)
-    assert [e["ev"] for e in events] == ["create", "delivery"]
+    assert [e["ev"] for e in events] == ["create", "delivery", "sent"]
     ev = events[0]
     assert ev["ev"] == "create" and ev["id"] == mid
     assert ev["source"] == "mail" and ev["title"] == "测试标题"
     assert [o["key"] for o in ev["options"]] == ["approve", "defer", "reject"]
-    assert ev["review_surface"] == "phone"
-    assert events[1]["status"] == "phone_ready"
-    assert env.cards == []
-    assert not (env.dir / "heartbeat_outbox.jsonl").exists()
+    assert ev["review_surface"] == "lark"
+    assert events[1]["status"] == "delivered"
+    assert len(env.cards) == 1
+    assert (env.dir / "heartbeat_outbox.jsonl").exists()
 
 
 def test_create_card_structure_and_button_value_round_trip(env):
@@ -110,8 +112,9 @@ def test_create_defaults_to_fyi_preset(env):
     assert st["attention"] == "notice"
     assert memorial.requires_decision(st) is False
     assert memorial.review_surface(st) == "none"
-    assert st["delivery_status"] == "web_only"
-    assert env.cards == []
+    # REQ-119: a notice is a Lark card too — nothing routes to the web.
+    assert st["delivery_status"] == "delivered"
+    assert len(env.cards) == 1
 
 
 def _routine_options(routine_id: str = "rt_test") -> list[dict]:
@@ -149,7 +152,6 @@ def test_routine_notice_still_reaches_lark_when_desk_cannot_ring(env,
                                                                  monkeypatch):
     # The downgrade must not make the product's own voice invisible (the 7/24
     # regression): with no desk, a routine notice rings Lark like checkin does.
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
     _, sent = memorial.create("routine:起来动动", "起来动动·眼睛",
                               "看远处 20 秒。", options=_routine_options())
     assert sent is True
@@ -177,7 +179,9 @@ def test_pause_mute_neither_promotes_nor_speaks_but_still_acts(env,
 
 
 def test_review_surface_matrix_preserves_attention_budget(env):
-    phone_id, _ = memorial.create("project", "方案", "选一个", preset="decision")
+    """REQ-119: every decision reviews on Lark; every card is a Lark card."""
+    ordinary_id, _ = memorial.create("project", "方案", "选一个",
+                                     preset="decision")
     lark_id, _ = memorial.create(
         "project", "现在决定", "正在飞书里聊", preset="decision",
         chat_id="oc_live")
@@ -186,23 +190,24 @@ def test_review_surface_matrix_preserves_attention_budget(env):
     alert_id, _ = memorial.create(
         "selfmon", "服务异常", "需要立即看", preset="fyi", urgent=True)
 
-    phone = memorial.get_memorial(phone_id)
+    ordinary = memorial.get_memorial(ordinary_id)
     lark = memorial.get_memorial(lark_id)
     calendar = memorial.get_memorial(calendar_id)
     alert = memorial.get_memorial(alert_id)
 
-    assert memorial.review_surface(phone) == "phone"
-    assert phone["delivery_status"] == "phone_ready"
+    assert memorial.review_surface(ordinary) == "lark"
+    assert ordinary["delivery_status"] == "delivered"
     assert memorial.review_surface(lark) == "lark"
     assert memorial.review_surface(calendar) == "lark"
     assert memorial.review_surface(alert) == "none"
     assert alert["attention"] == "alert"
-    assert len(env.cards) == 3
+    assert len(env.cards) == 4
     # 8/3: the ask moved to a role line at the TOP of every card (the old
     # bottom status pair only covered two classes and sat below the fold).
     assert "🎯 等你拍一个" in env.cards[0][0]
     assert "🎯 等你拍一个" in env.cards[1][0]
-    assert "⚡ 即时提醒 · 不用批" in env.cards[2][0]
+    assert "🎯 等你拍一个" in env.cards[2][0]
+    assert "⚡ 即时提醒 · 不用批" in env.cards[3][0]
 
 
 def test_old_delivered_decision_truthfully_stays_lark_routed():
@@ -220,9 +225,12 @@ def test_only_decisions_accept_an_explicit_review_surface(env):
     with pytest.raises(ValueError):
         memorial.create(
             "mail", "通知", "看看", preset="fyi", review_at="lark")
-    with pytest.raises(ValueError):
-        memorial.create(
-            "mail", "决定", "选一个", preset="decision", review_at="none")
+    # A decision explicitly asked to review nowhere is clamped to Lark —
+    # the hard constraint (decisions must be reviewable) outranks the caller,
+    # same precedence as the old lark-clamp (REQ-119).
+    mid, _ = memorial.create(
+        "mail", "决定", "选一个", preset="decision", review_at="none")
+    assert memorial.review_surface(memorial.get_memorial(mid)) == "lark"
 
 
 def test_hard_immediacy_cannot_be_downgraded_to_phone(env):
@@ -480,7 +488,7 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
     # ("sent" = REQ-118 thread-lookup event appended after delivery)
     assert [e["ev"] for e in _ledger_events(env.dir)] == [
-        "create", "delivery", "chat"
+        "create", "delivery", "sent", "chat"
     ]
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
@@ -590,7 +598,7 @@ def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
     assert actions[0]["value"]["action"] == "intent_close"
 
 
-def test_memorialize_output_routes_plain_prose_to_web_not_lark(env):
+def test_memorialize_output_keeps_ambient_prose_ledger_only(env):
     output = "跨 Session 有一件进展\n---\n另一件独立进展"
     rendered = memorial.memorialize_output(output, "cross-session-sync")
     assert rendered == ""
@@ -598,23 +606,23 @@ def test_memorialize_output_routes_plain_prose_to_web_not_lark(env):
     assert [state["body"] for state in states] == [
         "跨 Session 有一件进展", "另一件独立进展"]
     assert all(state["attention"] == "notice" for state in states)
+    assert all(state["delivery_status"] == "ledger_only" for state in states)
 
 
-def test_memorialize_output_routes_ordinary_choices_to_phone(env):
+def test_memorialize_output_renders_ordinary_choices_for_lark(env):
     rendered = memorial.memorialize_output(
         "要采用哪条路径？\nOPTIONS: 路径 A | 路径 B",
         "heartbeat",
     )
-    assert rendered == ""
-    state = memorial.list_memorials()[-1]
-    card = json.loads(memorial.card_json(state["id"]))
+    card = json.loads(rendered)
     assert [action["text"]["content"] for action in _actions(card)] == [
         "路径 A", "路径 B", "💬 聊聊这个", "🤔 看不懂"]
+    state = memorial.list_memorials()[-1]
     assert state["attention"] == "decision"
-    assert memorial.review_surface(state) == "phone"
+    assert memorial.review_surface(state) == "lark"
 
 
-def test_cross_session_options_stay_web_first(env):
+def test_cross_session_options_stay_ambient_notice(env):
     rendered = memorial.memorialize_output(
         "另一个执行会话有个建议\nOPTIONS: 去核实 | 先不管",
         "cross-session-sync",
@@ -628,8 +636,7 @@ def test_cross_session_options_stay_web_first(env):
 def test_explicit_title_line_becomes_card_header(env):
     output = "TITLE: 发声候选已备好，挑一个\n三个候选：A、B、C，各配 open problem。"
     rendered = memorial.memorialize_output(output, "intention-check")
-    assert rendered == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(rendered)
     assert card["header"]["title"]["content"] == "📜 🎯 发声候选已备好，挑一个"
     body = card["elements"][0]["text"]["content"]
     assert body.startswith("🎯 等你拍一个")
@@ -639,8 +646,7 @@ def test_explicit_title_line_becomes_card_header(env):
 def test_short_first_line_promoted_to_title(env):
     output = "**周会冲突提醒**\n周四 9:00 的周会和心理咨询撞了，需要挪一个。"
     rendered = memorial.memorialize_output(output, "intention-check")
-    assert rendered == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(rendered)
     assert card["header"]["title"]["content"] == "📜 🎯 周会冲突提醒"
     # markdown heading was dropped from the body — no double-say
     assert "周会冲突提醒" not in card["elements"][0]["text"]["content"]
@@ -649,8 +655,7 @@ def test_short_first_line_promoted_to_title(env):
 def test_title_only_output_still_makes_a_card(env):
     out = memorial.memorialize_output("TITLE: 今晚 EF 增长破千，值得看一眼",
                                       "intention-check")
-    assert out == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(out)
     assert card["header"]["title"]["content"] == "📜 🎯 今晚 EF 增长破千，值得看一眼"
     assert card["elements"][0]["text"]["content"] == (
         "🎯 等你拍一个\n\n今晚 EF 增长破千，值得看一眼")
@@ -660,8 +665,7 @@ def test_overlong_explicit_title_clipped_but_body_keeps_full_line(env):
     long_title = "这是一个远超四十个字符上限的超长标题" * 3
     out = memorial.memorialize_output(f"TITLE: {long_title}\n正文在此",
                                       "intention-check")
-    assert out == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(out)
     assert card["header"]["title"]["content"] == f"📜 🎯 {long_title[:40]}"
     body = card["elements"][0]["text"]["content"]
     assert long_title in body and "正文在此" in body
@@ -670,8 +674,7 @@ def test_overlong_explicit_title_clipped_but_body_keeps_full_line(env):
 def test_asymmetric_markup_first_line_keeps_clean_title_and_body(env):
     out = memorial.memorialize_output("【提醒】周四 9:00 周会和咨询撞了\n需要挪一个。",
                                       "intention-check")
-    assert out == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(out)
     assert card["header"]["title"]["content"] == "📜 🎯 【提醒】周四 9:00 周会和咨询撞了"
     # prose first line (not pure markup) stays in the body
     assert "【提醒】" in card["elements"][0]["text"]["content"]
@@ -704,15 +707,17 @@ def test_prose_without_headline_keeps_generic_source_title(env):
     output = ("这是一段没有标题、首行也很长很长很长很长很长很长很长很长很长很长"
               "很长很长很长的正文\n第二行内容")
     rendered = memorial.memorialize_output(output, "intention-check")
-    assert rendered == ""
-    card = json.loads(memorial.card_json(memorial.list_memorials()[-1]["id"]))
+    card = json.loads(rendered)
     assert card["header"]["title"]["content"] == "📜 🎯 Intent"
 
 
 def test_memorialize_output_does_not_double_wrap_memorial(env):
     mid, _ = memorial.create("mail", "邮件", "正文", preset="fyi", send=False)
     card = memorial.card_json(mid)
-    assert memorial.memorialize_output(card, "mail-triage") == ""
+    # An existing memorial card passes through for Lark delivery — it is not
+    # re-created, and the pass-through keeps the SAME memorial id.
+    out = memorial.memorialize_output(card, "mail-triage")
+    assert f'"id": "{mid}"' in out or f'"id":"{mid}"' in out
     assert memorial.get_memorial(mid)["attention"] == "notice"
     assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
 
@@ -736,9 +741,12 @@ def test_decision_on_sentinel_suppressed_body_returns_safe_card(env):
 def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
     legacy = build_card("📡 EigenFlux", "同一条动态")
     first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")
-    assert first == ""
+    assert first != ""  # curated signal renders for Lark
     mid = memorial.list_memorials()[-1]["id"]
     assert memorial.get_memorial(mid)["attention"] == "notice"
+    # Once the transport recorded a delivery, the same content is suppressed —
+    # not re-rendered into a second card.
+    memorial._record_delivery(mid, "delivered")
     assert memorial.memorialize_output(legacy, "eigenflux-feed-triage") == ""
 
 
