@@ -339,13 +339,11 @@ def probe_all(
     primary = next((row for row in rows if row["id"] == "primary"), None)
     if primary:
         try:
-            from .model_fallback import clear, is_spend_limit, trip
+            from .model_fallback import clear, limit_reason, trip
 
-            if (
-                primary["status"] == "unhealthy"
-                and is_spend_limit(str(primary.get("detail") or ""))
-            ):
-                trip("spend_limit", base)
+            reason = limit_reason(str(primary.get("detail") or ""))
+            if primary["status"] == "unhealthy" and reason:
+                trip(reason, base)
             elif primary["status"] == "healthy":
                 clear(base)
         except Exception:

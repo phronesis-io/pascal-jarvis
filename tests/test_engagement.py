@@ -92,7 +92,7 @@ def test_first_reply_credits_source_followons_are_conversation(tmp_path):
     # First reply → credited to calendar-sync
     record_response(log, "好的改一下")
     # Two follow-on free-form messages → conversation, NOT calendar-sync
-    record_response(log, "凯瑞老师那边怎么说")
+    record_response(log, "同事A那边怎么说")
     record_response(log, "我背还有点痛")
 
     rows = [json.loads(l) for l in log.read_text().splitlines()]

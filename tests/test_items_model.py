@@ -1,4 +1,4 @@
-"""Memorial-first item model used by web and mobile."""
+"""Memorial-first item model used by the desktop archive."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dashboard.pages.items import _item_source_label, enrich_items, filter_items
 
 
 def _state(mid: str, epoch: float, *, matter_id: str = "",
-           attention: str = "decision", review: str = "phone",
+           attention: str = "decision", review: str = "lark",
            status: str = "pending", options: list[dict] | None = None) -> dict:
     return {
         "id": mid,
@@ -22,7 +22,7 @@ def _state(mid: str, epoch: float, *, matter_id: str = "",
         "matter_id": matter_id,
         "attention": attention,
         "review_surface": review if attention == "decision" else "none",
-        "delivery_status": "phone_ready",
+        "delivery_status": "delivered",
         "status": status,
         "options": options or (
             [{"key": "approve", "label": "同意", "action": None}]
@@ -76,7 +76,7 @@ def test_filters_status_topic_time_and_attention_surface():
     ])
     assert [item["id"] for item in filter_items(
         items, mode="pending", topic_id="mat_a",
-        time_window="30d", surface="phone", now=now)] == ["phone"]
+        time_window="30d", surface="lark", now=now)] == ["phone"]
     assert [item["id"] for item in filter_items(
         items, mode="notice", time_window="24h", now=now)] == ["notice"]
     assert [item["id"] for item in filter_items(

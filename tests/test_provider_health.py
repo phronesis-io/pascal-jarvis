@@ -232,6 +232,32 @@ def test_spend_limit_canary_trips_shared_provider_gate(tmp_path):
     assert gate(tmp_path, probe=False) == "backup"
 
 
+def test_session_limit_canary_trips_shared_provider_gate(tmp_path):
+    _write_config(tmp_path)
+
+    def runner(cmd, **kwargs):
+        if kwargs["env"].get("ANTHROPIC_BASE_URL") == "https://backup.example":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}), stderr=""
+            )
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="HTTP 429: You've hit your session limit · resets 6pm (Asia/Shanghai)",
+        )
+
+    ph.probe_all(
+        tmp_path,
+        runner=runner,
+        openai_caller=lambda *a, **k: {"output_text": ph.CANARY_MARKER},
+    )
+
+    from core.model_fallback import gate
+
+    assert gate(tmp_path, probe=False) == "backup"
+
+
 def test_probe_failure_redacts_secret_shaped_error(tmp_path):
     _write_config(tmp_path)
     spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[1]

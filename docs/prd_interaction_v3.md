@@ -71,7 +71,7 @@ v1（6/11）解决"交互质量与可靠性"，v2（6/13）做"系统迭代"。�
 - **验收**：熔断不再以裸文本入聊天;run_cycle 该路径 return ""。✅ 单测
 
 ### REQ-63 engagement 归因改按引用回复/message_id,不按 60 分钟邻近【数据优先地基】✅ 本期
-- **问题**：record_response 把 60 分钟内每条回复都算给最近一次 sent 的源,无 message_id join → calendar-sync 27 sent/29 response=107%,日志可证"凯瑞老师""背痛""eigenflux"被算进 calendar-sync。所有 keep/cut 决策建在噪声上(违背 Pascal 数据优先原则)。
+- **问题**：record_response 把 60 分钟内每条回复都算给最近一次 sent 的源,无 message_id join → calendar-sync 27 sent/29 response=107%,日志可证"同事A""背痛""eigenflux"被算进 calendar-sync。所有 keep/cut 决策建在噪声上(违背 Pascal 数据优先原则)。
 - **方案**：record_response:① 回复含 `[Replying to: <card source=...>]` 标记 → 归因到那张卡的源;② 每条 sent 只算第一条回复,后续自由消息记 source='conversation';③ 一条 sent 至多一条 response。content_head 已带 Replying-to 标记,可行。
 - **验收**：引用回复归因到正确源;非引用回复不再误算;同一 sent 不超 1 response。✅ 单测
 

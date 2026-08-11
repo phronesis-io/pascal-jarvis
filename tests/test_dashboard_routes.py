@@ -1080,6 +1080,7 @@ class TestDecisionSurface:
 
     def test_only_explicit_choices_count_as_pending_decisions(self):
         from dashboard.uiutil import (memorial_is_notice, memorial_is_pending,
+                                      memorial_review_surface,
                                       memorial_surface_label,
                                       memorial_visible_options)
         base = {"status": "pending", "delivery_status": "delivered",
@@ -1097,7 +1098,10 @@ class TestDecisionSurface:
         assert memorial_is_notice(decision) is False
         assert memorial_surface_label({
             **decision, "review_surface": "phone"
-        }) == "手机集中批"
+        }) == "飞书即时批"
+        assert memorial_review_surface({
+            **decision, "review_surface": "phone"
+        }) == "lark"
         assert memorial_surface_label({
             **decision, "review_surface": "lark"
         }) == "飞书即时批"
@@ -1710,4 +1714,3 @@ class TestRoutes:
         assert response.status_code == 200
         assert response.json()["providers"][0]["status"] == "healthy"
         assert "token" not in response.text.lower()
-

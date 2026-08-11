@@ -45,6 +45,9 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "You have hit your monthly spend limit",
     "monthly spend limit",
     "spend limit",
+    "You've hit your session limit",
+    "You have hit your session limit",
+    "session limit",
     "credit balance",
     "Connection error",
     "Failed to authenticate",
@@ -89,6 +92,9 @@ PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "You've hit your monthly spend limit",
     "You have hit your monthly spend limit",
     "monthly spend limit",
+    "You've hit your session limit",
+    "You have hit your session limit",
+    "session limit",
     "raise it at claude.ai/settings/usage",
 )
 

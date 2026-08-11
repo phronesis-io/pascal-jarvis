@@ -25,7 +25,7 @@ from core.claude_bin import resolve_claude_bin
 from core.model_fallback import (
     fallback_for_stderr,
     gate,
-    is_spend_limit,
+    limit_reason,
     trip,
 )
 from core.safety import looks_like_error
@@ -391,9 +391,10 @@ def run_auxiliary_model(
                         model=current_model,
                         attempted=tuple(attempted),
                     )
-                if provider == "Claude primary" and is_spend_limit(error_text):
+                reason = limit_reason(error_text)
+                if provider == "Claude primary" and reason:
                     try:
-                        trip("spend_limit", root_path)
+                        trip(reason, root_path)
                     except Exception:
                         pass
                 next_model = fallback_for_stderr(

@@ -49,7 +49,7 @@ def _record_response_locked(log_path: Path, content_head: str) -> bool:
     # AFTER it (REQ-63). The old code credited EVERY reply within 60min to the
     # last sent source with no cap — so a multi-message conversation after one
     # proactive card billed every message to that source (calendar-sync showed
-    # 27 sent / 29 responses = 107%, with '凯瑞老师'/背痛 misattributed). Now:
+    # 27 sent / 29 responses = 107%, with '同事A'/背痛 misattributed). Now:
     # only the FIRST reply credits the source; later messages are 'conversation'.
     last_sent = None
     responded_already = False
