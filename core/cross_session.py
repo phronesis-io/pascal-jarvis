@@ -569,9 +569,15 @@ def collect_incremental(
             "fingerprints": current[-MAX_TURNS_PER_SESSION:],
         }
 
-    files_state = {
-        path: value for path, value in files_state.items() if Path(path).is_file()
-    }
+    state_cutoff = time.time() - max(1, int(window_hours)) * 3600
+    retained_state = {}
+    for path, value in files_state.items():
+        try:
+            if Path(path).stat().st_mtime >= state_cutoff:
+                retained_state[path] = value
+        except OSError:
+            continue
+    files_state = retained_state
     combined = "\n".join(output)
     if len(combined) > MAX_INCREMENTAL_CHARS:
         lines = combined.splitlines()

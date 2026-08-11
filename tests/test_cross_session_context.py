@@ -216,6 +216,51 @@ def test_incremental_codex_watermark_and_context_tail(tmp_path):
             assert line.startswith("[context] ")
 
 
+def test_incremental_prunes_watermarks_outside_scan_window_without_replay(
+    tmp_path, monkeypatch,
+):
+    now = 10_000
+    codex_root = tmp_path / "codex"
+    active = codex_root / "active.jsonl"
+    stale = codex_root / "stale.jsonl"
+    _codex(active, session_id="active")
+    _codex(stale, session_id="stale")
+    os.utime(active, (now - 10, now - 10))
+    os.utime(stale, (now - 7200, now - 7200))
+    state = tmp_path / "seen.json"
+    state.write_text(json.dumps({
+        "version": 2,
+        "files": {
+            str(stale): {
+                "provider": "codex",
+                "session_id": "stale",
+                "size": stale.stat().st_size,
+                "fingerprints": ["old"],
+            },
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr("core.cross_session.time.time", lambda: now)
+
+    first = collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    )
+    saved = json.loads(state.read_text(encoding="utf-8"))
+
+    assert "把 Codex 结论同步给主 Agent" in first
+    assert set(saved["files"]) == {str(active)}
+    assert collect_incremental(
+        state_file=state,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        window_hours=1,
+    ) == ""
+
+
 def test_prompt_and_first_digest_keep_latest_user_after_many_agent_updates(tmp_path):
     codex_root = tmp_path / "codex"
     path = codex_root / "busy.jsonl"

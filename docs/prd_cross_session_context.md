@@ -28,7 +28,8 @@ survives as a durable digest after native provider sessions age out.
 4. Inject a bounded recent projection only into the owner's private prompt.
    Group and external conversations never receive it.
 5. Keep the existing heartbeat digest, upgraded to both providers and an
-   atomic per-file watermark. Unchanged sessions emit nothing.
+   atomic per-file watermark. Unchanged sessions emit nothing, and watermark
+   entries outside the same scan window are pruned.
 6. Treat transcript text as untrusted historical context. Mutable facts such
    as PR, deploy, task, or calendar state still require authoritative checks.
 7. Provider transcript formats may fail independently; a bad or drifting file
