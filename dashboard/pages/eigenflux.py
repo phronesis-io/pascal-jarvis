@@ -24,12 +24,13 @@ from ..uiutil import (
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 TASKS = (
-    ("eigenflux-feed-triage", "信号摄取", 30 * 60),
-    ("eigenflux-publish", "广播起草", 3 * 3600),
-    ("eigenflux-profile", "画像同步", 36 * 3600),
-    ("eigenflux-friends", "好友申请", 30 * 60),
-    ("eigenflux-preinstall", "能力同步", 36 * 3600),
+    ("eigenflux-feed-triage", "信号摄取", 10 * 60, 30 * 60),
+    ("eigenflux-publish", "广播起草", 60 * 60, 3 * 3600),
+    ("eigenflux-profile", "画像同步", 24 * 3600, 36 * 3600),
+    ("eigenflux-friends", "好友申请", 10 * 60, 30 * 60),
+    ("eigenflux-preinstall", "能力同步", 24 * 3600, 36 * 3600),
 )
+SUCCESS_STATUSES = frozenset({"ok", "empty_pre", "idle"})
 
 
 def _truthy(value) -> bool:
@@ -99,15 +100,29 @@ def load_network_overview(
     task_state = heartbeat.get("tasks") if isinstance(heartbeat, dict) else {}
     if not isinstance(task_state, dict):
         task_state = heartbeat if isinstance(heartbeat, dict) else {}
+    interval_overrides = read_json(
+        root / "interval_overrides.json", ttl=5, default={}
+    ) or {}
+    if not isinstance(interval_overrides, dict):
+        interval_overrides = {}
     tasks = []
     current_epoch = (
         datetime.now().timestamp() if now_epoch is None else _number(now_epoch)
     )
-    for task_id, label, max_age_s in TASKS:
+    for task_id, label, default_interval_s, minimum_max_age_s in TASKS:
         state = task_state.get(task_id) or {}
         state = state if isinstance(state, dict) else {}
         circuit = state.get("circuit") or {}
         circuit = circuit if isinstance(circuit, dict) else {}
+        effective_interval_s = _number(
+            interval_overrides.get(task_id)
+            or state.get("effective_interval")
+            or default_interval_s,
+            default_interval_s,
+        )
+        if effective_interval_s <= 0:
+            effective_interval_s = default_interval_s
+        max_age_s = max(minimum_max_age_s, 2 * effective_interval_s)
         disabled_until = _number(circuit.get("disabled_until"))
         last_status = str(state.get("last_status") or "")
         last_success = _number(state.get("last_success"))
@@ -118,13 +133,13 @@ def load_network_overview(
         healthy = (
             disabled_until <= current_epoch
             and fresh
-            and last_status in {"ok", "empty_pre"}
+            and last_status in SUCCESS_STATUSES
         )
         if disabled_until > current_epoch:
             detail = "熔断中"
         elif not fresh:
             detail = "超过应有周期未成功"
-        elif last_status not in {"ok", "empty_pre"}:
+        elif last_status not in SUCCESS_STATUSES:
             detail = last_status or "状态未知"
         else:
             detail = "正常"
