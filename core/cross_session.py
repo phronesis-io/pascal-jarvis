@@ -46,13 +46,21 @@ MAX_CONTEXT_TURNS = 6
 MAX_TURN_CHARS = 500
 
 _SECRET_RE = re.compile(
-    r"((?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}"
+    r"(-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?"
+    r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"
+    r"|(?<![A-Za-z0-9])(?:sk|rk)_(?:live|test)_[A-Za-z0-9_\-]{8,}"
+    r"|(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}"
     r"|(?:gh[pousr]|github_pat)_[A-Za-z0-9_\-]{12,}"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|AIza[A-Za-z0-9_\-]{30,}"
+    r"|xox[a-z]-[A-Za-z0-9-]{10,}"
     r"|Bearer\s+\S+"
     r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
-    r"|(?<![A-Za-z0-9])[\"']?(?:token|secret|api[_ -]?key|password)[\"']?"
+    r"|(?<![A-Za-z0-9_])[\"']?[A-Za-z0-9_\-]*"
+    r"(?:token|secret|password|passwd|api[_ -]?key|access[_ -]?key|private[_ -]?key)"
+    r"[A-Za-z0-9_\-]*[\"']?"
     r"\s*(?:is|[=:])\s*(?:[\"'][^\"']+[\"']|\S+))",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 _SYNTHETIC_PREFIXES = (
     "This session is being continued from a previous conversation",
@@ -77,6 +85,9 @@ _AUTOMATED_SESSION_PREFIXES = (
     "self-improve ",
     "[background task]",
     "[cross-session digest]",
+    "review the code changes",
+    "review the current code changes",
+    "reply exactly codex_canary_ok",
 )
 
 
@@ -176,6 +187,22 @@ def _dedupe_adjacent(turns: Iterable[Turn]) -> tuple[Turn, ...]:
     return tuple(result[-MAX_TURNS_PER_SESSION:])
 
 
+def _recent_with_user(turns: Iterable[Turn], limit: int) -> tuple[Turn, ...]:
+    """Keep the latest user objective even after many assistant updates."""
+    items = tuple(turns)
+    size = max(1, int(limit))
+    selected = items[-size:]
+    if any(turn.role == "user" for turn in selected):
+        return selected
+    latest_user = next(
+        (turn for turn in reversed(items[:-size]) if turn.role == "user"),
+        None,
+    )
+    if latest_user is None or size == 1:
+        return (latest_user,) if latest_user is not None else selected
+    return (latest_user, *selected[-(size - 1):])
+
+
 def _claude_tail(path: Path) -> SessionTail | None:
     for item in _head_records(path):
         if item.get("isSidechain") or item.get("type") != "user":
@@ -240,9 +267,16 @@ def _codex_is_interactive(meta: dict) -> bool:
         return False
     if isinstance(source, dict) and "subagent" in source:
         return False
-    # Jarvis fallback, provider canaries, and review helpers all use `codex
-    # exec`; human Codex Desktop/CLI conversations use vscode/cli/app sources.
-    return str(source or "").lower() != "exec"
+    source_name = str(source or "").lower()
+    if source_name != "exec":
+        return True
+    # Recent Codex Desktop versions can represent an owner-visible task as
+    # `exec`; retain those candidates, then reject known automation by their
+    # first user turn in _codex_tail. Headless CLI/Jarvis executions stay out.
+    return (
+        str(meta.get("originator") or "").lower() == "codex desktop"
+        and str(meta.get("thread_source") or "").lower() == "user"
+    )
 
 
 def _codex_tail(path: Path) -> SessionTail | None:
@@ -252,6 +286,7 @@ def _codex_tail(path: Path) -> SessionTail | None:
     session_id = str(meta.get("id") or meta.get("session_id") or path.stem)
     workspace = str(meta.get("cwd") or "")
     turns: list[Turn] = []
+    first_user_seen = False
     for item in _tail_records(path):
         if item.get("type") != "event_msg":
             continue
@@ -266,6 +301,10 @@ def _codex_tail(path: Path) -> SessionTail | None:
         else:
             continue
         raw_text = str(payload.get("message") or "").strip()
+        if role == "user" and not first_user_seen:
+            first_user_seen = True
+            if raw_text.lower().startswith(_AUTOMATED_SESSION_PREFIXES):
+                return None
         if _is_synthetic(raw_text):
             continue
         timestamp = str(item.get("timestamp") or payload.get("timestamp") or "")
@@ -279,7 +318,7 @@ def _codex_tail(path: Path) -> SessionTail | None:
             identity=_turn_identity("codex", role, timestamp, raw_text),
         ))
     clean_turns = _dedupe_adjacent(turns)
-    if not clean_turns:
+    if not clean_turns or not any(turn.role == "user" for turn in clean_turns):
         return None
     return SessionTail(
         provider="codex",
@@ -483,7 +522,8 @@ def collect_incremental(
         else:
             start = _overlap_start(old_fingerprints, current)
 
-        new_turns = list(session.turns[start:])[-MAX_NEW_TURNS_PER_SESSION:]
+        new_turns = list(_recent_with_user(
+            session.turns[start:], MAX_NEW_TURNS_PER_SESSION))
         if new_turns:
             context_start = max(0, start - CONTEXT_TAIL)
             for turn in session.turns[context_start:start]:
@@ -560,7 +600,7 @@ def build_prompt_context(
             f"### {label} - {_project_label(session)} - "
             f"updated {_short_ts(session.updated_at)}"
         )
-        for turn in session.turns[-MAX_CONTEXT_TURNS:]:
+        for turn in _recent_with_user(session.turns, MAX_CONTEXT_TURNS):
             role = "User" if turn.role == "user" else "Assistant"
             lines.append(f"- {role}: {turn.text}")
     rendered = "\n".join(lines)

@@ -45,19 +45,21 @@ def _claude(path, session_id="claude-human", secret=""):
 
 
 def _codex(path, *, session_id="codex-human", source="vscode",
-           thread_source="user"):
+           thread_source="user", originator="Codex Desktop",
+           user_message="把 Codex 结论同步给主 Agent"):
     _write(path, [
         {"type": "session_meta", "payload": {
             "id": session_id,
             "cwd": "/work/beta",
             "source": source,
             "thread_source": thread_source,
+            "originator": originator,
         }},
         {"type": "event_msg", "timestamp": "2026-08-11T11:00:00Z",
-         "payload": {"type": "user_message", "message": "把 Codex 结论同步给主 Agent"}},
+         "payload": {"type": "user_message", "message": user_message}},
         # Codex can emit duplicate user_message events; only one turn survives.
         {"type": "event_msg", "timestamp": "2026-08-11T11:00:00Z",
-         "payload": {"type": "user_message", "message": "把 Codex 结论同步给主 Agent"}},
+         "payload": {"type": "user_message", "message": user_message}},
         {"type": "response_item", "payload": {
             "type": "tool_output", "output": "api_key=tool-secret-must-not-leak"}},
         {"type": "event_msg", "timestamp": "2026-08-11T11:01:00Z",
@@ -101,6 +103,10 @@ def test_redaction_does_not_mangle_task_notifications():
     assert "super-secret" not in redact_text("api_key=super-secret")
     assert redact_text('{"api_key":"super-secret"}') == '{[redacted]}'
     assert "hunter2" not in redact_text('{"password": "hunter2"}')
+    assert "AWSVALUE" not in redact_text("AWS_SECRET_ACCESS_KEY=AWSVALUE")
+    assert "AKIAIOSFODNN7EXAMPLE" not in redact_text("AKIAIOSFODNN7EXAMPLE")
+    pem = "-----BEGIN PRIVATE KEY----- private-material -----END PRIVATE KEY-----"
+    assert "private-material" not in redact_text(pem)
 
 
 def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
@@ -129,7 +135,20 @@ def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
     )
     _write(automation, rows)
     _codex(codex_root / "manual.jsonl", session_id="manual-codex")
-    _codex(codex_root / "fallback.jsonl", session_id="fallback", source="exec")
+    _codex(codex_root / "desktop-exec.jsonl", session_id="desktop-exec", source="exec")
+    _codex(
+        codex_root / "fallback.jsonl",
+        session_id="fallback",
+        source="exec",
+        originator="Codex CLI",
+        user_message="You are the Codex execution provider inside Jarvis. do work",
+    )
+    _codex(
+        codex_root / "review.jsonl",
+        session_id="review",
+        source="exec",
+        user_message="Review the code changes against the base branch main",
+    )
     _codex(codex_root / "subagent.jsonl", session_id="subagent",
            source={"subagent": "review"}, thread_source="subagent")
 
@@ -141,7 +160,7 @@ def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
         limit=20,
     )
     assert {session.session_id for session in sessions} == {
-        "manual-claude", "manual-codex",
+        "manual-claude", "manual-codex", "desktop-exec",
     }
 
 
@@ -183,6 +202,31 @@ def test_incremental_codex_watermark_and_context_tail(tmp_path):
     for line in third.splitlines():
         if "已经实现并完成验证" in line:
             assert line.startswith("[context] ")
+
+
+def test_prompt_and_first_digest_keep_latest_user_after_many_agent_updates(tmp_path):
+    codex_root = tmp_path / "codex"
+    path = codex_root / "busy.jsonl"
+    _codex(path, user_message="用户最初目标不能被进度消息挤掉")
+    with path.open("a", encoding="utf-8") as handle:
+        for index in range(25):
+            handle.write(json.dumps({
+                "type": "event_msg",
+                "timestamp": f"2026-08-11T11:{index + 2:02d}:00Z",
+                "payload": {
+                    "type": "agent_message",
+                    "message": f"进度更新 {index}",
+                },
+            }, ensure_ascii=False) + "\n")
+
+    kwargs = {
+        "claude_root": tmp_path / "claude",
+        "codex_root": codex_root,
+        "tracker_path": tmp_path / "missing.json",
+    }
+    assert "用户最初目标不能被进度消息挤掉" in build_prompt_context(**kwargs)
+    assert "用户最初目标不能被进度消息挤掉" in collect_incremental(
+        state_file=tmp_path / "seen.json", **kwargs)
 
 
 def test_live_root_gate_injects_owner_prompt_but_not_group(tmp_path, monkeypatch):
