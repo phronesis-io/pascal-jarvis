@@ -46,6 +46,16 @@ def _number(value, default: float = 0) -> float:
         return default
 
 
+def _validated_interval_overrides(value) -> dict[str, int]:
+    """Match HeartbeatRunner's all-or-nothing sidecar validation."""
+    if not isinstance(value, dict):
+        return {}
+    try:
+        return {key: int(item) for key, item in value.items() if int(item) > 0}
+    except (OverflowError, TypeError, ValueError):
+        return {}
+
+
 def _fmt_epoch(value) -> str:
     try:
         return datetime.fromtimestamp(float(value)).strftime("%m-%d %H:%M")
@@ -100,11 +110,9 @@ def load_network_overview(
     task_state = heartbeat.get("tasks") if isinstance(heartbeat, dict) else {}
     if not isinstance(task_state, dict):
         task_state = heartbeat if isinstance(heartbeat, dict) else {}
-    interval_overrides = read_json(
+    interval_overrides = _validated_interval_overrides(read_json(
         root / "interval_overrides.json", ttl=5, default={}
-    ) or {}
-    if not isinstance(interval_overrides, dict):
-        interval_overrides = {}
+    ))
     tasks = []
     current_epoch = (
         datetime.now().timestamp() if now_epoch is None else _number(now_epoch)
