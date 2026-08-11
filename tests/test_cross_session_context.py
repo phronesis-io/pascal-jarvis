@@ -99,6 +99,8 @@ def test_redaction_does_not_mangle_task_notifications():
         "<task-notification>finished</task-notification>"
     )
     assert "super-secret" not in redact_text("api_key=super-secret")
+    assert redact_text('{"api_key":"super-secret"}') == '{[redacted]}'
+    assert "hunter2" not in redact_text('{"password": "hunter2"}')
 
 
 def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):

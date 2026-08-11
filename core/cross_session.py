@@ -50,7 +50,8 @@ _SECRET_RE = re.compile(
     r"|(?:gh[pousr]|github_pat)_[A-Za-z0-9_\-]{12,}"
     r"|Bearer\s+\S+"
     r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
-    r"|\b(?:token|secret|api[_ -]?key|password)\b\s*(?:is|[=:])\s*\S+)",
+    r"|(?<![A-Za-z0-9])[\"']?(?:token|secret|api[_ -]?key|password)[\"']?"
+    r"\s*(?:is|[=:])\s*(?:[\"'][^\"']+[\"']|\S+))",
     re.IGNORECASE,
 )
 _SYNTHETIC_PREFIXES = (

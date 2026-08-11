@@ -122,6 +122,33 @@ def test_owner_background_call_keeps_tool_capability(tmp_path, monkeypatch):
     assert calls[0][calls[0].index("--session-id") + 1] == "first-session"
 
 
+def test_cli_preserves_explicit_uuid_when_forking_resumed_session(
+    tmp_path, monkeypatch,
+):
+    seen = {}
+
+    def run(prompt, **kwargs):
+        seen["prompt"] = prompt
+        seen.update(kwargs)
+        return aux_model.AuxiliaryModelResult(text="done")
+
+    monkeypatch.setattr(aux_model, "run_auxiliary_model", run)
+    monkeypatch.setattr(sys, "stdin", StringIO("background work"))
+
+    result = aux_model.main([
+        "--root", str(tmp_path),
+        "--resume", "main-session",
+        "--fork-session",
+        "--session-id", "11111111-1111-4111-8111-111111111111",
+    ])
+
+    assert result == 0
+    assert seen["session_args"] == (
+        "--resume", "main-session", "--fork-session",
+        "--session-id", "11111111-1111-4111-8111-111111111111",
+    )
+
+
 def test_primary_spend_limit_trips_gate_and_reaches_backup(
     tmp_path, monkeypatch,
 ):

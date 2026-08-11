@@ -476,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         values = ["--resume", args.resume]
         if args.fork_session:
             values.append("--fork-session")
+        if args.session_id:
+            values.extend(("--session-id", args.session_id))
         session = tuple(values)
     elif args.session_id:
         session = ("--session-id", args.session_id)
