@@ -122,6 +122,67 @@ def test_owner_background_call_keeps_tool_capability(tmp_path, monkeypatch):
     assert calls[0][calls[0].index("--session-id") + 1] == "first-session"
 
 
+def test_background_retries_register_distinct_provider_sessions(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+    registered = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            return _result(command, 1, stderr="connection reset")
+        return _result(command, 0, stdout="recovered")
+
+    result = aux_model.run_auxiliary_model(
+        "owner task",
+        root=tmp_path,
+        session_args=(
+            "--resume", "main-session", "--fork-session",
+            "--session-id", "11111111-1111-4111-8111-111111111111",
+        ),
+        session_registrar=lambda session_id: registered.append(session_id) or True,
+        runner=runner,
+    )
+
+    first_id = calls[0][calls[0].index("--session-id") + 1]
+    retry_id = calls[1][calls[1].index("--session-id") + 1]
+    assert result.text == "recovered"
+    assert first_id == "11111111-1111-4111-8111-111111111111"
+    assert retry_id != first_id
+    assert registered == [retry_id]
+
+
+def test_background_retry_refuses_unregistered_provider_session(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return _result(command, 1, stderr="connection reset")
+
+    try:
+        aux_model.run_auxiliary_model(
+            "owner task",
+            root=tmp_path,
+            session_args=("--session-id", "first-session"),
+            session_registrar=lambda _session_id: False,
+            runner=runner,
+        )
+    except RuntimeError as exc:
+        assert "unregistered" in str(exc)
+    else:
+        raise AssertionError("unregistered retry was launched")
+    assert len(calls) == 1
+
+
 def test_cli_preserves_explicit_uuid_when_forking_resumed_session(
     tmp_path, monkeypatch,
 ):
@@ -147,6 +208,30 @@ def test_cli_preserves_explicit_uuid_when_forking_resumed_session(
         "--resume", "main-session", "--fork-session",
         "--session-id", "11111111-1111-4111-8111-111111111111",
     )
+
+
+def test_cli_wires_retry_sessions_into_managed_job_registry(
+    tmp_path, monkeypatch,
+):
+    from core.jobs import JobManager
+
+    manager = JobManager(tmp_path / "jobs")
+    job_id = manager.create_job("owner", "background work")
+    retry_id = "22222222-2222-4222-8222-222222222222"
+
+    def run(_prompt, **kwargs):
+        assert kwargs["session_registrar"](retry_id) is True
+        return aux_model.AuxiliaryModelResult(text="done")
+
+    monkeypatch.setattr(aux_model, "run_auxiliary_model", run)
+    monkeypatch.setattr(sys, "stdin", StringIO("background work"))
+
+    assert aux_model.main([
+        "--root", str(tmp_path),
+        "--managed-job-id", job_id,
+        "--jobs-dir", str(tmp_path / "jobs"),
+    ]) == 0
+    assert retry_id in manager.get_job(job_id)["session_ids"]
 
 
 def test_primary_spend_limit_trips_gate_and_reaches_backup(

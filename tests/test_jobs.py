@@ -34,7 +34,14 @@ def test_update_job_reports_presence_and_records_provider_session(tmp_path):
 
     assert jm.update_job(job_id, session_id=session_id) is True
     assert jm.get_job(job_id)["session_id"] == session_id
+    assert jm.get_job(job_id)["session_ids"] == [session_id]
+    retry_id = "22222222-2222-4222-8222-222222222222"
+    assert jm.add_session_id(job_id, retry_id) is True
+    assert jm.get_job(job_id)["session_ids"] == [session_id, retry_id]
+    assert jm.add_session_id(job_id, retry_id) is True
+    assert jm.get_job(job_id)["session_ids"] == [session_id, retry_id]
     assert jm.update_job("missing", session_id=session_id) is False
+    assert jm.add_session_id("missing", retry_id) is False
 
 
 def test_list_jobs_filters_by_conv_key(tmp_path):
@@ -301,6 +308,7 @@ def test_explicit_background_job_registers_its_real_claude_session():
     assert 'set-session "$job_id" "$bg_session_id"' in source
     assert '--resume "$_main_sid" --fork-session --session-id "$bg_session_id"' \
         in source
+    assert source.count('--managed-job-id "$job_id" --jobs-dir "$JOBS_DIR"') == 2
     assert "refusing untracked launch" in source
 
 

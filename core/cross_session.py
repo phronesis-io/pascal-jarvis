@@ -367,8 +367,13 @@ def _managed_claude_ids(
         if entry.get("session_id"):
             managed.add(str(entry["session_id"]))
     for entry in jobs.values():
-        if isinstance(entry, dict) and entry.get("session_id"):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("session_id"):
             managed.add(str(entry["session_id"]))
+        session_ids = entry.get("session_ids")
+        if isinstance(session_ids, list):
+            managed.update(str(value) for value in session_ids if value)
     return managed
 
 
@@ -423,14 +428,22 @@ def discover_interactive_sessions(
     candidates.sort(key=lambda item: item[0], reverse=True)
 
     sessions: list[SessionTail] = []
-    for _, provider, path in candidates[:MAX_SCAN_FILES]:
+    valid_scans = 0
+    for _, provider, path in candidates:
         if provider == "claude" and path.stem in managed_claude:
             continue
         session = _claude_tail(path) if provider == "claude" else _codex_tail(path)
-        if session is None or session.session_id in managed_claude:
+        if session is None:
+            continue
+        valid_scans += 1
+        if session.session_id in managed_claude:
+            if valid_scans >= MAX_SCAN_FILES:
+                break
             continue
         sessions.append(session)
         if len(sessions) >= max(1, int(limit)):
+            break
+        if valid_scans >= MAX_SCAN_FILES:
             break
     return sessions
 

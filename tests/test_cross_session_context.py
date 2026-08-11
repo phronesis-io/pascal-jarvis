@@ -125,11 +125,17 @@ def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
     }))
     _claude(claude_root / "jarvis" / f"{managed_id}.jsonl", managed_id)
     background_id = "11111111-1111-4111-8111-111111111111"
+    retry_id = "22222222-2222-4222-8222-222222222222"
     _claude(claude_root / "jarvis" / f"{background_id}.jsonl", background_id)
+    _claude(claude_root / "jarvis" / f"{retry_id}.jsonl", retry_id)
     jobs = tmp_path / "jobs" / "registry.json"
     jobs.parent.mkdir()
     jobs.write_text(json.dumps({
-        "j-test": {"session_id": background_id, "status": "running"},
+        "j-test": {
+            "session_id": background_id,
+            "session_ids": [background_id, retry_id],
+            "status": "running",
+        },
     }))
     _claude(claude_root / "manual" / "manual.jsonl", "manual-claude")
     _claude(claude_root / "automation" / "automation.jsonl", "automation")
@@ -285,3 +291,33 @@ def test_corrupt_provider_file_degrades_without_losing_good_session(tmp_path):
         tracker_path=tmp_path / "missing.json",
     )
     assert "把 Codex 结论同步给主 Agent" in rendered
+
+
+def test_automated_candidates_do_not_consume_valid_scan_budget(
+    tmp_path, monkeypatch,
+):
+    codex_root = tmp_path / "codex"
+    human = codex_root / "human.jsonl"
+    _codex(human, session_id="human", user_message="保留较早的人类会话")
+    os.utime(human, (1, 1))
+    for index in range(4):
+        automated = codex_root / f"automation-{index}.jsonl"
+        _codex(
+            automated,
+            session_id=f"automation-{index}",
+            source="exec",
+            user_message="Review the code changes against the base branch main",
+        )
+        os.utime(automated, (10 + index, 10 + index))
+    monkeypatch.setattr("core.cross_session.MAX_SCAN_FILES", 2)
+    monkeypatch.setattr("core.cross_session.time.time", lambda: 100)
+
+    sessions = discover_interactive_sessions(
+        window_hours=1,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        limit=1,
+    )
+
+    assert [session.session_id for session in sessions] == ["human"]

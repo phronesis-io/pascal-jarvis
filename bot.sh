@@ -1902,6 +1902,7 @@ except Exception:
       --system-prompt-file "$sys_prompt_file" \
       --consume-system-prompt-file \
       --metadata-file "$provider_file" \
+      --managed-job-id "$job_id" --jobs-dir "$JOBS_DIR" \
       --resume "$_main_sid" --fork-session --session-id "$bg_session_id" \
       2>>"$log_file_job" > "$output_file") &
   else
@@ -1910,6 +1911,7 @@ except Exception:
       --system-prompt-file "$sys_prompt_file" \
       --consume-system-prompt-file \
       --metadata-file "$provider_file" \
+      --managed-job-id "$job_id" --jobs-dir "$JOBS_DIR" \
       --session-id "$bg_session_id" \
       2>>"$log_file_job" > "$output_file") &
   fi
