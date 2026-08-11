@@ -9,9 +9,11 @@ real asks lost in a pile indistinguishable from noise.
 Two outcomes, deliberately different:
   留中 (lapse)  alerts/notices past their deadline, and decisions so old nobody
                 will ever answer them, are archived. Terminal, silent, counted.
-  docket        decisions past their deadline but still answerable are grouped
-                by source into ONE morning card. Never re-pushed individually:
-                that is the card storm of 7/22.
+  docket        while any decision is past its deadline but still answerable,
+                ONE morning card reports the whole open backlog — numbers from
+                memorial.ledger_accounting(), the same 口径 every ledger query
+                uses (REQ-122). Never re-pushed individually: that is the card
+                storm of 7/22.
 
 Tier-0 by design — pure arithmetic over timestamps. No model call decides
 whether Pascal answered something.
@@ -66,19 +68,14 @@ def run(now=None, send: bool = True) -> dict:
     if _already_sent_today(states, today):
         return summary
 
-    unread_signals = sum(
-        1 for st in states
-        if st.get("source") == "eigenflux-feed-triage"
-        and st.get("status") == "pending")
-    title, body = memorial.escrow_docket(
-        overdue, now=now, unread_signals=unread_signals)
-    # 去看看 must actually GO somewhere. A record-only option would spend the
-    # tap, mark the docket 已批 and move the user nowhere — the docket points
-    # at the web desk, it is never a second inbox. When no reachable web-desk
-    # URL exists the button is OMITTED rather than shipped dead.
-    from core.mobile_access import web_desk_url
-    desk = web_desk_url("/items")
-    extra_buttons = [{"text": "去事项处理", "url": desk}] if desk else []
+    # The lapse loop above just moved rows; the docket must count the ledger
+    # as it stands NOW, through the same accounting every other reporter uses
+    # (REQ-122) — not the pre-sweep snapshot. The 📡 signal line is computed
+    # inside escrow_docket from these same states, never passed in.
+    fresh = memorial.list_memorials()
+    title, body = memorial.escrow_docket(fresh, now=now)
+    # No 去-somewhere button: the web desk is retired (REQ-120) and a URL
+    # button pointing at it would be a dead end by the no-dead-ends rule.
     mid, accepted = memorial.create(
         source=memorial.ESCROW_DIGEST_SOURCE,
         title=title,
@@ -89,7 +86,6 @@ def run(now=None, send: bool = True) -> dict:
             {"key": "lapse_all", "label": "全部留中",
              "action": {"type": "memorial_lapse_all", "params": {}}},
         ],
-        extra_buttons=extra_buttons,
         attention=memorial.ATTENTION_DECISION,
         dedup_key=f"escrow-docket-{today}",
         send=send,
@@ -98,6 +94,17 @@ def run(now=None, send: bool = True) -> dict:
     # create() returns the existing memorial id when its dedup gate rejects a
     # duplicate. Only report an id for work this sweep actually created.
     summary["docket_id"] = mid if accepted else ""
+    if accepted:
+        # Today's docket supersedes yesterday's: an unanswered docket is not
+        # an ask anybody will still answer once a fresher one exists, and it
+        # must never sit pending forever (it is excluded from every sweep and
+        # count by design — see memorial.counts_in_ledger).
+        for st in fresh:
+            if (str(st.get("source", "")) == memorial.ESCROW_DIGEST_SOURCE
+                    and st.get("status") == "pending"
+                    and st.get("id") != mid):
+                memorial.resolve(st["id"], "已被今天的新一张替代",
+                                 "superseded_by_next_docket")
     return summary
 
 
