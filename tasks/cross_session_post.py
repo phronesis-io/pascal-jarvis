@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hook: write cross-session digest to memory; surface user_message when warranted.
+"""Post-hook: write Claude/Codex cross-session digest; gate user_message output.
 
 Receives Claude's summary from stdin and writes to memory/system/cross_session_digest.md.
 Keeps max 50 lines, newest first. NOT a silent task: the digest write is silent, but a
@@ -90,7 +90,7 @@ KNOWN_REPOS = {
 HEADER = """\
 ---
 name: Cross-Session Digest
-description: Recent activity from other Claude Code projects
+description: Recent activity from interactive Claude Code and Codex sessions
 type: reference
 ---
 

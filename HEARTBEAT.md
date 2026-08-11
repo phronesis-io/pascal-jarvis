@@ -824,9 +824,10 @@ OPTIONS 行的**下一行**写：
 - post: tasks/cross_session_post.py
 - prompt: |
     [CROSS-SESSION DIGEST]
-    Below are recent conversations from Pascal's other Claude Code projects.
-    Pascal works across many tmux sessions simultaneously — this is his PRIMARY
-    work context during the day. Treat this as essential situational awareness.
+    Below are recent owner-interactive conversations from Claude Code and Codex.
+    Jarvis-managed model calls, canaries, subagents, tool payloads, and secrets
+    are filtered before this prompt. Pascal works across many coding sessions
+    simultaneously — this is essential situational awareness for the main agent.
 
     Produce TWO outputs:
 

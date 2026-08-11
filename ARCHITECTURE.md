@@ -177,6 +177,10 @@ the exact release commit or a healthy resident descendant that contains it.
   workspace-write review sandbox and never serves group or non-owner traffic.
 - `core.runtime_provider`: per-conversation executor preference. Preference
   changes route order only; `conversation_runtime` records what actually ran.
+- `core.cross_session`: bounded, redacted owner-only continuity across
+  interactive Claude Code and Codex sessions. It excludes Jarvis-managed
+  provider calls and supplies both immediate prompt context and the durable
+  heartbeat digest; provider transcripts remain the source of truth.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The separate
   `restart.sh --runtime` path is configuration-only: it revalidates release

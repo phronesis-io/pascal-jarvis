@@ -20,6 +20,27 @@ from core.session import build_recent_turns, get_session_counter
 from core.compact import read_compact
 
 
+def _external_work_context(jarvis_dir: str) -> str:
+    """Load owner-private coding-session context only inside the live runtime.
+
+    Tests and library callers often build prompts against temporary roots.  A
+    strict root match keeps those calls hermetic and prevents an accidental
+    read of the machine owner's real provider transcripts.
+    """
+    runtime_root = os.environ.get("JARVIS_DIR", "").strip()
+    if not runtime_root:
+        return ""
+    try:
+        if Path(runtime_root).resolve() != Path(jarvis_dir).resolve():
+            return ""
+        from core.cross_session import build_prompt_context
+        return build_prompt_context(
+            tracker_path=Path(runtime_root) / "active_sessions.json")
+    except Exception:
+        # Provider transcript drift must not make the primary conversation fail.
+        return ""
+
+
 def _build_group_prompt(
     jarvis_dir: str,
     memory_dir: str,
@@ -242,6 +263,7 @@ def build_system_prompt(
     except Exception:
         # Prompt construction must survive a fresh/damaged optional DB.
         cross_provider_turns = ""
+    external_work_context = _external_work_context(jarvis_dir)
 
     # 奏折专属对话 (REQ-118): conv_key "memorial:<id>" is a per-card session —
     # pin the card's content at the top so the whole session stays on that
@@ -303,6 +325,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {session_compact}
 
 {cross_provider_turns}
+
+{external_work_context}
 
 {recent_turns}"""
 
