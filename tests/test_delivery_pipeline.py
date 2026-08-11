@@ -18,10 +18,25 @@ from core.delivery import (
 )
 
 
+def _local_ts(*args) -> float:
+    """Epoch for a wall-clock moment in the pipeline's own local timezone.
+
+    core.delivery resolves quiet hours and day boundaries via
+    core.timeutil.now_local() (reads /etc/localtime, ignores the TZ env).
+    A naive datetime().timestamp() is interpreted under the TZ env instead,
+    so on a machine where the two disagree (CI at UTC, a dev shell with
+    TZ=UTC) a "14:00" clock silently lands inside quiet hours or on the
+    wrong day. Pinning tzinfo makes injected clocks mean what they say
+    everywhere (2026-08-11 CI incident: three tests red only at UTC 05:11).
+    """
+    from core.timeutil import now_local
+    return datetime(*args, tzinfo=now_local().tzinfo).timestamp()
+
+
 @pytest.fixture
 def pipeline(tmp_path):
     sent = []
-    now = [datetime(2026, 7, 23, 14, 0).timestamp()]
+    now = [_local_ts(2026, 7, 23, 14, 0)]
 
     def transport(envelope, channel):
         sent.append((envelope, channel))
@@ -64,6 +79,7 @@ def test_every_delivery_connection_is_closed(monkeypatch, tmp_path):
         tmp_path,
         db_path=tmp_path / "jarvis.db",
         transport=lambda _envelope, _channel: TransportResult(True, "msg-ok"),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),  # daytime: no quiet queue
         sleeper=lambda _seconds: None,
     )
     assert pipe.deliver(
@@ -95,16 +111,86 @@ def test_delivery_schema_is_initialized_once_per_database(
     assert calls == [1]
 
 
-def test_notice_and_phone_decision_route_to_web(pipeline):
+def test_notices_and_decisions_route_to_lark(pipeline):
+    """REQ-119: Lark is the only surface — auto-routing never lands on the
+    retired web channel, whatever legacy review_surface metadata says."""
     pipe, sent, _ = pipeline
     notice = pipe.deliver(DeliveryEnvelope(
         source="digest", payload={"text": "今天没有异常"}))
     decision = pipe.deliver(DeliveryEnvelope(
         source="mail", payload={"text": "是否回复"},
         attention="decision", metadata={"review_surface": "phone"}))
-    assert notice.channel == "web"
-    assert decision.channel == "web"
-    assert [channel for _, channel in sent] == ["web", "web"]
+    assert notice.channel == "lark"
+    assert decision.channel == "lark"
+    assert [channel for _, channel in sent] == ["lark", "lark"]
+
+
+def test_no_path_creates_a_web_envelope(pipeline):
+    """Regression guard for the fake web transport: every route the pipeline
+    can pick must be a real channel; no new row may carry route_channel=web."""
+    pipe, sent, _ = pipeline
+    for envelope in (
+        DeliveryEnvelope(source="a", payload={"text": "notice"}),
+        DeliveryEnvelope(source="b", payload={"text": "alert"},
+                         attention="alert"),
+        DeliveryEnvelope(source="c", payload={"text": "decision"},
+                         attention="decision"),
+        DeliveryEnvelope(source="d", payload={"text": "legacy phone"},
+                         metadata={"review_surface": "phone"}),
+        DeliveryEnvelope(source="e", payload={"text": "legacy none"},
+                         metadata={"review_surface": "none"}),
+        DeliveryEnvelope(source="f", payload={"text": "legacy web meta"},
+                         metadata={"review_surface": "web"}),
+    ):
+        pipe.deliver(envelope)
+    assert sent, "envelopes must actually reach the transport"
+    assert all(channel != "web" for _, channel in sent)
+    rows = pipe.list(limit=500)
+    assert rows and all(row["route_channel"] != "web" for row in rows)
+
+
+def test_explicit_web_request_is_refused_not_faked(tmp_path):
+    """An explicit requested_channel=web must fail loudly — the old default
+    transport returned unconditional success for it (the 1.8%-read fake
+    ledger). Exercises the REAL production transport: the web channel falls
+    through to the unknown-channel refusal before any subprocess runs."""
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "jarvis.db",
+        transport=delivery._default_transport(tmp_path),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),  # daytime: reach transport
+        sleeper=lambda _seconds: None,
+    )
+    result = pipe.deliver(DeliveryEnvelope(
+        source="legacy-web-caller", payload={"text": "老调用点"},
+        requested_channel="web"))
+    assert result.state != "delivered"
+    row = pipe.get(result.delivery_id)
+    assert "unknown channel: web" in str(row["last_error"])
+
+
+def test_web_kind_is_rejected():
+    with pytest.raises(ValueError):
+        DeliveryEnvelope(source="x", kind="web",
+                         payload={"text": "t"}).normalized()
+
+
+def test_flush_sweeps_legacy_web_rows_as_suppressed(pipeline):
+    """Rows queued for the retired web surface before REQ-119 must neither
+    fake-deliver nor churn into dead letters — they suppress, honestly."""
+    pipe, sent, _ = pipeline
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        db.execute(
+            "INSERT INTO delivery_envelopes (id,source,kind,attention,"
+            "requested_channel,route_channel,state,content_hash,payload,"
+            "metadata,created_epoch,updated_epoch) "
+            "VALUES ('dlv_legacy','old-source','text','notice','auto','web',"
+            "'queued','h','{\"text\":\"老网页卡\"}','{}',1,1)")
+    results = pipe.flush_due()
+    legacy = [r for r in results if r.delivery_id == "dlv_legacy"]
+    assert legacy and legacy[0].state == "suppressed"
+    assert legacy[0].reason == "web_surface_retired"
+    assert all(channel != "web" for _, channel in sent)
+    assert pipe.get("dlv_legacy")["state"] == "suppressed"
 
 
 def test_reply_bypasses_quiet_and_uses_reply_channel(tmp_path, monkeypatch):
@@ -118,7 +204,7 @@ def test_reply_bypasses_quiet_and_uses_reply_channel(tmp_path, monkeypatch):
 
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite", transport=transport,
-        clock=lambda: datetime(2026, 7, 23, 3, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 3, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -152,7 +238,7 @@ def test_reply_can_return_user_requested_json(tmp_path):
 def test_quiet_hours_queue_then_flush(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_QUIET_START", "23:30")
     monkeypatch.setenv("JARVIS_QUIET_END", "10:00")
-    now = [datetime(2026, 7, 23, 23, 45).timestamp()]
+    now = [_local_ts(2026, 7, 23, 23, 45)]
     sent = []
 
     def transport(envelope, channel):
@@ -170,7 +256,7 @@ def test_quiet_hours_queue_then_flush(tmp_path, monkeypatch):
     assert result.state == "queued"
     assert result.reason == "quiet_hours"
     assert not sent
-    now[0] = datetime(2026, 7, 24, 10, 1).timestamp()
+    now[0] = _local_ts(2026, 7, 24, 10, 1)
     flushed = pipe.flush_due()
     assert flushed[0].state == "delivered"
     assert sent == ["lark"]
@@ -234,7 +320,7 @@ def test_global_daily_cap(pipeline):
 
 
 def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
-    now = [datetime(2026, 7, 22, 23, 0).timestamp()]
+    now = [_local_ts(2026, 7, 22, 23, 0)]
     path = tmp_path / "db.sqlite"
     pipe = DeliveryPipeline(
         tmp_path,
@@ -260,7 +346,7 @@ def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
     ]
     assert [pipe.deliver(item).state for item in queued] == ["queued", "queued"]
 
-    now[0] = datetime(2026, 7, 23, 10, 0).timestamp()
+    now[0] = _local_ts(2026, 7, 23, 10, 0)
     prior = pipe.deliver(DeliveryEnvelope(
         source="signal",
         payload={"text": "already delivered today"},
@@ -375,7 +461,7 @@ def test_retry_then_delivery_records_attempts(tmp_path):
 
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite", transport=transport,
-        clock=lambda: datetime(2026, 7, 23, 14, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -412,7 +498,7 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
         tmp_path, db_path=tmp_path / "db.sqlite",
         transport=lambda _e, _c: (_ for _ in ()).throw(
             RuntimeError("adapter crashed")),
-        clock=lambda: datetime(2026, 7, 23, 14, 0).timestamp(),
+        clock=lambda: _local_ts(2026, 7, 23, 14, 0),
         sleeper=lambda _: None,
     )
     result = pipe.deliver(DeliveryEnvelope(
@@ -428,7 +514,7 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
 
 
 def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
-    now = [datetime(2026, 7, 23, 14, 0).timestamp()]
+    now = [_local_ts(2026, 7, 23, 14, 0)]
     calls = []
     pipe = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "db.sqlite",

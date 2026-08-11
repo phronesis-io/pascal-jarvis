@@ -53,14 +53,16 @@ def test_pre_no_data_emits_nothing(tmp_path):
     assert not (tmp_path / "data" / "metrics" / ".digest_pending.json").exists()
 
 
-def test_pre_emits_records_and_stages_pending(tmp_path):
+def test_pre_emits_flips_and_stages_pending(tmp_path):
+    """REQ-121: steady-state snapshots never reach Claude — the history file
+    is their 台账 — while flips (anomaly) still emit and stage pending."""
     mdir = _write_records(tmp_path, [SNAP, ANOM])
     r = _run_pre(tmp_path)
     assert "=== METRICS RECORDS ===" in r.stdout
-    assert '"kind": "snapshot"' in r.stdout and '"kind": "anomaly"' in r.stdout
-    assert "说人话" in r.stdout
+    assert '"kind": "snapshot"' not in r.stdout
+    assert '"kind": "anomaly"' in r.stdout
     pending = json.load(open(mdir / ".digest_pending.json"))
-    assert pending["ts"] == ANOM["ts"]  # max emitted ts
+    assert pending["ts"] == ANOM["ts"]  # max COLLECTED ts (snapshot included)
 
 
 def test_pre_respects_watermark(tmp_path):
@@ -130,12 +132,12 @@ def test_post_malformed_cards_are_skipped(tmp_path):
 
 
 def test_failed_cycle_reemits_then_advances(tmp_path):
-    _write_records(tmp_path, [SNAP])
+    _write_records(tmp_path, [ANOM])
     r1 = _run_pre(tmp_path)
-    assert '"kind": "snapshot"' in r1.stdout
+    assert '"kind": "anomaly"' in r1.stdout
     _run_post(tmp_path, "__NO_ENVELOPE__ garbled")
     r2 = _run_pre(tmp_path)
-    assert '"kind": "snapshot"' in r2.stdout  # re-emitted after failure
+    assert '"kind": "anomaly"' in r2.stdout  # re-emitted after failure
     _run_post(tmp_path, "HEARTBEAT_OK")
     r3 = _run_pre(tmp_path)
     assert r3.stdout.strip() == ""            # watermark advanced
@@ -240,10 +242,12 @@ def test_mixed_batch_retry_keeps_anomaly(tmp_path):
     _write_records(tmp_path, [_anom("2026-07-19T04:00:00+08:00"),
                               dict(SNAP, ts="2026-07-19T05:00:00+08:00")])
     r = _run_pre(tmp_path)
-    assert '"kind": "anomaly"' in r.stdout and '"kind": "snapshot"' in r.stdout
-    # render failed → retry: BOTH records must re-emit
+    assert '"kind": "anomaly"' in r.stdout
+    assert '"kind": "snapshot"' not in r.stdout  # steady state stays ledgered
+    # render failed → retry: the anomaly must re-emit
     r = _run_pre(tmp_path)
-    assert '"kind": "anomaly"' in r.stdout and '"kind": "snapshot"' in r.stdout
+    assert '"kind": "anomaly"' in r.stdout
+    assert '"kind": "snapshot"' not in r.stdout
 
 
 def test_all_suppressed_batch_advances_watermark_directly(tmp_path):
@@ -256,11 +260,14 @@ def test_all_suppressed_batch_advances_watermark_directly(tmp_path):
     wm = json.loads((tmp_path / "data" / "metrics"
                      / ".digest_watermark.json").read_text())
     assert wm["ts"] == "2026-07-19T06:00:00+08:00"
-    # a later snapshot is NOT crowded out by the suppressed backlog
+    # a later steady-state snapshot never cards (REQ-121); the watermark
+    # still advances over it so it cannot clog the window
     _write_records(tmp_path, [dict(SNAP, ts="2026-07-19T10:00:00+08:00")])
     r = _run_pre(tmp_path)
-    assert '"kind": "snapshot"' in r.stdout
-    assert '"kind": "anomaly"' not in r.stdout
+    assert r.stdout.strip() == ""
+    wm = json.loads((tmp_path / "data" / "metrics"
+                     / ".digest_watermark.json").read_text())
+    assert wm["ts"] == "2026-07-19T10:00:00+08:00"
 
 
 def _write_sources_yaml(tmp_path, snapshot_hour=9, name="demo"):
@@ -309,7 +316,7 @@ def test_no_absence_when_snapshot_exists(tmp_path):
                                "metrics": {"a": 1}}])
     out = main(tmp_path, now=_now_at(12))
     assert '"kind": "absence"' not in out
-    assert '"kind": "snapshot"' in out  # the real record still emits
+    assert '"kind": "snapshot"' not in out  # steady state never cards (REQ-121)
 
 
 def test_absence_alone_does_not_stage_pending(tmp_path):

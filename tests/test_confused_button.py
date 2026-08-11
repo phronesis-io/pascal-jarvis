@@ -25,7 +25,6 @@ from core import memorial  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     yield
 

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Post-hook: write cross-session digest to memory; push user_message when warranted.
+"""Post-hook: write cross-session digest to memory; surface user_message when warranted.
 
 Receives Claude's summary from stdin and writes to memory/system/cross_session_digest.md.
 Keeps max 50 lines, newest first. NOT a silent task: the digest write is silent, but a
-"user_message" field in the JSON envelope is printed to stdout → Lark. (This docstring
+"user_message" field in the JSON envelope is printed to stdout. (This docstring
 claimed "silent" until 2026-07-07, which made the noisiest push path in the system
 invisible to anyone auditing from the docs — see the HEARTBEAT.md task index.)
+Delivery semantics since REQ-119 (2026-08-11): cross-session-sync is an
+AMBIENT source, so the printed user_message becomes a ledger-only memorial
+surfaced via the morning-anchor 攒批 line — not a realtime Lark card. The
+three gates below still matter: they keep junk out of the ledger and digest.
 
 Every user_message must pass three gates before it reaches Pascal (2026-07-07 incident:
 PRs #71/#73/#75 auto-merged 08:18–08:55, yet "3 个 PR 等你批" was pushed 8 more times

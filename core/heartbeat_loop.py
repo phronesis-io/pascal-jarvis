@@ -214,8 +214,6 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
 
     def transport(envelope, channel):
         ids_before = len(_LAST_SENT_IDS)
-        if channel == "web":
-            return TransportResult(True)
         if envelope.kind == "card":
             ok = _lark_send_card(
                 str(envelope.payload.get("card_json") or ""),
@@ -1716,9 +1714,10 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     from core.memorial import memorialize_output
                     memorialized = memorialize_output(
                         output, _peek_source(jd) or "heartbeat")
-                    # Empty is meaningful: the content was durably placed on
-                    # the web/phone Items surface and must not fall through as
-                    # the original prose to Lark.
+                    # Empty is meaningful: the content is durably ledgered
+                    # (ledger-only ambient exhaust or an already-accepted
+                    # card, REQ-119) and must not fall through as the
+                    # original prose to Lark.
                     output = memorialized
                 except Exception as e:
                     # Delivery remains fail-open during migration: a broken

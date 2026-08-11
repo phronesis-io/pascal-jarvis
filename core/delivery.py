@@ -111,7 +111,9 @@ class DeliveryEnvelope:
         self.metadata = dict(self.metadata or {})
         if not self.id:
             self.id = f"dlv_{uuid.uuid4().hex}"
-        if self.kind not in {"text", "card", "reply", "push", "web"}:
+        # "web" is deliberately NOT a kind: the web surface is retired
+        # (REQ-119) and its transport used to fake success unconditionally.
+        if self.kind not in {"text", "card", "reply", "push"}:
             raise ValueError(f"unsupported delivery kind: {self.kind}")
         if self.attention not in {"decision", "notice", "alert", "reply"}:
             raise ValueError(f"unsupported attention: {self.attention}")
@@ -265,8 +267,10 @@ def _default_transport(
     db_path: str | Path | None = None,
 ) -> Transport:
     def send(envelope: DeliveryEnvelope, channel: str) -> TransportResult:
-        if channel == "web":
-            return TransportResult(True)
+        # No "web" branch on purpose (REQ-119): it returned unconditional
+        # success for a surface with 1.8% read rate — a fake ledger of
+        # "delivered" cards nobody saw. An unknown channel is refused below;
+        # a defensive branch may not fabricate a receipt.
         if channel == "push":
             try:
                 from core.mobile_access import send_push
@@ -492,26 +496,20 @@ def _content_hash(envelope: DeliveryEnvelope) -> str:
 def _route(envelope: DeliveryEnvelope) -> str:
     requested = envelope.requested_channel
     if requested != "auto":
+        # An explicit "web"/"phone"/"none" request passes through unmapped and
+        # is refused by the transport (REQ-119): the web desk is retired, and
+        # silently rerouting an explicit request would hide the dead caller.
         aliases = {
-            "phone": "web", "none": "web", "lark_card": "lark",
-            "reply": "lark_reply", "mobile": "push",
+            "lark_card": "lark", "reply": "lark_reply", "mobile": "push",
         }
         return aliases.get(requested, requested)
     if envelope.kind == "reply" or envelope.reply_to:
         return "lark_reply"
-    review = str(envelope.metadata.get("review_surface") or "")
-    if review in {"phone", "none", "web"}:
-        return "web"
-    if review == "lark":
-        return "lark"
     if envelope.kind == "push":
         return "push"
-    if envelope.kind == "web":
-        return "web"
-    if envelope.attention in {"alert", "reply"} or envelope.conversation_bound:
-        return "lark"
-    # Notices and ordinary decisions stay on the durable web/phone desk.
-    return "web"
+    # Lark is the only delivery surface (REQ-119). Producers that want no
+    # realtime delivery stay out of the pipeline (memorial ledger-only cards).
+    return "lark"
 
 
 def _quiet_now(moment: datetime) -> bool:
@@ -831,7 +829,7 @@ class DeliveryPipeline:
             moment = datetime.fromtimestamp(now, tz=now_local().tzinfo)
             bypass_quiet = (
                 envelope.urgent or envelope.conversation_bound
-                or envelope.kind == "reply" or route == "web"
+                or envelope.kind == "reply"
                 or envelope.metadata.get("bypass_quiet")
             )
             if (envelope.metadata.get("force_queue")
@@ -1087,11 +1085,22 @@ class DeliveryPipeline:
                     envelope.id, True, "suppressed",
                     str(row["route_channel"]), reason="expired_ttl"))
                 continue
+            if str(row["route_channel"]) == "web":
+                # Legacy rows queued for the retired web surface (REQ-119):
+                # attempting them would only churn retries into dead letters,
+                # and marking them delivered would resurrect the fake ledger.
+                with closing(_connect(self.path)) as db, db:
+                    self._set_state(
+                        db, envelope.id, "suppressed", "web_surface_retired",
+                        last_error="web_surface_retired")
+                results.append(DeliveryResult(
+                    envelope.id, True, "suppressed", "web",
+                    reason="web_surface_retired"))
+                continue
             moment = datetime.fromtimestamp(now, tz=now_local().tzinfo)
             if (_quiet_now(moment) and not envelope.urgent
                     and not envelope.conversation_bound
-                    and envelope.kind != "reply"
-                    and str(row["route_channel"]) != "web"):
+                    and envelope.kind != "reply"):
                 continue
             results.append(self._attempt(
                 envelope, str(row["route_channel"]) or _route(envelope)))
@@ -1314,7 +1323,9 @@ def main(argv: list[str] | None = None) -> int:
     send = sub.add_parser("send")
     send.add_argument("--source", required=True)
     send.add_argument(
-        "--kind", default="text", choices=["text", "card", "web", "push"]
+        # No "web": the web surface is retired (REQ-119) and the kind is
+        # rejected by DeliveryEnvelope.normalized() — don't offer it here.
+        "--kind", default="text", choices=["text", "card", "push"]
     )
     send.add_argument("--attention", default="notice",
                       choices=["decision", "notice", "alert", "reply"])

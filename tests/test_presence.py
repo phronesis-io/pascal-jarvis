@@ -44,6 +44,11 @@ def _sent(i, ts="2026-08-07 09:01"):
             "lark_message_id": f"om_{i}"}
 
 
+def _ledger_only(i, ts="2026-08-07 09:01"):
+    return {"ev": "delivery", "id": f"mem_{i}", "ts": ts,
+            "status": "ledger_only"}
+
+
 def test_floor_pages_when_feishu_goes_quiet(tmp_path):
     """The cliff signature: cards created all day, almost none reach Feishu."""
     events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
@@ -77,8 +82,9 @@ def test_warning_text_is_stable_for_alert_dedup():
                    for ch in presence.FLOOR_WARNING.replace("7/24", ""))
 
 
-def test_digest_batches_archive_only_cards(tmp_path):
-    events = [_created(i) for i in range(7)] + [_sent(0)]
+def test_digest_batches_ledger_only_cards(tmp_path):
+    events = ([_created(i) for i in range(7)] + [_sent(0)]
+              + [_ledger_only(i) for i in range(1, 7)])
     _write_ledger(tmp_path, events)
     line = presence.morning_digest_line(now=NOW)
     assert "6 条" in line
@@ -86,11 +92,39 @@ def test_digest_batches_archive_only_cards(tmp_path):
     assert "标题0" not in line  # that one reached Feishu
 
 
-def test_digest_stays_quiet_below_the_contract_threshold(tmp_path):
-    """攒批≥5条才提一行 — 1-4 条不值得占用晨间锚点。"""
-    events = [_created(i) for i in range(4)]
+def test_digest_ignores_queued_lark_cards(tmp_path):
+    """Adversarial review (2026-08-11): a Lark card waiting out quiet hours
+    has a create event and no sent event YET — counting it would double-expose
+    it (digest line at 8:30, real card when the queue flushes). Only rows
+    explicitly recorded ledger_only belong to the digest."""
+    events = [_created(i) for i in range(6)]  # queued: no delivery event yet
     _write_ledger(tmp_path, events)
     assert presence.morning_digest_line(now=NOW) == ""
+
+
+def test_digest_stays_quiet_below_the_contract_threshold(tmp_path):
+    """攒批≥5条才提一行 — 1-4 条不值得占用晨间锚点。"""
+    events = ([_created(i) for i in range(4)]
+              + [_ledger_only(i) for i in range(4)])
+    _write_ledger(tmp_path, events)
+    assert presence.morning_digest_line(now=NOW) == ""
+
+
+def test_ledger_only_cards_feed_the_morning_digest(tmp_path, monkeypatch):
+    """REQ-119 end-to-end: an ambient card that create() keeps ledger-only
+    (no envelope, no Lark send) is exactly what the 攒批 digest line counts."""
+    import core.memorial as memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    for i in range(5):
+        mid, accepted = memorial.create(
+            source="cross-session-sync", title=f"会话动态{i}", body=f"第 {i} 条")
+        assert accepted is True
+        assert memorial.get_memorial(mid)["delivery_status"] == "ledger_only"
+
+    line = presence.morning_digest_line(now=datetime.now())
+    assert "5 条" in line
+    assert "会话动态4" in line
 
 
 def test_morning_anchor_appends_the_digest_below_the_one_liner(
@@ -99,11 +133,13 @@ def test_morning_anchor_appends_the_digest_below_the_one_liner(
     import tasks.morning_anchor_post as post
 
     monkeypatch.setattr(lifelog, "morning_anchor_fired", lambda: False)
-    monkeypatch.setattr(lifelog, "morning_anchor_mark", lambda: None)
+    monkeypatch.setattr(lifelog, "morning_anchor_mark", lambda *a, **k: None)
     monkeypatch.setattr(post, "morning_anchor_fired", lambda: False)
-    monkeypatch.setattr(post, "morning_anchor_mark", lambda: None)
-    events = [_created(i, ts=datetime.now().strftime("%Y-%m-%d %H:%M"))
-              for i in range(6)]
+    monkeypatch.setattr(post, "morning_anchor_mark", lambda *a, **k: None)
+    monkeypatch.setattr(post, "morning_anchor_last_text", lambda: "")
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    events = ([_created(i, ts=now_ts) for i in range(6)]
+              + [_ledger_only(i, ts=now_ts) for i in range(6)])
     _write_ledger(tmp_path, events)
     monkeypatch.setattr(sys, "stdin", io.StringIO("早。今天的锚点：死活题。"))
     assert post.main() == 0
@@ -116,7 +152,8 @@ def test_morning_anchor_survives_a_broken_digest(monkeypatch, capsys):
     import tasks.morning_anchor_post as post
 
     monkeypatch.setattr(post, "morning_anchor_fired", lambda: False)
-    monkeypatch.setattr(post, "morning_anchor_mark", lambda: None)
+    monkeypatch.setattr(post, "morning_anchor_mark", lambda *a, **k: None)
+    monkeypatch.setattr(post, "morning_anchor_last_text", lambda: "")
 
     def boom(**kw):
         raise RuntimeError("ledger unreadable")
@@ -124,3 +161,59 @@ def test_morning_anchor_survives_a_broken_digest(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO("早。锚点一行。"))
     assert post.main() == 0
     assert "锚点一行" in capsys.readouterr().out
+
+
+def test_morning_anchor_skips_same_line_as_yesterday(monkeypatch, capsys):
+    """REQ-121: an anchor line substantively identical to yesterday's (and no
+    digest riding along) is not resent — the window is consumed instead."""
+    import tasks.morning_anchor_post as post
+
+    marks = []
+    monkeypatch.setattr(post, "morning_anchor_fired", lambda: False)
+    monkeypatch.setattr(post, "morning_anchor_mark",
+                        lambda *a, **k: marks.append(k))
+    monkeypatch.setattr(post, "morning_anchor_last_text",
+                        lambda: "早。今天的锚点：死活题。")
+    monkeypatch.setattr(presence, "morning_digest_line", lambda **kw: "")
+    monkeypatch.setattr(sys, "stdin",
+                        io.StringIO("  早。今天的锚点：死活题。  "))
+    assert post.main() == 0
+    assert capsys.readouterr().out == ""  # no card
+    assert marks, "the day must still be stamped as handled"
+
+
+def test_morning_anchor_same_line_still_sends_when_digest_rides(
+        tmp_path, monkeypatch, capsys):
+    """The digest footer has no other surface — fresh counts override the
+    same-as-yesterday skip."""
+    import tasks.morning_anchor_post as post
+
+    monkeypatch.setattr(post, "morning_anchor_fired", lambda: False)
+    monkeypatch.setattr(post, "morning_anchor_mark", lambda *a, **k: None)
+    monkeypatch.setattr(post, "morning_anchor_last_text",
+                        lambda: "早。今天的锚点：死活题。")
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    events = ([_created(i, ts=now_ts) for i in range(6)]
+              + [_ledger_only(i, ts=now_ts) for i in range(6)])
+    _write_ledger(tmp_path, events)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("早。今天的锚点：死活题。"))
+    assert post.main() == 0
+    out = capsys.readouterr().out
+    assert "6 条" in out and "归档" in out
+
+
+def test_morning_anchor_fresh_line_is_sent_and_remembered(monkeypatch, capsys):
+    import tasks.morning_anchor_post as post
+
+    remembered = []
+    monkeypatch.setattr(post, "morning_anchor_fired", lambda: False)
+    monkeypatch.setattr(
+        post, "morning_anchor_mark",
+        lambda *a, **k: remembered.append(k.get("text", "")))
+    monkeypatch.setattr(post, "morning_anchor_last_text",
+                        lambda: "早。昨天的锚点：拉伸。")
+    monkeypatch.setattr(presence, "morning_digest_line", lambda **kw: "")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("早。今天的锚点：死活题。"))
+    assert post.main() == 0
+    assert "死活题" in capsys.readouterr().out
+    assert remembered == ["早。今天的锚点：死活题。"]

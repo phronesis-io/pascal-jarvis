@@ -31,58 +31,94 @@ from core.eigenflux_publish import (  # noqa: E402
 )
 
 
-# ── C1: no card routes to an unreachable surface ─────────────────────────────
+# ── C1 (REQ-119): Lark is the ONLY delivery surface ──────────────────────────
+# 14d to 8/11: Lark cards read 95.7% (235), web cards 1.8% (170) — the web
+# desk was a dead surface whose transport faked success. New contract
+# (adversarial-review verdict, 2026-08-11): ledger-only narrows by ATTENTION,
+# not by blanket source — alerts and decisions always ring; only an
+# ambient-source NOTICE stays in the ledger (batched into the morning
+# anchor digest). No routing decision consults desk reachability.
 
 
-def test_decision_degrades_to_lark_when_desk_unreachable(monkeypatch):
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
-    assert memorial._infer_review_surface(
-        "eigenflux-publish", memorial.ATTENTION_DECISION, [],
-    ) == memorial.REVIEW_LARK
+def test_every_decision_reviews_on_lark(tmp_path, monkeypatch):
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    mid, _ = memorial.create("eigenflux-publish", "广播批准", "内容",
+                             preset="decision")
+    assert memorial.review_surface(memorial.get_memorial(mid)) == \
+        memorial.REVIEW_LARK
+    # A legacy review_at hint changes nothing — there is no other surface.
+    mid2, _ = memorial.create("task-triage", "选一个", "两个方案",
+                              preset="decision", review_at="phone")
+    assert memorial.review_surface(memorial.get_memorial(mid2)) == \
+        memorial.REVIEW_LARK
 
 
-def test_decision_stays_on_desk_when_reachable(monkeypatch):
-    """The 7/23 design comes back, unchanged, the moment a phone pairs."""
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
-    assert memorial._infer_review_surface(
-        "eigenflux-publish", memorial.ATTENTION_DECISION, [],
-    ) == memorial.REVIEW_PHONE
-
-
-def test_notice_pushes_to_lark_when_desk_unreachable(monkeypatch):
-    """The product's own voice (checkin) must not be archived into silence."""
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+def test_notice_pushes_to_lark():
+    """The product's own voice (checkin) goes to the chat, unconditionally."""
     st = {"source": "checkin", "attention": memorial.ATTENTION_NOTICE,
           "options": [], "extra_buttons": []}
     assert memorial.should_push_to_lark(st) is True
 
 
-def test_notice_stays_web_when_desk_reachable(monkeypatch):
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
-    st = {"source": "checkin", "attention": memorial.ATTENTION_NOTICE,
-          "options": [], "extra_buttons": []}
-    assert memorial.should_push_to_lark(st) is False
+def test_governed_sources_push_their_curated_cards():
+    """metrics-digest / phronesis-monitor / repos-sync are NOT ambient: their
+    noise is governed upstream (REQ-121 pre-filter, interval + 成卡门槛,
+    daily rollup), so a card they DO emit is signal and must reach the chat —
+    a prompt that promises delivery must not be contradicted by routing."""
+    for source in ("metrics-digest", "phronesis-monitor", "repos-sync"):
+        assert source not in memorial.AMBIENT_SOURCES
+        st = {"source": source, "attention": memorial.ATTENTION_NOTICE,
+              "options": [], "extra_buttons": []}
+        assert memorial.should_push_to_lark(st) is True, source
+
+
+def test_metrics_flip_card_reaches_lark_end_to_end(tmp_path, monkeypatch):
+    """REQ-121 × REQ-119: a metrics-digest state FLIP (the only thing the
+    pre-hook lets through) becomes a real delivered Lark card."""
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_flip")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    mid, accepted = memorial.create(
+        source="metrics-digest", title="🚨 demo 异常", body="a 掉到 0",
+        preset="fyi")
+    assert accepted is True
+    assert memorial.get_memorial(mid)["delivery_status"] == "delivered"
 
 
 @pytest.mark.parametrize("source", sorted(memorial.AMBIENT_SOURCES))
-def test_ambient_sources_never_degrade_to_lark(monkeypatch, source):
-    """Monitoring exhaust stays web-first even with the desk down — pushing it
-    would recreate the 7/22 card storm; the escrow docket carries the tail."""
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+def test_ambient_notices_are_ledger_only_never_web(source, tmp_path,
+                                                   monkeypatch):
+    """Ambient exhaust notices never push AND never grow a delivery envelope
+    — pushing them would recreate the 7/22 card storm; a web envelope would
+    resurrect the fake-delivered ledger. The morning digest carries them."""
     st = {"source": source, "attention": memorial.ATTENTION_NOTICE,
           "options": [], "extra_buttons": []}
     assert memorial.should_push_to_lark(st) is False
 
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
+    mid, accepted = memorial.create(
+        source=source, title="监控尾气", body=f"exhaust from {source}")
+    assert accepted is True
+    assert memorial.get_memorial(mid)["delivery_status"] == "ledger_only"
 
-def test_desk_reachability_failure_fails_toward_lark(monkeypatch):
-    """If the reachability check itself dies, the safe wrong answer is the
-    chat the user reads — not the desk that may not exist."""
-    import core.proactive as proactive
-    monkeypatch.setattr(proactive, "_desk_cache", None)
-    monkeypatch.setattr(
-        proactive, "_has_paired_phone_subscription",
-        lambda root=None: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert proactive.desk_reachable(root="x") is False
+    from core.delivery import DeliveryPipeline
+    rows = DeliveryPipeline(tmp_path, db_path=tmp_path / "jarvis.db").list()
+    assert rows == [], "ledger-only cards must not enter the delivery pipeline"
+
+
+@pytest.mark.parametrize("source", sorted(memorial.AMBIENT_SOURCES))
+def test_ambient_alert_and_decision_still_ring(source):
+    """Attention outranks the source: an alert or a decision from an ambient
+    source is not exhaust and must reach the chat."""
+    alert = {"source": source, "attention": memorial.ATTENTION_ALERT,
+             "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(alert) is True
+    decision = {"source": source, "attention": memorial.ATTENTION_DECISION,
+                "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(decision) is True
 
 
 # ── C2: a no-op action must not toast success ────────────────────────────────
@@ -101,7 +137,6 @@ def test_noop_action_result_is_not_a_success():
 def test_decide_toast_is_honest_about_a_noop(tmp_path, monkeypatch):
     """The five 「已批：✓」toasts on 「Intent not found」, reproduced."""
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
     monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
     monkeypatch.setattr(
         memorial, "_execute_action",
@@ -123,7 +158,6 @@ def test_decide_toast_is_honest_about_a_noop(tmp_path, monkeypatch):
 
 def test_decide_toast_still_celebrates_real_success(tmp_path, monkeypatch):
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
     monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
     monkeypatch.setattr(
         memorial, "_execute_action", lambda action, **kw: "Closure recorded")
@@ -237,7 +271,6 @@ def test_retry_success_converges_the_card_via_memorial_resolve(tmp_path, monkeyp
     from core import memorial
 
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
 
     mid, _ = memorial.create(
         source="eigenflux-publish", title="广播批准", body="内容",
@@ -264,12 +297,10 @@ def test_retry_success_converges_the_card_via_memorial_resolve(tmp_path, monkeyp
     assert "已广播" in st.get("resolved_label", "")
 
 
-def test_curated_signals_reach_lark_when_desk_unreachable(monkeypatch):
-    """eigenflux-feed-triage is web-first but not ambient (2026-08-03): ~2
-    curated, pre-contextualized signal briefs a day were routed to a desk the
-    owner measurably never opens (5.2s TTFB through the funnel relay). Signal
-    of that volume and quality earns the chat; monitoring exhaust stays out."""
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: False)
+def test_curated_signals_reach_lark(monkeypatch):
+    """eigenflux-feed-triage is not ambient (2026-08-03): ~2 curated,
+    pre-contextualized signal briefs a day earn the chat; monitoring
+    exhaust stays out."""
     st = {"source": "eigenflux-feed-triage",
           "attention": memorial.ATTENTION_NOTICE,
           "options": [], "extra_buttons": []}
@@ -285,7 +316,6 @@ def test_notice_card_opens_with_zhidaojiuxing(tmp_path, monkeypatch):
     """Owner: 「每一个东西我不知道怎么办」— a card that needs nothing must SAY
     so, first line, so no card ever leaves him guessing."""
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
     mid, _ = memorial.create(
         source="eigenflux-feed-triage", title="信号", body="一条简报",
         preset="fyi", send=False)

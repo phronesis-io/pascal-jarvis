@@ -298,7 +298,6 @@ def test_preset_lock_is_enforced_at_create_for_every_entry_path(tmp_path, monkey
     adopt_card, the heartbeat prose route, and any future emitter."""
     from core import memorial
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(memorial, "_desk_reachable", lambda: True)
 
     mid, _ = memorial.create(
         source="checkin", title="t", body="正文",

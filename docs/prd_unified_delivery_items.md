@@ -1,7 +1,11 @@
 # PRD: Unified Delivery and Memorial-First Items
 
 - Date: 2026-07-23
-- Status: Implemented
+- Status: Implemented; **partially superseded 2026-08-11 (REQ-119)** — every
+  phone/web routing clause in this document is retired. Lark is the only
+  delivery surface; the web channel and its unconditional-success transport
+  are removed, ambient exhaust is ledger-only with a morning-anchor digest
+  line. The one-envelope/one-pipeline architecture itself remains current.
 - Owner: Pascal
 - Product principle: protect human attention; every output has one durable
   state and every decision has one visible object.
