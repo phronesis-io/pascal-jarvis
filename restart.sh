@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./restart.sh          # Restart bot only (daemon stays alive, restarts bot)
-#   ./restart.sh --full   # Restart daemon, bot, dashboard, and mobile gateway
+#   ./restart.sh --full   # Restart daemon, bot, and dashboard
 #   ./restart.sh --runtime # Restart the already-deployed revision (config only)
 #   ./restart.sh --status # Just show current process status
 #
@@ -347,8 +347,7 @@ refresh_launchd_definitions() {
   # their processes are restarted.
   for label in \
       "com.pascal.jarvis.daemon" \
-      "com.pascal.jarvis.dashboard" \
-      "com.pascal.jarvis.mobile-gateway"; do
+      "com.pascal.jarvis.dashboard"; do
     job="gui/$UID/$label"
     plist="$HOME/Library/LaunchAgents/$label.plist"
     if launchd_job_state "$job"; then
@@ -450,9 +449,6 @@ restart_user_surfaces() {
   local failed=0
   restart_launchd_surface \
     "com.pascal.jarvis.dashboard" "Dashboard" "dashboard" || failed=1
-  restart_launchd_surface \
-    "com.pascal.jarvis.mobile-gateway" "Mobile gateway" \
-    "mobile-gateway" || failed=1
   return "$failed"
 }
 
@@ -585,7 +581,7 @@ case "${1:-}" in
     echo "Usage: ./restart.sh [--full|--runtime|--status|--help] [--yes]"
     echo ""
     echo "  (no args)   Restart bot only (daemon auto-detects and stays)"
-    echo "  --full      Restart daemon, bot, dashboard, and mobile gateway"
+    echo "  --full      Restart daemon, bot, and dashboard"
     echo "  --runtime   Restart config/state only when live code already matches HEAD"
     echo "  --status    Show current process status"
     echo "  --yes, -y   Skip the in-flight-conversation confirmation"

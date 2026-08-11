@@ -102,8 +102,8 @@ git diff --cached
 
 - `:3456` - local Admin operations console.
 - `:3457` - NiceGUI dashboard.
-- `:3458` - authenticated mobile gateway; it may proxy the dashboard, never
-  Admin.
+- `:3458` - retired (2026-08-11, REQ-120); the mobile gateway and its
+  Tailscale funnel no longer run.
 - `components.yaml` - single source of truth for supervised components.
 - `data/jarvis.db` - shared SQLite WAL state store.
 - `:8787` - optional local Taskline engineering sidecar.

@@ -23,9 +23,10 @@ zero and the phone desk was never successfully paired. Therefore:
   Lark. Web visibility is not delivery.
 - **Lark arrival volume is the product's pulse.** `core.presence` pages
   selfmon when it falls below floor; treat that page as a P0, not a metric.
-- **Web dashboard and the mobile gateway are frozen**: archive + ops
-  reference only. No new feature investment lands there; content that only
-  reaches the archive gets its one shot via the morning-anchor batch line.
+- **Web dashboard is frozen**: archive + ops reference only. No new feature
+  investment lands there; content that only reaches the archive gets its one
+  shot via the morning-anchor batch line. The mobile gateway (`:3458`) and
+  its Tailscale funnel are retired (2026-08-11, REQ-120).
 - Routines is frozen pending fold-into-Lark or retirement (five days live,
   zero uses).
 
@@ -83,11 +84,8 @@ zero and the phone desk was never successfully paired. Therefore:
 
 ## Mobile Rules
 
-- Stable routes can be saved to the home screen.
-- Pairing is revocable, audited, and separate from Tailscale availability.
-- Network changes and app suspension must preserve the current object and
-  resume position.
-- Admin is never proxied through the mobile gateway.
+- The dedicated mobile gateway (`:3458`) and its Tailscale funnel are retired
+  (2026-08-11, REQ-120); Lark is the mobile surface.
 
 ## Content and Visual Rules
 

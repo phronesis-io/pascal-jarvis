@@ -104,21 +104,6 @@ components:
     critical: false
     requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
 
-  - name: mobile-gateway
-    check: launchctl
-    label: com.pascal.jarvis.mobile-gateway
-    critical: false
-    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.mobile-gateway.plist
-    note: authenticated TLS gateway to dashboard :3457 only; :3456 is never proxied
-
-  - name: mobile-tailnet
-    check: tailnet
-    port: 3458
-    mode: funnel
-    critical: false
-    requires_cmd: tailscale
-    note: public HTTPS ingress to authenticated :3458 only; Tailscale remains a private maintenance fallback
-
   - name: daemon-launchd
     check: launchctl
     label: com.pascal.jarvis.daemon
