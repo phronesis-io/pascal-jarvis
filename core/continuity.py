@@ -4,10 +4,11 @@ A handoff moves the next interaction between desktop and phone. It never
 copies the Memorial, Matter, or Delegation it points at; those stores remain
 authoritative.
 
-The phone push notification that used to accompany a mobile-bound handoff is
-retired with the mobile gateway (REQ-120, 2026-08-11): a handoff row is now a
-silent, durable affordance surfaced by the dashboard's 接力区, and Lark is the
-only interrupting channel.
+The mobile desk is retired (REQ-120, 2026-08-11): 发到手机 no longer exists,
+so a NEW handoff may only target the desktop 接力区 and no push notification
+accompanies it — Lark is the only interrupting channel. "mobile" survives in
+``SURFACES`` for the READ paths only (list/claim/complete/reopen), so legacy
+mobile-bound rows keep rendering and closing instead of orphaning.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from contextlib import closing
 from pathlib import Path
 
 SURFACES = {"desktop", "mobile"}
+# The only surface a NEW handoff may target (REQ-120). Kept separate from
+# SURFACES so read paths still recognize legacy mobile rows.
+CREATABLE_TARGET_SURFACES = {"desktop"}
 ENTITY_TYPES = {"memorial", "matter", "delegation"}
 ACTIVE_STATES = {"open", "claimed"}
 TERMINAL_STATES = {"completed", "cancelled"}
@@ -104,6 +108,10 @@ def _validate(entity_type: str, entity_id: str,
         raise ValueError("entity_id is required")
     if from_surface not in SURFACES or to_surface not in SURFACES:
         raise ValueError("surface must be desktop or mobile")
+    if to_surface not in CREATABLE_TARGET_SURFACES:
+        raise ValueError(
+            "mobile is no longer a creatable handoff target "
+            "(REQ-120: the mobile desk is retired; Lark is the phone surface)")
     if from_surface == to_surface:
         raise ValueError("handoff must cross surfaces")
 

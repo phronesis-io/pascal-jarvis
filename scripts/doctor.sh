@@ -42,7 +42,7 @@ _missing_modules=$(python3 - <<'PYEOF' 2>/dev/null || true
 import importlib
 
 required = (
-    "yaml", "nicegui", "pywebpush", "qrcode", "aiohttp", "fastapi",
+    "yaml", "nicegui", "aiohttp", "fastapi",
     "lark_oapi", "pytest",
 )
 missing = []

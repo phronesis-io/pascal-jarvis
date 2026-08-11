@@ -9,14 +9,13 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from nicegui import run, ui
+from nicegui import ui
 
 from core import memorial
 from core.continuity import (
     claim_handoff,
     complete_entity_handoffs,
     complete_handoff,
-    create_handoff,
     list_handoffs,
 )
 
@@ -38,7 +37,6 @@ from ..uiutil import (
     memorial_surface_label,
     memorial_visible_options,
     source_label,
-    surface_from_headers,
 )
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
@@ -187,34 +185,10 @@ def _load_item(memorial_id: str) -> dict | None:
     return enriched[0] if enriched else None
 
 
-async def _send_handoff(state: dict, surface: str, actor: str) -> dict:
-    target = "desktop" if surface == "mobile" else "mobile"
-    return await run.io_bound(
-        create_handoff,
-        "memorial",
-        state["id"],
-        from_surface=surface,
-        to_surface=target,
-        title=memorial_display_title(state),
-        matter_id=str(state.get("matter_id", "") or ""),
-        created_by=actor,
-    )
-
-
-def _handoff_notice(result: dict, target: str) -> tuple[str, str]:
-    if not result.get("created"):
-        return (
-            "已经在电脑接力区" if target == "desktop" else "已经发到手机",
-            "info",
-        )
-    if target == "desktop":
-        return "已放到电脑接力区", "positive"
-    if result.get("delivery_state") == "delivered":
-        return "已发到手机", "positive"
-    return "已放到手机接力区；通知暂未送达", "warning"
-
-
 def _render_handoff_band(surface: str, refresh) -> None:
+    # Read path only: legacy mobile-era handoff rows still render, claim, and
+    # complete here so they never orphan. Creating a NEW mobile-bound handoff
+    # (发到手机) is retired with the mobile desk (REQ-120).
     try:
         handoffs = list_handoffs(target_surface=surface, limit=8)
     except Exception:
@@ -375,8 +349,7 @@ def items_page():
                     "item-filter-select")
                 if filters["mode"] == "pending":
                     ui.select(
-                        {"": "全部入口", "phone": "手机集中批",
-                         "lark": "飞书即时批"},
+                        {"": "全部入口", "lark": "飞书即时批"},
                         value=filters["surface"], label="处理入口",
                         on_change=lambda event: change(
                             "surface", event.value or ""),
@@ -419,13 +392,6 @@ def items_page():
                     # the user their tap failed when it had worked, and left
                     # them with nowhere to go. Report what actually happened.
                     ui.notify(chat_started_notice(payload), type="positive")
-
-            async def handoff(state: dict):
-                result = await _send_handoff(state, surface, actor)
-                target = "desktop" if surface == "mobile" else "mobile"
-                message, tone = _handoff_notice(result, target)
-                ui.notify(message, type=tone)
-                board.refresh()
 
             with ui.element("div").classes("memorial-grid item-grid"):
                 for state in shown:
@@ -495,15 +461,6 @@ def items_page():
                                         "item-detail-link"):
                                 ui.icon("open_in_full", size="16px")
                                 ui.label("查看全文")
-                            if not decided_state:
-                                ui.button(
-                                    "电脑继续" if surface == "mobile"
-                                    else "发到手机",
-                                    icon=("computer" if surface == "mobile"
-                                          else "smartphone"),
-                                    on_click=lambda item=state: handoff(item),
-                                ).props("flat no-caps").classes(
-                                    "memorial-chat")
                             ui.button(
                                 "去飞书聊", icon="forum",
                                 on_click=lambda mid=state["id"]: chat(mid),
@@ -585,12 +542,6 @@ def item_detail_page(memorial_id: str):
                     # them with nowhere to go. Report what actually happened.
                     ui.notify(chat_started_notice(payload), type="positive")
 
-            async def handoff():
-                result = await _send_handoff(state, surface, actor)
-                target = "desktop" if surface == "mobile" else "mobile"
-                message, tone = _handoff_notice(result, target)
-                ui.notify(message, type=tone)
-
             with ui.row().classes("w-full items-center justify-between gap-3"):
                 ui.link("返回事项", "/items").classes("jarvis-nav-link")
                 ui.label(state.get("ts", "")).classes("memorial-time")
@@ -649,14 +600,6 @@ def item_detail_page(memorial_id: str):
                                 button.get("text", "打开来源"),
                                 button["url"], new_tab=True,
                             ).classes("jarvis-nav-link")
-                    if not decided_state:
-                        ui.button(
-                            "电脑继续" if surface == "mobile" else "发到手机",
-                            icon=("computer" if surface == "mobile"
-                                  else "smartphone"),
-                            on_click=handoff,
-                        ).props("outline no-caps").classes(
-                            "memorial-secondary")
                     ui.button(
                         "去飞书聊", icon="forum", on_click=chat,
                     ).props("flat no-caps").classes("memorial-chat")

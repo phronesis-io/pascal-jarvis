@@ -94,7 +94,7 @@ deployment remains governed:
 ./restart.sh --runtime  # config/state only; requires governed clean HEAD == live code
 ./restart.sh --status   # show daemon / bot / lark-cli process status
 ./restart.sh            # governed code deploy: main + PR + CI + release authority
-./restart.sh --full     # governed deploy of daemon, bot, dashboard, mobile gateway
+./restart.sh --full     # governed deploy of daemon, bot, dashboard
 ```
 
 ---

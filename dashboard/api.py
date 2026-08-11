@@ -71,7 +71,7 @@ async def _owner_guard(request: Request) -> None:
     if not token:
         raise HTTPException(401, "authenticated owner device required")
     from core.mobile_access import validate_device_token
-    if validate_device_token(token, touch=False) is None:
+    if validate_device_token(token) is None:
         raise HTTPException(401, "authenticated owner device required")
 
 
@@ -474,6 +474,12 @@ def register_api_routes():
         }
 
     # ── Cross-device continuity ──────────────────────────────────────
+    #
+    # Trust boundary (REQ-120): the mobile gateway that used to authenticate
+    # a device and stamp X-Jarvis-Device is retired, so that header has no
+    # authenticator behind it anymore. These endpoints therefore operate as
+    # the local desktop surface only — a client-supplied header is at most an
+    # unverified hint and never switches the surface identity.
 
     @app.get("/api/handoffs")
     async def api_handoff_list(target_surface: str = "",
@@ -489,15 +495,16 @@ def register_api_routes():
 
     @app.post("/api/handoffs", dependencies=_WRITE)
     async def api_handoff_create(request: Request):
+        """Create a handoff as the desktop surface (see trust note above)."""
         from core.continuity import create_handoff
         data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "").strip()
-        from_surface = "mobile" if device_id else "desktop"
-        created_by = device_id or "local"
+        from_surface = "desktop"
+        created_by = "local"
         requested_source = str(data.get("from_surface", "") or "").strip()
         if requested_source and requested_source != from_surface:
             raise HTTPException(
-                403, "from_surface does not match authenticated device")
+                403, "only the desktop surface can create handoffs "
+                     "(REQ-120: no authenticated mobile caller exists)")
         try:
             return await run_in_threadpool(
                 create_handoff,
@@ -521,14 +528,15 @@ def register_api_routes():
 
     @app.post("/api/handoffs/{handoff_id}/claim", dependencies=_WRITE)
     async def api_handoff_claim(handoff_id: str, request: Request):
+        """Claim a handoff as the desktop surface (see trust note above)."""
         from core.continuity import claim_handoff
         data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "").strip()
-        surface = "mobile" if device_id else "desktop"
+        surface = "desktop"
         requested_surface = str(data.get("surface", "") or "").strip()
         if requested_surface and requested_surface != surface:
             raise HTTPException(
-                403, "surface does not match authenticated device")
+                403, "only the desktop surface can claim handoffs "
+                     "(REQ-120: no authenticated mobile caller exists)")
         try:
             return claim_handoff(handoff_id, surface=surface)
         except KeyError as exc:
@@ -538,13 +546,14 @@ def register_api_routes():
 
     @app.post("/api/handoffs/{handoff_id}/complete", dependencies=_WRITE)
     async def api_handoff_complete(handoff_id: str, request: Request):
+        """Complete a desktop-bound handoff (see trust note above).
+
+        Legacy mobile-bound rows are not completable here — they close
+        through their entity's terminal projection instead.
+        """
         from core.continuity import complete_handoff, get_handoff
         await request.json()
-        surface = (
-            "mobile"
-            if request.headers.get("X-Jarvis-Device", "").strip()
-            else "desktop"
-        )
+        surface = "desktop"
         handoff = get_handoff(handoff_id)
         if handoff is None:
             raise HTTPException(404, "handoff not found")
@@ -704,6 +713,12 @@ def register_api_routes():
 
     @app.post("/api/delegations/{delegation_id}/handoff", dependencies=_WRITE)
     async def api_delegation_handoff(delegation_id: str, request: Request):
+        """Park a delegation in the desktop 接力区.
+
+        REQ-120: "mobile" is no longer a creatable target — the old default
+        (to_surface="mobile") would push nothing and land nowhere. Explicit
+        mobile requests get the core validator's 400.
+        """
         from core.continuity import create_handoff
         from core.delegations import DelegationStore
         data = await request.json()
@@ -715,8 +730,8 @@ def register_api_routes():
                 create_handoff,
                 "delegation",
                 delegation_id,
-                from_surface=str(data.get("from_surface") or "desktop"),
-                to_surface=str(data.get("to_surface") or "mobile"),
+                from_surface=str(data.get("from_surface") or "mobile"),
+                to_surface=str(data.get("to_surface") or "desktop"),
                 title=detail["title"],
                 matter_id=str(detail.get("matter_id") or ""),
                 created_by=str(os.environ.get("USER_ID") or "owner"),

@@ -17,7 +17,6 @@ from core.matters import (
 from core.continuity import (
     claim_handoff,
     complete_entity_handoffs,
-    create_handoff,
     list_handoffs,
 )
 from core.matter_bridge import bindings_for_matter, lark_deep_link
@@ -363,37 +362,6 @@ def matter_detail_page(matter_id: str):
                 handoff_dialog.open()
             detail.refresh()
 
-        async def send_surface_handoff():
-            matter = get_matter(
-                matter_id, include_links=False, include_events=False)
-            if matter is None:
-                ui.notify("这个事项已经不存在", type="warning")
-                return
-            target = "desktop" if surface == "mobile" else "mobile"
-            result = await run.io_bound(
-                create_handoff,
-                "matter",
-                matter_id,
-                from_surface=surface,
-                to_surface=target,
-                title=matter.get("title", ""),
-                matter_id=matter_id,
-                created_by=actor,
-            )
-            if not result.get("created"):
-                message = (
-                    "已经在电脑接力区"
-                    if target == "desktop" else "已经发到手机"
-                )
-                ui.notify(message, type="info")
-            elif target == "desktop":
-                ui.notify("已放到电脑接力区", type="positive")
-            elif result.get("delivery_state") == "delivered":
-                ui.notify("已发到手机", type="positive")
-            else:
-                ui.notify(
-                    "已放到手机接力区；通知暂未送达", type="warning")
-
         def force_close():
             update_matter(matter_id, status=close_state["status"], actor="user",
                           force=True)
@@ -467,13 +435,6 @@ def matter_detail_page(matter_id: str):
                                 "matter-action-link"):
                             ui.icon("chat_bubble_outline", size="18px")
                             ui.label("在飞书继续")
-                    ui.button(
-                        "电脑继续" if surface == "mobile" else "发到手机",
-                        icon=("computer" if surface == "mobile"
-                              else "smartphone"),
-                        on_click=send_surface_handoff,
-                    ).props("outline no-caps").classes(
-                        "memorial-secondary")
                     with ui.link(
                             target=f"/api/matters/{matter_id}/context?format=markdown",
                             new_tab=True).classes("matter-action-link"):

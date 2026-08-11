@@ -86,8 +86,12 @@ def test_setup_installs_and_verifies_the_complete_dependency_set():
     assert "pip install -r requirements-dev.txt" in script
     assert 'if python3 -c "import yaml"' not in script
     assert "nicegui" in script
-    assert "pywebpush" in script
-    assert "qrcode" in script
+    # REQ-120: Web Push and pairing QR are retired with the mobile desk —
+    # their libraries must not creep back into the dependency set.
+    assert "pywebpush" not in script
+    assert "qrcode" not in script
+    assert "pywebpush" not in runtime_requirements
+    assert "qrcode" not in runtime_requirements
     assert "lark_oapi" in script
     assert "pip check" in script
     assert "sys.version_info >= (3, 10)" in script

@@ -144,8 +144,8 @@ def test_terminal_delegation_closes_linked_intent_and_handoff(tmp_path):
     handoff = create_handoff(
         "delegation",
         delegation["id"],
-        from_surface="desktop",
-        to_surface="mobile",
+        from_surface="mobile",
+        to_surface="desktop",
     )
 
     store.terminal(
@@ -178,8 +178,8 @@ def test_failed_attempt_keeps_linked_intent_and_handoff_open(tmp_path):
     handoff = create_handoff(
         "delegation",
         delegation["id"],
-        from_surface="desktop",
-        to_surface="mobile",
+        from_surface="mobile",
+        to_surface="desktop",
     )
     step = store.add_step(
         delegation["id"],
@@ -263,8 +263,8 @@ def test_terminal_projection_failure_is_durably_retried(
     handoff = create_handoff(
         "delegation",
         delegation["id"],
-        from_surface="desktop",
-        to_surface="mobile",
+        from_surface="mobile",
+        to_surface="desktop",
     )
     real_sync = projection_module.sync_projection
     monkeypatch.setattr(
@@ -342,8 +342,8 @@ def test_duplicate_receipt_reopens_legacy_terminal_projections(tmp_path):
     handoff = create_handoff(
         "delegation",
         delegation["id"],
-        from_surface="desktop",
-        to_surface="mobile",
+        from_surface="mobile",
+        to_surface="desktop",
     )
     store.claim_step(
         delegation["id"],

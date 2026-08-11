@@ -10,8 +10,6 @@ PyYAML>=6.0
 
 # Dashboard (NiceGUI-powered agent backend)
 nicegui==3.15.0
-pywebpush>=2.0
-qrcode[pil]>=8.0
 
 # Lark long-connection sidecar (card callbacks and read receipts)
 lark-oapi>=1.6.0

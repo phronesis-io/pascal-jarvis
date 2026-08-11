@@ -21,23 +21,23 @@ from __future__ import annotations
 import hashlib
 import hmac
 
-from core.timeutil import now_local, now_local_str
-
 
 def _db():
     from dashboard.db import get_db
     return get_db()
 
 
-def _now() -> str:
-    return now_local_str("%Y-%m-%dT%H:%M:%S")
-
-
 def _hash(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
-def validate_device_token(token: str, touch: bool = True) -> dict | None:
+def validate_device_token(token: str) -> dict | None:
+    """Pure hash comparison against a non-revoked ``mobile_devices`` row.
+
+    The last-seen touch machinery is gone with the gateway (REQ-120):
+    nothing displays that timestamp anymore, and a validator should not
+    write.
+    """
     try:
         device_id, secret = str(token).split(".", 1)
     except ValueError:
@@ -49,19 +49,6 @@ def validate_device_token(token: str, touch: bool = True) -> dict | None:
     if not row or not hmac.compare_digest(str(row["token_hash"]), _hash(secret)):
         return None
     item = dict(row)
-    if touch:
-        should_touch = True
-        try:
-            from datetime import datetime
-            last_seen = datetime.fromisoformat(row["last_seen_at"] or "")
-            should_touch = (now_local().replace(tzinfo=None)
-                            - last_seen.replace(tzinfo=None)).total_seconds() >= 300
-        except (TypeError, ValueError):
-            pass
-        if should_touch:
-            _db().execute("UPDATE mobile_devices SET last_seen_at = ? WHERE id = ?",
-                          (_now(), device_id))
-            _db().commit()
     item.pop("token_hash", None)
     return item
 
