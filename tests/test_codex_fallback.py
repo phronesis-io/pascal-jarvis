@@ -73,6 +73,7 @@ def test_parse_thread_id_ignores_non_json_noise():
 
 def test_run_reuses_thread_for_the_same_lark_conversation(tmp_path, monkeypatch):
     calls = []
+    monkeypatch.setattr(cf, "resolve_codex_bin", lambda configured="": "/opt/codex")
     monkeypatch.setattr(cf, "ensure_codex_authenticated", lambda binary: None)
 
     def invoke(**kwargs):
@@ -98,6 +99,7 @@ def test_run_reuses_thread_for_the_same_lark_conversation(tmp_path, monkeypatch)
 def test_missing_saved_thread_is_rebuilt_once(tmp_path, monkeypatch):
     cf.save_session("ou_owner", "stale-thread", "gpt-test", str(tmp_path))
     calls = []
+    monkeypatch.setattr(cf, "resolve_codex_bin", lambda configured="": "/opt/codex")
     monkeypatch.setattr(cf, "ensure_codex_authenticated", lambda binary: None)
 
     def invoke(**kwargs):
@@ -123,6 +125,7 @@ def test_uncertain_failure_is_never_replayed_in_a_fresh_thread(
         tmp_path, monkeypatch):
     cf.save_session("ou_owner", "existing-thread", "gpt-test", str(tmp_path))
     calls = []
+    monkeypatch.setattr(cf, "resolve_codex_bin", lambda configured="": "/opt/codex")
     monkeypatch.setattr(cf, "ensure_codex_authenticated", lambda binary: None)
 
     def invoke(**kwargs):
