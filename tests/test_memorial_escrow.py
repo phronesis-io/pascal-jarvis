@@ -230,7 +230,7 @@ def test_lapsed_rows_are_labelled_and_stay_out_of_the_pending_queue(env):
     mid = _make(env, "metrics-digest", memorial.ATTENTION_NOTICE, age_h=24 * 8)
     memorial.lapse(mid, "未读满 8 天")
     state = memorial.get_memorial(mid)
-    assert memorial_lapsed_note(state) == "留中 · 未读满 8 天"
+    assert memorial_lapsed_note(state) == "已收起 · 未读满 8 天"
     assert memorial_is_pending(state) is False
     assert memorial_is_notice(state) is False
 

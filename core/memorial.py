@@ -70,7 +70,8 @@ CHAT_OPT_KEY = "chat"
 # an immediate plain-language retelling (explain queue → heartbeat), and
 # (3) a negative example future card-writing prompts are shown.
 CONFUSED_OPT_KEY = "confused"
-CHAT_BUTTON_LABEL = "💬 聊聊这个"
+CHAT_BUTTON_TEXT = "聊聊这个"
+CHAT_BUTTON_LABEL = f"💬 {CHAT_BUTTON_TEXT}"
 
 # Same retry profile as core.heartbeat_loop (REQ-11).
 SEND_RETRY_DELAYS = (2, 5)
@@ -85,8 +86,30 @@ CHAT_RETAP_THROTTLE_S = 120
 # the archive.  This bound prevents an emitter regression from recreating the
 # old wall-of-text experience while「聊聊这个」still receives richer context.
 CARD_BODY_MAX_CHARS = 900
-CARD_BODY_MAX_LINES = 8
-CHAT_CONTEXT_MAX_CHARS = 1500
+CARD_BODY_MAX_LINES = 14
+
+# When the card had to clip, 「聊聊这个」sends the untruncated source text as a
+# chat message. Bounding it keeps a runaway emitter from pasting a novel into
+# the conversation, but it sits far above the card bound: the card is the
+# decision surface, the chat is where the full record is allowed to land.
+# (2026-08-11: Pascal — "我只能看到一堆截断". Tapping the button used to load
+# context for the MODEL and tell HIM nothing he hadn't already seen.)
+FULL_TEXT_MAX_CHARS = 4000
+# Follow-up chunks leave room for the title and an honest remaining/done note
+# inside one Lark text message.
+CONTINUATION_CHUNK_CHARS = 3500
+# The 背景 section rides after the full body with its own budget, so a long
+# body can never silently amputate it.
+CHAT_OPENER_CONTEXT_MAX = 1000
+
+# The model's injected chat context must cover at least everything the opener
+# just showed Pascal (FULL_TEXT_MAX_CHARS of body) — if he quotes the tail of
+# the「全文」he was sent and the model never saw it, the model confabulates in
+# the very conversation whose point was giving both sides the same record.
+CHAT_CONTEXT_MAX_CHARS = 6000
+
+# Says what the button DOES, not that context exists somewhere.
+CLIP_NOTICE = f"…还有下半段，点「{CHAT_BUTTON_TEXT}」我把全文发给你"
 
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
@@ -972,6 +995,24 @@ def _button_groups(state: dict, include_options: bool = True,
     return groups
 
 
+def _cut_at_boundary(text: str, limit: int) -> str:
+    """Cut to ≤``limit`` chars on a line/space boundary, never inside a
+    markdown link (a broken `[label](https://…` fragment renders as noise)."""
+    cut = text[:limit]
+    for sep in ("\n", " "):
+        if sep in cut[limit // 2:]:
+            cut = cut.rsplit(sep, 1)[0]
+            break
+    # If we still landed inside a markdown link, back up further.
+    last_open = cut.rfind("[")
+    if last_open != -1:
+        after = cut[last_open:]
+        close_b = after.find("]")
+        if close_b == -1 or after.find(")", close_b) == -1:
+            cut = cut[:last_open].rstrip()
+    return cut.rstrip()
+
+
 def _display_body(body: str) -> str:
     """Compact card copy while preserving the full ledger/chat context."""
     raw = str(body or "").strip()
@@ -979,25 +1020,22 @@ def _display_body(body: str) -> str:
     clipped = len(lines) > CARD_BODY_MAX_LINES
     text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
     if len(text) > CARD_BODY_MAX_CHARS:
-        cut = text[:CARD_BODY_MAX_CHARS]
-        # Clip on a line/space boundary so the cut can't land inside a
-        # markdown link and leave a broken `[label](https://…` fragment.
-        for sep in ("\n", " "):
-            if sep in cut[CARD_BODY_MAX_CHARS // 2:]:
-                cut = cut.rsplit(sep, 1)[0]
-                break
-        # If we still landed inside a markdown link, back up further.
-        last_open = cut.rfind("[")
-        if last_open != -1:
-            after = cut[last_open:]
-            close_b = after.find("]")
-            if close_b == -1 or after.find(")", close_b) == -1:
-                cut = cut[:last_open].rstrip()
-        text = cut.rstrip()
+        text = _cut_at_boundary(text, CARD_BODY_MAX_CHARS)
         clipped = True
     if clipped:
-        text += "\n\n…完整背景可点「聊聊这个」"
+        text += "\n\n" + CLIP_NOTICE
     return text
+
+
+def body_was_clipped(body: str) -> bool:
+    """True when _display_body had to drop part of the source text.
+
+    Derived from the rendered output rather than restating the clip triggers,
+    so it can never drift from what the card actually showed. (A body that
+    itself ends with CLIP_NOTICE false-positives — benign: the full text gets
+    sent anyway.)
+    """
+    return _display_body(body).endswith(CLIP_NOTICE)
 
 
 def _render_card(state: dict, *, body: str | None = None,
@@ -1119,7 +1157,10 @@ def _chatting_card(state: dict, ts: str) -> dict:
         _render_card(
             state, status_line=status,
             include_options=state["status"] == "pending",
-            include_chat=False,
+            # A clipped body keeps the button: its CLIP_NOTICE names it, and
+            # if the opener send failed this is the only retry surface — a
+            # rendered pointer to a missing button would be a dead end.
+            include_chat=body_was_clipped(str(state.get("body", ""))),
         ),
         state,
     )
@@ -1286,7 +1327,29 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
 _opener_thread: threading.Thread | None = None
 
 
-def _deliver_opener(text: str, chat_id: str) -> None:
+def _finish_opener_continuation(meta: dict, delivered: bool) -> bool:
+    """Publish the first safe offset after the opener attempt finishes."""
+    if not meta:
+        return False
+    conv_key = str(meta.get("conv_key") or "")
+    memorial_id = str(meta.get("memorial_id") or "")
+    token = str(meta.get("token") or "")
+    latest = _latest_chat_continuation([conv_key], memorial_id=memorial_id)
+    if (not latest or str(latest.get("activation_token") or "") != token
+            or not latest.get("awaiting_opener")):
+        return False
+    offset = int(meta.get("delivered_offset") or 0) if delivered else 0
+    _append_line(_ledger_path(), {
+        "ev": "chat_continuation", "id": memorial_id,
+        "conv_key": conv_key, "offset": offset, "done": False,
+        "awaiting_opener": False, "activation_token": token,
+        "ts": now_local_str(), "epoch": int(time.time()),
+    })
+    return True
+
+
+def _deliver_opener(text: str, chat_id: str,
+                    continuation: dict | None = None) -> None:
     try:
         from core.delivery import (DeliveryEnvelope, TransportResult,
                                    deliver as deliver_envelope)
@@ -1305,7 +1368,13 @@ def _deliver_opener(text: str, chat_id: str) -> None:
                 requested_channel="lark",
                 conversation_bound=True,
                 chat_id=chat_id,
+                # bypass_dedup: every opener is user-tap-triggered, and for a
+                # clipped card it IS the payload — a re-tap an hour later must
+                # resend, not get eaten by the 6h dedup window while the toast
+                # claims success. Double-taps are already caught upstream by
+                # CHAT_RETAP_THROTTLE_S.
                 metadata={"bypass_throttle": True,
+                          "bypass_dedup": True,
                           "dedup_text": f"{chat_id}\0{text}"},
             ),
             root=JARVIS_DIR,
@@ -1313,14 +1382,22 @@ def _deliver_opener(text: str, chat_id: str) -> None:
         )
         if result.state == "delivered":
             _write_outbox(text)
+            _finish_opener_continuation(continuation or {}, delivered=True)
+        else:
+            # A later 「继续发」must restart at zero, never skip an opener the
+            # delivery authority could not confirm.
+            _finish_opener_continuation(continuation or {}, delivered=False)
     except Exception as e:
+        _finish_opener_continuation(continuation or {}, delivered=False)
         print(f"memorial opener send failed: {e}", file=sys.stderr)
 
 
-def _send_opener_async(text: str, chat_id: str) -> None:
+def _send_opener_async(text: str, chat_id: str,
+                       continuation: dict | None = None) -> None:
     global _opener_thread
     _opener_thread = threading.Thread(target=_deliver_opener,
-                                      args=(text, chat_id), daemon=True)
+                                      args=(text, chat_id, continuation),
+                                      daemon=True)
     _opener_thread.start()
 
 
@@ -1561,7 +1638,7 @@ def _deliver_existing(
                 record_sent(mid, result.message_id)
             except Exception as e:
                 print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
-        _write_outbox(readable + f"\n\n（奏折 {mid} 已发出，等批示）")
+        _write_outbox(readable + f"\n\n（卡片 {mid} 已发出，等你回）")
         return True
 
     if result.state == "suppressed":
@@ -2445,7 +2522,9 @@ def _bounded_chat_context(st: dict) -> str:
     budget = max(CHAT_CONTEXT_MAX_CHARS - len("\n".join(fixed)) - 32, 200)
     body = str(st.get("body", "")).strip()
     context = str(st.get("context", "")).strip()
-    body_budget = min(900, int(budget * 0.7))
+    # Cover at least the FULL_TEXT_MAX_CHARS of body the opener may have just
+    # shown Pascal; the model must never know less than he does.
+    body_budget = min(FULL_TEXT_MAX_CHARS, int(budget * 0.7))
     body = body[:body_budget].rstrip()
     context = context[:max(budget - len(body), 0)].rstrip()
     variable = [f"正文: {body}"]
@@ -2701,6 +2780,113 @@ def recent_confused(limit: int = 3) -> list[dict]:
     return out[:limit]
 
 
+def _latest_chat_continuation(conv_keys: list[str],
+                              memorial_id: str = "") -> dict | None:
+    keys = {str(key or "").strip() for key in conv_keys if str(key or "").strip()}
+    mid = str(memorial_id or "").strip()
+    if not keys and not mid:
+        return None
+    for event in reversed(read_jsonl(_ledger_path())):
+        if event.get("ev") != "chat_continuation":
+            continue
+        if mid and str(event.get("id") or "") == mid:
+            return event
+        if not mid and str(event.get("conv_key") or "") in keys:
+            return event
+    return None
+
+
+def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
+                       memorial_id: str = "") -> dict:
+    """Prepare the next promised chunk without advancing delivery state."""
+    key = str(conv_key or "").strip()
+    continuation = _latest_chat_continuation(
+        [key, *(lookup_keys or [])], memorial_id=memorial_id)
+    if continuation and continuation.get("awaiting_opener"):
+        return {
+            "handled": True,
+            "awaiting_opener": True,
+            "reply": "全文还在发送，稍等一下再回「继续发」。",
+        }
+    if not continuation or continuation.get("done"):
+        return {"handled": False, "reply": ""}
+    memorial_id = str(continuation.get("id") or "")
+    st = get_memorial(memorial_id)
+    if st is None:
+        return {"handled": False, "reply": ""}
+    full = str(st.get("body") or "").strip()
+    start = max(0, min(int(continuation.get("offset") or 0), len(full)))
+    while start < len(full) and full[start].isspace():
+        start += 1
+    remaining_text = full[start:]
+    if not remaining_text:
+        return {"handled": False, "reply": ""}
+
+    chunk = _cut_at_boundary(remaining_text, CONTINUATION_CHUNK_CHARS)
+    if not chunk:
+        chunk = remaining_text[:CONTINUATION_CHUNK_CHARS]
+    next_offset = start + len(chunk)
+    while next_offset < len(full) and full[next_offset].isspace():
+        next_offset += 1
+    rest = max(len(full) - next_offset, 0)
+    state_key = str(continuation.get("conv_key") or key)
+    tail = (
+        f"（原文还有约 {rest} 字，再回一句「继续发」）"
+        if rest else "（原文已发完）"
+    )
+    return {
+        "handled": True,
+        "reply": f"📜 「{st['title']}」续文：\n\n{chunk}\n\n{tail}",
+        "remaining_chars": rest,
+        "memorial_id": memorial_id,
+        "state_conv_key": state_key,
+        "expected_offset": int(continuation.get("offset") or 0),
+        "next_offset": next_offset,
+    }
+
+
+def commit_chat_continuation(conv_key: str, state_conv_key: str,
+                             memorial_id: str, expected_offset: int,
+                             next_offset: int) -> bool:
+    """Advance one prepared chunk only after Lark confirms delivery."""
+    continuation = _latest_chat_continuation(
+        [state_conv_key], memorial_id=memorial_id)
+    if not continuation or continuation.get("done"):
+        return False
+    if int(continuation.get("offset") or 0) != int(expected_offset):
+        return False
+    st = get_memorial(memorial_id)
+    if st is None:
+        return False
+    full = str(st.get("body") or "").strip()
+    start = max(0, min(int(expected_offset), len(full)))
+    while start < len(full) and full[start].isspace():
+        start += 1
+    remaining_text = full[start:]
+    chunk = _cut_at_boundary(remaining_text, CONTINUATION_CHUNK_CHARS)
+    if not chunk:
+        chunk = remaining_text[:CONTINUATION_CHUNK_CHARS]
+    computed_next = start + len(chunk)
+    while computed_next < len(full) and full[computed_next].isspace():
+        computed_next += 1
+    if computed_next != int(next_offset):
+        return False
+    done = computed_next >= len(full)
+    _append_line(_ledger_path(), {
+        "ev": "chat_continuation", "id": memorial_id,
+        "conv_key": state_conv_key, "offset": computed_next, "done": done,
+        "ts": now_local_str(), "epoch": int(time.time()),
+    })
+    # Only delivered text becomes model context.
+    _append_line(_pending_merge_path(), {
+        "conv_key": str(conv_key or "").strip(),
+        "job_id": f"memorial-continuation:{memorial_id}:{computed_next}",
+        "ts": now_local_str(),
+        "summary": f"[卡片续文：{st['title']}]\n{chunk}",
+    })
+    return True
+
+
 def chat(memorial_id: str) -> dict:
     """「聊聊这个」: inject the memorial's full context into bot.sh's
     pending-merge channel (so Pascal's next message arrives with the topic
@@ -2766,9 +2952,55 @@ def chat(memorial_id: str) -> dict:
                   file=sys.stderr)
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
-    opener = (f"📜 已带上「{st['title']}」的背景。"
-              "直接说你想追问什么，或告诉我你的倾向。")
-    _send_opener_async(opener, st.get("chat_id", ""))
+    #    When the card was clipped, the opener IS the payload: he taps the
+    #    button precisely because he cannot see the rest, and until now this
+    #    only loaded context for the model and told him "已带上背景".
+    full = str(st.get("body", "")).strip()
+    extra = str(st.get("context", "")).strip()
+    continuation_offset = len(full)
+    continuation_done = True
+    continuation_meta = None
+    if body_was_clipped(full):
+        body_part = full
+        if len(body_part) > FULL_TEXT_MAX_CHARS:
+            # Never a silent cut: the whole point of this opener is that a
+            # silent cut is what he complained about. Announce the remainder
+            # and offer the follow-up (the ledger keeps the full body, so
+            # a reply of「继续发」can deliver the rest in-conversation).
+            body_part = _cut_at_boundary(body_part, FULL_TEXT_MAX_CHARS)
+            continuation_offset = len(body_part)
+            continuation_done = False
+            rest = len(full) - len(body_part)
+            body_part += (f"\n\n（一条消息只放得下这么多——原文还有约 {rest} 字，"
+                          "回一句「继续发」我把剩下的发来）")
+        parts = [f"📜 「{st['title']}」全文：", "", body_part]
+        if extra:
+            parts += ["", "—— 背景 ——", extra[:CHAT_OPENER_CONTEXT_MAX]]
+        opener = "\n".join(parts)
+    else:
+        opener = (f"📜 已带上「{st['title']}」的背景。"
+                  "直接说你想追问什么，或告诉我你的倾向。")
+    if conv_key:
+        # Tombstone every older continuation immediately. For a long opener,
+        # the async delivery thread publishes either the confirmed first-chunk
+        # offset or zero on failure; it never assumes the opener arrived.
+        activation_token = f"{time.time_ns()}:{os.getpid()}"
+        _append_line(_ledger_path(), {
+            "ev": "chat_continuation", "id": memorial_id,
+            "conv_key": conv_key,
+            "offset": 0 if not continuation_done else continuation_offset,
+            "done": continuation_done,
+            "awaiting_opener": not continuation_done,
+            "activation_token": activation_token,
+            "ts": ts, "epoch": int(time.time()),
+        })
+        if not continuation_done:
+            continuation_meta = {
+                "conv_key": conv_key, "memorial_id": memorial_id,
+                "token": activation_token,
+                "delivered_offset": continuation_offset,
+            }
+    _send_opener_async(opener, st.get("chat_id", ""), continuation_meta)
 
     return {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
             "deep_link": conversation_deep_link(st),
@@ -2841,6 +3073,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=0,
                     help="creation window in days (default 0 = whole ledger)")
 
+    cp = sub.add_parser("continue", help="send the next promised body chunk")
+    cp.add_argument("--conv-key", required=True)
+    cp.add_argument("--lookup-key", action="append", default=[])
+    cp.add_argument("--memorial-id", default="")
+
+    ccp = sub.add_parser(
+        "continue-commit", help="commit a continuation after delivery")
+    ccp.add_argument("--conv-key", required=True)
+    ccp.add_argument("--state-conv-key", required=True)
+    ccp.add_argument("--memorial-id", required=True)
+    ccp.add_argument("--expected-offset", required=True, type=int)
+    ccp.add_argument("--next-offset", required=True, type=int)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -2884,6 +3129,19 @@ def main(argv: list[str] | None = None) -> int:
         acct = ledger_accounting(window_days=window)
         print(json.dumps(acct, ensure_ascii=False))
         return 0
+
+    if args.cmd == "continue":
+        print(json.dumps(continue_chat_body(
+            args.conv_key, lookup_keys=args.lookup_key,
+            memorial_id=args.memorial_id), ensure_ascii=False))
+        return 0
+
+    if args.cmd == "continue-commit":
+        committed = commit_chat_continuation(
+            args.conv_key, args.state_conv_key, args.memorial_id,
+            args.expected_offset, args.next_offset)
+        print(json.dumps({"committed": committed}, ensure_ascii=False))
+        return 0 if committed else 1
 
     parser.print_usage(sys.stderr)
     return 2

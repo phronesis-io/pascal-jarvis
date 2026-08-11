@@ -2713,6 +2713,8 @@ print(content)
       # the reply is publicly visible while the per-card session carries the
       # owner's private memory, and prompt.py would take the group path
       # where the memorial context is never injected (red-team 7/21).
+      _mem_id=""
+      _mem_title=""
       if { [ -n "$_root_id" ] && [ "$_root_id" != "null" ]; } || \
          { [ -n "$_parent_id" ] && [ "$_parent_id" != "null" ]; }; then
         if [ "$_owner_p2p" -eq 1 ]; then
@@ -2750,6 +2752,43 @@ print(content)
         if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
           lark_reply_text "$message_id" "$_matter_reply" >/dev/null 2>&1 || true
+          continue
+        fi
+      fi
+
+      # A clipped memorial explicitly promises that these exact replies will
+      # deliver the rest. Keep this deterministic and owner-only; group cards
+      # promise the same continuation, so the owner may fulfill it there too.
+      # The lookup keys cover direct chat ids and per-card thread routing.
+      if [ "$_inline_cmd_ok" -eq 1 ] && \
+         { [ "$content" = "继续发" ] || [ "$content" = "继续发送" ] || \
+           [ "$content" = "发剩下的" ]; }; then
+        _memorial_continue=$(python3 -m core.memorial continue \
+          --conv-key "$conv_key" --lookup-key "$chat_id" \
+          --memorial-id "${_mem_id:-}" \
+          2>>"$LOG_FILE" || echo '{"handled":false}')
+        if [ "$(echo "$_memorial_continue" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
+          _continue_reply=$(echo "$_memorial_continue" | jq -r '.reply // empty' 2>/dev/null)
+          if [ "$(echo "$_memorial_continue" | jq -r '.awaiting_opener // false' 2>/dev/null)" = "true" ]; then
+            delivery_reply_reliable "$message_id" "$_continue_reply" || true
+          elif [ -n "$_continue_reply" ] && \
+             delivery_reply_reliable "$message_id" "$_continue_reply"; then
+            _continue_mid=$(echo "$_memorial_continue" | jq -r '.memorial_id // empty')
+            _continue_state_key=$(echo "$_memorial_continue" | jq -r '.state_conv_key // empty')
+            _continue_expected=$(echo "$_memorial_continue" | jq -r '.expected_offset // -1')
+            _continue_next=$(echo "$_memorial_continue" | jq -r '.next_offset // -1')
+            if python3 -m core.memorial continue-commit \
+                 --conv-key "$conv_key" --state-conv-key "$_continue_state_key" \
+                 --memorial-id "$_continue_mid" \
+                 --expected-offset "$_continue_expected" \
+                 --next-offset "$_continue_next" 2>>"$LOG_FILE" >/dev/null; then
+              log_info "Memorial continuation delivered and committed: conv_key=$conv_key"
+            else
+              log_warn "Memorial continuation delivered but commit failed: conv_key=$conv_key"
+            fi
+          else
+            log_warn "Memorial continuation not delivered; offset retained: conv_key=$conv_key"
+          fi
           continue
         fi
       fi

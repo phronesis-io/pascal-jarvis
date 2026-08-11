@@ -70,7 +70,7 @@ def test_model_marker_cannot_approve_owner_decisions(tmp_path):
     )
 
     assert "[ACTION:" not in result
-    assert "只能通过已认证的奏折按钮或控制台" in result
+    assert "只能通过已认证的卡片按钮或控制台" in result
     assert "已批准" not in result
 
 

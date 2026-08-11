@@ -15,6 +15,7 @@ Four were shipped and are pinned here:
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -86,6 +87,19 @@ def test_chat_notice_still_says_something_useful_without_a_toast():
     assert notice and "不可用" not in notice
 
 
+def test_clipped_memorial_continue_promise_is_wired_for_owner_lark_chat():
+    root = Path(__file__).resolve().parent.parent
+    bot = (root / "bot.sh").read_text(encoding="utf-8")
+    assert "python3 -m core.memorial continue" in bot
+    assert '[ "$_inline_cmd_ok" -eq 1 ]' in bot
+    assert '--lookup-key "$chat_id"' in bot
+    assert '--memorial-id "${_mem_id:-}"' in bot
+    assert 'delivery_reply_reliable "$message_id" "$_continue_reply"' in bot
+    assert "python3 -m core.memorial continue-commit" in bot
+    for phrase in ("继续发", "继续发送", "发剩下的"):
+        assert f'[ "$content" = "{phrase}" ]' in bot
+
+
 def test_no_surface_reports_the_lark_entrance_as_unavailable():
     """All three pages used to strand the user with this exact string."""
     from pathlib import Path
@@ -148,7 +162,7 @@ def test_lapse_all_notice_names_a_filter_not_a_destination(env, monkeypatch):
                          jobs_dir=str(env.dir), log_file="",
                          owner_authenticated=True)
     message = ap._do_memorial_lapse_all("")
-    assert "已留中 1 件" in message
+    assert "已收起 1 件" in message
     # 「去事项看」 is a dead end for whoever is already on the items page.
     assert "「事项」里翻回" not in message
     assert "「全部」" in message

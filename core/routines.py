@@ -47,7 +47,7 @@ AUTONOMY_LEVELS = (AUTONOMY_OBSERVE, AUTONOMY_PROPOSE, AUTONOMY_ACT)
 
 AUTONOMY_HELP = {
     AUTONOMY_OBSERVE: "只看不说：跑完只进审计记录，永不打扰",
-    AUTONOMY_PROPOSE: "提方案等批红：出一张卡，动作要你点头（默认）",
+    AUTONOMY_PROPOSE: "提方案等你点头：出一张卡，动作要你确认（默认）",
     AUTONOMY_ACT: "可自己动手：限内部可逆动作（建 intent / 记任务 / 写笔记）",
 }
 

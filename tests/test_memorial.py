@@ -44,7 +44,8 @@ def env(tmp_path, monkeypatch):
     # Most tests care about chat semantics, not thread scheduling. Keep them
     # deterministic; the dedicated async test below covers non-blocking send.
     monkeypatch.setattr(memorial, "_send_opener_async",
-                        lambda text, chat_id: memorial._deliver_opener(text, chat_id))
+                        lambda text, chat_id, continuation=None:
+                        memorial._deliver_opener(text, chat_id, continuation))
     return rec
 
 
@@ -244,7 +245,7 @@ def test_card_compacts_long_body_but_ledger_keeps_full_context(env):
     mid, _ = memorial.create("mail", "长邮件", body, preset="fyi")
     card_body = json.loads(memorial.card_json(mid))["elements"][0]["text"]["content"]
     assert len(card_body) < len(body)
-    assert "完整背景可点「聊聊这个」" in card_body
+    assert memorial.CLIP_NOTICE in card_body
     assert memorial.get_memorial(mid)["body"] == body
 
 
@@ -481,18 +482,209 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert "邮件标题" in entry["summary"]
     assert "来自 alice" in entry["summary"]
     assert "待批" in entry["summary"]
-    assert len(entry["summary"]) <= 1500
+    assert len(entry["summary"]) <= memorial.CHAT_CONTEXT_MAX_CHARS
 
     # 3. ledger event + replacement card keeps remaining options, drops 聊聊
     # ("sent" = REQ-118 thread-lookup event appended after delivery)
     assert [e["ev"] for e in _ledger_events(env.dir)] == [
-        "create", "delivery", "sent", "chat"
+        "create", "delivery", "sent", "chat", "chat_continuation"
     ]
     card = payload["card"]["data"]
     body = card["elements"][0]["text"]["content"]
     assert "💬 聊天中" in body
     labels = [a["text"]["content"] for a in _actions(card)]
     assert labels == ["已阅", "标为重点"]  # no 聊聊这个 button
+
+
+def test_chat_on_a_clipped_card_sends_the_full_text(env):
+    """He taps 聊聊这个 BECAUSE the card was cut. The opener must carry the
+    missing text — loading context for the model alone told him nothing
+    (2026-08-11: "我只能看到一堆截断")."""
+    body = "\n".join(f"第{i}件事，细节在这里" for i in range(30))
+    mid, _ = memorial.create("memorial-escrow", "待批 14 件", body,
+                             preset="fyi", context="来自晨间台账")
+    card_body = json.loads(memorial.card_json(mid))["elements"][0]["text"]["content"]
+    assert memorial.CLIP_NOTICE in card_body      # precondition: it WAS clipped
+    assert "第29件事" not in card_body
+
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "全文" in opener
+    assert "第0件事" in opener and "第29件事" in opener   # nothing dropped
+    assert "来自晨间台账" in opener                       # background too
+    assert len(opener) <= memorial.FULL_TEXT_MAX_CHARS
+
+
+def test_chat_on_a_short_card_keeps_the_concise_opener(env):
+    """Un-clipped cards must not have their body pasted back at him."""
+    mid, _ = memorial.create("mail", "短卡", "一句话就说完了", preset="fyi")
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert opener.startswith("📜 已带上「短卡」的背景")
+    assert "一句话就说完了" not in opener
+
+
+def test_clipped_opener_announces_the_cut_and_keeps_the_background(env):
+    """A message headed「全文」must never be silently cut — a silent cut IS
+    the 2026-08-11 complaint. Over FULL_TEXT_MAX_CHARS the remainder is
+    announced with a follow-up offer, and 背景 still rides along (it has its
+    own budget instead of being appended last and amputated first)."""
+    body = "\n".join(f"第{i}段，" + "内容细节" * 20 for i in range(80))
+    assert len(body) > memorial.FULL_TEXT_MAX_CHARS
+    mid, _ = memorial.create("mail", "超长邮件", body, preset="fyi",
+                             context="来自晨间台账")
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "原文还有约" in opener and "继续发" in opener
+    assert "—— 背景 ——" in opener and "来自晨间台账" in opener
+    # honest bound: body part capped, plus the announcement and background
+    assert len(opener) <= (memorial.FULL_TEXT_MAX_CHARS
+                           + memorial.CHAT_OPENER_CONTEXT_MAX + 200)
+
+
+def test_clipped_opener_continues_until_the_full_body_is_delivered(env):
+    body = "\n".join(f"段{i:03d}:" + (chr(65 + i % 26) * 90)
+                     for i in range(120))
+    mid, _ = memorial.create("mail", "需要续传的长文", body, preset="fyi")
+
+    memorial.chat(mid)
+    opener = env.texts[0][0]
+    assert "段000:" in opener and "继续发" in opener
+
+    replies = []
+    for _ in range(10):
+        result = memorial.continue_chat_body("ou_test")
+        if not result["handled"]:
+            break
+        replies.append(result)
+        assert memorial.commit_chat_continuation(
+            "ou_test", result["state_conv_key"], result["memorial_id"],
+            result["expected_offset"], result["next_offset"])
+        if result["remaining_chars"] == 0:
+            break
+
+    assert replies
+    assert replies[-1]["remaining_chars"] == 0
+    assert "原文已发完" in replies[-1]["reply"]
+    assert "段119:" in replies[-1]["reply"]
+    assert memorial.continue_chat_body("ou_test")["handled"] is False
+
+    continuation_events = [e for e in _ledger_events(env.dir)
+                           if e["ev"] == "chat_continuation"]
+    offsets = [e["offset"] for e in continuation_events]
+    assert offsets == sorted(set(offsets))
+    assert continuation_events[-1]["done"] is True
+
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    continuation_jobs = [row for row in pending
+                         if row["job_id"].startswith("memorial-continuation:")]
+    assert len(continuation_jobs) == len(replies)
+    assert len({row["job_id"] for row in continuation_jobs}) == len(replies)
+
+
+def test_new_short_chat_supersedes_an_old_continuation(env):
+    long_body = "\n".join(f"旧文{i}:" + "很长" * 80 for i in range(80))
+    old_mid, _ = memorial.create("mail", "旧长文", long_body, preset="fyi")
+    memorial.chat(old_mid)
+    assert memorial._latest_chat_continuation(["ou_test"])["done"] is False
+
+    new_mid, _ = memorial.create("mail", "新短文", "已经说完", preset="fyi")
+    memorial.chat(new_mid)
+
+    latest = memorial._latest_chat_continuation(["ou_test"])
+    assert latest["id"] == new_mid and latest["done"] is True
+    assert memorial.continue_chat_body("ou_test")["handled"] is False
+
+
+def test_continuation_survives_lark_chat_and_thread_routing_keys(env):
+    body = "\n".join(f"线程正文{i}:" + "内容" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "线程长文", body, preset="fyi",
+                             chat_id="oc_direct_chat")
+    memorial.chat(mid)
+
+    result = memorial.continue_chat_body(
+        f"memorial:{mid}", lookup_keys=["oc_direct_chat"], memorial_id=mid)
+
+    assert result["handled"] is True
+    assert memorial.commit_chat_continuation(
+        f"memorial:{mid}", result["state_conv_key"], result["memorial_id"],
+        result["expected_offset"], result["next_offset"])
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    continuation = [row for row in pending
+                    if row["job_id"].startswith("memorial-continuation:")]
+    assert continuation[-1]["conv_key"] == f"memorial:{mid}"
+
+
+def test_continuation_does_not_advance_before_delivery_commit(env):
+    body = "\n".join(f"可靠续文{i}:" + "正文" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "发送失败也不能丢", body, preset="fyi")
+    memorial.chat(mid)
+    before = memorial._latest_chat_continuation(["ou_test"])
+
+    first = memorial.continue_chat_body("ou_test")
+    retry = memorial.continue_chat_body("ou_test")
+
+    assert first["reply"] == retry["reply"]
+    assert memorial._latest_chat_continuation(["ou_test"])["offset"] == before["offset"]
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    assert not any(row["job_id"].startswith("memorial-continuation:")
+                   for row in pending)
+
+    assert memorial.commit_chat_continuation(
+        "ou_test", first["state_conv_key"], mid,
+        first["expected_offset"], first["next_offset"])
+    assert memorial._latest_chat_continuation(["ou_test"])["offset"] == first["next_offset"]
+    assert memorial.commit_chat_continuation(
+        "ou_test", first["state_conv_key"], mid,
+        first["expected_offset"], first["next_offset"]) is False
+
+
+def test_failed_opener_restarts_continuation_from_the_beginning(env, monkeypatch):
+    body = "\n".join(f"首段{i}:" + "正文" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "首段也不能丢", body, preset="fyi")
+    monkeypatch.setattr(memorial, "_send_opener_async",
+                        lambda text, chat_id, continuation=None:
+                        memorial._finish_opener_continuation(
+                            continuation or {}, delivered=False))
+
+    memorial.chat(mid)
+    state = memorial._latest_chat_continuation(["ou_test"])
+    assert state["offset"] == 0
+    assert state["done"] is False
+    assert state["awaiting_opener"] is False
+    retry = memorial.continue_chat_body("ou_test")
+    assert "首段0:" in retry["reply"]
+
+
+def test_continue_while_opener_is_in_flight_does_not_advance(env, monkeypatch):
+    body = "\n".join(f"等待{i}:" + "正文" * 100 for i in range(80))
+    monkeypatch.setattr(memorial, "_send_opener_async",
+                        lambda *_args, **_kwargs: None)
+    mid, _ = memorial.create("mail", "正在发送", body, preset="fyi")
+    memorial.chat(mid)
+
+    waiting = memorial.continue_chat_body("ou_test")
+
+    assert waiting["handled"] is True
+    assert waiting["awaiting_opener"] is True
+    assert "还在发送" in waiting["reply"]
+    state = memorial._latest_chat_continuation(["ou_test"])
+    assert state["offset"] == 0 and state["awaiting_opener"] is True
+
+
+def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):
+    """The clipped card's CLIP_NOTICE names the 聊聊 button, and a failed
+    opener send has no other retry surface — removing the button while the
+    body still points at it would be a rendered dead end."""
+    body = "\n".join(f"第{i}件事，细节在这里" for i in range(30))
+    mid, _ = memorial.create("mail", "长卡", body, preset="fyi")
+    payload = memorial.chat(mid)
+    card = payload["card"]["data"]
+    labels = [a["text"]["content"] for a in _actions(card)]
+    assert memorial.CHAT_BUTTON_LABEL in labels
 
 
 def test_chat_context_keeps_state_when_body_and_background_are_huge(env):
@@ -1001,9 +1193,9 @@ def test_display_body_never_cuts_through_a_markdown_link():
     link = "[官方公告](https://example.com/a-very-long-path-that-straddles-the-limit)"
     body = filler + " " + link
     out = memorial._display_body(body)
-    assert "…完整背景可点「聊聊这个」" in out
+    assert memorial.CLIP_NOTICE in out
     # every link opener that survived the clip must still have its closer
-    core_text = out.split("…完整背景可点")[0]
+    core_text = out.split(memorial.CLIP_NOTICE)[0]
     assert core_text.count("](") == core_text.count(")") or "](" not in core_text
 
 

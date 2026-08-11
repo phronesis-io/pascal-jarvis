@@ -92,7 +92,7 @@ SOURCE_LABELS = {
 }
 
 
-def source_label(source: str, fallback: str = "奏折") -> str:
+def source_label(source: str, fallback: str = "卡片") -> str:
     raw = str(source or "").strip()
     if not raw:
         return fallback
@@ -282,7 +282,11 @@ def memorial_lapsed_note(state: dict) -> str:
     if str(state.get("status", "")) != STATUS_LAPSED:
         return ""
     reason = str(state.get("lapse_reason", "")).strip()
-    return f"留中 · {reason}" if reason else "留中"
+    # Rows lapsed before the 2026-08-11 de-jargon pass carry the old court
+    # wording in their ledgers; map it at display time so the archive doesn't
+    # read half-translated.
+    reason = {"全部留中": "先都放着"}.get(reason, reason)
+    return f"已收起 · {reason}" if reason else "已收起"
 
 
 def memorial_is_pending(state: dict) -> bool:

@@ -138,8 +138,13 @@ def build_activity_feed(jarvis_dir: str | Path, limit: int = 12) -> list[dict]:
         text = str(o.get("text", "")).replace("\n", " ").strip()
         # The pending section already shows memorial deliveries. Repeating
         # every card (and every chat opener) here merely rebuilds the noise wall.
+        # Old-wording branches (奏折/已带上) stay: the outbox keeps history,
+        # so pre-rename lines still need filtering alongside the new copy
+        # (卡片 mem_ suffix, and the clipped-card「全文」opener).
         if (text.startswith("CARD:") or "**📜" in text or "📜 聊聊" in text
-                or "📜 已带上" in text or "（奏折 mem_" in text):
+                or "📜 已带上" in text or "（奏折 mem_" in text
+                or "（卡片 mem_" in text
+                or ("📜 「" in text and "」全文：" in text)):
             continue
         if len(text) > 100:
             text = text[:100].rstrip() + "…"
