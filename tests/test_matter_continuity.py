@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import subprocess
@@ -11,8 +10,6 @@ import types
 from pathlib import Path
 
 import pytest
-from aiohttp import CookieJar, web
-from aiohttp.test_utils import TestClient, TestServer
 
 import dashboard.db as db_module
 from core import intentions, memorial
@@ -273,89 +270,6 @@ def test_mobile_pair_code_is_one_time_and_device_is_revocable():
     assert validate_device_token(device["token"]) is None
 
 
-def test_mobile_certificate_chain_is_reusable_and_rotates_leaf_for_host(tmp_path):
-    from cryptography import x509
-    from cryptography.x509.oid import ExtensionOID
-    from dashboard.mobile_gateway import ensure_certificate
-
-    cert, key, ca_download = ensure_certificate("192.168.1.8", tmp_path)
-    leaf = x509.load_pem_x509_certificate(cert.read_bytes())
-    ca = x509.load_der_x509_certificate(ca_download.read_bytes())
-    assert key.stat().st_mode & 0o777 == 0o600
-    assert leaf.issuer == ca.subject
-    assert ca.extensions.get_extension_for_oid(
-        ExtensionOID.BASIC_CONSTRAINTS).value.ca is True
-    first_ca = ca_download.read_bytes()
-    first_leaf = cert.read_bytes()
-    cert2, _, ca2 = ensure_certificate("192.168.1.9", tmp_path)
-    assert ca2.read_bytes() == first_ca
-    assert cert2.read_bytes() != first_leaf
-    san = x509.load_pem_x509_certificate(cert2.read_bytes()).extensions.get_extension_for_oid(
-        ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
-    assert "192.168.1.9" in [str(value) for value in san.get_values_for_type(x509.IPAddress)]
-
-
-def test_mobile_ca_is_name_constrained_to_private_space(tmp_path):
-    from cryptography import x509
-    from dashboard.mobile_gateway import ensure_certificate
-
-    _, _, ca_download = ensure_certificate("192.168.1.8", tmp_path)
-    ca = x509.load_der_x509_certificate(ca_download.read_bytes())
-    constraints = ca.extensions.get_extension_for_class(x509.NameConstraints)
-    assert constraints.critical is True
-    permitted = constraints.value.permitted_subtrees
-    nets = [str(v.value) for v in permitted if isinstance(v, x509.IPAddress)]
-    assert "192.168.0.0/16" in nets
-    assert "100.64.0.0/10" in nets  # Tailscale CGNAT space
-    assert "localhost" in [v.value for v in permitted if isinstance(v, x509.DNSName)]
-
-
-def test_mobile_unconstrained_legacy_ca_is_rotated_with_backup(tmp_path):
-    from cryptography import x509
-    from dashboard import mobile_gateway
-    from dashboard.mobile_gateway import ensure_certificate
-
-    # Forge a legacy (unconstrained) CA by generating one with constraints
-    # stripped, mimicking the pre-rotation deployment.
-    real_constraints = mobile_gateway._ca_name_constraints
-    mobile_gateway._ca_name_constraints = lambda: (_ for _ in ()).throw(AssertionError)
-    try:
-        import cryptography.x509 as x509mod
-        original_add = x509mod.CertificateBuilder.add_extension
-
-        def skip_constraints(self, ext, critical):
-            if isinstance(ext, x509mod.NameConstraints):
-                return self
-            return original_add(self, ext, critical=critical)
-
-        x509mod.CertificateBuilder.add_extension = skip_constraints
-        mobile_gateway._ca_name_constraints = real_constraints
-        ensure_certificate("192.168.1.8", tmp_path)
-    finally:
-        x509mod.CertificateBuilder.add_extension = original_add
-        mobile_gateway._ca_name_constraints = real_constraints
-    assert not mobile_gateway._ca_is_constrained(tmp_path / "jarvis-mobile-ca.pem")
-
-    _, _, ca_download = ensure_certificate("192.168.1.8", tmp_path)
-    assert mobile_gateway._ca_is_constrained(tmp_path / "jarvis-mobile-ca.pem")
-    assert (tmp_path / "jarvis-mobile-ca.pem.unconstrained.bak").exists()
-    ca = x509.load_der_x509_certificate(ca_download.read_bytes())
-    ca.extensions.get_extension_for_class(x509.NameConstraints)
-
-
-def test_mobile_lan_detection_ignores_tunnel_benchmark_address(monkeypatch):
-    from dashboard import mobile_gateway
-
-    def fake_run(command, **_kwargs):
-        if command[0].endswith("/route"):
-            return types.SimpleNamespace(stdout="  interface: en0\n")
-        return types.SimpleNamespace(stdout="192.168.13.108\n")
-
-    monkeypatch.setattr(mobile_gateway.subprocess, "run", fake_run)
-    assert mobile_gateway.detect_lan_ip() == "192.168.13.108"
-    assert mobile_gateway._usable_lan_ip("198.18.0.1") is False
-
-
 def test_mobile_pair_qr_encodes_a_local_png():
     from dashboard.pages.settings import _pair_qr_data_url
 
@@ -606,17 +520,6 @@ def test_tailnet_offline_backend_failure_does_not_claim_ready(monkeypatch):
     assert "backend unavailable" in status["detail"]
 
 
-def test_mobile_audit_does_not_trust_spoofed_forwarded_address(monkeypatch):
-    from dashboard import mobile_gateway
-    request = types.SimpleNamespace(
-        headers={"X-Forwarded-For": "203.0.113.9"}, remote="192.168.13.20")
-    assert mobile_gateway._remote(request) == "192.168.13.20"
-    monkeypatch.setenv("JARVIS_TRUST_PROXY_HEADERS", "1")
-    assert mobile_gateway._remote(request) == "192.168.13.20"
-    request.remote = "127.0.0.1"
-    assert mobile_gateway._remote(request) == "203.0.113.9"
-
-
 def test_mobile_audit_and_push_subscription_validation(monkeypatch):
     audit_access("dev_x", "10.0.0.2", "GET", "/matters", 200)
     assert recent_access(1)[0]["device_id"] == "dev_x"
@@ -635,181 +538,6 @@ def test_mobile_audit_and_push_subscription_validation(monkeypatch):
     ))
     result = send_push("title", "body")
     assert result["failed"] == 1
-
-
-def test_gateway_requires_pairing_and_forwards_only_to_configured_backend(monkeypatch):
-    from dashboard import mobile_gateway
-
-    async def scenario():
-        backend_app = web.Application()
-
-        async def backend(request):
-            if request.headers.get("Upgrade", "").lower() == "websocket":
-                ws = web.WebSocketResponse()
-                await ws.prepare(request)
-                async for message in ws:
-                    await ws.send_json({
-                        "message": message.data,
-                        "device": request.headers.get(
-                            "X-Jarvis-Device", ""),
-                    })
-                    await ws.close()
-                return ws
-            return web.json_response({
-                "path": request.path,
-                "origin": request.headers.get("Origin", ""),
-                "device": request.headers.get("X-Jarvis-Device", ""),
-            })
-
-        backend_app.router.add_route("*", "/{tail:.*}", backend)
-        backend_server = TestServer(backend_app)
-        await backend_server.start_server()
-        monkeypatch.setattr(mobile_gateway, "BACKEND",
-                            str(backend_server.make_url("/")).rstrip("/"))
-        client = TestClient(TestServer(mobile_gateway.create_gateway_app()),
-                            cookie_jar=CookieJar(unsafe=True))
-        await client.start_server()
-        try:
-            denied = await client.get("/matters")
-            assert denied.status == 401
-            assert denied.headers["X-Frame-Options"] == "DENY"
-            assert denied.headers["Referrer-Policy"] == "no-referrer"
-            assert "form-action 'self'" in denied.headers["Content-Security-Policy"]
-            audit_count = len(recent_access(100))
-            probe = await client.get("/.env")
-            assert probe.status == 404
-            assert len(recent_access(100)) == audit_count
-            pair = create_pair_code("test phone")
-            preview = await client.get(
-                f"/pair/{pair['code']}", allow_redirects=False)
-            assert preview.status == 200
-            preview_body = await preview.text()
-            assert "确认连接这台设备" in preview_body
-            assert 'class="certificate-link"' in preview_body
-            assert ".certificate-link:focus-visible" in preview_body
-            # Repeated GETs simulate message previews and must not consume the
-            # one-time code before the owner explicitly confirms.
-            second_preview = await client.get(
-                f"/pair/{pair['code']}", allow_redirects=False)
-            assert second_preview.status == 200
-            paired = await client.post(
-                "/pair", data={"code": pair["code"]}, allow_redirects=False)
-            assert paired.status == 302
-            device_cookie = paired.headers.get("Set-Cookie", "")
-            assert "jarvis_device=" in device_cookie
-            assert "HttpOnly" in device_cookie
-            assert "Max-Age=31536000" in device_cookie
-            assert "SameSite=Lax" in device_cookie
-            onboarding = [
-                item for item in memorial.list_memorials()
-                if item["source"] == "mobile-onboarding"
-            ]
-            assert len(onboarding) == 1
-            # REQ-119: the onboarding confirmation is a Lark card now.
-            assert onboarding[0]["delivery_status"] == "delivered"
-            allowed = await client.get(
-                "/matters", headers={"Accept": "text/html"})
-            assert allowed.status == 200
-            renewed_cookie = allowed.headers.get("Set-Cookie", "")
-            assert "jarvis_device=" in renewed_cookie
-            assert "HttpOnly" in renewed_cookie
-            assert "Max-Age=31536000" in renewed_cookie
-            assert "SameSite=Lax" in renewed_cookie
-            payload = await allowed.json()
-            assert payload["path"] == "/matters"
-            assert payload["device"].startswith("dev_")
-            websocket = await client.ws_connect("/ws")
-            await websocket.send_str("continue")
-            websocket_payload = await websocket.receive_json()
-            assert websocket_payload == {
-                "message": "continue",
-                "device": payload["device"],
-            }
-            await websocket.close()
-            rejected = await client.post(
-                "/api/test", headers={"Origin": "https://attacker.example"})
-            assert rejected.status == 403
-        finally:
-            await client.close()
-            await backend_server.close()
-
-    asyncio.run(scenario())
-
-
-def test_gateway_pair_form_and_failure_limit(monkeypatch):
-    from dashboard import mobile_gateway
-
-    async def scenario():
-        mobile_gateway._PAIR_FAILURES.clear()
-        monkeypatch.setattr(mobile_gateway, "PAIR_FAILURE_LIMIT", 2)
-        client = TestClient(TestServer(mobile_gateway.create_gateway_app()),
-                            cookie_jar=CookieJar(unsafe=True))
-        await client.start_server()
-        try:
-            first = await client.post("/pair", data={"code": "invalid"})
-            second = await client.post("/pair", data={"code": "invalid"})
-            limited = await client.post("/pair", data={"code": "invalid"})
-            assert first.status == 401
-            assert second.status == 401
-            assert limited.status == 429
-            assert limited.headers["Cache-Control"] == "no-store"
-
-            mobile_gateway._PAIR_FAILURES.clear()
-            pair = create_pair_code("form phone")
-            paired = await client.post(
-                "/pair", data={"code": pair["code"]}, allow_redirects=False)
-            assert paired.status == 302
-        finally:
-            mobile_gateway._PAIR_FAILURES.clear()
-            await client.close()
-
-    asyncio.run(scenario())
-
-
-def test_gateway_backend_constant_never_points_at_admin():
-    from dashboard.mobile_gateway import BACKEND
-    assert BACKEND == "http://127.0.0.1:3457"
-    assert "3456" not in BACKEND
-
-
-def test_gateway_websocket_reset_is_a_normal_disconnect():
-    from aiohttp import WSMsgType
-    from aiohttp.client_exceptions import ClientConnectionResetError
-    from dashboard.mobile_gateway import _relay_websockets
-
-    class FakeSocket:
-        def __init__(self, messages=(), fail_send=False, idle=False):
-            self.messages = list(messages)
-            self.fail_send = fail_send
-            self.idle = idle
-            self.closed = False
-            self.sent = []
-
-        def __aiter__(self):
-            async def stream():
-                for message in self.messages:
-                    yield message
-                if self.idle:
-                    await asyncio.Event().wait()
-            return stream()
-
-        async def send_str(self, value):
-            if self.fail_send:
-                raise ClientConnectionResetError("phone suspended")
-            self.sent.append(value)
-
-        async def send_bytes(self, value):
-            await self.send_str(value)
-
-    async def scenario():
-        client = FakeSocket([
-            types.SimpleNamespace(type=WSMsgType.TEXT, data="resume"),
-        ])
-        backend = FakeSocket(fail_send=True, idle=True)
-        await asyncio.wait_for(
-            _relay_websockets(client, backend), timeout=1)
-
-    asyncio.run(scenario())
 
 
 def test_web_decision_updates_every_delivered_lark_card(monkeypatch):

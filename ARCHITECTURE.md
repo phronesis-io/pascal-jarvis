@@ -12,8 +12,10 @@ launchd
             -> core.ef_stream_loop
             -> admin.py :3456
   -> dashboard.main :3457
-  -> dashboard.mobile_gateway :3458
 ```
+
+The mobile gateway (`dashboard.mobile_gateway :3458`) and its Tailscale
+funnel are retired (2026-08-11, REQ-120).
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
@@ -185,7 +187,7 @@ the exact release commit or a healthy resident descendant that contains it.
   external facts.
 - `dashboard/`: human and operator projections over the same durable state.
 - `views/`: JSON files for RichView interactive card payloads (created by
-  `core.richview`, consumed by mobile gateway and dashboard). Each file is a
+  `core.richview`, consumed by the dashboard). Each file is a
   `{view_id}.json` produced at card creation time.
 
 ## Durable State
