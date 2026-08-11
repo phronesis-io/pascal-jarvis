@@ -8,6 +8,9 @@ from core import model_fallback as mf
 def test_model_error_detection():
     assert mf.is_model_error("There's an issue with the selected model (claude-fable-5)")
     assert mf.is_model_error("You've hit your monthly spend limit")
+    assert mf.is_model_error(
+        "You've hit your session limit · resets 6pm (Asia/Shanghai)"
+    )
     assert mf.is_model_error("Rate limit exceeded")
     assert mf.is_model_error("too many requests")
     assert mf.is_model_error("invalid model")
@@ -32,6 +35,15 @@ def test_hard_spend_limit_skips_same_provider_retry():
     assert mf.is_model_error("monthly spend limit")
 
 
+def test_session_limit_skips_same_provider_and_identifies_reason():
+    error = "HTTP 429: You've hit your session limit · resets 6pm (Asia/Shanghai)"
+    assert mf.is_account_limit(error)
+    assert mf.limit_reason(error) == "session_limit"
+    assert mf.fallback_for_stderr("opus", error) is None
+    assert mf.limit_reason("You've hit your monthly spend limit") == "spend_limit"
+    assert mf.limit_reason("rate limit exceeded") is None
+
+
 def test_rate_limit_still_jumps_to_cheapest():
     # Transient throttling may be per-model/tier — the haiku detour stays.
     assert mf.fallback_for_stderr("opus", "rate limit exceeded") == "haiku"
@@ -47,6 +59,27 @@ def test_is_spend_limit_hard_exhaustion_only():
     assert not mf.is_spend_limit("rate limit exceeded")
     assert not mf.is_spend_limit("too many requests")
     assert not mf.is_spend_limit("")
+
+
+def test_cli_limit_reason():
+    import subprocess, sys
+    r = subprocess.run(
+        [sys.executable, "-m", "core.model_fallback", "--limit-reason"],
+        input="You've hit your session limit · resets 6pm (Asia/Shanghai)",
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0
+    assert r.stdout.strip() == "session_limit"
+
+    r = subprocess.run(
+        [sys.executable, "-m", "core.model_fallback", "--limit-reason"],
+        input="rate limit exceeded",
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 1
+    assert r.stdout.strip() == ""
 
 
 def test_transient_error_no_fallback():
@@ -163,6 +196,15 @@ def test_trip_pages_pascal_once_per_cooldown(tmp_path):
     assert len(_deadletter_rows(tmp_path)) == 2
 
 
+def test_session_limit_trip_uses_temporary_recovery_copy(tmp_path):
+    mf.trip("session_limit", tmp_path)
+    rows = _deadletter_rows(tmp_path)
+    assert len(rows) == 1
+    assert "本次会话额度" in rows[0]["detail"]
+    assert "自动探测并切回" in rows[0]["detail"]
+    assert "本月额度用完" not in rows[0]["detail"]
+
+
 def test_trip_pages_once_per_episode_not_every_6h(tmp_path):
     """2026-07-08 red-team fix: one ongoing outage = ONE page. The old
     6h-cadence check re-paged Pascal ~4×/day for the whole month-end spend
@@ -214,6 +256,7 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
     assert "core.reply_closure" in bot         # REQ-64 wired
     assert "core.model_fallback" in bot        # REQ-77 wired
+    assert "--limit-reason" in bot             # session/spend limit reason preserved
     assert '"$_cur_model"' in bot              # main path uses degradable model
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
     assert "openai_fallback_flags=(--no-tools)" in bot
@@ -285,7 +328,7 @@ def test_bot_sh_wires_sticky_provider_gate():
     from pathlib import Path
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
     assert "core.model_fallback --gate" in bot          # attempt 1 consults gate
-    assert "core.model_fallback --is-spend-limit" in bot  # trip on HARD spend only
+    assert "core.model_fallback --limit-reason" in bot  # trip on hard account limit
     assert "core.model_fallback --trip" in bot
     assert "core.model_fallback --clear" in bot         # probe success reopens
     assert "--gate no-probe" in bot                     # background jobs follow flag
@@ -392,7 +435,7 @@ def test_heartbeat_claude_call_suppresses_nonfallback_error_stdout(tmp_path, mon
     assert runner.claude_call("prompt") == ""
 
 
-def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path, monkeypatch):
+def test_heartbeat_claude_call_uses_backup_provider_after_session_limit(tmp_path, monkeypatch):
     from subprocess import CompletedProcess
     from core.heartbeat import HeartbeatRunner
 
@@ -422,7 +465,7 @@ def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path
             return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
         return CompletedProcess(
             cmd, 1,
-            stdout="You've hit your monthly spend limit",
+            stdout="HTTP 429: You've hit your session limit · resets 6pm (Asia/Shanghai)",
             stderr="",
         )
 
@@ -431,7 +474,7 @@ def test_heartbeat_claude_call_uses_backup_provider_after_primary_chain(tmp_path
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert any(env.get("ANTHROPIC_BASE_URL") == "https://backup.example"
                for _, env in calls)
-    # Spend limit is account-wide: exactly ONE doomed primary call (no haiku
+    # Session limit is account-wide: exactly ONE doomed primary call (no haiku
     # detour), and the sticky gate is tripped for every other process.
     primary_models = [cmd[cmd.index("--model") + 1] for cmd, env in calls
                       if env.get("ANTHROPIC_AUTH_TOKEN") != "backup-token"]

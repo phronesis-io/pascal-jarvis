@@ -82,6 +82,7 @@ COMPLAINT_PATTERNS = {
 
 PROVIDER_ERROR_NEEDLES = (
     "monthly spend limit",
+    "session limit",
     "raise it at claude.ai/settings/usage",
     "usage limit",
     "rate limit",
@@ -430,6 +431,8 @@ def _is_direct_provider_surface(text: str) -> bool:
         "⚙",
         "you've hit your monthly spend limit",
         "you have hit your monthly spend limit",
+        "you've hit your session limit",
+        "you have hit your session limit",
         "api error",
         "failed to authenticate",
     ))

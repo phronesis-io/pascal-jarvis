@@ -1,4 +1,4 @@
-"""Model-crash / spend-limit graceful fallback (REQ-77) + sticky provider gate.
+"""Model-crash / account-limit graceful fallback (REQ-77) + provider gate.
 
 Real sessions died mid-task on "You've hit your monthly spend limit" and
 "There's an issue with the selected model (claude-fable-5)", followed by the
@@ -12,7 +12,7 @@ degrade chain instead of crashing. Detection is pure + testable; bot.sh
 consumes the CLI.
 
 Degrade chain: opus → sonnet → haiku. (Fable is banned — never in the chain.)
-A HARD spend limit is account-wide, so it never degrades within the provider
+A HARD account limit is account-wide, so it never degrades within the provider
 (2026-07-07 incident: the opus→haiku detour just burned a second doomed call);
 callers jump straight to their backup-provider branch instead.
 
@@ -76,6 +76,11 @@ _HARD_SPEND = re.compile(
     r"monthly spend limit|spend limit|usage limit (reached|exceeded)"
     r"|credit balance is too low|insufficient credits",
     re.IGNORECASE)
+_SESSION_LIMIT = re.compile(
+    r"(?:you(?:'ve| have) hit (?:your )?)?session limit"
+    r"|session usage limit (?:reached|exceeded)",
+    re.IGNORECASE,
+)
 _RATE_LIMIT = re.compile(
     r"rate limit (reached|exceeded)|rate_limit|too many requests",
     re.IGNORECASE)
@@ -85,12 +90,28 @@ def is_model_error(stderr: str) -> bool:
     """True if stderr indicates the MODEL (not the network) is the problem."""
     if not stderr:
         return False
-    return bool(_MODEL_ERROR.search(stderr) or _HARD_SPEND.search(stderr)
+    return bool(_MODEL_ERROR.search(stderr) or is_account_limit(stderr)
                 or _RATE_LIMIT.search(stderr))
 
 
+def limit_reason(stderr: str) -> str | None:
+    """Return the stable reason for a hard account-wide provider limit."""
+    if not stderr:
+        return None
+    if _SESSION_LIMIT.search(stderr):
+        return "session_limit"
+    if _HARD_SPEND.search(stderr):
+        return "spend_limit"
+    return None
+
+
+def is_account_limit(stderr: str) -> bool:
+    """True for account-wide limits that require immediate provider failover."""
+    return limit_reason(stderr) is not None
+
+
 def is_spend_limit(stderr: str) -> bool:
-    """True ONLY for hard account exhaustion (never transient rate limits)."""
+    """Backward-compatible predicate for hard monetary/usage exhaustion."""
     return bool(stderr and _HARD_SPEND.search(stderr))
 
 
@@ -120,7 +141,7 @@ def next_model(current: str) -> str | None:
 def fallback_for_stderr(current: str, stderr: str) -> str | None:
     """Given the failed model + its stderr, the model to retry with (or None).
 
-    - HARD spend limit → None: the limit is account-wide, so degrading models
+    - HARD account limit → None: the limit is account-wide, so degrading models
       on the SAME provider just burns another doomed call (2026-07-07: every
       reply paid an opus+haiku probe pair). Both consumers fall through to
       their backup-provider branch on None + is_model_error.
@@ -131,7 +152,7 @@ def fallback_for_stderr(current: str, stderr: str) -> str | None:
     """
     if not is_model_error(stderr):
         return None
-    if is_spend_limit(stderr):
+    if is_account_limit(stderr):
         return None
     if _RATE_LIMIT.search(stderr):
         cheapest = DEGRADE_CHAIN[-1]
@@ -141,9 +162,17 @@ def fallback_for_stderr(current: str, stderr: str) -> str | None:
 
 # ── Sticky cross-process provider gate ──────────────────────────────────────
 
-# Pascal-facing text (no jargon, no provider names — 备用通道 only).
-_TRIP_NOTE = ("Claude 主通道本月额度用完了，我已自动切到备用通道，功能不受影响。"
-              "想恢复主通道可以在 claude.ai/settings/usage 提额度。")
+# Pascal-facing text (no jargon, no backup-provider names).
+_TRIP_NOTES = {
+    "session_limit": (
+        "Claude 主通道暂时达到本次会话额度，我已自动切到备用通道。"
+        "额度重置后会自动探测并切回。"
+    ),
+    "spend_limit": (
+        "Claude 主通道本月额度用完了，我已自动切到备用通道，功能不受影响。"
+        "想恢复主通道可以在 claude.ai/settings/usage 提额度。"
+    ),
+}
 _CLEAR_NOTE = "主通道恢复了，已切回。"
 
 
@@ -271,7 +300,11 @@ def trip(reason: str = "spend_limit",
             notify_since = float(state["spend_limit_since"])
         _write_state(path, state)
     if notify_since is not None:
-        _notify_pascal(jarvis_dir, _TRIP_NOTE, notify_since)
+        _notify_pascal(
+            jarvis_dir,
+            _TRIP_NOTES.get(reason, _TRIP_NOTES["spend_limit"]),
+            notify_since,
+        )
 
 
 def clear(jarvis_dir: str | Path | None = None) -> None:
@@ -300,12 +333,20 @@ if __name__ == "__main__":
     # CLI for bot.sh: args = <current_model> ; stderr text on stdin.
     # Gate verbs: --gate [no-probe] prints primary|backup|probe;
     # --trip [reason] / --clear manage the sticky flag;
-    # --is-spend-limit mirrors --is-model-error (stderr on stdin, exit 0/1)
-    # so bash can gate --trip on the HARD spend signature only.
+    # --limit-reason prints session_limit|spend_limit for account-wide limits.
+    # Legacy --is-spend-limit remains for callers that need monetary limits.
     if len(sys.argv) > 1 and sys.argv[1] == "--is-model-error":
         sys.exit(0 if is_model_error(sys.stdin.read()) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--is-spend-limit":
         sys.exit(0 if is_spend_limit(sys.stdin.read()) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--is-account-limit":
+        sys.exit(0 if is_account_limit(sys.stdin.read()) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--limit-reason":
+        reason = limit_reason(sys.stdin.read())
+        if reason:
+            print(reason)
+            sys.exit(0)
+        sys.exit(1)
     if len(sys.argv) > 1 and sys.argv[1] == "--gate":
         print(gate(probe=(len(sys.argv) < 3 or sys.argv[2] != "no-probe")))
         sys.exit(0)

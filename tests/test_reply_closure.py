@@ -18,7 +18,7 @@ def test_na_signals():
 
 
 def test_ambiguous_returns_none():
-    for t in ["今天天气不错", "", "你觉得呢", "凯瑞老师那边"]:
+    for t in ["今天天气不错", "", "你觉得呢", "同事A那边"]:
         assert rc.classify_reply(t) is None, t
 
 

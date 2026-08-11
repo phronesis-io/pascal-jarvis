@@ -217,8 +217,17 @@ def memorial_option_label(label: str) -> str:
 
 
 def memorial_review_surface(state: dict) -> str:
+    """Map legacy review metadata onto the only live approval surface.
+
+    Core keeps old ``phone`` values for audit fidelity. The dashboard must not
+    advertise that retired surface as actionable, so every pending decision is
+    presented as Lark-bound here.
+    """
     from core.memorial import review_surface
-    return review_surface(state)
+    surface = review_surface(state)
+    if memorial_is_pending(state) and surface != "none":
+        return "lark"
+    return surface
 
 
 def memorial_surface_label(state: dict) -> str:
@@ -232,7 +241,7 @@ def memorial_surface_label(state: dict) -> str:
         return "知会 · 无需批"
     if memorial_review_surface(state) == REVIEW_LARK:
         return "飞书即时批"
-    return "手机集中批"
+    return "待处理"
 
 
 def memorial_visible_options(state: dict) -> list[dict]:

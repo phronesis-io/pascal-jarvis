@@ -41,13 +41,14 @@ zero and the phone desk was never successfully paired. Therefore:
 - Do not expose retries, tool calls, scheduler logs, or duplicate cards.
 - A thread about one Memorial retains that Memorial as its context.
 
-### Phone and Desktop Items
+### Ledger and Desktop Archive
 
-- One card represents one matter requiring one reading or decision.
-- The same Item is resolved everywhere; device handoff never forks it.
-- Pending decisions lead, routine notices follow.
-- Details and evidence are available on demand, not forced into the first
-  viewport.
+- One ledger row represents one matter requiring one reading or decision.
+- Actionable Items are delivered and resolved in Lark; the dashboard mirrors
+  history for archive and diagnosis, not as a second inbox.
+- Pending decisions lead the Lark docket; ambient notices stay ledger-only and
+  return as one bounded morning-anchor summary.
+- Details and evidence are available on demand, not forced into the first card.
 
 ### Matter
 
@@ -66,8 +67,8 @@ zero and the phone desk was never successfully paired. Therefore:
 ### Delegation
 
 - Show the current required step, evidence state, blocker, and next action.
-- Keep progress inspectable on phone and desktop without pushing routine
-  transitions into Lark.
+- Keep consequential progress inspectable in Lark and detailed evidence
+  available to executor sessions without pushing routine transitions.
 - Never use completed styling for an unverified mutation.
 - Shadow predictions stay out of the active user surface.
 
@@ -80,8 +81,8 @@ zero and the phone desk was never successfully paired. Therefore:
 - A repeated callback or retry returns the original receipt.
 - An explicit "send again" creates a new contract version.
 - Missing evidence means unknown, not failure and not success.
-- Mobile and desktop operate the same Item and Delegation IDs. A Handoff moves
-  attention; it does not copy state.
+- Lark and executor sessions operate the same Item and Delegation IDs. A
+  Handoff moves attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
   activity signals mean inactivity.
 

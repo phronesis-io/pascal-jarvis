@@ -1118,22 +1118,22 @@ You have access to the user's memory below. Use it to personalize your responses
                 try:
                     from core.model_fallback import (fallback_for_stderr,
                                                      is_model_error,
-                                                     is_spend_limit)
+                                                     limit_reason)
                     nxt = fallback_for_stderr(model or "", err_text)
                     model_problem = is_model_error(err_text)
-                    spend_limited = is_spend_limit(err_text)
+                    account_limit_reason = limit_reason(err_text)
                 except Exception:
                     nxt = None
                     model_problem = False
-                    spend_limited = False
-                if spend_limited and not use_backup:
+                    account_limit_reason = None
+                if account_limit_reason and not use_backup:
                     # Account-wide: persist it so EVERY process (bot replies,
                     # background jobs, next cycles) skips the doomed primary.
                     # trip() also pages Pascal once (6h cooldown) through the
                     # daemon's Claude-independent dead-letter channel.
                     try:
                         from core.model_fallback import trip as _gate_trip
-                        _gate_trip("spend_limit", self.jarvis_dir)
+                        _gate_trip(account_limit_reason, self.jarvis_dir)
                     except Exception:
                         pass
                 if nxt and f"{provider}:{nxt}" not in attempted:

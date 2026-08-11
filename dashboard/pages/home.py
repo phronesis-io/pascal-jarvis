@@ -285,10 +285,6 @@ def home_page():
 
             states = memorial_states(JARVIS_DIR)
             pending = pending_memorials(JARVIS_DIR, states=states)
-            phone_pending = [
-                state for state in pending
-                if memorial_review_surface(state) == "phone"
-            ]
             lark_pending = [
                 state for state in pending
                 if memorial_review_surface(state) == "lark"
@@ -311,8 +307,6 @@ def home_page():
                         '?.scrollIntoView({behavior: "smooth"})')
 
             with ui.element("div").classes("metric-strip"):
-                _metric("手机待批", len(phone_pending), alert=bool(phone_pending),
-                        href="/items")
                 _metric("飞书待批", len(lark_pending), alert=bool(lark_pending),
                         href="/items")
                 _metric("7 日互动率", f"{stats['rate']}%", href="/engagement")
@@ -323,23 +317,18 @@ def home_page():
                 ui.label("壹 · 决策").classes("section-kicker")
                 with ui.row().classes("w-full items-end justify-between gap-4"):
                     with ui.column().classes("gap-1"):
-                        ui.label("手机集中批").classes("section-title")
-                        ui.label("把可等待的判断放在一起，留出完整时间做真正重要的事。").classes(
+                        ui.label("飞书集中批").classes("section-title")
+                        ui.label("把可等待的判断集中到飞书，留出完整时间做真正重要的事。").classes(
                             "section-note")
-                    ui.link(f"查看全部 {len(phone_pending)} →", "/items").classes(
+                    ui.link(f"查看全部 {len(lark_pending)} →", "/items").classes(
                         "jarvis-nav-link")
-                if phone_pending:
+                if lark_pending:
                     with ui.element("div").classes("memorial-grid"):
-                        for state in phone_pending[:4]:
+                        for state in lark_pending[:4]:
                             _memorial_preview(state, live_content.refresh)
                 else:
                     ui.label("没有需要集中批阅的事项。Jarvis 会继续在后台看着。").classes(
                         "empty-guidance")
-                if lark_pending:
-                    ui.label(
-                        f"另有 {len(lark_pending)} 张即时奏折已送到飞书；"
-                        "它们也保留在「飞书批」中，任一处批示都会同步。"
-                    ).classes("section-note")
 
             with ui.column().classes("w-full gap-3"):
                 ui.label("贰 · 变化").classes("section-kicker")

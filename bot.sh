@@ -1024,8 +1024,8 @@ print(build_system_prompt(
   # looping to empty death ("Continue / No response requested").
   local _cur_model="$MAIN_MODEL"
 
-  # Sticky provider gate (2026-07-07 spend-limit incident): a monthly spend
-  # limit is account-wide, yet every message re-probed primary from scratch —
+  # Sticky provider gate: account-wide spend/session limits used to make every
+  # message re-probe primary from scratch —
   # ~11s of doomed attempts per reply AND two raw error turns written into
   # the live session transcript each time. When the gate says the flag is
   # fresh, start attempt 1 on backup; _claude_backup_tried=1 keeps the
@@ -1040,7 +1040,7 @@ print(build_system_prompt(
     _use_claude_backup=1
     _claude_backup_tried=1
     _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
-    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup provider (model=$_cur_model)"
+    log_info "[$session_id] Provider gate: primary account-limited — starting on backup provider (model=$_cur_model)"
   elif [ "$_provider_gate" = "backup" ] \
     && [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
     && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
@@ -1337,20 +1337,24 @@ except Exception:
       if [ "${_exit_code:-0}" -eq 143 ]; then
         break
       fi
-      # Sticky provider gate: a HARD spend limit from PRIMARY is account-wide
+      # Sticky provider gate: a HARD account limit from PRIMARY is account-wide
       # — persist it so every caller (replies, heartbeat, background jobs)
       # starts on backup instead of re-walking the doomed primary ladder.
       # --trip also pages Pascal once per outage episode (never again for the
       # same ongoing episode; 6h anti-flap across episodes) via the daemon's
       # Claude-independent dead-letter channel.
-      if [ "$_use_claude_backup" -eq 0 ] \
-        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-spend-limit 2>/dev/null; then
-        python3 -m core.model_fallback --trip spend_limit >/dev/null 2>&1 || true
+      _account_limit_reason=""
+      if [ "$_use_claude_backup" -eq 0 ]; then
+        _account_limit_reason=$(printf '%s' "$_model_error_text" \
+          | python3 -m core.model_fallback --limit-reason 2>/dev/null) || true
+      fi
+      if [ -n "$_account_limit_reason" ]; then
+        python3 -m core.model_fallback --trip "$_account_limit_reason" >/dev/null 2>&1 || true
       fi
       # REQ-77: if the empty answer was a MODEL error (unavailable / banned /
       # rate-limited) rather than a transient blip, degrade the model for the
       # next attempt instead of retrying the same broken model to death.
-      # A HARD spend limit yields NO same-provider fallback (empty _fallback):
+      # A HARD account limit yields NO same-provider fallback (empty _fallback):
       # degrading opus→haiku on an exhausted account just burned a second
       # doomed call — the elif below jumps straight to the backup provider.
       _fallback=""
