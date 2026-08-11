@@ -7,9 +7,9 @@ small, redacted tail from owner-driven sessions for two bounded projections:
 * ``context`` gives the main Lark agent immediate situational awareness, even
   before the next digest cycle succeeds.
 
-Jarvis-managed Claude sessions, Codex ``exec`` calls, health canaries,
-subagents, reasoning, and tool payloads are excluded to prevent self-echo and
-private implementation data from becoming conversation memory.
+Jarvis-managed sessions, headless Codex executions, health canaries, subagents,
+reasoning, and tool payloads are excluded to prevent self-echo and private
+implementation data from becoming conversation memory.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ MAX_TURN_CHARS = 500
 _SECRET_RE = re.compile(
     r"(-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?"
     r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"
+    r"|(?:Cookie|Set-Cookie|Authorization|Proxy-Authorization)\s*:\s*[^\r\n]+"
+    r"|[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"
     r"|(?<![A-Za-z0-9])(?:sk|rk)_(?:live|test)_[A-Za-z0-9_\-]{8,}"
     r"|(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}"
     r"|(?:gh[pousr]|github_pat)_[A-Za-z0-9_\-]{12,}"
@@ -57,7 +59,8 @@ _SECRET_RE = re.compile(
     r"|Bearer\s+\S+"
     r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
     r"|(?<![A-Za-z0-9_])[\"']?[A-Za-z0-9_\-]*"
-    r"(?:token|secret|password|passwd|api[_ -]?key|access[_ -]?key|private[_ -]?key)"
+    r"(?:token|secret|password|passwd|credential|cookie|session(?:[_ -]?id)?"
+    r"|api[_ -]?key|access[_ -]?key|private[_ -]?key)"
     r"[A-Za-z0-9_\-]*[\"']?"
     r"\s*(?:is|[=:])\s*(?:[\"'][^\"']+[\"']|\S+))",
     re.IGNORECASE | re.DOTALL,
@@ -111,8 +114,8 @@ class SessionTail:
 
 def redact_text(value: object, limit: int = MAX_TURN_CHARS) -> str:
     """Collapse and redact transcript text before it enters any projection."""
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    text = _SECRET_RE.sub("[redacted]", text)
+    text = _SECRET_RE.sub("[redacted]", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[:limit].rstrip() + "..."
     return text

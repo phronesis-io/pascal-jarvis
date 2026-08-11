@@ -19,8 +19,10 @@ survives as a durable digest after native provider sessions age out.
 
 1. Discover top-level, human-driven Claude Code and Codex sessions across
    workspaces, including the Jarvis workspace.
-2. Exclude Jarvis-owned Claude sessions, Codex `exec` calls, canaries,
-   subagents, reasoning, tool inputs, and tool outputs.
+2. Exclude Jarvis-owned provider sessions, headless Codex executions,
+   canaries, subagents, reasoning, tool inputs, and tool outputs. Preserve
+   owner-visible Codex Desktop tasks even if a provider version labels them
+   `source=exec`.
 3. Redact credential-shaped material before text reaches a prompt, digest, or
    diagnostic output.
 4. Inject a bounded recent projection only into the owner's private prompt.

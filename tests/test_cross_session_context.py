@@ -107,6 +107,11 @@ def test_redaction_does_not_mangle_task_notifications():
     assert "AKIAIOSFODNN7EXAMPLE" not in redact_text("AKIAIOSFODNN7EXAMPLE")
     pem = "-----BEGIN PRIVATE KEY----- private-material -----END PRIVATE KEY-----"
     assert "private-material" not in redact_text(pem)
+    assert "session-value" not in redact_text("Cookie: session=session-value\nnext")
+    assert redact_text("Cookie: session=session-value\nnext").endswith("next")
+    uri = redact_text("connect https://alice:uri-password@example.test/path")
+    assert "alice" not in uri and "uri-password" not in uri
+    assert "example.test/path" in uri
 
 
 def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
