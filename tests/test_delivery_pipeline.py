@@ -133,24 +133,22 @@ def test_no_path_creates_a_web_envelope(pipeline):
     assert rows and all(row["route_channel"] != "web" for row in rows)
 
 
-def test_explicit_web_request_is_refused_not_faked(pipeline):
-    """An explicit requested_channel=web must fail loudly — the old transport
-    returned unconditional success for it (the 1.8%-read fake ledger)."""
-    pipe, sent, _ = pipeline
-
-    real_transport = pipe.transport
-
-    def strict(envelope, channel):
-        # Mirror the production default transport's refusal contract.
-        if channel not in {"lark", "lark_reply", "push"}:
-            return TransportResult(False, error=f"unknown channel: {channel}")
-        return real_transport(envelope, channel)
-
-    pipe.transport = strict
+def test_explicit_web_request_is_refused_not_faked(tmp_path):
+    """An explicit requested_channel=web must fail loudly — the old default
+    transport returned unconditional success for it (the 1.8%-read fake
+    ledger). Exercises the REAL production transport: the web channel falls
+    through to the unknown-channel refusal before any subprocess runs."""
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "jarvis.db",
+        transport=delivery._default_transport(tmp_path),
+        sleeper=lambda _seconds: None,
+    )
     result = pipe.deliver(DeliveryEnvelope(
         source="legacy-web-caller", payload={"text": "老调用点"},
         requested_channel="web"))
     assert result.state != "delivered"
+    row = pipe.get(result.delivery_id)
+    assert "unknown channel: web" in str(row["last_error"])
 
 
 def test_web_kind_is_rejected():

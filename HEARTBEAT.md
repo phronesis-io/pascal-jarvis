@@ -26,7 +26,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup); metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
+| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent; a gated user_message (anchor check + live gh PR verify + sent dedup) is AMBIENT — it lands in the ledger and the morning-anchor 攒批 line, not as a realtime Lark card (REQ-119 ledger-only); metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
 | Team | phronesis-monitor | only when the user is named or his action is needed (REQ-121); team chatter never cards |
 | Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic, personal-site | silent (beat only on change/fail; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent) |
 

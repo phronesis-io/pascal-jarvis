@@ -1323,7 +1323,9 @@ def main(argv: list[str] | None = None) -> int:
     send = sub.add_parser("send")
     send.add_argument("--source", required=True)
     send.add_argument(
-        "--kind", default="text", choices=["text", "card", "web", "push"]
+        # No "web": the web surface is retired (REQ-119) and the kind is
+        # rejected by DeliveryEnvelope.normalized() — don't offer it here.
+        "--kind", default="text", choices=["text", "card", "push"]
     )
     send.add_argument("--attention", default="notice",
                       choices=["decision", "notice", "alert", "reply"])

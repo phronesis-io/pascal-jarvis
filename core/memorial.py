@@ -208,27 +208,29 @@ WEB_FIRST_SOURCES = {
     "eigenflux-feed-triage",
 }
 
-# Monitoring exhaust whose notices are LEDGER-ONLY (REQ-119, 2026-08-11):
+# Monitoring exhaust whose NOTICES are LEDGER-ONLY (REQ-119, 2026-08-11):
 # create() records them in memorials.jsonl — where the morning anchor's
 # 攒批 digest line (core.presence) is their one batched shot at being seen —
 # but they get no delivery envelope and never enter the delivery pipeline.
 # Rationale, measured 14d to 8/11: Lark cards were read 95.7% (235 cards),
 # web cards 1.8% (170 cards) — the web desk was a fake surface whose
-# transport unconditionally reported success. Pushing this exhaust to Lark
-# instead would recreate the 7/22 card storm, so it stays out of every
-# realtime channel. Alerts from these sources still page (attention wins).
+# transport unconditionally reported success. Pushing raw exhaust to Lark
+# instead would recreate the 7/22 card storm. Alerts and decisions from an
+# ambient source still deliver — attention class outranks the source.
+#
+# Adversarial-review verdict (2026-08-11): ledger-only narrows by ATTENTION,
+# not by blanket source membership, so this set holds ONLY sources whose
+# per-card value is unfiltered exhaust. metrics-digest, phronesis-monitor
+# and repos-sync are NOT here: their noise is governed upstream (REQ-121 —
+# steady-state snapshots dropped at the pre-hook, 60m interval + 成卡门槛,
+# 24h daily rollup), so a card they DO emit is curated signal that must
+# reach the chat, not a row that quietly rots in the ledger.
 # Interactive, personal voices (checkin, routines, intention-check,
 # daily-reflect, heartbeat prose) are deliberately NOT here: those going
-# invisible is exactly the 7/24 regression.
-#
-# eigenflux-feed-triage is NOT ambient (2026-08-03). Its cards are curated
-# signal — ~2/day, each a one-line brief already contextualized to the user
-# — not exhaust. Content of this volume and quality earns the chat.
+# invisible is exactly the 7/24 regression. eigenflux-feed-triage is NOT
+# ambient (2026-08-03): curated one-line briefs earn the chat.
 AMBIENT_SOURCES = {
     "cross-session-sync",
-    "metrics-digest",
-    "phronesis-monitor",
-    "repos-sync",
 }
 
 ALERT_SOURCES = {
@@ -342,43 +344,20 @@ def requires_decision(state: dict) -> bool:
     ) == ATTENTION_DECISION
 
 
-def _infer_review_surface(source: str, attention: str,
-                          extra_buttons: list[dict],
-                          *, urgent: bool = False,
-                          chat_id: str = "") -> str:
-    """Choose where a human decision should happen: Lark, always.
-
-    The phone/web review desk is retired (REQ-119, 2026-08-11 拍板: 飞书=
-    唯一投递面). Measured 14d: web-surface cards were read 1.8% vs 95.7% on
-    Lark — a decision parked anywhere but the chat is a decision nobody sees.
-    REVIEW_PHONE survives only as a legacy ledger value for old rows.
-
-    The unused keyword parameters are kept so existing call sites (and the
-    CLI) need no change; every input now maps to the same answer.
-    """
-    del source, extra_buttons, urgent, chat_id  # every decision reviews on Lark
-    if attention != ATTENTION_DECISION:
-        return REVIEW_NONE
-    return REVIEW_LARK
-
-
 def review_surface(state: dict) -> str:
-    """Preferred approval surface, with a truthful fallback for old rows."""
+    """Preferred approval surface, with a truthful fallback for old rows.
+
+    Since REQ-119 (2026-08-11) every decision reviews on Lark — the
+    phone/web desk is retired (14d read rates: Lark 95.7% vs web 1.8%).
+    An explicit legacy value on an old ledger row is still reported as
+    written; ``REVIEW_PHONE`` survives only as that historical value.
+    """
     explicit = str(state.get("review_surface", "") or "")
     if explicit in REVIEW_SURFACES:
         return explicit
     if not requires_decision(state):
         return REVIEW_NONE
-    # Before this field existed, a delivered/queued decision was a Lark card.
-    if str(state.get("delivery_status", "")) in {
-            "delivered", "queued", "retry_queued"}:
-        return REVIEW_LARK
-    return _infer_review_surface(
-        str(state.get("source", "")),
-        ATTENTION_DECISION,
-        list(state.get("extra_buttons") or []),
-        chat_id=str(state.get("chat_id", "")),
-    )
+    return REVIEW_LARK
 
 
 def delivery_accepted(state: dict) -> bool:
@@ -388,19 +367,18 @@ def delivery_accepted(state: dict) -> bool:
 def should_push_to_lark(state: dict) -> bool:
     """Lark is the ONLY delivery surface (REQ-119, 2026-08-11 拍板).
 
-    A card either goes to Lark or stays ledger-only. Ambient monitoring
-    exhaust (AMBIENT_SOURCES) is ledger-only — the morning anchor's 攒批
-    digest line re-surfaces it — so this cannot recreate the 7/22 card
-    storm. Everything else (alerts, decisions, the product's own voice)
-    goes to the chat: the 14d读卡数据 (Lark 95.7% vs web 1.8%) settled
-    that any other surface is a place cards go to die. An alert always
-    pushes, even from an ambient source — anomaly pages must ring.
+    A card either goes to Lark or stays ledger-only, and ledger-only
+    narrows by ATTENTION, never by a blanket source verdict: alerts and
+    decisions always ring, and only an ambient-source NOTICE stays in the
+    ledger, where the morning anchor's 攒批 digest line re-surfaces it.
+    The 14d读卡数据 (Lark 95.7% vs web 1.8%) settled that any other
+    surface is a place cards go to die.
     """
     if str(state.get("attention", "") or "") == ATTENTION_ALERT:
         return True
-    if str(state.get("source", "")) in AMBIENT_SOURCES:
-        return False
-    return True
+    if requires_decision(state):
+        return True
+    return str(state.get("source", "")) not in AMBIENT_SOURCES
 
 
 _ALERT_RE = re.compile(
@@ -1638,21 +1616,11 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         attention = ATTENTION_ALERT
     if attention not in {ATTENTION_DECISION, ATTENTION_NOTICE, ATTENTION_ALERT}:
         raise ValueError("attention must be decision, notice, or alert")
-    inferred_review_at = _infer_review_surface(
-        source, attention, native_buttons, urgent=urgent, chat_id=chat_id)
-    # Hard time/conversation/native-action constraints cannot be downgraded by
-    # a caller accidentally passing phone. Ordinary decisions may explicitly
-    # opt into Lark when a trusted emitter has stronger context.
-    review_at = str(
-        REVIEW_LARK if inferred_review_at == REVIEW_LARK
-        else (review_at or inferred_review_at)
-    )
-    if review_at not in REVIEW_SURFACES:
-        raise ValueError("review_at must be lark, phone, or none")
-    if attention == ATTENTION_DECISION and review_at == REVIEW_NONE:
-        raise ValueError("decisions must be reviewed on lark or phone")
-    if attention != ATTENTION_DECISION and review_at != REVIEW_NONE:
-        raise ValueError("only decisions can have a review surface")
+    # REQ-119: Lark is the only review surface — the attention class fully
+    # determines where a card waits. The caller's legacy ``review_at`` hint
+    # is ignored (the phone desk is retired); it stays in the signature so
+    # older emitters keep working.
+    review_at = REVIEW_LARK if attention == ATTENTION_DECISION else REVIEW_NONE
 
     if not matter_id:
         try:
@@ -1711,10 +1679,9 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
             print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
 
     state = _fold([ev])[mid]
-    if not send:
-        if not should_push_to_lark(state):
-            # Ledger-only cards have no other transport: record it now.
-            return mid, _deliver_existing(state, urgent=urgent)
+    # send=False leaves Lark-routed cards to the caller's transport; a
+    # ledger-only card has no other transport, so its status records now.
+    if not send and should_push_to_lark(state):
         return mid, False
     return mid, _deliver_existing(state, urgent=urgent)
 
@@ -2719,8 +2686,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--chat-id", dest="chat_id", default="")
     sp.add_argument("--urgent", action="store_true",
                     help="bypass quiet hours (only for genuinely urgent asks)")
-    sp.add_argument("--review-at", choices=(REVIEW_PHONE, REVIEW_LARK),
-                    default="", help="preferred approval surface")
+    # No --review-at flag: decisions always review on Lark (REQ-119) — a
+    # choice that silently does nothing is a dead affordance.
 
     lp = sub.add_parser("list", help="print folded ledger states (JSON lines)")
     lp.add_argument("--pending", action="store_true")
@@ -2742,7 +2709,7 @@ def main(argv: list[str] | None = None) -> int:
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
                                context=args.context, chat_id=args.chat_id,
-                               urgent=args.urgent, review_at=args.review_at)
+                               urgent=args.urgent)
         except ValueError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2

@@ -66,20 +66,25 @@ def sent_count(hours: float = 24, now: datetime | None = None) -> int:
 
 
 def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
-    """Cards created in the window that never got a Feishu send.
+    """Cards created in the window that are explicitly ledger-only.
 
-    Under REQ-119 these are the ledger-only rows (ambient exhaust plus any
-    card whose send never succeeded) — real content that no one will ever
-    see unless a batch surface carries it. Counted from the ledger itself
-    (create with no ``sent`` event), not from any per-row status field, so
-    legacy ``web_only`` rows and failed sends are covered identically.
+    Counts ONLY rows whose delivery event says ``ledger_only`` (ambient
+    exhaust, REQ-119) — the rows whose one reach IS the morning digest.
+    Inferring from "created but no ``sent`` event" would also sweep in
+    Lark-routed cards still sitting in the quiet-hours queue and cards on
+    the retry path, double-exposing them once the queue flushes
+    (adversarial review, 2026-08-11).
     """
     events = _events()
-    sent_ids = {str(e.get("id")) for e in events if e.get("ev") == "sent"}
+    ledger_ids = {
+        str(e.get("id")) for e in events
+        if e.get("ev") == "delivery"
+        and str(e.get("status", "")) == "ledger_only"
+    }
     cutoff = (now or datetime.now()) - timedelta(hours=hours)
     return [e for e in events
             if e.get("ev") == "create" and _in_window(e, cutoff)
-            and str(e.get("id")) not in sent_ids]
+            and str(e.get("id")) in ledger_ids]
 
 
 def check(now: datetime | None = None) -> str:

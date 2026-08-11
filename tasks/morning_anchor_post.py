@@ -46,12 +46,16 @@ def main() -> int:
     if not message:
         return 0
 
-    # Dedup backstop: stamp first, then print — a crash between the two loses
-    # one nudge (fine), the reverse order could double-send (not fine).
+    # Dedup backstop: stamp first, then everything else — a crash after the
+    # stamp loses one nudge (fine), any later stamping point would reopen
+    # the double-send window the stamp exists to close. Yesterday's line is
+    # captured before the stamp overwrites it (REQ-121 comparison below).
     if morning_anchor_fired():
         print("[morning-anchor] already sent today — dropping duplicate",
               file=sys.stderr)
         return 0
+    previous_line = morning_anchor_last_text()
+    morning_anchor_mark(text=message)
 
     # Deterministic footer, not part of the model's one-line contract:
     # ledger-only cards (ambient exhaust that never reaches Feishu, REQ-119)
@@ -66,16 +70,14 @@ def main() -> int:
         digest = ""
 
     # REQ-121: a line substantively identical to yesterday's carries no new
-    # information — skip the resend and consume today's window. The digest
-    # footer overrides the skip: its counts/titles are fresh content, and it
-    # has no other surface (dropping it would silence the ledger-only bin).
-    if not digest and _normalized(message) == _normalized(
-            morning_anchor_last_text()):
+    # information — skip the resend (the window is already stamped). The
+    # digest footer overrides the skip: its counts/titles are fresh content,
+    # and it has no other surface (dropping it would silence the ledger-only
+    # bin).
+    if not digest and _normalized(message) == _normalized(previous_line):
         print("[morning-anchor] same line as yesterday, no digest — "
               "skipping resend", file=sys.stderr)
-        morning_anchor_mark()  # keeps yesterday's remembered text
         return 0
-    morning_anchor_mark(text=message)
 
     if digest:
         message = f"{message}\n{digest}"

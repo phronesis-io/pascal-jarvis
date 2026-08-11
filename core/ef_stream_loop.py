@@ -181,8 +181,6 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
     )
 
     def transport(envelope, channel):
-        if channel == "web":
-            return TransportResult(True)
         ok = _lark_send(
             str(envelope.payload.get("text") or ""),
             user_id,

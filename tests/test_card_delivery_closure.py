@@ -33,22 +33,26 @@ from core.eigenflux_publish import (  # noqa: E402
 
 # ── C1 (REQ-119): Lark is the ONLY delivery surface ──────────────────────────
 # 14d to 8/11: Lark cards read 95.7% (235), web cards 1.8% (170) — the web
-# desk was a dead surface whose transport faked success. New contract: a card
-# either goes to Lark or stays ledger-only (ambient exhaust, batched into the
-# morning anchor digest). No routing decision consults desk reachability.
+# desk was a dead surface whose transport faked success. New contract
+# (adversarial-review verdict, 2026-08-11): ledger-only narrows by ATTENTION,
+# not by blanket source — alerts and decisions always ring; only an
+# ambient-source NOTICE stays in the ledger (batched into the morning
+# anchor digest). No routing decision consults desk reachability.
 
 
-def test_every_decision_reviews_on_lark():
-    assert memorial._infer_review_surface(
-        "eigenflux-publish", memorial.ATTENTION_DECISION, [],
-    ) == memorial.REVIEW_LARK
-    # Neither urgency nor native buttons nor a live chat change the answer —
-    # there is no other surface to send a decision to.
-    assert memorial._infer_review_surface(
-        "task-triage", memorial.ATTENTION_DECISION,
-        [{"text": "打开", "value": {"action": "open"}}],
-        urgent=True, chat_id="oc_x",
-    ) == memorial.REVIEW_LARK
+def test_every_decision_reviews_on_lark(tmp_path, monkeypatch):
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    mid, _ = memorial.create("eigenflux-publish", "广播批准", "内容",
+                             preset="decision")
+    assert memorial.review_surface(memorial.get_memorial(mid)) == \
+        memorial.REVIEW_LARK
+    # A legacy review_at hint changes nothing — there is no other surface.
+    mid2, _ = memorial.create("task-triage", "选一个", "两个方案",
+                              preset="decision", review_at="phone")
+    assert memorial.review_surface(memorial.get_memorial(mid2)) == \
+        memorial.REVIEW_LARK
 
 
 def test_notice_pushes_to_lark():
@@ -58,12 +62,37 @@ def test_notice_pushes_to_lark():
     assert memorial.should_push_to_lark(st) is True
 
 
+def test_governed_sources_push_their_curated_cards():
+    """metrics-digest / phronesis-monitor / repos-sync are NOT ambient: their
+    noise is governed upstream (REQ-121 pre-filter, interval + 成卡门槛,
+    daily rollup), so a card they DO emit is signal and must reach the chat —
+    a prompt that promises delivery must not be contradicted by routing."""
+    for source in ("metrics-digest", "phronesis-monitor", "repos-sync"):
+        assert source not in memorial.AMBIENT_SOURCES
+        st = {"source": source, "attention": memorial.ATTENTION_NOTICE,
+              "options": [], "extra_buttons": []}
+        assert memorial.should_push_to_lark(st) is True, source
+
+
+def test_metrics_flip_card_reaches_lark_end_to_end(tmp_path, monkeypatch):
+    """REQ-121 × REQ-119: a metrics-digest state FLIP (the only thing the
+    pre-hook lets through) becomes a real delivered Lark card."""
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_flip")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    mid, accepted = memorial.create(
+        source="metrics-digest", title="🚨 demo 异常", body="a 掉到 0",
+        preset="fyi")
+    assert accepted is True
+    assert memorial.get_memorial(mid)["delivery_status"] == "delivered"
+
+
 @pytest.mark.parametrize("source", sorted(memorial.AMBIENT_SOURCES))
-def test_ambient_sources_are_ledger_only_never_web(source, tmp_path,
+def test_ambient_notices_are_ledger_only_never_web(source, tmp_path,
                                                    monkeypatch):
-    """Monitoring exhaust never pushes AND never grows a delivery envelope —
-    pushing it would recreate the 7/22 card storm; a web envelope would
-    resurrect the fake-delivered ledger. The morning digest carries it."""
+    """Ambient exhaust notices never push AND never grow a delivery envelope
+    — pushing them would recreate the 7/22 card storm; a web envelope would
+    resurrect the fake-delivered ledger. The morning digest carries them."""
     st = {"source": source, "attention": memorial.ATTENTION_NOTICE,
           "options": [], "extra_buttons": []}
     assert memorial.should_push_to_lark(st) is False
@@ -80,12 +109,16 @@ def test_ambient_sources_are_ledger_only_never_web(source, tmp_path,
     assert rows == [], "ledger-only cards must not enter the delivery pipeline"
 
 
-def test_ambient_alert_still_pages():
-    """An ANOMALY from an ambient source is an alert, not exhaust — the
-    attention class outranks the source's ledger-only default."""
-    st = {"source": "metrics-digest", "attention": memorial.ATTENTION_ALERT,
-          "options": [], "extra_buttons": []}
-    assert memorial.should_push_to_lark(st) is True
+@pytest.mark.parametrize("source", sorted(memorial.AMBIENT_SOURCES))
+def test_ambient_alert_and_decision_still_ring(source):
+    """Attention outranks the source: an alert or a decision from an ambient
+    source is not exhaust and must reach the chat."""
+    alert = {"source": source, "attention": memorial.ATTENTION_ALERT,
+             "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(alert) is True
+    decision = {"source": source, "attention": memorial.ATTENTION_DECISION,
+                "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(decision) is True
 
 
 # ── C2: a no-op action must not toast success ────────────────────────────────

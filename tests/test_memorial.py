@@ -148,10 +148,9 @@ def test_routine_card_is_notice_not_pending_decision(env):
     assert [s["id"] for s, _ in scan["lapse"]] == [mid]
 
 
-def test_routine_notice_still_reaches_lark_when_desk_cannot_ring(env,
-                                                                 monkeypatch):
-    # The downgrade must not make the product's own voice invisible (the 7/24
-    # regression): with no desk, a routine notice rings Lark like checkin does.
+def test_routine_notice_reaches_lark(env):
+    # The product's own voice must not go invisible (the 7/24 regression):
+    # a routine notice rings Lark like checkin does.
     _, sent = memorial.create("routine:起来动动", "起来动动·眼睛",
                               "看远处 20 秒。", options=_routine_options())
     assert sent is True
@@ -221,16 +220,15 @@ def test_old_delivered_decision_truthfully_stays_lark_routed():
     assert memorial.review_surface(old) == "lark"
 
 
-def test_only_decisions_accept_an_explicit_review_surface(env):
-    with pytest.raises(ValueError):
-        memorial.create(
-            "mail", "通知", "看看", preset="fyi", review_at="lark")
-    # A decision explicitly asked to review nowhere is clamped to Lark —
-    # the hard constraint (decisions must be reviewable) outranks the caller,
-    # same precedence as the old lark-clamp (REQ-119).
+def test_attention_class_fully_determines_review_surface(env):
+    """REQ-119: the legacy review_at hint is ignored — a decision reviews on
+    Lark and a notice reviews nowhere, whatever the caller asks for."""
     mid, _ = memorial.create(
+        "mail", "通知", "看看", preset="fyi", review_at="lark")
+    assert memorial.review_surface(memorial.get_memorial(mid)) == "none"
+    mid2, _ = memorial.create(
         "mail", "决定", "选一个", preset="decision", review_at="none")
-    assert memorial.review_surface(memorial.get_memorial(mid)) == "lark"
+    assert memorial.review_surface(memorial.get_memorial(mid2)) == "lark"
 
 
 def test_hard_immediacy_cannot_be_downgraded_to_phone(env):

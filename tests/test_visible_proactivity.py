@@ -246,7 +246,7 @@ def test_memorial_never_requests_proactive_phone_reach(
     assert memorial.get_memorial(memorial_id)["delivery_status"] == "delivered"
 
     ledger_id, ledger_accepted = memorial.create(
-        "repos-sync", "监控尾气", "只入台账")
+        "cross-session-sync", "监控尾气", "只入台账")
     assert ledger_accepted is True
     assert memorial.get_memorial(ledger_id)["delivery_status"] == "ledger_only"
 
