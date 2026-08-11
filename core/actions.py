@@ -452,21 +452,30 @@ class ActionProcessor:
     # ── 缴回制度 ──
 
     def _do_memorial_lapse_all(self, raw: str) -> str:
-        """留中 every overdue decision currently in the docket.
+        """留中 every decision currently waiting on the owner.
 
-        The set is recomputed at tap time rather than read from the card: a
-        card can sit unread for hours, and anything Pascal answered (or that
-        resolved itself upstream) in the meantime must not be archived as
-        unanswered. Bulk-archiving the owner's decision queue is owner-only.
+        Same set as the docket headline counts (REQ-122): ALL pending
+        decisions — not just the overdue slice — minus the docket's own card
+        (memorial.counts_in_ledger, the shared 口径 predicate). A button under
+        「N 件事等你拍板」 that archived a different N would be one more
+        number nobody can trust. The set is recomputed at tap time rather
+        than read from the card: a card can sit unread for hours, and
+        anything Pascal answered (or that resolved itself upstream) in the
+        meantime must not be archived as unanswered. Bulk-archiving the
+        owner's decision queue is owner-only.
         """
         from core import memorial
 
         self._require_owner_callback()
-        overdue = memorial.escrow_scan()["overdue"]
-        if not overdue:
-            return "没有逾期待批的事项了。"
+        waiting = [
+            st for st in memorial.list_memorials(pending_only=True)
+            if memorial.counts_in_ledger(st)
+            and str(st.get("attention", "")) == memorial.ATTENTION_DECISION
+        ]
+        if not waiting:
+            return "没有等你拍板的事了。"
         archived = sum(
-            1 for state in overdue
+            1 for state in waiting
             if memorial.lapse(state["id"], "全部留中")
         )
         # Names the filter tab, not a destination: actionable if the reader is

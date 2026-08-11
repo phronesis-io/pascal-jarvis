@@ -148,16 +148,20 @@ def test_lapsed_cards_do_not_count_as_engagement(env, monkeypatch):
 # ── the docket ───────────────────────────────────────────────────────────
 
 
-def test_docket_groups_by_source_instead_of_listing_every_row(env):
+def test_docket_names_the_urgent_few_and_sums_the_rest(env):
+    """奏折铁律 rewrite (REQ-122): conclusion first, 2-3 named asks, one line
+    for the remainder — not a per-source accounting table."""
     for _ in range(14):
         _make(env, "eigenflux-publish", memorial.ATTENTION_DECISION, age_h=24 * 7)
     _make(env, "pgc-improvement", memorial.ATTENTION_DECISION, age_h=72)
-    overdue = memorial.escrow_scan(now=NOW)["overdue"]
-    title, body = memorial.escrow_docket(overdue, now=NOW)
-    assert "15" in title and "7" in title
-    # 14 stuck cards from one source read as one broken flow, not 14 asks.
-    assert "14 件" in body
-    assert body.count("·") <= memorial.ESCROW_DIGEST_MAX_GROUPS + 1
+    title, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
+    assert title == "15 件事等你拍板"
+    first = body.splitlines()[0]
+    assert first.startswith("有 15 件事等你拍板，最急的是")
+    assert "等了 7 天" in first
+    # Named bullets stay few; the other 12 are one honest line, not a pile.
+    assert body.count("·") == 2
+    assert "其余 12 件" in body
 
 
 def test_run_archives_and_sends_one_docket(env):
@@ -183,10 +187,25 @@ def test_only_one_docket_per_day(env):
     assert len(env.cards) == cards_after_first
 
 
+def test_new_docket_supersedes_yesterdays_unanswered_one(env):
+    """Review #1: the docket is excluded from every sweep and count by
+    design, so nothing else can ever close it — an unanswered docket must be
+    resolved by its successor, not accumulate as immortal pending rows."""
+    _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
+    first = memorial_escrow.run(now=NOW, send=True)
+    second = memorial_escrow.run(now=NOW + timedelta(days=1), send=True)
+    assert first["docket_id"] and second["docket_id"]
+    old = memorial.get_memorial(first["docket_id"])
+    assert old["status"] == "decided"
+    assert old["action_result"] == "superseded_by_next_docket"
+    # The new docket stays pending — it is today's card, nothing replaced it.
+    assert memorial.get_memorial(second["docket_id"])["status"] == "pending"
+
+
 def test_no_docket_outside_the_morning_window(env):
     _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
     summary = memorial_escrow.run(now=NOW.replace(hour=23), send=False)
-    assert summary["overdue"] == 1 and not summary["docket_id"]
+    assert summary["overdue"] and not summary["docket_id"]
 
 
 def test_sweep_still_archives_outside_the_morning_window(env):
