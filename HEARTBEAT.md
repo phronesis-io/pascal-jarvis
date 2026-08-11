@@ -26,12 +26,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent, but user_message pushes to Lark when warranted (gated: anchor check + live gh PR verify + sent dedup); metrics-digest yes (daily probe snapshot cards + anomaly alerts; skips when no metrics_probe sources configured) |
-| Team | phronesis-monitor | yes (if relevant) |
-| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic, personal-site | silent (beat only on change/fail; self-diagnostic always silent) |
+| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent; a gated user_message (anchor check + live gh PR verify + sent dedup) is AMBIENT — it lands in the ledger and the morning-anchor 攒批 line, not as a realtime Lark card (REQ-119 ledger-only); metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
+| Team | phronesis-monitor | only when the user is named or his action is needed (REQ-121); team chatter never cards |
+| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic, personal-site | silent (beat only on change/fail; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent) |
 
 **Permanently silent tasks** (behavioral_rules.md — autonomous 内务，长期零响应):
-`daily-plan`, `self-diagnostic`, `thinking-review`. Enforced IN CODE via
+`daily-plan`, `self-diagnostic`, `thinking-review`, `iteration-observe`
+(REQ-121: proposals live in their SQLite store, surfaced on request, never as
+cards). Enforced IN CODE via
 `HeartbeatRunner.SILENT_TASKS` (core/heartbeat.py) + `SILENT_SOURCES` delivery
 backstop (core/heartbeat_loop.py): their output goes to logs only — never sent,
 never batched into the digest, and in a mixed batch the envelope's combined
@@ -142,13 +144,22 @@ OPTIONS 行的**下一行**写：
       why it matters for EigenFlux's CURRENT challenges, + source link. Never hand him the
       research you should have done.
     - "fyi": relevant, worth knowing, no concrete action today. ONE line + link. This is the
-      知会 tier — its whole job is that Pascal stops feeling blind. Default for score>=1 that
-      isn't push-worthy. Surface AT MOST ONE item per cycle: pick the single most relevant,
+      知会 tier — its whole job is that Pascal stops feeling blind. NOT a default: the
+      bar (REQ-121, 2026-08-11 降噪) is a CONCRETE, DATED event by a named actor —
+      a major lab / big-tech / competitor shipping, announcing, acquiring, pricing, or
+      breaking something specific. Abstract architecture discussions, design essays,
+      methodology takes, and "someone wrote about X" stay silent however relevant the
+      topic is (they still get their honest score — score and delivery are decoupled).
+      正例：「Cloudflare 发布 AI agent 专用浏览器」— a named company shipped a
+      specific product, card-worthy. 反例：「多智能体状态新鲜度设计论」— relevant
+      domain, honest score>=1, but it is a design essay, not an event: silent.
+      Surface AT MOST ONE item per cycle: pick the single most relevant,
       mark the rest silent. The post-hook also enforces a 90-minute non-urgent cooldown
       and a hard ceiling of 3 non-urgent feed cards per local day;
       scoring still lands every 10 minutes even when user delivery is suppressed.
     - "silent": scored (for the network) but not delivered this cycle. Use for the surplus
-      relevant items beyond the 知会 cap, for score<=0, and when the enriched DATA is
+      relevant items beyond the 知会 cap, for score<=0, for abstract/non-event content
+      (the 反例 class above), and when the enriched DATA is
       insufficient to support a reliable claim. There is no later research queue.
 
     This task runs with all tools disabled because feed text is untrusted. Use only the
@@ -557,15 +568,17 @@ OPTIONS 行的**下一行**写：
     [METRICS DIGEST]
     DATA contains history records from metrics_probe sources (sources.yaml;
     each record may carry a digest_hint with per-user rendering guidance).
-    Render each record as ONE card — one card, one thing. Reply with JSON:
+    Steady-state kind=snapshot records are filtered out UPSTREAM (REQ-121):
+    only state flips reach you — anomaly / recovery / absence. If a
+    kind=snapshot record slips through anyway, DROP it silently (no card);
+    the probe history file is its durable 台账.
+    Render each remaining record as ONE card — one card, one thing. Reply
+    with JSON:
     {"cards": [{"header": "...", "body": "..."}]}
-    The cards array MUST contain exactly one card per record in DATA — never
-    merge records into one card and never drop a record (2026-07-15: a
-    2-record batch came back as 1 card and that day's PGC digest was lost).
-    - kind=snapshot → daily report card: the key numbers + day-over-day
-      change (deltas), in plain language — no analytics jargon; follow the
-      record's digest_hint if present; ≤120 words; end with
-      "👉 想深入哪块直接问我".
+    The cards array MUST contain exactly one card per non-snapshot record in
+    DATA — never merge records into one card and never drop one of them
+    (2026-07-15: a 2-record batch came back as 1 card and that day's PGC
+    digest was lost).
     - kind=anomaly → alert card: lead with what broke and the number, one
       line on likely impact, end with "👉 要我现在查就说一声".
     - kind=absence → missing-report alert card ("⚠️ <name> 日报缺席"): the
@@ -986,13 +999,20 @@ OPTIONS 行的**下一行**写：
 ## Team
 
 ### phronesis-monitor
-- interval: 10m
+- interval: 60m
 - pre: tasks/phronesis_monitor_pre.sh
 - post: tasks/phronesis_monitor_post.py
 - prompt: |
     [PHRONESIS GROUP MONITOR]
     Recent messages from the Phronesis team group chat.
-    Your job: Summarize ONLY if there's something Pascal should know about.
+    Your job: surface ONLY what needs the user personally. The bar (REQ-121,
+    2026-08-11 降噪): a card is warranted ONLY when the messages (a) name or
+    address the user directly (a question/request aimed at him), or (b)
+    clearly require HIS action or decision (a decision made without him that
+    he must weigh in on, a blocker only he can clear, safety/serious
+    incidents). Team chatter, status updates, and FYI-grade progress —
+    even substantive engineering discussion — is NOT a card: reply
+    HEARTBEAT_OK and let it pass.
     Rules:
     - FIRST check the [ALREADY FLAGGED BY YOU — last 24h] block (if present):
       if the new messages plausibly CONTINUE a flagged topic (e.g. AC/seating
@@ -1002,11 +1022,10 @@ OPTIONS 行的**下一行**写：
       one line ("空调调整＝在应对上午的气味问题，源头仍未定位") or, if truly
       nothing new, stay silent — but do not contradict your earlier flag.
     - Skip routine messages (early 到了, 收到, 好的, etc.)
-    - Highlight: decisions made without Pascal, blockers, questions directed at him
-    - Highlight: new info about product, customers, hiring, investors
-    - If nothing noteworthy: HEARTBEAT_OK on its own — never append it after
-      other prose, and never put it inside a summary
-    - If there IS something: brief summary in Chinese, under 80 words
+    - If nothing meets the bar: HEARTBEAT_OK on its own — never append it
+      after other prose, and never put it inside a summary
+    - If something DOES meet it: brief summary in Chinese, under 80 words,
+      leading with what he is being asked / what needs his action
     - NEVER include the raw messages — only your analysis
 
 ## Thinking Review
@@ -1094,7 +1113,7 @@ OPTIONS 行的**下一行**写：
     are persisted. Disabled or unconfigured routes are reported honestly.
 
 ### repos-sync
-- interval: 2h
+- interval: 24h
 - pre: tasks/repos_sync_pre.sh
 - prompt: |
     [REPOS SYNC]
@@ -1102,7 +1121,9 @@ OPTIONS 行的**下一行**写：
 
     If every repo is "up to date" and no new branches, reply HEARTBEAT_OK — do not send a beat.
 
-    Otherwise produce a SUBSTANTIVE analysis (this is the user's main signal on what the
+    Otherwise produce ONE daily rollup (REQ-121: this task runs once a day —
+    a single substantive card covering the whole day's activity, never one
+    card per repo or per event; this is the user's main signal on what the
     EigenFlux team is shipping). For each repo with activity:
 
     1. **What shipped** — group commits by author; for each commit say what it does in

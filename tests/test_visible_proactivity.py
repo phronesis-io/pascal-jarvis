@@ -219,27 +219,36 @@ def test_proactive_signal_uses_shared_0930_quiet_hours_default(
     assert sent == [("morning_signal", "push")]
 
 
-def test_memorial_invokes_optional_reach_after_durable_signal(
+def test_memorial_never_requests_proactive_phone_reach(
         tmp_path, monkeypatch):
+    """REQ-119: the phone-reach compensation existed FOR web-only cards.
+    With Lark the only surface there is nothing to compensate — memorial
+    must not touch core.proactive on any create path."""
     from core import memorial, proactive
 
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    reached = []
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
     monkeypatch.setattr(
         proactive,
         "maybe_push_signal",
-        lambda state, **_kwargs: reached.append(state["id"]),
+        lambda *_args, **_kwargs: pytest.fail(
+            "memorial must not invoke proactive phone reach (REQ-119)"),
     )
 
     memorial_id, accepted = memorial.create(
         "eigenflux-feed-triage",
         "新信号",
-        "已可靠写入网页",
+        "一条值得查看的网络更新",
     )
-
     assert accepted is True
-    assert memorial.get_memorial(memorial_id)["delivery_status"] == "web_only"
-    assert reached == [memorial_id]
+    assert memorial.get_memorial(memorial_id)["delivery_status"] == "delivered"
+
+    ledger_id, ledger_accepted = memorial.create(
+        "cross-session-sync", "监控尾气", "只入台账")
+    assert ledger_accepted is True
+    assert memorial.get_memorial(ledger_id)["delivery_status"] == "ledger_only"
 
 
 def test_memorial_send_false_never_creates_optional_push(
@@ -261,68 +270,62 @@ def test_memorial_send_false_never_creates_optional_push(
         send=False,
     )
 
-    assert accepted is True
-    assert memorial.get_memorial(memorial_id)["delivery_status"] == "web_only"
+    # The caller owns the transport: nothing is sent, nothing is faked.
+    assert accepted is False
+    assert memorial.get_memorial(memorial_id)["delivery_status"] == "not_sent"
 
 
-def test_heartbeat_adapter_requests_reach_for_send_false_signal(
+def test_heartbeat_adapter_renders_signal_for_lark(
         tmp_path, monkeypatch):
     from core import memorial, proactive
     from core.card import build_card
     from core.heartbeat import _annotate_card_source
 
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    reached = []
     monkeypatch.setattr(
         proactive,
         "maybe_push_signal",
-        lambda state, **_kwargs: reached.append(
-            (state["id"], state["source"])),
+        lambda *_args, **_kwargs: pytest.fail(
+            "memorialize must not invoke proactive reach (REQ-119)"),
     )
     card = _annotate_card_source(
         build_card("📡 新信号", "值得查看", source="eigenflux-feed"),
         "eigenflux-feed-triage",
     )
 
-    assert memorial.memorialize_output(
+    rendered = memorial.memorialize_output(
         "CARD:" + card,
         "eigenflux-feed-triage",
-    ) == ""
+    )
+    assert rendered != ""  # curated signal earns the chat (2026-08-03)
     states = memorial.list_memorials()
-    assert [(row["source"], row["delivery_status"]) for row in states] == [
-        ("eigenflux-feed-triage", "web_only")]
-    assert reached == [(states[0]["id"], "eigenflux-feed-triage")]
+    assert [row["source"] for row in states] == ["eigenflux-feed-triage"]
+    assert f'"id": "{states[0]["id"]}"' in rendered
 
 
 def test_mixed_heartbeat_cards_keep_exact_producer_source(
         tmp_path, monkeypatch):
-    from core import memorial, proactive
+    from core import memorial
     from core.card import build_card
     from core.heartbeat import _annotate_card_source
 
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
-    reached = []
-    monkeypatch.setattr(
-        proactive,
-        "maybe_push_signal",
-        lambda state, **_kwargs: reached.append(state["source"]),
-    )
     eigenflux = _annotate_card_source(
         build_card("📡 EF", "ef body"), "eigenflux-feed-triage")
     recommendation = _annotate_card_source(
         build_card("📺 推荐", "recommend body"), "content-recommend")
 
-    assert memorial.memorialize_output(
+    rendered = memorial.memorialize_output(
         f"CARD:{eigenflux}\nCARD:{recommendation}",
         "eigenflux-feed-triage,content-recommend",
-    ) == ""
+    )
+    assert len(rendered.splitlines()) == 2  # both render for Lark
     assert {
         row["title"]: row["source"] for row in memorial.list_memorials()
     } == {
         "EF": "eigenflux-feed-triage",
         "推荐": "content-recommend",
     }
-    assert reached == ["eigenflux-feed-triage", "content-recommend"]
 
 
 def test_signal_filter_searches_body_and_has_named_eigenflux_source():

@@ -436,7 +436,12 @@ class HeartbeatRunner:
     # exact task→message pairing point (see _collect_output) plus a delivery-
     # layer backstop in core/heartbeat_loop.py (SILENT_SOURCES). To silence
     # another task, add its name here — no logic changes needed.
-    SILENT_TASKS = {"daily-plan", "self-diagnostic", "thinking-review"}
+    # iteration-observe (REQ-121, 2026-08-11 降噪): its output is operational
+    # JSON and its Proposals live in the iteration SQLite store, surfaced on
+    # request — never as cards. (Today it has no post-script so nothing routes
+    # anyway; the entry makes the contract explicit and future-proof.)
+    SILENT_TASKS = {"daily-plan", "self-diagnostic", "thinking-review",
+                    "iteration-observe"}
 
     # Tasks whose PRE-script mutates state that the POST-script must always
     # get a chance to reconcile (REQ-30). intention-check's pre marks intents

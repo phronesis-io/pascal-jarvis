@@ -33,7 +33,6 @@ def ledger(tmp_path, monkeypatch):
                         lambda: tmp_path / "pending.jsonl")
     monkeypatch.setattr(memorial, "_record_delivery", lambda *a, **k: None)
     monkeypatch.setattr(memorial, "_record_engagement", lambda *a, **k: None)
-    monkeypatch.setattr(memorial, "_request_proactive_reach", lambda *a, **k: None)
     return memorial
 
 

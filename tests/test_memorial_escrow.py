@@ -167,7 +167,7 @@ def test_docket_names_the_urgent_few_and_sums_the_rest(env):
 def test_run_archives_and_sends_one_docket(env):
     _make(env, "metrics-digest", memorial.ATTENTION_NOTICE, age_h=24 * 8)
     _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
-    summary = memorial_escrow.run(now=NOW, send=False)
+    summary = memorial_escrow.run(now=NOW, send=True)
     assert summary["lapsed"] == 1
     assert summary["overdue"] == 1
     assert summary["docket_id"]
@@ -175,9 +175,16 @@ def test_run_archives_and_sends_one_docket(env):
 
 def test_only_one_docket_per_day(env):
     _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
-    first = memorial_escrow.run(now=NOW, send=False)
-    second = memorial_escrow.run(now=NOW.replace(hour=11), send=False)
-    assert first["docket_id"] and not second["docket_id"]
+    first = memorial_escrow.run(now=NOW, send=True)
+    assert first["docket_id"]
+    cards_after_first = len(env.cards)
+    memorial_escrow.run(now=NOW.replace(hour=11), send=True)
+    # The dedup gate may hand back the existing docket id, but a same-day
+    # second sweep must neither mint a second docket nor send a second card.
+    dockets = [s for s in memorial.list_memorials()
+               if s["source"] == memorial.ESCROW_DIGEST_SOURCE]
+    assert len(dockets) == 1
+    assert len(env.cards) == cards_after_first
 
 
 def test_no_docket_outside_the_morning_window(env):

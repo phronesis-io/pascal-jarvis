@@ -9,9 +9,14 @@ traffic. Feishu arrival volume IS the product's pulse, so:
 - ``check``: a floor sentinel for selfmon — fewer than SENT_FLOOR_24H cards
   actually reaching Feishu in 24h is a red flag regardless of how healthy
   the pipeline claims to be.
-- ``morning-digest``: web-only cards batched into the morning anchor (the
+- ``morning-digest``: ledger-only cards batched into the morning anchor (the
   style contract's 「攒批≥5条晨匣提一行」clause, PR #36 — never implemented
   until now), instead of silently rotting in an archive nobody opens.
+
+Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
+reached Feishu (ledger ``sent`` event) or stayed ledger-only (ambient
+exhaust, ``delivery_status=ledger_only``). The digest line is the batched
+surface for the latter.
 """
 
 from __future__ import annotations
@@ -60,18 +65,26 @@ def sent_count(hours: float = 24, now: datetime | None = None) -> int:
                if e.get("ev") == "sent" and _in_window(e, cutoff))
 
 
-def web_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
-    """Cards created in the window that never got a Feishu send.
+def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
+    """Cards created in the window that are explicitly ledger-only.
 
-    These are the archive-only rows — real content that, with zero web
-    traffic, no one will ever see unless a batch surface carries it.
+    Counts ONLY rows whose delivery event says ``ledger_only`` (ambient
+    exhaust, REQ-119) — the rows whose one reach IS the morning digest.
+    Inferring from "created but no ``sent`` event" would also sweep in
+    Lark-routed cards still sitting in the quiet-hours queue and cards on
+    the retry path, double-exposing them once the queue flushes
+    (adversarial review, 2026-08-11).
     """
     events = _events()
-    sent_ids = {str(e.get("id")) for e in events if e.get("ev") == "sent"}
+    ledger_ids = {
+        str(e.get("id")) for e in events
+        if e.get("ev") == "delivery"
+        and str(e.get("status", "")) == "ledger_only"
+    }
     cutoff = (now or datetime.now()) - timedelta(hours=hours)
     return [e for e in events
             if e.get("ev") == "create" and _in_window(e, cutoff)
-            and str(e.get("id")) not in sent_ids]
+            and str(e.get("id")) in ledger_ids]
 
 
 def check(now: datetime | None = None) -> str:
@@ -93,7 +106,7 @@ def morning_digest_line(now: datetime | None = None) -> str:
     Data formatting is code's job — the anchor's LLM contract stays ONE
     hand-written line; this rides below it.
     """
-    rows = web_only(24, now=now)
+    rows = ledger_only(24, now=now)
     if len(rows) < DIGEST_MIN:
         return ""
     titles = "／".join(

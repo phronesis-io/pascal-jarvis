@@ -7,6 +7,9 @@ Two jobs:
 1. Emit metrics_probe history records (data/metrics/*.jsonl) newer than the
    digest watermark, staging the candidate watermark in .digest_pending.json
    (promoted by the post-hook only on a well-formed Claude reply).
+   Steady-state kind=snapshot records are dropped here (REQ-121): the
+   history files are the durable 台账 and only state flips
+   (anomaly/recovery/absence) are worth a card.
 2. Absence alerts: a probe that failed all day produces NO records — and a
    watermark can't miss what never arrived (2026-07-15: the server-side
    improvement loop was dead for three weeks and the old daily card kept
@@ -209,6 +212,14 @@ def main(jarvis_dir: str | Path | None = None,
     jarvis_dir = Path(jarvis_dir or os.environ.get("JARVIS_DIR", "."))
     now = now or datetime.now().astimezone()
     records, pending_ts = collect_new_records(jarvis_dir)
+    # REQ-121 (2026-08-11 降噪): steady-state daily snapshots never become
+    # cards — the probe history files under data/metrics/ ARE the 台账, and
+    # 14 days of engagement data showed the daily report card was pure noise.
+    # Only state FLIPS reach Claude: anomaly/recovery (already edge-triggered
+    # against .anomaly_state.json in filter_anomalies) and absence (once per
+    # source per day). The watermark still advances over the dropped
+    # snapshots via pending_ts, computed before this filter.
+    records = [r for r in records if r.get("kind") != "snapshot"]
     records = filter_anomalies(jarvis_dir, records)
     absences = detect_absences(jarvis_dir, now)
     if not records and not absences:
