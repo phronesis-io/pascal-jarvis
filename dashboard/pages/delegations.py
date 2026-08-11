@@ -6,13 +6,11 @@ from datetime import datetime
 
 from nicegui import run, ui
 
-from core.continuity import create_handoff
 from core.delegations import DelegationStore, is_confirmable, is_retryable
 from core.delegation_reconcile import sync_attention_item
 
 from ..uiutil import (
     add_dashboard_head,
-    client_surface,
     dashboard_header,
     guarded_refresh_timer,
     notify_safely,
@@ -103,28 +101,6 @@ async def _retry(detail: dict, refresh) -> None:
     refresh()
 
 
-async def _handoff(detail: dict, surface: str) -> None:
-    target = "desktop" if surface == "mobile" else "mobile"
-    try:
-        await run.io_bound(
-            create_handoff,
-            "delegation",
-            detail["id"],
-            from_surface=surface,
-            to_surface=target,
-            title=detail["title"],
-            matter_id=str(detail.get("matter_id") or ""),
-            created_by="local",
-        )
-    except Exception as exc:
-        notify_safely(f"接力没有建立：{exc}", type="negative")
-        return
-    notify_safely(
-        "已放到电脑接力区" if target == "desktop" else "已发到手机",
-        type="positive",
-    )
-
-
 def _status_badge(status: str):
     ui.badge(
         STATUS_LABELS.get(status, status),
@@ -210,7 +186,6 @@ def delegation_list_page():
 @ui.page("/delegations/{delegation_id}")
 def delegation_detail_page(delegation_id: str):
     add_dashboard_head()
-    surface, _ = client_surface()
     with ui.column().classes("jarvis-page"):
         dashboard_header(
             "/delegations",
@@ -280,10 +255,6 @@ def delegation_detail_page(delegation_id: str):
                         "取消", icon="close",
                         on_click=lambda: _cancel(detail, body.refresh),
                     ).props("flat no-caps color=negative")
-                ui.button(
-                    icon="devices",
-                    on_click=lambda: _handoff(detail, surface),
-                ).props("flat round").tooltip("跨设备继续")
 
             ui.label("执行步骤").classes("section-title")
             for step in detail["steps"]:

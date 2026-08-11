@@ -137,9 +137,6 @@ the exact release commit or a healthy resident descendant that contains it.
   initializes schema once per database inode, and never holds a transaction
   across a network send.
 - `core.memorial`: visible Item and decision ledger.
-- `core.proactive`: narrow reach policy over already-durable notices. It may
-  request a paired-phone push for explicitly selected sources, but never owns
-  storage, quiet hours, retries, or delivery state.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.routines`: user-authored recurring work — definition, claim, autonomy
   enforcement, action allow-list, and the per-run audit trail.

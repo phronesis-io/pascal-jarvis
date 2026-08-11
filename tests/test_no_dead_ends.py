@@ -122,10 +122,14 @@ def test_fallback_card_drops_the_instruction_when_there_is_no_link(env, monkeypa
 def test_web_desk_url_refuses_anything_not_https(monkeypatch):
     """A localhost or relative base is unreachable from a phone; "" is honest."""
     from core import mobile_access
-    monkeypatch.setattr("core.tailnet.tailnet_status",
-                        lambda *a, **k: {"url": "http://localhost:3458"})
-    monkeypatch.setattr("core.config.Config",
-                        lambda *a, **k: SimpleNamespace(get=lambda *_: ""))
+    monkeypatch.setattr(
+        "core.config.Config",
+        lambda *a, **k: SimpleNamespace(
+            get=lambda *_a, **_k: "http://localhost:3457"))
+    assert mobile_access.web_desk_url("/items") == ""
+    monkeypatch.setattr(
+        "core.config.Config",
+        lambda *a, **k: SimpleNamespace(get=lambda *_a, **_k: ""))
     assert mobile_access.web_desk_url("/items") == ""
 
 

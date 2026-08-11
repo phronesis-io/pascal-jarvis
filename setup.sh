@@ -125,7 +125,7 @@ if "$JARVIS_PYTHON" - <<'PYEOF'
 import importlib
 
 required = (
-    "yaml", "nicegui", "pywebpush", "qrcode", "aiohttp", "fastapi",
+    "yaml", "nicegui", "aiohttp", "fastapi",
     "lark_oapi", "pytest",
 )
 missing = []

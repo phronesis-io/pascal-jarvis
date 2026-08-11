@@ -1165,10 +1165,11 @@ class TestRoutes:
 
     @staticmethod
     def owner_headers():
-        from core.mobile_access import consume_pair_code, create_pair_code
-        paired = consume_pair_code(create_pair_code("owner test device")["code"])
-        assert paired is not None
-        return {"Authorization": f"Bearer {paired['token']}"}
+        # Pairing is retired (REQ-120); _owner_guard still honors a legacy
+        # mobile_devices credential, so mint one the way pairing used to.
+        from tests.conftest import seed_legacy_device
+        token = seed_legacy_device(device_id="dev_owner_test")
+        return {"Authorization": f"Bearer {token}"}
 
     @pytest.mark.parametrize("path", PAGES)
     def test_page_renders_200(self, client, path):
@@ -1309,33 +1310,13 @@ class TestRoutes:
         })
         assert forced.status_code == 200 and forced.json()["status"] == "done"
 
-    def test_api_mobile_pairing_and_revocation(self, client):
+    def test_api_mobile_routes_are_gone(self, client):
+        """REQ-120: the /api/mobile/* surface is retired, not just guarded."""
+        assert client.get("/api/mobile/status").status_code == 404
         assert client.post(
-            "/api/mobile/pair", json={"ttl": "bad"}
-        ).status_code == 401
-        headers = self.owner_headers()
-        assert client.post(
-            "/api/mobile/pair", json={"ttl": "bad"}, headers=headers
-        ).status_code == 400
-        paired = client.post(
-            "/api/mobile/pair",
-            json={"label": "test phone", "ttl": 5},
-            headers=headers,
-        )
-        assert paired.status_code == 200
-        from core.mobile_access import consume_pair_code
-        device = consume_pair_code(paired.json()["code"])
-        assert device is not None
-        status = client.get("/api/mobile/status")
-        assert status.status_code == 200
-        assert "test phone" in {
-            item["label"] for item in status.json()["devices"]
-        }
-        revoked = client.delete(
-            f"/api/mobile/devices/{device['device_id']}",
-            headers=headers,
-        )
-        assert revoked.status_code == 200
+            "/api/mobile/pair", json={"label": "x"},
+            headers=self.owner_headers(),
+        ).status_code == 404
 
     def test_api_items_decision_and_delivery_confirmation(
             self, client, jarvis_tmp, monkeypatch):
@@ -1531,31 +1512,48 @@ class TestRoutes:
 
     def test_api_cross_device_handoff_lifecycle(
             self, client, jarvis_tmp, monkeypatch):
+        """REQ-120 trust boundary: X-Jarvis-Device has no authenticator
+        behind it anymore, so the REST endpoints act as the desktop surface
+        only. In-process callers (Lark-side flows) remain the trusted path
+        for mobile-origin handoffs; REST can list/claim/complete them."""
         from core import memorial
+        from core.continuity import create_handoff
         monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
         memorial_id, _ = memorial.create(
             "api", "回电脑继续", "完整背景", preset="fyi", send=False)
-        created = client.post("/api/handoffs", json={
-            "entity_type": "memorial",
-            "entity_id": memorial_id,
-            "from_surface": "mobile",
-            "to_surface": "desktop",
-            "title": "回电脑继续",
-        }, headers={"X-Jarvis-Device": "dev_test_phone"})
-        assert created.status_code == 200
-        handoff = created.json()
-        assert handoff["created"] is True
-        assert handoff["created_by"] == "dev_test_phone"
 
-        duplicate = client.post("/api/handoffs", json={
+        # A client-supplied device header cannot claim mobile provenance.
+        spoofed = client.post("/api/handoffs", json={
             "entity_type": "memorial",
             "entity_id": memorial_id,
             "from_surface": "mobile",
             "to_surface": "desktop",
         }, headers={"X-Jarvis-Device": "dev_test_phone"})
-        assert duplicate.status_code == 200
-        assert duplicate.json()["id"] == handoff["id"]
-        assert duplicate.json()["created"] is False
+        assert spoofed.status_code == 403
+
+        # Mobile is not a creatable target anywhere (REQ-120).
+        retired_target = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": memorial_id,
+            "to_surface": "mobile",
+        })
+        assert retired_target.status_code == 400
+        assert "REQ-120" in retired_target.json()["detail"]
+
+        # Desktop-to-desktop cannot cross surfaces, so the REST surface has
+        # no creatable combination left — every refusal is explicit.
+        no_direction = client.post("/api/handoffs", json={
+            "entity_type": "memorial",
+            "entity_id": memorial_id,
+            "to_surface": "desktop",
+        })
+        assert no_direction.status_code == 400
+
+        # The trusted in-process path still parks work for the desktop.
+        handoff = create_handoff(
+            "memorial", memorial_id, from_surface="mobile",
+            to_surface="desktop", title="回电脑继续")
+        assert handoff["created"] is True
 
         listed = client.get(
             "/api/handoffs?target_surface=desktop&status=active")
@@ -1572,38 +1570,17 @@ class TestRoutes:
         )
         assert claimed.status_code == 200
         assert claimed.json()["status"] == "claimed"
-        wrong_complete = client.post(
-            f"/api/handoffs/{handoff['id']}/complete",
-            json={},
-            headers={"X-Jarvis-Device": "dev_test_phone"},
-        )
-        assert wrong_complete.status_code == 403
         completed = client.post(
             f"/api/handoffs/{handoff['id']}/complete", json={})
         assert completed.status_code == 200
         assert completed.json()["status"] == "completed"
 
-        invalid = client.post("/api/handoffs", json={
-            "entity_type": "memorial",
-            "entity_id": "mem_invalid",
-            "from_surface": "mobile",
-            "to_surface": "mobile",
-        }, headers={"X-Jarvis-Device": "dev_test_phone"})
-        assert invalid.status_code == 400
-        spoofed = client.post("/api/handoffs", json={
-            "entity_type": "memorial",
-            "entity_id": memorial_id,
-            "from_surface": "mobile",
-            "to_surface": "desktop",
-        })
-        assert spoofed.status_code == 403
         missing = client.post("/api/handoffs", json={
             "entity_type": "memorial",
             "entity_id": "mem_missing",
-            "from_surface": "desktop",
-            "to_surface": "mobile",
+            "to_surface": "desktop",
         })
-        assert missing.status_code == 404
+        assert missing.status_code == 400
 
     def test_api_work_sessions(self, client, monkeypatch):
         import core.work_sessions as work_sessions
@@ -1734,26 +1711,3 @@ class TestRoutes:
         assert response.json()["providers"][0]["status"] == "healthy"
         assert "token" not in response.text.lower()
 
-    def test_push_test_targets_the_authenticated_device(
-            self, client, monkeypatch):
-        from core import mobile_access
-
-        headers = self.owner_headers()
-        token = headers["Authorization"].split(" ", 1)[1]
-        device_id = token.split(".", 1)[0]
-        headers["X-Jarvis-Device"] = device_id
-        captured = {}
-
-        def fake_send_push(*_args, **kwargs):
-            captured.update(kwargs)
-            return {"sent": 1, "failed": 0, "disabled": 0}
-
-        monkeypatch.setattr(mobile_access, "send_push", fake_send_push)
-        response = client.post(
-            "/api/mobile/push-test",
-            json={"body": "test"},
-            headers=headers,
-        )
-
-        assert response.status_code == 200
-        assert captured["device_id"] == device_id

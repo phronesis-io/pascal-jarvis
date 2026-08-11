@@ -152,12 +152,6 @@ def record_completion(matter_id: str, provider: str, session: dict | None,
     )
     add_event(matter_id, "work_session_completed", summary[:1200], actor=provider,
               payload={**payload, "artifacts": sorted(changed_files or set())})
-    try:
-        from core.mobile_access import send_push
-        send_push(f"{provider} 工作已结束", summary[:240],
-                  url=f"/matters/{matter_id}", matter_id=matter_id)
-    except Exception:
-        pass
     return {"matter_id": matter_id, "session": session, "summary": summary,
             "artifacts": sorted(changed_files or set()), "exit_code": exit_code}
 

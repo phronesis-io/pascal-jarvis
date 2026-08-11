@@ -8,7 +8,6 @@ Run as part of the NiceGUI app (same process, same port).
 Or standalone for headless mode: python3 -m dashboard.api
 """
 
-import json
 import os
 import re
 import time
@@ -57,18 +56,22 @@ _WRITE = [Depends(_write_guard)]
 
 
 async def _owner_guard(request: Request) -> None:
-    """Require a device token already validated by the mobile gateway.
+    """Require a Bearer token from a still-valid paired-device row.
 
     NiceGUI's desktop buttons execute their callbacks in-process and do not
-    use these REST mutations. Mobile REST calls arrive through :3458, whose
-    gateway forwards the paired device token as a Bearer credential.
+    use these REST mutations. The mobile gateway that used to forward these
+    tokens is retired (REQ-120, 2026-08-11) and pairing no longer mints new
+    ones, so in practice this guard now rejects every request unless a
+    legacy ``mobile_devices`` credential is presented explicitly (tests do;
+    production has none). It stays in place so the owner-only mutations keep
+    failing CLOSED rather than silently opening to any local process.
     """
     auth = str(request.headers.get("authorization") or "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not token:
         raise HTTPException(401, "authenticated owner device required")
     from core.mobile_access import validate_device_token
-    if validate_device_token(token, touch=False) is None:
+    if validate_device_token(token) is None:
         raise HTTPException(401, "authenticated owner device required")
 
 
@@ -400,85 +403,6 @@ def register_api_routes():
             item["deep_link"] = lark_deep_link(item)
         return {"items": items}
 
-    # ── Authenticated mobile gateway / Web Push ──────────────────────
-
-    @app.get("/api/mobile/status")
-    async def api_mobile_status():
-        from core.config import Config
-        from core.mobile_access import list_devices, recent_access
-        from core.tailnet import tailnet_status
-        status_path = Config().jarvis_dir / "mobile_access.json"
-        try:
-            gateway = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            gateway = {"url": "", "tls": False}
-        saved_tailnet = gateway.get("tailnet") or {}
-        gateway["tailnet"] = tailnet_status(
-            int(gateway.get("port") or 3458),
-            mode=saved_tailnet.get("mode") or "funnel",
-        )
-        return {"gateway": gateway, "devices": list_devices(),
-                "recent_access": recent_access(20)}
-
-    @app.post("/api/mobile/pair", dependencies=_OWNER_WRITE)
-    async def api_mobile_pair(request: Request):
-        from core.config import Config
-        from core.mobile_access import create_pair_code
-        data = await request.json()
-        try:
-            result = create_pair_code(data.get("label", "手机"), data.get("ttl", 15))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(400, "ttl must be an integer from 1 to 60") from exc
-        try:
-            gateway = json.loads(
-                (Config().jarvis_dir / "mobile_access.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
-            gateway = {}
-        lan_base = str(gateway.get("url") or "").rstrip("/")
-        tailnet = gateway.get("tailnet") or {}
-        tailnet_base = (str(tailnet.get("url") or "").rstrip("/")
-                        if tailnet.get("ready") else "")
-        result["lan_pair_url"] = (
-            f"{lan_base}/pair/{result['code']}" if lan_base else "")
-        result["tailnet_pair_url"] = (
-            f"{tailnet_base}/pair/{result['code']}" if tailnet_base else "")
-        result["pair_url"] = result["tailnet_pair_url"] or result["lan_pair_url"]
-        return result
-
-    @app.delete("/api/mobile/devices/{device_id}", dependencies=_OWNER_WRITE)
-    async def api_mobile_revoke(device_id: str):
-        from core.mobile_access import revoke_device
-        if not revoke_device(device_id):
-            raise HTTPException(404, "device not found or already revoked")
-        return {"status": "revoked"}
-
-    @app.get("/api/mobile/vapid-public-key")
-    async def api_mobile_vapid_key():
-        from core.mobile_access import vapid_public_key
-        return {"public_key": vapid_public_key()}
-
-    @app.post("/api/mobile/push-subscriptions", dependencies=_OWNER_WRITE)
-    async def api_mobile_push_subscribe(request: Request):
-        from core.mobile_access import register_push
-        data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "local")
-        try:
-            subscription_id = register_push(device_id, data.get("subscription") or data)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {"status": "subscribed", "id": subscription_id}
-
-    @app.post("/api/mobile/push-test", dependencies=_OWNER_WRITE)
-    async def api_mobile_push_test(request: Request):
-        from core.mobile_access import send_push
-        data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "local")
-        return send_push(
-            "Jarvis 已连接",
-            data.get("body", "手机通知通道工作正常。"),
-            device_id=device_id,
-        )
-
     # ── Memorial-first Items and delivery state ─────────────────────
 
     @app.get("/api/items")
@@ -550,6 +474,12 @@ def register_api_routes():
         }
 
     # ── Cross-device continuity ──────────────────────────────────────
+    #
+    # Trust boundary (REQ-120): the mobile gateway that used to authenticate
+    # a device and stamp X-Jarvis-Device is retired, so that header has no
+    # authenticator behind it anymore. These endpoints therefore operate as
+    # the local desktop surface only — a client-supplied header is at most an
+    # unverified hint and never switches the surface identity.
 
     @app.get("/api/handoffs")
     async def api_handoff_list(target_surface: str = "",
@@ -565,15 +495,16 @@ def register_api_routes():
 
     @app.post("/api/handoffs", dependencies=_WRITE)
     async def api_handoff_create(request: Request):
+        """Create a handoff as the desktop surface (see trust note above)."""
         from core.continuity import create_handoff
         data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "").strip()
-        from_surface = "mobile" if device_id else "desktop"
-        created_by = device_id or "local"
+        from_surface = "desktop"
+        created_by = "local"
         requested_source = str(data.get("from_surface", "") or "").strip()
         if requested_source and requested_source != from_surface:
             raise HTTPException(
-                403, "from_surface does not match authenticated device")
+                403, "only the desktop surface can create handoffs "
+                     "(REQ-120: no authenticated mobile caller exists)")
         try:
             return await run_in_threadpool(
                 create_handoff,
@@ -597,14 +528,15 @@ def register_api_routes():
 
     @app.post("/api/handoffs/{handoff_id}/claim", dependencies=_WRITE)
     async def api_handoff_claim(handoff_id: str, request: Request):
+        """Claim a handoff as the desktop surface (see trust note above)."""
         from core.continuity import claim_handoff
         data = await request.json()
-        device_id = request.headers.get("X-Jarvis-Device", "").strip()
-        surface = "mobile" if device_id else "desktop"
+        surface = "desktop"
         requested_surface = str(data.get("surface", "") or "").strip()
         if requested_surface and requested_surface != surface:
             raise HTTPException(
-                403, "surface does not match authenticated device")
+                403, "only the desktop surface can claim handoffs "
+                     "(REQ-120: no authenticated mobile caller exists)")
         try:
             return claim_handoff(handoff_id, surface=surface)
         except KeyError as exc:
@@ -614,13 +546,14 @@ def register_api_routes():
 
     @app.post("/api/handoffs/{handoff_id}/complete", dependencies=_WRITE)
     async def api_handoff_complete(handoff_id: str, request: Request):
+        """Complete a desktop-bound handoff (see trust note above).
+
+        Legacy mobile-bound rows are not completable here — they close
+        through their entity's terminal projection instead.
+        """
         from core.continuity import complete_handoff, get_handoff
         await request.json()
-        surface = (
-            "mobile"
-            if request.headers.get("X-Jarvis-Device", "").strip()
-            else "desktop"
-        )
+        surface = "desktop"
         handoff = get_handoff(handoff_id)
         if handoff is None:
             raise HTTPException(404, "handoff not found")
@@ -780,6 +713,12 @@ def register_api_routes():
 
     @app.post("/api/delegations/{delegation_id}/handoff", dependencies=_WRITE)
     async def api_delegation_handoff(delegation_id: str, request: Request):
+        """Park a delegation in the desktop 接力区.
+
+        REQ-120: "mobile" is no longer a creatable target — the old default
+        (to_surface="mobile") would push nothing and land nowhere. Explicit
+        mobile requests get the core validator's 400.
+        """
         from core.continuity import create_handoff
         from core.delegations import DelegationStore
         data = await request.json()
@@ -791,8 +730,8 @@ def register_api_routes():
                 create_handoff,
                 "delegation",
                 delegation_id,
-                from_surface=str(data.get("from_surface") or "desktop"),
-                to_surface=str(data.get("to_surface") or "mobile"),
+                from_surface=str(data.get("from_surface") or "mobile"),
+                to_surface=str(data.get("to_surface") or "desktop"),
                 title=detail["title"],
                 matter_id=str(detail.get("matter_id") or ""),
                 created_by=str(os.environ.get("USER_ID") or "owner"),

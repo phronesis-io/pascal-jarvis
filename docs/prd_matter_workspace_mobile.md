@@ -1,7 +1,10 @@
 # PRD: Jarvis Matter Workspace and Mobile Home
 
 - Date: 2026-07-22
-- Status: Implemented for personal production use
+- Status: Implemented for personal production use; the mobile-gateway
+  portions (Phase 4A/4B: `:3458`, pairing, device credentials, Web Push,
+  Tailscale Serve/Funnel) are retired as of 2026-08-11 (REQ-120) — Lark is
+  the mobile surface. Kept as the historical record of that design.
 - Owner: Pascal
 - Product principle: one Jarvis, many entrances; entrances are replaceable,
   state is not allowed to fork.
