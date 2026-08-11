@@ -282,14 +282,35 @@ def _codex_is_interactive(meta: dict) -> bool:
     )
 
 
+def _codex_initial_user(path: Path) -> str:
+    """Read the real first user request independently of the bounded tail."""
+    for item in _head_records(path):
+        if item.get("type") != "event_msg":
+            continue
+        payload = item.get("payload") or {}
+        if not isinstance(payload, dict) or payload.get("type") != "user_message":
+            continue
+        raw_text = str(payload.get("message") or "").strip()
+        if _is_synthetic(raw_text):
+            continue
+        return raw_text
+    return ""
+
+
 def _codex_tail(path: Path) -> SessionTail | None:
     meta = _codex_meta(path)
     if not _codex_is_interactive(meta):
         return None
+    initial_user = _codex_initial_user(path)
+    if initial_user.lower().startswith(_AUTOMATED_SESSION_PREFIXES):
+        return None
+    if str(meta.get("source") or "").lower() == "exec" and not initial_user:
+        # Desktop exec transcripts are admitted only with positive evidence of
+        # an owner request. A drifted/oversized head must fail closed.
+        return None
     session_id = str(meta.get("id") or meta.get("session_id") or path.stem)
     workspace = str(meta.get("cwd") or "")
     turns: list[Turn] = []
-    first_user_seen = False
     for item in _tail_records(path):
         if item.get("type") != "event_msg":
             continue
@@ -304,10 +325,6 @@ def _codex_tail(path: Path) -> SessionTail | None:
         else:
             continue
         raw_text = str(payload.get("message") or "").strip()
-        if role == "user" and not first_user_seen:
-            first_user_seen = True
-            if raw_text.lower().startswith(_AUTOMATED_SESSION_PREFIXES):
-                return None
         if _is_synthetic(raw_text):
             continue
         timestamp = str(item.get("timestamp") or payload.get("timestamp") or "")

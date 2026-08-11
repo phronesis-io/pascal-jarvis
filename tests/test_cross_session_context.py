@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 
+from core import cross_session
 from core.cross_session import (
     SESSION_NAMESPACE,
     build_prompt_context,
@@ -321,3 +322,67 @@ def test_automated_candidates_do_not_consume_valid_scan_budget(
     )
 
     assert [session.session_id for session in sessions] == ["human"]
+
+
+def test_large_codex_tail_cannot_hide_automated_first_request(
+    tmp_path, monkeypatch,
+):
+    codex_root = tmp_path / "codex"
+    automated = codex_root / "large-automation.jsonl"
+    _codex(
+        automated,
+        session_id="large-automation",
+        source="exec",
+        user_message="Review the code changes against the base branch main",
+    )
+    with automated.open("a", encoding="utf-8") as handle:
+        for index in range(20):
+            handle.write(json.dumps({
+                "type": "response_item",
+                "payload": {"type": "reasoning", "text": "x" * 100},
+            }) + "\n")
+        handle.write(json.dumps({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "看起来像正常请求"},
+        }, ensure_ascii=False) + "\n")
+
+    original_tail = cross_session._tail_records
+    monkeypatch.setattr(
+        "core.cross_session._tail_records",
+        lambda path: original_tail(path, max_bytes=512),
+    )
+
+    sessions = discover_interactive_sessions(
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+        limit=10,
+    )
+
+    assert sessions == []
+
+
+def test_desktop_exec_without_head_user_evidence_fails_closed(tmp_path):
+    path = tmp_path / "codex" / "drifted.jsonl"
+    _write(path, [{
+        "type": "session_meta",
+        "payload": {
+            "id": "drifted",
+            "cwd": "/work/beta",
+            "source": "exec",
+            "thread_source": "user",
+            "originator": "Codex Desktop",
+        },
+    }, {
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "message": "private automation"},
+    }])
+
+    sessions = discover_interactive_sessions(
+        claude_root=tmp_path / "claude",
+        codex_root=tmp_path / "codex",
+        tracker_path=tmp_path / "missing.json",
+        limit=10,
+    )
+
+    assert sessions == []
