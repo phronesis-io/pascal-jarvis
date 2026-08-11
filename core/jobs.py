@@ -130,8 +130,8 @@ class JobManager:
                 pass
         return job_id
 
-    def update_job(self, job_id: str, **kwargs) -> None:
-        """Update fields on a job entry."""
+    def update_job(self, job_id: str, **kwargs) -> bool:
+        """Update fields on a job entry and report whether it existed."""
         if kwargs.get("pid"):
             # Capture identity alongside the PID (covers the set-pid CLI
             # arm) so cancel/sweep can detect reuse. Done before taking
@@ -140,9 +140,10 @@ class JobManager:
         with _locked(self.registry_path):
             registry = self._read_registry()
             if job_id not in registry:
-                return
+                return False
             registry[job_id].update(kwargs)
             _atomic_write_json(self.registry_path, registry)
+        return True
 
     def finish_job(self, job_id: str, status: str = "completed") -> None:
         """Mark a job as finished (completed or failed).
@@ -435,6 +436,11 @@ if __name__ == "__main__":
         job_id = sys.argv[2]
         pid = int(sys.argv[3])
         jm.update_job(job_id, pid=pid)
+
+    elif cmd == "set-session":
+        job_id = sys.argv[2]
+        session_id = sys.argv[3]
+        print("updated" if jm.update_job(job_id, session_id=session_id) else "not_found")
 
     elif cmd == "finish":
         job_id = sys.argv[2]

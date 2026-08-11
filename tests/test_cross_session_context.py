@@ -111,6 +111,13 @@ def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
         conv_key: {"session_id": managed_id, "counter": 1},
     }))
     _claude(claude_root / "jarvis" / f"{managed_id}.jsonl", managed_id)
+    background_id = "11111111-1111-4111-8111-111111111111"
+    _claude(claude_root / "jarvis" / f"{background_id}.jsonl", background_id)
+    jobs = tmp_path / "jobs" / "registry.json"
+    jobs.parent.mkdir()
+    jobs.write_text(json.dumps({
+        "j-test": {"session_id": background_id, "status": "running"},
+    }))
     _claude(claude_root / "manual" / "manual.jsonl", "manual-claude")
     _claude(claude_root / "automation" / "automation.jsonl", "automation")
     automation = claude_root / "automation" / "automation.jsonl"
@@ -128,6 +135,7 @@ def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
         claude_root=claude_root,
         codex_root=codex_root,
         tracker_path=tracker,
+        jobs_registry_path=jobs,
         limit=20,
     )
     assert {session.session_id for session in sessions} == {

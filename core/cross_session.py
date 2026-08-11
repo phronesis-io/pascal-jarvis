@@ -290,26 +290,41 @@ def _codex_tail(path: Path) -> SessionTail | None:
     )
 
 
-def _managed_claude_ids(tracker_path: Path | None) -> set[str]:
-    """Derive every deterministic Lark-owned Claude session from its tracker."""
-    if not tracker_path or not tracker_path.is_file():
-        return set()
+def _read_mapping(path: Path | None) -> dict:
+    if not path or not path.is_file():
+        return {}
     try:
-        tracker = json.loads(tracker_path.read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _managed_claude_ids(
+    tracker_path: Path | None,
+    jobs_registry_path: Path | None,
+) -> set[str]:
+    """Find Lark conversations and background Claude sessions owned by Jarvis."""
+    tracker = _read_mapping(tracker_path)
+    jobs = _read_mapping(jobs_registry_path)
+    if not tracker and not jobs:
         return set()
     managed: set[str] = set()
-    if not isinstance(tracker, dict):
-        return managed
     for conv_key, entry in tracker.items():
         if not isinstance(entry, dict):
             continue
-        counter = max(0, int(entry.get("counter") or 0))
+        try:
+            counter = max(0, int(entry.get("counter") or 0))
+        except (TypeError, ValueError):
+            counter = 0
         managed.update(
             str(uuid.uuid5(SESSION_NAMESPACE, f"{conv_key}-{index}"))
             for index in range(1, counter + 1)
         )
         if entry.get("session_id"):
+            managed.add(str(entry["session_id"]))
+    for entry in jobs.values():
+        if isinstance(entry, dict) and entry.get("session_id"):
             managed.add(str(entry["session_id"]))
     return managed
 
@@ -328,6 +343,7 @@ def discover_interactive_sessions(
     claude_root: str | Path | None = None,
     codex_root: str | Path | None = None,
     tracker_path: str | Path | None = None,
+    jobs_registry_path: str | Path | None = None,
     window_hours: int = DEFAULT_WINDOW_HOURS,
     limit: int = MAX_CONTEXT_SESSIONS,
 ) -> list[SessionTail]:
@@ -342,7 +358,15 @@ def discover_interactive_sessions(
         tracker_path = Path(jarvis_dir) / "active_sessions.json" if jarvis_dir else None
     else:
         tracker_path = Path(tracker_path)
-    managed_claude = _managed_claude_ids(tracker_path)
+    if jobs_registry_path is None:
+        jarvis_dir = os.environ.get("JARVIS_DIR", "")
+        if jarvis_dir:
+            jobs_registry_path = Path(jarvis_dir) / "jobs" / "registry.json"
+        elif tracker_path and tracker_path.name == "active_sessions.json":
+            jobs_registry_path = tracker_path.parent / "jobs" / "registry.json"
+    else:
+        jobs_registry_path = Path(jobs_registry_path)
+    managed_claude = _managed_claude_ids(tracker_path, jobs_registry_path)
     cutoff = time.time() - max(1, int(window_hours)) * 3600
     candidates: list[tuple[float, str, Path]] = []
     for provider, root in (("claude", claude_root), ("codex", codex_root)):
@@ -417,6 +441,7 @@ def collect_incremental(
     claude_root: str | Path | None = None,
     codex_root: str | Path | None = None,
     tracker_path: str | Path | None = None,
+    jobs_registry_path: str | Path | None = None,
     window_hours: int = DEFAULT_WINDOW_HOURS,
 ) -> str:
     """Return unseen provider turns and atomically advance per-file watermarks."""
@@ -431,6 +456,7 @@ def collect_incremental(
         claude_root=claude_root,
         codex_root=codex_root,
         tracker_path=tracker_path,
+        jobs_registry_path=jobs_registry_path,
         window_hours=window_hours,
         limit=MAX_SCAN_FILES,
     )
@@ -506,6 +532,7 @@ def build_prompt_context(
     claude_root: str | Path | None = None,
     codex_root: str | Path | None = None,
     tracker_path: str | Path | None = None,
+    jobs_registry_path: str | Path | None = None,
     window_hours: int = DEFAULT_WINDOW_HOURS,
     max_chars: int = MAX_CONTEXT_CHARS,
 ) -> str:
@@ -514,6 +541,7 @@ def build_prompt_context(
         claude_root=claude_root,
         codex_root=codex_root,
         tracker_path=tracker_path,
+        jobs_registry_path=jobs_registry_path,
         window_hours=window_hours,
         limit=MAX_CONTEXT_SESSIONS,
     )

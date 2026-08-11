@@ -27,6 +27,16 @@ def test_create_job(tmp_path):
     assert (tmp_path / "jobs" / job_id).is_dir()
 
 
+def test_update_job_reports_presence_and_records_provider_session(tmp_path):
+    jm = JobManager(tmp_path / "jobs")
+    job_id = jm.create_job("user-1", "run experiment")
+    session_id = "11111111-1111-4111-8111-111111111111"
+
+    assert jm.update_job(job_id, session_id=session_id) is True
+    assert jm.get_job(job_id)["session_id"] == session_id
+    assert jm.update_job("missing", session_id=session_id) is False
+
+
 def test_list_jobs_filters_by_conv_key(tmp_path):
     jm = JobManager(tmp_path / "jobs")
     jm.create_job("user-1", "task A")
@@ -284,6 +294,14 @@ def test_promoted_job_persists_its_result_where_the_registry_points():
     assert 'printf \'%s\\n\' "$reply" > "$JOBS_DIR/$_promoted_job/output.md"' \
         in source
     assert "任务失败：模型未产出结果" in source
+
+
+def test_explicit_background_job_registers_its_real_claude_session():
+    source = _bot_source()
+    assert 'set-session "$job_id" "$bg_session_id"' in source
+    assert '--resume "$_main_sid" --fork-session --session-id "$bg_session_id"' \
+        in source
+    assert "refusing untracked launch" in source
 
 
 def test_promoted_job_never_ends_in_silence():
