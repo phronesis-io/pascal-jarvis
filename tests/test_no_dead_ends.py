@@ -43,38 +43,11 @@ def _buttons(card: dict) -> list[dict]:
 # ── 1. every button either acts or navigates ─────────────────────────────
 
 
-def test_docket_review_button_actually_navigates(env, monkeypatch):
+def test_docket_never_renders_a_desk_button(env):
+    """The web desk is retired (REQ-120): any URL button pointing at it would
+    be a dead end, so the docket ships with no navigation buttons at all —
+    an absent button beats a button that spends a tap and does nothing."""
     from datetime import datetime, timedelta
-    monkeypatch.setattr("core.mobile_access.web_desk_url",
-                        lambda path="/items": "https://desk.example/items")
-    now = datetime(2026, 7, 29, 9, 0)
-    mid, _ = memorial.create(source="intention-check", title="要拍板的事",
-                             body="正文", preset="decision",
-                             attention=memorial.ATTENTION_DECISION, send=False)
-    path = memorial._ledger_path()
-    stamp = (now - timedelta(hours=72)).strftime("%Y-%m-%d %H:%M")
-    lines = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        e = json.loads(line)
-        if e.get("id") == mid and e.get("ev") == "create":
-            e["ts"] = stamp
-        lines.append(json.dumps(e, ensure_ascii=False))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    summary = memorial_escrow.run(now=now, send=True)
-    docket = memorial.get_memorial(summary["docket_id"])
-    urls = [b.get("url") for b in docket["extra_buttons"] if b.get("url")]
-    assert urls == ["https://desk.example/items"]
-    # No record-only option may be labelled as if it navigates.
-    for option in docket["options"]:
-        assert "去看" not in option["label"]
-
-
-def test_docket_omits_the_button_when_there_is_nowhere_to_go(env, monkeypatch):
-    """An absent button beats a button that spends a tap and does nothing."""
-    from datetime import datetime, timedelta
-    monkeypatch.setattr("core.mobile_access.web_desk_url",
-                        lambda path="/items": "")
     now = datetime(2026, 7, 29, 9, 0)
     mid, _ = memorial.create(source="intention-check", title="要拍板的事",
                              body="正文", preset="decision",
@@ -161,12 +134,12 @@ def test_web_desk_url_refuses_anything_not_https(monkeypatch):
 
 def test_lapse_all_notice_names_a_filter_not_a_destination(env, monkeypatch):
     from core.actions import ActionProcessor
-    mid, _ = memorial.create(source="intention-check", title="t", body="b",
-                             preset="decision",
-                             attention=memorial.ATTENTION_DECISION, send=False)
-    monkeypatch.setattr(memorial, "escrow_scan",
-                        lambda *a, **k: {"overdue": [memorial.get_memorial(mid)],
-                                         "lapse": []})
+    # A fresh pending decision — NOT overdue: since REQ-122 the button
+    # archives the same set the docket headline counts (all pending
+    # decisions), recomputed at tap time.
+    memorial.create(source="intention-check", title="t", body="b",
+                    preset="decision",
+                    attention=memorial.ATTENTION_DECISION, send=False)
     ap = ActionProcessor(jarvis_dir=env.dir, memory_dir=str(env.dir),
                          jobs_dir=str(env.dir), log_file="",
                          owner_authenticated=True)

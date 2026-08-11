@@ -95,8 +95,9 @@ signal. Measured drift:
 
 Three consequences, in descending severity:
 1. **The team inbox lies about when things were said, and that is the field I
-   quote back to Pascal.** I wrote "8/4 18:27 凯瑞说加好友白名单" in tonight's
-   hourly note; he actually said it at **16:02**.
+   quote back to Pascal.** In tonight's hourly note I cited a teammate's
+   message (paraphrased here: a suggestion about the friend-request flow) as
+   sent at 18:27; it was actually sent at **16:02**.
 2. **After any downtime the drift is unbounded** — a backlog collected on
    recovery gets stamped with the recovery moment. Today's +145 min is the mild
    version; a multi-day outage would stamp days-old messages as "now".
@@ -107,15 +108,15 @@ Three consequences, in descending severity:
 
 ### Defect B — the sender's name is thrown away
 
-lark-cli returns `sender.name` (`"凯瑞"`), the adapter keeps only the open_id:
+lark-cli returns `sender.name` (e.g. `"同事C"` — synthetic placeholder, real
+names stay out of the repo), the adapter keeps only the open_id:
 
 ```python
             "actor": {"raw": sender, "resolved": ""},
 ```
 
-`_write_inbox` uses `resolved or raw`, so `inbox_team.md` reads
-`ou_6bfd60e9…` (a bare 32-hex open_id, truncated here for repo hygiene)
-instead of `凯瑞`. `warm/team.md` does not
+`_write_inbox` uses `resolved or raw`, so `inbox_team.md` shows a bare
+`ou_…` open_id instead of the sender's name. `warm/team.md` does not
 map every id, so summarizing the team group means guessing who spoke — a direct
 hallucination surface (REQ-78 class).
 
@@ -156,7 +157,8 @@ def _parse_create_time(raw, fallback: float) -> float:
 - C: `return str(raw)` in `_extract_text`'s fallback (callers already slice).
 
 Tests to add: a fixture message with `create_time="2026-08-04 17:03"` asserting
-the signal ts is 17:03 (not now) and `actor.resolved == "凯瑞"`.
+the signal ts is 17:03 (not now) and `actor.resolved == "同事C"` (synthetic
+fixture name).
 
 ## 5. Retirement question: **do NOT retire `phronesis-monitor` yet**
 

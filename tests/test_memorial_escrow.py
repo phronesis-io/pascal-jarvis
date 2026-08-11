@@ -187,10 +187,25 @@ def test_only_one_docket_per_day(env):
     assert len(env.cards) == cards_after_first
 
 
+def test_new_docket_supersedes_yesterdays_unanswered_one(env):
+    """Review #1: the docket is excluded from every sweep and count by
+    design, so nothing else can ever close it — an unanswered docket must be
+    resolved by its successor, not accumulate as immortal pending rows."""
+    _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
+    first = memorial_escrow.run(now=NOW, send=True)
+    second = memorial_escrow.run(now=NOW + timedelta(days=1), send=True)
+    assert first["docket_id"] and second["docket_id"]
+    old = memorial.get_memorial(first["docket_id"])
+    assert old["status"] == "decided"
+    assert old["action_result"] == "superseded_by_next_docket"
+    # The new docket stays pending — it is today's card, nothing replaced it.
+    assert memorial.get_memorial(second["docket_id"])["status"] == "pending"
+
+
 def test_no_docket_outside_the_morning_window(env):
     _make(env, "intention-check", memorial.ATTENTION_DECISION, age_h=72)
     summary = memorial_escrow.run(now=NOW.replace(hour=23), send=False)
-    assert summary["overdue"] == 1 and not summary["docket_id"]
+    assert summary["overdue"] and not summary["docket_id"]
 
 
 def test_sweep_still_archives_outside_the_morning_window(env):

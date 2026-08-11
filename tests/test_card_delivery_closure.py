@@ -325,13 +325,22 @@ def test_notice_card_opens_with_zhidaojiuxing(tmp_path, monkeypatch):
 
 def test_docket_mentions_accumulated_unread_signals():
     """Owner: 「信号…攒的比较多，你可以提醒我去看一眼」— one line in the
-    morning docket, threshold 5 so one unread brief doesn't nag."""
+    morning docket, threshold 5 so one unread brief doesn't nag. The count
+    comes from the states themselves (REQ-122 review #4), never a caller."""
     from datetime import datetime
-    states = [{"source": "intention-check", "title": "t", "status": "pending",
-               "attention": memorial.ATTENTION_DECISION,
-               "ts": "2026-08-01 09:00", "epoch": 1785600000}]
+
+    def _signal(i):
+        return {"source": memorial.SIGNAL_SOURCE, "title": f"s{i}",
+                "status": "pending", "attention": memorial.ATTENTION_NOTICE,
+                "ts": "2026-08-03 09:00", "epoch": 1785772800}
+
+    ask = {"source": "intention-check", "title": "t", "status": "pending",
+           "attention": memorial.ATTENTION_DECISION,
+           "ts": "2026-08-01 09:00", "epoch": 1785600000}
     now = datetime(2026, 8, 4, 9, 0)
-    _, body_quiet = memorial.escrow_docket(states, now=now, unread_signals=2)
+    _, body_quiet = memorial.escrow_docket(
+        [ask] + [_signal(i) for i in range(2)], now=now)
     assert "信号攒了" not in body_quiet
-    _, body_loud = memorial.escrow_docket(states, now=now, unread_signals=7)
+    _, body_loud = memorial.escrow_docket(
+        [ask] + [_signal(i) for i in range(7)], now=now)
     assert "信号攒了 7 条" in body_loud

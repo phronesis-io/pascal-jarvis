@@ -116,25 +116,42 @@ def test_unparsable_ts_is_excluded_from_every_bucket(env):
 
 
 def test_an_unknown_folded_status_fails_loudly(env):
-    """口径分裂 starts with a status quietly missing from the arithmetic."""
+    """口径分裂 starts with a status quietly missing from the arithmetic —
+    a real ValueError naming the status, alive even under python -O."""
     states = [{"id": "x", "status": "half_done", "ts": "2026-08-10 09:00",
                "attention": memorial.ATTENTION_NOTICE, "source": "s"}]
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="half_done"):
         memorial.ledger_accounting(states=states, now=NOW)
 
 
+def test_accounting_excludes_the_dockets_own_cards(env):
+    """Same counts_in_ledger predicate as escrow_scan: the docket reports the
+    ledger, it is not an entry in it."""
+    _make("intention-check", memorial.ATTENTION_DECISION, age_h=2)
+    _make(memorial.ESCROW_DIGEST_SOURCE, memorial.ATTENTION_DECISION, age_h=24)
+    acct = memorial.ledger_accounting(now=NOW)
+    assert acct["created"] == 1 and acct["pending_decision"] == 1
+
+
 def test_cli_accounting_reports_the_same_numbers(env, capsys, monkeypatch):
-    """巡检复算入口: python3 -m core.memorial accounting --days N."""
+    """巡检复算入口: python3 -m core.memorial accounting. The default window
+    is the whole ledger — the same 口径 the docket card counts."""
     monkeypatch.setattr(memorial, "now_local", lambda: NOW)
     _make("intention-check", memorial.ATTENTION_DECISION, age_h=2)
     stale = _make("metrics-digest", memorial.ATTENTION_NOTICE, age_h=24 * 8)
     memorial.lapse(stale, "未读满 8 天")
-    assert memorial.main(["accounting", "--days", "0"]) == 0
+    assert memorial.main(["accounting"]) == 0
     acct = json.loads(capsys.readouterr().out.strip())
     assert acct["window_days"] is None
     assert acct["created"] == 2
     assert acct["pending"] == 1 and acct["lapsed"] == 1
     assert acct["pending"] + acct["decided"] + acct["lapsed"] == acct["created"]
+
+
+def test_cli_accounting_rejects_a_negative_window(env, capsys):
+    """A typo'd --days must error, never silently widen to all-time."""
+    assert memorial.main(["accounting", "--days", "-3"]) == 2
+    assert "--days" in capsys.readouterr().err
 
 
 # ── the docket card uses the SAME arithmetic ─────────────────────────────
@@ -182,9 +199,12 @@ def test_docket_face_speaks_no_jargon(env):
     for age in (24 * 6, 72, 60, 50):
         _make("intention-check", memorial.ATTENTION_DECISION, age_h=age)
     _make("checkin", memorial.ATTENTION_NOTICE, age_h=24 * 2)
+    _make("calendar-sync", memorial.ATTENTION_ALERT, age_h=4)
+    for i in range(6):
+        _make(memorial.SIGNAL_SOURCE, memorial.ATTENTION_NOTICE, age_h=6 + i)
     face = "\n".join(
-        memorial.escrow_docket(memorial.list_memorials(), now=NOW,
-                               unread_signals=7))
+        memorial.escrow_docket(memorial.list_memorials(), now=NOW))
+    assert "信号攒了 6 条" in face  # every line kind is present in this face
     for banned in ("escrow", "lapse", "pending", "docket", "memorial",
                    "待批", "留中", "逾期"):
         assert banned not in face.lower(), banned
@@ -199,10 +219,36 @@ def test_docket_with_nothing_waiting_says_so(env):
 
 def test_docket_with_only_notices_still_reports_them(env):
     _make("checkin", memorial.ATTENTION_NOTICE, age_h=3)
-    _make("eigenflux-feed-triage", memorial.ATTENTION_NOTICE, age_h=5)
+    _make(memorial.SIGNAL_SOURCE, memorial.ATTENTION_NOTICE, age_h=5)
     title, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
     assert title == "没有等你拍板的事"
+    # Below the 📡 threshold the signal rows stay in the plain-notice line.
     assert "另有 2 条" in body and "自动归档" in body
+
+
+def test_docket_alerts_get_their_own_line_never_the_hands_off_bucket(env):
+    """Review #3: a pending alert described as 「不用动手」 would be the card
+    telling him to ignore an alarm."""
+    _make("intention-check", memorial.ATTENTION_DECISION, age_h=72)
+    _make("calendar-sync", memorial.ATTENTION_ALERT, age_h=30,
+          title="日历授权快过期了")
+    _make("checkin", memorial.ATTENTION_NOTICE, age_h=3)
+    _, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
+    assert "⚠️ 1 条告警还挂着：「日历授权快过期了」" in body
+    # The hands-off bucket holds ONLY the plain notice, never the alert.
+    assert "另有 1 条只是说给你听的" in body
+
+
+def test_docket_counts_each_signal_row_exactly_once(env):
+    """Review #4: rows the 📡 line already counts are deducted from 另有 N 条
+    — every pending card lands on exactly one line of the face."""
+    _make("intention-check", memorial.ATTENTION_DECISION, age_h=72)
+    _make("checkin", memorial.ATTENTION_NOTICE, age_h=3)
+    for i in range(5):
+        _make(memorial.SIGNAL_SOURCE, memorial.ATTENTION_NOTICE, age_h=6 + i)
+    _, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
+    assert "📡 信号攒了 5 条" in body
+    assert "另有 1 条" in body  # the checkin notice — signals not re-counted
 
 
 # ── the ghost backfill ───────────────────────────────────────────────────

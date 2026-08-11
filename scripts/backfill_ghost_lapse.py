@@ -17,7 +17,7 @@ other 留中 row.
 
 Ghost definition (matches ``memorial.delivery_accepted`` semantics):
   status == pending, AND delivery_status is not a live-channel acceptance
-  (``delivered`` / ``queued`` / ``retry_queued`` / ``ledger_only``). Rows
+  (``memorial.ACCEPTED_DELIVERY_STATUSES`` minus the dead desk). Rows
   whose status is ``web_only`` / ``phone_ready`` are dead-surface rows by
   definition and qualify at any age; anything else (``not_sent``, ``failed``,
   …) must additionally be older than ``--min-age-hours`` (default 48) so a
@@ -44,11 +44,13 @@ from core.timeutil import now_local  # noqa: E402
 
 REASON = "web_surface_retired_backfill"
 
-# Acceptance by a channel that can actually reach a human (or, for
-# ledger_only, a deliberate REQ-119 placement the morning digest covers).
-LIVE_STATUSES = {"delivered", "queued", "retry_queued", "ledger_only"}
 # The retired desk's statuses: no human ever saw these, whatever their age.
 DEAD_SURFACE_STATUSES = {"web_only", "phone_ready"}
+# Acceptance by a channel that can actually reach a human (or, for
+# ledger_only, a deliberate REQ-119 placement the morning digest covers).
+# Derived from the module's own contract minus the dead desk — a hand-copied
+# set here would silently drift the moment memorial adds a status.
+LIVE_STATUSES = memorial.ACCEPTED_DELIVERY_STATUSES - DEAD_SURFACE_STATUSES
 
 
 def find_ghosts(states: list[dict], now: datetime,
@@ -73,18 +75,21 @@ def run(now: datetime | None = None, apply: bool = False,
         min_age_h: float = 48.0) -> dict:
     now = now or now_local()
     ghosts = find_ghosts(memorial.list_memorials(), now, min_age_h)
-    lapsed = 0
+    acted: list[dict] = []
     if apply:
         # memorial.lapse() re-reads folded state and refuses non-pending rows,
         # so a concurrent 批红 between scan and write is never overwritten.
-        lapsed = sum(
-            1 for st in ghosts if memorial.lapse(st["id"], REASON))
+        acted = [st for st in ghosts if memorial.lapse(st["id"], REASON)]
+    # The audit trail counts what actually happened: rows LAPSED on an apply
+    # run (a candidate a concurrent 批红 rescued must not be reported as
+    # archived), candidates on a dry run (the preview is the product).
+    audited = acted if apply else ghosts
     return {
         "candidates": len(ghosts),
-        "lapsed": lapsed,
+        "lapsed": len(acted),
         "apply": apply,
         "by_source": dict(Counter(
-            str(st.get("source", "?")) for st in ghosts)),
+            str(st.get("source", "?")) for st in audited)),
     }
 
 
