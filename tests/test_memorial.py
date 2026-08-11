@@ -556,6 +556,9 @@ def test_clipped_opener_continues_until_the_full_body_is_delivered(env):
         if not result["handled"]:
             break
         replies.append(result)
+        assert memorial.commit_chat_continuation(
+            "ou_test", result["state_conv_key"], result["memorial_id"],
+            result["expected_offset"], result["next_offset"])
         if result["remaining_chars"] == 0:
             break
 
@@ -603,11 +606,39 @@ def test_continuation_survives_lark_chat_and_thread_routing_keys(env):
         f"memorial:{mid}", lookup_keys=["oc_direct_chat"], memorial_id=mid)
 
     assert result["handled"] is True
+    assert memorial.commit_chat_continuation(
+        f"memorial:{mid}", result["state_conv_key"], result["memorial_id"],
+        result["expected_offset"], result["next_offset"])
     pending = [json.loads(line) for line in
                (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
     continuation = [row for row in pending
                     if row["job_id"].startswith("memorial-continuation:")]
     assert continuation[-1]["conv_key"] == f"memorial:{mid}"
+
+
+def test_continuation_does_not_advance_before_delivery_commit(env):
+    body = "\n".join(f"可靠续文{i}:" + "正文" * 100 for i in range(80))
+    mid, _ = memorial.create("mail", "发送失败也不能丢", body, preset="fyi")
+    memorial.chat(mid)
+    before = memorial._latest_chat_continuation(["ou_test"])
+
+    first = memorial.continue_chat_body("ou_test")
+    retry = memorial.continue_chat_body("ou_test")
+
+    assert first["reply"] == retry["reply"]
+    assert memorial._latest_chat_continuation(["ou_test"])["offset"] == before["offset"]
+    pending = [json.loads(line) for line in
+               (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()]
+    assert not any(row["job_id"].startswith("memorial-continuation:")
+                   for row in pending)
+
+    assert memorial.commit_chat_continuation(
+        "ou_test", first["state_conv_key"], mid,
+        first["expected_offset"], first["next_offset"])
+    assert memorial._latest_chat_continuation(["ou_test"])["offset"] == first["next_offset"]
+    assert memorial.commit_chat_continuation(
+        "ou_test", first["state_conv_key"], mid,
+        first["expected_offset"], first["next_offset"]) is False
 
 
 def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):

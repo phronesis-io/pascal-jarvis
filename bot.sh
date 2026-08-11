@@ -2769,10 +2769,24 @@ print(content)
           2>>"$LOG_FILE" || echo '{"handled":false}')
         if [ "$(echo "$_memorial_continue" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _continue_reply=$(echo "$_memorial_continue" | jq -r '.reply // empty' 2>/dev/null)
-          if [ -n "$_continue_reply" ]; then
-            lark_reply_text "$message_id" "$_continue_reply" >/dev/null 2>&1 || true
+          if [ -n "$_continue_reply" ] && \
+             delivery_reply_reliable "$message_id" "$_continue_reply"; then
+            _continue_mid=$(echo "$_memorial_continue" | jq -r '.memorial_id // empty')
+            _continue_state_key=$(echo "$_memorial_continue" | jq -r '.state_conv_key // empty')
+            _continue_expected=$(echo "$_memorial_continue" | jq -r '.expected_offset // -1')
+            _continue_next=$(echo "$_memorial_continue" | jq -r '.next_offset // -1')
+            if python3 -m core.memorial continue-commit \
+                 --conv-key "$conv_key" --state-conv-key "$_continue_state_key" \
+                 --memorial-id "$_continue_mid" \
+                 --expected-offset "$_continue_expected" \
+                 --next-offset "$_continue_next" 2>>"$LOG_FILE" >/dev/null; then
+              log_info "Memorial continuation delivered and committed: conv_key=$conv_key"
+            else
+              log_warn "Memorial continuation delivered but commit failed: conv_key=$conv_key"
+            fi
+          else
+            log_warn "Memorial continuation not delivered; offset retained: conv_key=$conv_key"
           fi
-          log_info "Memorial continuation delivered: conv_key=$conv_key"
           continue
         fi
       fi

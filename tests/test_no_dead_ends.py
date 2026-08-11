@@ -94,6 +94,8 @@ def test_clipped_memorial_continue_promise_is_wired_for_owner_lark_chat():
     assert '[ "$_inline_cmd_ok" -eq 1 ]' in bot
     assert '--lookup-key "$chat_id"' in bot
     assert '--memorial-id "${_mem_id:-}"' in bot
+    assert 'delivery_reply_reliable "$message_id" "$_continue_reply"' in bot
+    assert "python3 -m core.memorial continue-commit" in bot
     for phrase in ("继续发", "继续发送", "发剩下的"):
         assert f'[ "$content" = "{phrase}" ]' in bot
 

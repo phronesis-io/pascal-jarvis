@@ -2768,7 +2768,7 @@ def _latest_chat_continuation(conv_keys: list[str],
 
 def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
                        memorial_id: str = "") -> dict:
-    """Return the next promised body chunk for one private conversation."""
+    """Prepare the next promised chunk without advancing delivery state."""
     key = str(conv_key or "").strip()
     continuation = _latest_chat_continuation(
         [key, *(lookup_keys or [])], memorial_id=memorial_id)
@@ -2784,11 +2784,6 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
         start += 1
     remaining_text = full[start:]
     if not remaining_text:
-        _append_line(_ledger_path(), {
-            "ev": "chat_continuation", "id": memorial_id,
-            "conv_key": key, "offset": len(full), "done": True,
-            "ts": now_local_str(), "epoch": int(time.time()),
-        })
         return {"handled": False, "reply": ""}
 
     chunk = _cut_at_boundary(remaining_text, CONTINUATION_CHUNK_CHARS)
@@ -2798,20 +2793,7 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
     while next_offset < len(full) and full[next_offset].isspace():
         next_offset += 1
     rest = max(len(full) - next_offset, 0)
-    done = rest == 0
     state_key = str(continuation.get("conv_key") or key)
-    _append_line(_ledger_path(), {
-        "ev": "chat_continuation", "id": memorial_id,
-        "conv_key": state_key, "offset": next_offset, "done": done,
-        "ts": now_local_str(), "epoch": int(time.time()),
-    })
-    # Keep the model's next real turn aligned with what Pascal has now read.
-    _append_line(_pending_merge_path(), {
-        "conv_key": key,
-        "job_id": f"memorial-continuation:{memorial_id}:{next_offset}",
-        "ts": now_local_str(),
-        "summary": f"[卡片续文：{st['title']}]\n{chunk}",
-    })
     tail = (
         f"（原文还有约 {rest} 字，再回一句「继续发」）"
         if rest else "（原文已发完）"
@@ -2821,7 +2803,52 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
         "reply": f"📜 「{st['title']}」续文：\n\n{chunk}\n\n{tail}",
         "remaining_chars": rest,
         "memorial_id": memorial_id,
+        "state_conv_key": state_key,
+        "expected_offset": int(continuation.get("offset") or 0),
+        "next_offset": next_offset,
     }
+
+
+def commit_chat_continuation(conv_key: str, state_conv_key: str,
+                             memorial_id: str, expected_offset: int,
+                             next_offset: int) -> bool:
+    """Advance one prepared chunk only after Lark confirms delivery."""
+    continuation = _latest_chat_continuation(
+        [state_conv_key], memorial_id=memorial_id)
+    if not continuation or continuation.get("done"):
+        return False
+    if int(continuation.get("offset") or 0) != int(expected_offset):
+        return False
+    st = get_memorial(memorial_id)
+    if st is None:
+        return False
+    full = str(st.get("body") or "").strip()
+    start = max(0, min(int(expected_offset), len(full)))
+    while start < len(full) and full[start].isspace():
+        start += 1
+    remaining_text = full[start:]
+    chunk = _cut_at_boundary(remaining_text, CONTINUATION_CHUNK_CHARS)
+    if not chunk:
+        chunk = remaining_text[:CONTINUATION_CHUNK_CHARS]
+    computed_next = start + len(chunk)
+    while computed_next < len(full) and full[computed_next].isspace():
+        computed_next += 1
+    if computed_next != int(next_offset):
+        return False
+    done = computed_next >= len(full)
+    _append_line(_ledger_path(), {
+        "ev": "chat_continuation", "id": memorial_id,
+        "conv_key": state_conv_key, "offset": computed_next, "done": done,
+        "ts": now_local_str(), "epoch": int(time.time()),
+    })
+    # Only delivered text becomes model context.
+    _append_line(_pending_merge_path(), {
+        "conv_key": str(conv_key or "").strip(),
+        "job_id": f"memorial-continuation:{memorial_id}:{computed_next}",
+        "ts": now_local_str(),
+        "summary": f"[卡片续文：{st['title']}]\n{chunk}",
+    })
+    return True
 
 
 def chat(memorial_id: str) -> dict:
@@ -3002,6 +3029,14 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--lookup-key", action="append", default=[])
     cp.add_argument("--memorial-id", default="")
 
+    ccp = sub.add_parser(
+        "continue-commit", help="commit a continuation after delivery")
+    ccp.add_argument("--conv-key", required=True)
+    ccp.add_argument("--state-conv-key", required=True)
+    ccp.add_argument("--memorial-id", required=True)
+    ccp.add_argument("--expected-offset", required=True, type=int)
+    ccp.add_argument("--next-offset", required=True, type=int)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -3051,6 +3086,13 @@ def main(argv: list[str] | None = None) -> int:
             args.conv_key, lookup_keys=args.lookup_key,
             memorial_id=args.memorial_id), ensure_ascii=False))
         return 0
+
+    if args.cmd == "continue-commit":
+        committed = commit_chat_continuation(
+            args.conv_key, args.state_conv_key, args.memorial_id,
+            args.expected_offset, args.next_offset)
+        print(json.dumps({"committed": committed}, ensure_ascii=False))
+        return 0 if committed else 1
 
     parser.print_usage(sys.stderr)
     return 2
