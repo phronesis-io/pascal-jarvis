@@ -21,6 +21,7 @@
 | 组件 | 必需？ | 作用 | 人类要做的事 |
 |---|---|---|---|
 | Claude Code CLI | ✅ 必需 | Jarvis 的大脑（每次心跳/对话都是一次 claude 调用） | 登录一次（订阅或 API 计费） |
+| Codex CLI | 可选但推荐 | Claude 限额时接管私聊；也可手动切为首选 | `codex login` 登录 ChatGPT |
 | python3.10+ / jq / requirements-dev.txt | ✅ 必需 | 运行时与安装验收 | 无 |
 | GitHub CLI (`gh`) | 仅生产发布 | PR/CI/review 发布门禁 | 首次 `gh auth login` |
 | Lark/飞书插件 | 可选 | 手机上和 bot 双向聊天 | 浏览器创建应用 + 授权（约 5 分钟） |
@@ -52,6 +53,11 @@ Console API 计费账户。验证：`printf 'Say OK' | claude -p` 能返回即�
 > 持续调用 Claude（每周期最多批量 4 个任务），这是主要消耗来源。新装默认
 > `heartbeat_model: sonnet`（便宜档）；追求最高质量可改 `opus`（成本显著上升）。
 > 订阅制（Pro/Max）下消耗计入订阅额度；API 计费下请先用 sonnet 观察一两天账单。
+
+**🧑 NEEDS HUMAN — Codex 登录（推荐）**：运行 `codex login` 并按浏览器流程
+登录 ChatGPT，验证 `codex login status` 显示已登录。macOS 的 ChatGPT 应用若已
+包含 Codex，Jarvis 会自动发现其内置二进制；也可在 `jarvis.yaml` 设置
+`codex.binary`。这个 fallback 不需要 `OPENAI_API_KEY`。
 
 ## Phase 1 — 克隆与基础安装
 

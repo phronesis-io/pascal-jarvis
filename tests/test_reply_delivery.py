@@ -89,6 +89,7 @@ def test_reply_path_uses_reliable_sender():
     assert "python3 -m core.delivery send" in _extract_fn(
         "delivery_reply_reliable")
     assert '_answer_provider="Claude backup2"' in BOT_SH
+    assert '_answer_provider="Codex"' in BOT_SH
 
 
 def test_send_to_lark_uses_reliable_sender():

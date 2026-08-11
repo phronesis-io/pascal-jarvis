@@ -29,6 +29,8 @@ Lark event
   -> bot.sh parsing and trust boundary
   -> core.prompt current memory + Matter context
   -> selected model/provider
+       owner p2p: preferred executor -> Claude chain -> Codex CLI -> GPT API
+       shared/untrusted: restricted Claude chain -> text-only GPT API
   -> deterministic action processors
   -> core.delivery reply envelope
   -> Lark receipt + Matter timeline
@@ -170,6 +172,11 @@ the exact release commit or a healthy resident descendant that contains it.
   worktrees, and Delegation links.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability.
+- `core.codex_fallback`: owner-private Codex CLI execution, bounded process
+  control, and one durable Codex thread per Lark conversation. It uses the
+  workspace-write review sandbox and never serves group or non-owner traffic.
+- `core.runtime_provider`: per-conversation executor preference. Preference
+  changes route order only; `conversation_runtime` records what actually ran.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The separate
   `restart.sh --runtime` path is configuration-only: it revalidates release

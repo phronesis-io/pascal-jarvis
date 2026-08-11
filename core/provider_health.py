@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .claude_bin import resolve_claude_bin
+from .codex_fallback import resolve_codex_bin
 from .config import Config
 
 
@@ -51,6 +52,7 @@ def _safe_error(value: object, limit: int = 240) -> str:
 
 def provider_specs(config: Config) -> list[dict[str, Any]]:
     claude = config.claude
+    codex = config.codex
     openai = config.openai
     main_model = str(claude.get("main_model") or "opus")
     return [
@@ -89,6 +91,17 @@ def provider_specs(config: Config) -> list[dict[str, Any]]:
             "model": str(claude.get("backup2_model") or main_model),
             "token": str(claude.get("backup2_auth_token") or ""),
             "base_url": str(claude.get("backup2_base_url") or ""),
+        },
+        {
+            "id": "codex",
+            "label": "Codex fallback",
+            "kind": "codex",
+            "enabled": bool(codex.get("fallback_enabled", True)),
+            "configured": bool(
+                codex.get("binary") or resolve_codex_bin()
+            ),
+            "model": str(codex.get("fallback_model") or "gpt-5.5"),
+            "binary": str(codex.get("binary") or ""),
         },
         {
             "id": "openai",
@@ -275,6 +288,93 @@ def _probe_openai(
     }
 
 
+def _probe_codex(
+    spec: dict[str, Any],
+    *,
+    root: Path,
+    timeout: int,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, Any]:
+    binary = resolve_codex_bin(str(spec.get("binary") or ""))
+    if not binary:
+        return {
+            "status": "unhealthy",
+            "detail": "Codex CLI not found",
+            "latency_ms": 0,
+        }
+    command = [
+        binary,
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "-C",
+        str(root),
+        "-m",
+        spec["model"],
+        "-",
+    ]
+    started = time.monotonic()
+    try:
+        completed = runner(
+            command,
+            input=(
+                f"Provider health canary. Reply with exactly {CANARY_MARKER} "
+                "and nothing else. Do not use tools."
+            ),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(root),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "unhealthy",
+            "detail": f"canary timed out after {timeout}s",
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:
+        return {
+            "status": "unhealthy",
+            "detail": _safe_error(f"{type(exc).__name__}: {exc}"),
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        }
+    text = ""
+    for line in str(completed.stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        item = event.get("item") if event.get("type") == "item.completed" else None
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = str(item.get("text") or "")
+    latency = round((time.monotonic() - started) * 1000)
+    if completed.returncode == 0 and text.strip() == CANARY_MARKER:
+        return {
+            "status": "healthy",
+            "detail": "bounded read-only canary answered",
+            "latency_ms": latency,
+            "actual_model": spec["model"],
+            "model_source": "requested",
+        }
+    return {
+        "status": "unhealthy",
+        "detail": (
+            "canary returned unexpected content"
+            if completed.returncode == 0
+            else _safe_error(completed.stderr)
+            or f"canary exited {completed.returncode}"
+        ),
+        "latency_ms": latency,
+    }
+
+
 def probe_provider(
     spec: dict[str, Any],
     *,
@@ -286,13 +386,16 @@ def probe_provider(
     result = _base_result(spec)
     if result["status"] != "not_run":
         return result
-    outcome = (
-        _probe_claude(
+    if spec["kind"] == "claude":
+        outcome = _probe_claude(
             spec, root=_root(root), timeout=timeout, runner=runner
         )
-        if spec["kind"] == "claude"
-        else _probe_openai(spec, timeout=timeout, caller=openai_caller)
-    )
+    elif spec["kind"] == "codex":
+        outcome = _probe_codex(
+            spec, root=_root(root), timeout=timeout, runner=runner
+        )
+    else:
+        outcome = _probe_openai(spec, timeout=timeout, caller=openai_caller)
     result.update(outcome)
     result["checked_at"] = _now()
     return result

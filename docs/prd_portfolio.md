@@ -90,11 +90,16 @@ verifier-accuracy thresholds in the PRD.
 
 ### Completed: Provider fallback observability
 
-Primary Claude, relay backup 1, optional relay backup 2, and GPT agentic
-fallback have bounded canaries and a shared health projection. `/model` and the
+Primary Claude, relay backup 1, optional relay backup 2, local Codex CLI, and
+GPT agentic fallback have bounded canaries and a shared health projection. `/model` and the
 Ops dashboard show configured position, requested model, observed model, last
 success, latency, and a sanitized failure category. A primary spend-limit
 canary trips the same fallback gate used by live routing.
+
+Owner-private Lark conversations use Claude-first automatic routing by default,
+then Codex CLI, then GPT API. `切到 Codex` and `切回 Claude` change the preferred
+executor without weakening fallback; Codex threads are durable per conversation.
+Group and non-owner traffic never enters the local Codex tool route.
 
 The live order also covers background jobs, session compaction, progress
 narration, EigenFlux message analysis, and heartbeat noise classification.

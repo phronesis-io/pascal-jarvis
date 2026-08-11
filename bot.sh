@@ -230,6 +230,10 @@ emit("CLAUDE_BACKUP2_BASE_URL", c.claude.get("backup2_base_url", ""))
 emit("CLAUDE_BACKUP2_MODEL", c.claude.get("backup2_model", ""))
 emit("BACKUP_MAX_SESSION_SIZE", c.claude.get("backup_max_session_size", 100000))
 emit("BACKUP_MAX_MEMORY_CHARS", c.claude.get("backup_max_memory_chars", 40000))
+emit("CODEX_FALLBACK_ENABLED", str(bool(c.codex.get("fallback_enabled", True))).lower())
+emit("CODEX_FALLBACK_MODEL", c.codex.get("fallback_model", "gpt-5.5"))
+emit("CODEX_FALLBACK_BINARY", c.codex.get("binary", ""))
+emit("CODEX_FALLBACK_TIMEOUT", c.codex.get("timeout", 300))
 emit("OPENAI_FALLBACK_ENABLED", str(bool(c.openai.get("fallback_enabled", True))).lower())
 emit("OPENAI_FALLBACK_MODEL", c.openai.get("fallback_model", "gpt-5.5"))
 emit("OPENAI_API_KEY_CONFIG", c.openai.get("api_key", ""))
@@ -272,6 +276,7 @@ export BOT_OPEN_ID
 export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
 export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_AUTH_TOKEN CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
 export BACKUP_MAX_SESSION_SIZE BACKUP_MAX_MEMORY_CHARS
+export CODEX_FALLBACK_ENABLED CODEX_FALLBACK_MODEL CODEX_FALLBACK_BINARY CODEX_FALLBACK_TIMEOUT
 export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
   export OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
@@ -764,6 +769,55 @@ No output found for job: $out_id"
   fi
 }
 
+# Run one Codex turn while publishing its killable wrapper PID through the
+# same session lock used by Claude. core.codex_fallback handles SIGTERM by
+# terminating Codex's own process group, so owner stop/cancel remains real.
+run_codex_locked() {
+  local _content="$1" _conv_key="$2" _system_prompt_file="$3"
+  local _model="$4" _timeout="$5" _work_dir="$6" _binary="$7"
+  local _lock_file="$8" _lock_token="$9" _answer_base="${10}"
+  local _stdin_file="${_answer_base}.codex.stdin"
+  local _stdout_file="${_answer_base}.codex.stdout"
+  local _stderr_file="${_answer_base}.codex.stderr"
+  local _codex_pid _codex_rc
+
+  printf '%s' "$_content" > "$_stdin_file"
+  : > "$_stdout_file"
+  : > "$_stderr_file"
+  python3 -m core.codex_fallback \
+    --conv-key "$_conv_key" \
+    --system-prompt-file "$_system_prompt_file" \
+    --model "$_model" \
+    --timeout "$_timeout" \
+    --work-dir "$_work_dir" \
+    --binary "$_binary" \
+    < "$_stdin_file" > "$_stdout_file" 2> "$_stderr_file" &
+  _codex_pid=$!
+
+  if ! grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
+    kill "$_codex_pid" 2>/dev/null || true
+    wait "$_codex_pid" 2>/dev/null || true
+    rm -f "$_stdin_file" "$_stdout_file"
+    return 143
+  fi
+  printf '%s %s' "$_codex_pid" "$_lock_token" > "$_lock_file"
+  wait "$_codex_pid" 2>/dev/null
+  _codex_rc=$?
+
+  if grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
+    printf 'acquiring %s' "$_lock_token" > "$_lock_file"
+  else
+    # stop/cancel removed the lock. Even a just-finished answer is discarded:
+    # once the user cancelled, no late reply or alternate provider may run.
+    _codex_rc=143
+  fi
+  if [ "$_codex_rc" -eq 0 ]; then
+    cat "$_stdout_file"
+  fi
+  rm -f "$_stdin_file" "$_stdout_file"
+  return "$_codex_rc"
+}
+
 # ── Message Handler (runs in background subshell) ────────────────────
 # Extracted from the main loop so different conversations run in parallel.
 # Same-session messages serialize via the existing lock file mechanism.
@@ -1016,6 +1070,9 @@ print(build_system_prompt(
   local _claude_backup2_tried=0
   local _claude_backup_token="${CLAUDE_BACKUP_AUTH_TOKEN:-}"
   local _claude_backup_base_url="${CLAUDE_BACKUP_BASE_URL:-}"
+  local _codex_tried=0
+  local _codex_uncertain=0
+  local _codex_cancelled=0
   local _openai_tried=0
   local _answer_provider=""
   local _answer_model=""
@@ -1023,6 +1080,44 @@ print(build_system_prompt(
   # spawn fails with a model-unavailable / spend-limit stderr, instead of
   # looping to empty death ("Continue / No response requested").
   local _cur_model="$MAIN_MODEL"
+
+  # A private conversation may explicitly prefer Codex. This changes only
+  # routing order: if Codex is unavailable, the normal Claude chain still
+  # runs, and the provider/model ledger records whichever route answered.
+  local _provider_preference="auto"
+  if [ "$is_group" -ne 1 ]; then
+    _provider_preference=$(python3 -m core.runtime_provider get "$conv_key" \
+      2>>"$LOG_FILE" || echo auto)
+  fi
+  if [ "$_provider_preference" = "codex" ] \
+    && [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ]; then
+    _codex_tried=1
+    log_info "[$session_id] Conversation preference: trying Codex first (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
+    answer=$(run_codex_locked "$content" "$conv_key" "$SYS_PROMPT_FILE" \
+      "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
+      "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
+      "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
+      "$ANSWER_FILE")
+    _codex_exit=$?
+    if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
+      _answer_provider="Codex"
+      _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
+      log_info "[$session_id] Preferred Codex route succeeded (${#answer} chars)"
+    elif [ "$_codex_exit" -eq 75 ]; then
+      answer=""
+      _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
+      log_warn "[$session_id] Preferred Codex route failed (exit=$_codex_exit, stderr=${_codex_err:-none}) — continuing to Claude"
+    elif [ "$_codex_exit" -eq 143 ]; then
+      answer=""
+      _codex_cancelled=1
+      log_info "[$session_id] Preferred Codex route cancelled — no replay"
+    else
+      answer=""
+      _codex_uncertain=1
+      _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
+      log_warn "[$session_id] Preferred Codex route ended ambiguously (exit=$_codex_exit, stderr=${_codex_err:-none}) — refusing automatic replay"
+    fi
+  fi
 
   # Sticky provider gate: account-wide spend/session limits used to make every
   # message re-probe primary from scratch —
@@ -1054,9 +1149,12 @@ print(build_system_prompt(
   fi
 
   # Five bounded calls are enough for the longest route:
-  # primary opus → sonnet → haiku → Backup 1 → Backup 2. GPT is invoked
-  # immediately after the final failed Claude-compatible route.
-  for _attempt in 1 2 3 4 5; do
+  # primary opus → sonnet → haiku → Backup 1 → Backup 2. Codex, then the
+  # text/API fallback, are invoked after the final Claude-compatible route.
+  local _attempt_sequence="1 2 3 4 5"
+  { [ -n "$answer" ] || [ "$_codex_uncertain" -eq 1 ] \
+      || [ "$_codex_cancelled" -eq 1 ]; } && _attempt_sequence=""
+  for _attempt in $_attempt_sequence; do
     if [ "$_attempt" -gt 1 ]; then
       log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
       sleep 3
@@ -1414,9 +1512,12 @@ print(build_system_prompt(
         _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
         _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
         _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
-      elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
-        && [ -n "${OPENAI_API_KEY:-}" ] \
-        && [ "$_openai_tried" -eq 0 ] \
+      elif { { [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ] \
+                && [ "$is_group" -ne 1 ] \
+                && [ "$_codex_tried" -eq 0 ]; } \
+             || { [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
+                  && [ -n "${OPENAI_API_KEY:-}" ] \
+                  && [ "$_openai_tried" -eq 0 ]; }; } \
         && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null \
              || { { [ "$_claude_backup_tried" -eq 1 ] \
                     || [ "$_claude_backup2_tried" -eq 1 ]; } \
@@ -1431,24 +1532,57 @@ print(build_system_prompt(
         # relay blip skipped the whole retry ladder and answered with a
         # context-free GPT reply; requiring a completed failed attempt means
         # backup really failed at least once in THIS handler run.
-        _openai_tried=1
-        log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-        answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
-          python3 -m core.openai_fallback \
-          ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
-          2>"${ANSWER_FILE}.openai.stderr")
-        _openai_exit=$?
-        if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
-          _answer_provider="GPT fallback"
-          _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
-          log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
-          break
+        if [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ] \
+          && [ "$is_group" -ne 1 ] && [ "$_codex_tried" -eq 0 ]; then
+          _codex_tried=1
+          log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying Codex fallback (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
+          answer=$(run_codex_locked "$content" "$conv_key" \
+            "$SYS_PROMPT_FILE" "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
+            "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
+            "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
+            "$ANSWER_FILE")
+          _codex_exit=$?
+          if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
+            _answer_provider="Codex"
+            _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
+            log_warn "[$session_id] Codex fallback succeeded (${#answer} chars)"
+            break
+          fi
+          answer=""
+          if [ "$_codex_exit" -eq 143 ]; then
+            _codex_cancelled=1
+            log_info "[$session_id] Codex fallback cancelled — no replay"
+            break
+          fi
+          _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
+          log_warn "[$session_id] Codex fallback failed (exit=$_codex_exit, stderr=${_codex_err:-none})"
+          if [ "$_codex_exit" -ne 75 ]; then
+            # A timeout/nonzero run may already have executed tools. Replaying
+            # the same request through GPT could duplicate external actions.
+            _codex_uncertain=1
+            break
+          fi
         fi
-        _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
-        log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
-        # Primary is already known-dead, backup has failed twice, and the final
-        # GPT route just failed. More loop iterations only repeat the same relay
-        # 403 and delay an honest failure report.
+        if [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
+          && [ -n "${OPENAI_API_KEY:-}" ] && [ "$_openai_tried" -eq 0 ]; then
+          _openai_tried=1
+          log_warn "[$session_id] Codex unavailable → trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
+          answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
+            python3 -m core.openai_fallback \
+            ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
+            2>"${ANSWER_FILE}.openai.stderr")
+          _openai_exit=$?
+          if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
+            _answer_provider="GPT fallback"
+            _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
+            log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
+            break
+          fi
+          _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
+          log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
+        fi
+        # Every independent route has now had one bounded attempt. Repeating a
+        # relay or uncertain tool-capable turn could duplicate side effects.
         break
       fi
       # On first failure, session file may have been created — update for retry
@@ -1474,7 +1608,9 @@ print(build_system_prompt(
   local _promoted_job=""
   [ -f "${ANSWER_FILE}.promoted" ] && _promoted_job=$(cat "${ANSWER_FILE}.promoted" 2>/dev/null)
   rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
-    "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.openai.stderr" "$SYS_PROMPT_FILE"
+    "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.codex.stderr" \
+    "${ANSWER_FILE}.codex.stdin" "${ANSWER_FILE}.codex.stdout" \
+    "${ANSWER_FILE}.openai.stderr" "$SYS_PROMPT_FILE"
   # Remove the lock ONLY if we still own it: after promotion released it (or
   # a staleness reclaim), it may belong to another live handler — an
   # unconditional rm here silently unlocked their in-flight session.
@@ -1522,7 +1658,12 @@ print(build_system_prompt(
     [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      if [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ] && [ -n "$_promoted_job" ]; then
+      if [ "${_codex_cancelled:-0}" -eq 1 ]; then
+        log_info "[$session_id] Cancelled Codex turn ended — staying silent"
+      elif [ "${_codex_uncertain:-0}" -eq 1 ]; then
+        lark_reply_text "$message_id" \
+          "Codex 执行被中断，是否已经完成无法确认。为避免重复操作，我没有自动换模型重跑；可以先让我核对结果，再决定是否继续。" >/dev/null
+      elif [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ] && [ -n "$_promoted_job" ]; then
         # Promoted job hit the 6000s ceiling. 「继续」 would land in the NEW
         # (rotated) session and not resume this work — say so honestly.
         lark_reply_text "$message_id" \
@@ -1570,9 +1711,12 @@ print(build_system_prompt(
       # content-safety classifier. Calling this a "安全过滤器" sent Pascal
       # debugging the wrong subsystem while the real fault was an exhausted
       # provider chain.
-      if [ "${_openai_tried:-0}" -eq 1 ]; then
+      if [ "${_codex_tried:-0}" -eq 1 ] && [ "${_openai_tried:-0}" -eq 1 ]; then
         lark_reply_text "$message_id" \
-          "主模型、Claude 备用通道和 GPT 兜底都未能完成这次请求。本次操作没有执行成功，具体故障已记录。" >/dev/null
+          "Claude、Codex 接力和 GPT 兜底都未能完成这次请求。本次操作没有执行成功，具体故障已记录。" >/dev/null
+      elif [ "${_codex_tried:-0}" -eq 1 ]; then
+        lark_reply_text "$message_id" \
+          "Claude 和 Codex 接力都未能完成这次请求。本次操作没有执行成功，具体故障已记录。" >/dev/null
       else
         lark_reply_text "$message_id" \
           "模型通道返回了错误信息，本次操作没有执行成功，具体故障已记录。" >/dev/null
@@ -1594,6 +1738,8 @@ print(build_system_prompt(
       _model_footer="（备用通道）"
     elif [ "$_answer_provider" = "Claude backup2" ]; then
       _model_footer="（备用通道 2）"
+    elif [ "$_answer_provider" = "Codex" ]; then
+      _model_footer="（Codex 接手）"
     elif [ "$_answer_provider" = "GPT fallback" ]; then
       _model_footer="（GPT 兜底）"
     elif [ -n "$_answer_model" ] && [ "$_answer_model" != "$MAIN_MODEL" ]; then
@@ -2721,12 +2867,12 @@ sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.matter_bridge import get_binding, record_turn
 from core.matters import link_entity
 b = get_binding(os.environ['JV_CONV_KEY'])
+record_turn(os.environ['JV_CONV_KEY'], 'user', os.environ['JV_CONTENT'],
+            os.environ.get('JV_MSG_ID', ''))
 if b:
     link_entity(b['matter_id'], 'session', os.environ['JV_SESSION_ID'],
                 provider='claude', title='Jarvis 飞书会话',
                 metadata={'conv_key': os.environ['JV_CONV_KEY']}, actor='lark')
-    record_turn(os.environ['JV_CONV_KEY'], 'user', os.environ['JV_CONTENT'],
-                os.environ.get('JV_MSG_ID', ''))
 " >>"$LOG_FILE" 2>&1 & )
 
       if [ -n "$rotated" ]; then

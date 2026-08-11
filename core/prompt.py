@@ -235,6 +235,13 @@ def build_system_prompt(
     counter = get_session_counter(tracker_path, conv_key)
     recent_turns = build_recent_turns(session_dir, session_id, counter, conv_key, 20)
     compact = read_compact(jarvis_dir, conv_key)
+    cross_provider_turns = ""
+    try:
+        from core.matter_bridge import recent_provider_context
+        cross_provider_turns = recent_provider_context(conv_key)
+    except Exception:
+        # Prompt construction must survive a fresh/damaged optional DB.
+        cross_provider_turns = ""
 
     # 奏折专属对话 (REQ-118): conv_key "memorial:<id>" is a per-card session —
     # pin the card's content at the top so the whole session stays on that
@@ -294,6 +301,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {memory}
 
 {session_compact}
+
+{cross_provider_turns}
 
 {recent_turns}"""
 
