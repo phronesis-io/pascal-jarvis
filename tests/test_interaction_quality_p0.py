@@ -151,6 +151,10 @@ def test_load_interval_overrides_ignores_garbage(tmp_path):
     assert runner.load_interval_overrides() == {}
     f.write_text(json.dumps({"t": "soon"}))
     assert runner.load_interval_overrides() == {}
+    f.write_text("[]")
+    assert runner.load_interval_overrides() == {}
+    f.write_text('{"t": 1e309}')
+    assert runner.load_interval_overrides() == {}
     f.write_text(json.dumps({"t": 0, "u": 7200}))
     assert runner.load_interval_overrides() == {"u": 7200}
 
