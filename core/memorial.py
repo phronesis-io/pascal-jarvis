@@ -193,8 +193,12 @@ ESCROW_DEADLINE_H = {
 }
 # A decision past its deadline is NOT archived — it is re-surfaced in the daily
 # 匣子 docket. But 批红 that never comes is itself an answer: past this hard
-# ceiling it is filed as 留中 so the docket cannot nag forever. Nothing in the
-# measured window was ever decided this late (p95 = 128h, max = 179h).
+# ceiling it is filed as 留中 so the docket cannot nag forever. Re-measured
+# 8/12 on the authoritative ledger (delivery_envelopes, 7/23-8/12, 296
+# decision-class cards): of the 117 ever acted on, the SLOWEST took 44.5h and
+# 116 of 117 landed inside 24h — nothing was ever decided past 48h. An older
+# note here claimed p95 = 128h / max = 179h; that does not reproduce on the
+# ledger and should not be cited again.
 #
 # 2026-08-12, Pascal 原话「死了的就别来烦我了」: the ceiling was 14 days, so a
 # card whose underlying matter had already passed (a prep reminder for a
