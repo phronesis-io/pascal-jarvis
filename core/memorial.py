@@ -41,7 +41,6 @@ CLI (any emitter can send a memorial in one line):
 from __future__ import annotations
 
 import copy
-import fcntl
 import itertools
 import json
 import os
@@ -50,25 +49,34 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from core.card import build_card, extract_card_text
+from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
+from core import memorial_cards, memorial_ledger
 from core.timeutil import now_local, now_local_str
 
-_DEFAULT_JARVIS_DIR = Path(__file__).resolve().parent.parent
-JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", _DEFAULT_JARVIS_DIR))
-_IMPORTED_JARVIS_DIR = JARVIS_DIR
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
+                                 Path(__file__).resolve().parent.parent))
+_INITIAL_JARVIS_DIR = JARVIS_DIR
+# Backward-compatible name introduced by the write-isolation audit.
+_IMPORTED_JARVIS_DIR = _INITIAL_JARVIS_DIR
 
 
 def runtime_root() -> Path:
-    """Resolve state storage at call time, preserving module overrides."""
-    if Path(JARVIS_DIR) != _IMPORTED_JARVIS_DIR:
-        return Path(JARVIS_DIR)
-    return Path(os.environ.get("JARVIS_DIR") or _IMPORTED_JARVIS_DIR)
+    """Resolve the active data root without defeating facade monkeypatches.
+
+    Tests historically patch ``core.memorial.JARVIS_DIR``.  Keep that hook
+    authoritative while also observing a ``JARVIS_DIR`` environment change
+    made after import when the facade global is untouched.
+    """
+    root = Path(JARVIS_DIR)
+    if root != _INITIAL_JARVIS_DIR:
+        return root
+    configured = os.environ.get("JARVIS_DIR", "").strip()
+    return Path(configured) if configured else root
 
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
@@ -518,21 +526,20 @@ _ID_COUNTER = itertools.count(1)
 
 
 def _ledger_path() -> Path:
-    return runtime_root() / "memorials.jsonl"
+    return memorial_ledger.ledger_path(runtime_root())
 
 
 def _pending_merge_path() -> Path:
     # bot.sh's bg-job merge channel: lines matching conv_key are prepended to
     # Pascal's next message and consumed (rewrite-keep-others). We only ever
     # append — same as bot.sh's own two writers.
-    return runtime_root() / "jobs" / "pending_merge.jsonl"
+    return memorial_ledger.pending_merge_path(runtime_root())
 
 
 def _outbox_path() -> Path:
-    return runtime_root() / "heartbeat_outbox.jsonl"
+    return memorial_ledger.outbox_path(runtime_root())
 
 
-@contextmanager
 def ledger_lock(ledger: Path):
     """Exclusive cross-process lock for memorials.jsonl writers.
 
@@ -543,13 +550,7 @@ def ledger_lock(ledger: Path):
     writer (here, heartbeat_loop delivery events, sidecar decide events
     via this module) takes this lock; appends hold it for microseconds.
     """
-    lock_path = ledger.parent / (ledger.name + ".lock")
-    with open(lock_path, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    return memorial_ledger.ledger_lock(ledger)
 
 
 def _append_line(path: Path, entry: dict) -> None:
@@ -557,16 +558,7 @@ def _append_line(path: Path, entry: dict) -> None:
     sidecar / CLI / heartbeat writers (same idiom as engagement_log /
     heartbeat_outbox appends). Ledger writes additionally take ledger_lock
     so a monthly rotation can never replace the file out from under them."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
-    if path.name == "memorials.jsonl":
-        with ledger_lock(path):
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-        return
-    with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(line)
+    memorial_ledger.append_line(path, entry)
 
 
 def _new_id() -> str:
@@ -592,125 +584,31 @@ def _resolve_user_id() -> str:
 
 def _fold(events: list[dict]) -> dict[str, dict]:
     """Fold the event stream into {id: current_state}."""
-    states: dict[str, dict] = {}
-    for e in events:
-        mid = str(e.get("id", ""))
-        if not mid:
-            continue
-        ev = e.get("ev", "")
-        if ev == "create":
-            options = e.get("options") or []
-            extra_buttons = e.get("extra_buttons") or []
-            states[mid] = {
-                "id": mid,
-                "ts": e.get("ts", ""),
-                "epoch": e.get("epoch", 0),
-                "source": str(e.get("source", "")),
-                "title": str(e.get("title", "")),
-                "body": str(e.get("body", "")),
-                "options": options,
-                "extra_buttons": extra_buttons,
-                "recommend": e.get("recommend") or None,
-                "authoring_protocol": bool(e.get("authoring_protocol", False)),
-                "authoring_audit_text": (
-                    str(e.get("authoring_audit_text", ""))
-                    if "authoring_audit_text" in e else None),
-                "attention": str(
-                    e.get("attention") or
-                    _default_attention(str(e.get("source", "")),
-                                       options, extra_buttons)
-                ),
-                "review_surface": str(e.get("review_surface", "")),
-                "context": str(e.get("context", "")),
-                "dedup_key": str(e.get("dedup_key", "")),
-                "chat_id": str(e.get("chat_id", "")),
-                "matter_id": str(e.get("matter_id", "")),
-                "status": "pending",
-                "lapsed_ts": "",
-                "lapse_reason": "",
-                "decided_opt": "",
-                "decided_label": "",
-                "decided_ts": "",
-                "action_result": "",
-                "resolved_label": "",
-                "resolved_ts": "",
-                "chat_ts": "",
-                "confused_ts": "",
-                "chat_epoch": 0,
-                "delivery_status": "not_sent",
-                "delivery_ts": "",
-            }
-        elif ev == "decide":
-            st = states.get(mid)
-            # A 留中 card stays tappable: scrolling back in Lark and answering
-            # an archived ask must revive it, not silently no-op. Events are
-            # chronological, so a later lapse cannot overwrite a real 批红
-            # (the lapse branch only fires on pending).
-            if st is not None and st["status"] in ("pending", STATUS_LAPSED):
-                st["status"] = "decided"
-                st["lapsed_ts"] = ""
-                st["lapse_reason"] = ""
-                st["decided_opt"] = str(e.get("opt", ""))
-                st["decided_label"] = str(e.get("label", ""))
-                st["decided_ts"] = str(e.get("ts", ""))
-                st["action_result"] = str(e.get("action_result", ""))
-        elif ev == "action_result":
-            # Written after the decide event once the option action ran —
-            # decide() appends the decide event BEFORE executing the action so
-            # a crash mid-action can't lead to a double execution on re-tap.
-            st = states.get(mid)
-            if st is not None:
-                st["action_result"] = str(e.get("result", ""))
-        elif ev == "resolve":
-            # External source truth can become terminal after (or without) a
-            # card tap. Resolution overrides an earlier reply-only decision
-            # so every delivered copy converges to the real state.
-            st = states.get(mid)
-            if st is not None:
-                st["status"] = "decided"
-                st["decided_opt"] = "__external__"
-                st["decided_label"] = str(e.get("label", "已处理"))
-                st["decided_ts"] = str(e.get("ts", ""))
-                st["action_result"] = str(e.get("result", ""))
-                st["resolved_label"] = str(e.get("label", "已处理"))
-                st["resolved_ts"] = str(e.get("ts", ""))
-        elif ev == "confused":
-            st = states.get(mid)
-            if st is not None:
-                st["confused_ts"] = str(e.get("ts", ""))
-        elif ev == "lapse":
-            # 留中: the deadline passed with no 批红. A terminal state that is
-            # explicitly NOT a decision — never fold it into decided_*, or the
-            # ledger would claim Pascal answered something he never saw.
-            st = states.get(mid)
-            if st is not None and st["status"] == "pending":
-                st["status"] = STATUS_LAPSED
-                st["lapsed_ts"] = str(e.get("ts", ""))
-                st["lapse_reason"] = str(e.get("reason", ""))
-        elif ev == "chat":
-            st = states.get(mid)
-            if st is not None:
-                st["chat_ts"] = str(e.get("ts", ""))
-                st["chat_epoch"] = e.get("epoch", 0)
-        elif ev == "delivery":
-            st = states.get(mid)
-            if st is not None:
-                st["delivery_status"] = str(e.get("status", "unknown"))
-                st["delivery_ts"] = str(e.get("ts", ""))
-    return states
+    return memorial_ledger.fold(
+        events,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 def get_memorial(memorial_id: str) -> dict | None:
     """Current folded state for one memorial, or None."""
-    return _fold(read_jsonl(_ledger_path())).get(str(memorial_id))
+    return memorial_ledger.get(
+        runtime_root(),
+        memorial_id,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 def list_memorials(pending_only: bool = False) -> list[dict]:
     """All memorials (creation order), optionally only the un-批 ones."""
-    states = list(_fold(read_jsonl(_ledger_path())).values())
-    if pending_only:
-        states = [s for s in states if s["status"] == "pending"]
-    return states
+    return memorial_ledger.list_all(
+        runtime_root(),
+        pending_only=pending_only,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 # ── 缴回制度: sweep pending cards to a terminal state ─────────────────────
@@ -977,8 +875,7 @@ def escrow_docket(states: list[dict],
 
 
 def _header(state: dict) -> str:
-    emoji = SOURCE_EMOJI.get(state["source"], "")
-    return " ".join(p for p in ("📜", emoji, state["title"]) if p)
+    return memorial_cards.header(state, SOURCE_EMOJI)
 
 
 def _button_groups(state: dict, include_options: bool = True,
@@ -990,66 +887,30 @@ def _button_groups(state: dict, include_options: bool = True,
     decision, opening a source is supporting context, and Chat is the escape
     hatch that must remain available after a decision.
     """
-    groups: list[list[dict]] = []
-    if include_options and state.get("options"):
-        # The primary button is 依议 — the 票拟'd option when there is one.
-        # Falling back to position means "first listed", which is an authoring
-        # accident, not a recommendation.
-        recommended = str((state.get("recommend") or {}).get("key", ""))
-        keys = [str(o.get("key", "")) for o in state["options"]]
-        primary = keys.index(recommended) if recommended in keys else 0
-        groups.append([
-            {"text": o.get("label", o.get("key", "")),
-             "type": "primary" if i == primary else "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": o.get("key", "")}}
-            for i, o in enumerate(state["options"])
-        ])
-    if state.get("extra_buttons"):
-        groups.append([{**dict(button), "type": "default"}
-                       for button in state["extra_buttons"]])
-    if include_chat:
-        groups.append([
-            {"text": CHAT_BUTTON_LABEL, "type": "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": CHAT_OPT_KEY}},
-            {"text": "🤔 看不懂", "type": "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": CONFUSED_OPT_KEY}},
-        ])
-    return groups
+    return memorial_cards.button_groups(
+        state,
+        include_options=include_options,
+        include_chat=include_chat,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
+        confused_opt_key=CONFUSED_OPT_KEY,
+    )
 
 
 def _cut_at_boundary(text: str, limit: int) -> str:
     """Cut to ≤``limit`` chars on a line/space boundary, never inside a
     markdown link (a broken `[label](https://…` fragment renders as noise)."""
-    cut = text[:limit]
-    for sep in ("\n", " "):
-        if sep in cut[limit // 2:]:
-            cut = cut.rsplit(sep, 1)[0]
-            break
-    # If we still landed inside a markdown link, back up further.
-    last_open = cut.rfind("[")
-    if last_open != -1:
-        after = cut[last_open:]
-        close_b = after.find("]")
-        if close_b == -1 or after.find(")", close_b) == -1:
-            cut = cut[:last_open].rstrip()
-    return cut.rstrip()
+    return memorial_cards.cut_at_boundary(text, limit)
 
 
 def _display_body(body: str) -> str:
     """Compact card copy while preserving the full ledger/chat context."""
-    raw = str(body or "").strip()
-    lines = raw.splitlines()
-    clipped = len(lines) > CARD_BODY_MAX_LINES
-    text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
-    if len(text) > CARD_BODY_MAX_CHARS:
-        text = _cut_at_boundary(text, CARD_BODY_MAX_CHARS)
-        clipped = True
-    if clipped:
-        text += "\n\n" + CLIP_NOTICE
-    return text
+    return memorial_cards.display_body(
+        body,
+        max_lines=CARD_BODY_MAX_LINES,
+        max_chars=CARD_BODY_MAX_CHARS,
+        clip_notice=CLIP_NOTICE,
+    )
 
 
 def body_was_clipped(body: str) -> bool:
@@ -1060,52 +921,32 @@ def body_was_clipped(body: str) -> bool:
     itself ends with CLIP_NOTICE false-positives — benign: the full text gets
     sent anyway.)
     """
-    return _display_body(body).endswith(CLIP_NOTICE)
+    return memorial_cards.body_was_clipped(
+        body,
+        max_lines=CARD_BODY_MAX_LINES,
+        max_chars=CARD_BODY_MAX_CHARS,
+        clip_notice=CLIP_NOTICE,
+    )
 
 
 def _render_card(state: dict, *, body: str | None = None,
                  status_line: str = "", include_options: bool = True,
                  include_chat: bool = True) -> str:
-    # A segmented trust boundary (currently EigenFlux raw text + local model
-    # analysis) scans only the local authoring segment for the idle sentinel.
-    # Escape literal tokens in the external display segment so core.card's
-    # global leak guard does not erase a legitimate private message.
-    audit_text = state.get("authoring_audit_text")
-    if audit_text is not None:
-        from core.safety import IDLE_SENTINEL, sentinel_present
-        if sentinel_present(audit_text):
-            return ""
-        escaped_title = _header(state).replace(
-            IDLE_SENTINEL, r"HEARTBEAT\_OK")
-    else:
-        escaped_title = _header(state)
-    content = _display_body(state["body"] if body is None else body)
-    if audit_text is not None:
-        content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
-    # 票拟 sits directly above the buttons it is about, and only while the card
-    # is still open — after 批红 it would read as advice on a settled matter.
-    rec = state.get("recommend") or {}
-    if include_options and rec.get("label") and rec.get("why"):
-        content += f"\n\n**建议：{rec['label']}** — {rec['why']}"
-    # Role line FIRST (2026-08-03, owner: 「每一个东西我不知道怎么办」). The
-    # very first thing a card says is what it wants from him — nothing, a
-    # decision, or immediate attention — so no card ever leaves him guessing.
-    # Replaces the old bottom-of-card status pair, which only covered two of
-    # the three classes and sat below the fold.
-    if state.get("status") == "pending":
-        attention = str(state.get("attention", ""))
-        if attention == ATTENTION_ALERT:
-            role = "⚡ 即时提醒 · 不用批"
-        elif requires_decision(state):
-            role = "🎯 等你拍一个"
-        else:
-            role = "ℹ️ 知道就行"
-        content = f"{role}\n\n{content}"
-    if status_line:
-        content += "\n\n" + status_line
-    return build_card(
-        escaped_title, content,
-        button_groups=_button_groups(state, include_options, include_chat),
+    return memorial_cards.render_card(
+        state,
+        body=body,
+        status_line=status_line,
+        include_options=include_options,
+        include_chat=include_chat,
+        source_emoji=SOURCE_EMOJI,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
+        confused_opt_key=CONFUSED_OPT_KEY,
+        max_lines=CARD_BODY_MAX_LINES,
+        max_chars=CARD_BODY_MAX_CHARS,
+        clip_notice=CLIP_NOTICE,
+        alert_attention=ATTENTION_ALERT,
+        requires_decision=requires_decision,
     )
 
 
@@ -1140,33 +981,13 @@ def _replacement_card(rendered: str, state: dict) -> dict:
     contains internal heartbeat residue. A later decision must still ACK the
     callback instead of trying to decode that empty render.
     """
-    if rendered:
-        try:
-            card = json.loads(rendered)
-            if isinstance(card, dict):
-                return card
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    # Telling the user to "go to 事项" from a Lark card that carries no way to
-    # get there is a dead end: on a phone the web desk is not reachable by
-    # typing. Ship the link when there is one, and drop the instruction when
-    # there is not — never name a destination the card cannot reach.
-    buttons = [{
-        "text": CHAT_BUTTON_LABEL,
-        "type": "default",
-        "value": {"action": "memorial", "id": state["id"],
-                  "opt": CHAT_OPT_KEY},
-    }]
-    desk = _web_desk_url(f"/items/{state['id']}")
-    if desk:
-        buttons.insert(0, {"text": "打开事项", "url": desk})
-    fallback = build_card(
-        "Jarvis · 事项",
-        ("状态已更新。完整记录在下面的「打开事项」里。" if desk
-         else "状态已更新。完整记录已存档，随时可以问我。"),
-        button_groups=[buttons],
+    return memorial_cards.replacement_card(
+        rendered,
+        state,
+        web_desk_url=_web_desk_url,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
     )
-    return json.loads(fallback)
 
 
 def _decided_card(state: dict) -> dict:
@@ -1451,28 +1272,14 @@ def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
     card did not author its own buttons. Only a TRAILING line counts: an
     'OPTIONS:' in the middle of the copy is prose, not a button declaration.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    for idx in range(len(lines) - 1, -1, -1):
-        if not lines[idx].strip():
-            continue
-        if idx in protected:
-            return text, None
-        match = _OPTIONS_LINE_RE.match(lines[idx])
-        if not match:
-            return text, None
-        labels: list[str] = []
-        for part in _OPTIONS_SPLIT_RE.split(match.group(1)):
-            part = part.strip().strip("「」\"'")
-            if part and part not in labels:
-                labels.append(part[:MAX_OPTION_LABEL_CHARS])
-        if not labels:
-            return text, None
-        body = "\n".join(lines[:idx]).rstrip()
-        return body, [{"key": f"r{i}", "label": label, "action": None,
-                       "reply": True}
-                      for i, label in enumerate(labels[:MAX_INLINE_OPTIONS], 1)]
-    return text, None
+    return memorial_cards.extract_inline_options(
+        text,
+        protected_lines=_markdown_protected_lines,
+        options_line_re=_OPTIONS_LINE_RE,
+        options_split_re=_OPTIONS_SPLIT_RE,
+        max_label_chars=MAX_OPTION_LABEL_CHARS,
+        max_options=MAX_INLINE_OPTIONS,
+    )
 
 
 def _markdown_protected_lines(lines: list[str]) -> set[int]:
@@ -1483,66 +1290,11 @@ def _markdown_protected_lines(lines: list[str]) -> set[int]:
     such as `````oops`` remains code. An unclosed fence protects the rest of
     the body.
     """
-    protected: set[int] = set()
-    fence_char = ""
-    fence_len = 0
-    fence_close_indent = 3
-    lazy_container = False
-
-    def indent_columns(value: str) -> int:
-        columns = 0
-        for char in value:
-            if char == " ":
-                columns += 1
-            elif char == "\t":
-                columns += 4 - (columns % 4)
-            else:
-                break
-        return columns
-
-    for index, line in enumerate(lines):
-        if fence_char:
-            protected.add(index)
-            stripped = line.lstrip(" \t")
-            if (indent_columns(line) <= fence_close_indent
-                    and re.fullmatch(
-                        rf"{re.escape(fence_char)}{{{fence_len},}}[ \t]*",
-                        stripped)):
-                fence_char, fence_len, fence_close_indent = "", 0, 3
-            continue
-        if not line.strip():
-            lazy_container = False
-            continue
-        if lazy_container:
-            protected.add(index)
-            continue
-        fence = _MARKDOWN_FENCE_OPEN_RE.match(line)
-        list_fence = _MARKDOWN_LIST_FENCE_OPEN_RE.match(line)
-        if fence and not (
-                fence.group(1).startswith("`") and "`" in fence.group(2)):
-            marker = fence.group(1)
-            fence_char, fence_len = marker[0], len(marker)
-            protected.add(index)
-            continue
-        if list_fence and not (
-                list_fence.group(2).startswith("`")
-                and "`" in list_fence.group(3)):
-            marker = list_fence.group(2)
-            fence_char, fence_len = marker[0], len(marker)
-            fence_close_indent = indent_columns(list_fence.group(1)) + 3
-            protected.add(index)
-            continue
-        if line.lstrip().startswith(">"):
-            protected.add(index)
-            lazy_container = True
-            continue
-        if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
-            protected.add(index)
-            lazy_container = True
-            continue
-        if indent_columns(line) >= 4:
-            protected.add(index)
-    return protected
+    return memorial_cards.markdown_protected_lines(
+        lines,
+        fence_open_re=_MARKDOWN_FENCE_OPEN_RE,
+        list_fence_open_re=_MARKDOWN_LIST_FENCE_OPEN_RE,
+    )
 
 
 def _split_authored_card_blocks(text: str) -> list[str]:
@@ -1554,29 +1306,11 @@ def _split_authored_card_blocks(text: str) -> list[str]:
     the whole response as one card leaks authoring syntax and merges two
     decisions.  A second TITLE line is an unambiguous new-card boundary.
     """
-    raw = str(text or "")
-    lines = raw.splitlines()
-    protected = _markdown_protected_lines(lines)
-    title_positions = [
-        index for index, line in enumerate(lines)
-        if index not in protected and _ANY_TITLE_LINE_RE.match(line)
-    ]
-
-    if len(title_positions) < 2:
-        return [raw]
-
-    prefix = lines[:title_positions[0]]
-    blocks: list[str] = []
-    for offset, start in enumerate(title_positions):
-        end = (title_positions[offset + 1]
-               if offset + 1 < len(title_positions) else len(lines))
-        block_lines = list(lines[start:end])
-        if offset == 0 and any(line.strip() for line in prefix):
-            # Preserve a natural preamble without letting it hide the first
-            # authored title from _extract_title_line.
-            block_lines = [block_lines[0], *prefix, *block_lines[1:]]
-        blocks.append("\n".join(block_lines).strip())
-    return blocks
+    return memorial_cards.split_authored_card_blocks(
+        text,
+        protected_lines=_markdown_protected_lines,
+        any_title_line_re=_ANY_TITLE_LINE_RE,
+    )
 
 
 def _scrub_embedded_authoring_directives(text: str) -> str:
@@ -1586,25 +1320,13 @@ def _scrub_embedded_authoring_directives(text: str) -> str:
     helper is intentionally not used by generic ``create`` callers such as
     mail or research ingestion.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    cleaned: list[str] = []
-    for index, line in enumerate(lines):
-        if index in protected:
-            cleaned.append(line)
-            continue
-        if _ANY_OPTIONS_LINE_RE.match(line):
-            continue
-        if _ANY_RECOMMEND_LINE_RE.match(line):
-            continue
-        title_match = _ANY_TITLE_LINE_RE.match(line)
-        if title_match:
-            value = title_match.group(1).strip()
-            if value:
-                cleaned.append(f"**{value}**")
-        else:
-            cleaned.append(line)
-    return "\n".join(cleaned).strip()
+    return memorial_cards.scrub_embedded_authoring_directives(
+        text,
+        protected_lines=_markdown_protected_lines,
+        any_options_line_re=_ANY_OPTIONS_LINE_RE,
+        any_recommend_line_re=_ANY_RECOMMEND_LINE_RE,
+        any_title_line_re=_ANY_TITLE_LINE_RE,
+    )
 
 
 def parse_authored_cards(text: str) -> list[dict]:
@@ -1637,34 +1359,15 @@ def _extract_recommendation(text: str) -> tuple[str, dict | None]:
     A RECOMMEND with no reason is dropped, not rendered: a recommendation the
     user cannot audit is just an instruction wearing a suggestion's clothes.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    seen = 0
-    for idx in range(len(lines) - 1, -1, -1):
-        if not lines[idx].strip():
-            continue
-        if idx in protected:
-            return text, None
-        seen += 1
-        match = _RECOMMEND_LINE_RE.match(lines[idx])
-        if match:
-            parts = _RECOMMEND_SPLIT_RE.split(match.group(1), maxsplit=1)
-            label = parts[0].strip().strip("「」\"'")
-            why = parts[1].strip() if len(parts) > 1 else ""
-            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
-            if not label or not why:
-                return body, None
-            return body, {"label": label[:MAX_OPTION_LABEL_CHARS],
-                          "why": why[:MAX_RECOMMEND_WHY_CHARS]}
-        if _ANY_RECOMMEND_LINE_RE.match(lines[idx]):
-            # Malformed is still authoring syntax. Remove a trailing empty
-            # directive so a valid OPTIONS immediately above remains the last
-            # meaningful line and keeps its buttons.
-            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
-            return body, None
-        if seen >= 3:
-            break
-    return text, None
+    return memorial_cards.extract_recommendation(
+        text,
+        protected_lines=_markdown_protected_lines,
+        recommend_line_re=_RECOMMEND_LINE_RE,
+        any_recommend_line_re=_ANY_RECOMMEND_LINE_RE,
+        recommend_split_re=_RECOMMEND_SPLIT_RE,
+        max_label_chars=MAX_OPTION_LABEL_CHARS,
+        max_why_chars=MAX_RECOMMEND_WHY_CHARS,
+    )
 
 
 def _normalize_recommendation(recommend: dict | None,
@@ -1675,62 +1378,25 @@ def _normalize_recommendation(recommend: dict | None,
     the user cannot act on, so it is discarded rather than shown. Matching is
     by label first (that is what the author wrote) and key second.
     """
-    if not isinstance(recommend, dict):
-        return None
-    label = str(recommend.get("label", "")).strip()
-    why = str(recommend.get("why", "")).strip()
-    if not label or not why:
-        return None
-    for option in options:
-        if label in (str(option.get("label", "")).strip(),
-                     str(option.get("key", "")).strip()):
-            return {"key": str(option.get("key", "")),
-                    "label": str(option.get("label", "")),
-                    "why": why[:MAX_RECOMMEND_WHY_CHARS]}
-    return None
+    return memorial_cards.normalize_recommendation(
+        recommend,
+        options,
+        max_why_chars=MAX_RECOMMEND_WHY_CHARS,
+    )
 
 
 def _normalize_options(options: list[dict] | None, preset: str | None) -> list[dict]:
-    if options is not None:
-        normalized = []
-        seen: set[str] = set()
-        for i, o in enumerate(options, 1):
-            key = str(o.get("key", "") or f"opt{i}").strip()
-            label = str(o.get("label", "")).strip()
-            if not label:
-                raise ValueError(f"option #{i} has no label")
-            if key in (CHAT_OPT_KEY, CONFUSED_OPT_KEY):
-                raise ValueError(f"option key '{key}' is reserved")
-            if key in seen:
-                raise ValueError(f"duplicate option key: {key}")
-            seen.add(key)
-            item = {"key": key, "label": label, "action": o.get("action") or None}
-            if o.get("reply"):
-                item["reply"] = True
-            normalized.append(item)
-        return normalized
-    name = preset or "fyi"  # a memorial with no options makes no sense — fyi is the safe floor
-    if name not in PRESETS:
-        raise ValueError(f"unknown preset: {name} (have: {', '.join(sorted(PRESETS))})")
-    return [dict(o) for o in PRESETS[name]]
+    return memorial_cards.normalize_options(
+        options,
+        preset,
+        presets=PRESETS,
+        reserved_keys={CHAT_OPT_KEY, CONFUSED_OPT_KEY},
+    )
 
 
 def _normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
     """Validate task-native buttons carried into an adopted memorial card."""
-    normalized: list[dict] = []
-    for i, button in enumerate(buttons or [], 1):
-        text = str(button.get("text", "")).strip()
-        if not text:
-            raise ValueError(f"extra button #{i} has no text")
-        item = {"text": text}
-        if button.get("url"):
-            item["url"] = str(button["url"])
-        elif isinstance(button.get("value"), dict):
-            item["value"] = dict(button["value"])
-        else:
-            raise ValueError(f"extra button #{i} needs url or value")
-        normalized.append(item)
-    return normalized
+    return memorial_cards.normalize_extra_buttons(buttons)
 
 
 # ── public API ──────────────────────────────────────────────────────────
