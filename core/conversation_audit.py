@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Iterable
 
 from core.claude_projects import jarvis_project_dirs
+from core.log import log
 from core.search import load_chat_messages
 from core.timeutil import now_local
 
@@ -813,7 +814,14 @@ def derive_card_leak_issues(conn: sqlite3.Connection, run_id: int,
                 try:
                     from core.memorial import _markdown_protected_lines
                     protected = _markdown_protected_lines(body.splitlines())
-                except Exception:
+                except Exception as exc:
+                    log(
+                        "conversation-audit",
+                        "card_protected_line_parse_failed",
+                        level="warn",
+                        memorial_id=str(rec.get("id") or ""),
+                        error_type=type(exc).__name__,
+                    )
                     protected = set()
                 matches = [
                     match for match in matches

@@ -256,7 +256,12 @@ def _resolve_user_id(root: Path) -> str:
     try:
         from core.config import Config
         return str(Config(root / "jarvis.yaml").lark.get("user_id", "") or "")
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "lark_user_resolution_failed",
+            level="error",
+            error_type=type(exc).__name__,
+        )
         return ""
 
 
@@ -322,6 +327,13 @@ def _default_transport(root: Path) -> Transport:
         except subprocess.TimeoutExpired:
             return TransportResult(False, error="send timed out after 15s")
         except Exception as exc:
+            _ops_log(
+                "lark_transport_exception",
+                level="error",
+                delivery_id=envelope.id,
+                channel=channel,
+                error_type=type(exc).__name__,
+            )
             return TransportResult(False, error=str(exc))
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "lark-cli failed").strip()
@@ -401,7 +413,12 @@ def _sanitize_card(card_json: str, proactive: bool) -> tuple[str, str, str]:
     try:
         from core.card import extract_card_text
         readable = extract_card_text(compact)
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "card_text_extraction_failed",
+            level="warn",
+            error_type=type(exc).__name__,
+        )
         readable = ""
     if not readable:
         fragments: list[str] = []
@@ -975,6 +992,13 @@ class DeliveryPipeline:
                     if not isinstance(result, TransportResult):
                         raise TypeError("transport must return TransportResult")
                 except Exception as exc:
+                    _ops_log(
+                        "transport_exception",
+                        level="error",
+                        delivery_id=envelope.id,
+                        route=route,
+                        error_type=type(exc).__name__,
+                    )
                     result = TransportResult(False, error=str(exc))
 
                 try:
