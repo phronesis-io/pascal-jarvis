@@ -3,7 +3,13 @@ import subprocess
 
 import pytest
 
-from core.iteration_loop import DailyObserver, IterationError, IterationStore, main
+from core.iteration_loop import (
+    DailyObserver,
+    IterationError,
+    IterationStore,
+    main,
+    sync_proposal_item,
+)
 
 
 def _store(tmp_path, now=None):
@@ -649,6 +655,199 @@ def test_successful_outcome_resolves_original_signal(monkeypatch, tmp_path):
     assert row["status"] == "resolved"
 
 
+def test_newer_healthy_observation_supersedes_pending_proposal(
+    monkeypatch, tmp_path,
+):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    store.set_item(proposal["id"], "mem-1")
+    clock[0] += 1
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = self.store.now()
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    projected = []
+    monkeypatch.setattr(
+        "core.iteration_loop.sync_proposal_item",
+        lambda row, **kwargs: projected.append((row["status"], kwargs["send"])),
+    )
+
+    result = Observer(store).run(create_proposals=False)
+
+    updated = store.get(proposal["id"])
+    assert updated["status"] == "superseded"
+    assert updated["actual"] == {"signal_open": False}
+    assert updated["events"][-1]["event_type"] == "proposal.superseded"
+    assert projected == [("superseded", False)]
+    assert result["reconciliation"]["signals_resolved"] == 1
+    assert result["reconciliation"]["proposals_superseded"] == 1
+    with store._connect() as db:
+        row = db.execute(
+            "SELECT status FROM iteration_signals WHERE id=?", (signal["id"],)
+        ).fetchone()
+    assert row["status"] == "resolved"
+
+
+def test_incomplete_observation_does_not_close_absent_signal(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    clock[0] += 1
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = self.store.now()
+            self._collector_incomplete["components"] = "partial component scan"
+            return []
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run(create_proposals=False)
+
+    assert store.get(proposal["id"])["status"] == "pending"
+    assert result["reconciliation"]["signals_resolved"] == 0
+    assert result["coverage"]["errors"] == [
+        {"source": "components", "error": "partial component scan"}
+    ]
+
+
+def test_active_signal_is_not_closed_by_same_observation(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    clock[0] += 1
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = self.store.now()
+            return [{
+                "source": "components",
+                "category": "health",
+                "key": "dashboard",
+                "severity": "critical",
+                "summary": "Dashboard unavailable",
+                "evidence": {"component": "dashboard", "ok": False},
+            }]
+
+        def _delegation_signals(self):
+            return []
+
+        def _conversation_signals(self):
+            return []
+
+    result = Observer(store).run(create_proposals=False)
+
+    assert store.get(proposal["id"])["status"] == "pending"
+    assert result["reconciliation"]["signals_resolved"] == 0
+
+
+def test_superseded_signal_can_create_fresh_proposal_after_recurrence(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    signal = _signal(store, severity="critical")
+    first, _ = store.propose_from_signal(signal)
+    clock[0] += 1
+    closure = store.reconcile_absent_signals(
+        active_fingerprints=set(),
+        coverage_observed_at={"components": clock[0]},
+    )
+    assert closure["proposal_ids"] == [first["id"]]
+
+    clock[0] += 1
+    recurrent = _signal(store, severity="critical")
+    second, created = store.propose_from_signal(recurrent)
+
+    assert created is True
+    assert second["id"] != first["id"]
+    assert second["status"] == "pending"
+
+
+def test_accepted_work_is_not_superseded_when_signal_recovers(tmp_path):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    signal = _signal(store, severity="critical")
+    proposal, _ = store.propose_from_signal(signal)
+    accepted = store.review(
+        proposal["id"], approved=True, actor="owner", queue=False
+    )
+    clock[0] += 1
+
+    closure = store.reconcile_absent_signals(
+        active_fingerprints=set(),
+        coverage_observed_at={"components": clock[0]},
+    )
+
+    assert closure["signal_ids"] == [signal["id"]]
+    assert closure["proposal_ids"] == []
+    assert store.get(accepted["id"])["status"] == "approved"
+
+
+def test_shipped_work_cannot_bypass_post_release_verification(
+    monkeypatch, tmp_path,
+):
+    clock = [1_000.0]
+    store = _store(tmp_path, clock)
+    proposal = _proposal(store, _signal(store, severity="critical"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps({"id": "task-123"}), ""
+        ),
+    )
+    queued = store.review(proposal["id"], approved=True, actor="owner")
+    shipped = store.mark_shipped(
+        queued["id"], release_sha="a" * 40, actor="deploy"
+    )
+    clock[0] += 1
+
+    closure = store.reconcile_absent_signals(
+        active_fingerprints=set(),
+        coverage_observed_at={"components": clock[0]},
+    )
+
+    assert closure == {"signal_ids": [], "proposal_ids": []}
+    assert store.get(shipped["id"])["status"] == "shipped"
+
+
+def test_superseded_item_lapses_without_external_card_sync(monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "core.memorial.lapse",
+        lambda item_id, reason="": calls.append(("lapse", item_id, reason)) or True,
+    )
+    monkeypatch.setattr(
+        "core.memorial.resolve",
+        lambda *args, **kwargs: calls.append(("resolve", args, kwargs)) or True,
+    )
+    proposal = {
+        "id": "prp-1",
+        "item_id": "mem-1",
+        "status": "superseded",
+        "review_reason": "问题已恢复",
+    }
+
+    assert sync_proposal_item(proposal, store=store, send=False) == "mem-1"
+    assert calls == [("lapse", "mem-1", "问题已恢复")]
+
+
 def test_signal_rejects_secret_material(tmp_path):
     store = _store(tmp_path)
     with pytest.raises(IterationError, match="secret"):
@@ -819,6 +1018,8 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
         "shipped": 0,
         "verified": 1,
         "needs_followup": 0,
+        "signals_resolved": 0,
+        "proposals_superseded": 0,
         "coverage_skipped": 0,
         "errors": [],
     }

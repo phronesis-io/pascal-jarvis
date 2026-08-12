@@ -125,6 +125,11 @@ L3 signal -> deduplicated Proposal -> human accept
   -> L3 outcome observation
 ```
 
+A complete same-source observation also closes an absent signal before human
+acceptance and lapses its pending Item locally. Incomplete or stale coverage
+fails closed; accepted work continues through its normal lifecycle, and
+shipped work cannot bypass the post-release observation gate.
+
 Taskline is an optional external sidecar with a separate database. Its tasks
 never become personal Intents. `core.taskline_bridge` links engineering
 evidence into Delegation so an Agent can recover context without treating its

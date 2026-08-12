@@ -194,8 +194,12 @@ deployed SHA, then rechecks the same source after release. A failed outcome
 creates a new human-gated follow-up instead of silently closing or remaining
 queued forever. Source outages fail closed instead of treating missing
 evidence as success; stronger evidence can reopen a rejected direction for a
-new human judgment. It may correctly finish an observation without creating a
-task.
+new human judgment. A newer complete same-source observation resolves a signal
+that disappeared and supersedes only its still-pending Proposal, removing the
+obsolete decision from the user's queue without external card edits. Accepted
+or shipped work is never cancelled by this path, and a real recurrence can
+create a fresh human-gated Proposal. It may correctly finish an observation
+without creating a task.
 
 The release-by-release evidence matrix is
 [`release_acceptance_2026-07-24.md`](release_acceptance_2026-07-24.md).

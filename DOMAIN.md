@@ -79,7 +79,11 @@ priority, and dependency context.
 
 Invariant: a Proposal cannot enter the executable engineering queue until a
 human explicitly accepts it. Repeated signals update one Proposal instead of
-creating unbounded tasks.
+creating unbounded tasks. A newer complete observation from the same source may
+resolve an absent signal and mark its still-pending Proposal `superseded`, so a
+recovered problem no longer consumes human attention. This never cancels work
+that a human already accepted, and shipped work still requires post-release
+verification.
 
 ### Engineering Task
 
