@@ -24,7 +24,10 @@ from .memory import load_tiered_memory
 from .prompt_experiments import choose_variant, inject_variant
 from .safety import parse_json_response
 from .sched_events import emit as sched_emit
-from .task_protocol import TaskState
+from .task_protocol import (
+    TaskState, output_source_marker, parse_output_source_marker,
+    strip_output_source_markers,
+)
 from .timeutil import now_local_str
 
 
@@ -35,9 +38,9 @@ _CARD_SOURCE_FIELD = "__jarvis_source"
 def _annotate_card_source(message: str, task_name: str) -> str:
     """Attach the exact producer to internal card JSON before batch merging.
 
-    The marker is consumed by ``core.memorial`` and never reaches Lark. Plain
-    prose keeps the batch-level source because it has no reliable boundaries
-    after the heartbeat combines several task outputs.
+    Plain prose is returned byte-for-byte.  Per-segment prose metadata is added
+    by ``_annotate_output_source`` inside the runner, after this compatibility
+    helper has preserved code indentation and direct-call behavior.
     """
     annotated: list[str] = []
     for raw_line in str(message).splitlines():
@@ -54,10 +57,45 @@ def _annotate_card_source(message: str, task_name: str) -> str:
         if isinstance(card, dict) and "config" in card and "elements" in card:
             card[_CARD_SOURCE_FIELD] = str(task_name)
             annotated.append(
-                prefix + json.dumps(card, ensure_ascii=False, separators=(",", ":")))
+                prefix + json.dumps(
+                    card, ensure_ascii=False, separators=(",", ":")))
         else:
             annotated.append(raw_line)
     return "\n".join(annotated)
+
+
+def _annotate_output_source(message: str, task_name: str) -> str:
+    """Runner-only task boundary for plain prose in mixed cycles.
+
+    Marker-looking upstream lines are removed before the trusted marker is
+    prepended, so model/post-hook output cannot spoof another task.  The final
+    safety pass strips this metadata for single-source cycles and processes
+    only the clean payload.
+    """
+    clean = "\n".join(
+        line for line in str(message).splitlines()
+        if not parse_output_source_marker(line)
+    )
+    return (output_source_marker(task_name) + "\n"
+            + _annotate_card_source(clean, task_name))
+
+
+def _contains_card_output(message: str) -> bool:
+    """Whether a task output contains an executable card envelope."""
+    text = strip_output_source_markers(message)
+    for raw_line in text.splitlines():
+        if raw_line != raw_line.lstrip(" \t"):
+            continue
+        candidate = raw_line.strip()
+        if candidate.startswith("CARD:"):
+            candidate = candidate[5:]
+        try:
+            card = json.loads(candidate) if candidate else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(card, dict) and "config" in card and "elements" in card:
+            return True
+    return False
 
 
 def _run_isolated(cmd: list[str], *, timeout: float,
@@ -735,7 +773,7 @@ class HeartbeatRunner:
             except Exception as e:
                 self._log(f"silent_outputs archive failed: {e}")
             return
-        user_messages.append(_annotate_card_source(message, task_name))
+        user_messages.append(_annotate_output_source(message, task_name))
         producing_tasks.append(task_name)
 
     def _load_tasks(self) -> list[dict]:
@@ -1641,7 +1679,11 @@ You have access to the user's memory below. Use it to personalize your responses
             # cycle. Their state was already updated above; persist and return
             # whatever output they staged.
             self.save_state(state)
-            combined = "\n\n---\n\n".join(m for m in user_messages if m.strip())
+            mixed_sources = len(set(producing_tasks)) > 1
+            combined = "\n\n---\n\n".join(
+                (m if mixed_sources else strip_output_source_markers(m))
+                for m in user_messages if strip_output_source_markers(m).strip()
+            )
             if combined.strip():
                 if producing_tasks:
                     try:
@@ -1913,7 +1955,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 # plus a paragraph repeating it). Only surface top_msg when no
                 # card carries the content; otherwise the card stands alone.
                 top_msg = envelope.get("user_message", "")
-                has_card = any(m.strip().startswith('{"config":') for m in user_messages)
+                has_card = any(_contains_card_output(m) for m in user_messages)
                 # SILENT_TASKS hard guarantee: the prompt asks for user_message
                 # as "combined markdown" across ALL tasks in the call, so when
                 # ANY task in the batch is silent the summary may carry its
@@ -1923,8 +1965,17 @@ You have access to the user's memory below. Use it to personalize your responses
                 any_silent = any(t["name"] in self.SILENT_TASKS for t in runnable)
                 any_self_delivering = any(
                     t["name"] in self.SELF_DELIVERING_TASKS for t in runnable)
+                # A top-level summary has no per-task boundary.  When an
+                # ambient task shares the batch, it may blend ledger-only
+                # exhaust with an ordinary task and acquire generic heartbeat
+                # delivery.  Per-task slices remain available and precisely
+                # attributed; the ambiguous summary fails closed.
+                from core.memorial import AMBIENT_SOURCES
+                any_ambient = any(
+                    t["name"] in AMBIENT_SOURCES for t in runnable)
                 if (top_msg and top_msg.strip() and not has_card
-                        and not any_silent and not any_self_delivering):
+                        and not any_silent and not any_self_delivering
+                        and not any_ambient):
                     user_messages.append(top_msg)
             else:
                 # NEVER dump raw JSON to user — log and treat as a FAILURE.
@@ -2015,12 +2066,20 @@ You have access to the user's memory below. Use it to personalize your responses
         self.save_state(state)
 
         # Separate card JSON from plain text — they use different Lark send paths
-        cards = [m for m in user_messages if m.startswith('{"config":')]
+        cards = [strip_output_source_markers(m) for m in user_messages
+                 if _contains_card_output(m)]
         texts = []
+        mixed_sources = len(set(producing_tasks)) > 1
         for raw_message in user_messages:
-            normalized_message = raw_message.strip()
+            segment_source = next((
+                parse_output_source_marker(line)
+                for line in raw_message.splitlines()
+                if parse_output_source_marker(line)
+            ), "")
+            clean_message = strip_output_source_markers(raw_message)
+            normalized_message = clean_message.strip()
             m = normalized_message
-            if not m or raw_message.startswith('{"config":'):
+            if not m or _contains_card_output(raw_message):
                 continue
             # Safety net: never send raw JSON to user — strip JSON-looking
             # content. Judged on the fence-stripped form so '```json\n{...}\n```'
@@ -2084,7 +2143,9 @@ You have access to the user's memory below. Use it to personalize your responses
             # and JSON examples; stripping here would upgrade indented code to
             # a top-level executable envelope downstream.
             texts.append(
-                raw_message if m == normalized_message else m)
+                ((output_source_marker(segment_source) + "\n")
+                 if mixed_sources and segment_source else "")
+                + (clean_message if m == normalized_message else m))
 
         combined_parts = []
         for card in cards:

@@ -8,6 +8,7 @@ queue depth when Jarvis feels "quiet" or "stuck".
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +20,16 @@ from ..uiutil import (ROUTINE_FINISH_STATUSES, ROUTINE_SKIP_REASONS,
 
 from ..telemetry import read_json, read_sched_events
 
-JARVIS_DIR = Path(__file__).parent.parent.parent
+_DEFAULT_JARVIS_DIR = Path(__file__).parent.parent.parent
+JARVIS_DIR = _DEFAULT_JARVIS_DIR
+
+
+def _runtime_root() -> Path:
+    """Resolve late while preserving the page modules' injection seam."""
+    injected = Path(JARVIS_DIR)
+    if injected != _DEFAULT_JARVIS_DIR:
+        return injected
+    return Path(os.environ.get("JARVIS_DIR") or injected)
 
 LOG_FAILURE_SIGNATURES = (
     "timed out (60s)",
@@ -149,7 +159,7 @@ def _age_minutes(ts: str, now: datetime | None = None) -> int | None:
 
 
 def queue_overview(jarvis_dir: Path | None = None) -> dict:
-    jd = jarvis_dir or JARVIS_DIR
+    jd = jarvis_dir or _runtime_root()
     night = []
     for row in _read_jsonl(jd / "night_queue.jsonl"):
         night.append({
@@ -217,7 +227,7 @@ def queue_overview(jarvis_dir: Path | None = None) -> dict:
 
 
 def ops_snapshot(jarvis_dir: Path | None = None, event_limit: int = 80) -> dict:
-    jd = jarvis_dir or JARVIS_DIR
+    jd = jarvis_dir or _runtime_root()
     jarvis_log = tail_log(jd / "jarvis.log", lines=160)
     daemon_log = tail_log(jd / "daemon.log", lines=80)
     events = read_sched_events(jd)[-event_limit:]
@@ -258,7 +268,7 @@ def ops_page():
 
         @ui.refreshable
         def content():
-            snap = ops_snapshot(JARVIS_DIR)
+            snap = ops_snapshot(_runtime_root())
             queues = snap["queues"]
             delivery = queues["delivery_state"]
             delegation_states = queues["delegations"].get("by_status", {})

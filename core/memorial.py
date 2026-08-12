@@ -444,6 +444,22 @@ _ALERT_RE = re.compile(
 def _looks_like_alert(text: str) -> bool:
     return bool(_ALERT_RE.search(str(text or "")))
 
+
+def _can_infer_alert_from_prose(source: str) -> bool:
+    """Whether model-authored prose may promote itself into the alert lane.
+
+    Natural notice sources are deliberately non-authoritative.  In particular,
+    a cross-session digest often reports that another system has ``0 告警`` or
+    describes an ``告警阈值``; keyword matching must not turn that exhaust into
+    a realtime owner interruption.  Dedicated callers can still pass an
+    explicit ``attention='alert'`` to ``create`` when they own the signal.
+    """
+    source = str(source or "")
+    return (
+        source not in NATURAL_NOTICE_SOURCES
+        and not source.startswith(ROUTINE_SOURCE_PREFIX)
+    )
+
 # LLM-authored buttons: a heartbeat task ends its card body with a line like
 #     OPTIONS: 加钱 | 限流到月底 | 让它自然停
 # and those become the buttons. This is the only way buttons can genuinely
@@ -602,14 +618,71 @@ def _fold(events: list[dict]) -> dict[str, dict]:
     )
 
 
-def get_memorial(memorial_id: str) -> dict | None:
+def get_memorial(
+    memorial_id: str, *, root: str | Path | None = None,
+) -> dict | None:
     """Current folded state for one memorial, or None."""
     return memorial_ledger.get(
-        runtime_root(),
+        Path(root) if root is not None else runtime_root(),
         memorial_id,
         default_attention=_default_attention,
         lapsed_status=STATUS_LAPSED,
     )
+
+
+def reconcile_ambient_queue(
+    source: str, *, root: str | Path | None = None,
+) -> dict:
+    """Move legacy queued ambient cards back to their ledger-only contract.
+
+    This migration is intentionally explicit: it only accepts a governed
+    ambient source, suppresses queued (never attempting/delivered) envelopes,
+    and appends both reclassification and delivery events to the memorial
+    ledger.  It is safe to rerun and returns the exact affected identities.
+    """
+    source = str(source or "").strip()
+    if source not in AMBIENT_SOURCES:
+        raise ValueError(f"not an ambient source: {source or '<empty>'}")
+    base = Path(root) if root is not None else runtime_root()
+    from core.delivery import DeliveryPipeline
+
+    pipeline = DeliveryPipeline(base)
+    reason = "ambient_ledger_only"
+    suppressed = set(pipeline.suppress_queued_source(source, reason=reason))
+    # SQLite and the append-only memorial ledger cannot share one transaction.
+    # Include rows from an earlier partial run so rerunning repairs a crash
+    # between queue suppression and ledger reclassification.
+    candidates = pipeline.list_source(
+        source, state="suppressed", last_error=reason)
+    memorial_ids: list[str] = []
+    ledger = memorial_ledger.ledger_path(base)
+    for row in candidates:
+        memorial_id = str(row.get("memorial_id") or "")
+        state = get_memorial(memorial_id, root=base) if memorial_id else None
+        if not state or str(state.get("source") or "") != source:
+            continue
+        if (state.get("attention") == ATTENTION_NOTICE
+                and state.get("review_surface") == REVIEW_NONE
+                and state.get("delivery_status") == "ledger_only"):
+            continue
+        memorial_ledger.append_line(ledger, {
+            "ev": "reclassify",
+            "id": memorial_id,
+            "attention": ATTENTION_NOTICE,
+            "review_surface": REVIEW_NONE,
+            "reason": "ambient_ledger_only",
+            "ts": now_local_str(),
+        })
+        memorial_ledger.append_line(ledger, {
+            "ev": "delivery", "id": memorial_id,
+            "status": "ledger_only", "ts": now_local_str(),
+        })
+        memorial_ids.append(memorial_id)
+    return {
+        "source": source,
+        "deliveries_suppressed": sorted(suppressed),
+        "memorials_reclassified": memorial_ids,
+    }
 
 
 def list_memorials(pending_only: bool = False) -> list[dict]:
@@ -1940,7 +2013,8 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
             preset=None if (has_native_action or inline_options)
             else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
-            attention=(ATTENTION_ALERT if _looks_like_alert(f"{title}\n{matter}")
+            attention=(ATTENTION_ALERT if _can_infer_alert_from_prose(source)
+                       and _looks_like_alert(f"{title}\n{matter}")
                        and not has_native_action and not inline_options
                        and fallback_preset == "fyi"
                        else ""),
@@ -2061,6 +2135,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
     """
     source_names = [s.strip() for s in str(source).split(",") if s.strip()]
     single_source = source_names[0] if len(source_names) == 1 else "heartbeat"
+    active_source = single_source
     rendered: list[str] = []
     prose: list[str] = []
 
@@ -2083,7 +2158,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         authored_blocks = _split_authored_card_blocks(text)
         if len(authored_blocks) > 1:
             _ops_log(
-                "card_split", source=single_source,
+                "card_split", source=active_source,
                 split_kind="concatenated_directives",
                 card_count=len(authored_blocks),
             )
@@ -2104,7 +2179,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         body, inline_options = _extract_inline_options(text)
         body = _scrub_embedded_authoring_directives(body)
         preset = (None if inline_options
-                  else SOURCE_DEFAULT_PRESET.get(single_source, "fyi"))
+                  else SOURCE_DEFAULT_PRESET.get(active_source, "fyi"))
         # 一张卡一件事 (REQ-117): the prompt contract is the first line of
         # defense; this is the mechanical backstop for bodies that merged
         # several matters anyway. A card whose author wrote its own OPTIONS
@@ -2113,20 +2188,21 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                   else split_matters(body))
         if len(chunks) > 1:
             _ops_log(
-                "card_split", source=single_source,
+                "card_split", source=active_source,
                 split_kind="prose_body", card_count=len(chunks),
             )
         for chunk in chunks:
             if explicit_title and len(chunks) == 1:
                 chunk_title, chunk_body = explicit_title, chunk
             else:
-                chunk_title, chunk_body = _title_for_chunk(chunk, single_source)
-            mid, _ = create(single_source, chunk_title, chunk_body,
+                chunk_title, chunk_body = _title_for_chunk(chunk, active_source)
+            mid, _ = create(active_source, chunk_title, chunk_body,
                             options=inline_options, preset=preset,
                             recommend=authored_recommend,
                             authoring_protocol=True, send=False,
                             attention=(ATTENTION_ALERT
-                                       if _looks_like_alert(chunk_body)
+                                       if _can_infer_alert_from_prose(active_source)
+                                       and _looks_like_alert(chunk_body)
                                        and not inline_options and preset == "fyi"
                                        else ""))
             state = get_memorial(mid) or {}
@@ -2154,9 +2230,16 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                                               ensure_ascii=False)]
     protected_output_lines = _markdown_protected_lines(output_lines)
     dropping_bad_card = False
+    from core.task_protocol import parse_output_source_marker
     for line_index, raw_line in enumerate(output_lines):
         line = raw_line.strip()
         protocol_line = line_index not in protected_output_lines
+        segment_source = (parse_output_source_marker(line)
+                          if protocol_line else "")
+        if segment_source:
+            flush_prose()
+            active_source = segment_source
+            continue
         if dropping_bad_card:
             if protocol_line and line == "---":
                 dropping_bad_card = False
@@ -2193,7 +2276,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                     adopted = ""  # ledger-only (REQ-119)
             else:
                 adopted = adopt_card(
-                    single_source, card_raw, suppress_accepted=True,
+                    active_source, card_raw, suppress_accepted=True,
                     skip_ledger_only=True,
                 )
             if adopted:
@@ -3172,6 +3255,11 @@ def main(argv: list[str] | None = None) -> int:
     rtp.add_argument("--conv-key", default=os.environ.get("JV_MEM_CONV_KEY", ""))
     rtp.add_argument("--reply", default=os.environ.get("JV_MEM_REPLY", ""))
 
+    rap = sub.add_parser(
+        "reconcile-ambient",
+        help="suppress queued ambient cards and restore ledger-only state")
+    rap.add_argument("--source", required=True, choices=sorted(AMBIENT_SOURCES))
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -3214,6 +3302,11 @@ def main(argv: list[str] | None = None) -> int:
         window = args.days if args.days > 0 else None
         acct = ledger_accounting(window_days=window)
         print(json.dumps(acct, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "reconcile-ambient":
+        print(json.dumps(
+            reconcile_ambient_queue(args.source), ensure_ascii=False))
         return 0
 
     if args.cmd == "continue":

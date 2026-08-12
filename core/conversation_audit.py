@@ -232,9 +232,18 @@ def _parse_message_ts(raw: str) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
     except ValueError:
-        return None
+        try:
+            parsed = datetime.strptime(
+                str(raw).strip()[:19].replace("T", " "),
+                "%Y-%m-%d %H:%M:%S",
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _event_type(message: str) -> tuple[str, str, dict]:
@@ -252,6 +261,9 @@ def _event_type(message: str) -> tuple[str, str, dict]:
     if "trying OpenAI fallback" in message:
         return "provider_call", message, {"provider": "GPT fallback"}
     if "Replied (" in message:
+        match = re.search(r"Replied \((\d+) chars\)", message)
+        if match:
+            meta["reply_chars"] = int(match.group(1))
         return "reply_sent", message, meta
     if "Suppressed content:" in message:
         return "suppressed_content", message.split("Suppressed content:", 1)[1].strip(), meta
@@ -462,23 +474,56 @@ def _provider_status_for_log(content: str) -> str:
     return "open"
 
 
-def _sessions_that_replied(conn: sqlite3.Connection, run_id: int) -> set[str]:
-    """Sessions that actually delivered at least one reply in this run.
+_REPLY_RECEIPT_WINDOW = timedelta(minutes=5)
+
+
+def _reply_receipts(
+    conn: sqlite3.Connection, run_id: int,
+) -> dict[str, list[tuple[datetime, int | None]]]:
+    """Timestamped reply receipts grouped by session.
 
     `session_messages` is a transcript, not a delivery record. A Claude Code
     CLI session, a heartbeat task session, or a background job all produce
     assistant turns that were never sent to anyone. Corroborating against
     `reply_sent` is the audit's own local evidence of what left the system.
+    The timestamp is load-bearing: one durable Claude session can reply again
+    hours later, and that later reply is not a receipt for an earlier no-op.
     """
-    return {
-        str(row["session_id"])
-        for row in conn.execute(
-            "SELECT DISTINCT session_id FROM conversation_events "
-            "WHERE run_id=? AND event_type='reply_sent' "
-            "AND session_id IS NOT NULL AND session_id!=''",
-            (run_id,),
-        )
-    }
+    receipts: dict[str, list[tuple[datetime, int | None]]] = {}
+    rows = conn.execute(
+        "SELECT ts,session_id,metadata FROM conversation_events "
+        "WHERE run_id=? AND event_type='reply_sent' "
+        "AND session_id IS NOT NULL AND session_id!=''",
+        (run_id,),
+    )
+    for row in rows:
+        timestamp = _parse_ts(str(row["ts"]))
+        if timestamp is not None:
+            try:
+                metadata = json.loads(str(row["metadata"] or "{}"))
+                reply_chars = int(metadata.get("reply_chars"))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                reply_chars = None
+            receipts.setdefault(str(row["session_id"]), []).append(
+                (timestamp, reply_chars)
+            )
+    return receipts
+
+
+def _has_nearby_reply(
+    row: sqlite3.Row,
+    receipts: dict[str, list[tuple[datetime, int | None]]],
+) -> bool:
+    message_at = _parse_message_ts(str(row["ts"]))
+    if message_at is None:
+        return False
+    text_chars = len(str(row["text"] or "").strip())
+    for replied_at, reply_chars in receipts.get(str(row["session_id"]), []):
+        delta = replied_at - message_at
+        if (timedelta(0) <= delta <= _REPLY_RECEIPT_WINDOW
+                and reply_chars == text_chars):
+            return True
+    return False
 
 
 def _add_user_visible_provider_issue(
@@ -561,11 +606,11 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     # Nothing goes dark: every detected provider error is still recorded by the
     # `provider_fallback_exercised` P1 above, and anything that got past the
     # safety boundary is a `provider_error_as_answer` P0 from suppressed_content.
-    replying_sessions = _sessions_that_replied(conn, run_id)
+    reply_receipts = _reply_receipts(conn, run_id)
     direct_provider_rows = [
         row for row in candidate_provider
         if _is_direct_provider_surface(row["text"])
-        and str(row["session_id"]) in replying_sessions
+        and _has_nearby_reply(row, reply_receipts)
     ]
 
     _empty_sql_filter = " OR ".join(
@@ -586,13 +631,13 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
     # and the two P0s raised that day were "No response requested." turns in
     # local Claude Code CLI sessions that had zero reply_sent events and zero
     # matching rows in the delivery ledger — nothing was ever sent to anyone.
-    # Residual, stated rather than hidden: a session that did reply and also
-    # emitted an internal no-op turn can still be flagged. Closing that needs
-    # per-message receipts, which the audit does not yet ingest.
+    # A timestamped reply receipt must land within the bounded turn window.
+    # Session identity alone is insufficient because one durable Claude
+    # session can reply to an unrelated user message hours later.
     direct_empty_rows = [
         row for row in candidate_empty
         if _is_direct_empty_surface(row["text"])
-        and str(row["session_id"]) in replying_sessions
+        and _has_nearby_reply(row, reply_receipts)
     ]
     provider_issue_type = (
         "progress_provider_error_leak"
