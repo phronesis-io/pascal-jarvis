@@ -272,6 +272,7 @@ ALERT_SOURCES = {
 # promote itself into a demand for a decision.
 NOTICE_SOURCES = {
     "checkin",
+    "exercise-week",
 }
 # Sources whose natural class is a notice, whatever their buttons say — the
 # single set both attention classifiers test (they were two hand-synced
@@ -299,9 +300,6 @@ PRESET_LOCKED_SOURCES = {
 # its own options (see _extract_inline_options).
 SOURCE_DEFAULT_PRESET = {
     "checkin": "companion",
-    "intention-check": "followup",
-    "intentions": "followup",
-    "intent": "followup",
     "watchlater-remind": "followup",
     "task-triage": "followup",
     "selfmon": "decision",
@@ -2324,6 +2322,64 @@ def resolve(memorial_id: str, label: str,
     return True
 
 
+def _claim_terminal_event(
+    memorial_id: str,
+    entry: dict,
+    allowed_statuses: set[str],
+) -> tuple[bool, dict | None, dict | None]:
+    """Atomically append one terminal event when the current state allows it."""
+    ledger = _ledger_path()
+    with ledger_lock(ledger):
+        events = read_jsonl(ledger)
+        before = _fold(events).get(memorial_id)
+        if before is None or before.get("status") not in allowed_statuses:
+            return False, before, None
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with open(ledger, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        events.append(entry)
+        after = _fold(events).get(memorial_id)
+    return True, before, after
+
+
+def resolve_thread_conversation(conv_key: str, reply_summary: str = "") -> bool:
+    """Close a pending memorial after its Lark thread receives a real reply.
+
+    The conversation key is the trust boundary: only ``memorial:<id>`` keys
+    can affect the memorial ledger. Delivery callers invoke this only after
+    the assistant reply is confirmed, so a provider or Lark failure leaves
+    the original card available for retry.
+    """
+    prefix = "memorial:"
+    key = str(conv_key or "").strip()
+    if not key.startswith(prefix):
+        return False
+    memorial_id = key[len(prefix):].strip()
+    if not memorial_id:
+        return False
+    summary = " ".join(str(reply_summary or "").split())[:200]
+    entry = {
+        "ev": "resolve",
+        "id": memorial_id,
+        "ts": now_local_str(),
+        "label": "已转入对话",
+        "result": summary,
+    }
+
+    # Thread replies and card decisions share this claim. Whichever reaches
+    # the ledger first owns the terminal transition; the loser must not repeat
+    # card syncs or execute an option action from a stale pending read.
+    claimed, _before, resolved = _claim_terminal_event(
+        memorial_id, entry, {"pending"})
+    if not claimed:
+        return False
+
+    if resolved is not None:
+        _sync_lark_card(memorial_id, _decided_card(resolved))
+    _complete_surface_handoffs(memorial_id)
+    return True
+
+
 def _finish_decide_side_effects(
         st: dict, memorial_id: str, opt_key: str, opt: dict,
         action_result: str, action_failed: bool,
@@ -2402,13 +2458,31 @@ def decide(
     if opt is None:
         return {"toast": {"type": "info", "content": "出错了，直接在对话里告诉我"}}
 
-    # Ledger BEFORE action: if the process dies mid-action, a re-tap hits the
-    # 「已批过」idempotence branch instead of re-running the side effect (a
-    # lost action beats a double calendar event). The result is back-filled
-    # as a separate action_result event.
+    # Atomically claim the terminal state BEFORE the action. A simultaneous
+    # thread reply or second tap can win this race, in which case this worker
+    # returns the authoritative terminal card without running a stale action.
     ts = now_local_str()
-    _append_line(_ledger_path(), {"ev": "decide", "id": memorial_id, "ts": ts,
-                                  "opt": opt_key, "label": opt.get("label", "")})
+    claimed, claimed_from, current = _claim_terminal_event(
+        memorial_id,
+        {"ev": "decide", "id": memorial_id, "ts": ts,
+         "opt": opt_key, "label": opt.get("label", "")},
+        {"pending", STATUS_LAPSED},
+    )
+    if not claimed:
+        if current is None:
+            current = claimed_from
+        if current is None:
+            return {"toast": {"type": "info",
+                              "content": "这张卡对应的事项找不到了，直接在对话里告诉我"}}
+        _complete_surface_handoffs(memorial_id)
+        return {
+            "toast": {
+                "type": "info",
+                "content": f"已批过：{current.get('decided_label', '已处理')}",
+            },
+            "card": {"type": "raw", "data": _decided_card(current)},
+        }
+    st = claimed_from or st
     try:
         from core.delivery import DeliveryPipeline
         DeliveryPipeline(JARVIS_DIR).confirm_entity(
@@ -3093,6 +3167,12 @@ def main(argv: list[str] | None = None) -> int:
     ccp.add_argument("--expected-offset", required=True, type=int)
     ccp.add_argument("--next-offset", required=True, type=int)
 
+    rtp = sub.add_parser(
+        "resolve-thread",
+        help="close a memorial after a confirmed thread reply")
+    rtp.add_argument("--conv-key", default=os.environ.get("JV_MEM_CONV_KEY", ""))
+    rtp.add_argument("--reply", default=os.environ.get("JV_MEM_REPLY", ""))
+
     args = parser.parse_args(argv)
 
     if args.cmd == "send":
@@ -3149,6 +3229,11 @@ def main(argv: list[str] | None = None) -> int:
             args.expected_offset, args.next_offset)
         print(json.dumps({"committed": committed}, ensure_ascii=False))
         return 0 if committed else 1
+
+    if args.cmd == "resolve-thread":
+        resolved = resolve_thread_conversation(args.conv_key, args.reply)
+        print(json.dumps({"resolved": resolved}, ensure_ascii=False))
+        return 0
 
     parser.print_usage(sys.stderr)
     return 2

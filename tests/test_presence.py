@@ -64,6 +64,86 @@ def test_floor_quiet_on_a_healthy_day(tmp_path):
     assert presence.check(now=NOW) == ""
 
 
+def test_sent_count_uses_delivery_receipts_and_excludes_non_cards(
+        tmp_path, monkeypatch):
+    from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
+
+    now = NOW.replace(tzinfo=__import__(
+        "core.timeutil", fromlist=["now_local"]).now_local().tzinfo).timestamp()
+    db_path = tmp_path / "data" / "jarvis.db"
+    monkeypatch.setenv("JARVIS_DB_PATH", str(db_path))
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=db_path,
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now, sleeper=lambda _: None,
+    )
+    budget = {
+        "burst_cap": 20,
+        "global_daily_cap": 20,
+        "source_daily_cap": 20,
+    }
+    for index in range(7):
+        card_json = json.dumps({
+            "config": {},
+            "elements": [{"tag": "markdown",
+                          "content": f"第 {index} 张卡"}],
+        })
+        assert pipe.deliver(DeliveryEnvelope(
+            source=f"card-{index}", kind="card",
+            payload={"card_json": card_json},
+            metadata=budget,
+        )).state == "delivered"
+    assert pipe.deliver(DeliveryEnvelope(
+        source="urgent-heartbeat", kind="card", attention="alert",
+        payload={"card_json": json.dumps({
+            "elements": [{"tag": "markdown", "content": "紧急提醒"}],
+        })},
+        metadata={**budget, "bypass_throttle": True},
+    )).state == "delivered"
+    pipe.deliver(DeliveryEnvelope(
+        source="plain-text", payload={"text": "不是卡"}, metadata=budget))
+    pipe.deliver(DeliveryEnvelope(
+        source="deploy-smoke", kind="card",
+        payload={"card_json": json.dumps({
+            "elements": [{"tag": "markdown", "content": "smoke"}],
+        })},
+        metadata={**budget, "bypass_throttle": True}))
+
+    # A stale or incomplete memorial side ledger cannot make presence lie.
+    _write_ledger(tmp_path, [_sent(0), _sent(1)])
+    assert presence.sent_count(now=NOW) == 8
+
+
+def test_floor_uses_delivery_db_without_memorial_ledger(tmp_path, monkeypatch):
+    """Direct heartbeat cards can exist before any memorial is written."""
+    from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
+
+    now = NOW.replace(tzinfo=__import__(
+        "core.timeutil", fromlist=["now_local"]).now_local().tzinfo).timestamp()
+    db_path = tmp_path / "data" / "jarvis.db"
+    monkeypatch.setenv("JARVIS_DB_PATH", str(db_path))
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=db_path,
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now, sleeper=lambda _: None,
+    )
+    for index in range(2):
+        assert pipe.deliver(DeliveryEnvelope(
+            source="heartbeat", kind="card",
+            payload={"card_json": json.dumps({
+                "elements": [{"tag": "markdown", "content": f"卡片 {index}"}],
+            })},
+            metadata={
+                "burst_cap": 20,
+                "global_daily_cap": 20,
+                "source_daily_cap": 20,
+            },
+        )).state == "delivered"
+
+    assert not (tmp_path / "memorials.jsonl").exists()
+    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+
+
 def test_floor_ignores_stale_sends_outside_the_window(tmp_path):
     """Ten sends last week must not mask a silent today."""
     events = [_sent(i, ts="2026-07-30 09:00") for i in range(10)]

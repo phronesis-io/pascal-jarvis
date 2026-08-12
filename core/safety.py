@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re as _re
+
 # The heartbeat idle sentinel. When it appears ANYWHERE in a task's output,
 # the model decided this cycle should stay silent — any surrounding text is
 # leaked scratch work ("...nothing noteworthy.\n\nHEARTBEAT_OK", 2026-07-15
@@ -150,7 +152,40 @@ def sanitize_for_user(text: str, fallback: str = "") -> str:
     return text
 
 
-import re as _re
+_PLAIN_USER_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("Intent not found or already closed", "这条提醒已经处理过了"),
+    ("Intent not found or already done", "这条提醒已经处理过了"),
+    ("Closure recorded", "已记下并关闭"),
+    ("Intent cancelled", "提醒已取消"),
+    ("escrow", "待处理记录"),
+    ("匣子", "待处理事项"),
+    ("留中", "自动归档"),
+    ("硬顶", "最长等待"),
+    ("台账", "记录"),
+)
+
+_USER_COPY_URL_RE = _re.compile(
+    r"https?://[^\s<>\[\]，。；、」』＞]+",
+    _re.IGNORECASE,
+)
+
+
+def plain_user_copy(text: str) -> str:
+    """Translate internal jargon without changing link destinations."""
+    urls: list[str] = []
+
+    def protect_url(match: _re.Match) -> str:
+        urls.append(match.group(0))
+        return f"\x00JARVIS_URL_{len(urls) - 1}\x00"
+
+    result = _USER_COPY_URL_RE.sub(protect_url, str(text or ""))
+    for internal, plain in _PLAIN_USER_REPLACEMENTS:
+        result = result.replace(internal, plain)
+    return _re.sub(
+        r"\x00JARVIS_URL_(\d+)\x00",
+        lambda match: urls[int(match.group(1))],
+        result,
+    )
 
 # Prompt-framing headers the model echoes back at the top of a task slice.
 # These reached Pascal's cards verbatim through 7/20 ("=== TASK: checkin ===",

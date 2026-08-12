@@ -136,3 +136,12 @@ def test_preinstall_verifier_references_only_live_test_files():
     missing = [name for name in references if not (ROOT / "tests" / name).is_file()]
     assert missing == []
     assert "test_eigenflux_messages.py" in references
+
+
+def test_preinstall_source_repos_can_be_overridden_for_worktrees():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+
+    assert 'REPOS_DIR="${JARVIS_REPOS_DIR:-$(dirname "$JARVIS_DIR")}"' in script
+    assert 'PLUGIN_DIR="${EIGENFLUX_PLUGIN_DIR:-$REPOS_DIR/eigenflux-claude-plugin}"' in script
+    assert 'MAIN_DIR="${EIGENFLUX_MAIN_DIR:-$REPOS_DIR/eigenflux}"' in script

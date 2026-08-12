@@ -8,6 +8,8 @@ round-trip). All lark-cli sends are mocked — nothing real is sent.
 
 import io
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -459,6 +461,83 @@ def test_resolve_overrides_old_reply_and_syncs_external_truth(env, monkeypatch):
         mid, "已通过（服务端确认）", "EigenFlux 好友关系已生效") is False
 
 
+def test_confirmed_thread_reply_resolves_only_its_pending_memorial(env):
+    mid, _ = memorial.create("mail", "邮件标题", "正文", preset="fyi")
+
+    assert memorial.resolve_thread_conversation(
+        f"memorial:{mid}", "这件事我已经说明白了") is True
+    state = memorial.get_memorial(mid)
+    assert state["status"] == "decided"
+    assert state["resolved_label"] == "已转入对话"
+    assert state["action_result"] == "这件事我已经说明白了"
+    assert memorial.resolve_thread_conversation(
+        f"memorial:{mid}", "重复投递") is False
+    assert memorial.resolve_thread_conversation("p2p:ordinary", "普通对话") is False
+    assert memorial.resolve_thread_conversation("memorial:missing", "找不到") is False
+
+
+def test_concurrent_thread_replies_claim_one_terminal_transition(env, monkeypatch):
+    mid, _ = memorial.create("mail", "邮件标题", "正文", preset="fyi")
+    synced = []
+    handed_off = []
+    monkeypatch.setattr(
+        memorial, "_sync_lark_card",
+        lambda memorial_id, card: synced.append((memorial_id, card)),
+    )
+    monkeypatch.setattr(
+        memorial, "_complete_surface_handoffs", handed_off.append,
+    )
+    workers = 8
+    ready = threading.Barrier(workers)
+
+    def close(index):
+        ready.wait()
+        return memorial.resolve_thread_conversation(
+            f"memorial:{mid}", f"并发回复 {index}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        outcomes = list(pool.map(close, range(workers)))
+
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == workers - 1
+    assert len([event for event in _ledger_events(env.dir)
+                if event.get("id") == mid and event.get("ev") == "resolve"]) == 1
+    assert [item[0] for item in synced] == [mid]
+    assert handed_off == [mid]
+
+
+def test_card_decision_cannot_execute_after_thread_resolution(env, monkeypatch):
+    calls = []
+    mid, _ = memorial.create(
+        "mail", "邮件标题", "正文",
+        options=[{
+            "key": "publish",
+            "label": "发布",
+            "action": {"type": "publish", "params": {}},
+        }],
+    )
+    stale_pending = memorial.get_memorial(mid)
+    monkeypatch.setattr(
+        memorial, "_execute_action",
+        lambda action, **kwargs: calls.append(action) or "published",
+    )
+
+    assert memorial.resolve_thread_conversation(
+        f"memorial:{mid}", "已经在对话里处理") is True
+    # Reproduce a worker that read pending just before the thread worker won.
+    monkeypatch.setattr(
+        memorial, "get_memorial", lambda _memorial_id: dict(stale_pending))
+
+    payload = memorial.decide(mid, "publish")
+
+    assert calls == []
+    assert "已批过" in payload["toast"]["content"]
+    terminal = [event for event in _ledger_events(env.dir)
+                if event.get("id") == mid
+                and event.get("ev") in {"resolve", "decide"}]
+    assert [event["ev"] for event in terminal] == ["resolve"]
+
+
 # ── chat ─────────────────────────────────────────────────────────────────
 
 
@@ -511,7 +590,7 @@ def test_chat_on_a_clipped_card_sends_the_full_text(env):
     opener = env.texts[0][0]
     assert "全文" in opener
     assert "第0件事" in opener and "第29件事" in opener   # nothing dropped
-    assert "来自晨间台账" in opener                       # background too
+    assert "来自晨间台账" in opener                       # source text stays literal
     assert len(opener) <= memorial.FULL_TEXT_MAX_CHARS
 
 
@@ -829,7 +908,7 @@ def test_explicit_title_line_becomes_card_header(env):
     card = json.loads(rendered)
     assert card["header"]["title"]["content"] == "📜 🎯 发声候选已备好，挑一个"
     body = card["elements"][0]["text"]["content"]
-    assert body.startswith("🎯 等你拍一个")
+    assert body.startswith("ℹ️ 知道就行")
     assert "TITLE" not in body and "三个候选" in body
 
 
@@ -848,7 +927,7 @@ def test_title_only_output_still_makes_a_card(env):
     card = json.loads(out)
     assert card["header"]["title"]["content"] == "📜 🎯 今晚 EF 增长破千，值得看一眼"
     assert card["elements"][0]["text"]["content"] == (
-        "🎯 等你拍一个\n\n今晚 EF 增长破千，值得看一眼")
+        "ℹ️ 知道就行\n\n今晚 EF 增长破千，值得看一眼")
 
 
 def test_overlong_explicit_title_clipped_but_body_keeps_full_line(env):
@@ -1330,11 +1409,12 @@ def test_maybe_rotate_runs_once_per_month(env):
     assert memorial.get_memorial("mem_old_3") is not None
 
 
-def test_prose_cards_use_the_sources_natural_preset(env):
-    """A follow-up source must not fall back to「已阅」."""
+def test_intention_check_prose_without_authored_choices_is_a_notice(env):
+    """A monitor observation is not a decision merely because of its source."""
     memorial.memorialize_output("这条 intent 到期了", source="intention-check")
     st = memorial.list_memorials()[-1]
-    assert [o["key"] for o in st["options"]] == ["done", "later", "stop"]
+    assert [o["key"] for o in st["options"]] == ["read", "watch"]
+    assert st["attention"] == memorial.ATTENTION_NOTICE
 
 
 def test_prose_cards_pick_up_an_inline_options_line(env):
@@ -1343,6 +1423,18 @@ def test_prose_cards_pick_up_an_inline_options_line(env):
     st = memorial.list_memorials()[-1]
     assert [o["label"] for o in st["options"]] == ["加钱", "限流"]
     assert "OPTIONS" not in st["body"]
+    assert st["attention"] == memorial.ATTENTION_DECISION
+
+
+def test_exercise_week_feedback_buttons_do_not_create_a_decision(env):
+    mid, _ = memorial.create(
+        "exercise-week", "本周运动", "恢复得不错",
+        options=[
+            {"key": "ack", "label": "知道了", "reply": "知道了"},
+            {"key": "more", "label": "多讲一点", "reply": "多讲一点"},
+        ],
+    )
+    assert memorial.get_memorial(mid)["attention"] == memorial.ATTENTION_NOTICE
 
 
 def test_cli_options_flag_builds_reply_buttons(env, capsys):

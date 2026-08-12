@@ -314,9 +314,204 @@ def test_global_daily_cap(pipeline):
             requested_channel="lark",
             metadata={"global_daily_cap": 1, "source_daily_cap": 9},
         ))
-    assert result.state == "suppressed"
+    assert result.state == "queued"
     assert result.reason == "global_daily_cap"
     assert len(sent) == 1
+
+
+def test_global_daily_budget_releases_next_morning(tmp_path):
+    now = [_local_ts(2026, 8, 12, 14, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.payload["text"])
+            or TransportResult(True, f"om_{len(sent)}")),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    metadata = {"global_daily_cap": 1, "source_daily_cap": 9}
+    assert pipe.deliver(DeliveryEnvelope(
+        source="one", payload={"text": "first"},
+        metadata=metadata)).state == "delivered"
+    deferred = pipe.deliver(DeliveryEnvelope(
+        source="two", payload={"text": "second"},
+        metadata=metadata))
+    assert deferred.state == "queued"
+    assert pipe.get(deferred.delivery_id)["next_attempt_epoch"] > now[0]
+
+    now[0] = _local_ts(2026, 8, 13, 9, 31)
+    assert pipe.flush_due()[0].state == "delivered"
+    assert sent == ["first", "second"]
+
+
+def test_alert_and_reply_bypass_proactive_daily_budget(tmp_path):
+    now = [_local_ts(2026, 8, 12, 14, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.payload["text"])
+            or TransportResult(True, f"om_{len(sent)}")),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    metadata = {"global_daily_cap": 1, "source_daily_cap": 9}
+    pipe.deliver(DeliveryEnvelope(
+        source="ordinary", payload={"text": "normal"}, metadata=metadata))
+    alert = pipe.deliver(DeliveryEnvelope(
+        source="guardian", payload={"text": "urgent alert"},
+        attention="alert", metadata=metadata))
+    reply = pipe.deliver(DeliveryEnvelope(
+        source="bot-reply", kind="reply", attention="reply",
+        reply_to="om_user", payload={"text": "reply"}, metadata=metadata))
+    assert alert.state == reply.state == "delivered"
+    assert sent == ["normal", "urgent alert", "reply"]
+
+
+def test_burst_budget_queues_fifth_card_without_losing_it(tmp_path):
+    now = [_local_ts(2026, 8, 12, 10, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.payload["text"])
+            or TransportResult(True, f"om_{len(sent)}")),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    metadata = {
+        "burst_cap": 4,
+        "burst_window_seconds": 600,
+        "global_daily_cap": 25,
+        "source_daily_cap": 9,
+    }
+    results = [pipe.deliver(DeliveryEnvelope(
+        source=f"source-{index}", payload={"text": f"card-{index}"},
+        metadata=metadata)) for index in range(5)]
+    assert [result.state for result in results] == [
+        "delivered", "delivered", "delivered", "delivered", "queued"]
+    assert results[-1].reason == "burst_budget"
+    assert sent == ["card-0", "card-1", "card-2", "card-3"]
+
+    now[0] += 600.01
+    assert pipe.flush_due()[0].state == "delivered"
+    assert sent[-1] == "card-4"
+
+
+def test_burst_budget_reservation_is_atomic_across_workers(tmp_path):
+    now = [_local_ts(2026, 8, 12, 10, 0)]
+    path = tmp_path / "db.sqlite"
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=path,
+        transport=lambda _envelope, _channel: TransportResult(True),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    # Initialize the schema before synchronizing worker threads. Otherwise
+    # the barrier also measures SQLite's one-time DDL serialization.
+    with delivery.closing(delivery._connect(path)):
+        pass
+    envelopes = [DeliveryEnvelope(
+        source=f"burst-source-{index}",
+        payload={"text": f"burst {index}"},
+        metadata={
+            "burst_cap": 4,
+            "burst_window_seconds": 600,
+            "global_daily_cap": 25,
+            "source_daily_cap": 9,
+            "force_queue": True,
+        },
+    ) for index in range(5)]
+    assert [pipe.deliver(envelope).state for envelope in envelopes] == [
+        "queued", "queued", "queued", "queued", "queued"]
+    barrier = threading.Barrier(5)
+
+    def reserve(envelope):
+        with delivery.closing(delivery._connect(path)) as db:
+            barrier.wait(timeout=5)
+            reason, _retry_epoch = pipe._reserve_attempt_cap(
+                db, envelope, now[0])
+            return reason
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        outcomes = list(executor.map(reserve, envelopes))
+
+    assert outcomes.count("") == 4
+    assert outcomes.count("burst_budget") == 1
+    with delivery.closing(delivery._connect(path)) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM delivery_cap_reservations"
+        ).fetchone()[0] == 4
+
+
+def test_burst_overflow_rechecks_when_inflight_reservations_release(tmp_path):
+    started = _local_ts(2026, 8, 12, 10, 0)
+    now = [started]
+    path = tmp_path / "db.sqlite"
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=path,
+        transport=lambda _envelope, _channel: TransportResult(True),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    limits = {
+        "burst_cap": 4,
+        "burst_window_seconds": 600,
+        "global_daily_cap": 25,
+        "source_daily_cap": 9,
+        "force_queue": True,
+    }
+    envelopes = [DeliveryEnvelope(
+        source=f"source-{index}", payload={"text": f"item {index}"},
+        metadata=limits,
+    ) for index in range(5)]
+    for envelope in envelopes:
+        assert pipe.deliver(envelope).state == "queued"
+
+    with delivery.closing(delivery._connect(path)) as db:
+        for envelope in envelopes[:4]:
+            assert pipe._reserve_attempt_cap(db, envelope, started)[0] == ""
+
+        now[0] = started + 30
+        reason, retry_epoch = pipe._reserve_attempt_cap(
+            db, envelopes[4], now[0])
+        assert reason == "burst_budget"
+        assert retry_epoch <= now[0] + delivery.CAP_RESERVATION_RECHECK_SECONDS + 0.001
+
+        for envelope in envelopes[:4]:
+            pipe._release_attempt_cap(db, envelope.id)
+        db.commit()
+        assert pipe._reserve_attempt_cap(
+            db, envelopes[4], retry_epoch)[0] == ""
+
+
+def test_exempt_inflight_reservations_do_not_consume_ordinary_budget(tmp_path):
+    now = [_local_ts(2026, 8, 12, 10, 0)]
+    path = tmp_path / "db.sqlite"
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=path,
+        transport=lambda _envelope, _channel: TransportResult(True),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    limits = {
+        "burst_cap": 4,
+        "burst_window_seconds": 600,
+        "global_daily_cap": 4,
+        "source_daily_cap": 9,
+        "force_queue": True,
+    }
+    alerts = [DeliveryEnvelope(
+        source=f"alert-{index}", attention="alert",
+        payload={"text": f"alert {index}"}, metadata=limits,
+    ) for index in range(4)]
+    ordinary = DeliveryEnvelope(
+        source="ordinary", payload={"text": "ordinary"}, metadata=limits)
+    for envelope in [*alerts, ordinary]:
+        assert pipe.deliver(envelope).state == "queued"
+
+    with delivery.closing(delivery._connect(path)) as db:
+        for alert in alerts:
+            assert pipe._reserve_attempt_cap(db, alert, now[0])[0] == ""
+        assert pipe._reserve_attempt_cap(db, ordinary, now[0])[0] == ""
+
+        rows = delivery._budgeted_reservations(db, now[0] - 600)
+        assert [row["source"] for row in rows] == ["ordinary"]
 
 
 def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
@@ -366,7 +561,9 @@ def test_send_day_metric_cap_reservation_is_atomic_across_workers(tmp_path):
     def reserve(envelope):
         with delivery.closing(delivery._connect(path)) as db:
             ready.wait(timeout=5)
-            return pipe._reserve_attempt_cap(db, envelope, now[0])
+            reason, _retry_epoch = pipe._reserve_attempt_cap(
+                db, envelope, now[0])
+            return reason
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         outcomes = list(executor.map(reserve, queued))
@@ -449,6 +646,70 @@ def test_card_sanitization_rewrites_markdown(pipeline):
     assert result.state == "delivered"
     delivered = json.loads(sent[0][0].payload["card_json"])
     assert delivered["elements"][0]["content"] == "真正内容"
+
+
+def test_user_copy_removes_internal_jargon_without_changing_actions(pipeline):
+    pipe, sent, _ = pipeline
+    card = {
+        "header": {"title": {"tag": "plain_text", "content": "匣子台账"}},
+        "elements": [
+            {"tag": "markdown", "content": "硬顶后留中。Closure recorded"},
+            {"tag": "action", "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看台账"},
+                "value": {
+                    "action": "watchlater",
+                    "title": "项目台账",
+                    "result": "Closure recorded",
+                },
+            }]},
+        ],
+    }
+    result = pipe.deliver(DeliveryEnvelope(
+        source="heartbeat", kind="card",
+        payload={"card_json": json.dumps(card, ensure_ascii=False)},
+        attention="alert", requested_channel="lark",
+    ))
+    assert result.state == "delivered"
+    delivered = json.loads(sent[0][0].payload["card_json"])
+    assert delivered["header"]["title"]["content"] == "待处理事项记录"
+    assert delivered["elements"][0]["content"] == (
+        "最长等待后自动归档。已记下并关闭")
+    button = delivered["elements"][1]["actions"][0]
+    assert button["text"]["content"] == "查看记录"
+    assert button["value"] == {
+        "action": "watchlater",
+        "title": "项目台账",
+        "result": "Closure recorded",
+    }
+
+
+def test_user_copy_rewrites_link_label_without_changing_url(pipeline):
+    pipe, sent, _ = pipeline
+    destination = "https://example.com/escrow?view=台账"
+    text = f"[查看 escrow 台账]({destination})，台账稍后看"
+
+    result = pipe.deliver(DeliveryEnvelope(
+        source="heartbeat", payload={"text": text},
+        requested_channel="lark",
+    ))
+
+    assert result.state == "delivered"
+    assert sent[0][0].payload["text"] == (
+        f"[查看 待处理记录 记录]({destination})，记录稍后看")
+
+
+def test_ordinary_reply_preserves_legitimate_domain_terms(pipeline):
+    pipe, sent, _ = pipeline
+    text = "In this contract, escrow and 台账 are the terms being discussed."
+    result = pipe.deliver(DeliveryEnvelope(
+        source="bot-reply", kind="reply", attention="reply",
+        reply_to="om_user", payload={"text": text},
+        requested_channel="lark",
+    ))
+
+    assert result.state == "delivered"
+    assert sent[0][0].payload["text"] == text
 
 
 def test_retry_then_delivery_records_attempts(tmp_path):
