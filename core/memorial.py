@@ -193,23 +193,15 @@ ESCROW_DEADLINE_H = {
 }
 # A decision past its deadline is NOT archived — it is re-surfaced in the daily
 # 匣子 docket. But 批红 that never comes is itself an answer: past this hard
-# ceiling it is filed as 留中 so the docket cannot nag forever. Re-measured
-# 8/12 on the authoritative ledger (delivery_envelopes, 7/23-8/12, 296
-# decision-class cards): of the 117 ever acted on, the SLOWEST took 44.5h and
-# 116 of 117 landed inside 24h — nothing was ever decided past 48h. An older
-# note here claimed p95 = 128h / max = 179h; that does not reproduce on the
-# ledger and should not be cited again.
+# ceiling it is filed as 留中 so the docket cannot nag forever. A bounded
+# production-ledger review found no decisions completed after the ordinary
+# overdue window; exact private activity metrics remain outside this public
+# repository.
 #
-# 2026-08-12, Pascal 原话「死了的就别来烦我了」: the ceiling was 14 days, so a
-# card whose underlying matter had already passed (a prep reminder for a
-# meeting that happened, a stopped-service notice long since resolved) kept
-# riding the morning docket for twelve more days. That morning's docket
-# announced 「31 件事等你拍板」 and only 3 were still live. The measured
-# window says a decision answered this late is a thin tail (median 2.1h, 75%
-# inside 24h, 90% inside 48h) — so four days keeps every realistically
-# answerable ask, clears the deadline lane by a full day, and drops the ten
-# days of nagging behind it. 留中 is archival, not deletion: the row stays in
-# the ledger and the docket still says so in one line.
+# The old 14-day ceiling let obsolete asks ride the morning docket long after
+# they stopped being actionable. Four days retains a generous decision window
+# while bounding repeated asks. 留中 is archival, not deletion: the row stays
+# in the ledger and the docket still says so in one line.
 ESCROW_HARD_LAPSE_H = 24 * 4
 # 御门听政: the docket goes out once a day, in the morning, as ONE card.
 # Re-pushing stale cards individually is the card storm this system was
