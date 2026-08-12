@@ -41,7 +41,6 @@ CLI (any emitter can send a memorial in one line):
 from __future__ import annotations
 
 import copy
-import fcntl
 import itertools
 import json
 import os
@@ -50,17 +49,49 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from core.card import build_card, extract_card_text
+from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
+from core import memorial_cards, memorial_ledger, memorial_transport
+from core.log import log
+from core.memorial_contracts import (
+    ATTENTION_ALERT,
+    ATTENTION_DECISION,
+    ATTENTION_NOTICE,
+    STATUS_LAPSED,
+)
 from core.timeutil import now_local, now_local_str
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
                                  Path(__file__).resolve().parent.parent))
+_INITIAL_JARVIS_DIR = JARVIS_DIR
+# Backward-compatible name introduced by the write-isolation audit.
+_IMPORTED_JARVIS_DIR = _INITIAL_JARVIS_DIR
+
+
+def runtime_root() -> Path:
+    """Resolve the active data root without defeating facade monkeypatches.
+
+    Tests historically patch ``core.memorial.JARVIS_DIR``.  Keep that hook
+    authoritative while also observing a ``JARVIS_DIR`` environment change
+    made after import when the facade global is untouched.
+    """
+    root = Path(JARVIS_DIR)
+    if root != _INITIAL_JARVIS_DIR:
+        return root
+    configured = os.environ.get("JARVIS_DIR", "").strip()
+    return Path(configured) if configured else root
+
+
+def _ops_log(message: str, *, level: str = "info", **fields) -> None:
+    """Emit grep-friendly operational evidence without private card text."""
+    try:
+        log("memorial", message, level=level, **fields)
+    except Exception:
+        pass
 
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
@@ -171,9 +202,6 @@ PRESETS: dict[str, list[dict]] = {
 # "not_this_kind" it silences a source rather than answering an ask, so it
 # must not promote the card to decision class or speak first-person.
 _FYI_KEYS = {"read", "watch", "ack", "not_this_kind", "pause"}
-ATTENTION_DECISION = "decision"
-ATTENTION_NOTICE = "notice"
-ATTENTION_ALERT = "alert"
 
 # ── 缴回制度 (escrow) ────────────────────────────────────────────────────
 # A card sent once and never tapped used to scroll out of Lark and vanish:
@@ -209,7 +237,6 @@ ESCROW_HARD_LAPSE_H = 24 * 4
 # already burned by (7/22) — the emperor gets a docket, not the pile.
 ESCROW_DIGEST_HOURS = range(8, 12)
 ESCROW_DIGEST_SOURCE = "memorial-escrow"
-STATUS_LAPSED = "lapsed"
 
 REVIEW_LARK = "lark"
 REVIEW_PHONE = "phone"
@@ -510,21 +537,20 @@ _ID_COUNTER = itertools.count(1)
 
 
 def _ledger_path() -> Path:
-    return JARVIS_DIR / "memorials.jsonl"
+    return memorial_ledger.ledger_path(runtime_root())
 
 
 def _pending_merge_path() -> Path:
     # bot.sh's bg-job merge channel: lines matching conv_key are prepended to
     # Pascal's next message and consumed (rewrite-keep-others). We only ever
     # append — same as bot.sh's own two writers.
-    return JARVIS_DIR / "jobs" / "pending_merge.jsonl"
+    return memorial_ledger.pending_merge_path(runtime_root())
 
 
 def _outbox_path() -> Path:
-    return JARVIS_DIR / "heartbeat_outbox.jsonl"
+    return memorial_ledger.outbox_path(runtime_root())
 
 
-@contextmanager
 def ledger_lock(ledger: Path):
     """Exclusive cross-process lock for memorials.jsonl writers.
 
@@ -535,13 +561,7 @@ def ledger_lock(ledger: Path):
     writer (here, heartbeat_loop delivery events, sidecar decide events
     via this module) takes this lock; appends hold it for microseconds.
     """
-    lock_path = ledger.parent / (ledger.name + ".lock")
-    with open(lock_path, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    return memorial_ledger.ledger_lock(ledger)
 
 
 def _append_line(path: Path, entry: dict) -> None:
@@ -549,16 +569,7 @@ def _append_line(path: Path, entry: dict) -> None:
     sidecar / CLI / heartbeat writers (same idiom as engagement_log /
     heartbeat_outbox appends). Ledger writes additionally take ledger_lock
     so a monthly rotation can never replace the file out from under them."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
-    if path.name == "memorials.jsonl":
-        with ledger_lock(path):
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-        return
-    with open(path, "a", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(line)
+    memorial_ledger.append_line(path, entry)
 
 
 def _new_id() -> str:
@@ -574,7 +585,7 @@ def _resolve_user_id() -> str:
         return uid
     try:
         from core.config import Config
-        return str(Config(JARVIS_DIR / "jarvis.yaml").lark.get("user_id", "") or "")
+        return str(Config(runtime_root() / "jarvis.yaml").lark.get("user_id", "") or "")
     except Exception:
         return ""
 
@@ -584,125 +595,31 @@ def _resolve_user_id() -> str:
 
 def _fold(events: list[dict]) -> dict[str, dict]:
     """Fold the event stream into {id: current_state}."""
-    states: dict[str, dict] = {}
-    for e in events:
-        mid = str(e.get("id", ""))
-        if not mid:
-            continue
-        ev = e.get("ev", "")
-        if ev == "create":
-            options = e.get("options") or []
-            extra_buttons = e.get("extra_buttons") or []
-            states[mid] = {
-                "id": mid,
-                "ts": e.get("ts", ""),
-                "epoch": e.get("epoch", 0),
-                "source": str(e.get("source", "")),
-                "title": str(e.get("title", "")),
-                "body": str(e.get("body", "")),
-                "options": options,
-                "extra_buttons": extra_buttons,
-                "recommend": e.get("recommend") or None,
-                "authoring_protocol": bool(e.get("authoring_protocol", False)),
-                "authoring_audit_text": (
-                    str(e.get("authoring_audit_text", ""))
-                    if "authoring_audit_text" in e else None),
-                "attention": str(
-                    e.get("attention") or
-                    _default_attention(str(e.get("source", "")),
-                                       options, extra_buttons)
-                ),
-                "review_surface": str(e.get("review_surface", "")),
-                "context": str(e.get("context", "")),
-                "dedup_key": str(e.get("dedup_key", "")),
-                "chat_id": str(e.get("chat_id", "")),
-                "matter_id": str(e.get("matter_id", "")),
-                "status": "pending",
-                "lapsed_ts": "",
-                "lapse_reason": "",
-                "decided_opt": "",
-                "decided_label": "",
-                "decided_ts": "",
-                "action_result": "",
-                "resolved_label": "",
-                "resolved_ts": "",
-                "chat_ts": "",
-                "confused_ts": "",
-                "chat_epoch": 0,
-                "delivery_status": "not_sent",
-                "delivery_ts": "",
-            }
-        elif ev == "decide":
-            st = states.get(mid)
-            # A 留中 card stays tappable: scrolling back in Lark and answering
-            # an archived ask must revive it, not silently no-op. Events are
-            # chronological, so a later lapse cannot overwrite a real 批红
-            # (the lapse branch only fires on pending).
-            if st is not None and st["status"] in ("pending", STATUS_LAPSED):
-                st["status"] = "decided"
-                st["lapsed_ts"] = ""
-                st["lapse_reason"] = ""
-                st["decided_opt"] = str(e.get("opt", ""))
-                st["decided_label"] = str(e.get("label", ""))
-                st["decided_ts"] = str(e.get("ts", ""))
-                st["action_result"] = str(e.get("action_result", ""))
-        elif ev == "action_result":
-            # Written after the decide event once the option action ran —
-            # decide() appends the decide event BEFORE executing the action so
-            # a crash mid-action can't lead to a double execution on re-tap.
-            st = states.get(mid)
-            if st is not None:
-                st["action_result"] = str(e.get("result", ""))
-        elif ev == "resolve":
-            # External source truth can become terminal after (or without) a
-            # card tap. Resolution overrides an earlier reply-only decision
-            # so every delivered copy converges to the real state.
-            st = states.get(mid)
-            if st is not None:
-                st["status"] = "decided"
-                st["decided_opt"] = "__external__"
-                st["decided_label"] = str(e.get("label", "已处理"))
-                st["decided_ts"] = str(e.get("ts", ""))
-                st["action_result"] = str(e.get("result", ""))
-                st["resolved_label"] = str(e.get("label", "已处理"))
-                st["resolved_ts"] = str(e.get("ts", ""))
-        elif ev == "confused":
-            st = states.get(mid)
-            if st is not None:
-                st["confused_ts"] = str(e.get("ts", ""))
-        elif ev == "lapse":
-            # 留中: the deadline passed with no 批红. A terminal state that is
-            # explicitly NOT a decision — never fold it into decided_*, or the
-            # ledger would claim Pascal answered something he never saw.
-            st = states.get(mid)
-            if st is not None and st["status"] == "pending":
-                st["status"] = STATUS_LAPSED
-                st["lapsed_ts"] = str(e.get("ts", ""))
-                st["lapse_reason"] = str(e.get("reason", ""))
-        elif ev == "chat":
-            st = states.get(mid)
-            if st is not None:
-                st["chat_ts"] = str(e.get("ts", ""))
-                st["chat_epoch"] = e.get("epoch", 0)
-        elif ev == "delivery":
-            st = states.get(mid)
-            if st is not None:
-                st["delivery_status"] = str(e.get("status", "unknown"))
-                st["delivery_ts"] = str(e.get("ts", ""))
-    return states
+    return memorial_ledger.fold(
+        events,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 def get_memorial(memorial_id: str) -> dict | None:
     """Current folded state for one memorial, or None."""
-    return _fold(read_jsonl(_ledger_path())).get(str(memorial_id))
+    return memorial_ledger.get(
+        runtime_root(),
+        memorial_id,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 def list_memorials(pending_only: bool = False) -> list[dict]:
     """All memorials (creation order), optionally only the un-批 ones."""
-    states = list(_fold(read_jsonl(_ledger_path())).values())
-    if pending_only:
-        states = [s for s in states if s["status"] == "pending"]
-    return states
+    return memorial_ledger.list_all(
+        runtime_root(),
+        pending_only=pending_only,
+        default_attention=_default_attention,
+        lapsed_status=STATUS_LAPSED,
+    )
 
 
 # ── 缴回制度: sweep pending cards to a terminal state ─────────────────────
@@ -969,8 +886,7 @@ def escrow_docket(states: list[dict],
 
 
 def _header(state: dict) -> str:
-    emoji = SOURCE_EMOJI.get(state["source"], "")
-    return " ".join(p for p in ("📜", emoji, state["title"]) if p)
+    return memorial_cards.header(state, SOURCE_EMOJI)
 
 
 def _button_groups(state: dict, include_options: bool = True,
@@ -982,66 +898,30 @@ def _button_groups(state: dict, include_options: bool = True,
     decision, opening a source is supporting context, and Chat is the escape
     hatch that must remain available after a decision.
     """
-    groups: list[list[dict]] = []
-    if include_options and state.get("options"):
-        # The primary button is 依议 — the 票拟'd option when there is one.
-        # Falling back to position means "first listed", which is an authoring
-        # accident, not a recommendation.
-        recommended = str((state.get("recommend") or {}).get("key", ""))
-        keys = [str(o.get("key", "")) for o in state["options"]]
-        primary = keys.index(recommended) if recommended in keys else 0
-        groups.append([
-            {"text": o.get("label", o.get("key", "")),
-             "type": "primary" if i == primary else "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": o.get("key", "")}}
-            for i, o in enumerate(state["options"])
-        ])
-    if state.get("extra_buttons"):
-        groups.append([{**dict(button), "type": "default"}
-                       for button in state["extra_buttons"]])
-    if include_chat:
-        groups.append([
-            {"text": CHAT_BUTTON_LABEL, "type": "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": CHAT_OPT_KEY}},
-            {"text": "🤔 看不懂", "type": "default",
-             "value": {"action": "memorial", "id": state["id"],
-                       "opt": CONFUSED_OPT_KEY}},
-        ])
-    return groups
+    return memorial_cards.button_groups(
+        state,
+        include_options=include_options,
+        include_chat=include_chat,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
+        confused_opt_key=CONFUSED_OPT_KEY,
+    )
 
 
 def _cut_at_boundary(text: str, limit: int) -> str:
     """Cut to ≤``limit`` chars on a line/space boundary, never inside a
     markdown link (a broken `[label](https://…` fragment renders as noise)."""
-    cut = text[:limit]
-    for sep in ("\n", " "):
-        if sep in cut[limit // 2:]:
-            cut = cut.rsplit(sep, 1)[0]
-            break
-    # If we still landed inside a markdown link, back up further.
-    last_open = cut.rfind("[")
-    if last_open != -1:
-        after = cut[last_open:]
-        close_b = after.find("]")
-        if close_b == -1 or after.find(")", close_b) == -1:
-            cut = cut[:last_open].rstrip()
-    return cut.rstrip()
+    return memorial_cards.cut_at_boundary(text, limit)
 
 
 def _display_body(body: str) -> str:
     """Compact card copy while preserving the full ledger/chat context."""
-    raw = str(body or "").strip()
-    lines = raw.splitlines()
-    clipped = len(lines) > CARD_BODY_MAX_LINES
-    text = "\n".join(lines[:CARD_BODY_MAX_LINES]).strip()
-    if len(text) > CARD_BODY_MAX_CHARS:
-        text = _cut_at_boundary(text, CARD_BODY_MAX_CHARS)
-        clipped = True
-    if clipped:
-        text += "\n\n" + CLIP_NOTICE
-    return text
+    return memorial_cards.display_body(
+        body,
+        max_lines=CARD_BODY_MAX_LINES,
+        max_chars=CARD_BODY_MAX_CHARS,
+        clip_notice=CLIP_NOTICE,
+    )
 
 
 def body_was_clipped(body: str) -> bool:
@@ -1058,46 +938,28 @@ def body_was_clipped(body: str) -> bool:
 def _render_card(state: dict, *, body: str | None = None,
                  status_line: str = "", include_options: bool = True,
                  include_chat: bool = True) -> str:
-    # A segmented trust boundary (currently EigenFlux raw text + local model
-    # analysis) scans only the local authoring segment for the idle sentinel.
-    # Escape literal tokens in the external display segment so core.card's
-    # global leak guard does not erase a legitimate private message.
-    audit_text = state.get("authoring_audit_text")
-    if audit_text is not None:
-        from core.safety import IDLE_SENTINEL, sentinel_present
-        if sentinel_present(audit_text):
-            return ""
-        escaped_title = _header(state).replace(
-            IDLE_SENTINEL, r"HEARTBEAT\_OK")
-    else:
-        escaped_title = _header(state)
-    content = _display_body(state["body"] if body is None else body)
-    if audit_text is not None:
-        content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
-    # 票拟 sits directly above the buttons it is about, and only while the card
-    # is still open — after 批红 it would read as advice on a settled matter.
-    rec = state.get("recommend") or {}
-    if include_options and rec.get("label") and rec.get("why"):
-        content += f"\n\n**建议：{rec['label']}** — {rec['why']}"
-    # Role line FIRST (2026-08-03, owner: 「每一个东西我不知道怎么办」). The
-    # very first thing a card says is what it wants from him — nothing, a
-    # decision, or immediate attention — so no card ever leaves him guessing.
-    # Replaces the old bottom-of-card status pair, which only covered two of
-    # the three classes and sat below the fold.
-    if state.get("status") == "pending":
-        attention = str(state.get("attention", ""))
-        if attention == ATTENTION_ALERT:
-            role = "⚡ 即时提醒 · 不用批"
-        elif requires_decision(state):
-            role = "🎯 等你拍一个"
-        else:
-            role = "ℹ️ 知道就行"
-        content = f"{role}\n\n{content}"
-    if status_line:
-        content += "\n\n" + status_line
-    return build_card(
-        escaped_title, content,
-        button_groups=_button_groups(state, include_options, include_chat),
+    return memorial_cards.render_card(
+        state,
+        body=body,
+        status_line=status_line,
+        include_options=include_options,
+        include_chat=include_chat,
+        source_emoji=SOURCE_EMOJI,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
+        confused_opt_key=CONFUSED_OPT_KEY,
+        max_lines=CARD_BODY_MAX_LINES,
+        max_chars=CARD_BODY_MAX_CHARS,
+        clip_notice=CLIP_NOTICE,
+        alert_attention=ATTENTION_ALERT,
+        requires_decision=requires_decision,
+        header_fn=_header,
+        display_body_fn=_display_body,
+        button_groups_fn=lambda value, show_options, show_chat: _button_groups(
+            value,
+            include_options=show_options,
+            include_chat=show_chat,
+        ),
     )
 
 
@@ -1132,33 +994,13 @@ def _replacement_card(rendered: str, state: dict) -> dict:
     contains internal heartbeat residue. A later decision must still ACK the
     callback instead of trying to decode that empty render.
     """
-    if rendered:
-        try:
-            card = json.loads(rendered)
-            if isinstance(card, dict):
-                return card
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    # Telling the user to "go to 事项" from a Lark card that carries no way to
-    # get there is a dead end: on a phone the web desk is not reachable by
-    # typing. Ship the link when there is one, and drop the instruction when
-    # there is not — never name a destination the card cannot reach.
-    buttons = [{
-        "text": CHAT_BUTTON_LABEL,
-        "type": "default",
-        "value": {"action": "memorial", "id": state["id"],
-                  "opt": CHAT_OPT_KEY},
-    }]
-    desk = _web_desk_url(f"/items/{state['id']}")
-    if desk:
-        buttons.insert(0, {"text": "打开事项", "url": desk})
-    fallback = build_card(
-        "Jarvis · 事项",
-        ("状态已更新。完整记录在下面的「打开事项」里。" if desk
-         else "状态已更新。完整记录已存档，随时可以问我。"),
-        button_groups=[buttons],
+    return memorial_cards.replacement_card(
+        rendered,
+        state,
+        web_desk_url=_web_desk_url,
+        chat_button_label=CHAT_BUTTON_LABEL,
+        chat_opt_key=CHAT_OPT_KEY,
     )
-    return json.loads(fallback)
 
 
 def _decided_card(state: dict) -> dict:
@@ -1210,30 +1052,13 @@ def _send(args: list[str], *, retries: bool = True) -> str:
     retry schedule.  The default remains for compatibility callers that invoke
     this low-level helper directly.
     """
-    delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
-    for attempt, delay in enumerate(delays):
-        if delay:
-            time.sleep(delay)
-        try:
-            r = subprocess.run(["lark-cli", "im", "+messages-send", *args,
-                                "--as", "bot", "--json"],
-                               capture_output=True, text=True, timeout=15)
-            if r.returncode == 0:
-                try:
-                    data = json.loads(r.stdout).get("data") or {}
-                    mid = (data.get("message_id")
-                           or (data.get("message") or {}).get("message_id") or "")
-                    if not mid:
-                        msgs = data.get("messages") or []
-                        mid = (msgs[0].get("message_id") if msgs else "") or ""
-                except Exception:
-                    mid = ""
-                return str(mid) or "sent"
-        except subprocess.TimeoutExpired:
-            print(f"memorial send attempt {attempt} timed out", file=sys.stderr)
-        except Exception as e:
-            print(f"memorial send attempt {attempt} failed: {e}", file=sys.stderr)
-    return ""
+    return memorial_transport.send(
+        args,
+        retries=retries,
+        retry_delays=SEND_RETRY_DELAYS,
+        runner=subprocess.run,
+        sleeper=time.sleep,
+    )
 
 
 def _send_card(card_json_str: str, chat_id: str = "") -> str:
@@ -1282,9 +1107,12 @@ def _record_engagement(row: dict) -> None:
     try:
         row.setdefault("ts", now_local_str("%Y-%m-%d %H:%M"))
         row.setdefault("epoch", int(time.time()))
-        _append_line(JARVIS_DIR / "engagement_log.jsonl", row)
+        _append_line(runtime_root() / "engagement_log.jsonl", row)
     except Exception as e:
-        print(f"memorial engagement log failed: {e}", file=sys.stderr)
+        _ops_log(
+            "engagement_log_failed", level="warn",
+            error_type=type(e).__name__,
+        )
 
 
 def _record_delivery(memorial_id: str, status: str, source: str = "",
@@ -1335,7 +1163,7 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
     # Compatibility audit only: SQLite delivery_envelopes is authoritative.
     # Avoid minting duplicate shadow rows when a caller re-submits the same
     # already-queued memorial.
-    queue_path = JARVIS_DIR / MEMORIAL_QUEUE_FILE
+    queue_path = runtime_root() / MEMORIAL_QUEUE_FILE
     try:
         if queue_path.exists() and any(
                 json.loads(line).get("memorial_id") == mid
@@ -1409,7 +1237,7 @@ def _deliver_opener(text: str, chat_id: str,
                           "bypass_dedup": True,
                           "dedup_text": f"{chat_id}\0{text}"},
             ),
-            root=JARVIS_DIR,
+            root=runtime_root(),
             transport=transport,
         )
         if result.state == "delivered":
@@ -1421,7 +1249,10 @@ def _deliver_opener(text: str, chat_id: str,
             _finish_opener_continuation(continuation or {}, delivered=False)
     except Exception as e:
         _finish_opener_continuation(continuation or {}, delivered=False)
-        print(f"memorial opener send failed: {e}", file=sys.stderr)
+        _ops_log(
+            "opener_delivery_failed", level="error",
+            error_type=type(e).__name__,
+        )
 
 
 def _send_opener_async(text: str, chat_id: str,
@@ -1443,28 +1274,14 @@ def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
     card did not author its own buttons. Only a TRAILING line counts: an
     'OPTIONS:' in the middle of the copy is prose, not a button declaration.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    for idx in range(len(lines) - 1, -1, -1):
-        if not lines[idx].strip():
-            continue
-        if idx in protected:
-            return text, None
-        match = _OPTIONS_LINE_RE.match(lines[idx])
-        if not match:
-            return text, None
-        labels: list[str] = []
-        for part in _OPTIONS_SPLIT_RE.split(match.group(1)):
-            part = part.strip().strip("「」\"'")
-            if part and part not in labels:
-                labels.append(part[:MAX_OPTION_LABEL_CHARS])
-        if not labels:
-            return text, None
-        body = "\n".join(lines[:idx]).rstrip()
-        return body, [{"key": f"r{i}", "label": label, "action": None,
-                       "reply": True}
-                      for i, label in enumerate(labels[:MAX_INLINE_OPTIONS], 1)]
-    return text, None
+    return memorial_cards.extract_inline_options(
+        text,
+        protected_lines=_markdown_protected_lines,
+        options_line_re=_OPTIONS_LINE_RE,
+        options_split_re=_OPTIONS_SPLIT_RE,
+        max_label_chars=MAX_OPTION_LABEL_CHARS,
+        max_options=MAX_INLINE_OPTIONS,
+    )
 
 
 def _markdown_protected_lines(lines: list[str]) -> set[int]:
@@ -1475,66 +1292,11 @@ def _markdown_protected_lines(lines: list[str]) -> set[int]:
     such as `````oops`` remains code. An unclosed fence protects the rest of
     the body.
     """
-    protected: set[int] = set()
-    fence_char = ""
-    fence_len = 0
-    fence_close_indent = 3
-    lazy_container = False
-
-    def indent_columns(value: str) -> int:
-        columns = 0
-        for char in value:
-            if char == " ":
-                columns += 1
-            elif char == "\t":
-                columns += 4 - (columns % 4)
-            else:
-                break
-        return columns
-
-    for index, line in enumerate(lines):
-        if fence_char:
-            protected.add(index)
-            stripped = line.lstrip(" \t")
-            if (indent_columns(line) <= fence_close_indent
-                    and re.fullmatch(
-                        rf"{re.escape(fence_char)}{{{fence_len},}}[ \t]*",
-                        stripped)):
-                fence_char, fence_len, fence_close_indent = "", 0, 3
-            continue
-        if not line.strip():
-            lazy_container = False
-            continue
-        if lazy_container:
-            protected.add(index)
-            continue
-        fence = _MARKDOWN_FENCE_OPEN_RE.match(line)
-        list_fence = _MARKDOWN_LIST_FENCE_OPEN_RE.match(line)
-        if fence and not (
-                fence.group(1).startswith("`") and "`" in fence.group(2)):
-            marker = fence.group(1)
-            fence_char, fence_len = marker[0], len(marker)
-            protected.add(index)
-            continue
-        if list_fence and not (
-                list_fence.group(2).startswith("`")
-                and "`" in list_fence.group(3)):
-            marker = list_fence.group(2)
-            fence_char, fence_len = marker[0], len(marker)
-            fence_close_indent = indent_columns(list_fence.group(1)) + 3
-            protected.add(index)
-            continue
-        if line.lstrip().startswith(">"):
-            protected.add(index)
-            lazy_container = True
-            continue
-        if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
-            protected.add(index)
-            lazy_container = True
-            continue
-        if indent_columns(line) >= 4:
-            protected.add(index)
-    return protected
+    return memorial_cards.markdown_protected_lines(
+        lines,
+        fence_open_re=_MARKDOWN_FENCE_OPEN_RE,
+        list_fence_open_re=_MARKDOWN_LIST_FENCE_OPEN_RE,
+    )
 
 
 def _split_authored_card_blocks(text: str) -> list[str]:
@@ -1546,29 +1308,11 @@ def _split_authored_card_blocks(text: str) -> list[str]:
     the whole response as one card leaks authoring syntax and merges two
     decisions.  A second TITLE line is an unambiguous new-card boundary.
     """
-    raw = str(text or "")
-    lines = raw.splitlines()
-    protected = _markdown_protected_lines(lines)
-    title_positions = [
-        index for index, line in enumerate(lines)
-        if index not in protected and _ANY_TITLE_LINE_RE.match(line)
-    ]
-
-    if len(title_positions) < 2:
-        return [raw]
-
-    prefix = lines[:title_positions[0]]
-    blocks: list[str] = []
-    for offset, start in enumerate(title_positions):
-        end = (title_positions[offset + 1]
-               if offset + 1 < len(title_positions) else len(lines))
-        block_lines = list(lines[start:end])
-        if offset == 0 and any(line.strip() for line in prefix):
-            # Preserve a natural preamble without letting it hide the first
-            # authored title from _extract_title_line.
-            block_lines = [block_lines[0], *prefix, *block_lines[1:]]
-        blocks.append("\n".join(block_lines).strip())
-    return blocks
+    return memorial_cards.split_authored_card_blocks(
+        text,
+        protected_lines=_markdown_protected_lines,
+        any_title_line_re=_ANY_TITLE_LINE_RE,
+    )
 
 
 def _scrub_embedded_authoring_directives(text: str) -> str:
@@ -1578,25 +1322,13 @@ def _scrub_embedded_authoring_directives(text: str) -> str:
     helper is intentionally not used by generic ``create`` callers such as
     mail or research ingestion.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    cleaned: list[str] = []
-    for index, line in enumerate(lines):
-        if index in protected:
-            cleaned.append(line)
-            continue
-        if _ANY_OPTIONS_LINE_RE.match(line):
-            continue
-        if _ANY_RECOMMEND_LINE_RE.match(line):
-            continue
-        title_match = _ANY_TITLE_LINE_RE.match(line)
-        if title_match:
-            value = title_match.group(1).strip()
-            if value:
-                cleaned.append(f"**{value}**")
-        else:
-            cleaned.append(line)
-    return "\n".join(cleaned).strip()
+    return memorial_cards.scrub_embedded_authoring_directives(
+        text,
+        protected_lines=_markdown_protected_lines,
+        any_options_line_re=_ANY_OPTIONS_LINE_RE,
+        any_recommend_line_re=_ANY_RECOMMEND_LINE_RE,
+        any_title_line_re=_ANY_TITLE_LINE_RE,
+    )
 
 
 def parse_authored_cards(text: str) -> list[dict]:
@@ -1629,34 +1361,15 @@ def _extract_recommendation(text: str) -> tuple[str, dict | None]:
     A RECOMMEND with no reason is dropped, not rendered: a recommendation the
     user cannot audit is just an instruction wearing a suggestion's clothes.
     """
-    lines = str(text or "").splitlines()
-    protected = _markdown_protected_lines(lines)
-    seen = 0
-    for idx in range(len(lines) - 1, -1, -1):
-        if not lines[idx].strip():
-            continue
-        if idx in protected:
-            return text, None
-        seen += 1
-        match = _RECOMMEND_LINE_RE.match(lines[idx])
-        if match:
-            parts = _RECOMMEND_SPLIT_RE.split(match.group(1), maxsplit=1)
-            label = parts[0].strip().strip("「」\"'")
-            why = parts[1].strip() if len(parts) > 1 else ""
-            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
-            if not label or not why:
-                return body, None
-            return body, {"label": label[:MAX_OPTION_LABEL_CHARS],
-                          "why": why[:MAX_RECOMMEND_WHY_CHARS]}
-        if _ANY_RECOMMEND_LINE_RE.match(lines[idx]):
-            # Malformed is still authoring syntax. Remove a trailing empty
-            # directive so a valid OPTIONS immediately above remains the last
-            # meaningful line and keeps its buttons.
-            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
-            return body, None
-        if seen >= 3:
-            break
-    return text, None
+    return memorial_cards.extract_recommendation(
+        text,
+        protected_lines=_markdown_protected_lines,
+        recommend_line_re=_RECOMMEND_LINE_RE,
+        any_recommend_line_re=_ANY_RECOMMEND_LINE_RE,
+        recommend_split_re=_RECOMMEND_SPLIT_RE,
+        max_label_chars=MAX_OPTION_LABEL_CHARS,
+        max_why_chars=MAX_RECOMMEND_WHY_CHARS,
+    )
 
 
 def _normalize_recommendation(recommend: dict | None,
@@ -1667,62 +1380,25 @@ def _normalize_recommendation(recommend: dict | None,
     the user cannot act on, so it is discarded rather than shown. Matching is
     by label first (that is what the author wrote) and key second.
     """
-    if not isinstance(recommend, dict):
-        return None
-    label = str(recommend.get("label", "")).strip()
-    why = str(recommend.get("why", "")).strip()
-    if not label or not why:
-        return None
-    for option in options:
-        if label in (str(option.get("label", "")).strip(),
-                     str(option.get("key", "")).strip()):
-            return {"key": str(option.get("key", "")),
-                    "label": str(option.get("label", "")),
-                    "why": why[:MAX_RECOMMEND_WHY_CHARS]}
-    return None
+    return memorial_cards.normalize_recommendation(
+        recommend,
+        options,
+        max_why_chars=MAX_RECOMMEND_WHY_CHARS,
+    )
 
 
 def _normalize_options(options: list[dict] | None, preset: str | None) -> list[dict]:
-    if options is not None:
-        normalized = []
-        seen: set[str] = set()
-        for i, o in enumerate(options, 1):
-            key = str(o.get("key", "") or f"opt{i}").strip()
-            label = str(o.get("label", "")).strip()
-            if not label:
-                raise ValueError(f"option #{i} has no label")
-            if key in (CHAT_OPT_KEY, CONFUSED_OPT_KEY):
-                raise ValueError(f"option key '{key}' is reserved")
-            if key in seen:
-                raise ValueError(f"duplicate option key: {key}")
-            seen.add(key)
-            item = {"key": key, "label": label, "action": o.get("action") or None}
-            if o.get("reply"):
-                item["reply"] = True
-            normalized.append(item)
-        return normalized
-    name = preset or "fyi"  # a memorial with no options makes no sense — fyi is the safe floor
-    if name not in PRESETS:
-        raise ValueError(f"unknown preset: {name} (have: {', '.join(sorted(PRESETS))})")
-    return [dict(o) for o in PRESETS[name]]
+    return memorial_cards.normalize_options(
+        options,
+        preset,
+        presets=PRESETS,
+        reserved_keys={CHAT_OPT_KEY, CONFUSED_OPT_KEY},
+    )
 
 
 def _normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
     """Validate task-native buttons carried into an adopted memorial card."""
-    normalized: list[dict] = []
-    for i, button in enumerate(buttons or [], 1):
-        text = str(button.get("text", "")).strip()
-        if not text:
-            raise ValueError(f"extra button #{i} has no text")
-        item = {"text": text}
-        if button.get("url"):
-            item["url"] = str(button["url"])
-        elif isinstance(button.get("value"), dict):
-            item["value"] = dict(button["value"])
-        else:
-            raise ValueError(f"extra button #{i} needs url or value")
-        normalized.append(item)
-    return normalized
+    return memorial_cards.normalize_extra_buttons(buttons)
 
 
 # ── public API ──────────────────────────────────────────────────────────
@@ -1820,7 +1496,7 @@ def _deliver_existing(
                 "retry_existing": True,
             },
         ),
-        root=JARVIS_DIR,
+        root=runtime_root(),
         transport=transport,
     )
 
@@ -1835,7 +1511,10 @@ def _deliver_existing(
                 from core.memorial_thread import record_sent
                 record_sent(mid, result.message_id)
             except Exception as e:
-                print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
+                _ops_log(
+                    "thread_receipt_record_failed", level="warn",
+                    memorial_id=mid, error_type=type(e).__name__,
+                )
         _write_outbox(readable + f"\n\n（卡片 {mid} 已发出，等你回）")
         return True
 
@@ -1849,8 +1528,7 @@ def _deliver_existing(
 
     if force_queue and result.reason == "quiet_hours":
         _record_delivery(mid, "queued")
-        print(f"memorial {mid}: quiet hours — queued in delivery state",
-              file=sys.stderr)
+        _ops_log("quiet_hours_queued", memorial_id=mid)
         return True
 
     _record_delivery(mid, "failed")
@@ -1958,9 +1636,12 @@ def _maybe_rotate() -> None:
     try:
         n = rotate_ledger()
         if n:
-            print(f"memorial ledger rotated: {n} cards archived", file=sys.stderr)
+            _ops_log("ledger_rotated", archived_cards=n)
     except Exception as e:
-        print(f"memorial ledger rotation failed: {e}", file=sys.stderr)
+        _ops_log(
+            "ledger_rotation_failed", level="error",
+            error_type=type(e).__name__,
+        )
         return
     try:
         marker.write_text(json.dumps({"month": month}), encoding="utf-8")
@@ -2044,8 +1725,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         source, title, body, opts, native_buttons, str(context), str(chat_id),
         str(matter_id), str(dedup_key), attention, review_at)
     if dup is not None:
-        print(f"memorial dedup: identical pending {dup['id']} within "
-              f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
+        _ops_log(
+            "pending_duplicate_reused",
+            memorial_id=dup["id"], window_hours=DEDUP_WINDOW_S // 3600,
+        )
         if not send:
             if (not should_push_to_lark(dup)
                     and not delivery_accepted(dup)):
@@ -2090,7 +1773,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
                 matter_id, "memorial_created", title, actor=source,
                 payload={"memorial_id": mid, "review_surface": review_at})
         except Exception as e:
-            print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
+            _ops_log(
+                "matter_link_failed", level="warn", memorial_id=mid,
+                error_type=type(e).__name__,
+            )
 
     state = _fold([ev])[mid]
     # send=False leaves Lark-routed cards to the caller's transport; a
@@ -2241,8 +1927,10 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     matters = ([body] if (native_buttons or inline_options)
                else split_matters(body))
     if len(matters) > 1:
-        print(f"memorial split: adopted {source or 'heartbeat'} card → "
-              f"{len(matters)} cards (一张卡一件事)", file=sys.stderr)
+        _ops_log(
+            "card_split", source=source or "heartbeat",
+            split_kind="adopted_card", card_count=len(matters),
+        )
     outputs: list[str] = []
     for matter in matters:
         mid, _ = create(
@@ -2394,8 +2082,11 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             return
         authored_blocks = _split_authored_card_blocks(text)
         if len(authored_blocks) > 1:
-            print(f"memorial split: {single_source} concatenated directives → "
-                  f"{len(authored_blocks)} cards", file=sys.stderr)
+            _ops_log(
+                "card_split", source=single_source,
+                split_kind="concatenated_directives",
+                card_count=len(authored_blocks),
+            )
             for authored_block in authored_blocks:
                 prose.extend(authored_block.splitlines())
                 flush_prose()
@@ -2421,8 +2112,10 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         chunks = ([body] if inline_options
                   else split_matters(body))
         if len(chunks) > 1:
-            print(f"memorial split: {single_source} prose body → "
-                  f"{len(chunks)} cards (一张卡一件事)", file=sys.stderr)
+            _ops_log(
+                "card_split", source=single_source,
+                split_kind="prose_body", card_count=len(chunks),
+            )
         for chunk in chunks:
             if explicit_title and len(chunks) == 1:
                 chunk_title, chunk_body = explicit_title, chunk
@@ -2526,10 +2219,11 @@ def _execute_action(
         return ""
     params = action.get("params") or {}
     raw = "|".join(f"{k}={v}" for k, v in params.items())
+    root = runtime_root()
     ap = ActionProcessor(
-        jarvis_dir=JARVIS_DIR,
-        memory_dir=os.environ.get("MEMORY_DIR", str(JARVIS_DIR / "memory")),
-        jobs_dir=os.environ.get("JV_JOBS_DIR", str(JARVIS_DIR / "jobs")),
+        jarvis_dir=root,
+        memory_dir=os.environ.get("MEMORY_DIR", str(root / "memory")),
+        jobs_dir=os.environ.get("JV_JOBS_DIR", str(root / "jobs")),
         log_file=os.environ.get("JV_LOG_FILE", ""),
         owner_authenticated=owner_authenticated,
     )
@@ -2559,12 +2253,16 @@ def _sync_lark_card(memorial_id: str, card: dict) -> None:
                 capture_output=True, text=True, timeout=12,
             )
             if result.returncode != 0:
-                print(f"memorial {memorial_id}: Lark card sync failed for "
-                      f"{message_id}: {(result.stderr or result.stdout)[:180]}",
-                      file=sys.stderr)
+                _ops_log(
+                    "lark_card_sync_rejected", level="warn",
+                    memorial_id=memorial_id, message_id=message_id,
+                    returncode=int(result.returncode),
+                )
         except Exception as e:
-            print(f"memorial {memorial_id}: Lark card sync failed: {e}",
-                  file=sys.stderr)
+            _ops_log(
+                "lark_card_sync_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(e).__name__,
+            )
 
 
 def _complete_surface_handoffs(memorial_id: str) -> None:
@@ -2573,8 +2271,10 @@ def _complete_surface_handoffs(memorial_id: str) -> None:
         from core.continuity import complete_entity_handoffs
         complete_entity_handoffs("memorial", memorial_id)
     except Exception as e:
-        print(f"memorial {memorial_id}: handoff completion failed: {e}",
-              file=sys.stderr)
+        _ops_log(
+            "handoff_completion_failed", level="warn",
+            memorial_id=memorial_id, error_type=type(e).__name__,
+        )
 
 
 def resolve(memorial_id: str, label: str,
@@ -2689,8 +2389,10 @@ def _finish_decide_side_effects(
                       payload={"memorial_id": memorial_id, "option": opt_key,
                                "action_result": action_result})
         except Exception as e:
-            print(f"memorial {memorial_id}: matter decision link failed: {e}",
-                  file=sys.stderr)
+            _ops_log(
+                "matter_decision_link_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(e).__name__,
+            )
     if opt.get("reply") or opt_key not in _FYI_KEYS:
         _queue_decision_context(st, opt.get("label", ""), action_result,
                                 is_reply=bool(opt.get("reply")))
@@ -2769,10 +2471,13 @@ def decide(
     st = claimed_from or st
     try:
         from core.delivery import DeliveryPipeline
-        DeliveryPipeline(JARVIS_DIR).confirm_entity(
+        DeliveryPipeline(runtime_root()).confirm_entity(
             memorial_id=memorial_id, state="acted")
     except Exception as e:
-        print(f"memorial delivery confirm failed: {e}", file=sys.stderr)
+        _ops_log(
+            "delivery_confirmation_failed", level="warn",
+            memorial_id=memorial_id, error_type=type(e).__name__,
+        )
     # 批红 = engagement：same "feedback" shape the legacy card buttons write,
     # so engagement-analyze sees which sources Pascal actually acts on.
     _record_engagement({"source": st.get("source", "memorial"),
@@ -2960,7 +2665,7 @@ EXPLAIN_RETAKE_S = 600  # a claimed request older than this is retaken
 
 
 def _explain_queue_path() -> Path:
-    return JARVIS_DIR / "data" / EXPLAIN_QUEUE_FILE
+    return runtime_root() / "data" / EXPLAIN_QUEUE_FILE
 
 
 def confused(memorial_id: str) -> dict:
@@ -2985,7 +2690,10 @@ def confused(memorial_id: str) -> dict:
         append_jsonl_locked(_explain_queue_path(), {
             "memorial_id": memorial_id, "ts": ts, "taken_at": 0})
     except OSError as exc:
-        print(f"memorial confused: queue write failed: {exc}", file=sys.stderr)
+        _ops_log(
+            "explain_queue_write_failed", level="error",
+            memorial_id=memorial_id, error_type=type(exc).__name__,
+        )
     try:  # hasten the next heartbeat cycle — best-effort
         Path("/tmp/jarvis-heartbeat-trigger").touch()
     except OSError:
@@ -3034,7 +2742,7 @@ _TRIGGER_PATH = Path("/tmp/jarvis-heartbeat-trigger")
 
 
 def _reply_followup_queue_path() -> Path:
-    return JARVIS_DIR / "data" / REPLY_FOLLOWUP_QUEUE_FILE
+    return runtime_root() / "data" / REPLY_FOLLOWUP_QUEUE_FILE
 
 
 def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
@@ -3053,8 +2761,10 @@ def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
             "memorial_id": st["id"], "opt_key": opt_key, "label": label,
             "ts": now_local_str(), "taken_at": 0, "attempts": 0})
     except OSError as exc:
-        print(f"memorial reply followup: queue write failed: {exc}",
-              file=sys.stderr)
+        _ops_log(
+            "reply_followup_queue_write_failed", level="error",
+            memorial_id=st["id"], error_type=type(exc).__name__,
+        )
         return
     try:  # hasten the next heartbeat cycle — best-effort
         _TRIGGER_PATH.touch()
@@ -3085,9 +2795,11 @@ def reply_followup_claim(now_epoch: int | None = None) -> dict | None:
         kept = []
         for row in rows:
             if int(row.get("attempts") or 0) >= REPLY_FOLLOWUP_MAX_ATTEMPTS:
-                print("memorial reply followup: dropping after "
-                      f"{REPLY_FOLLOWUP_MAX_ATTEMPTS} attempts: {row}",
-                      file=sys.stderr)
+                _ops_log(
+                    "reply_followup_dropped", level="error",
+                    memorial_id=str(row.get("memorial_id") or ""),
+                    attempts=REPLY_FOLLOWUP_MAX_ATTEMPTS,
+                )
                 continue
             if not claimed and int(row.get("taken_at") or 0) <= (
                     now_e - REPLY_FOLLOWUP_RETAKE_S):
@@ -3272,7 +2984,7 @@ def chat(memorial_id: str) -> dict:
     ts = now_local_str()
 
     if st.get("chat_epoch") and time.time() - st["chat_epoch"] < CHAT_RETAP_THROTTLE_S:
-        print(f"memorial chat re-tap throttled: id={memorial_id}", file=sys.stderr)
+        _ops_log("chat_retap_throttled", memorial_id=memorial_id)
         return {"toast": {"type": "info", "content": "已在聊了——直接回消息就行"},
                 "deep_link": conversation_deep_link(st),
                 "card": {"type": "raw",
@@ -3287,16 +2999,17 @@ def chat(memorial_id: str) -> dict:
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if conv_key:
         if _injection_queued(conv_key, f"memorial:{memorial_id}"):
-            print(f"memorial chat: injection for {memorial_id} already queued",
-                  file=sys.stderr)
+            _ops_log("chat_injection_already_queued", memorial_id=memorial_id)
         else:
             _append_line(_pending_merge_path(), {
                 "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
                 "ts": ts, "summary": _bounded_chat_context(st),
             })
     else:
-        print(f"memorial chat: no conv_key for {memorial_id} — context not injected",
-              file=sys.stderr)
+        _ops_log(
+            "chat_injection_missing_conversation", level="warn",
+            memorial_id=memorial_id,
+        )
 
     _append_line(_ledger_path(), {"ev": "chat", "id": memorial_id, "ts": ts,
                                   "epoch": int(time.time())})
@@ -3313,8 +3026,10 @@ def chat(memorial_id: str) -> dict:
             companion.record_engaged(st.get("context", ""),
                                      str(st.get("title", "")))
         except Exception as exc:
-            print(f"memorial chat: companion capture failed: {exc}",
-                  file=sys.stderr)
+            _ops_log(
+                "companion_capture_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(exc).__name__,
+            )
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
     #    When the card was clipped, the opener IS the payload: he taps the

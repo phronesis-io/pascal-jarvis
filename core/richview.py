@@ -24,20 +24,38 @@ Usage:
 """
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
 
 from core.config import Config
 
-ROOT = Path(__file__).resolve().parent.parent
-_config = Config(ROOT / "jarvis.yaml")
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+_INITIAL_JARVIS_DIR = JARVIS_DIR
 
-VIEWS_DIR = ROOT / "views"
-VIEWS_DIR.mkdir(exist_ok=True)
+VIEWS_DIR = JARVIS_DIR / "views"
+_INITIAL_VIEWS_DIR = VIEWS_DIR
 
 # Max views to keep (FIFO cleanup)
 MAX_VIEWS = 200
+
+
+def runtime_root() -> Path:
+    """Resolve state at call time while preserving the legacy module hook."""
+    root = Path(JARVIS_DIR)
+    if root != _INITIAL_JARVIS_DIR:
+        return root
+    configured = os.environ.get("JARVIS_DIR", "").strip()
+    return Path(configured) if configured else root
+
+
+def _views_dir() -> Path:
+    configured = Path(VIEWS_DIR)
+    if configured != _INITIAL_VIEWS_DIR:
+        return configured
+    return runtime_root() / "views"
 
 
 def publish(
@@ -68,7 +86,9 @@ def publish(
     }
 
     # Write view data
-    view_file = VIEWS_DIR / f"{view_id}.json"
+    views_dir = _views_dir()
+    views_dir.mkdir(parents=True, exist_ok=True)
+    view_file = views_dir / f"{view_id}.json"
     try:
         view_file.write_text(json.dumps(view, ensure_ascii=False, indent=2))
     except OSError as e:
@@ -81,8 +101,9 @@ def publish(
     _cleanup()
 
     # Build URL from admin config
-    host = _config.admin.get("host", "127.0.0.1")
-    port = int(_config.admin.get("port", 3456))
+    config = Config(runtime_root() / "jarvis.yaml")
+    host = config.admin.get("host", "127.0.0.1")
+    port = int(config.admin.get("port", 3456))
     base = f"http://{host}:{port}"
     return f"{base}/view/{view_id}"
 
@@ -91,8 +112,9 @@ def get_view(view_id: str) -> dict | None:
     """Load a view by ID. Returns None if expired or missing."""
     if not view_id or ".." in view_id or "/" in view_id or "\\" in view_id:
         return None
-    view_file = VIEWS_DIR / f"{view_id}.json"
-    if not view_file.resolve().is_relative_to(VIEWS_DIR.resolve()):
+    views_dir = _views_dir()
+    view_file = views_dir / f"{view_id}.json"
+    if not view_file.resolve().is_relative_to(views_dir.resolve()):
         return None
     if not view_file.exists():
         return None
@@ -106,7 +128,7 @@ def get_view(view_id: str) -> dict | None:
 def list_views() -> list[dict]:
     """List all active (non-expired) views, newest first."""
     views = []
-    for f in sorted(VIEWS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in sorted(_views_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             v = json.loads(f.read_text())
             if time.time() <= v.get("expires_at", 0):
@@ -120,7 +142,7 @@ def list_views() -> list[dict]:
 
 def _cleanup():
     """Remove oldest views if over MAX_VIEWS."""
-    files = sorted(VIEWS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    files = sorted(_views_dir().glob("*.json"), key=lambda p: p.stat().st_mtime)
     while len(files) > MAX_VIEWS:
         files[0].unlink(missing_ok=True)
         files.pop(0)

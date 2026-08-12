@@ -6,6 +6,9 @@ reach the user as a card.
 """
 
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +19,21 @@ _spec = importlib.util.spec_from_file_location(
 )
 ip = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ip)
+
+
+def test_card_ledger_follows_jarvis_dir_on_import(tmp_path):
+    code = (
+        "import tasks.intentions_post as m; "
+        "print(m.CARD_LEDGER)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT,
+        env={**os.environ, "JARVIS_DIR": str(tmp_path)},
+        capture_output=True, text=True, check=True,
+    )
+
+    assert Path(result.stdout.strip()) == (
+        tmp_path / "data" / ".intent_card_ledger.jsonl")
 
 
 @pytest.fixture(autouse=True)

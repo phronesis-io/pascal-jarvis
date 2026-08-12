@@ -70,6 +70,19 @@ def _actions(card: dict) -> list[dict]:
 # ── create ───────────────────────────────────────────────────────────────
 
 
+def test_runtime_paths_follow_late_jarvis_dir_injection(tmp_path, monkeypatch):
+    """Collection-time import must not pin memorial writes to the checkout."""
+    monkeypatch.setattr(memorial, "JARVIS_DIR", memorial._IMPORTED_JARVIS_DIR)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+
+    assert memorial._ledger_path() == tmp_path / "memorials.jsonl"
+    assert memorial._pending_merge_path() == tmp_path / "jobs" / "pending_merge.jsonl"
+    assert memorial._outbox_path() == tmp_path / "heartbeat_outbox.jsonl"
+    assert memorial._explain_queue_path() == tmp_path / "data" / "explain_queue.jsonl"
+    assert memorial._reply_followup_queue_path() == (
+        tmp_path / "data" / "reply_followup_queue.jsonl")
+
+
 def test_create_routes_ordinary_decision_to_lark(env):
     """REQ-119: Lark is the only delivery surface — an ordinary decision is a
     real Lark card, not a row parked on a desk that never rang (7/24)."""

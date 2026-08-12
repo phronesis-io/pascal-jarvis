@@ -17,7 +17,11 @@ POST = ROOT / "tasks" / "daily_plan_post.py"
 
 
 def _run_post(tmp_path: Path, stdin_text: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "MEMORY_DIR": str(tmp_path / "mem")}
+    env = {
+        **os.environ,
+        "JARVIS_DIR": str(tmp_path),
+        "MEMORY_DIR": str(tmp_path / "mem"),
+    }
     return subprocess.run(
         [sys.executable, str(POST)],
         input=stdin_text, capture_output=True, text=True, env=env,
@@ -40,6 +44,7 @@ def test_plan_logged_but_no_card_on_stdout(tmp_path):
                log.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(entries) == 1
     assert "深度工作" in entries[0]["plan"]
+    assert (tmp_path / "data" / ".daily_plan_stamp").exists()
 
 
 def test_heartbeat_ok_writes_nothing(tmp_path):

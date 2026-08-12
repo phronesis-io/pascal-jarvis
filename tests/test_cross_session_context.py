@@ -487,3 +487,157 @@ def test_desktop_exec_without_head_user_evidence_fails_closed(tmp_path):
     )
 
     assert sessions == []
+
+
+def test_facade_keeps_public_types_constants_and_function_signatures():
+    """The split must not require callers to migrate their imports."""
+    import inspect
+
+    from core import cross_session_discovery
+    from core import cross_session_parsing
+    from core import cross_session_projection
+
+    assert cross_session.Turn is cross_session_parsing.Turn
+    assert cross_session.SessionTail is cross_session_parsing.SessionTail
+    assert cross_session.SESSION_NAMESPACE == cross_session_discovery.SESSION_NAMESPACE
+    assert cross_session.DEFAULT_STATE_FILE == cross_session_projection.DEFAULT_STATE_FILE
+    assert list(inspect.signature(cross_session.discover_interactive_sessions).parameters) == [
+        "claude_root", "codex_root", "tracker_path", "jobs_registry_path",
+        "window_hours", "limit",
+    ]
+    assert list(inspect.signature(cross_session.collect_incremental).parameters) == [
+        "state_file", "claude_root", "codex_root", "tracker_path",
+        "jobs_registry_path", "window_hours",
+    ]
+    assert list(inspect.signature(cross_session.build_prompt_context).parameters) == [
+        "claude_root", "codex_root", "tracker_path", "jobs_registry_path",
+        "window_hours", "max_chars",
+    ]
+
+
+def test_facade_private_codex_meta_hook_still_drives_parser(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "hello",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "patched-meta", "cwd": "/patched", "source": "vscode",
+    })
+
+    parsed = cross_session._codex_tail(session)
+
+    assert parsed is not None
+    assert parsed.session_id == "patched-meta"
+    assert parsed.workspace == "/patched"
+
+
+def test_facade_private_codex_policy_hooks_still_drive_parser(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "hello",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "patched-policy", "cwd": "/patched", "source": "vscode",
+    })
+    monkeypatch.setattr(cross_session, "redact_text", lambda _value: "patched")
+    monkeypatch.setattr(
+        cross_session, "_turn_identity",
+        lambda *_args: "patched-identity",
+    )
+
+    parsed = cross_session._codex_tail(session)
+
+    assert parsed is not None
+    assert parsed.turns[0].text == "patched"
+    assert parsed.turns[0].identity == "patched-identity"
+
+    monkeypatch.setattr(cross_session, "_codex_is_interactive", lambda _meta: False)
+    assert cross_session._codex_tail(session) is None
+
+
+def test_facade_private_claude_policy_hooks_still_drive_parser(
+    tmp_path, monkeypatch,
+):
+    session = tmp_path / "claude.jsonl"
+    session.write_text(json.dumps({
+        "type": "user", "sessionId": "claude-hook", "cwd": "/patched",
+        "message": {"content": "hello"},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cross_session, "redact_text", lambda _value: "patched")
+    monkeypatch.setattr(
+        cross_session, "_turn_identity", lambda *_args: "patched-identity",
+    )
+
+    parsed = cross_session._claude_tail(session)
+
+    assert parsed is not None
+    assert parsed.turns[0].text == "patched"
+    assert parsed.turns[0].identity == "patched-identity"
+
+    monkeypatch.setattr(cross_session, "_is_synthetic", lambda _text: True)
+    assert cross_session._claude_tail(session) is None
+
+
+def test_facade_one_argument_codex_initial_user_override_is_compatible(
+    tmp_path, monkeypatch,
+):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(json.dumps({"type": "event_msg", "payload": {
+        "type": "user_message", "message": "hello",
+    }}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "legacy-hook", "source": "vscode",
+    })
+    monkeypatch.setattr(cross_session, "_codex_initial_user", lambda _path: "hello")
+
+    assert cross_session._codex_tail(session) is not None
+
+
+def test_facade_synthetic_hook_drives_initial_user_filter(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "synthetic-by-policy",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cross_session, "_is_synthetic",
+        lambda text: text == "synthetic-by-policy",
+    )
+
+    assert cross_session._codex_initial_user(session) == ""
+
+
+def test_facade_cli_keeps_incremental_and_context_commands(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "seen.json"
+    calls = []
+
+    def fake_incremental(**kwargs):
+        calls.append(("incremental", kwargs))
+        return "new turns"
+
+    def fake_context(**kwargs):
+        calls.append(("context", kwargs))
+        return "recent context"
+
+    monkeypatch.setattr(cross_session, "collect_incremental", fake_incremental)
+    monkeypatch.setattr(cross_session, "build_prompt_context", fake_context)
+
+    assert cross_session.main([
+        "incremental", "--state-file", str(state), "--window-hours", "12",
+    ]) == 0
+    assert capsys.readouterr().out == "new turns\n"
+    assert calls.pop() == ("incremental", {
+        "state_file": str(state), "window_hours": 12,
+    })
+
+    assert cross_session.main(["context", "--window-hours", "6", "--max-chars", "321"]) == 0
+    assert capsys.readouterr().out == "recent context\n"
+    assert calls.pop() == ("context", {"window_hours": 6, "max_chars": 321})

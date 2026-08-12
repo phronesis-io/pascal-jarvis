@@ -33,6 +33,17 @@ def _local_ts(*args) -> float:
     return datetime(*args, tzinfo=now_local().tzinfo).timestamp()
 
 
+def test_default_paths_resolve_environment_at_call_time(tmp_path, monkeypatch):
+    """Importing delivery must not pin later JARVIS_DIR test injection."""
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
+
+    pipe = DeliveryPipeline(transport=lambda *_: TransportResult(True))
+
+    assert pipe.root == tmp_path
+    assert pipe.path == tmp_path / "data" / "jarvis.db"
+
+
 @pytest.fixture
 def pipeline(tmp_path):
     sent = []
@@ -774,7 +785,7 @@ def test_transport_exception_is_retried_and_durably_queued(tmp_path):
         ).fetchone()[0] == 0
 
 
-def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
+def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path, capsys):
     now = [_local_ts(2026, 7, 23, 14, 0)]
     calls = []
     pipe = DeliveryPipeline(
@@ -796,6 +807,11 @@ def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
     now[0] += 301
     terminal = pipe.flush_due()[0]
     assert terminal.state == "failed"
+    terminal_event = json.loads(capsys.readouterr().err.splitlines()[-1])
+    assert terminal_event["component"] == "delivery"
+    assert terminal_event["msg"] == "terminal_failure"
+    assert terminal_event["attempts"] == delivery.MAX_DELIVERY_ATTEMPTS
+    assert "offline" not in json.dumps(terminal_event)
     assert pipe.get(result.delivery_id)["attempts"] == delivery.MAX_DELIVERY_ATTEMPTS
     assert pipe.get(result.delivery_id)["last_error"] == "offline"
     dead = pipe.pending_dead_letters()
@@ -806,6 +822,34 @@ def test_retry_exhaustion_reaches_terminal_failure_and_stops(tmp_path):
     assert pipe.flush_due() == []
     assert len(calls) == delivery.MAX_DELIVERY_ATTEMPTS
     assert pipe.pending_dead_letters() == []
+
+
+def test_broken_log_sink_does_not_abort_terminal_delivery_state(
+    tmp_path, monkeypatch,
+):
+    now = [_local_ts(2026, 7, 23, 14, 0)]
+    monkeypatch.setattr(
+        delivery, "log",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("log down")),
+    )
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda _e, _c: TransportResult(False, error="offline"),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    result = pipe.deliver(DeliveryEnvelope(
+        source="test", payload={"text": "keep me"},
+        requested_channel="lark",
+    ))
+    for _ in range(2):
+        now[0] += 301
+        terminal = pipe.flush_due()[0]
+
+    assert result.accepted is True
+    assert terminal.state == "failed"
+    assert pipe.get(result.delivery_id)["attempts"] == (
+        delivery.MAX_DELIVERY_ATTEMPTS
+    )
 
 
 def test_state_updates_reject_unknown_columns(tmp_path):

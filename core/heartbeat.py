@@ -1602,10 +1602,39 @@ You have access to the user's memory below. Use it to personalize your responses
             self._log(
                 f"Untrusted-input solo: {[t['name'] for t in untrusted_due]}")
 
+        # A malformed multi-task envelope cannot tell us which slice broke it.
+        # Retrying the same roster as another batch simply recreates the same
+        # failure. On the next due cycle, fan those tasks out once as direct
+        # single-task calls; each task then owns its own parse and state result.
+        envelope_retry_names = set(
+            state.get("__envelope_parse__", {}).get("isolate_tasks", [])
+        )
+        envelope_retry_due = [
+            task for task in tier2
+            if (not task.get("heavy") and not task.get("untrusted_input")
+                and task["name"] in envelope_retry_names)
+        ]
+        for task in envelope_retry_due:
+            self._run_solo_task(
+                task, task_data, state, now, user_messages, producing_tasks,
+                isolation_reason="envelope-retry",
+            )
+        if envelope_retry_due:
+            attempted = {task["name"] for task in envelope_retry_due}
+            remaining = envelope_retry_names - attempted
+            if remaining:
+                state["__envelope_parse__"]["isolate_tasks"] = sorted(remaining)
+            else:
+                state.pop("__envelope_parse__", None)
+            self._log(
+                "Envelope-retry solo: "
+                f"{[task['name'] for task in envelope_retry_due]}")
+
         # ── Tier 2: regular tasks go through Claude ────────────────────
         runnable = [
             t for t in tier2
-            if not t.get("heavy") and not t.get("untrusted_input")
+            if (not t.get("heavy") and not t.get("untrusted_input")
+                and t["name"] not in envelope_retry_names)
         ]
         if not runnable:
             # No batch tasks — only Tier 0 and/or heavy-solo tasks ran this
@@ -1947,8 +1976,13 @@ You have access to the user's memory below. Use it to personalize your responses
                                 + " …tail: " + " ".join(raw[-200:].split())))
             env = state.get("__envelope_parse__", {})
             env_fails = int(env.get("consecutive_failures", 0)) + 1
-            state["__envelope_parse__"] = {"consecutive_failures": env_fails,
-                                           "last_failure": now}
+            pending_isolation = set(env.get("isolate_tasks", []))
+            pending_isolation.update(task["name"] for task in runnable)
+            state["__envelope_parse__"] = {
+                "consecutive_failures": env_fails,
+                "last_failure": now,
+                "isolate_tasks": sorted(pending_isolation),
+            }
             # Persistent envelope breakage is a real signal (prompt too long /
             # model degraded) — surface it loudly rather than silently
             # poisoning task circuits.
@@ -1971,7 +2005,13 @@ You have access to the user's memory below. Use it to personalize your responses
             # duration covers claude_call + this task's post-script routing
             self._event("task_finish", task=task["name"], status="ok",
                         duration_s=round(time.time() - call_t0, 2))
-        state.pop("__envelope_parse__", None)  # a clean parse clears the shared streak
+        # A clean batch clears the shared parse streak only after every task
+        # from the malformed roster has received its isolated retry. Some
+        # roster members may not be due yet; clearing their names here would
+        # silently put them back into the next multi-task batch.
+        envelope_state = state.get("__envelope_parse__", {})
+        if not envelope_state.get("isolate_tasks"):
+            state.pop("__envelope_parse__", None)
         self.save_state(state)
 
         # Separate card JSON from plain text — they use different Lark send paths

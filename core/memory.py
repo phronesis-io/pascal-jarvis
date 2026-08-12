@@ -211,8 +211,9 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     (Perception PRD §3.4/§6 — sensitivity model steps 1-2.)
 
     max_chars: override the global memory budget. Used when the backup LLM
-    relay has a smaller context window than the primary (1M) channel.
-    Sub-tier budgets scale proportionally.
+    relay has a smaller context window than the primary (1M) channel. Small
+    budgets preserve identity and safety context first; knowledge notes yield
+    before the rules that govern degraded operation.
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -221,16 +222,6 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     if max_chars is not None and int(max_chars) <= 0:
         raise ValueError("max_chars must be positive")
     budget = int(max_chars) if max_chars is not None else MAX_MEMORY_CHARS
-    if budget < MAX_MEMORY_CHARS:
-        ratio = max_chars / MAX_MEMORY_CHARS
-        hot_budget = int(HOT_BUDGET * ratio)
-        system_budget = int(SYSTEM_BUDGET * ratio)
-        timeline_budget = int(TIMELINE_BUDGET * ratio)
-    else:
-        hot_budget = HOT_BUDGET
-        system_budget = SYSTEM_BUDGET
-        timeline_budget = TIMELINE_BUDGET
-
     # Build each tier's sections independently (priority-ordered within tier).
     hot_parts = _collect_hot(memory_dir)
     warm_parts = _collect_warm(memory_dir)
@@ -256,15 +247,36 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
         blocks = [full[t] for t in ("hot", "warm", "system", "timeline") if full[t]]
         return sep.join(blocks)
 
+    if budget < MAX_MEMORY_CHARS:
+        # Degraded providers used to scale every tier equally. At the live 40k
+        # backup budget that gave hot only 6k, cutting behavioral rules in
+        # half and dropping today's calendar, active intents, and user profile,
+        # while warm research notes still received 19k. Preserve the complete
+        # identity/safety tier when it fits within 70%; divide the remainder
+        # between current operational state, recent chronology, and warm notes.
+        hot_budget = min(len(full["hot"]), int(budget * 0.70))
+        remaining = max(0, budget - hot_budget)
+        system_budget = int(remaining * 0.55)
+        timeline_budget = int(remaining * 0.20)
+    else:
+        hot_budget = HOT_BUDGET
+        system_budget = SYSTEM_BUDGET
+        timeline_budget = TIMELINE_BUDGET
+
     # OVER BUDGET — apply per-tier reserves. hot + system + timeline get their
     # reserves (load-bearing); warm absorbs the squeeze with the remainder. If
     # a reserved tier is under its reserve, the slack flows to warm.
-    hot_text = _join_within_budget(hot_parts, hot_budget, "hot")
-    system_text = _join_within_budget(system_parts, system_budget, "system")
-    timeline_text = _join_within_budget(timeline_parts, timeline_budget, "timeline")
+    degraded_budget = budget < MAX_MEMORY_CHARS
+    hot_text = _join_within_budget(
+        hot_parts, hot_budget, "hot", expected=degraded_budget)
+    system_text = _join_within_budget(
+        system_parts, system_budget, "system", expected=degraded_budget)
+    timeline_text = _join_within_budget(
+        timeline_parts, timeline_budget, "timeline", expected=degraded_budget)
     used = len(hot_text) + len(system_text) + len(timeline_text)
     warm_room = max(0, budget - used - 3 * len(sep))
-    warm_text = _join_within_budget(warm_parts, warm_room, "warm")
+    warm_text = _join_within_budget(
+        warm_parts, warm_room, "warm", expected=True)
 
     blocks = [b for b in (hot_text, warm_text, system_text, timeline_text) if b]
     result = sep.join(blocks)
@@ -417,7 +429,9 @@ def _collect_timeline(memory_dir: Path) -> list[str]:
     return parts
 
 
-def _join_within_budget(parts: list[str], budget: int, tier: str) -> str:
+def _join_within_budget(
+    parts: list[str], budget: int, tier: str, *, expected: bool = False,
+) -> str:
     """Join a tier's sections, truncating WITHIN the tier's reserved budget.
 
     Sections are added in priority order (highest first). When the budget is
@@ -501,14 +515,14 @@ def _join_within_budget(parts: list[str], budget: int, tier: str) -> str:
         now = time.time()
         if now - _TRUNCATION_WARNED_AT.get(tier, 0) >= _TRUNCATION_WARN_INTERVAL_S:
             _TRUNCATION_WARNED_AT[tier] = now
-            # expected=True on warm: warm absorbing the global squeeze is the
-            # loader's DESIGN, not a failure — selfmon's silent-failure scan
-            # skips expected entries, so only hot/system/timeline truncation
-            # (always a real problem) is counted (REQ-94).
+            # A configured reduced provider budget deliberately squeezes lower
+            # tiers after protecting hot identity/safety context. Mark those
+            # planned cuts expected so selfmon does not report the fallback's
+            # bounded context window as a new memory corruption incident.
             log("memory", "tier_truncated", level="warn", tier=tier,
                 dropped_chars=dropped_chars, budget=budget,
                 dropped_sections=dropped_sections,
-                expected=(tier == "warm"))
+                expected=expected)
 
     return sep.join(out)
 

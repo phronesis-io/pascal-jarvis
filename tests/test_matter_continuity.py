@@ -106,6 +106,15 @@ def test_owner_can_switch_runtime_preference_between_codex_and_claude():
     assert "Claude 优先" in handle_lark_command("/model", "ou_owner")["reply"]
 
 
+def test_natural_backup_command_bypasses_failed_model():
+    for command in ("上一下备用吧", "用备用", "切到备用通道", "换到备用试试"):
+        switched = handle_lark_command(
+            command, "ou_owner", "ou_owner", chat_type="p2p"
+        )
+        assert switched["handled"] is True
+        assert "Codex 优先" in switched["reply"]
+
+
 def test_group_cannot_enable_codex_local_executor():
     result = handle_lark_command(
         "/model codex", "oc_group", "oc_group", chat_type="group")

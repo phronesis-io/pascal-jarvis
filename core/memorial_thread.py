@@ -28,7 +28,7 @@ def _ledger_path() -> Path:
     # test events into the PRODUCTION ledger (caught by red-team 7/21):
     # tests patch memorial.JARVIS_DIR, not this module.
     from core import memorial
-    return memorial.JARVIS_DIR / "memorials.jsonl"
+    return memorial.runtime_root() / "memorials.jsonl"
 
 
 def record_sent(memorial_id: str, lark_message_id: str) -> None:

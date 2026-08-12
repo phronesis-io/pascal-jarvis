@@ -7,12 +7,33 @@ the 2026-06-12 recheck (lark-cli 1.0.51).
 """
 
 import json
+import subprocess
+import sys
 
 from core.reaction_save import extract_saveable
 
 
 def _mget(msg):
     return json.dumps({"data": {"messages": [msg]}}, ensure_ascii=False)
+
+
+def test_reaction_save_module_cli_emits_saveable_json():
+    payload = _mget({
+        "sender": {"sender_type": "app"},
+        "content": "CLI contract https://example.com/cli",
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-m", "core.reaction_save"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout)["items"][0]["url"] == (
+        "https://example.com/cli"
+    )
 
 
 # Live shape 1: text message, content pre-decoded at TOP LEVEL (no body key)

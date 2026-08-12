@@ -12,7 +12,11 @@ POST = ROOT / "tasks" / "weekly_review_post.py"
 
 
 def _run_post(tmp_path: Path, payload: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "MEMORY_DIR": str(tmp_path / "memory")}
+    env = {
+        **os.environ,
+        "JARVIS_DIR": str(tmp_path),
+        "MEMORY_DIR": str(tmp_path / "memory"),
+    }
     return subprocess.run(
         [sys.executable, str(POST)],
         input=payload,
@@ -41,6 +45,8 @@ def test_structured_review_renders_without_time_source_argument(tmp_path):
 
     card = _assert_weekly_card(result)
     assert "本周完成了两件重要事项" in json.dumps(card, ensure_ascii=False)
+    assert (tmp_path / "data" / ".weekly_review_stamp").exists()
+    assert len(list((tmp_path / "views").glob("*.json"))) == 1
 
 
 def test_plain_text_review_renders_without_time_source_argument(tmp_path):
@@ -51,3 +57,5 @@ def test_plain_text_review_renders_without_time_source_argument(tmp_path):
 
     card = _assert_weekly_card(result)
     assert "稳定节奏" in json.dumps(card, ensure_ascii=False)
+    assert (tmp_path / "data" / ".weekly_review_stamp").exists()
+    assert len(list((tmp_path / "views").glob("*.json"))) == 1

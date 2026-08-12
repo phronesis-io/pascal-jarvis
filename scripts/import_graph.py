@@ -94,6 +94,15 @@ class ImportGraph:
             ))
         return rows
 
+    def direct_cycles(self) -> list[tuple[str, str]]:
+        """Return unique two-module import cycles in stable order."""
+        return sorted(
+            (source, dependency)
+            for source, dependencies in self.outgoing.items()
+            for dependency in dependencies
+            if source < dependency and source in self.outgoing.get(dependency, ())
+        )
+
 
 def _module_name(root: Path, path: Path) -> tuple[str, bool]:
     try:
@@ -258,6 +267,7 @@ def render_json(graph: ImportGraph) -> str:
         "root": str(graph.root),
         "module_count": len(graph.sources),
         "edge_count": sum(len(values) for values in graph.outgoing.values()),
+        "direct_cycles": [list(pair) for pair in graph.direct_cycles()],
         "modules": [
             {
                 "module": module,
@@ -350,6 +360,11 @@ def _parser() -> argparse.ArgumentParser:
         help="exit 2 when at least one module exceeds --threshold",
     )
     parser.add_argument(
+        "--max-direct-cycles",
+        type=int,
+        help="fail when the number of direct two-module cycles exceeds this budget",
+    )
+    parser.add_argument(
         "--focus",
         action="append",
         default=[],
@@ -379,6 +394,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.fail_on_threshold and args.threshold is None:
         print("error: --fail-on-threshold requires --threshold", file=sys.stderr)
+        return 1
+    if args.max_direct_cycles is not None and args.max_direct_cycles < 0:
+        print("error: --max-direct-cycles must be >= 0", file=sys.stderr)
         return 1
     try:
         graph = build_graph(args.root, args.paths)
@@ -410,6 +428,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if args.fail_on_threshold:
             return 2
+    cycles = graph.direct_cycles()
+    if args.max_direct_cycles is not None and len(cycles) > args.max_direct_cycles:
+        detail = ", ".join(f"{left}<->{right}" for left, right in cycles)
+        print(
+            f"ERROR: {len(cycles)} direct import cycles exceed budget "
+            f"{args.max_direct_cycles}: {detail}",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

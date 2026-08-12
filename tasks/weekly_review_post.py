@@ -13,6 +13,17 @@ from core.timeutil import now_local_str
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 
 
+def _stamp_success() -> None:
+    import datetime
+
+    jarvis_dir = Path(
+        os.environ.get("JARVIS_DIR")
+        or Path(__file__).resolve().parent.parent)
+    stamp = jarvis_dir / "data" / ".weekly_review_stamp"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(datetime.date.today().strftime("%Y-W%V"), encoding="utf-8")
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
@@ -39,6 +50,7 @@ def main() -> int:
                     "date": now_local_str("%Y-%m-%d"),
                 },
             ))
+            _stamp_success()
             return 0
         else:
             return 0
@@ -72,11 +84,7 @@ def main() -> int:
         ))
 
     # Stamp this week so the pre-script skips on restart (dedup)
-    import datetime
-    jarvis_dir = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
-    stamp = jarvis_dir / "data" / ".weekly_review_stamp"
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    stamp.write_text(datetime.date.today().strftime("%Y-W%V"), encoding="utf-8")
+    _stamp_success()
 
     return 0
 

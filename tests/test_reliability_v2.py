@@ -187,9 +187,30 @@ def test_diag_extract_warnings_scrubs_gate_triggers():
 
 def test_diag_user_id_accepts_production_config_key(tmp_path, monkeypatch):
     dp = _load_diag_post()
-    monkeypatch.setattr(dp, "ROOT", tmp_path)
+    monkeypatch.setattr(dp, "JARVIS_DIR", tmp_path)
     (tmp_path / "jarvis.yaml").write_text("lark:\n  user_id: ou_production\n")
     assert dp._user_id() == "ou_production"
+
+
+def test_diag_stamp_follows_jarvis_dir_without_losing_code_imports(tmp_path):
+    """Runtime state and Python source roots are separate concerns."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    code = (
+        "import tasks.self_diagnostic_post as m; "
+        "m._mark_alerted(['warning']); print(m.STAMP); "
+        "from core import memorial"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=root,
+        env={**os.environ, "JARVIS_DIR": str(tmp_path)},
+        capture_output=True, text=True, check=True,
+    )
+
+    assert Path(result.stdout.strip()) == tmp_path / ".diag_last_alert.json"
+    assert (tmp_path / ".diag_last_alert.json").exists()
 
 
 def test_diag_alert_dedup_window(tmp_path, monkeypatch):

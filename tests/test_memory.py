@@ -654,6 +654,52 @@ def test_custom_memory_budget_is_a_hard_cap_and_preserves_tiers(tmp_path):
     assert "TIMELINE_BUDGET_MARKER" in output
 
 
+def test_backup_budget_preserves_complete_hot_identity_before_warm_notes(
+    tmp_path, monkeypatch,
+):
+    import core.memory as memory_mod
+    events = []
+    monkeypatch.setattr(memory_mod, "log", lambda *args, **kwargs: events.append(kwargs))
+    memory_mod._TRUNCATION_WARNED_AT.clear()
+    hot = tmp_path / "hot"
+    system = tmp_path / "system"
+    timeline = tmp_path / "timeline"
+    warm = tmp_path / "warm"
+    for path in (hot, system, timeline, warm):
+        path.mkdir()
+    (hot / "structured_facts.md").write_text("facts\n" + "f" * 1500)
+    (hot / "behavioral_rules.md").write_text(
+        "RULES_START\n" + "r" * 10_000 + "\nRULES_END"
+    )
+    for name in (
+        "active_intents.md", "calendar_today.md", "feedback_rules.md",
+        "group_context.md", "user_healing_frame.md",
+    ):
+        (hot / name).write_text(name + "\n" + "h" * 1800)
+    (hot / "user_profile.md").write_text(
+        "user_profile\n" + "p" * 1800 + "\nHOT_LAST_USER_PROFILE"
+    )
+    (system / "open_threads.md").write_text(
+        "SYSTEM_PRIORITY\n" + "s" * 18_000
+    )
+    (timeline / "daily_log.md").write_text(
+        "TIMELINE_PRIORITY\n" + "t" * 5000
+    )
+    (warm / "project_research.md").write_text(
+        "WARM_RESEARCH\n" + "w" * 40_000
+    )
+
+    output = load_tiered_memory(tmp_path, max_chars=40_000)
+
+    assert len(output) <= 40_000
+    assert "RULES_START" in output and "RULES_END" in output
+    assert "HOT_LAST_USER_PROFILE" in output
+    assert "SYSTEM_PRIORITY" in output
+    assert "TIMELINE_PRIORITY" in output
+    assert events
+    assert all(event["expected"] is True for event in events)
+
+
 def test_warm_per_file_cap_head_keep(tmp_path):
     from core.memory import WARM_FILE_CAP
     warm = tmp_path / "warm"

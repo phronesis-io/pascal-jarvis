@@ -47,6 +47,8 @@ _PROTECTED_FILES = [
     # paths were not listed here.
     ROOT / "data" / "companion_voice.jsonl",
     ROOT / "data" / "companion_last_spoke",
+    ROOT / "data" / ".daily_plan_stamp",
+    ROOT / "data" / ".weekly_review_stamp",
 ]
 
 # A subset of the protected files are *live runtime state* that the production
@@ -68,6 +70,8 @@ _LIVE_RUNTIME_FILES = {
     ROOT / "data" / "jarvis.db",
     ROOT / "data" / "companion_voice.jsonl",
     ROOT / "data" / "companion_last_spoke",
+    ROOT / "data" / ".daily_plan_stamp",
+    ROOT / "data" / ".weekly_review_stamp",
 }
 
 
@@ -89,15 +93,55 @@ def _checksum(path: Path) -> str | None:
     return hashlib.md5(path.read_bytes()).hexdigest()
 
 
+def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
+    """Cheaply detect writes outside the historical protected-file list.
+
+    Hashing the whole 49 MB runtime tree before every test would make the
+    suite unusable.  Metadata is enough to catch newly-created files and the
+    normal write/replace patterns used by Jarvis; the high-risk named files
+    above still receive content hashes.  We watch every top-level file plus
+    every entry under data/ and views/ so a new sidecar cannot silently fall
+    outside this guard again.
+    """
+    paths: set[Path] = set()
+    try:
+        paths.update(
+            entry for entry in ROOT.iterdir()
+            if entry.is_file() and entry.name != ".git"
+        )
+    except OSError:
+        pass
+    for directory in (ROOT / "data", ROOT / "views"):
+        if not directory.exists():
+            continue
+        paths.add(directory)
+        try:
+            paths.update(directory.rglob("*"))
+        except OSError:
+            pass
+    snapshot = {}
+    for path in paths:
+        if path in _PROTECTED_FILES:
+            continue
+        try:
+            stat = path.stat()
+            snapshot[path] = (
+                int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_ino))
+        except OSError:
+            continue
+    return snapshot
+
+
 @pytest.fixture(autouse=True)
 def _isolate_runtime_database(monkeypatch, tmp_path):
-    """Route every test's default SQLite access to a private database.
+    """Route every test's mutable runtime state to a private root.
 
     Individual modules may still monkeypatch dashboard.db.DB_PATH when they
-    need a named database.  The environment override covers all other stores
-    that resolve JARVIS_DB_PATH directly and prevents CLI entry points from
-    silently falling back to the live repo database.
+    need a named database. The environment overrides cover stores that resolve
+    either JARVIS_DIR or JARVIS_DB_PATH and prevent CLI entry points from
+    silently falling back to live repository state.
     """
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
 
     import dashboard.db as db_module
@@ -116,8 +160,12 @@ def _isolate_runtime_database(monkeypatch, tmp_path):
 
 def _strict_guard() -> bool:
     """True when the live-bot exemption is disabled (CI-equivalent strictness)."""
-    return str(os.environ.get("JARVIS_TEST_STRICT_GUARD") or "").strip() not in (
-        "", "0", "false", "False")
+    # Strict is the default. A running production heartbeat is not proof that
+    # it, rather than the current test, wrote a changed file. An explicit
+    # opt-out remains available for diagnosis, but a normal green run can no
+    # longer hide a real test leak behind an unrelated live process.
+    return str(os.environ.get("JARVIS_TEST_STRICT_GUARD", "1")).strip() not in (
+        "0", "false", "False")
 
 
 # Mutations the live-bot exemption forgave, reported at the end of the run.
@@ -131,6 +179,7 @@ _FORGIVEN: list[str] = []
 def _guard_repo_files(_isolate_runtime_database, request):
     bot_was_live = _bot_is_running()
     before = {p: _checksum(p) for p in _PROTECTED_FILES}
+    tree_before = _metadata_snapshot()
     yield
     bot_live = None  # computed lazily, only if a mismatch shows up
     for p, old in before.items():
@@ -151,6 +200,23 @@ def _guard_repo_files(_isolate_runtime_database, request):
             f"  before: {old}\n  after:  {new}\n"
             f"Check your fixtures — they must use tmp_path, not repo paths."
         )
+    tree_after = _metadata_snapshot()
+    for p in sorted(set(tree_before) | set(tree_after), key=str):
+        old = tree_before.get(p)
+        new = tree_after.get(p)
+        if old == new:
+            continue
+        if not _strict_guard():
+            if bot_live is None:
+                bot_live = bot_was_live or _bot_is_running()
+            if bot_live:
+                _FORGIVEN.append(f"{p.relative_to(ROOT)}  ({request.node.nodeid})")
+                continue
+        raise AssertionError(
+            f"RUNTIME PATH MODIFIED BY TEST: {p}\n"
+            f"  before: {old}\n  after:  {new}\n"
+            "Inject JARVIS_DIR/root/tmp_path instead of writing into the repo."
+        )
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -166,27 +232,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if len(_FORGIVEN) > 20:
         terminalreporter.write_line(f"  ... and {len(_FORGIVEN) - 20} more")
     terminalreporter.write_line(
-        "CI has no live bot and applies this check strictly, so these may be "
-        "real failures there. Reproduce with JARVIS_TEST_STRICT_GUARD=1 "
-        "(stop the bot first) before quoting this run as evidence.")
-
-
-@pytest.fixture(autouse=True)
-def _isolate_intent_telemetry(monkeypatch):
-    """Intent lifecycle events must never reach the LIVE sched_events.jsonl.
-
-    core.intentions._emit_intent hardcodes the repo root (production processes
-    have no other home), so test intent operations — even against tmp
-    databases — were emitting telemetry into the real event log: the 6/13
-    verification found 688 test-fixture events ('约学妹', '读 x402'…)
-    polluting the dashboard funnel. Tests that WANT to assert on telemetry
-    re-patch this explicitly.
-    """
-    try:
-        import core.intentions as _intents
-        monkeypatch.setattr(_intents, "_emit_intent", lambda *a, **k: None)
-    except ImportError:
-        pass
+        "This exemption was explicitly enabled with "
+        "JARVIS_TEST_STRICT_GUARD=0. Reproduce in strict mode before quoting "
+        "this run as evidence.")
 
 
 @pytest.fixture(autouse=True)

@@ -79,6 +79,11 @@ claude:
   backup2_auth_token: ""
   backup2_base_url: ""
   backup2_model: ""
+  # Keep relay sessions bounded. With a reduced memory budget Jarvis preserves
+  # identity, safety rules, today's calendar, and active commitments before
+  # older research notes.
+  backup_max_session_size: 100000
+  backup_max_memory_chars: 40000
 
 
 # ── Codex CLI fallback settings ───────────────────────────────────

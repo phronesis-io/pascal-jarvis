@@ -1,5 +1,7 @@
 # 2026-07-20 自改进轮 PRD（REQ-103~111）
 
+> 历史实施记录，不是当前规范。请先看本目录 README、`docs/prd_portfolio.md` 与当前架构文档。
+
 实证来源：① 7 天 Lark DM 全量复盘（775 条消息，oc_<redacted>）；
 ② /tmp 日志 + sched_events + memorials 台账 + conversation_audit.db；③ todos.md 已批立项（7/14）。
 今天生产基线：components 12/12 绿，1505 tests 绿。

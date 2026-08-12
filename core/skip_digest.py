@@ -15,8 +15,11 @@ skipped intent's `category` (behavioral_rules §5 — the existing taxonomy):
     which carried tags=[] so a tags whitelist would have missed it) gets
     PER-ITEM backfill: one breach entry per occurrence with the original
     prompt riding along (batch 4, armed 7/9 after the shadow period).
-  - everything else (other categories, or a KNOWN-absent row — deleted
-    intent) still folds into ONE aggregate entry ("停摆期间跳过了 N 件事").
+  - healing/autonomous occurrences are consumed silently: they are private
+    maintenance or non-nagging care, so a scheduler miss is operational data,
+    not a new demand on Pascal's attention.
+  - everything else (other categories, or a KNOWN-absent row — deleted intent)
+    still folds into ONE aggregate entry ("停摆期间跳过了 N 件事").
   - an event whose category lookup FAILED (db unreadable, not row-absent) is
     deferred untouched and retried next scan — never consumed on a failure
     (F-13; the old fail-open-to-aggregate permanently downgraded bills).
@@ -68,6 +71,7 @@ TS_FMT = "%Y-%m-%d %H:%M:%S"       # sched_events timestamp format
 # Only ① 硬约束 — the other surfaced classes (context/external) are prep/follow
 # -up whose moment already passed, and ③ healing must never be chased at all.
 BACKFILL_CATEGORIES = ("hard",)
+SILENT_CATEGORIES = ("healing", "autonomous")
 
 # Sentinel returned by _intent_row when the LOOKUP ITSELF failed (db
 # unreadable / WAL recovery error / disk error) — as opposed to None, which
@@ -283,6 +287,7 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
 
         backfill: list[tuple[dict, dict]] = []
         aggregate: list[dict] = []
+        silent: list[dict] = []
         deferred = 0
         for e in events:
             row = _intent_row(jarvis_dir, e.get("task", ""))
@@ -291,6 +296,8 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                 continue
             if row and row.get("category") in BACKFILL_CATEGORIES:
                 backfill.append((e, row))
+            elif row and row.get("category") in SILENT_CATEGORIES:
+                silent.append(e)
             else:
                 aggregate.append(e)
         if deferred:
@@ -305,10 +312,12 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                                  ensure_ascii=False, indent=2))
             for e in aggregate:
                 print(f"[skip-digest] would consume: {_event_key(e)}")
+            for e in silent:
+                print(f"[skip-digest] would consume silently: {_event_key(e)}")
             if aggregate:
                 print(json.dumps(_digest_entry(aggregate, now_ts),
                                  ensure_ascii=False, indent=2))
-            return len(backfill) + len(aggregate)
+            return len(backfill) + len(aggregate) + len(silent)
 
         queue = _breach_queue(jarvis_dir)
         sqlite_mode = jarvis_dir.resolve() == ROOT.resolve()
@@ -350,6 +359,8 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
             consumed[_event_key(e)] = now
         for e in aggregate:
             consumed[_event_key(e)] = now
+        for e in silent:
+            consumed[_event_key(e)] = now
         state = {"last_scan": now, "consumed": consumed}
         _save_state(state_path, state)
 
@@ -366,7 +377,7 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             print(f"[skip-digest] queued digest of {len(aggregate)} skipped item(s)",
                   file=sys.stderr)
-        return len(backfill) + len(aggregate)
+        return len(backfill) + len(aggregate) + len(silent)
     except Exception as e:  # noqa: BLE001 — fail-open by contract
         try:
             print(f"[skip-digest] queue_digest failed (fail-open): {e}",
@@ -383,7 +394,13 @@ def diag_line(jarvis_dir: Path = ROOT) -> str:
     the stall having happened, not about digest bookkeeping.
     """
     try:
-        n = len(_recent_skip_events(Path(jarvis_dir)))
+        n = 0
+        for event in _recent_skip_events(Path(jarvis_dir)):
+            row = _intent_row(Path(jarvis_dir), event.get("task", ""))
+            if row is not _LOOKUP_FAILED and row \
+                    and row.get("category") in SILENT_CATEGORIES:
+                continue
+            n += 1
         if n > 0:
             return (f"⚠️ {n} 个定时事项在过去24h被停摆跳过"
                     "（intent_occurrence_skipped / expires_at_lapsed）"

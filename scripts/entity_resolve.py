@@ -23,10 +23,11 @@ import re
 import sys
 from pathlib import Path
 
-# ── Locate data files ──────────────────────────────────────────────
+# ── Locate code and data independently ────────────────────────────
 
-JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(JARVIS_DIR))
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+sys.path.insert(0, str(CODE_ROOT))
 from core.claude_projects import auto_memory_dir as _auto_mem
 from core.eigenflux_friends import temporary_friend_policy_active
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", str(_auto_mem())))

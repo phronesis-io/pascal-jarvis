@@ -147,8 +147,8 @@ def _run_log() -> None:
 
 @ui.page("/routines")
 def routines_page() -> None:
-    for _ in jarvis_page("routines", "例程",
-                         "你自己建的自动化 —— 它们什么时候跑、看什么、能动到哪一步"):
+    with jarvis_page("/routines", "例程",
+                     "你自己建的自动化 —— 它们什么时候跑、看什么、能动到哪一步"):
         _routine_list()
         ui.label("运行记录").classes("text-base font-medium mt-4")
         ui.label("observe 级例程的产出只在这里出现，不会发给任何人。"

@@ -105,6 +105,22 @@ def test_hard_category_split_from_aggregate(tmp_path):
     assert len(_breach_lines(jd)) == 2
 
 
+def test_autonomous_and_healing_skips_are_audited_without_user_breach(tmp_path):
+    jd = tmp_path
+    _seed_db(jd, [
+        ("int_hourly", "小时报", "写入内部时间线", "autonomous"),
+        ("int_heal", "温和观察", "只记录不催", "healing"),
+    ])
+    _emit_skip(jd, "int_hourly", "小时报")
+    _emit_skip(jd, "int_heal", "温和观察")
+
+    assert sd.queue_digest(jd, force=True) == 2
+    assert _breach_lines(jd) == []
+    state = json.loads((jd / "data" / ".skip_digest_state.json").read_text())
+    assert len(state["consumed"]) == 2
+    assert sd.diag_line(jd).startswith("✓")
+
+
 def test_no_db_degrades_to_aggregate_only(tmp_path):
     jd = tmp_path
     _emit_skip(jd, "int_bill", "信用卡还款提醒")

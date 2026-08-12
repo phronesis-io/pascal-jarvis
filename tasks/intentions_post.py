@@ -27,8 +27,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+sys.path.insert(0, str(CODE_ROOT))
 
 from core.intent_lifecycle import mark_executed, mark_failed, get_intent
 from core.intent_closure import record_closure, note_closure_touch
@@ -39,7 +40,7 @@ from core.intent_scheduler import (
 from core.card import build_card
 from core.safety import parse_json_response
 
-CARD_LEDGER = ROOT / "data" / ".intent_card_ledger.jsonl"
+CARD_LEDGER = JARVIS_DIR / "data" / ".intent_card_ledger.jsonl"
 
 
 # Bare status / ack tokens an internal "prompt"-type intent may report as its
@@ -361,8 +362,13 @@ def _apply_action(intent_id: str, response: str, action: str,
             print(f"[intentions_post] closure record failed: {e}", file=sys.stderr)
         return True  # closure rows never card
     # quiet_hour: HEARTBEAT_OK is protocol, never user-facing content.
+    # File-product intents are autonomous bookkeeping: their verified append
+    # is the product. A degraded model once returned a useful hourly-log entry
+    # with action=notify, turning "this does not affect you" into a memorial.
+    # Enforce the product boundary here instead of trusting model-selected
+    # action prose.
     if action != "silent" and response and not _is_contentless(response) \
-            and not quiet_hour:
+            and not quiet_hour and intent_id not in PRODUCT_LOGS:
         user_messages.append(response)
         # One-tap closure buttons for a follow-up that is ASKING (REQ-34).
         if button_specs is not None:

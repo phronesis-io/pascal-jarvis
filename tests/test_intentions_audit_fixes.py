@@ -339,6 +339,26 @@ def test_opted_in_heartbeat_ok_is_quiet_hour_done(monkeypatch, tmp_path,
     assert msgs == []                   # protocol token never carded
 
 
+def test_file_product_is_internal_even_when_model_requests_notify(
+    monkeypatch, tmp_path,
+):
+    executed, _ = _record_marks(monkeypatch)
+    target = _opt_in(monkeypatch, tmp_path)
+    msgs = []
+
+    resolved = ip._apply_action(
+        "int_hb",
+        response="18:00 记录备用通道恢复和当前运行状态",
+        action="notify",
+        user_messages=msgs,
+    )
+
+    assert resolved is True
+    assert executed == ["int_hb"]
+    assert "备用通道恢复" in target.read_text(encoding="utf-8")
+    assert msgs == []
+
+
 def test_non_product_heartbeat_ok_still_blocks(monkeypatch):
     """The sentinel semantics are scoped to the file-product intent ONLY —
     for every other intent a HEARTBEAT_OK slot stays a husk (F2 behavior:
