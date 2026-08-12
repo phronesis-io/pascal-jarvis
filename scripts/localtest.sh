@@ -15,6 +15,10 @@ if [ "${1:-}" = "--runtime" ]; then
   runtime=1
   shift
 fi
+if [ "$runtime" -eq 1 ] && [ "$#" -gt 0 ]; then
+  echo "[localtest] --runtime accepts no pytest arguments; run the ordinary full gate separately" >&2
+  exit 2
+fi
 
 echo "[localtest] shell syntax"
 bash -n bot.sh
@@ -34,8 +38,16 @@ else
   echo "[localtest] shellcheck NOT INSTALLED — CI still runs it; install it" >&2
 fi
 
-echo "[localtest] pytest"
-python3 -m pytest tests/ "$@"
+if [ "$runtime" -eq 0 ]; then
+  echo "[localtest] pytest"
+  python3 -m pytest tests/ "$@"
+else
+  # A live heartbeat legitimately updates repository runtime state while the
+  # strict pytest guard requires those same paths to stay byte-for-byte still.
+  # The full suite belongs before deploy (and in protected CI); this mode is
+  # deliberately the post-restart runtime gate only.
+  echo "[localtest] pytest skipped in runtime mode (use the pre-deploy full gate)"
+fi
 
 if [ "$runtime" -eq 1 ]; then
   echo "[localtest] component health"

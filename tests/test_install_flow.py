@@ -15,6 +15,86 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _localtest_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+    root = tmp_path / "repo"
+    scripts = root / "scripts"
+    tasks = root / "tasks"
+    bin_dir = tmp_path / "bin"
+    for directory in (scripts, tasks, root / "tests", bin_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    (scripts / "localtest.sh").write_text(
+        (ROOT / "scripts" / "localtest.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (scripts / "runtime_env.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (root / "bot.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    calls = tmp_path / "python-calls.txt"
+    (bin_dir / "python3").write_text(
+        "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$PYTHON_CALLS\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "shellcheck").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    for executable in (bin_dir / "python3", bin_dir / "shellcheck"):
+        executable.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PYTHON_CALLS": str(calls),
+    }
+    return root, env, calls
+
+
+def test_localtest_runtime_mode_skips_pytest_and_runs_runtime_gates(tmp_path):
+    root, env, calls = _localtest_fixture(tmp_path)
+
+    result = subprocess.run(
+        ["bash", "scripts/localtest.sh", "--runtime"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    invoked = calls.read_text(encoding="utf-8")
+    assert "pytest skipped in runtime mode" in result.stdout
+    assert "-m pytest" not in invoked
+    assert "-m core.components" in invoked
+    assert "-m core.deploy verify" in invoked
+    assert "-m core.deploy smoke" in invoked
+
+
+def test_localtest_normal_mode_keeps_strict_full_suite(tmp_path):
+    root, env, calls = _localtest_fixture(tmp_path)
+
+    subprocess.run(
+        ["bash", "scripts/localtest.sh"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "-m pytest tests/" in calls.read_text(encoding="utf-8")
+
+
+def test_localtest_runtime_mode_rejects_discarded_pytest_arguments(tmp_path):
+    root, env, calls = _localtest_fixture(tmp_path)
+
+    result = subprocess.run(
+        ["bash", "scripts/localtest.sh", "--runtime", "tests/test_one.py"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "accepts no pytest arguments" in result.stderr
+    assert not calls.exists()
+
+
 def test_runtime_env_prefers_tcc_safe_managed_virtualenv(tmp_path):
     root = tmp_path / "Desktop" / "jarvis"
     home = tmp_path / "home"
