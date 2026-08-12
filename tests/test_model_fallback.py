@@ -35,6 +35,22 @@ def test_hard_spend_limit_skips_same_provider_retry():
     assert mf.is_model_error("monthly spend limit")
 
 
+def test_weekly_usage_limit_is_account_wide():
+    error = "You've hit your weekly limit · resets Aug 15 at 3am (Asia/Shanghai)"
+    assert mf.limit_reason(error) == "spend_limit"
+    assert mf.is_account_limit(error)
+    assert mf.is_model_error(error)
+    assert mf.fallback_for_stderr("opus", error) is None
+    assert mf.is_account_limit("You have reached your weekly limit")
+    assert mf.is_account_limit("You've exceeded your daily usage limit")
+    assert mf.is_account_limit("Weekly usage limit reached")
+
+
+def test_descriptive_period_limits_do_not_trip_provider_gate():
+    assert not mf.is_account_limit("The API has a daily limit of 100 requests")
+    assert not mf.is_account_limit("This plan has a weekly limit of five items")
+
+
 def test_session_limit_skips_same_provider_and_identifies_reason():
     error = "HTTP 429: You've hit your session limit · resets 6pm (Asia/Shanghai)"
     assert mf.is_account_limit(error)
@@ -646,6 +662,41 @@ def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path
     assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus"]
     assert openai_calls
     assert openai_calls[0][0]["model"] == "gpt-test"
+
+
+def test_heartbeat_weekly_limit_reaches_openai_fallback(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core import openai_fallback
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_FALLBACK_MODEL", "gpt-test")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kwargs: CompletedProcess(
+            cmd,
+            1,
+            stdout=(
+                "You've hit your weekly limit · resets Aug 15 at 3am "
+                "(Asia/Shanghai)"
+            ),
+            stderr="",
+        ),
+    )
+    calls = []
+
+    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
+        calls.append(payload)
+        return {"output_text": "HEARTBEAT_OK"}
+
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+
+    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert calls and calls[0]["model"] == "gpt-test"
+    assert runner.last_provider == "GPT fallback"
 
 
 def _gate_runner(tmp_path):
