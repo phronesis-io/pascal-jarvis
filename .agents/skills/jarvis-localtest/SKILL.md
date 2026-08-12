@@ -68,6 +68,11 @@ Only on the production machine, after committing the intended revision:
 ./scripts/localtest.sh --runtime
 ```
 
+Runtime mode intentionally skips pytest because live heartbeat processes
+mutate runtime state that the strict test-write guard requires to remain
+unchanged. It is a post-restart component/revision/smoke gate; the ordinary
+full local gate and protected CI must already be green before deployment.
+
 `restart.sh` first requires local `main`, `HEAD == origin/main`, a clean tracked
 worktree, protected-main policy, a merged PR, successful required checks, and
 release authority. Normal authority is an independent review bound to the
