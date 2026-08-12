@@ -139,6 +139,10 @@ the exact release commit or a healthy resident descendant that contains it.
   initializes schema once per database inode, and never holds a transaction
   across a network send. Its retry/cap interaction is frozen in
   `docs/delivery_retry_and_caps.md`.
+- `docs/capability_inventory.md`: generated evidence map for supported
+  components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
+  missing contracts and drift; it never authorizes deletion without explicit
+  retirement, replacement, migration, and data-retention evidence.
 - `core.memorial`: visible Item and decision ledger.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.routines`: user-authored recurring work — definition, claim, autonomy

@@ -22,8 +22,14 @@ Then inspect the worktree:
 ```bash
 git status --short --branch
 python3 -m core.components
+python3 scripts/capability_inventory.py --check-doc docs/capability_inventory.md
 python3 scripts/import_graph.py core dashboard tasks --threshold 24 --limit 20
 ```
+
+The capability inventory is the evidence-backed list of supported runtime
+surfaces. Update it with the generator whenever a component, heartbeat task,
+CLI, dashboard/admin route, or Lark command changes; never delete a capability
+from a broad cleanup without an explicit retirement and migration review.
 
 The import graph is a review signal for broad or self-improve rounds, not a
 hard quality verdict. Compare the high-adjacency list before and after the
