@@ -30,6 +30,7 @@ PROPOSAL_STATES = {
     "queued",
     "shipped",
     "verified",
+    "superseded",
     "needs_followup",
     "rejected",
 }
@@ -318,7 +319,7 @@ class IterationStore:
                     return self._decode_proposal(db, existing), False
             elif existing is not None and existing["status"] != "needs_followup":
                 if (
-                    existing["status"] != "verified"
+                    existing["status"] not in {"verified", "superseded"}
                     or float(signal["last_seen"] or 0)
                     <= float(existing["verified_at"] or 0)
                 ):
@@ -704,6 +705,95 @@ class IterationStore:
                     (current["signal_fingerprint"],),
                 )
         return self.get(proposal_id)
+
+    def reconcile_absent_signals(
+        self,
+        *,
+        active_fingerprints: set[str],
+        coverage_observed_at: dict[str, float],
+    ) -> dict[str, Any]:
+        """Close stale signals only after a newer, complete source observation.
+
+        Pending proposals become superseded because no owner decision is needed
+        after the underlying problem disappears. Accepted work keeps its own
+        lifecycle, and shipped work must still pass post-release verification.
+        """
+        now = self.now()
+        resolved_ids: list[str] = []
+        superseded_ids: list[str] = []
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            signals = db.execute(
+                "SELECT * FROM iteration_signals WHERE status='open'"
+            ).fetchall()
+            for signal in signals:
+                fingerprint = str(signal["fingerprint"] or "")
+                source = str(signal["source"] or "")
+                observed_at = float(coverage_observed_at.get(source) or 0)
+                if (
+                    not observed_at
+                    or fingerprint in active_fingerprints
+                    or observed_at <= float(signal["last_seen"] or 0)
+                ):
+                    continue
+                shipped = db.execute(
+                    """
+                    SELECT 1 FROM iteration_proposals
+                     WHERE signal_fingerprint=? AND status='shipped'
+                     LIMIT 1
+                    """,
+                    (fingerprint,),
+                ).fetchone()
+                if shipped is not None:
+                    continue
+                db.execute(
+                    "UPDATE iteration_signals SET status='resolved' WHERE id=?",
+                    (signal["id"],),
+                )
+                resolved_ids.append(str(signal["id"]))
+                pending = db.execute(
+                    """
+                    SELECT * FROM iteration_proposals
+                     WHERE signal_fingerprint=? AND status='pending'
+                     ORDER BY created_at DESC,rowid DESC LIMIT 1
+                    """,
+                    (fingerprint,),
+                ).fetchone()
+                if pending is None:
+                    continue
+                reason = "同一来源的新观测显示问题已恢复，无需人工判断"
+                db.execute(
+                    """
+                    UPDATE iteration_proposals
+                       SET status='superseded',actual_json=?,review_reason=?,
+                           verified_at=?,updated_at=?
+                     WHERE id=? AND status='pending'
+                    """,
+                    (
+                        _json({"signal_open": False}),
+                        reason,
+                        now,
+                        now,
+                        pending["id"],
+                    ),
+                )
+                if not db.execute("SELECT changes()").fetchone()[0]:
+                    continue
+                proposal_id = str(pending["id"])
+                superseded_ids.append(proposal_id)
+                self._event(
+                    db,
+                    proposal_id,
+                    "proposal.superseded",
+                    actor="observer",
+                    from_status="pending",
+                    to_status="superseded",
+                    metadata={"source": source, "observed_at": observed_at},
+                )
+        return {
+            "signal_ids": resolved_ids,
+            "proposal_ids": superseded_ids,
+        }
 
     def get(self, proposal_id: str) -> dict[str, Any]:
         with closing(self._connect()) as db:
@@ -1198,11 +1288,29 @@ class DailyObserver:
                 verified += 1
             else:
                 followups += 1
+        closure = self.store.reconcile_absent_signals(
+            active_fingerprints=open_fingerprints,
+            coverage_observed_at=coverage_observed_at,
+        )
+        for proposal in self.store.list(status="superseded", limit=50):
+            if not proposal.get("item_id"):
+                continue
+            try:
+                sync_proposal_item(proposal, store=self.store, send=False)
+            except OSError as exc:
+                errors.append(
+                    {
+                        "proposal_id": str(proposal["id"]),
+                        "error": f"item projection failed: {exc}"[:200],
+                    }
+                )
         return {
             "queue_recovered": recovered,
             "shipped": shipped,
             "verified": verified,
             "needs_followup": followups,
+            "signals_resolved": len(closure["signal_ids"]),
+            "proposals_superseded": len(closure["proposal_ids"]),
             "coverage_skipped": coverage_skipped,
             "errors": errors,
         }
@@ -1277,11 +1385,17 @@ def sync_proposal_item(
     item_id = str(proposal.get("item_id") or "")
     if proposal["status"] != "pending":
         if item_id:
-            memorial.resolve(
-                item_id,
-                "已进入研发队列" if proposal["status"] in {"approved", "queued"} else "不做",
-                proposal["review_reason"],
-            )
+            if proposal["status"] == "superseded":
+                memorial.lapse(
+                    item_id,
+                    reason=proposal["review_reason"] or "问题已恢复，无需判断",
+                )
+            else:
+                memorial.resolve(
+                    item_id,
+                    "已进入研发队列" if proposal["status"] in {"approved", "queued"} else "不做",
+                    proposal["review_reason"],
+                )
         return item_id
     if item_id and memorial.get_memorial(item_id) is not None:
         return item_id
