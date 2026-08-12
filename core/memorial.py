@@ -40,6 +40,7 @@ CLI (any emitter can send a memorial in one line):
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import itertools
 import json
@@ -423,6 +424,7 @@ def _looks_like_alert(text: str) -> bool:
 # asking. Accepts the Chinese label and full-width separators/colon so a task
 # author does not have to think about ASCII.
 _OPTIONS_LINE_RE = re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：]\s*(.+?)\s*$", re.I)
+_ANY_OPTIONS_LINE_RE = re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：].*$", re.I)
 _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
 
 # LLM-authored card title, same contract shape as OPTIONS: the FIRST line of
@@ -431,6 +433,10 @@ _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
 # 「Intent」in 11 days, burying e.g. the weekly 首席科学家发声 candidates
 # under a header nobody opens.
 _TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
+_ANY_TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：](.*)$", re.I)
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_MARKDOWN_LIST_FENCE_OPEN_RE = re.compile(
+    r"^( {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+)(`{3,}|~{3,})(.*)$")
 
 # 票拟 — the Grand Secretariat's proposed rescript, attached to the memorial so
 # the emperor's job is 依议 or 驳, not drafting the answer himself. A decision
@@ -444,6 +450,8 @@ _TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
 # recommend without a reason: an unexplained recommendation is an order.
 _RECOMMEND_LINE_RE = re.compile(
     r"^\s*(?:RECOMMEND|建议)\s*[:：]\s*(.+?)\s*$", re.I)
+_ANY_RECOMMEND_LINE_RE = re.compile(
+    r"^\s*(?:RECOMMEND|建议)\s*[:：].*$", re.I)
 _RECOMMEND_SPLIT_RE = re.compile(r"\s*(?:—+|--+|－+|·)\s*")
 MAX_RECOMMEND_WHY_CHARS = 60
 MAX_TITLE_CHARS = 40
@@ -595,6 +603,10 @@ def _fold(events: list[dict]) -> dict[str, dict]:
                 "options": options,
                 "extra_buttons": extra_buttons,
                 "recommend": e.get("recommend") or None,
+                "authoring_protocol": bool(e.get("authoring_protocol", False)),
+                "authoring_audit_text": (
+                    str(e.get("authoring_audit_text", ""))
+                    if "authoring_audit_text" in e else None),
                 "attention": str(
                     e.get("attention") or
                     _default_attention(str(e.get("source", "")),
@@ -1046,7 +1058,22 @@ def body_was_clipped(body: str) -> bool:
 def _render_card(state: dict, *, body: str | None = None,
                  status_line: str = "", include_options: bool = True,
                  include_chat: bool = True) -> str:
+    # A segmented trust boundary (currently EigenFlux raw text + local model
+    # analysis) scans only the local authoring segment for the idle sentinel.
+    # Escape literal tokens in the external display segment so core.card's
+    # global leak guard does not erase a legitimate private message.
+    audit_text = state.get("authoring_audit_text")
+    if audit_text is not None:
+        from core.safety import IDLE_SENTINEL, sentinel_present
+        if sentinel_present(audit_text):
+            return ""
+        escaped_title = _header(state).replace(
+            IDLE_SENTINEL, r"HEARTBEAT\_OK")
+    else:
+        escaped_title = _header(state)
     content = _display_body(state["body"] if body is None else body)
+    if audit_text is not None:
+        content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
     # 票拟 sits directly above the buttons it is about, and only while the card
     # is still open — after 批红 it would read as advice on a settled matter.
     rec = state.get("recommend") or {}
@@ -1069,7 +1096,7 @@ def _render_card(state: dict, *, body: str | None = None,
     if status_line:
         content += "\n\n" + status_line
     return build_card(
-        _header(state), content,
+        escaped_title, content,
         button_groups=_button_groups(state, include_options, include_chat),
     )
 
@@ -1417,9 +1444,12 @@ def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
     'OPTIONS:' in the middle of the copy is prose, not a button declaration.
     """
     lines = str(text or "").splitlines()
+    protected = _markdown_protected_lines(lines)
     for idx in range(len(lines) - 1, -1, -1):
         if not lines[idx].strip():
             continue
+        if idx in protected:
+            return text, None
         match = _OPTIONS_LINE_RE.match(lines[idx])
         if not match:
             return text, None
@@ -1437,6 +1467,160 @@ def _extract_inline_options(text: str) -> tuple[str, list[dict] | None]:
     return text, None
 
 
+def _markdown_protected_lines(lines: list[str]) -> set[int]:
+    """Return lines whose directive-looking text is Markdown content.
+
+    Protect fenced code, four-space/tab-indented code, and blockquotes. A
+    closing fence may contain only the fence marker and whitespace; a line
+    such as `````oops`` remains code. An unclosed fence protects the rest of
+    the body.
+    """
+    protected: set[int] = set()
+    fence_char = ""
+    fence_len = 0
+    fence_close_indent = 3
+    lazy_container = False
+
+    def indent_columns(value: str) -> int:
+        columns = 0
+        for char in value:
+            if char == " ":
+                columns += 1
+            elif char == "\t":
+                columns += 4 - (columns % 4)
+            else:
+                break
+        return columns
+
+    for index, line in enumerate(lines):
+        if fence_char:
+            protected.add(index)
+            stripped = line.lstrip(" \t")
+            if (indent_columns(line) <= fence_close_indent
+                    and re.fullmatch(
+                        rf"{re.escape(fence_char)}{{{fence_len},}}[ \t]*",
+                        stripped)):
+                fence_char, fence_len, fence_close_indent = "", 0, 3
+            continue
+        if not line.strip():
+            lazy_container = False
+            continue
+        if lazy_container:
+            protected.add(index)
+            continue
+        fence = _MARKDOWN_FENCE_OPEN_RE.match(line)
+        list_fence = _MARKDOWN_LIST_FENCE_OPEN_RE.match(line)
+        if fence and not (
+                fence.group(1).startswith("`") and "`" in fence.group(2)):
+            marker = fence.group(1)
+            fence_char, fence_len = marker[0], len(marker)
+            protected.add(index)
+            continue
+        if list_fence and not (
+                list_fence.group(2).startswith("`")
+                and "`" in list_fence.group(3)):
+            marker = list_fence.group(2)
+            fence_char, fence_len = marker[0], len(marker)
+            fence_close_indent = indent_columns(list_fence.group(1)) + 3
+            protected.add(index)
+            continue
+        if line.lstrip().startswith(">"):
+            protected.add(index)
+            lazy_container = True
+            continue
+        if re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+", line):
+            protected.add(index)
+            lazy_container = True
+            continue
+        if indent_columns(line) >= 4:
+            protected.add(index)
+    return protected
+
+
+def _split_authored_card_blocks(text: str) -> list[str]:
+    """Split concatenated ``TITLE:`` card drafts without requiring ``---``.
+
+    Heartbeat prompts ask for one directive block per card, but models can
+    occasionally omit the separator between two otherwise-valid blocks.  In
+    that shape the first card's OPTIONS line is no longer trailing, so treating
+    the whole response as one card leaks authoring syntax and merges two
+    decisions.  A second TITLE line is an unambiguous new-card boundary.
+    """
+    raw = str(text or "")
+    lines = raw.splitlines()
+    protected = _markdown_protected_lines(lines)
+    title_positions = [
+        index for index, line in enumerate(lines)
+        if index not in protected and _ANY_TITLE_LINE_RE.match(line)
+    ]
+
+    if len(title_positions) < 2:
+        return [raw]
+
+    prefix = lines[:title_positions[0]]
+    blocks: list[str] = []
+    for offset, start in enumerate(title_positions):
+        end = (title_positions[offset + 1]
+               if offset + 1 < len(title_positions) else len(lines))
+        block_lines = list(lines[start:end])
+        if offset == 0 and any(line.strip() for line in prefix):
+            # Preserve a natural preamble without letting it hide the first
+            # authored title from _extract_title_line.
+            block_lines = [block_lines[0], *prefix, *block_lines[1:]]
+        blocks.append("\n".join(block_lines).strip())
+    return blocks
+
+
+def _scrub_embedded_authoring_directives(text: str) -> str:
+    """Remove malformed directives at the proactive model-output boundary.
+
+    Code fences and quoted material are content and remain byte-for-byte. This
+    helper is intentionally not used by generic ``create`` callers such as
+    mail or research ingestion.
+    """
+    lines = str(text or "").splitlines()
+    protected = _markdown_protected_lines(lines)
+    cleaned: list[str] = []
+    for index, line in enumerate(lines):
+        if index in protected:
+            cleaned.append(line)
+            continue
+        if _ANY_OPTIONS_LINE_RE.match(line):
+            continue
+        if _ANY_RECOMMEND_LINE_RE.match(line):
+            continue
+        title_match = _ANY_TITLE_LINE_RE.match(line)
+        if title_match:
+            value = title_match.group(1).strip()
+            if value:
+                cleaned.append(f"**{value}**")
+        else:
+            cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def parse_authored_cards(text: str) -> list[dict]:
+    """Parse model-authored card prose into isolated, cleaned card drafts.
+
+    This is the single parser for direct model post-hooks, proactive prose,
+    and legacy rich-card adoption. Callers with a one-card contract use the
+    first result; batch-capable callers may render every result.
+    """
+    parsed: list[dict] = []
+    for block in _split_authored_card_blocks(str(text or "")):
+        title, remainder = _extract_title_line(block)
+        remainder, recommend = _extract_recommendation(remainder)
+        body, options = _extract_inline_options(remainder)
+        body = _scrub_embedded_authoring_directives(body)
+        parsed.append({
+            "title": title,
+            "body": body,
+            "options": options,
+            "recommend": recommend,
+        })
+    return parsed
+
+
 def _extract_recommendation(text: str) -> tuple[str, dict | None]:
     """Split a ``RECOMMEND: <label> — <why>`` line off LLM-authored prose.
 
@@ -1446,10 +1630,13 @@ def _extract_recommendation(text: str) -> tuple[str, dict | None]:
     user cannot audit is just an instruction wearing a suggestion's clothes.
     """
     lines = str(text or "").splitlines()
+    protected = _markdown_protected_lines(lines)
     seen = 0
     for idx in range(len(lines) - 1, -1, -1):
         if not lines[idx].strip():
             continue
+        if idx in protected:
+            return text, None
         seen += 1
         match = _RECOMMEND_LINE_RE.match(lines[idx])
         if match:
@@ -1461,6 +1648,12 @@ def _extract_recommendation(text: str) -> tuple[str, dict | None]:
                 return body, None
             return body, {"label": label[:MAX_OPTION_LABEL_CHARS],
                           "why": why[:MAX_RECOMMEND_WHY_CHARS]}
+        if _ANY_RECOMMEND_LINE_RE.match(lines[idx]):
+            # Malformed is still authoring syntax. Remove a trailing empty
+            # directive so a valid OPTIONS immediately above remains the last
+            # meaningful line and keeps its buttons.
+            body = "\n".join(lines[:idx] + lines[idx + 1:]).rstrip()
+            return body, None
         if seen >= 3:
             break
     return text, None
@@ -1784,7 +1977,9 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            dedup_key: str = "",
            attention: str = "",
            review_at: str = "",
-           recommend: dict | None = None) -> tuple[str, bool]:
+           recommend: dict | None = None,
+           authoring_protocol: bool = False,
+           authoring_audit_text: str | None = None) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and route it.
 
     Returns ``(memorial_id, accepted)``. Accepted means the memorial is
@@ -1803,25 +1998,18 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     """
     _maybe_rotate()
     source, title, body = str(source), str(title), str(body)
-    # TITLE:/OPTIONS: are authoring directives for the model, never content.
-    # Stripping them is unconditional and lives HERE, at the one boundary every
-    # card passes through, because attaching it to a particular entry path is
-    # what leaked it four times (audit P0 #268/#276/#282/#285, 7/22–7/27):
-    #   - a caller passing explicit options skipped the OPTIONS strip entirely
-    #     (intentions closure cards shipped the raw line);
-    #   - adopt_card builds its body from card elements and never ran either
-    #     extractor, so directly-built rich cards (daily-reflect) shipped both.
-    # Whose buttons win is a SEPARATE decision from whether the residue is
-    # removed: an explicit caller still overrides the parsed line below.
-    # 票拟 comes off first: it may sit either side of OPTIONS, and the OPTIONS
-    # parser only inspects the LAST non-empty line — a trailing RECOMMEND would
-    # otherwise cost the card its authored buttons.
-    body, parsed_recommend = _extract_recommendation(body)
-    body, inline_options = _extract_inline_options(body)
-    leading_title, stripped_body = _extract_title_line(body)
-    if leading_title:
-        body = stripped_body
-        if not str(title).strip():
+    # Parse model authoring syntax only at an explicit authoring boundary.
+    # Generic callers carry mail, research and network quotations, where a
+    # leading TITLE or trailing OPTIONS/RECOMMEND may be legitimate content.
+    parsed_recommend = None
+    inline_options = None
+    if authoring_protocol and authoring_audit_text is None:
+        authored = parse_authored_cards(body)[0]
+        body = str(authored["body"])
+        parsed_recommend = authored["recommend"]
+        inline_options = authored["options"]
+        leading_title = str(authored["title"])
+        if leading_title and not str(title).strip():
             title = leading_title
     if source in PRESET_LOCKED_SOURCES:
         # The model imitating historical cards must not displace the preset
@@ -1872,7 +2060,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     ev = {"ev": "create", "id": mid, "ts": ts, "epoch": int(time.time()),
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context),
-          "attention": attention, "review_surface": review_at}
+          "attention": attention, "review_surface": review_at,
+          "authoring_protocol": bool(authoring_protocol)}
+    if authoring_audit_text is not None:
+        ev["authoring_audit_text"] = str(authoring_audit_text)
     # An explicit caller outranks the parsed line, same precedence the options
     # and title directives already follow.
     final_recommend = _normalize_recommendation(recommend or parsed_recommend, opts)
@@ -1983,6 +2174,42 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
                                        "value": dict(action["value"])})
 
     body = "\n\n".join(body_parts).strip()
+    text_elements: list[tuple[int, str, list[str]]] = []
+    for element_index, element in enumerate(card.get("elements", [])):
+        element_text = str(element.get("text", {}).get("content", ""))
+        if element_text:
+            text_elements.append((
+                element_index, element_text,
+                _split_authored_card_blocks(element_text)))
+    if sum(len(blocks) for _, _, blocks in text_elements) > 1:
+        outputs: list[str] = []
+        elements = card.get("elements", [])
+        for text_offset, (element_index, _, blocks) in enumerate(text_elements):
+            next_text_index = (
+                text_elements[text_offset + 1][0]
+                if text_offset + 1 < len(text_elements) else len(elements))
+            for authored_block in blocks:
+                text_element = copy.deepcopy(elements[element_index])
+                text_element["text"]["content"] = authored_block
+                block_elements = [text_element]
+                # Actions following a one-block text element belong to that
+                # element. If one text element itself contains multiple card
+                # drafts, callback ownership is unknowable: fail closed and let
+                # each draft's own OPTIONS become safe suggested replies.
+                if len(blocks) == 1:
+                    block_elements.extend(copy.deepcopy(
+                        elements[element_index + 1:next_text_index]))
+                else:
+                    text_element.pop("actions", None)
+                block_card = copy.deepcopy(card)
+                block_card["elements"] = block_elements
+                adopted = adopt_card(
+                    source, json.dumps(block_card, ensure_ascii=False),
+                    context=context, suppress_accepted=suppress_accepted,
+                    skip_ledger_only=skip_ledger_only)
+                if adopted:
+                    outputs.append(adopted)
+        return "\n".join(outputs)
     title = _clean_adopted_title(header, source)
     # A task that builds its own rich card still writes TITLE:/OPTIONS: — they
     # are model authoring directives, not content, and this path never ran the
@@ -2021,6 +2248,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         mid, _ = create(
             source=source or "heartbeat", title=title, body=matter,
             options=options, recommend=adopted_recommend,
+            authoring_protocol=True,
             preset=None if (has_native_action or inline_options)
             else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
@@ -2049,6 +2277,8 @@ def _extract_title_line(text: str) -> tuple[str, str]:
     """
     lines = text.splitlines()
     if not lines:
+        return "", text
+    if 0 in _markdown_protected_lines(lines):
         return "", text
     m = _TITLE_LINE_RE.match(lines[0])
     if not m:
@@ -2162,13 +2392,26 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         text = strip_task_framing(text)
         if not text:
             return
+        authored_blocks = _split_authored_card_blocks(text)
+        if len(authored_blocks) > 1:
+            print(f"memorial split: {single_source} concatenated directives → "
+                  f"{len(authored_blocks)} cards", file=sys.stderr)
+            for authored_block in authored_blocks:
+                prose.extend(authored_block.splitlines())
+                flush_prose()
+            return
         explicit_title, text = _extract_title_line(text)
         if not text:
             return
         # Buttons follow the card: an OPTIONS line authored by the task wins;
         # otherwise fall back to what this source is usually asking for, and
         # only then to「已阅」.
+        # RECOMMEND may legally follow OPTIONS. Remove it first so the
+        # trailing-line OPTIONS parser still sees the authored buttons, then
+        # carry the recommendation explicitly into create().
+        text, authored_recommend = _extract_recommendation(text)
         body, inline_options = _extract_inline_options(text)
+        body = _scrub_embedded_authoring_directives(body)
         preset = (None if inline_options
                   else SOURCE_DEFAULT_PRESET.get(single_source, "fyi"))
         # 一张卡一件事 (REQ-117): the prompt contract is the first line of
@@ -2186,7 +2429,9 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             else:
                 chunk_title, chunk_body = _title_for_chunk(chunk, single_source)
             mid, _ = create(single_source, chunk_title, chunk_body,
-                            options=inline_options, preset=preset, send=False,
+                            options=inline_options, preset=preset,
+                            recommend=authored_recommend,
+                            authoring_protocol=True, send=False,
                             attention=(ATTENTION_ALERT
                                        if _looks_like_alert(chunk_body)
                                        and not inline_options and preset == "fyi"
@@ -2198,15 +2443,49 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                 continue
             rendered.append(card_json(mid))
 
-    for raw_line in str(output).splitlines():
+    raw_output = str(output)
+    output_lines = raw_output.splitlines()
+    # One standalone legacy card remains backward-compatible. In mixed prose,
+    # executable cards require the explicit CARD: envelope so Markdown examples
+    # and lazy blockquote continuations cannot acquire live callbacks.
+    try:
+        standalone_card = json.loads(raw_output.strip())
+    except (json.JSONDecodeError, TypeError, ValueError):
+        standalone_card = None
+    first_nonempty = next(
+        (line for line in output_lines if line.strip()), "")
+    if (first_nonempty == first_nonempty.lstrip(" \t")
+            and isinstance(standalone_card, dict)
+            and "config" in standalone_card and "elements" in standalone_card):
+        output_lines = ["CARD:" + json.dumps(standalone_card,
+                                              ensure_ascii=False)]
+    protected_output_lines = _markdown_protected_lines(output_lines)
+    dropping_bad_card = False
+    for line_index, raw_line in enumerate(output_lines):
         line = raw_line.strip()
-        if line == "---":
+        protocol_line = line_index not in protected_output_lines
+        if dropping_bad_card:
+            if protocol_line and line == "---":
+                dropping_bad_card = False
+            continue
+        if protocol_line and line == "---":
             flush_prose()
             continue
-        card_raw = line[5:] if line.startswith("CARD:") else line
-        try:
-            card = json.loads(card_raw) if card_raw else None
-        except (json.JSONDecodeError, TypeError, ValueError):
+        is_card_envelope = line.startswith("CARD:")
+        card_raw = line[5:] if is_card_envelope else ""
+        # CARD is an executable envelope, not inline Markdown. It can only
+        # occupy its own top-level block; a preceding quote/list/prose line
+        # makes it content and therefore non-executable.
+        can_execute_card = (
+            protocol_line and is_card_envelope
+            and not any(part.strip() for part in prose)
+        )
+        if can_execute_card:
+            try:
+                card = json.loads(card_raw) if card_raw else None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                card = None
+        else:
             card = None
         if isinstance(card, dict) and "config" in card and "elements" in card:
             flush_prose()
@@ -2226,6 +2505,11 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                 )
             if adopted:
                 rendered.append(adopted)
+        elif is_card_envelope and protocol_line:
+            # Fail closed: malformed or context-bound internal envelopes are
+            # never turned into a user-visible prose card.
+            dropping_bad_card = True
+            continue
         elif line:
             prose.append(raw_line)
     flush_prose()

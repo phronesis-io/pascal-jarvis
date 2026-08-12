@@ -372,6 +372,7 @@ def test_exercise_week_post_renders_one_card_one_matter(tmp_path):
     events = [json.loads(l) for l in ledger.read_text().splitlines()]
     assert events[0]["source"] == "exercise-week"
     assert events[0]["title"] == "本周运动"
+    assert events[0]["authoring_protocol"] is True
     # Week stamped → second run same week emits nothing
     r2 = _run_exweek_post(body, tmp_path)
     assert r2.stdout.strip() == ""
@@ -394,6 +395,15 @@ def test_exercise_week_post_falls_back_to_deterministic_body(tmp_path):
     dumped = r.stdout
     assert "本周运动 1 次" in dumped
     assert "游泳×1" in dumped
+
+
+def test_exercise_week_post_strips_model_authoring_directives(tmp_path):
+    r = _run_exweek_post(
+        "TITLE: 模型标题\n本周动了两次。\nOPTIONS: 甲 | 乙", tmp_path)
+    assert r.returncode == 0, r.stderr
+    event = json.loads((tmp_path / "memorials.jsonl").read_text().splitlines()[0])
+    assert event["body"] == "本周动了两次。"
+    assert "TITLE:" not in event["body"] and "OPTIONS:" not in event["body"]
 
 
 def test_exercise_week_post_silent_on_sentinel(tmp_path):

@@ -44,9 +44,12 @@ def _annotate_card_source(message: str, task_name: str) -> str:
         stripped = raw_line.strip()
         prefix = "CARD:" if stripped.startswith("CARD:") else ""
         payload = stripped[5:] if prefix else stripped
-        try:
-            card = json.loads(payload) if payload else None
-        except (json.JSONDecodeError, TypeError, ValueError):
+        if raw_line == raw_line.lstrip(" \t"):
+            try:
+                card = json.loads(payload) if payload else None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                card = None
+        else:
             card = None
         if isinstance(card, dict) and "config" in card and "elements" in card:
             card[_CARD_SOURCE_FIELD] = str(task_name)
@@ -1972,11 +1975,12 @@ You have access to the user's memory below. Use it to personalize your responses
         self.save_state(state)
 
         # Separate card JSON from plain text — they use different Lark send paths
-        cards = [m for m in user_messages if m.strip().startswith('{"config":')]
+        cards = [m for m in user_messages if m.startswith('{"config":')]
         texts = []
-        for m in user_messages:
-            m = m.strip()
-            if not m or m.startswith('{"config":'):
+        for raw_message in user_messages:
+            normalized_message = raw_message.strip()
+            m = normalized_message
+            if not m or raw_message.startswith('{"config":'):
                 continue
             # Safety net: never send raw JSON to user — strip JSON-looking
             # content. Judged on the fence-stripped form so '```json\n{...}\n```'
@@ -2036,11 +2040,15 @@ You have access to the user's memory below. Use it to personalize your responses
             if self.idle_judge and self._judge_is_idle_noise(m):
                 self._log(f"Haiku judge dropped idle-noise message: {m[:80]!r}")
                 continue
-            texts.append(m)
+            # Keep the original indentation. It is a trust boundary for CARD
+            # and JSON examples; stripping here would upgrade indented code to
+            # a top-level executable envelope downstream.
+            texts.append(
+                raw_message if m == normalized_message else m)
 
         combined_parts = []
         for card in cards:
-            combined_parts.append(f"CARD:{card.strip()}")
+            combined_parts.append(f"CARD:{card}")
         if texts:
             combined_parts.append("\n\n---\n\n".join(texts))
 

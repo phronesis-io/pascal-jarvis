@@ -140,6 +140,32 @@ def test_fenced_whole_json_message_blocked_without_husk(tmp_path, monkeypatch,
     assert any("Blocked raw JSON" in msg for _, msg in log_lines)
 
 
+def test_indented_card_json_example_is_not_executed(tmp_path, monkeypatch,
+                                                     log_lines):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: x\n")
+    raw = "    " + json.dumps({
+        "config": {}, "elements": [{"actions": [{
+            "text": {"content": "执行"},
+            "value": {"action": "dangerous-example"},
+        }]}],
+    }, ensure_ascii=False)
+    monkeypatch.setattr(runner, "claude_call", lambda p, timeout=None: raw)
+    assert runner.run_cycle(force=True) == ""
+
+
+def test_indented_card_envelope_keeps_its_code_indentation(
+        tmp_path, monkeypatch, log_lines):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: x\n")
+    raw = "    CARD:" + json.dumps({
+        "config": {}, "elements": [{"actions": [{
+            "text": {"content": "执行"},
+            "value": {"action": "dangerous-example"},
+        }]}],
+    }, ensure_ascii=False)
+    monkeypatch.setattr(runner, "claude_call", lambda p, timeout=None: raw)
+    assert runner.run_cycle(force=True).startswith("    CARD:")
+
+
 def test_embedded_json_husk_residue_suppressed(tmp_path, monkeypatch, log_lines):
     """>50% branch: when the non-JSON residue is only fence markers and
     punctuation, delivery is suppressed and the suppression is logged."""

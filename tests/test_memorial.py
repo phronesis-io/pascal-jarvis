@@ -1285,7 +1285,8 @@ def test_inline_options_become_buttons_and_leave_the_body(env):
     """A task-authored `OPTIONS:` line is the card's buttons, not its copy."""
     mid, _ = memorial.create(
         "intention-check", "NewsAPI 额度",
-        "额度这周到底。\nOPTIONS: 加钱 | 限流到月底 | 让它自然停")
+        "额度这周到底。\nOPTIONS: 加钱 | 限流到月底 | 让它自然停",
+        authoring_protocol=True)
 
     st = memorial.get_memorial(mid)
     assert [o["label"] for o in st["options"]] == ["加钱", "限流到月底", "让它自然停"]
@@ -1298,7 +1299,9 @@ def test_inline_options_become_buttons_and_leave_the_body(env):
 
 
 def test_inline_options_accept_chinese_label_and_fullwidth_separators(env):
-    mid, _ = memorial.create("mail", "t", "正文\n选项：通过｜拒绝／先问清楚")
+    mid, _ = memorial.create(
+        "heartbeat", "t", "正文\n选项：通过｜拒绝／先问清楚",
+        authoring_protocol=True)
     assert [o["label"] for o in memorial.get_memorial(mid)["options"]] == [
         "通过", "拒绝", "先问清楚"]
 
@@ -1315,7 +1318,9 @@ def test_options_line_only_counts_when_trailing(env):
 def test_inline_options_are_capped_and_clipped(env):
     labels = " | ".join(["选项" + str(i) for i in range(1, 8)])
     long_label = "这是一个非常非常冗长以至于手机上根本显示不下的按钮文案"
-    mid, _ = memorial.create("mail", "t", f"正文\nOPTIONS: {long_label} | {labels}")
+    mid, _ = memorial.create(
+        "heartbeat", "t", f"正文\nOPTIONS: {long_label} | {labels}",
+        authoring_protocol=True)
     opts = memorial.get_memorial(mid)["options"]
     assert len(opts) == memorial.MAX_INLINE_OPTIONS
     assert len(opts[0]["label"]) == memorial.MAX_OPTION_LABEL_CHARS
@@ -1323,7 +1328,8 @@ def test_inline_options_are_capped_and_clipped(env):
 
 def test_reply_tap_is_injected_first_person_and_reads_back_as_speech(env):
     mid, _ = memorial.create("intention-check", "NewsAPI 额度",
-                             "正文\nOPTIONS: 加钱 | 限流")
+                             "正文\nOPTIONS: 加钱 | 限流",
+                             authoring_protocol=True)
     payload = memorial.decide(mid, "r1")
 
     assert payload["toast"]["type"] == "success"

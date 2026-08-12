@@ -140,6 +140,13 @@ def test_mixed_heartbeat_cards_keep_exact_producer_source(
     }
 
 
+def test_heartbeat_source_annotation_preserves_indented_json_example():
+    from core.heartbeat import _annotate_card_source
+
+    example = '    {"config":{},"elements":[]}'
+    assert _annotate_card_source(example, "checkin") == example
+
+
 def test_signal_filter_searches_body_and_has_named_eigenflux_source():
     pytest.importorskip("nicegui", exc_type=ImportError)
     from dashboard.pages.signals import filter_signals

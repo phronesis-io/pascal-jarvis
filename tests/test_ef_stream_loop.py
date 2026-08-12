@@ -91,6 +91,45 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
     assert accepted is True and visible is True
 
 
+def test_memorial_model_analysis_keeps_segmented_authoring_provenance(
+        monkeypatch, tmp_path):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return "mem_sent", True
+
+    monkeypatch.setattr(efsl.memorial, "create", create)
+    monkeypatch.setattr(efsl.memorial, "get_memorial",
+                        lambda mid: {"delivery_status": "delivered"})
+    efsl._deliver_memorial_and_mark(
+        "原文 OPTIONS: 只是引用\n\n💡 建议", ["evt3"], {}, "u1", [],
+        tmp_path / ".ef-seen", tmp_path, title="EigenFlux 消息",
+        authored_options=[{"key": "r1", "label": "回复"}],
+        authoring_audit_text="建议")
+    assert captured["authoring_protocol"] is True
+    assert captured["authoring_audit_text"] == "建议"
+    assert "OPTIONS: 只是引用" in captured["body"]
+
+
+def test_external_message_without_analysis_still_has_segmented_provenance(
+        monkeypatch, tmp_path):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return "mem_sent", True
+
+    monkeypatch.setattr(efsl.memorial, "create", create)
+    monkeypatch.setattr(efsl.memorial, "get_memorial",
+                        lambda mid: {"delivery_status": "delivered"})
+    efsl._deliver_memorial_and_mark(
+        "外部原文 HEARTBEAT_OK", ["evt4"], {}, "u1", [],
+        tmp_path / ".ef-seen", tmp_path, title="EigenFlux 消息")
+    assert captured["authoring_audit_text"] == ""
+    assert captured["authoring_protocol"] is True
+
+
 def test_queue_acceptance_does_not_depend_on_deadletter_sink(
         monkeypatch, tmp_path):
     def boom(*a, **k):
