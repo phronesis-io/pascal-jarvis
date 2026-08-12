@@ -96,6 +96,27 @@ def test_claude_session_limit_caught_even_under_card_header():
     assert looks_like_error(text, proactive=True) is True
 
 
+def test_claude_weekly_limit_caught_in_interactive_reply():
+    text = "You've hit your weekly limit · resets Aug 15 at 3am (Asia/Shanghai)"
+    assert looks_like_error(text) is True
+
+
+def test_claude_weekly_limit_caught_even_under_card_header():
+    text = "**Intent**\n\nYou've hit your weekly limit · resets Aug 15 at 3am"
+    assert looks_like_error(text, proactive=True) is True
+
+
+def test_account_limit_variants_share_provider_classifier():
+    assert looks_like_error("You have reached your weekly limit") is True
+    assert looks_like_error("Weekly usage limit reached") is True
+    assert looks_like_error(
+        "**Intent**\n\nWeekly usage limit reached", proactive=True
+    ) is True
+    assert looks_like_error(
+        "I verified that you've hit your weekly limit and fallback is active."
+    ) is False
+
+
 def test_substring_patterns_in_json():
     for p in ERROR_SUBSTRINGS:
         text = f'some prefix {p} and more text' + "x" * 50

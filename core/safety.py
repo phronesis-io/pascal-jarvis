@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re as _re
 
+from core.model_fallback import is_account_limit, is_account_limit_line
+
 # The heartbeat idle sentinel. When it appears ANYWHERE in a task's output,
 # the model decided this cycle should stay silent — any surrounding text is
 # leaked scratch work ("...nothing noteworthy.\n\nHEARTBEAT_OK", 2026-07-15
@@ -45,6 +47,10 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "usage limit",
     "You've hit your monthly spend limit",
     "You have hit your monthly spend limit",
+    "You've hit your weekly limit",
+    "You have hit your weekly limit",
+    "You've hit your daily limit",
+    "You have hit your daily limit",
     "monthly spend limit",
     "spend limit",
     "You've hit your session limit",
@@ -94,6 +100,10 @@ PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "You've hit your monthly spend limit",
     "You have hit your monthly spend limit",
     "monthly spend limit",
+    "You've hit your weekly limit",
+    "You have hit your weekly limit",
+    "You've hit your daily limit",
+    "You have hit your daily limit",
     "You've hit your session limit",
     "You have hit your session limit",
     "session limit",
@@ -123,11 +133,16 @@ def looks_like_error(text: str, proactive: bool = False) -> bool:
         stripped = line.lstrip()
         if any(stripped.startswith(p) for p in ERROR_PATTERNS):
             return True
+        if is_account_limit_line(stripped):
+            return True
     # Check substring patterns (for errors embedded in JSON)
     if any(p in head for p in ERROR_SUBSTRINGS):
         return True
-    if proactive and any(p in head for p in PROACTIVE_ERROR_SUBSTRINGS):
-        return True
+    if proactive:
+        if any(p in head for p in PROACTIVE_ERROR_SUBSTRINGS):
+            return True
+        if is_account_limit(head):
+            return True
     return False
 
 

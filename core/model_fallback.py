@@ -73,7 +73,13 @@ _MODEL_ERROR = re.compile(
 # many requests / 429" too, and tripping a 30-min sticky gate on a transient
 # 429 would needlessly divert whole processes to the backup provider.
 _HARD_SPEND = re.compile(
-    r"monthly spend limit|spend limit|usage limit (reached|exceeded)"
+    r"monthly spend limit|spend limit"
+    r"|you(?:'ve| have) (?:hit|reached|exceeded) "
+    r"(?:your )?(?:daily|weekly|monthly) "
+    r"(?:usage )?limit"
+    r"|(?:daily|weekly|monthly) (?:usage )?limit "
+    r"(?:has been )?(?:reached|exceeded)"
+    r"|usage limit (reached|exceeded)"
     r"|credit balance is too low|insufficient credits",
     re.IGNORECASE)
 _SESSION_LIMIT = re.compile(
@@ -108,6 +114,17 @@ def limit_reason(stderr: str) -> str | None:
 def is_account_limit(stderr: str) -> bool:
     """True for account-wide limits that require immediate provider failover."""
     return limit_reason(stderr) is not None
+
+
+def is_account_limit_line(text: str) -> bool:
+    """True when an account-limit error starts the supplied output line."""
+    if not text:
+        return False
+    for pattern in (_SESSION_LIMIT, _HARD_SPEND):
+        match = pattern.search(text)
+        if match and not text[:match.start()].strip():
+            return True
+    return False
 
 
 def is_spend_limit(stderr: str) -> bool:
@@ -169,8 +186,8 @@ _TRIP_NOTES = {
         "额度重置后会自动探测并切回。"
     ),
     "spend_limit": (
-        "Claude 主通道本月额度用完了，我已自动切到备用通道，功能不受影响。"
-        "想恢复主通道可以在 claude.ai/settings/usage 提额度。"
+        "Claude 主通道额度已达到上限，我已自动切到备用通道，功能不受影响。"
+        "额度重置或调整后会自动探测并切回。"
     ),
 }
 _CLEAR_NOTE = "主通道恢复了，已切回。"
