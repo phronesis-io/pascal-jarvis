@@ -81,7 +81,7 @@ def main() -> int:
         from core import memorial
         mem_id, _ = memorial.create(
             source="exercise-week", title="本周运动", body=body,
-            options=OPTIONS, send=False,
+            options=OPTIONS, authoring_protocol=True, send=False,
             context="每周日晚的运动小结（REQ-116）：数据来自日历运动事件 + 手记运动条目，纯记录不说教。",
         )
         print(memorial.card_json(mem_id))

@@ -439,7 +439,7 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
             mid, _ = memorial.create(
                 source="intentions", title=title, body=combined,
                 options=_memorial_closure_options(spec["parent"]),
-                send=False)
+                authoring_protocol=True, send=False)
             print(memorial.card_json(mid))
             return
         except Exception as e:

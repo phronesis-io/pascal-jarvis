@@ -224,7 +224,11 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
 
 
 def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
-                               title: str) -> tuple[list, bool, bool]:
+                               title: str,
+                               authored_options: list[dict] | None = None,
+                               authored_recommend: dict | None = None,
+                               authoring_audit_text: str | None = "",
+                               ) -> tuple[list, bool, bool]:
     """Deliver an EigenFlux event through the memorial card surface.
 
     Returns ``(seen, accepted, visible_now)``. ``accepted`` includes a card
@@ -235,9 +239,14 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
     """
     try:
         mid, _ = memorial.create(
-            source="eigenflux", title=title, body=msg, preset="fyi",
+            source="eigenflux", title=title, body=msg,
+            options=authored_options,
+            preset=None if authored_options else "fyi",
+            recommend=authored_recommend,
             context=json.dumps(metadata or {}, ensure_ascii=False)[:1500],
             matter_id=str((metadata or {}).get("matter_id", "")),
+            authoring_protocol=authoring_audit_text is not None,
+            authoring_audit_text=authoring_audit_text,
         )
         state = memorial.get_memorial(mid) or {}
         delivery = state.get("delivery_status", "")
@@ -573,8 +582,21 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                         stop,
                     ) or ""
                 body = msg
+                authored_options = None
+                authored_recommend = None
+                # Empty still means "segmented external text": literal protocol
+                # tokens in the network message are content, not Jarvis residue.
+                authoring_audit_text = ""
                 if analysis and "HEARTBEAT_OK" not in analysis:
-                    body = f"{msg}\n\n💡 {analysis}"
+                    authored = memorial.parse_authored_cards(analysis)[0]
+                    analysis_body = str(authored["body"])
+                    analysis_title = str(authored["title"])
+                    if analysis_title and analysis_title not in analysis_body:
+                        analysis_body = f"**{analysis_title}**\n{analysis_body}".strip()
+                    body = f"{msg}\n\n💡 {analysis_body}" if analysis_body else msg
+                    authored_options = authored["options"]
+                    authored_recommend = authored["recommend"]
+                    authoring_audit_text = analysis_body
                 m = re.search(r"\*\*(.+?)\*\*", msg)
                 title = f"{m.group(1)} 来信" if m else "EigenFlux 消息"
                 metadata = extract_metadata(line)
@@ -597,7 +619,10 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     log("ef-stream", f"Matter routing skipped: {e}", level="warn")
                 seen, accepted, _ = _deliver_memorial_and_mark(
                     body, ids, metadata, user_id,
-                    seen, seen_file, jd, title=title)
+                    seen, seen_file, jd, title=title,
+                    authored_options=authored_options,
+                    authored_recommend=authored_recommend,
+                    authoring_audit_text=authoring_audit_text)
                 if not _can_continue_after_delivery(
                     proc, accepted=accepted
                 ):

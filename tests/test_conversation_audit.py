@@ -384,10 +384,16 @@ def test_timestamped_shell_errors_still_flag_restart_regressions(tmp_path):
 # raw OPTIONS line)
 # ===========================================================================
 
-def _ledger_line(ts, body, title="卡", source="checkin", mid="mem_1"):
-    return json.dumps({"ev": "create", "id": mid, "ts": ts, "title": title,
-                       "body": body, "source": source, "options": [],
-                       "context": "", "epoch": 1}, ensure_ascii=False)
+def _ledger_line(ts, body, title="卡", source="checkin", mid="mem_1",
+                 authoring_protocol=None, authoring_audit_text=None):
+    row = {"ev": "create", "id": mid, "ts": ts, "title": title,
+           "body": body, "source": source, "options": [],
+           "context": "", "epoch": 1}
+    if authoring_protocol is not None:
+        row["authoring_protocol"] = authoring_protocol
+    if authoring_audit_text is not None:
+        row["authoring_audit_text"] = authoring_audit_text
+    return json.dumps(row, ensure_ascii=False)
 
 
 def _paths(tmp_path):
@@ -520,6 +526,55 @@ def test_card_leak_task_framing_ignores_cjk_timeline(tmp_path):
                      "issue_type='card_template_leak'", (run_id,)).fetchone()[0]
     conn.close()
     assert n == 0
+
+
+def test_card_leak_ignores_options_inside_markdown_examples(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    bodies = [
+        "协议例子：\n```text\nOPTIONS: 甲 | 乙\n```",
+        "对方原文：\n> OPTIONS: 甲 | 乙",
+        "缩进代码：\n    OPTIONS: 甲 | 乙",
+        "空行后的缩进代码：\n\n    OPTIONS: 甲 | 乙",
+        "协议例子：\n```text\nRECOMMEND: 甲 — 示例\nTITLE: 示例\n```",
+        '卡片例子：\n```json\n{"response":"示例"}\n```',
+    ]
+    (tmp_path / "memorials.jsonl").write_text(
+        "\n".join(_ledger_line(ts, body, mid=f"m{i}")
+                  for i, body in enumerate(bodies)) + "\n",
+        encoding="utf-8",
+    )
+    paths = _paths(tmp_path)
+    run_id = audit.run_audit(paths, hours=24)
+    conn = audit.connect(paths.db_path)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM audit_issues WHERE run_id=? AND "
+        "issue_type='card_template_leak'", (run_id,)).fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_card_leak_respects_authoring_provenance(tmp_path):
+    ts = now_local().strftime("%Y-%m-%d %H:%M")
+    body = ("TITLE: 引用标题\n正文\nOPTIONS: 引用选项\n"
+            'HEARTBEAT_OK\n{"response":"引用 JSON"}')
+    (tmp_path / "memorials.jsonl").write_text("\n".join([
+        _ledger_line(ts, body, source="mail", mid="quoted",
+                     authoring_protocol=False),
+        _ledger_line(ts, body, source="heartbeat", mid="leaked",
+                     authoring_protocol=True),
+        _ledger_line(ts, body, source="eigenflux", mid="segmented",
+                     authoring_protocol=True,
+                     authoring_audit_text="这段本地分析是干净的"),
+    ]) + "\n", encoding="utf-8")
+    paths = _paths(tmp_path)
+    run_id = audit.run_audit(paths, hours=24)
+    conn = audit.connect(paths.db_path)
+    rows = conn.execute(
+        "SELECT evidence FROM audit_issues WHERE run_id=? AND "
+        "issue_type='card_template_leak'", (run_id,)).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert "memorial=leaked" in rows[0]["evidence"]
 
 
 def test_resolve_by_id_closes_twin_rows(tmp_path):

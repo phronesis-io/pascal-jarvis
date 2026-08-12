@@ -94,7 +94,8 @@ def test_recommendation_renders_and_makes_its_option_primary(env):
         body=("这条广播已核对三处来源。\n"
               "OPTIONS: 同意 | 不采纳\n"
               "RECOMMEND: 同意 — 三个信源已复现，撤回成本一条命令"),
-        attention=memorial.ATTENTION_DECISION, send=False)
+        attention=memorial.ATTENTION_DECISION,
+        authoring_protocol=True, send=False)
     state = memorial.get_memorial(mid)
     assert state["recommend"]["label"] == "同意"
     assert state["recommend"]["why"] == "三个信源已复现，撤回成本一条命令"
@@ -116,7 +117,8 @@ def test_recommendation_without_a_reason_is_dropped(env):
     mid, _ = memorial.create(
         source="eigenflux-publish", title="t",
         body="正文\nOPTIONS: 同意 | 不采纳\nRECOMMEND: 同意",
-        attention=memorial.ATTENTION_DECISION, send=False)
+        attention=memorial.ATTENTION_DECISION,
+        authoring_protocol=True, send=False)
     state = memorial.get_memorial(mid)
     assert state["recommend"] is None
     assert "RECOMMEND" not in state["body"].upper()
@@ -126,7 +128,8 @@ def test_recommendation_naming_a_missing_option_is_dropped(env):
     mid, _ = memorial.create(
         source="eigenflux-publish", title="t",
         body="正文\nOPTIONS: 同意 | 不采纳\nRECOMMEND: 稍后再说 — 理由充分",
-        attention=memorial.ATTENTION_DECISION, send=False)
+        attention=memorial.ATTENTION_DECISION,
+        authoring_protocol=True, send=False)
     assert memorial.get_memorial(mid)["recommend"] is None
 
 
@@ -135,7 +138,8 @@ def test_trailing_recommendation_does_not_cost_the_card_its_buttons(env):
     mid, _ = memorial.create(
         source="eigenflux-publish", title="t",
         body="正文\nOPTIONS: 同意 | 不采纳\nRECOMMEND: 同意 — 因为证据齐了",
-        attention=memorial.ATTENTION_DECISION, send=False)
+        attention=memorial.ATTENTION_DECISION,
+        authoring_protocol=True, send=False)
     labels = [o["label"] for o in memorial.get_memorial(mid)["options"]]
     assert labels == ["同意", "不采纳"]
 
@@ -144,7 +148,8 @@ def test_recommendation_disappears_after_the_decision(env):
     mid, _ = memorial.create(
         source="eigenflux-publish", title="t",
         body="正文\nOPTIONS: 同意 | 不采纳\nRECOMMEND: 同意 — 因为证据齐了",
-        attention=memorial.ATTENTION_DECISION, send=False)
+        attention=memorial.ATTENTION_DECISION,
+        authoring_protocol=True, send=False)
     memorial.decide(mid, "r1", owner_authenticated=True)
     import json
     card = memorial._decided_card(memorial.get_memorial(mid))

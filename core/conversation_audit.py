@@ -709,18 +709,22 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
 # cards so the NEXT escape shows up as an open P0 by itself.
 _CARD_LEAK_SIGNATURES: list[tuple[str, re.Pattern]] = [
     ("sentinel_token", re.compile(r"HEARTBEAT_OK")),
-    ("raw_json_envelope", re.compile(r'^\s*\{"(?:response|tasks)"', re.M)),
+    ("raw_json_envelope", re.compile(
+        r'^[ \t]*\{"(?:response|tasks)"', re.M)),
     # ASCII-only tail — same rationale as safety._FRAMING_LINE_RE: a \S tail
     # would flag every card quoting a "[ts] 中文" timeline line as a leak.
     ("task_framing", re.compile(
-        r"^\s*(?:===\s*TASK[^=\n]*===|\[[A-Z][A-Z_ -]{1,24}\]"
-        r"|\[20\d\d-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?\]\s*[A-Za-z0-9_./-]{0,40})\s*$",
+        r"^[ \t]*(?:===\s*TASK[^=\n]*===|\[[A-Z][A-Z_ -]{1,24}\]"
+        r"|\[20\d\d-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?\][ \t]*[A-Za-z0-9_./-]{0,40})[ \t]*$",
         re.M)),
     ("bare_send", re.compile(r"\A\s*send\s*\Z")),
-    ("raw_options_line", re.compile(r"^\s*(?:OPTIONS|选项)\s*[:：]", re.M)),
+    ("raw_options_line", re.compile(
+        r"^[ \t]*(?:OPTIONS|选项)\s*[:：]", re.M)),
+    ("raw_recommend_line", re.compile(
+        r"^[ \t]*(?:RECOMMEND|建议)\s*[:：]", re.M)),
+    ("raw_title_line", re.compile(
+        r"^[ \t]*(?:TITLE|标题)\s*[:：]", re.M)),
 ]
-
-
 def derive_card_leak_issues(conn: sqlite3.Connection, run_id: int,
                             jarvis_dir: Path, since: datetime) -> int:
     ledger = jarvis_dir / "memorials.jsonl"
@@ -740,9 +744,30 @@ def derive_card_leak_issues(conn: sqlite3.Connection, run_id: int,
         ts = _parse_ts(raw_ts if raw_ts.count(":") >= 2 else raw_ts + ":00")
         if ts is None or ts < since:
             continue
-        body = str(rec.get("body", ""))
+        body = str(rec.get(
+            "authoring_audit_text", rec.get("body", "")))
         for kind, pat in _CARD_LEAK_SIGNATURES:
-            m = pat.search(body)
+            # New ledger rows record whether the body crossed a model-authoring
+            # boundary. Protocol-shaped text in mail/research/network quotes is
+            # content regardless of which historical leak signature it matches.
+            # Legacy rows lack the field and remain fail-closed.
+            if rec.get("authoring_protocol") is False:
+                continue
+            matches = list(pat.finditer(body))
+            if matches:
+                # Template examples in fenced/indented code or blockquotes are
+                # content, not leaked card-author directives. Keep every
+                # line-based sentinel aligned with memorial's parser boundary.
+                try:
+                    from core.memorial import _markdown_protected_lines
+                    protected = _markdown_protected_lines(body.splitlines())
+                except Exception:
+                    protected = set()
+                matches = [
+                    match for match in matches
+                    if body[:match.start()].count("\n") not in protected
+                ]
+            m = matches[0] if matches else None
             if not m:
                 continue
             _add_issue(

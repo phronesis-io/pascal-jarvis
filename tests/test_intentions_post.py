@@ -174,6 +174,7 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys, tmp_p
     ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
     assert "intent_close" in ledger and "int_parent" in ledger
     assert '"via": "button"' in ledger
+    assert '"authoring_protocol": true' in ledger
 
 
 def test_two_intent_ask_keeps_legacy_combined_card(capsys):
