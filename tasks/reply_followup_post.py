@@ -43,9 +43,10 @@ def _run_auth_marker(text: str) -> str:
     if _AUTH_MARKER not in text:
         return text
     from core.actions import ActionProcessor
-    ap = ActionProcessor(jarvis_dir=memorial.JARVIS_DIR,
-                         memory_dir=memorial.JARVIS_DIR / "memory",
-                         jobs_dir=memorial.JARVIS_DIR / "jobs")
+    root = memorial.runtime_root()
+    ap = ActionProcessor(jarvis_dir=root,
+                         memory_dir=root / "memory",
+                         jobs_dir=root / "jobs")
     receipt = ap._do_lark_auth_login("")
     return (text.replace(_AUTH_MARKER, "").strip() + "\n" + receipt).strip()
 

@@ -46,6 +46,15 @@ def test_audit_ingests_logs_and_derives_issues(tmp_path):
     assert "Issues derived: 3" in report
 
 
+def test_default_paths_honor_jarvis_dir_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+
+    paths = audit.default_paths()
+
+    assert paths.jarvis_dir == tmp_path
+    assert paths.db_path == tmp_path / "data" / "conversation_audit.db"
+
+
 def test_report_can_be_written_from_cli(tmp_path, monkeypatch):
     log = tmp_path / "jarvis.log"
     log.write_text(

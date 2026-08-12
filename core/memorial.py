@@ -59,8 +59,16 @@ from core.card_split import split_matters
 from core.jsonl import read_jsonl
 from core.timeutil import now_local, now_local_str
 
-JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
-                                 Path(__file__).resolve().parent.parent))
+_DEFAULT_JARVIS_DIR = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", _DEFAULT_JARVIS_DIR))
+_IMPORTED_JARVIS_DIR = JARVIS_DIR
+
+
+def runtime_root() -> Path:
+    """Resolve state storage at call time, preserving module overrides."""
+    if Path(JARVIS_DIR) != _IMPORTED_JARVIS_DIR:
+        return Path(JARVIS_DIR)
+    return Path(os.environ.get("JARVIS_DIR") or _IMPORTED_JARVIS_DIR)
 
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
@@ -510,18 +518,18 @@ _ID_COUNTER = itertools.count(1)
 
 
 def _ledger_path() -> Path:
-    return JARVIS_DIR / "memorials.jsonl"
+    return runtime_root() / "memorials.jsonl"
 
 
 def _pending_merge_path() -> Path:
     # bot.sh's bg-job merge channel: lines matching conv_key are prepended to
     # Pascal's next message and consumed (rewrite-keep-others). We only ever
     # append — same as bot.sh's own two writers.
-    return JARVIS_DIR / "jobs" / "pending_merge.jsonl"
+    return runtime_root() / "jobs" / "pending_merge.jsonl"
 
 
 def _outbox_path() -> Path:
-    return JARVIS_DIR / "heartbeat_outbox.jsonl"
+    return runtime_root() / "heartbeat_outbox.jsonl"
 
 
 @contextmanager
@@ -574,7 +582,7 @@ def _resolve_user_id() -> str:
         return uid
     try:
         from core.config import Config
-        return str(Config(JARVIS_DIR / "jarvis.yaml").lark.get("user_id", "") or "")
+        return str(Config(runtime_root() / "jarvis.yaml").lark.get("user_id", "") or "")
     except Exception:
         return ""
 
@@ -1282,7 +1290,7 @@ def _record_engagement(row: dict) -> None:
     try:
         row.setdefault("ts", now_local_str("%Y-%m-%d %H:%M"))
         row.setdefault("epoch", int(time.time()))
-        _append_line(JARVIS_DIR / "engagement_log.jsonl", row)
+        _append_line(runtime_root() / "engagement_log.jsonl", row)
     except Exception as e:
         print(f"memorial engagement log failed: {e}", file=sys.stderr)
 
@@ -1335,7 +1343,7 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
     # Compatibility audit only: SQLite delivery_envelopes is authoritative.
     # Avoid minting duplicate shadow rows when a caller re-submits the same
     # already-queued memorial.
-    queue_path = JARVIS_DIR / MEMORIAL_QUEUE_FILE
+    queue_path = runtime_root() / MEMORIAL_QUEUE_FILE
     try:
         if queue_path.exists() and any(
                 json.loads(line).get("memorial_id") == mid
@@ -1409,7 +1417,7 @@ def _deliver_opener(text: str, chat_id: str,
                           "bypass_dedup": True,
                           "dedup_text": f"{chat_id}\0{text}"},
             ),
-            root=JARVIS_DIR,
+            root=runtime_root(),
             transport=transport,
         )
         if result.state == "delivered":
@@ -1820,7 +1828,7 @@ def _deliver_existing(
                 "retry_existing": True,
             },
         ),
-        root=JARVIS_DIR,
+        root=runtime_root(),
         transport=transport,
     )
 
@@ -2526,10 +2534,11 @@ def _execute_action(
         return ""
     params = action.get("params") or {}
     raw = "|".join(f"{k}={v}" for k, v in params.items())
+    root = runtime_root()
     ap = ActionProcessor(
-        jarvis_dir=JARVIS_DIR,
-        memory_dir=os.environ.get("MEMORY_DIR", str(JARVIS_DIR / "memory")),
-        jobs_dir=os.environ.get("JV_JOBS_DIR", str(JARVIS_DIR / "jobs")),
+        jarvis_dir=root,
+        memory_dir=os.environ.get("MEMORY_DIR", str(root / "memory")),
+        jobs_dir=os.environ.get("JV_JOBS_DIR", str(root / "jobs")),
         log_file=os.environ.get("JV_LOG_FILE", ""),
         owner_authenticated=owner_authenticated,
     )
@@ -2769,7 +2778,7 @@ def decide(
     st = claimed_from or st
     try:
         from core.delivery import DeliveryPipeline
-        DeliveryPipeline(JARVIS_DIR).confirm_entity(
+        DeliveryPipeline(runtime_root()).confirm_entity(
             memorial_id=memorial_id, state="acted")
     except Exception as e:
         print(f"memorial delivery confirm failed: {e}", file=sys.stderr)
@@ -2960,7 +2969,7 @@ EXPLAIN_RETAKE_S = 600  # a claimed request older than this is retaken
 
 
 def _explain_queue_path() -> Path:
-    return JARVIS_DIR / "data" / EXPLAIN_QUEUE_FILE
+    return runtime_root() / "data" / EXPLAIN_QUEUE_FILE
 
 
 def confused(memorial_id: str) -> dict:
@@ -3034,7 +3043,7 @@ _TRIGGER_PATH = Path("/tmp/jarvis-heartbeat-trigger")
 
 
 def _reply_followup_queue_path() -> Path:
-    return JARVIS_DIR / "data" / REPLY_FOLLOWUP_QUEUE_FILE
+    return runtime_root() / "data" / REPLY_FOLLOWUP_QUEUE_FILE
 
 
 def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:

@@ -47,6 +47,8 @@ _PROTECTED_FILES = [
     # paths were not listed here.
     ROOT / "data" / "companion_voice.jsonl",
     ROOT / "data" / "companion_last_spoke",
+    ROOT / "data" / ".daily_plan_stamp",
+    ROOT / "data" / ".weekly_review_stamp",
 ]
 
 # A subset of the protected files are *live runtime state* that the production
@@ -68,6 +70,8 @@ _LIVE_RUNTIME_FILES = {
     ROOT / "data" / "jarvis.db",
     ROOT / "data" / "companion_voice.jsonl",
     ROOT / "data" / "companion_last_spoke",
+    ROOT / "data" / ".daily_plan_stamp",
+    ROOT / "data" / ".weekly_review_stamp",
 }
 
 
@@ -87,6 +91,45 @@ def _checksum(path: Path) -> str | None:
     if not path.exists():
         return None
     return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
+    """Cheaply detect writes outside the historical protected-file list.
+
+    Hashing the whole 49 MB runtime tree before every test would make the
+    suite unusable.  Metadata is enough to catch newly-created files and the
+    normal write/replace patterns used by Jarvis; the high-risk named files
+    above still receive content hashes.  We watch every top-level file plus
+    every entry under data/ and views/ so a new sidecar cannot silently fall
+    outside this guard again.
+    """
+    paths: set[Path] = set()
+    try:
+        paths.update(
+            entry for entry in ROOT.iterdir()
+            if entry.is_file() and entry.name != ".git"
+        )
+    except OSError:
+        pass
+    for directory in (ROOT / "data", ROOT / "views"):
+        if not directory.exists():
+            continue
+        paths.add(directory)
+        try:
+            paths.update(directory.rglob("*"))
+        except OSError:
+            pass
+    snapshot = {}
+    for path in paths:
+        if path in _PROTECTED_FILES:
+            continue
+        try:
+            stat = path.stat()
+            snapshot[path] = (
+                int(stat.st_mtime_ns), int(stat.st_size), int(stat.st_ino))
+        except OSError:
+            continue
+    return snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +174,7 @@ _FORGIVEN: list[str] = []
 def _guard_repo_files(_isolate_runtime_database, request):
     bot_was_live = _bot_is_running()
     before = {p: _checksum(p) for p in _PROTECTED_FILES}
+    tree_before = _metadata_snapshot()
     yield
     bot_live = None  # computed lazily, only if a mismatch shows up
     for p, old in before.items():
@@ -150,6 +194,23 @@ def _guard_repo_files(_isolate_runtime_database, request):
             f"PROTECTED FILE MODIFIED BY TEST: {p}\n"
             f"  before: {old}\n  after:  {new}\n"
             f"Check your fixtures — they must use tmp_path, not repo paths."
+        )
+    tree_after = _metadata_snapshot()
+    for p in sorted(set(tree_before) | set(tree_after), key=str):
+        old = tree_before.get(p)
+        new = tree_after.get(p)
+        if old == new:
+            continue
+        if not _strict_guard():
+            if bot_live is None:
+                bot_live = bot_was_live or _bot_is_running()
+            if bot_live:
+                _FORGIVEN.append(f"{p.relative_to(ROOT)}  ({request.node.nodeid})")
+                continue
+        raise AssertionError(
+            f"RUNTIME PATH MODIFIED BY TEST: {p}\n"
+            f"  before: {old}\n  after:  {new}\n"
+            "Inject JARVIS_DIR/root/tmp_path instead of writing into the repo."
         )
 
 

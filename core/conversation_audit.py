@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -106,7 +107,7 @@ class AuditPaths:
 
 
 def default_paths(jarvis_dir: Path | None = None) -> AuditPaths:
-    root = jarvis_dir or Path.cwd()
+    root = Path(jarvis_dir or os.environ.get("JARVIS_DIR") or Path.cwd())
     return AuditPaths(
         jarvis_dir=root,
         log_paths=[

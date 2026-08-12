@@ -27,8 +27,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+sys.path.insert(0, str(CODE_ROOT))
 
 from core.intent_lifecycle import mark_executed, mark_failed, get_intent
 from core.intent_closure import record_closure, note_closure_touch
@@ -39,7 +40,7 @@ from core.intent_scheduler import (
 from core.card import build_card
 from core.safety import parse_json_response
 
-CARD_LEDGER = ROOT / "data" / ".intent_card_ledger.jsonl"
+CARD_LEDGER = JARVIS_DIR / "data" / ".intent_card_ledger.jsonl"
 
 
 # Bare status / ack tokens an internal "prompt"-type intent may report as its

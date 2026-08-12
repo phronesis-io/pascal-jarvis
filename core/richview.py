@@ -24,17 +24,18 @@ Usage:
 """
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
 
 from core.config import Config
 
-ROOT = Path(__file__).resolve().parent.parent
-_config = Config(ROOT / "jarvis.yaml")
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+_config = Config(JARVIS_DIR / "jarvis.yaml")
 
-VIEWS_DIR = ROOT / "views"
-VIEWS_DIR.mkdir(exist_ok=True)
+VIEWS_DIR = JARVIS_DIR / "views"
 
 # Max views to keep (FIFO cleanup)
 MAX_VIEWS = 200
@@ -68,6 +69,7 @@ def publish(
     }
 
     # Write view data
+    VIEWS_DIR.mkdir(parents=True, exist_ok=True)
     view_file = VIEWS_DIR / f"{view_id}.json"
     try:
         view_file.write_text(json.dumps(view, ensure_ascii=False, indent=2))

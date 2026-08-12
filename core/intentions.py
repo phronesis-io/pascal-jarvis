@@ -21,6 +21,7 @@ Architecture:
 
 import fcntl
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -31,7 +32,8 @@ from pathlib import Path
 
 from core.timeutil import now_local, now_local_str
 
-ROOT = Path(__file__).parent.parent
+CODE_ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
 
 # Sidecar state files (repo-root data/, all writers use atomic tmp+rename)
 INFLIGHT_FILE = ROOT / "data" / ".intention_inflight.json"
@@ -254,7 +256,7 @@ def _get_db():
     global _sys_path_added
     if not _sys_path_added:
         import sys
-        sys.path.insert(0, str(ROOT))
+        sys.path.insert(0, str(CODE_ROOT))
         _sys_path_added = True
     from dashboard.db import get_db
     return get_db()
@@ -3415,5 +3417,5 @@ def _cli(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(CODE_ROOT))
     sys.exit(_cli(sys.argv[1:]))

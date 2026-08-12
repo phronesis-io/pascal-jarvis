@@ -1,12 +1,35 @@
 """Tests for core.intentions — intent CRUD and lifecycle."""
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+def test_runtime_sidecars_follow_jarvis_dir_on_import(tmp_path):
+    """Intent sidecars must live beside the injected runtime, not source."""
+    root = Path(__file__).resolve().parent.parent
+    code = (
+        "import json; import core.intentions as m; "
+        "print(json.dumps([str(m.ROOT), str(m.INFLIGHT_FILE), "
+        "str(m.SKIP_LOG_SEEN_FILE)]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=root,
+        env={**os.environ, "JARVIS_DIR": str(tmp_path)},
+        capture_output=True, text=True, check=True,
+    )
+
+    runtime, inflight, seen = json.loads(result.stdout)
+    assert Path(runtime) == tmp_path
+    assert Path(inflight) == tmp_path / "data" / ".intention_inflight.json"
+    assert Path(seen) == tmp_path / "data" / ".cal_skip_log_seen.json"
 
 
 @pytest.fixture

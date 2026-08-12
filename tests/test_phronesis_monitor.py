@@ -32,11 +32,13 @@ def test_trailing_sentinel_is_suppressed_and_not_ledgered(tmp_path):
     assert r.returncode == 0
     assert r.stdout.strip() == ""
     assert _ledger(tmp_path) == []
+    assert not (tmp_path / "views").exists()
 
 
 def test_bare_sentinel_is_silent(tmp_path):
     r = _run_post(tmp_path, "HEARTBEAT_OK")
     assert r.stdout.strip() == "" and _ledger(tmp_path) == []
+    assert not (tmp_path / "views").exists()
 
 
 def test_surfaced_card_is_recorded_in_flagged_ledger(tmp_path):
@@ -48,6 +50,7 @@ def test_surfaced_card_is_recorded_in_flagged_ledger(tmp_path):
     assert len(entries) == 1
     assert "工业" in entries[0]["summary"]
     assert entries[0]["ts"]  # ISO timestamp present
+    assert len(list((tmp_path / "views").glob("*.json"))) == 1
 
 
 def test_ledger_stays_bounded(tmp_path):

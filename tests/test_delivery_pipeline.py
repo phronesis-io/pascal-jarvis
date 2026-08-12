@@ -33,6 +33,17 @@ def _local_ts(*args) -> float:
     return datetime(*args, tzinfo=now_local().tzinfo).timestamp()
 
 
+def test_default_paths_resolve_environment_at_call_time(tmp_path, monkeypatch):
+    """Importing delivery must not pin later JARVIS_DIR test injection."""
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.delenv("JARVIS_DB_PATH", raising=False)
+
+    pipe = DeliveryPipeline(transport=lambda *_: TransportResult(True))
+
+    assert pipe.root == tmp_path
+    assert pipe.path == tmp_path / "data" / "jarvis.db"
+
+
 @pytest.fixture
 def pipeline(tmp_path):
     sent = []

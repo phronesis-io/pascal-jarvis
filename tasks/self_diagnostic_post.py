@@ -27,14 +27,15 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parent.parent
+JARVIS_DIR = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
 # The heartbeat runs this as a script, so sys.path[0] is tasks/ — not the repo
 # root. Without this insert `from core import memorial` raises
 # ModuleNotFoundError and the alarm silently degrades to the plain-text
 # emergency path (observed 2026-07-27). Every other task script that imports
 # core already does this; this one was the sole outlier.
-sys.path.insert(0, str(ROOT))
-STAMP = ROOT / ".diag_last_alert.json"
+sys.path.insert(0, str(CODE_ROOT))
+STAMP = JARVIS_DIR / ".diag_last_alert.json"
 DEDUP_WINDOW_S = 4 * 3600
 
 # Raw substrings the proactive error gate kills (core/safety.py) — scrub them
@@ -46,7 +47,7 @@ def _user_id() -> str:
     """Lark user open_id from jarvis.yaml (the bot's owner)."""
     try:
         import yaml
-        cfg = yaml.safe_load((ROOT / "jarvis.yaml").read_text()) or {}
+        cfg = yaml.safe_load((JARVIS_DIR / "jarvis.yaml").read_text()) or {}
         lark = cfg.get("lark", {}) or {}
         # Production config and bot.sh use `user_id`; older installs used
         # `user_open_id`. Accept both so the independent diagnostic alarm
@@ -183,7 +184,7 @@ def main():
         pre_output = Path(pre_file).read_text(encoding="utf-8", errors="replace")
     else:
         # Fallback: the runner persists the last diagnostic pre output here.
-        cache = ROOT / ".diag_last_pre.txt"
+        cache = JARVIS_DIR / ".diag_last_pre.txt"
         if cache.exists():
             pre_output = cache.read_text(encoding="utf-8", errors="replace")
 
