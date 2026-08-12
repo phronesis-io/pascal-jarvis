@@ -22,7 +22,12 @@ Then inspect the worktree:
 ```bash
 git status --short --branch
 python3 -m core.components
+python3 scripts/import_graph.py core dashboard tasks --threshold 24 --limit 20
 ```
+
+The import graph is a review signal for broad or self-improve rounds, not a
+hard quality verdict. Compare the high-adjacency list before and after the
+change; explain growth instead of mechanically hiding central authorities.
 
 Never discard changes you did not create. A dirty live-runtime worktree is
 normal; stage only your own files or hunks.

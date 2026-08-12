@@ -751,11 +751,45 @@ def test_parse_failure_acks_and_does_not_trip_batched_circuits(tmp_path, monkeyp
     assert state["other-task"]["last_status"] == "parse_failed"
     # The shared envelope-parse counter absorbs the failure instead.
     assert state["__envelope_parse__"]["consecutive_failures"] == 1
+    assert state["__envelope_parse__"]["isolate_tasks"] == [
+        "intention-check", "other-task"
+    ]
     # Fast retry: last_run rewound so the task re-fires within ~5 minutes
     import time as _t
     other_interval = 3600
     eta = state["other-task"]["last_run"] + other_interval - int(_t.time())
     assert eta <= 300
+
+
+def test_parse_failure_retries_each_task_solo_next_cycle(tmp_path, monkeypatch):
+    runner, stdin_log = _ack_runner(tmp_path)
+    calls = []
+
+    def responder(prompt, timeout=None):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "{this is not json"
+        if "intention-check" in prompt:
+            return '{"intents": {}}'
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", responder)
+    runner.run_cycle(force=True)
+    retry_state = runner.load_state()
+    retry_state["intention-check"]["last_run"] = 0
+    retry_state["other-task"]["last_run"] = 0
+    runner.save_state(retry_state)
+    runner.run_cycle(force=True)
+
+    assert len(calls) == 3
+    assert "2 tasks due" in calls[0]
+    assert "isolated envelope-retry task: intention-check" in calls[1]
+    assert "isolated envelope-retry task: other-task" in calls[2]
+    state = runner.load_state()
+    assert "__envelope_parse__" not in state
+    assert state["intention-check"]["last_status"] == "ok"
+    assert state["other-task"]["last_status"] == "idle"
+    assert '{"intents": {}}' in stdin_log.read_text()
 
 
 def test_single_task_reply_is_not_envelope_parsed(tmp_path, monkeypatch):
@@ -1155,7 +1189,7 @@ def test_replay_2026_07_02_outage_zero_circuit_trips(tmp_path, monkeypatch):
     assert not [e for e in events if e.get("reason") == "circuit_open"]
 
 
-def test_shared_call_and_envelope_parse_counters_are_independent(
+def test_shared_call_and_envelope_parse_recovery_is_independent(
         tmp_path, monkeypatch):
     """The two dunder streaks must never cross-contaminate: a dead call bumps
     ONLY __shared_call__ (→ backoff), a garbled envelope bumps ONLY
@@ -1179,8 +1213,13 @@ def test_shared_call_and_envelope_parse_counters_are_independent(
     assert "__shared_call__" not in state          # call path alive → cleared
     assert state["__envelope_parse__"]["consecutive_failures"] == 1
 
+    # The next cycle fans the broken roster out into isolated calls. Their
+    # failures belong to those tasks; they must not recreate a shared-call
+    # streak or leave the envelope clamp armed forever.
     monkeypatch.setattr(runner, "claude_call", _failing_call(runner))
     runner.run_cycle(force=True)
     state = runner.load_state()
-    assert state["__shared_call__"]["consecutive_failures"] == 1   # restarts
-    assert state["__envelope_parse__"]["consecutive_failures"] == 1  # untouched
+    assert "__shared_call__" not in state
+    assert "__envelope_parse__" not in state
+    assert state["task-a"]["last_status"] == "failed"
+    assert state["task-b"]["last_status"] == "failed"

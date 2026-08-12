@@ -245,6 +245,14 @@ def _model_preference_command(content: str) -> str | None:
         "使用 codex",
     }:
         return "codex"
+    # Provider switching must not depend on the provider that just failed.
+    # Pascal naturally says variants such as “上一下备用吧”; handle that at
+    # the deterministic command boundary and route to the local Codex rung.
+    if re.fullmatch(
+        r"(?:上|用|切到|切换到|换到)(?:一下)?(?:备用|备用通道)(?:吧|试试)?[。！!]?$",
+        text,
+    ):
+        return "codex"
     if text in {
         "/model claude", "/model auto", "切回 claude",
         "切回 claude code", "切到 claude", "切到 claude code",

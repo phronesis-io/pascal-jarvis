@@ -361,8 +361,13 @@ def _apply_action(intent_id: str, response: str, action: str,
             print(f"[intentions_post] closure record failed: {e}", file=sys.stderr)
         return True  # closure rows never card
     # quiet_hour: HEARTBEAT_OK is protocol, never user-facing content.
+    # File-product intents are autonomous bookkeeping: their verified append
+    # is the product. A degraded model once returned a useful hourly-log entry
+    # with action=notify, turning "this does not affect you" into a memorial.
+    # Enforce the product boundary here instead of trusting model-selected
+    # action prose.
     if action != "silent" and response and not _is_contentless(response) \
-            and not quiet_hour:
+            and not quiet_hour and intent_id not in PRODUCT_LOGS:
         user_messages.append(response)
         # One-tap closure buttons for a follow-up that is ASKING (REQ-34).
         if button_specs is not None:

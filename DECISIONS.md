@@ -13,16 +13,18 @@ continuity are three different responsibilities.
 
 | Module | Owns | Must not own |
 |---|---|---|
-| `core.runtime_provider` | The owner's per-conversation preferred executor and the durable record of which provider/model actually answered. | Starting a model process, reading provider transcripts, or discovering interactive coding sessions. |
+| `core.runtime_provider` | The owner's durable per-conversation preferred executor (`auto` or `codex`). | Recording which provider actually answered, starting a model process, or reading provider transcripts. |
 | `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per Lark conversation. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
 | `core.cross_session` | Bounded discovery, parsing, redaction, and projection of owner-operated Claude Code/Codex sessions into immediate prompt context and the heartbeat digest. | Selecting or invoking a provider, claiming that an external session completed work, or replacing provider transcripts as source of truth. |
+| `core.matter_bridge` | The provider-neutral Lark conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
 
 The short version is:
 
 ```text
-runtime_provider chooses and records
+runtime_provider stores the owner's route preference
 codex_fallback executes one allowed Codex turn
 cross_session observes and projects external interactive context
+matter_bridge records the route that actually answered
 ```
 
 ### Control Flow
@@ -33,7 +35,7 @@ flowchart LR
     Choice --> Router["bot route selection"]
     Router -->|Codex selected or fallback reached| Codex["codex_fallback: bounded Codex turn"]
     Router -->|Other provider selected| Other["Claude or GPT adapter"]
-    Codex --> Actual["runtime_provider: actual provider/model record"]
+    Codex --> Actual["matter_bridge: actual provider/model record"]
     Other --> Actual
 
     Interactive["Owner-operated Claude Code / Codex sessions"] --> Continuity["cross_session: discover, parse, redact"]
@@ -58,8 +60,9 @@ flowchart LR
 
 `cross_session` must not call `codex_fallback`, and `codex_fallback` must not
 consult cross-session projections to decide whether to run. Route selection may
-call the execution adapter and then record the actual result, but neither
-execution nor continuity may create a second preference store.
+call the execution adapter and then record the actual result through
+`matter_bridge`, but execution, continuity, and the conversation ledger must
+not create a second preference store.
 
 ## Architecture Adjacency Check
 

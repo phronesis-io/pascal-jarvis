@@ -18,6 +18,8 @@ def test_defaults_when_no_config(tmp_path, monkeypatch):
     cfg = Config(None)
     assert cfg.claude["heartbeat_model"] == "opus"
     assert cfg.claude["max_session_size"] == 512000
+    assert cfg.claude["backup_max_session_size"] == 100000
+    assert cfg.claude["backup_max_memory_chars"] == 40000
     assert cfg.openai["fallback_model"] == "gpt-5.5"
     assert cfg.heartbeat["check_interval"] == 10
 

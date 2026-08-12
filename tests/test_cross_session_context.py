@@ -487,3 +487,57 @@ def test_desktop_exec_without_head_user_evidence_fails_closed(tmp_path):
     )
 
     assert sessions == []
+
+
+def test_facade_keeps_public_types_constants_and_function_signatures():
+    """The split must not require callers to migrate their imports."""
+    import inspect
+
+    from core import cross_session_discovery
+    from core import cross_session_parsing
+    from core import cross_session_projection
+
+    assert cross_session.Turn is cross_session_parsing.Turn
+    assert cross_session.SessionTail is cross_session_parsing.SessionTail
+    assert cross_session.SESSION_NAMESPACE == cross_session_discovery.SESSION_NAMESPACE
+    assert cross_session.DEFAULT_STATE_FILE == cross_session_projection.DEFAULT_STATE_FILE
+    assert list(inspect.signature(cross_session.discover_interactive_sessions).parameters) == [
+        "claude_root", "codex_root", "tracker_path", "jobs_registry_path",
+        "window_hours", "limit",
+    ]
+    assert list(inspect.signature(cross_session.collect_incremental).parameters) == [
+        "state_file", "claude_root", "codex_root", "tracker_path",
+        "jobs_registry_path", "window_hours",
+    ]
+    assert list(inspect.signature(cross_session.build_prompt_context).parameters) == [
+        "claude_root", "codex_root", "tracker_path", "jobs_registry_path",
+        "window_hours", "max_chars",
+    ]
+
+
+def test_facade_cli_keeps_incremental_and_context_commands(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "seen.json"
+    calls = []
+
+    def fake_incremental(**kwargs):
+        calls.append(("incremental", kwargs))
+        return "new turns"
+
+    def fake_context(**kwargs):
+        calls.append(("context", kwargs))
+        return "recent context"
+
+    monkeypatch.setattr(cross_session, "collect_incremental", fake_incremental)
+    monkeypatch.setattr(cross_session, "build_prompt_context", fake_context)
+
+    assert cross_session.main([
+        "incremental", "--state-file", str(state), "--window-hours", "12",
+    ]) == 0
+    assert capsys.readouterr().out == "new turns\n"
+    assert calls.pop() == ("incremental", {
+        "state_file": str(state), "window_hours": 12,
+    })
+
+    assert cross_session.main(["context", "--window-hours", "6", "--max-chars", "321"]) == 0
+    assert capsys.readouterr().out == "recent context\n"
+    assert calls.pop() == ("context", {"window_hours": 6, "max_chars": 321})
