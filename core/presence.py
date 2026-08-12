@@ -14,14 +14,15 @@ traffic. Feishu arrival volume IS the product's pulse, so:
   until now), instead of silently rotting in an archive nobody opens.
 
 Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
-reached Feishu (ledger ``sent`` event) or stayed ledger-only (ambient
-exhaust, ``delivery_status=ledger_only``). The digest line is the batched
-surface for the latter.
+has a successful receipt in the unified delivery database or stayed
+ledger-only (ambient exhaust, ``delivery_status=ledger_only``). The digest
+line is the batched surface for the latter.
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -58,9 +59,51 @@ def _in_window(ev: dict, cutoff: datetime) -> bool:
         return False
 
 
+def _delivery_sent_count(hours: float, now: datetime) -> int | None:
+    """Authoritative count of delivered Lark cards, or None pre-migration."""
+    from core.runtime_paths import database_path
+    from core.timeutil import now_local
+
+    path = database_path(JARVIS_DIR)
+    if not path.exists():
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=now_local().tzinfo)
+    cutoff_epoch = (now - timedelta(hours=hours)).timestamp()
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT source FROM delivery_envelopes "
+                "WHERE kind='card' AND route_channel='lark' "
+                "AND delivered_epoch>=? "
+                "AND state IN ('delivered','read','acted')",
+                (cutoff_epoch,),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return None
+
+    count = 0
+    for row in rows:
+        if row["source"] == "deploy-smoke":
+            continue
+        count += 1
+    return count
+
+
 def sent_count(hours: float = 24, now: datetime | None = None) -> int:
-    """Cards that verifiably reached Feishu (ledger ``sent`` events)."""
-    cutoff = (now or datetime.now()) - timedelta(hours=hours)
+    """Cards that verifiably reached Feishu.
+
+    The unified delivery DB is authoritative because it records the transport
+    receipt for every producer. The memorial ``sent`` event remains a bounded
+    migration fallback for fresh installs and pre-delivery databases.
+    """
+    moment = now or datetime.now()
+    delivered = _delivery_sent_count(hours, moment)
+    if delivered is not None:
+        return delivered
+    cutoff = moment - timedelta(hours=hours)
     return sum(1 for e in _events()
                if e.get("ev") == "sent" and _in_window(e, cutoff))
 
@@ -90,12 +133,16 @@ def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
 def check(now: datetime | None = None) -> str:
     """Selfmon sentinel line, or "" when presence is healthy.
 
-    A missing ledger means a fresh install with no product activity yet —
-    that is not an outage, so no page.
+    A fresh install with neither delivery DB nor memorial activity is not an
+    outage. Once the delivery DB exists, it is authoritative even when the
+    legacy memorial ledger has never been created.
     """
-    if not _ledger_path().exists():
+    moment = now or datetime.now()
+    delivered = _delivery_sent_count(24, moment)
+    if delivered is None and not _ledger_path().exists():
         return ""
-    if sent_count(24, now=now) < SENT_FLOOR_24H:
+    count = delivered if delivered is not None else sent_count(24, now=moment)
+    if count < SENT_FLOOR_24H:
         return FLOOR_WARNING
     return ""
 

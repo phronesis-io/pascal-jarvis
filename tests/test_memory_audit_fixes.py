@@ -387,12 +387,29 @@ def test_session_compact_binds_memory_dirs_by_exact_slug():
     # matching bound BOTH names to the heartbeat dir and jarvis-root was
     # never compacted.  Verify the two dirs differ and match their expected
     # slugs (derived, not hardcoded).
-    from core.claude_projects import path_slug, JARVIS_DIR
+    from core.claude_projects import canonical_jarvis_dir, path_slug, JARVIS_DIR
     expected_auto_slug = path_slug(JARVIS_DIR.parents[1])
-    expected_hb_slug = path_slug(JARVIS_DIR)
+    expected_hb_slug = path_slug(canonical_jarvis_dir())
     assert sc.AUTO_MEMORY.parent.name == expected_auto_slug
     assert sc.HEARTBEAT_MEMORY.parent.name == expected_hb_slug
     assert sc.AUTO_MEMORY != sc.HEARTBEAT_MEMORY
+
+
+def test_canonical_jarvis_dir_resolves_a_linked_worktree(tmp_path):
+    from core.claude_projects import canonical_jarvis_dir
+
+    primary = tmp_path / "repos" / "pascal-jarvis"
+    common = primary / ".git"
+    git_dir = common / "worktrees" / "audit"
+    worktree = tmp_path / "worktrees" / "audit"
+    git_dir.mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        f"gitdir: {git_dir}\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+    assert canonical_jarvis_dir(worktree) == primary
+    assert canonical_jarvis_dir(primary) == primary
 
 
 # ── [15] 2026-07-09: compact vs concurrent-append race guard ──────────────

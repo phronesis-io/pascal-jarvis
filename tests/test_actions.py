@@ -438,7 +438,7 @@ def test_intent_close_multiword_result(tmp_path):
     # Simulate the `do` CLI path: argv joined with '|'
     raw = "|".join([f"id={pid}", "outcome=done", "result=招到", "候选人", "下周面"])
     out = ap._do_intent_close(raw)
-    assert out == "Closure recorded"
+    assert out == "已记下并关闭"
     p = get_intent(pid)
     assert p["closure_status"] == "done"
     assert p["closure_result"] == "招到 候选人 下周面"   # full multi-word, not truncated
@@ -492,7 +492,7 @@ def test_intent_close_via_passthrough(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "record_closure", fake_record_closure)
     raw = "id=int_x|outcome=done|via=button|result=做了（按钮记录）"
-    assert ap._do_intent_close(raw) == "Closure recorded"
+    assert ap._do_intent_close(raw) == "已记下并关闭"
     assert seen["via"] == "button"
     assert seen["result"] == "做了（按钮记录）"
 

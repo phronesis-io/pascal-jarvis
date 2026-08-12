@@ -45,7 +45,10 @@ SEND_TIMEOUT_SECONDS = 15
 ATTEMPT_STALE_SECONDS = 90
 DEDUP_WINDOW_SECONDS = 6 * 3600
 DEFAULT_SOURCE_DAILY_CAP = 24
-DEFAULT_GLOBAL_DAILY_CAP = 120
+DEFAULT_GLOBAL_DAILY_CAP = 25
+DEFAULT_BURST_CAP = 4
+DEFAULT_BURST_WINDOW_SECONDS = 10 * 60
+CAP_RESERVATION_RECHECK_SECONDS = 5
 
 _STATE_UPDATE_FIELDS = frozenset({
     "attempts",
@@ -320,7 +323,12 @@ def _default_transport(root: Path) -> Transport:
 
 
 def _sanitize_text(value: str, proactive: bool) -> tuple[str, str]:
-    from core.safety import looks_like_error, sentinel_present, strip_task_framing
+    from core.safety import (
+        looks_like_error,
+        plain_user_copy,
+        sentinel_present,
+        strip_task_framing,
+    )
 
     raw = str(value or "")
     if sentinel_present(raw):
@@ -334,6 +342,8 @@ def _sanitize_text(value: str, proactive: bool) -> tuple[str, str]:
             continue
         kept.append(line)
     text = "\n".join(kept).strip()
+    if proactive:
+        text = plain_user_copy(text)
     if not text:
         return "", "tool_narration" if removed else "empty"
     if looks_like_error(text, proactive=proactive):
@@ -360,6 +370,11 @@ def _sanitize_card(card_json: str, proactive: bool) -> tuple[str, str, str]:
         nonlocal blocked
         if isinstance(value, dict):
             for key, item in list(value.items()):
+                if key == "value":
+                    # Interactive-card callback payloads are structured data,
+                    # not user-visible copy. Mutating them can change the
+                    # action that runs or the value it persists.
+                    continue
                 if key in {"content", "text", "title"} and isinstance(item, str):
                     clean, reason = _sanitize_text(item, proactive)
                     if reason and not clean:
@@ -386,6 +401,8 @@ def _sanitize_card(card_json: str, proactive: bool) -> tuple[str, str, str]:
         def collect(value):
             if isinstance(value, dict):
                 for key, item in value.items():
+                    if key == "value":
+                        continue
                     if key in {"content", "text", "title"} and isinstance(item, str):
                         if item.strip():
                             fragments.append(item.strip())
@@ -452,6 +469,61 @@ def _quiet_now(moment: datetime) -> bool:
 
 def _next_awake_epoch(moment: datetime) -> float:
     return next_awake(moment).timestamp()
+
+
+def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
+    """True for traffic that must not wait behind proactive-card budgets."""
+    return bool(
+        envelope.metadata.get("bypass_throttle")
+        or envelope.kind == "reply"
+        or envelope.attention in {"reply", "alert"}
+        or envelope.urgent
+        or envelope.conversation_bound
+        or envelope.source == "deploy-smoke"
+    )
+
+
+def _row_budget_exempt(row: sqlite3.Row | dict) -> bool:
+    values = dict(row)
+    try:
+        metadata = json.loads(values.get("metadata") or "{}")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        metadata = {}
+    return bool(
+        metadata.get("bypass_throttle")
+        or values.get("kind") == "reply"
+        or values.get("attention") in {"reply", "alert"}
+        or metadata.get("urgent")
+        or metadata.get("conversation_bound")
+        or values.get("source") == "deploy-smoke"
+    )
+
+
+def _budgeted_deliveries(
+    db: sqlite3.Connection,
+    since: float,
+) -> list[sqlite3.Row]:
+    rows = db.execute(
+        "SELECT source,kind,attention,metadata,delivered_epoch "
+        "FROM delivery_envelopes WHERE delivered_epoch>=? "
+        "ORDER BY delivered_epoch",
+        (since,),
+    ).fetchall()
+    return [row for row in rows if not _row_budget_exempt(row)]
+
+
+def _budgeted_reservations(
+    db: sqlite3.Connection,
+    since: float,
+) -> list[sqlite3.Row]:
+    rows = db.execute(
+        "SELECT e.source,e.kind,e.attention,e.metadata,r.reserved_epoch "
+        "FROM delivery_cap_reservations r "
+        "JOIN delivery_envelopes e ON e.id=r.delivery_id "
+        "WHERE r.reserved_epoch>=? ORDER BY r.reserved_epoch",
+        (since,),
+    ).fetchall()
+    return [row for row in rows if not _row_budget_exempt(row)]
 
 
 class DeliveryPipeline:
@@ -578,24 +650,17 @@ class DeliveryPipeline:
         ).fetchone()[0]
         if source_count > source_cap:
             return "source_daily_cap"
-        global_cap = int(envelope.metadata.get(
-            "global_daily_cap",
-            os.environ.get("JARVIS_DELIVERY_GLOBAL_DAILY_CAP",
-                           DEFAULT_GLOBAL_DAILY_CAP)))
-        total = db.execute(
-            "SELECT COUNT(*) FROM delivery_envelopes "
-            "WHERE created_epoch>=? "
-            "AND state IN ('queued','attempting','delivered','read','acted')",
-            (start,),
-        ).fetchone()[0]
-        return "global_daily_cap" if total > global_cap else ""
+        # The product-wide budget is a send-time capacity limit, not an
+        # acceptance throttle. Overflow must remain queued for the next
+        # window instead of becoming a permanent suppression.
+        return ""
 
     def _reserve_attempt_cap(
         self,
         db: sqlite3.Connection,
         envelope: DeliveryEnvelope,
         now: float,
-    ) -> str:
+    ) -> tuple[str, float | None]:
         """Atomically reserve one send-day cap slot without holding network I/O.
 
         Creation-time throttling bounds accepted work, but a quiet-hours queue
@@ -606,7 +671,7 @@ class DeliveryPipeline:
         if (envelope.metadata.get("bypass_throttle")
                 or envelope.kind == "reply"
                 or envelope.attention == "reply"):
-            return ""
+            return "", None
         local = datetime.fromtimestamp(now, tz=now_local().tzinfo)
         start = local.replace(
             hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -623,7 +688,7 @@ class DeliveryPipeline:
             ).fetchone()
             if existing:
                 db.commit()
-                return ""
+                return "", None
 
             reservations = (
                 "SELECT COUNT(*) FROM delivery_cap_reservations "
@@ -643,7 +708,7 @@ class DeliveryPipeline:
                 ).fetchone()[0]
                 if sent + held >= metric_cap:
                     db.commit()
-                    return "metric_daily_cap"
+                    return "metric_daily_cap", None
 
             source_cap = int(envelope.metadata.get(
                 "source_daily_cap",
@@ -663,27 +728,58 @@ class DeliveryPipeline:
             ).fetchone()[0]
             if source_sent + source_held >= source_cap:
                 db.commit()
-                return "source_daily_cap"
+                return "source_daily_cap", None
 
-            global_cap = int(envelope.metadata.get(
-                "global_daily_cap",
-                os.environ.get(
-                    "JARVIS_DELIVERY_GLOBAL_DAILY_CAP",
-                    DEFAULT_GLOBAL_DAILY_CAP,
-                ),
-            ))
-            total_sent = db.execute(
-                "SELECT COUNT(*) FROM delivery_envelopes "
-                "WHERE delivered_epoch>=?",
-                (start,),
-            ).fetchone()[0]
-            total_held = db.execute(
-                reservations,
-                (start,),
-            ).fetchone()[0]
-            if total_sent + total_held >= global_cap:
-                db.commit()
-                return "global_daily_cap"
+            if not _budget_exempt(envelope):
+                global_cap = int(envelope.metadata.get(
+                    "global_daily_cap",
+                    os.environ.get(
+                        "JARVIS_DELIVERY_GLOBAL_DAILY_CAP",
+                        DEFAULT_GLOBAL_DAILY_CAP,
+                    ),
+                ))
+                total_sent = len(_budgeted_deliveries(db, start))
+                total_held = len(_budgeted_reservations(db, start))
+                if total_sent + total_held >= global_cap:
+                    db.commit()
+                    moment = datetime.fromtimestamp(
+                        now, tz=now_local().tzinfo)
+                    return "global_daily_cap", _next_awake_epoch(moment)
+
+                burst_window = max(1, int(envelope.metadata.get(
+                    "burst_window_seconds",
+                    os.environ.get(
+                        "JARVIS_DELIVERY_BURST_WINDOW_SECONDS",
+                        DEFAULT_BURST_WINDOW_SECONDS,
+                    ),
+                )))
+                burst_cap = max(1, int(envelope.metadata.get(
+                    "burst_cap",
+                    os.environ.get(
+                        "JARVIS_DELIVERY_BURST_CAP",
+                        DEFAULT_BURST_CAP,
+                    ),
+                )))
+                recent = _budgeted_deliveries(db, now - burst_window)
+                recent_reservations = _budgeted_reservations(
+                    db, now - burst_window)
+                if len(recent) + len(recent_reservations) >= burst_cap:
+                    retry_candidates = [
+                        float(row["delivered_epoch"]) + burst_window
+                        for row in recent
+                    ]
+                    retry_candidates.extend(
+                        float(row["reserved_epoch"]) + burst_window
+                        for row in recent_reservations
+                    )
+                    # A reservation may disappear as soon as its transport
+                    # resolves. Recheck promptly instead of treating in-flight
+                    # work as a completed send for the entire burst window.
+                    if recent_reservations:
+                        retry_candidates.append(
+                            now + CAP_RESERVATION_RECHECK_SECONDS)
+                    db.commit()
+                    return "burst_budget", min(retry_candidates) + 0.001
 
             db.execute(
                 "INSERT INTO delivery_cap_reservations "
@@ -698,7 +794,7 @@ class DeliveryPipeline:
                 ),
             )
             db.commit()
-            return ""
+            return "", None
         except Exception:
             db.rollback()
             raise
@@ -815,16 +911,18 @@ class DeliveryPipeline:
                 db.rollback()
                 raise
 
-            throttled = self._reserve_attempt_cap(
+            throttled, retry_epoch = self._reserve_attempt_cap(
                 db, envelope, claimed_at)
             if throttled:
                 try:
+                    deferred = throttled in {
+                        "global_daily_cap", "burst_budget"}
                     self._set_state(
                         db,
                         envelope.id,
-                        "suppressed",
+                        "queued" if deferred else "suppressed",
                         throttled,
-                        next_attempt_epoch=None,
+                        next_attempt_epoch=(retry_epoch if deferred else None),
                         last_error=throttled,
                     )
                     db.commit()
@@ -834,7 +932,7 @@ class DeliveryPipeline:
                 return DeliveryResult(
                     envelope.id,
                     True,
-                    "suppressed",
+                    "queued" if deferred else "suppressed",
                     route,
                     reason=throttled,
                 )

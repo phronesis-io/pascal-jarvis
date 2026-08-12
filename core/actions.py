@@ -787,7 +787,7 @@ class ActionProcessor:
         try:
             from core.intent_closure import record_closure
             ok = record_closure(iid, outcome=outcome, result=result, via=via)
-            return "Closure recorded" if ok else "Intent not found or already closed"
+            return "已记下并关闭" if ok else "这条提醒已经处理过了"
         except Exception:
             return "FAILED"
 
@@ -796,7 +796,7 @@ class ActionProcessor:
         try:
             from core.intent_lifecycle import cancel_intent
             ok = cancel_intent(p.get("id", ""), p.get("reason", ""))
-            return "Intent cancelled" if ok else "Intent not found or already done"
+            return "提醒已取消" if ok else "这条提醒已经处理过了"
         except Exception:
             return "FAILED"
 

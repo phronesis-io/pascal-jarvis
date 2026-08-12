@@ -19,6 +19,29 @@ from pathlib import Path
 JARVIS_DIR = Path(__file__).resolve().parents[1]
 
 
+def canonical_jarvis_dir(repo_dir: str | Path | None = None) -> Path:
+    """Return the primary checkout behind ``repo_dir``, including worktrees."""
+    root = Path(repo_dir or JARVIS_DIR).expanduser().resolve()
+    dot_git = root / ".git"
+    if not dot_git.is_file():
+        return root
+    try:
+        marker = dot_git.read_text(encoding="utf-8").strip()
+        if not marker.startswith("gitdir:"):
+            return root
+        git_dir = Path(marker.split(":", 1)[1].strip()).expanduser()
+        if not git_dir.is_absolute():
+            git_dir = (root / git_dir).resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return root
+        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        common_dir = (git_dir / common).resolve()
+        return common_dir.parent if common_dir.name == ".git" else root
+    except OSError:
+        return root
+
+
 def path_slug(path: str | Path) -> str:
     """The Claude Code project-dir slug for a filesystem path."""
     resolved = str(Path(path).expanduser().resolve())
@@ -42,7 +65,11 @@ def jarvis_project_dirs(work_dir: str | Path | None = None) -> list[Path]:
     """
     if work_dir is None:
         work_dir = _resolve_work_dir()
-    roots = [Path(work_dir), Path(work_dir) / "repos", JARVIS_DIR]
+    roots = [
+        Path(work_dir),
+        Path(work_dir) / "repos",
+        canonical_jarvis_dir(),
+    ]
     seen: set[str] = set()
     dirs: list[Path] = []
     for root in roots:
@@ -74,5 +101,5 @@ def auto_memory_dir(work_dir: str | Path | None = None) -> Path:
 
 
 def heartbeat_memory_dir() -> Path:
-    """Heartbeat memory: ``project_dir(JARVIS_DIR) / "memory"``."""
-    return project_dir(JARVIS_DIR) / "memory"
+    """Heartbeat memory for the primary checkout behind any worktree."""
+    return project_dir(canonical_jarvis_dir()) / "memory"

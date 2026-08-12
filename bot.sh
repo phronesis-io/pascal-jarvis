@@ -1824,7 +1824,22 @@ ${_model_footer}"
         --model "${_answer_model:-$MAIN_MODEL}" \
         --provider "${_answer_provider:-Claude primary}" \
         --session-id "$session_id" >>"$LOG_FILE" 2>&1 & )
+    resolve_memorial_thread_after_reply "$conv_key" "$reply"
   fi
+}
+
+# A successful reply in a memorial thread is itself a completed handoff.
+# Close the original card only at a confirmed-delivery boundary; failed
+# provider or Lark attempts leave it pending and retryable.
+resolve_memorial_thread_after_reply() {
+  local conv_key="$1" reply="$2"
+  case "$conv_key" in
+    memorial:*)
+      ( JV_MEM_CONV_KEY="$conv_key" JV_MEM_REPLY="$reply" \
+        JARVIS_DIR="$JARVIS_DIR" python3 -m core.memorial resolve-thread \
+        >>"$LOG_FILE" 2>&1 & )
+      ;;
+  esac
 }
 
 # ── Background Job Runner ────────────────────────────────────────────
@@ -2765,7 +2780,9 @@ print(content)
           2>>"$LOG_FILE" || echo '{"handled":false}')
         if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
-          lark_reply_text "$message_id" "$_matter_reply" >/dev/null 2>&1 || true
+          if delivery_reply_reliable "$message_id" "$_matter_reply"; then
+            resolve_memorial_thread_after_reply "$conv_key" "$_matter_reply"
+          fi
           continue
         fi
       fi
@@ -2797,6 +2814,7 @@ print(content)
                  --expected-offset "$_continue_expected" \
                  --next-offset "$_continue_next" 2>>"$LOG_FILE" >/dev/null; then
               log_info "Memorial continuation delivered and committed: conv_key=$conv_key"
+              resolve_memorial_thread_after_reply "$conv_key" "$_continue_reply"
             else
               log_warn "Memorial continuation delivered but commit failed: conv_key=$conv_key"
             fi

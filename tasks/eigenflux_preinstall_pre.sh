@@ -40,10 +40,10 @@ export PATH="$HOME/.local/bin:$PATH"
 # ── Paths (self-contained; does not rely on WORK_DIR) ─────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JARVIS_DIR="${JARVIS_DIR:-$(dirname "$SCRIPT_DIR")}"
-REPOS_DIR="$(dirname "$JARVIS_DIR")"
+REPOS_DIR="${JARVIS_REPOS_DIR:-$(dirname "$JARVIS_DIR")}"
 
-PLUGIN_DIR="$REPOS_DIR/eigenflux-claude-plugin"   # downstream copy; watched for runtime-constant drift
-MAIN_DIR="$REPOS_DIR/eigenflux"                   # TRUE upstream: CLI contract + canonical skill text
+PLUGIN_DIR="${EIGENFLUX_PLUGIN_DIR:-$REPOS_DIR/eigenflux-claude-plugin}"   # downstream copy; watched for runtime-constant drift
+MAIN_DIR="${EIGENFLUX_MAIN_DIR:-$REPOS_DIR/eigenflux}"                   # TRUE upstream: CLI contract + canonical skill text
 # Skills source of truth = the MAIN repo, not a plugin: both plugins are
 # `copy-skills` snapshots of eigenflux/skills and LAG it — the claude-plugin
 # copy was verified to be missing the messaging privacy boundary and the
