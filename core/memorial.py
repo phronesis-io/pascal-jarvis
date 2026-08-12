@@ -195,7 +195,18 @@ ESCROW_DEADLINE_H = {
 # 匣子 docket. But 批红 that never comes is itself an answer: past this hard
 # ceiling it is filed as 留中 so the docket cannot nag forever. Nothing in the
 # measured window was ever decided this late (p95 = 128h, max = 179h).
-ESCROW_HARD_LAPSE_H = 24 * 14
+#
+# 2026-08-12, Pascal 原话「死了的就别来烦我了」: the ceiling was 14 days, so a
+# card whose underlying matter had already passed (a prep reminder for a
+# meeting that happened, a stopped-service notice long since resolved) kept
+# riding the morning docket for twelve more days. That morning's docket
+# announced 「31 件事等你拍板」 and only 3 were still live. The measured
+# window says a decision answered this late is a thin tail (median 2.1h, 75%
+# inside 24h, 90% inside 48h) — so four days keeps every realistically
+# answerable ask, clears the deadline lane by a full day, and drops the ten
+# days of nagging behind it. 留中 is archival, not deletion: the row stays in
+# the ledger and the docket still says so in one line.
+ESCROW_HARD_LAPSE_H = 24 * 4
 # 御门听政: the docket goes out once a day, in the morning, as ONE card.
 # Re-pushing stale cards individually is the card storm this system was
 # already burned by (7/22) — the emperor gets a docket, not the pile.

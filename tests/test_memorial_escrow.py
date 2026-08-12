@@ -245,3 +245,20 @@ def test_docket_never_sweeps_itself_into_the_next_docket(env):
                for s in scan["overdue"])
     assert all(s.get("source") != memorial.ESCROW_DIGEST_SOURCE
                for s, _ in scan["lapse"])
+
+
+def test_a_week_old_decision_no_longer_rides_the_docket(env):
+    """2026-08-12,「死了的就别来烦我了」.
+
+    The morning docket announced 「31 件事等你拍板」 and only 3 were still
+    live: prep reminders for meetings that had happened, a stopped-service
+    notice long since resolved, and Jarvis's own housekeeping. Under the old
+    14-day ceiling each of those kept riding the docket for a fortnight.
+    """
+    dead = _make(env, "intention-check", memorial.ATTENTION_DECISION,
+                 age_h=24 * 7)
+    live = _make(env, "intention-check", memorial.ATTENTION_DECISION,
+                 age_h=24 * 3)
+    scan = memorial.escrow_scan(now=NOW)
+    assert [s["id"] for s, _ in scan["lapse"]] == [dead]
+    assert [s["id"] for s in scan["overdue"]] == [live]
