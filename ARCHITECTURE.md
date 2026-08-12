@@ -137,7 +137,8 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.delivery`: the only user-facing retry, dedup, quiet-hour, throttle,
   routing, and delivery-state machine. It uses short-lived connections,
   initializes schema once per database inode, and never holds a transaction
-  across a network send.
+  across a network send. Its retry/cap interaction is frozen in
+  `docs/delivery_retry_and_caps.md`.
 - `core.memorial`: visible Item and decision ledger.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.routines`: user-authored recurring work — definition, claim, autonomy
@@ -180,7 +181,8 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.cross_session`: bounded, redacted owner-only continuity across
   interactive Claude Code and Codex sessions. It excludes Jarvis-managed
   provider calls and supplies both immediate prompt context and the durable
-  heartbeat digest; provider transcripts remain the source of truth.
+  heartbeat digest; provider transcripts remain the source of truth. The
+  choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The separate
   `restart.sh --runtime` path is configuration-only: it revalidates release

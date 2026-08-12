@@ -10,10 +10,11 @@ Read these current-state documents before changing behavior:
 1. `PRODUCT.md` - who Jarvis serves and what outcomes matter.
 2. `DOMAIN.md` - vocabulary and invariants.
 3. `ARCHITECTURE.md` - process, module, and authority boundaries.
-4. `DESIGN.md` - interaction and surface rules.
-5. `docs/prd_portfolio.md` - which historical PRDs are shipped, superseded,
+4. `DECISIONS.md` - easy-to-confuse ownership decisions and change routing.
+5. `DESIGN.md` - interaction and surface rules.
+6. `docs/prd_portfolio.md` - which historical PRDs are shipped, superseded,
    rejected, or active.
-6. `docs/release_acceptance_2026-07-24.md` - the current requirement-to-evidence
+7. `docs/release_acceptance_2026-07-24.md` - the current requirement-to-evidence
    ledger.
 
 Then inspect the worktree:
