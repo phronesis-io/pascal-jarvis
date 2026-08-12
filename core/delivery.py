@@ -1156,6 +1156,63 @@ class DeliveryPipeline:
                 envelope, str(row["route_channel"]) or _route(envelope)))
         return results
 
+    def suppress_queued_source(
+        self, source: str, *, reason: str,
+    ) -> list[str]:
+        """Suppress every currently queued envelope from one retired path.
+
+        This is an explicit reconciliation primitive for product migrations;
+        it never touches attempting or delivered work and records one normal
+        delivery event per row so the queue cannot diverge from its history.
+        """
+        source = str(source or "").strip()
+        reason = str(reason or "").strip()
+        if not source:
+            raise ValueError("source is required")
+        if not reason:
+            raise ValueError("reason is required")
+        with closing(_connect(self.path)) as db, db:
+            rows = db.execute(
+                "SELECT id FROM delivery_envelopes "
+                "WHERE source=? AND state='queued' ORDER BY created_epoch",
+                (source,),
+            ).fetchall()
+            ids = [str(row["id"]) for row in rows]
+            for delivery_id in ids:
+                self._set_state(
+                    db, delivery_id, "suppressed", reason,
+                    next_attempt_epoch=None, last_error=reason,
+                )
+        return ids
+
+    def list_source(
+        self, source: str, *, state: str = "", last_error: str = "",
+    ) -> list[dict]:
+        """Return all envelopes for an exact source and optional state/reason.
+
+        Unlike the operator-facing ``list`` method this is intentionally not
+        capped: reconciliation must repair every row from a prior partial run,
+        not just the newest dashboard page.
+        """
+        source = str(source or "").strip()
+        if not source:
+            raise ValueError("source is required")
+        clauses = ["source=?"]
+        params: list = [source]
+        if state:
+            clauses.append("state=?")
+            params.append(str(state))
+        if last_error:
+            clauses.append("last_error=?")
+            params.append(str(last_error))
+        query = (
+            "SELECT * FROM delivery_envelopes WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_epoch"
+        )
+        with closing(_connect(self.path)) as db, db:
+            return [dict(row) for row in db.execute(query, params).fetchall()]
+
     def confirm(self, delivery_id: str, state: str) -> DeliveryResult:
         if state not in {"read", "acted"}:
             raise ValueError("confirmation state must be read or acted")

@@ -177,6 +177,7 @@ def _lark_send_text(text: str, user_id: str, *,
 
 
 _LAST_ROUTE_ALL_DELIVERED = True
+DELIVERED_SOURCES_FILE = ".heartbeat_delivered_sources.json"
 
 
 def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
@@ -190,6 +191,9 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
     """
     global _LAST_ROUTE_ALL_DELIVERED
     _LAST_ROUTE_ALL_DELIVERED = True
+    delivered_sources: list[str] = []
+    delivered_sources_path = jarvis_dir / DELIVERED_SOURCES_FILE
+    delivered_sources_path.unlink(missing_ok=True)
     # Idle-sentinel gate (belt-and-braces below the card builders): if
     # HEARTBEAT_OK appears ANYWHERE in the output — prose, card JSON,
     # anything — the model decided this cycle stays silent and everything
@@ -211,6 +215,26 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
     remaining_text_parts = []
     results: list[bool] = []
     source = _peek_source(jarvis_dir) or "heartbeat"
+
+    def memorial_routing(memorial_id: str) -> tuple[str, str, str]:
+        if not memorial_id:
+            return source, "notice", "none"
+        try:
+            from core.memorial import get_memorial
+            state = get_memorial(memorial_id, root=jarvis_dir) or {}
+            card_source = str(state.get("source") or source)
+            attention = str(state.get("attention") or "notice")
+            if attention not in {"decision", "notice", "alert"}:
+                attention = "notice"
+            review_surface = str(
+                state.get("review_surface")
+                or ("lark" if attention == "decision" else "none")
+            )
+            return card_source, attention, review_surface
+        except Exception as exc:
+            log("heartbeat", f"Could not read memorial routing: {exc}",
+                level="warn")
+            return source, "notice", "none"
 
     def transport(envelope, channel):
         ids_before = len(_LAST_SENT_IDS)
@@ -252,13 +276,14 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
         if line.startswith("CARD:"):
             card_json = line[5:]
             memorial_id = _memorial_id_from_card(card_json)
+            card_source, attention, review_surface = memorial_routing(memorial_id)
             _ids_before = len(_LAST_SENT_IDS)
             result = submit(DeliveryEnvelope(
-                source=source,
+                source=card_source,
                 kind="card",
                 payload={"card_json": card_json,
                          "text": extract_card_text(card_json)},
-                attention="decision" if memorial_id else "notice",
+                attention=attention,
                 requested_channel="lark",
                 urgent=not respect_quiet,
                 memorial_id=memorial_id,
@@ -266,7 +291,7 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
                 provider=provider,
                 model=model,
                 metadata={
-                    "review_surface": "lark",
+                    "review_surface": review_surface,
                     "bypass_quiet": not respect_quiet,
                     "bypass_dedup": not respect_quiet,
                     "bypass_throttle": not respect_quiet,
@@ -275,6 +300,8 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
             ))
             if result.state == "delivered":
                 results.append(True)
+                if result.reason != "duplicate":
+                    delivered_sources.append(card_source)
                 if memorial_id:
                     _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
                     _record_sent_lark_id(memorial_id, _ids_before)
@@ -294,25 +321,28 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
 
         elif line.startswith('{"config":'):
             memorial_id = _memorial_id_from_card(line)
+            card_source, attention, review_surface = memorial_routing(memorial_id)
             _ids_before = len(_LAST_SENT_IDS)
             result = submit(DeliveryEnvelope(
-                source=source,
+                source=card_source,
                 kind="card",
                 payload={"card_json": line, "text": extract_card_text(line)},
-                attention="decision" if memorial_id else "notice",
+                attention=attention,
                 requested_channel="lark",
                 urgent=not respect_quiet,
                 memorial_id=memorial_id,
                 dedup_key=f"memorial:{memorial_id}" if memorial_id else "",
                 provider=provider,
                 model=model,
-                metadata={"review_surface": "lark",
+                metadata={"review_surface": review_surface,
                           "bypass_quiet": not respect_quiet,
                           "bypass_dedup": not respect_quiet,
                           "bypass_throttle": not respect_quiet,
                           "retry_existing": True},
             ))
             delivered = result.state == "delivered"
+            if delivered and result.reason != "duplicate":
+                delivered_sources.append(card_source)
             if delivered and memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
                 _record_sent_lark_id(memorial_id, _ids_before)
@@ -359,8 +389,22 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
             result.state in {"delivered", "suppressed"}
             or result.reason == "quiet_hours"
             or (respect_quiet and result.state == "queued"))
+        if result.state == "delivered" and result.reason != "duplicate":
+            delivered_sources.append(source)
 
-    return all(results) if results else True
+    if delivered_sources:
+        unique_sources = list(dict.fromkeys(delivered_sources))
+        tmp = delivered_sources_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(unique_sources, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, delivered_sources_path)
+    if not results:
+        # Empty is a successful ledger-only outcome, not a transport failure,
+        # but it is also not a send.  Keep the outer loop from writing an
+        # empty outbox row or crediting every cycle source with engagement.
+        _LAST_ROUTE_ALL_DELIVERED = False
+        return True
+    return all(results)
 
 
 # ── Delivery ledger + aggregate alert (REQ-11) ──────────────────────
@@ -496,6 +540,7 @@ def _peek_source(jarvis_dir: Path) -> str:
 def _clear_delivery_sidecars(jarvis_dir: Path) -> None:
     (jarvis_dir / ".heartbeat_last_source").unlink(missing_ok=True)
     (jarvis_dir / PROMPT_VARIANTS_FILE).unlink(missing_ok=True)
+    (jarvis_dir / DELIVERED_SOURCES_FILE).unlink(missing_ok=True)
 
 
 def _is_urgent(source_str: str) -> bool:
@@ -1287,6 +1332,19 @@ def _record_engagement(jarvis_dir: Path):
 
     sent_ids = list(_LAST_SENT_IDS)
     _LAST_SENT_IDS.clear()
+    delivered_sources_path = jarvis_dir / DELIVERED_SOURCES_FILE
+    try:
+        parsed_sources = json.loads(
+            delivered_sources_path.read_text(encoding="utf-8"))
+        delivered_sources = [
+            str(item).strip() for item in parsed_sources
+            if str(item).strip()
+        ] if isinstance(parsed_sources, list) else []
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        delivered_sources = []
+    delivered_sources_path.unlink(missing_ok=True)
+    if delivered_sources:
+        sources = ",".join(dict.fromkeys(delivered_sources))
 
     elog = jarvis_dir / "engagement_log.jsonl"
     with open(elog, "a") as f:
@@ -1724,6 +1782,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                     # adapter must not suppress the underlying alert/event.
                     log("heartbeat", f"memorialize output failed: {e}",
                         level="warn")
+                    from core.task_protocol import strip_output_source_markers
+                    output = strip_output_source_markers(output)
 
                 delivered = _route_output(
                     output, user_id, jd, respect_quiet=True,

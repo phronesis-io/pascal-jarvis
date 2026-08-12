@@ -204,6 +204,37 @@ def test_flush_sweeps_legacy_web_rows_as_suppressed(pipeline):
     assert pipe.get("dlv_legacy")["state"] == "suppressed"
 
 
+def test_suppress_queued_source_is_transactional_and_audited(pipeline):
+    pipe, sent, _ = pipeline
+    for index, source in enumerate(
+            ("cross-session-sync", "cross-session-sync", "mail")):
+        result = pipe.deliver(DeliveryEnvelope(
+            source=source,
+            payload={"text": f"queued {source} {index}"},
+            attention="decision",
+        ))
+        assert result.state == "delivered"
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        db.execute(
+            "UPDATE delivery_envelopes SET state='queued', "
+            "next_attempt_epoch=9999999999 WHERE source='cross-session-sync'"
+        )
+
+    suppressed = pipe.suppress_queued_source(
+        "cross-session-sync", reason="ambient_ledger_only")
+
+    assert len(suppressed) == 2
+    assert all(pipe.get(delivery_id)["state"] == "suppressed"
+               for delivery_id in suppressed)
+    assert pipe.list(state="queued") == []
+    assert pipe.get(next(row["id"] for row in pipe.list()
+                         if row["source"] == "mail"))["state"] == "delivered"
+    rows = pipe.list_source(
+        "cross-session-sync", state="suppressed",
+        last_error="ambient_ledger_only")
+    assert [row["id"] for row in rows] == suppressed
+
+
 def test_reply_bypasses_quiet_and_uses_reply_channel(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_QUIET_START", "00:00")
     monkeypatch.setenv("JARVIS_QUIET_END", "23:59")

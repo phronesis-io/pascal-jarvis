@@ -122,6 +122,36 @@ def test_route_output_failed_memorial_keeps_card_not_text_fallback(tmp_path):
     assert events[-1]["status"] == "retry_queued"
 
 
+def test_route_output_preserves_memorial_attention(tmp_path, monkeypatch):
+    """A memorial id proves card ownership, not decision-class attention."""
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    from core import memorial
+    from core.delivery import DeliveryPipeline
+
+    notice_id, _ = memorial.create(
+        "daily-reflect", "复盘", "只是知会", preset="fyi", send=False)
+    decision_id, _ = memorial.create(
+        "mail", "需要判断", "回不回复？", preset="decision", send=False)
+    (tmp_path / ".heartbeat_last_source").write_text(
+        "cross-session-sync,daily-reflect,mail")
+
+    with patch("core.heartbeat_loop._lark_send_card", return_value=False):
+        _route_output(
+            "CARD:" + memorial.card_json(notice_id),
+            "user123", tmp_path,
+        )
+        _route_output(
+            "CARD:" + memorial.card_json(decision_id),
+            "user123", tmp_path,
+        )
+
+    rows = {row["memorial_id"]: row for row in DeliveryPipeline(tmp_path).list()}
+    assert rows[notice_id]["attention"] == "notice"
+    assert rows[decision_id]["attention"] == "decision"
+    assert rows[notice_id]["source"] == "daily-reflect"
+    assert rows[decision_id]["source"] == "mail"
+
+
 def test_route_output_blocks_raw_json():
     """Raw JSON that isn't a card should be blocked."""
     with patch("core.heartbeat_loop._lark_send_text") as mock_send:
@@ -156,6 +186,48 @@ def test_record_engagement_skips_silent_sources(tmp_path):
     sources = {r["source"] for r in rows if r["type"] == "sent"}
     assert "checkin" in sources            # non-silent logged
     assert "daily-plan" not in sources     # silent skipped (REQ-61)
+
+
+def test_record_engagement_uses_actual_sent_memorial_sources(
+        tmp_path, monkeypatch):
+    """Mixed-cycle sidecars must not credit ledger-only ambient segments."""
+    from core import heartbeat_loop as hl
+    from core import memorial
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    calendar_id, _ = memorial.create(
+        "calendar-sync", "会议冲突", "需要选一个",
+        preset="decision", send=False)
+    (tmp_path / ".heartbeat_last_source").write_text(
+        "cross-session-sync,calendar-sync")
+    with patch("core.heartbeat_loop._lark_send_card", return_value=True):
+        _route_output(
+            "CARD:" + memorial.card_json(calendar_id),
+            "user123", tmp_path,
+        )
+
+    hl._record_engagement(tmp_path)
+
+    rows = [json.loads(line) for line in
+            (tmp_path / "engagement_log.jsonl").read_text().splitlines()]
+    assert [row["source"] for row in rows] == ["calendar-sync"]
+
+
+def test_pure_ambient_ledger_outcome_is_not_counted_as_a_send(
+        tmp_path, monkeypatch):
+    """Ledger-only content is handled successfully without fake engagement."""
+    from core import heartbeat_loop as hl
+    from core import memorial
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    (tmp_path / ".heartbeat_last_source").write_text("cross-session-sync")
+    output = memorial.memorialize_output(
+        "PGC 当前 0 告警，磁盘风险已解除。", "cross-session-sync")
+
+    assert output == ""
+    assert _route_output(output, "user123", tmp_path) is True
+    assert hl._LAST_ROUTE_ALL_DELIVERED is False
+    assert not (tmp_path / hl.DELIVERED_SOURCES_FILE).exists()
 
 
 def test_beat_throttles_and_keeps_daemon_greppable_format(capsys, monkeypatch):

@@ -156,6 +156,13 @@ def fold(
             if state is not None:
                 state["delivery_status"] = str(event.get("status", "unknown"))
                 state["delivery_ts"] = str(event.get("ts", ""))
+        elif event_type == "reclassify":
+            state = states.get(memorial_id)
+            if state is not None:
+                if event.get("attention"):
+                    state["attention"] = str(event["attention"])
+                if "review_surface" in event:
+                    state["review_surface"] = str(event["review_surface"])
     return states
 
 

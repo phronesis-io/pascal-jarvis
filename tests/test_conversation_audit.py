@@ -130,6 +130,49 @@ def test_empty_reply_is_still_flagged_when_the_session_did_reply(tmp_path):
     assert "empty_reply_user_visible" in report
 
 
+def test_empty_reply_is_not_correlated_with_unrelated_later_reply(tmp_path):
+    """A reused Claude session can reply hours after an internal no-op turn.
+
+    Session identity alone is not delivery evidence for a particular assistant
+    message.  The 2026-08-12 audit paired a 09:15 UTC no-op with a real 17:14
+    local reply from the same session and raised a false P0.
+    """
+    paths = _empty_reply_fixture(tmp_path, replied=False)
+    sid = "37cad35c-f395-5cdd-babe-97fbef249e1c"
+    later = now_local() + timedelta(hours=8)
+    log = tmp_path / "jarvis.log"
+    log.write_text(
+        f"[{later.strftime('%Y-%m-%d %H:%M:%S')}] [INFO] "
+        f"[{sid}] Replied (22 chars)\n",
+        encoding="utf-8",
+    )
+    paths.log_paths = [log]
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "empty_reply_user_visible" not in report
+
+
+def test_empty_reply_is_not_correlated_with_different_length_reply(tmp_path):
+    """A nearby receipt for a real fallback/error answer is not the no-op."""
+    paths = _empty_reply_fixture(tmp_path, replied=False)
+    sid = "37cad35c-f395-5cdd-babe-97fbef249e1c"
+    stamp = (now_local() - timedelta(minutes=9)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    log = tmp_path / "jarvis.log"
+    log.write_text(
+        f"[{stamp}] [INFO] [{sid}] Replied (67 chars)\n",
+        encoding="utf-8",
+    )
+    paths.log_paths = [log]
+
+    run_id = audit.run_audit(paths, hours=48)
+    report = audit.render_report(paths.db_path, run_id)
+
+    assert "empty_reply_user_visible" not in report
+
+
 def _provider_error_fixture(tmp_path, *, replied: bool):
     """A session whose transcript recorded a provider error, optionally one
     that actually delivered a reply. Mirrors _empty_reply_fixture."""
@@ -152,7 +195,8 @@ def _provider_error_fixture(tmp_path, *, replied: bool):
     if replied:
         log = tmp_path / "jarvis.log"
         stamp = (now_local() - timedelta(minutes=9)).strftime("%Y-%m-%d %H:%M:%S")
-        log.write_text(f"[{stamp}] [INFO] [{sid}] Replied (22 chars)\n",
+        chars = len("API Error: 403 无权访问 vip_1_max_cheap 分组")
+        log.write_text(f"[{stamp}] [INFO] [{sid}] Replied ({chars} chars)\n",
                        encoding="utf-8")
         log_paths = [log]
     return audit.AuditPaths(
@@ -193,17 +237,22 @@ def test_audit_flags_user_visible_provider_and_empty_replies(tmp_path):
     session = session_dir / f"{sid}.jsonl"
     now = datetime.now(timezone.utc)
     log = tmp_path / "jarvis.log"
-    log.write_text(
-        f"[{(now_local() - timedelta(minutes=9)).strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"[INFO] [{sid}] Replied (22 chars)\n",
-        encoding="utf-8",
+    provider_text = (
+        "🔧 You've hit your monthly spend limit · raise it at "
+        "claude.ai/settings/usage"
     )
+    log.write_text("\n".join([
+        f"[{(now_local() - timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"[INFO] [{sid}] Replied ({len(provider_text)} chars)",
+        f"[{(now_local() - timedelta(minutes=9)).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"[INFO] [{sid}] Replied (22 chars)",
+    ]) + "\n", encoding="utf-8")
     rows = [
         {
             "type": "assistant",
             "message": {
                 "role": "assistant",
-                "content": "🔧 You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+                "content": provider_text,
             },
             "timestamp": (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         },

@@ -448,9 +448,11 @@ def main() -> int:
         if not raw:
             return 0
 
-    # If there's a user-facing message, print to stdout (sent to Lark) — but
-    # only after all three gates pass (see module docstring): grounded time
-    # anchors, live-verified PR claims, and no near-duplicate of a recent push.
+    # If there's a user-facing candidate, print it to stdout for the heartbeat
+    # adapter.  The adapter records this ambient source ledger-only; it is not
+    # a realtime Lark send.  The morning anchor is its one batched surface.
+    # The three gates still run before ledgering: grounded time anchors,
+    # live-verified PR claims, and no near-duplicate of a recent candidate.
     # Suppression skips ONLY the print — the digest below is still written for
     # continuity (an early return here would also break the consecutive
     # no-new-data dedup and the digest history).

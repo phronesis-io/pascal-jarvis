@@ -662,6 +662,56 @@ def test_mixed_batch_summary_never_leaks_silent_content(tmp_path, monkeypatch):
     assert (runner.jarvis_dir / ".heartbeat_last_source").read_text() == "task-b"
 
 
+def test_mixed_batch_summary_never_leaks_ambient_content(tmp_path, monkeypatch):
+    """A top-level summary cannot be attributed inside an ambient mix.
+
+    Per-task slices retain their exact source, but the model's top-level prose
+    may blend both tasks.  Fail closed instead of turning cross-session exhaust
+    into a generic heartbeat push.
+    """
+    hb = (
+        "### cross-session-sync\n- interval: 10m\n- prompt: digest\n\n"
+        "### task-b\n- interval: 1h\n- prompt: b\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    envelope = json.dumps({
+        "tasks": {
+            "cross-session-sync": "HEARTBEAT_OK",
+            "task-b": "HEARTBEAT_OK",
+        },
+        "user_message": "跨 Session 有个风险；task-b 也有一条更新。",
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+
+    assert runner.run_cycle(force=True) == ""
+    assert not (runner.jarvis_dir / ".heartbeat_last_source").exists()
+
+
+def test_source_marker_does_not_hide_card_from_summary_dedup(tmp_path, monkeypatch):
+    """Internal attribution must preserve card-vs-summary dedup semantics."""
+    hb = (
+        "### task-a\n- interval: 1h\n- prompt: a\n\n"
+        "### task-b\n- interval: 1h\n- prompt: b\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    card = json.dumps({
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "结果"}},
+        "elements": [{"tag": "div", "text": {
+            "tag": "lark_md", "content": "卡片已经说清楚"}}],
+    }, ensure_ascii=False)
+    envelope = json.dumps({
+        "tasks": {"task-a": "CARD:" + card, "task-b": "HEARTBEAT_OK"},
+        "user_message": "重复说明：卡片已经说清楚。",
+    }, ensure_ascii=False)
+    monkeypatch.setattr(runner, "claude_call", lambda p: envelope)
+
+    result = runner.run_cycle(force=True)
+    assert "重复说明" not in result
+    assert "卡片已经说清楚" in result
+    assert "CARD:{" in result
+
+
 def test_silent_task_full_output_archived(tmp_path, monkeypatch):
     """Suppressed output is preserved in FULL (silent_outputs.jsonl) — the
     80-char jarvis.log prefix alone would destroy thinking-review /

@@ -37,8 +37,44 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
+
+
+# Internal boundary between HeartbeatRunner's per-task output collection and
+# the memorial adapter.  The combined cycle string otherwise loses which
+# prose came from which task; a comma-separated sidecar can name producers but
+# cannot map individual segments back to them.
+OUTPUT_SOURCE_PREFIX = "[[JARVIS_SOURCE:"
+OUTPUT_SOURCE_SUFFIX = "]]"
+_OUTPUT_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
+
+
+def output_source_marker(source: str) -> str:
+    """Return a fail-closed internal marker for one task output segment."""
+    source = str(source or "").strip()
+    if not _OUTPUT_SOURCE_RE.fullmatch(source):
+        source = "heartbeat"
+    return f"{OUTPUT_SOURCE_PREFIX}{source}{OUTPUT_SOURCE_SUFFIX}"
+
+
+def parse_output_source_marker(line: str) -> str:
+    """Extract a valid source from a marker line, otherwise return ``""``."""
+    text = str(line or "").strip()
+    if not (text.startswith(OUTPUT_SOURCE_PREFIX)
+            and text.endswith(OUTPUT_SOURCE_SUFFIX)):
+        return ""
+    source = text[len(OUTPUT_SOURCE_PREFIX):-len(OUTPUT_SOURCE_SUFFIX)]
+    return source if _OUTPUT_SOURCE_RE.fullmatch(source) else ""
+
+
+def strip_output_source_markers(text: str) -> str:
+    """Remove internal source lines without changing payload whitespace."""
+    return "\n".join(
+        line for line in str(text or "").splitlines()
+        if not parse_output_source_marker(line)
+    )
 
 
 # ── Circuit Breaker ──────────────────────────────────────────────────
