@@ -193,9 +193,16 @@ ESCROW_DEADLINE_H = {
 }
 # A decision past its deadline is NOT archived — it is re-surfaced in the daily
 # 匣子 docket. But 批红 that never comes is itself an answer: past this hard
-# ceiling it is filed as 留中 so the docket cannot nag forever. Nothing in the
-# measured window was ever decided this late (p95 = 128h, max = 179h).
-ESCROW_HARD_LAPSE_H = 24 * 14
+# ceiling it is filed as 留中 so the docket cannot nag forever. A bounded
+# production-ledger review found no decisions completed after the ordinary
+# overdue window; exact private activity metrics remain outside this public
+# repository.
+#
+# The old 14-day ceiling let obsolete asks ride the morning docket long after
+# they stopped being actionable. Four days retains a generous decision window
+# while bounding repeated asks. 留中 is archival, not deletion: the row stays
+# in the ledger and the docket still says so in one line.
+ESCROW_HARD_LAPSE_H = 24 * 4
 # 御门听政: the docket goes out once a day, in the morning, as ONE card.
 # Re-pushing stale cards individually is the card storm this system was
 # already burned by (7/22) — the emperor gets a docket, not the pile.
