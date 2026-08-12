@@ -284,6 +284,81 @@ def test_codex_probe_rejects_explanatory_marker(tmp_path, monkeypatch):
     assert result["status"] == "unhealthy"
 
 
+def test_codex_probe_reports_stream_error_before_incidental_stderr(
+    tmp_path, monkeypatch,
+):
+    spec = {
+        "id": "codex", "label": "Codex fallback", "kind": "codex",
+        "enabled": True, "configured": True, "model": "gpt-test",
+        "binary": "/opt/codex",
+    }
+    monkeypatch.setattr(ph, "resolve_codex_bin", lambda configured="": "/opt/codex")
+    output = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "ignored"}),
+        json.dumps({
+            "type": "error",
+            "message": "You've hit your usage limit. Try again Aug 18.",
+        }),
+        json.dumps({
+            "type": "turn.failed",
+            "error": {
+                "message": "You've hit your usage limit. Try again Aug 18."
+            },
+        }),
+    ])
+
+    result = ph.probe_provider(
+        spec,
+        root=tmp_path,
+        runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=output,
+            stderr="WARN codex_rollout state db discrepancy: falling_back",
+        ),
+    )
+
+    assert result["status"] == "unhealthy"
+    assert result["detail"] == "You've hit your usage limit. Try again Aug 18."
+    assert "state db discrepancy" not in result["detail"]
+
+
+def test_codex_probe_redacts_stream_error_and_falls_back_to_stderr(
+    tmp_path, monkeypatch,
+):
+    spec = {
+        "id": "codex", "label": "Codex fallback", "kind": "codex",
+        "enabled": True, "configured": True, "model": "gpt-test",
+        "binary": "/opt/codex",
+    }
+    monkeypatch.setattr(ph, "resolve_codex_bin", lambda configured="": "/opt/codex")
+
+    secret = ph.probe_provider(
+        spec,
+        root=tmp_path,
+        runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps({
+                "type": "turn.failed",
+                "error": {"message": "token=do-not-store HTTP 401"},
+            }),
+            stderr="incidental warning",
+        ),
+    )
+    fallback = ph.probe_provider(
+        spec,
+        root=tmp_path,
+        runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="not json", stderr="process launch failed"
+        ),
+    )
+
+    assert "do-not-store" not in secret["detail"]
+    assert "[redacted]" in secret["detail"]
+    assert fallback["detail"] == "process launch failed"
+
+
 def test_spend_limit_canary_trips_shared_provider_gate(tmp_path):
     _write_config(tmp_path)
 
