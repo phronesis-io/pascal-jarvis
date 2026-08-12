@@ -381,7 +381,13 @@ def _governed(source: str, inferred: str) -> str:
     try:
         from core.attention_roi import class_for
         return class_for(source, inferred)
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "attention_policy_unavailable",
+            level="warn",
+            source=source,
+            error_type=type(exc).__name__,
+        )
         return inferred
 
 
@@ -602,7 +608,12 @@ def _resolve_user_id() -> str:
     try:
         from core.config import Config
         return str(Config(runtime_root() / "jarvis.yaml").lark.get("user_id", "") or "")
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "lark_user_resolution_failed",
+            level="error",
+            error_type=type(exc).__name__,
+        )
         return ""
 
 
@@ -1220,7 +1231,12 @@ def _quiet_hours_now() -> bool:
     try:
         from core.heartbeat_loop import _in_quiet_hours
         return _in_quiet_hours()
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "quiet_hours_check_failed",
+            level="error",
+            error_type=type(exc).__name__,
+        )
         return False
 
 
@@ -1791,7 +1807,13 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         try:
             from core.matter_router import matter_id_from_context
             matter_id = matter_id_from_context(context)
-        except Exception:
+        except Exception as exc:
+            _ops_log(
+                "matter_context_resolution_failed",
+                level="warn",
+                source=source,
+                error_type=type(exc).__name__,
+            )
             matter_id = ""
 
     dup = _find_recent_duplicate(
@@ -1860,15 +1882,16 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
 
 def _web_desk_url(path: str = "/items") -> str:
-    """Absolute web-desk URL, or "" when this install has no public entry.
-
-    Wrapped so a card-render path can never be broken by the mobile layer:
-    an unreachable desk means "render no link", not "raise".
-    """
+    """Absolute web-desk URL, or "" when this install has no public entry."""
     try:
         from core.mobile_access import web_desk_url
         return web_desk_url(path)
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "web_desk_url_failed",
+            level="warn",
+            error_type=type(exc).__name__,
+        )
         return ""
 
 
@@ -2321,7 +2344,13 @@ def _sync_lark_card(memorial_id: str, card: dict) -> None:
     try:
         from core.memorial_thread import sent_message_ids
         message_ids = sent_message_ids(memorial_id)
-    except Exception:
+    except Exception as exc:
+        _ops_log(
+            "thread_receipt_lookup_failed",
+            level="warn",
+            memorial_id=memorial_id,
+            error_type=type(exc).__name__,
+        )
         return
     if not message_ids:
         return
@@ -2586,6 +2615,12 @@ def decide(
                 )
                 result_box.append((r, False))
             except Exception as e:
+                _ops_log(
+                    "decision_action_failed",
+                    level="error",
+                    memorial_id=memorial_id,
+                    error_type=type(e).__name__,
+                )
                 result_box.append((f"FAILED: {e}", True))
 
         t = threading.Thread(
@@ -2732,8 +2767,13 @@ def conversation_deep_link(state: dict) -> str:
             bindings = bindings_for_matter(matter_id)
             if bindings:
                 return lark_deep_link(bindings[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            _ops_log(
+                "matter_deep_link_failed",
+                level="warn",
+                matter_id=matter_id,
+                error_type=type(exc).__name__,
+            )
     chat_id = str(state.get("chat_id", "") or "")
     if chat_id:
         return f"https://applink.feishu.cn/client/chat/open?openChatId={chat_id}"
