@@ -55,7 +55,14 @@ from pathlib import Path
 from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
-from core import memorial_cards, memorial_ledger
+from core import memorial_cards, memorial_ledger, memorial_transport
+from core.log import log
+from core.memorial_contracts import (
+    ATTENTION_ALERT,
+    ATTENTION_DECISION,
+    ATTENTION_NOTICE,
+    STATUS_LAPSED,
+)
 from core.timeutil import now_local, now_local_str
 
 JARVIS_DIR = Path(os.environ.get("JARVIS_DIR",
@@ -77,6 +84,14 @@ def runtime_root() -> Path:
         return root
     configured = os.environ.get("JARVIS_DIR", "").strip()
     return Path(configured) if configured else root
+
+
+def _ops_log(message: str, *, level: str = "info", **fields) -> None:
+    """Emit grep-friendly operational evidence without private card text."""
+    try:
+        log("memorial", message, level=level, **fields)
+    except Exception:
+        pass
 
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
@@ -187,9 +202,6 @@ PRESETS: dict[str, list[dict]] = {
 # "not_this_kind" it silences a source rather than answering an ask, so it
 # must not promote the card to decision class or speak first-person.
 _FYI_KEYS = {"read", "watch", "ack", "not_this_kind", "pause"}
-ATTENTION_DECISION = "decision"
-ATTENTION_NOTICE = "notice"
-ATTENTION_ALERT = "alert"
 
 # ── 缴回制度 (escrow) ────────────────────────────────────────────────────
 # A card sent once and never tapped used to scroll out of Lark and vanish:
@@ -225,7 +237,6 @@ ESCROW_HARD_LAPSE_H = 24 * 4
 # already burned by (7/22) — the emperor gets a docket, not the pile.
 ESCROW_DIGEST_HOURS = range(8, 12)
 ESCROW_DIGEST_SOURCE = "memorial-escrow"
-STATUS_LAPSED = "lapsed"
 
 REVIEW_LARK = "lark"
 REVIEW_PHONE = "phone"
@@ -921,12 +932,7 @@ def body_was_clipped(body: str) -> bool:
     itself ends with CLIP_NOTICE false-positives — benign: the full text gets
     sent anyway.)
     """
-    return memorial_cards.body_was_clipped(
-        body,
-        max_lines=CARD_BODY_MAX_LINES,
-        max_chars=CARD_BODY_MAX_CHARS,
-        clip_notice=CLIP_NOTICE,
-    )
+    return _display_body(body).endswith(CLIP_NOTICE)
 
 
 def _render_card(state: dict, *, body: str | None = None,
@@ -947,6 +953,13 @@ def _render_card(state: dict, *, body: str | None = None,
         clip_notice=CLIP_NOTICE,
         alert_attention=ATTENTION_ALERT,
         requires_decision=requires_decision,
+        header_fn=_header,
+        display_body_fn=_display_body,
+        button_groups_fn=lambda value, show_options, show_chat: _button_groups(
+            value,
+            include_options=show_options,
+            include_chat=show_chat,
+        ),
     )
 
 
@@ -1039,30 +1052,13 @@ def _send(args: list[str], *, retries: bool = True) -> str:
     retry schedule.  The default remains for compatibility callers that invoke
     this low-level helper directly.
     """
-    delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
-    for attempt, delay in enumerate(delays):
-        if delay:
-            time.sleep(delay)
-        try:
-            r = subprocess.run(["lark-cli", "im", "+messages-send", *args,
-                                "--as", "bot", "--json"],
-                               capture_output=True, text=True, timeout=15)
-            if r.returncode == 0:
-                try:
-                    data = json.loads(r.stdout).get("data") or {}
-                    mid = (data.get("message_id")
-                           or (data.get("message") or {}).get("message_id") or "")
-                    if not mid:
-                        msgs = data.get("messages") or []
-                        mid = (msgs[0].get("message_id") if msgs else "") or ""
-                except Exception:
-                    mid = ""
-                return str(mid) or "sent"
-        except subprocess.TimeoutExpired:
-            print(f"memorial send attempt {attempt} timed out", file=sys.stderr)
-        except Exception as e:
-            print(f"memorial send attempt {attempt} failed: {e}", file=sys.stderr)
-    return ""
+    return memorial_transport.send(
+        args,
+        retries=retries,
+        retry_delays=SEND_RETRY_DELAYS,
+        runner=subprocess.run,
+        sleeper=time.sleep,
+    )
 
 
 def _send_card(card_json_str: str, chat_id: str = "") -> str:
@@ -1113,7 +1109,10 @@ def _record_engagement(row: dict) -> None:
         row.setdefault("epoch", int(time.time()))
         _append_line(runtime_root() / "engagement_log.jsonl", row)
     except Exception as e:
-        print(f"memorial engagement log failed: {e}", file=sys.stderr)
+        _ops_log(
+            "engagement_log_failed", level="warn",
+            error_type=type(e).__name__,
+        )
 
 
 def _record_delivery(memorial_id: str, status: str, source: str = "",
@@ -1250,7 +1249,10 @@ def _deliver_opener(text: str, chat_id: str,
             _finish_opener_continuation(continuation or {}, delivered=False)
     except Exception as e:
         _finish_opener_continuation(continuation or {}, delivered=False)
-        print(f"memorial opener send failed: {e}", file=sys.stderr)
+        _ops_log(
+            "opener_delivery_failed", level="error",
+            error_type=type(e).__name__,
+        )
 
 
 def _send_opener_async(text: str, chat_id: str,
@@ -1509,7 +1511,10 @@ def _deliver_existing(
                 from core.memorial_thread import record_sent
                 record_sent(mid, result.message_id)
             except Exception as e:
-                print(f"memorial {mid}: record_sent failed: {e}", file=sys.stderr)
+                _ops_log(
+                    "thread_receipt_record_failed", level="warn",
+                    memorial_id=mid, error_type=type(e).__name__,
+                )
         _write_outbox(readable + f"\n\n（卡片 {mid} 已发出，等你回）")
         return True
 
@@ -1523,8 +1528,7 @@ def _deliver_existing(
 
     if force_queue and result.reason == "quiet_hours":
         _record_delivery(mid, "queued")
-        print(f"memorial {mid}: quiet hours — queued in delivery state",
-              file=sys.stderr)
+        _ops_log("quiet_hours_queued", memorial_id=mid)
         return True
 
     _record_delivery(mid, "failed")
@@ -1632,9 +1636,12 @@ def _maybe_rotate() -> None:
     try:
         n = rotate_ledger()
         if n:
-            print(f"memorial ledger rotated: {n} cards archived", file=sys.stderr)
+            _ops_log("ledger_rotated", archived_cards=n)
     except Exception as e:
-        print(f"memorial ledger rotation failed: {e}", file=sys.stderr)
+        _ops_log(
+            "ledger_rotation_failed", level="error",
+            error_type=type(e).__name__,
+        )
         return
     try:
         marker.write_text(json.dumps({"month": month}), encoding="utf-8")
@@ -1718,8 +1725,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         source, title, body, opts, native_buttons, str(context), str(chat_id),
         str(matter_id), str(dedup_key), attention, review_at)
     if dup is not None:
-        print(f"memorial dedup: identical pending {dup['id']} within "
-              f"{DEDUP_WINDOW_S // 3600}h — not re-created", file=sys.stderr)
+        _ops_log(
+            "pending_duplicate_reused",
+            memorial_id=dup["id"], window_hours=DEDUP_WINDOW_S // 3600,
+        )
         if not send:
             if (not should_push_to_lark(dup)
                     and not delivery_accepted(dup)):
@@ -1764,7 +1773,10 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
                 matter_id, "memorial_created", title, actor=source,
                 payload={"memorial_id": mid, "review_surface": review_at})
         except Exception as e:
-            print(f"memorial {mid}: matter link failed: {e}", file=sys.stderr)
+            _ops_log(
+                "matter_link_failed", level="warn", memorial_id=mid,
+                error_type=type(e).__name__,
+            )
 
     state = _fold([ev])[mid]
     # send=False leaves Lark-routed cards to the caller's transport; a
@@ -1915,8 +1927,10 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     matters = ([body] if (native_buttons or inline_options)
                else split_matters(body))
     if len(matters) > 1:
-        print(f"memorial split: adopted {source or 'heartbeat'} card → "
-              f"{len(matters)} cards (一张卡一件事)", file=sys.stderr)
+        _ops_log(
+            "card_split", source=source or "heartbeat",
+            split_kind="adopted_card", card_count=len(matters),
+        )
     outputs: list[str] = []
     for matter in matters:
         mid, _ = create(
@@ -2068,8 +2082,11 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             return
         authored_blocks = _split_authored_card_blocks(text)
         if len(authored_blocks) > 1:
-            print(f"memorial split: {single_source} concatenated directives → "
-                  f"{len(authored_blocks)} cards", file=sys.stderr)
+            _ops_log(
+                "card_split", source=single_source,
+                split_kind="concatenated_directives",
+                card_count=len(authored_blocks),
+            )
             for authored_block in authored_blocks:
                 prose.extend(authored_block.splitlines())
                 flush_prose()
@@ -2095,8 +2112,10 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
         chunks = ([body] if inline_options
                   else split_matters(body))
         if len(chunks) > 1:
-            print(f"memorial split: {single_source} prose body → "
-                  f"{len(chunks)} cards (一张卡一件事)", file=sys.stderr)
+            _ops_log(
+                "card_split", source=single_source,
+                split_kind="prose_body", card_count=len(chunks),
+            )
         for chunk in chunks:
             if explicit_title and len(chunks) == 1:
                 chunk_title, chunk_body = explicit_title, chunk
@@ -2234,12 +2253,16 @@ def _sync_lark_card(memorial_id: str, card: dict) -> None:
                 capture_output=True, text=True, timeout=12,
             )
             if result.returncode != 0:
-                print(f"memorial {memorial_id}: Lark card sync failed for "
-                      f"{message_id}: {(result.stderr or result.stdout)[:180]}",
-                      file=sys.stderr)
+                _ops_log(
+                    "lark_card_sync_rejected", level="warn",
+                    memorial_id=memorial_id, message_id=message_id,
+                    returncode=int(result.returncode),
+                )
         except Exception as e:
-            print(f"memorial {memorial_id}: Lark card sync failed: {e}",
-                  file=sys.stderr)
+            _ops_log(
+                "lark_card_sync_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(e).__name__,
+            )
 
 
 def _complete_surface_handoffs(memorial_id: str) -> None:
@@ -2248,8 +2271,10 @@ def _complete_surface_handoffs(memorial_id: str) -> None:
         from core.continuity import complete_entity_handoffs
         complete_entity_handoffs("memorial", memorial_id)
     except Exception as e:
-        print(f"memorial {memorial_id}: handoff completion failed: {e}",
-              file=sys.stderr)
+        _ops_log(
+            "handoff_completion_failed", level="warn",
+            memorial_id=memorial_id, error_type=type(e).__name__,
+        )
 
 
 def resolve(memorial_id: str, label: str,
@@ -2364,8 +2389,10 @@ def _finish_decide_side_effects(
                       payload={"memorial_id": memorial_id, "option": opt_key,
                                "action_result": action_result})
         except Exception as e:
-            print(f"memorial {memorial_id}: matter decision link failed: {e}",
-                  file=sys.stderr)
+            _ops_log(
+                "matter_decision_link_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(e).__name__,
+            )
     if opt.get("reply") or opt_key not in _FYI_KEYS:
         _queue_decision_context(st, opt.get("label", ""), action_result,
                                 is_reply=bool(opt.get("reply")))
@@ -2447,7 +2474,10 @@ def decide(
         DeliveryPipeline(runtime_root()).confirm_entity(
             memorial_id=memorial_id, state="acted")
     except Exception as e:
-        print(f"memorial delivery confirm failed: {e}", file=sys.stderr)
+        _ops_log(
+            "delivery_confirmation_failed", level="warn",
+            memorial_id=memorial_id, error_type=type(e).__name__,
+        )
     # 批红 = engagement：same "feedback" shape the legacy card buttons write,
     # so engagement-analyze sees which sources Pascal actually acts on.
     _record_engagement({"source": st.get("source", "memorial"),
@@ -2660,7 +2690,10 @@ def confused(memorial_id: str) -> dict:
         append_jsonl_locked(_explain_queue_path(), {
             "memorial_id": memorial_id, "ts": ts, "taken_at": 0})
     except OSError as exc:
-        print(f"memorial confused: queue write failed: {exc}", file=sys.stderr)
+        _ops_log(
+            "explain_queue_write_failed", level="error",
+            memorial_id=memorial_id, error_type=type(exc).__name__,
+        )
     try:  # hasten the next heartbeat cycle — best-effort
         Path("/tmp/jarvis-heartbeat-trigger").touch()
     except OSError:
@@ -2728,8 +2761,10 @@ def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
             "memorial_id": st["id"], "opt_key": opt_key, "label": label,
             "ts": now_local_str(), "taken_at": 0, "attempts": 0})
     except OSError as exc:
-        print(f"memorial reply followup: queue write failed: {exc}",
-              file=sys.stderr)
+        _ops_log(
+            "reply_followup_queue_write_failed", level="error",
+            memorial_id=st["id"], error_type=type(exc).__name__,
+        )
         return
     try:  # hasten the next heartbeat cycle — best-effort
         _TRIGGER_PATH.touch()
@@ -2760,9 +2795,11 @@ def reply_followup_claim(now_epoch: int | None = None) -> dict | None:
         kept = []
         for row in rows:
             if int(row.get("attempts") or 0) >= REPLY_FOLLOWUP_MAX_ATTEMPTS:
-                print("memorial reply followup: dropping after "
-                      f"{REPLY_FOLLOWUP_MAX_ATTEMPTS} attempts: {row}",
-                      file=sys.stderr)
+                _ops_log(
+                    "reply_followup_dropped", level="error",
+                    memorial_id=str(row.get("memorial_id") or ""),
+                    attempts=REPLY_FOLLOWUP_MAX_ATTEMPTS,
+                )
                 continue
             if not claimed and int(row.get("taken_at") or 0) <= (
                     now_e - REPLY_FOLLOWUP_RETAKE_S):
@@ -2947,7 +2984,7 @@ def chat(memorial_id: str) -> dict:
     ts = now_local_str()
 
     if st.get("chat_epoch") and time.time() - st["chat_epoch"] < CHAT_RETAP_THROTTLE_S:
-        print(f"memorial chat re-tap throttled: id={memorial_id}", file=sys.stderr)
+        _ops_log("chat_retap_throttled", memorial_id=memorial_id)
         return {"toast": {"type": "info", "content": "已在聊了——直接回消息就行"},
                 "deep_link": conversation_deep_link(st),
                 "card": {"type": "raw",
@@ -2962,16 +2999,17 @@ def chat(memorial_id: str) -> dict:
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if conv_key:
         if _injection_queued(conv_key, f"memorial:{memorial_id}"):
-            print(f"memorial chat: injection for {memorial_id} already queued",
-                  file=sys.stderr)
+            _ops_log("chat_injection_already_queued", memorial_id=memorial_id)
         else:
             _append_line(_pending_merge_path(), {
                 "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
                 "ts": ts, "summary": _bounded_chat_context(st),
             })
     else:
-        print(f"memorial chat: no conv_key for {memorial_id} — context not injected",
-              file=sys.stderr)
+        _ops_log(
+            "chat_injection_missing_conversation", level="warn",
+            memorial_id=memorial_id,
+        )
 
     _append_line(_ledger_path(), {"ev": "chat", "id": memorial_id, "ts": ts,
                                   "epoch": int(time.time())})
@@ -2988,8 +3026,10 @@ def chat(memorial_id: str) -> dict:
             companion.record_engaged(st.get("context", ""),
                                      str(st.get("title", "")))
         except Exception as exc:
-            print(f"memorial chat: companion capture failed: {exc}",
-                  file=sys.stderr)
+            _ops_log(
+                "companion_capture_failed", level="warn",
+                memorial_id=memorial_id, error_type=type(exc).__name__,
+            )
 
     # 2. Opener so Pascal has something to reply to — off the callback thread.
     #    When the card was clipped, the opener IS the payload: he taps the

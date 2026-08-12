@@ -28,6 +28,23 @@ def _spec(tmp_path):
     return ManagedLog(label, (log,)), plist, log
 
 
+def test_log_maintenance_cli_clamps_limits_and_reports_json(monkeypatch, capsys):
+    from core import log_maintenance
+
+    calls = []
+    monkeypatch.setattr(
+        log_maintenance,
+        "maintain_logs",
+        lambda **kwargs: calls.append(kwargs) or {
+            "ok": True, "status": "complete", "results": [],
+        },
+    )
+
+    assert log_maintenance.main(["--max-bytes", "0", "--keep", "0"]) == 0
+    assert calls == [{"max_bytes": 1, "keep": 1}]
+    assert '"status": "complete"' in capsys.readouterr().out
+
+
 def test_below_threshold_does_not_touch_service(tmp_path, monkeypatch):
     spec, plist, _log = _spec(tmp_path)
     monkeypatch.setattr(

@@ -155,7 +155,7 @@ def test_adopted_calendar_card_with_three_reschedules_becomes_three_cards(
            if el.get("tag") == "action" for a in el["actions"]}
     assert len(ids) == 3
     # the split is audited
-    assert "memorial split" in capsys.readouterr().err
+    assert '"msg": "card_split"' in capsys.readouterr().err
 
 
 def test_adopted_card_with_native_action_button_never_splits(env):
@@ -182,7 +182,7 @@ def test_prose_multi_matter_body_splits_into_cards(env, capsys):
     rendered = memorial.memorialize_output(THREE_RESCHEDULES, "calendar-sync")
     cards = [json.loads(line) for line in rendered.splitlines()]
     assert len(cards) == 3
-    assert "memorial split" in capsys.readouterr().err
+    assert '"msg": "card_split"' in capsys.readouterr().err
     assert len([s for s in memorial.list_memorials()]) == 3
 
 

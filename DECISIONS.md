@@ -71,6 +71,7 @@ Use the stdlib-only graph check before and after a broad self-improve round:
 ```bash
 python3 scripts/import_graph.py core --threshold 20
 python3 scripts/import_graph.py core --format mermaid --focus core.cross_session
+python3 scripts/import_graph.py core --max-direct-cycles 11
 ```
 
 The first command ranks modules by unique adjacent internal modules and warns
@@ -78,7 +79,24 @@ when a module exceeds the chosen review threshold. The second emits a Mermaid
 one-hop view suitable for a PR or architecture note. A threshold is a review
 trigger, not proof that a module is badly designed; central authority modules
 can have intentionally high fan-in. CI can opt into a hard gate with
-`--fail-on-threshold` once a reviewed baseline exists.
+`--fail-on-threshold` once a reviewed baseline exists. Direct two-module
+cycles are different: pytest enforces the reviewed current baseline and fails
+on any new pair, while removals need no allowlist change.
+
+## ADR-002: Memorial Boundaries and Failure Evidence
+
+**Status:** accepted
+
+- `core.memorial_ledger` owns append/fold storage primitives.
+- `core.memorial_cards` owns card parsing and composition.
+- `core.memorial_transport` owns the low-level Lark send attempt and emits
+  structured, payload-free failure evidence.
+- `core.memorial_contracts` owns shared state values imported by readers.
+- `core.memorial` remains the compatibility facade and orchestration layer.
+
+Delivery truth is still `core.delivery` plus SQLite receipts/dead letters.
+Structured log events make failure diagnosable; they never substitute for a
+receipt and must not contain private card bodies or provider stderr.
 
 The current delivery retry and cap decision is documented, with its state
 machine, in `docs/delivery_retry_and_caps.md`.

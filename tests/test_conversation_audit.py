@@ -601,3 +601,12 @@ def test_resolve_by_id_closes_twin_rows(tmp_path):
     n = audit.resolve_findings(paths.db_path, "fixed", issue_id=findings[0]["id"])
     assert n == 2
     assert audit.open_findings(paths.db_path, days=7) == []
+
+
+def test_connect_uses_wal_and_bounded_lock_wait(tmp_path):
+    connection = audit.connect(tmp_path / "conversation_audit.db")
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        connection.close()

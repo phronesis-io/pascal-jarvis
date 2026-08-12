@@ -69,8 +69,17 @@ def test_facade_private_hooks_drive_extracted_implementations(monkeypatch):
     assert folded["mem_hook"]["attention"] == "facade-attention"
 
     monkeypatch.setattr(memorial, "requires_decision", lambda state: True)
+    monkeypatch.setattr(memorial, "_display_body", lambda _body: "patched body")
     rendered = memorial._render_card(folded["mem_hook"])
     assert "🎯 等你拍一个" in rendered
+    assert "patched body" in rendered
+    assert memorial.body_was_clipped("body") is False
+
+    monkeypatch.setattr(
+        memorial, "_display_body",
+        lambda _body: "patched body\n\n" + memorial.CLIP_NOTICE,
+    )
+    assert memorial.body_was_clipped("body") is True
 
 
 def test_legacy_facade_symbols_remain_importable():

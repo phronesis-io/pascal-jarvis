@@ -32,6 +32,53 @@ def test_runtime_sidecars_follow_jarvis_dir_on_import(tmp_path):
     assert Path(seen) == tmp_path / "data" / ".cal_skip_log_seen.json"
 
 
+def test_runtime_sidecars_follow_jarvis_dir_after_import(tmp_path, monkeypatch):
+    """Late fixture injection must redirect every intentions sidecar."""
+    import core.intentions as intentions_mod
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    assert intentions_mod.runtime_root() == tmp_path
+    assert intentions_mod._inflight_path().is_relative_to(tmp_path)
+    assert intentions_mod._breach_queue_path().is_relative_to(tmp_path)
+    assert intentions_mod._skip_log_seen_path().is_relative_to(tmp_path)
+    assert intentions_mod._event_map_path().is_relative_to(tmp_path)
+
+    intentions_mod.write_inflight(["intent-late-root"])
+    assert intentions_mod.read_inflight() == ["intent-late-root"]
+    assert intentions_mod._inflight_path().exists()
+    assert intentions_mod._skip_log_once("late-root") is True
+    assert intentions_mod._skip_log_seen_path().exists()
+
+
+def test_intent_telemetry_follows_jarvis_dir_after_import(tmp_path, monkeypatch):
+    import core.intentions as intentions_mod
+    import core.sched_events as sched_events
+
+    calls = []
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        sched_events, "emit",
+        lambda root, event, **fields: calls.append((Path(root), event, fields)),
+    )
+
+    intentions_mod._emit_intent("intent_test", "intent-late-root", value=1)
+
+    assert calls == [(tmp_path, "intent_test", {
+        "task": "intent-late-root", "value": 1,
+    })]
+
+
+def test_richview_follows_jarvis_dir_after_import(tmp_path, monkeypatch):
+    import core.richview as richview
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    url = richview.publish("late root", [{"type": "markdown", "content": "ok"}])
+
+    assert richview.runtime_root() == tmp_path
+    assert url.startswith("http://127.0.0.1:3456/view/")
+    assert len(list((tmp_path / "views").glob("*.json"))) == 1
+
+
 @pytest.fixture
 def intent_db(tmp_path, monkeypatch):
     """Create an in-memory-like SQLite DB for intentions testing."""

@@ -128,7 +128,7 @@ def _engaged(state: dict) -> bool:
     produced (the ledger fold sets `chat_ts`), so 「聊聊这个」 — the one signal
     that a card started a real conversation — never counted at all.
     """
-    from core.memorial import STATUS_LAPSED
+    from core.memorial_contracts import STATUS_LAPSED
 
     status = str(state.get("status", ""))
     if status == STATUS_LAPSED:
@@ -175,7 +175,7 @@ def evaluate(stats: dict[tuple[str, str], dict] | None = None) -> dict:
 
     Returns ``{"demote": {...}, "promote": [...], "noisy_notices": [...]}``.
     """
-    from core.memorial import ATTENTION_DECISION, ATTENTION_NOTICE
+    from core.memorial_contracts import ATTENTION_DECISION, ATTENTION_NOTICE
 
     stats = compute_stats() if stats is None else stats
     _init()
@@ -274,7 +274,7 @@ def class_for(source: str, natural: str) -> str:
     touch an alert, and cannot silence anything — a notice still has its
     durable Item and Signals surface.
     """
-    from core.memorial import ATTENTION_DECISION, ATTENTION_NOTICE
+    from core.memorial_contracts import ATTENTION_DECISION, ATTENTION_NOTICE
 
     if natural != ATTENTION_DECISION:
         return natural

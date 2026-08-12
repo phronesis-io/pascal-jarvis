@@ -248,7 +248,7 @@ def kind_stats(window_days: int = WINDOW_DAYS,
     the whole point of the gradient is that 「知道了」 and 「这类不必」 are
     different answers, and the old instrument could not tell them apart.
     """
-    from core.memorial import STATUS_LAPSED
+    from core.memorial_contracts import STATUS_LAPSED
 
     if states is None:
         from core import memorial

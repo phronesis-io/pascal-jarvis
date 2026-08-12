@@ -34,11 +34,52 @@ from core.timeutil import now_local, now_local_str
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
 ROOT = Path(os.environ.get("JARVIS_DIR") or CODE_ROOT)
+_INITIAL_ROOT = ROOT
 
 # Sidecar state files (repo-root data/, all writers use atomic tmp+rename)
 INFLIGHT_FILE = ROOT / "data" / ".intention_inflight.json"
 _DEFAULT_BREACH_QUEUE = ROOT / "data" / ".intent_breach_queue.jsonl"
 BREACH_QUEUE = _DEFAULT_BREACH_QUEUE
+_INITIAL_INFLIGHT_FILE = INFLIGHT_FILE
+_INITIAL_BREACH_QUEUE = _DEFAULT_BREACH_QUEUE
+
+
+def runtime_root() -> Path:
+    """Resolve the mutable state root at call time.
+
+    ``ROOT`` remains a compatibility override for older callers. When it has
+    not been patched, a post-import ``JARVIS_DIR`` change is authoritative.
+    """
+    root = Path(ROOT)
+    if root != _INITIAL_ROOT:
+        return root
+    configured = os.environ.get("JARVIS_DIR", "").strip()
+    return Path(configured) if configured else root
+
+
+def _runtime_path(current: Path, initial: Path, relative: str) -> Path:
+    configured = Path(current)
+    if configured != initial:
+        return configured
+    return runtime_root() / relative
+
+
+def _inflight_path() -> Path:
+    return _runtime_path(
+        INFLIGHT_FILE, _INITIAL_INFLIGHT_FILE,
+        "data/.intention_inflight.json",
+    )
+
+
+def _breach_queue_path() -> Path:
+    return _runtime_path(
+        BREACH_QUEUE, _INITIAL_BREACH_QUEUE,
+        "data/.intent_breach_queue.jsonl",
+    )
+
+
+def _using_default_breach_queue() -> bool:
+    return Path(BREACH_QUEUE) == _INITIAL_BREACH_QUEUE
 
 
 @contextmanager
@@ -107,7 +148,7 @@ def _emit_intent(event: str, intent_id: str, **fields) -> None:
     """Emit an intent-lifecycle event to sched_events.jsonl. Never raises."""
     try:
         from core.sched_events import emit as sched_emit
-        sched_emit(ROOT, event, task=intent_id, **fields)
+        sched_emit(runtime_root(), event, task=intent_id, **fields)
     except Exception:
         pass
 
@@ -1385,12 +1426,13 @@ def _queue_breach(intent: dict, now: datetime) -> None:
             "attempt": intent.get("attempt") or 0,
             "ts": now.strftime("%Y-%m-%dT%H:%M:%S"), "notify_attempts": 0,
         }
-        if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+        queue = _breach_queue_path()
+        if _using_default_breach_queue():
             _store_breach_sqlite(entry)
             return
-        BREACH_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-        with breach_queue_lock(BREACH_QUEUE):
-            with open(BREACH_QUEUE, "a", encoding="utf-8") as f:
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        with breach_queue_lock(queue):
+            with open(queue, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[intentions] breach queue append failed: {e}", file=sys.stderr)
@@ -2082,13 +2124,28 @@ EVENT_MAP_FILE = ROOT / "calendar_event_mapping.json"
 # survives. Fail-open both ways: a corrupt sidecar logs again (the bridge
 # must never crash on it), a failed write just means one extra line next cycle.
 SKIP_LOG_SEEN_FILE = ROOT / "data" / ".cal_skip_log_seen.json"
+_INITIAL_EVENT_MAP_FILE = EVENT_MAP_FILE
+_INITIAL_SKIP_LOG_SEEN_FILE = SKIP_LOG_SEEN_FILE
+
+
+def _event_map_path() -> Path:
+    return _runtime_path(
+        EVENT_MAP_FILE, _INITIAL_EVENT_MAP_FILE, "calendar_event_mapping.json")
+
+
+def _skip_log_seen_path() -> Path:
+    return _runtime_path(
+        SKIP_LOG_SEEN_FILE, _INITIAL_SKIP_LOG_SEEN_FILE,
+        "data/.cal_skip_log_seen.json",
+    )
 
 
 def _skip_log_once(key: str) -> bool:
     """True exactly once per local day per key — the caller may log then."""
     today = now_local_str("%Y-%m-%d")
+    seen_path = _skip_log_seen_path()
     try:
-        state = json.loads(SKIP_LOG_SEEN_FILE.read_text(encoding="utf-8"))
+        state = json.loads(seen_path.read_text(encoding="utf-8"))
         if not isinstance(state, dict) or state.get("date") != today:
             state = {"date": today, "seen": []}
     except Exception:
@@ -2101,10 +2158,10 @@ def _skip_log_once(key: str) -> bool:
     seen.append(key)
     try:
         import os
-        SKIP_LOG_SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SKIP_LOG_SEEN_FILE.with_suffix(".tmp")
+        seen_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = seen_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False))
-        os.replace(tmp, SKIP_LOG_SEEN_FILE)
+        os.replace(tmp, seen_path)
     except Exception:
         pass
     return True
@@ -2116,7 +2173,7 @@ def _load_event_map() -> list:
     REQ-85(b) (per-day handling) — the calendar bridge must never crash on it.
     """
     try:
-        data = json.loads(EVENT_MAP_FILE.read_text(encoding="utf-8"))
+        data = json.loads(_event_map_path().read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -2692,33 +2749,34 @@ def write_inflight(ids: list[str], breach_ids: list[str] | None = None) -> None:
     breach ids that rode this cycle's PRE apology prompt (so post marks
     exactly those shown — not a blanket wipe that would eat reconcile's
     freshly-queued breaches)."""
-    INFLIGHT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = INFLIGHT_FILE.with_suffix(".tmp")
+    inflight = _inflight_path()
+    inflight.parent.mkdir(parents=True, exist_ok=True)
+    tmp = inflight.with_suffix(".tmp")
     tmp.write_text(json.dumps(
         {"ts": now_local_str("%Y-%m-%dT%H:%M:%S"), "ids": list(ids),
          "breach_ids": list(breach_ids or [])},
         ensure_ascii=False))
     import os
-    os.replace(tmp, INFLIGHT_FILE)
+    os.replace(tmp, inflight)
 
 
 def read_inflight() -> list[str]:
     try:
-        return list(json.loads(INFLIGHT_FILE.read_text()).get("ids", []))
+        return list(json.loads(_inflight_path().read_text()).get("ids", []))
     except (OSError, json.JSONDecodeError, AttributeError):
         return []
 
 
 def read_inflight_breaches() -> list[str]:
     try:
-        return list(json.loads(INFLIGHT_FILE.read_text()).get("breach_ids", []))
+        return list(json.loads(_inflight_path().read_text()).get("breach_ids", []))
     except (OSError, json.JSONDecodeError, AttributeError):
         return []
 
 
 def clear_inflight() -> None:
     try:
-        INFLIGHT_FILE.unlink(missing_ok=True)
+        _inflight_path().unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -2890,11 +2948,12 @@ def store_breach_entry(entry: dict) -> None:
 
 def _import_legacy_breaches() -> None:
     """One-way import for writers not yet upgraded from the JSONL adapter."""
-    if BREACH_QUEUE != _DEFAULT_BREACH_QUEUE or not BREACH_QUEUE.exists():
+    queue = _breach_queue_path()
+    if not _using_default_breach_queue() or not queue.exists():
         return
     try:
-        with breach_queue_lock(BREACH_QUEUE):
-            lines = BREACH_QUEUE.read_text(encoding="utf-8").splitlines()
+        with breach_queue_lock(queue):
+            lines = queue.read_text(encoding="utf-8").splitlines()
             entries = []
             for line in lines:
                 try:
@@ -2906,7 +2965,7 @@ def _import_legacy_breaches() -> None:
             for entry in entries:
                 _store_breach_sqlite(entry)
             # Preserve the inode for any old process that still has it open.
-            with open(BREACH_QUEUE, "w", encoding="utf-8"):
+            with open(queue, "w", encoding="utf-8"):
                 pass
     except OSError as e:
         print(f"[intentions] legacy breach import failed: {e}", file=sys.stderr)
@@ -2924,7 +2983,7 @@ def peek_breaches(max_notify_attempts: int = BREACH_MAX_SHOWS) -> list[dict]:
     is the only writer, called only when a card actually went out. Shown at
     most BREACH_MAX_SHOWS times (1) — a breach apology must never nag.
     """
-    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+    if _using_default_breach_queue():
         _import_legacy_breaches()
         try:
             db = _get_db()
@@ -2948,11 +3007,12 @@ def peek_breaches(max_notify_attempts: int = BREACH_MAX_SHOWS) -> list[dict]:
             print(f"[intentions] breach sqlite peek failed: {e}",
                   file=sys.stderr)
             return []
-    if not BREACH_QUEUE.exists():
+    queue = _breach_queue_path()
+    if not queue.exists():
         return []
     entries = []
     try:
-        for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+        for line in queue.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             try:
@@ -2978,7 +3038,7 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
     """
     if not ids:
         return
-    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+    if _using_default_breach_queue():
         try:
             import time
             db = _get_db()
@@ -2999,7 +3059,8 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
             print(f"[intentions] breach sqlite mark-shown failed: {e}",
                   file=sys.stderr)
         return
-    if not BREACH_QUEUE.exists():
+    queue = _breach_queue_path()
+    if not queue.exists():
         return
     shown = set(ids)
     keep = []
@@ -3007,8 +3068,8 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
         # F-6: the whole read→rewrite must hold the writer lock, or a
         # concurrent append (skip-digest backfill, _queue_breach) lands
         # between our read and os.replace and is silently destroyed.
-        with breach_queue_lock(BREACH_QUEUE):
-            for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+        with breach_queue_lock(queue):
+            for line in queue.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -3020,11 +3081,11 @@ def mark_breaches_shown(ids: list[str], max_notify_attempts: int = BREACH_MAX_SH
                     if e["notify_attempts"] >= max_notify_attempts:
                         continue  # shown enough — retire
                 keep.append(e)
-            tmp = BREACH_QUEUE.with_suffix(".tmp")
+            tmp = queue.with_suffix(".tmp")
             tmp.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in keep)
                            + ("\n" if keep else ""), encoding="utf-8")
             import os
-            os.replace(tmp, BREACH_QUEUE)
+            os.replace(tmp, queue)
     except OSError as e:
         print(f"[intentions] breach mark-shown failed: {e}", file=sys.stderr)
 
@@ -3040,7 +3101,7 @@ def clear_breaches(ids: list[str] | None = None) -> None:
     breaches — use mark_breaches_shown with explicit ids instead)."""
     if not ids:
         return
-    if BREACH_QUEUE == _DEFAULT_BREACH_QUEUE:
+    if _using_default_breach_queue():
         try:
             import time
             db = _get_db()
@@ -3056,24 +3117,25 @@ def clear_breaches(ids: list[str] | None = None) -> None:
             print(f"[intentions] breach sqlite clear failed: {e}",
                   file=sys.stderr)
         return
-    if not BREACH_QUEUE.exists():
+    queue = _breach_queue_path()
+    if not queue.exists():
         return
     try:
         drop = set(ids)
         keep = []
         # F-6: locked read→rewrite — this runs in the BOT process on the
         # reply-closure path and used to race the heartbeat's appends.
-        with breach_queue_lock(BREACH_QUEUE):
-            for line in BREACH_QUEUE.read_text(encoding="utf-8").splitlines():
+        with breach_queue_lock(queue):
+            for line in queue.read_text(encoding="utf-8").splitlines():
                 try:
                     if json.loads(line).get("id") not in drop:
                         keep.append(line)
                 except json.JSONDecodeError:
                     continue
-            tmp = BREACH_QUEUE.with_suffix(".tmp")
+            tmp = queue.with_suffix(".tmp")
             tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
             import os
-            os.replace(tmp, BREACH_QUEUE)
+            os.replace(tmp, queue)
     except OSError as e:
         print(f"[intentions] breach clear failed: {e}", file=sys.stderr)
 

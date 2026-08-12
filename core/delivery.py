@@ -31,6 +31,7 @@ from typing import Callable
 
 from core.attention_policy import in_quiet_hours, next_awake
 from core.card import extract_card_text
+from core.log import log
 from core.runtime_paths import database_path
 from core.timeutil import now_local
 
@@ -61,6 +62,13 @@ _STATE_UPDATE_FIELDS = frozenset({
 })
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY: dict[Path, tuple[int, int]] = {}
+
+
+def _ops_log(message: str, *, level: str = "info", **fields) -> None:
+    try:
+        log("delivery", message, level=level, **fields)
+    except Exception:
+        pass
 
 _TOOL_NARRATION_RE = re.compile(
     r"^\s*(?:🔧\s*)?(?:"
@@ -1086,6 +1094,15 @@ class DeliveryPipeline:
             except Exception:
                 db.rollback()
                 raise
+            _ops_log(
+                "terminal_failure" if terminal else "retry_batch_exhausted",
+                level="error" if terminal else "warn",
+                delivery_id=envelope.id,
+                source=envelope.source,
+                kind=envelope.kind,
+                attempts=attempts,
+                state=state,
+            )
             return DeliveryResult(
                 envelope.id, True, state, route, reason=last_error)
 

@@ -113,6 +113,36 @@ def test_usage_stats_cli_is_numeric_only_and_counts_subagent_tokens(
     assert "private subagent transcript text" not in cache
 
 
+def test_delegation_shadow_cli_classifies_without_persisting(capsys):
+    from core import delegation_shadow
+
+    assert delegation_shadow.main([
+        "classify", "--text", "请把报告发给对方，发完核对消息记录",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["is_delegation"] is True
+    assert payload["risk_tier"] >= 1
+
+
+def test_eigenflux_skill_overlay_cli_writes_composed_contract(tmp_path):
+    from core import eigenflux_skill_overlay
+
+    base = tmp_path / "base.md"
+    overlay = tmp_path / "overlay.md"
+    output = tmp_path / "output.md"
+    base.write_text("intro\n\n### Fetch Unread Messages\nbody", encoding="utf-8")
+    overlay.write_text("Jarvis verified-send rule", encoding="utf-8")
+
+    assert eigenflux_skill_overlay.main([
+        "--base", str(base), "--overlay", str(overlay), "--output", str(output),
+    ]) == 0
+    rendered = output.read_text(encoding="utf-8")
+    assert eigenflux_skill_overlay.BEGIN in rendered
+    assert "Jarvis verified-send rule" in rendered
+    assert rendered.index("Jarvis verified-send rule") < rendered.index(
+        "### Fetch Unread Messages")
+
+
 def test_admin_session_and_live_chat_contracts(tmp_path, monkeypatch):
     import admin
 
@@ -151,7 +181,11 @@ def _empty_usage() -> dict:
     return _empty_aggregate()
 
 
-@pytest.mark.parametrize("path", ["/routines", "/usage"])
+@pytest.mark.parametrize("path", [
+    "/routines", "/usage", "/agent-calendar", "/eigenflux", "/memorials",
+    "/ops", "/settings", "/signals", "/thinking", "/delegations",
+    "/delegations/missing", "/engagement", "/intentions", "/tasks",
+])
 def test_uncovered_dashboard_pages_render_real_http_200(
     path, tmp_path, monkeypatch,
 ):
@@ -160,7 +194,14 @@ def test_uncovered_dashboard_pages_render_real_http_200(
     from nicegui import app as nicegui_app
     from core import routines
     import dashboard.db as db_module
+    from dashboard.pages import (  # noqa: F401
+        agent_calendar, delegations, eigenflux, engagement, intentions,
+        memorials, ops, settings, signals, tasks, thinking,
+    )
+    from dashboard.pages import engagement as engagement_page_module
+    from dashboard.pages import intentions as intentions_page_module
     from dashboard.pages import routines as routines_page_module
+    from dashboard.pages import tasks as tasks_page_module
     from dashboard.pages import usage as usage_page_module
 
     if not nicegui_app.config.has_run_config:
@@ -182,6 +223,10 @@ def test_uncovered_dashboard_pages_render_real_http_200(
         )
 
     monkeypatch.setattr(routines_page_module, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(engagement_page_module, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(intentions_page_module, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(tasks_page_module, "JARVIS_DIR", tmp_path)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setattr(usage_page_module, "load_aggregate", _empty_usage)
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "dashboard.db")
     if db_module._connection is not None:

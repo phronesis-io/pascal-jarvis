@@ -413,22 +413,39 @@ def render_card(
     clip_notice: str,
     alert_attention: str,
     requires_decision: Callable[[dict], bool],
+    header_fn: Callable[[dict], str] | None = None,
+    display_body_fn: Callable[[str], str] | None = None,
+    button_groups_fn: Callable[..., list[list[dict]]] | None = None,
 ) -> str:
+    render_header = header_fn or (lambda value: header(value, source_emoji))
+    render_body = display_body_fn or (
+        lambda value: display_body(
+            value,
+            max_lines=max_lines,
+            max_chars=max_chars,
+            clip_notice=clip_notice,
+        )
+    )
+    render_buttons = button_groups_fn or (
+        lambda value, show_options, show_chat: button_groups(
+            value,
+            include_options=show_options,
+            include_chat=show_chat,
+            chat_button_label=chat_button_label,
+            chat_opt_key=chat_opt_key,
+            confused_opt_key=confused_opt_key,
+        )
+    )
     audit_text = state.get("authoring_audit_text")
     if audit_text is not None:
         from core.safety import IDLE_SENTINEL, sentinel_present
         if sentinel_present(audit_text):
             return ""
-        escaped_title = header(state, source_emoji).replace(
+        escaped_title = render_header(state).replace(
             IDLE_SENTINEL, r"HEARTBEAT\_OK")
     else:
-        escaped_title = header(state, source_emoji)
-    content = display_body(
-        state["body"] if body is None else body,
-        max_lines=max_lines,
-        max_chars=max_chars,
-        clip_notice=clip_notice,
-    )
+        escaped_title = render_header(state)
+    content = render_body(state["body"] if body is None else body)
     if audit_text is not None:
         content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
     recommendation = state.get("recommend") or {}
@@ -452,14 +469,7 @@ def render_card(
     return build_card(
         escaped_title,
         content,
-        button_groups=button_groups(
-            state,
-            include_options=include_options,
-            include_chat=include_chat,
-            chat_button_label=chat_button_label,
-            chat_opt_key=chat_opt_key,
-            confused_opt_key=confused_opt_key,
-        ),
+        button_groups=render_buttons(state, include_options, include_chat),
     )
 
 

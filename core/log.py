@@ -19,7 +19,7 @@ from core.timeutil import now_local_str
 
 
 def log(component: str, msg: str, level: str = "info", file=None, **kwargs):
-    """Emit a structured log line to stderr (or specified file).
+    """Emit a structured log line to stderr (or specified file), fail-open.
 
     Args:
         component: Source module (e.g. "heartbeat", "bot", "daemon")
@@ -27,12 +27,17 @@ def log(component: str, msg: str, level: str = "info", file=None, **kwargs):
         level: "info", "warn", "error"
         **kwargs: Additional structured fields (task count, cycle_id, etc.)
     """
-    entry = {
-        "ts": now_local_str("%Y-%m-%dT%H:%M:%S"),
-        "level": level,
-        "component": component,
-        "msg": msg,
-    }
-    entry.update(kwargs)
-    output = file or sys.stderr
-    print(json.dumps(entry, ensure_ascii=False), file=output)
+    try:
+        entry = {
+            "ts": now_local_str("%Y-%m-%dT%H:%M:%S"),
+            "level": level,
+            "component": component,
+            "msg": msg,
+        }
+        entry.update(kwargs)
+        output = file or sys.stderr
+        print(json.dumps(entry, ensure_ascii=False), file=output)
+    except Exception:
+        # Observability is subordinate to the operation it describes. A bad
+        # stream, clock, or non-serializable field must never abort delivery.
+        return

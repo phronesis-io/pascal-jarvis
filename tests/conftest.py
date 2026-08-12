@@ -134,13 +134,14 @@ def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_database(monkeypatch, tmp_path):
-    """Route every test's default SQLite access to a private database.
+    """Route every test's mutable runtime state to a private root.
 
     Individual modules may still monkeypatch dashboard.db.DB_PATH when they
-    need a named database.  The environment override covers all other stores
-    that resolve JARVIS_DB_PATH directly and prevents CLI entry points from
-    silently falling back to the live repo database.
+    need a named database. The environment overrides cover stores that resolve
+    either JARVIS_DIR or JARVIS_DB_PATH and prevent CLI entry points from
+    silently falling back to live repository state.
     """
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
 
     import dashboard.db as db_module
@@ -159,8 +160,12 @@ def _isolate_runtime_database(monkeypatch, tmp_path):
 
 def _strict_guard() -> bool:
     """True when the live-bot exemption is disabled (CI-equivalent strictness)."""
-    return str(os.environ.get("JARVIS_TEST_STRICT_GUARD") or "").strip() not in (
-        "", "0", "false", "False")
+    # Strict is the default. A running production heartbeat is not proof that
+    # it, rather than the current test, wrote a changed file. An explicit
+    # opt-out remains available for diagnosis, but a normal green run can no
+    # longer hide a real test leak behind an unrelated live process.
+    return str(os.environ.get("JARVIS_TEST_STRICT_GUARD", "1")).strip() not in (
+        "0", "false", "False")
 
 
 # Mutations the live-bot exemption forgave, reported at the end of the run.
@@ -227,27 +232,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if len(_FORGIVEN) > 20:
         terminalreporter.write_line(f"  ... and {len(_FORGIVEN) - 20} more")
     terminalreporter.write_line(
-        "CI has no live bot and applies this check strictly, so these may be "
-        "real failures there. Reproduce with JARVIS_TEST_STRICT_GUARD=1 "
-        "(stop the bot first) before quoting this run as evidence.")
-
-
-@pytest.fixture(autouse=True)
-def _isolate_intent_telemetry(monkeypatch):
-    """Intent lifecycle events must never reach the LIVE sched_events.jsonl.
-
-    core.intentions._emit_intent hardcodes the repo root (production processes
-    have no other home), so test intent operations — even against tmp
-    databases — were emitting telemetry into the real event log: the 6/13
-    verification found 688 test-fixture events ('约学妹', '读 x402'…)
-    polluting the dashboard funnel. Tests that WANT to assert on telemetry
-    re-patch this explicitly.
-    """
-    try:
-        import core.intentions as _intents
-        monkeypatch.setattr(_intents, "_emit_intent", lambda *a, **k: None)
-    except ImportError:
-        pass
+        "This exemption was explicitly enabled with "
+        "JARVIS_TEST_STRICT_GUARD=0. Reproduce in strict mode before quoting "
+        "this run as evidence.")
 
 
 @pytest.fixture(autouse=True)

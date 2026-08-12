@@ -184,12 +184,18 @@ def _claude_tail(
     *,
     head_records: Callable[[Path], Iterable[dict]] = _head_records,
     tail_records: Callable[[Path], list[dict]] = _tail_records,
+    extract: Callable[[object], str] = extract_text,
+    is_synthetic: Callable[[str], bool] = _is_synthetic,
+    redact: Callable[[object], str] = redact_text,
+    turn_identity: Callable[[str, str, str, str], str] = _turn_identity,
+    dedupe_adjacent: Callable[[Iterable[Turn]], list[Turn]] = _dedupe_adjacent,
+    mtime_iso: Callable[[Path], str] = _mtime_iso,
 ) -> SessionTail | None:
     for item in head_records(path):
         if item.get("isSidechain") or item.get("type") != "user":
             continue
-        first_user = extract_text((item.get("message") or {}).get("content"))
-        if _is_synthetic(first_user):
+        first_user = extract((item.get("message") or {}).get("content"))
+        if is_synthetic(first_user):
             continue
         if first_user.strip().lower().startswith(_AUTOMATED_SESSION_PREFIXES):
             return None
@@ -201,11 +207,11 @@ def _claude_tail(
         if item.get("isSidechain") or item.get("type") not in {"user", "assistant"}:
             continue
         role = str(item.get("type") or "")
-        raw_text = extract_text((item.get("message") or {}).get("content"))
-        if _is_synthetic(raw_text):
+        raw_text = extract((item.get("message") or {}).get("content"))
+        if is_synthetic(raw_text):
             continue
         timestamp = str(item.get("timestamp") or "")
-        text = redact_text(raw_text)
+        text = redact(raw_text)
         if not text:
             continue
         session_id = str(item.get("sessionId") or session_id)
@@ -214,9 +220,9 @@ def _claude_tail(
             role=role,
             text=text,
             timestamp=timestamp,
-            identity=_turn_identity("claude", role, timestamp, raw_text),
+            identity=turn_identity("claude", role, timestamp, raw_text),
         ))
-    clean_turns = _dedupe_adjacent(turns)
+    clean_turns = dedupe_adjacent(turns)
     if not clean_turns:
         return None
     return SessionTail(
@@ -224,7 +230,7 @@ def _claude_tail(
         session_id=session_id,
         workspace=workspace or path.parent.name,
         path=path,
-        updated_at=_mtime_iso(path),
+        updated_at=mtime_iso(path),
         turns=clean_turns,
     )
 
@@ -261,6 +267,7 @@ def _codex_initial_user(
     path: Path,
     *,
     head_records: Callable[[Path], Iterable[dict]] = _head_records,
+    is_synthetic: Callable[[str], bool] = _is_synthetic,
 ) -> str:
     """Read the real first user request independently of the bounded tail."""
     for item in head_records(path):
@@ -270,7 +277,7 @@ def _codex_initial_user(
         if not isinstance(payload, dict) or payload.get("type") != "user_message":
             continue
         raw_text = str(payload.get("message") or "").strip()
-        if _is_synthetic(raw_text):
+        if is_synthetic(raw_text):
             continue
         return raw_text
     return ""
@@ -281,11 +288,19 @@ def _codex_tail(
     *,
     head_records: Callable[[Path], Iterable[dict]] = _head_records,
     tail_records: Callable[[Path], list[dict]] = _tail_records,
+    codex_meta: Callable[[Path], dict] = _codex_meta,
+    codex_initial_user: Callable[..., str] = _codex_initial_user,
+    codex_is_interactive: Callable[[dict], bool] = _codex_is_interactive,
+    is_synthetic: Callable[[str], bool] = _is_synthetic,
+    redact: Callable[[object], str] = redact_text,
+    turn_identity: Callable[[str, str, str, str], str] = _turn_identity,
+    dedupe_adjacent: Callable[[Iterable[Turn]], list[Turn]] = _dedupe_adjacent,
+    mtime_iso: Callable[[Path], str] = _mtime_iso,
 ) -> SessionTail | None:
-    meta = _codex_meta(path)
-    if not _codex_is_interactive(meta):
+    meta = codex_meta(path)
+    if not codex_is_interactive(meta):
         return None
-    initial_user = _codex_initial_user(path, head_records=head_records)
+    initial_user = codex_initial_user(path, head_records=head_records)
     if initial_user.lower().startswith(_AUTOMATED_SESSION_PREFIXES):
         return None
     if str(meta.get("source") or "").lower() == "exec" and not initial_user:
@@ -307,19 +322,19 @@ def _codex_tail(
         else:
             continue
         raw_text = str(payload.get("message") or "").strip()
-        if _is_synthetic(raw_text):
+        if is_synthetic(raw_text):
             continue
         timestamp = str(item.get("timestamp") or payload.get("timestamp") or "")
-        text = redact_text(raw_text)
+        text = redact(raw_text)
         if not text:
             continue
         turns.append(Turn(
             role=role,
             text=text,
             timestamp=timestamp,
-            identity=_turn_identity("codex", role, timestamp, raw_text),
+            identity=turn_identity("codex", role, timestamp, raw_text),
         ))
-    clean_turns = _dedupe_adjacent(turns)
+    clean_turns = dedupe_adjacent(turns)
     if not clean_turns or not any(turn.role == "user" for turn in clean_turns):
         return None
     return SessionTail(
@@ -327,6 +342,6 @@ def _codex_tail(
         session_id=session_id,
         workspace=workspace or path.parent.name,
         path=path,
-        updated_at=_mtime_iso(path),
+        updated_at=mtime_iso(path),
         turns=clean_turns,
     )

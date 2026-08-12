@@ -158,6 +158,53 @@ def test_status_rules_are_conservative():
     assert "conflicts" in contradictory["status_reason"]
 
 
+def test_module_level_string_is_not_executable_test_evidence(tmp_path):
+    root = _fixture_repo(tmp_path)
+    (root / "tests" / "test_facts.py").write_text(
+        'UNUSED = "core.sample sample-task /things name: bot"\n',
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(root)
+    by_id = {item["id"]: item for item in inventory["capabilities"]}
+
+    assert by_id["cli:core.sample"]["status"] == "fix"
+    assert by_id["heartbeat:sample-task"]["status"] == "fix"
+    assert "missing test reference" in by_id["cli:core.sample"]["evidence_gaps"]
+
+
+def test_function_name_and_docstring_are_not_executable_test_evidence(tmp_path):
+    root = _fixture_repo(tmp_path)
+    (root / "tests" / "test_facts.py").write_text(
+        "def test_core_sample_name_only():\n"
+        '    \"\"\"sample-task /things handle_lark_command name: bot.\"\"\"\n'
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(root)
+    by_id = {item["id"]: item for item in inventory["capabilities"]}
+
+    assert by_id["cli:core.sample"]["status"] == "fix"
+    assert by_id["heartbeat:sample-task"]["status"] == "fix"
+    assert by_id["route:page:/things"]["status"] == "fix"
+
+
+def test_matching_test_filename_without_behavior_is_not_evidence(tmp_path):
+    root = _fixture_repo(tmp_path)
+    (root / "tests" / "test_sample.py").write_text(
+        "def test_unrelated_arithmetic():\n"
+        "    assert 2 + 2 == 4\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(root)
+    by_id = {item["id"]: item for item in inventory["capabilities"]}
+
+    assert by_id["cli:core.sample"]["status"] == "fix"
+    assert "missing test reference" in by_id["cli:core.sample"]["evidence_gaps"]
+
+
 def test_real_inventory_has_expected_anchors_and_unique_ids():
     inventory = build_inventory(ROOT)
     by_id = {item["id"]: item for item in inventory["capabilities"]}

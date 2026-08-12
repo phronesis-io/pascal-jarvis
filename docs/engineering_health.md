@@ -1,0 +1,50 @@
+# Engineering Health
+
+This is current-state engineering knowledge, not a count of old audit claims.
+Static findings must be reproduced against the repository before they become
+work. The supported product surface remains the generated
+`docs/capability_inventory.md`.
+
+## Current Evidence
+
+- The generated inventory has 222 active capabilities: 222 `keep`, 0 `fix`,
+  0 `retire-candidate`. A `keep` row means definition, implementation,
+  entrypoint, and executable-test reference exist; it is not a coverage claim.
+- `core.cross_session` is a 190-line facade over discovery, parsing, and
+  projection modules.
+- Memorial storage, card composition, transport, and shared state contracts
+  live in `core.memorial_ledger`, `core.memorial_cards`,
+  `core.memorial_transport`, and `core.memorial_contracts`. The facade still
+  owns orchestration and interaction workflows and remains a refactor target.
+- The strict test write guard is enabled by default. `JARVIS_TEST_STRICT_GUARD=0`
+  is a diagnostic opt-out and cannot be quoted as release evidence.
+- The provider scenario extracts the relevant `bot.sh` production handler
+  functions verbatim and executes them in an isolated harness: Claude limit ->
+  Codex lock/session -> reliable Lark delivery -> provider/model turn record ->
+  next-prompt continuity. It does not claim to start the full listener process;
+  startup and wiring are covered separately by shell/install/runtime checks.
+
+## Verified Audit Decisions
+
+| Claim | Verdict | Evidence / decision |
+|---|---|---|
+| 66 silent broad catches in memorial/delivery | Overstated | The current files contain 30 broad catches, many of which rollback and re-raise or protect non-authoritative enrichment. Memorial transport failures and delivery terminal failures now emit structured events; user-facing delivery state remains durable in SQLite/dead letters. Broad catches should still be narrowed when the protected boundary is edited. |
+| Conversation audit DB lacks WAL | Fixed | `core.conversation_audit.connect` enables WAL, `synchronous=NORMAL`, and a 5s busy timeout; a regression reads the live pragmas. WAL improves concurrent access; it is not described as the mechanism that prevents SQLite corruption. |
+| Memorial import cycles can grow unnoticed | Fixed as a gate; debt remains | `scripts/import_graph.py` reports direct cycles and pytest rejects any pair outside the reviewed 11-pair baseline. Existing deferred cycles remain explicit refactor debt. |
+| Memorial/delivery failures use unstructured stderr | Fixed at hot boundaries | Memorial transport and orchestration events use `core.log`; delivery emits `retry_batch_exhausted` and `terminal_failure`. CLI output remains ordinary stdout/stderr by contract. |
+| `usage_stats`, `matter_bridge`, `routine_evidence`, `card_split`, and `lark_auth` have no tests | False | They are exercised by capability contracts, matter continuity/prompt/provider E2E, routine tests, memorial split tests, and dedicated Lark auth tests. Test-file naming is not coverage evidence. |
+| Real clocks make tests flaky | Partly valid policy risk | A raw text scan finds time calls in many tests, but many create input timestamps or use injected clocks. The repository rule is explicit: behavior that depends on time uses an injected clock/timezone-aware fixture. New failures are fixed at the clock boundary, not by freezing the whole suite. |
+| Memorial is still a god module | Valid residual debt | Natural storage/rendering/transport/contract boundaries are extracted. Remaining orchestration, callbacks, continuation queues, and adoption flows should be split by behavior with compatibility tests; line count alone does not authorize a rewrite. |
+| No formal migration path anywhere | Overstated, residual improvement | The shared dashboard DB has an ordered migration ledger; conversation audit has named migrations. Several domain bootstraps still use guarded additive `ALTER TABLE` operations. Before any rename/type/destructive migration, move that domain to a named, verified migration; do not perform schema surgery as opportunistic cleanup. |
+| Dead letters have no alert | False | The Guardian consumes unnotified SQLite dead letters, alerts through its independent channel, and marks rows only after confirmed notification. The ops page and self-diagnostic projection also expose counts. |
+| No pytest config means no timeout | False as a release blocker | CI has a 15-minute job timeout and the strict local suite is the canonical command. Parallel pytest is deliberately not default because tests exercise shared process and SQLite contracts. |
+| Old July plans look current | Fixed | `docs/plans/README.md` marks dated plans as historical evidence; current behavior is governed by product/domain/architecture/decision docs and the PRD portfolio. |
+| Import graph is not a CI gate | Fixed | The core-cycle budget runs in pytest, while adjacency remains a review signal rather than a brittle hard limit for central authority modules. |
+
+## Retention Rule
+
+Do not delete a capability because it looks old, has a large module, or has low
+traffic. A retire candidate requires an explicit deprecation marker, no active
+entrypoint, a replacement/migration decision, and a data-retention review. The
+current inventory has no capability meeting that standard, so this round
+deletes none.

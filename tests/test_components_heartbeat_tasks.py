@@ -168,6 +168,7 @@ def test_shipped_manifest_actually_arms_the_check(tmp_path):
 
     armed = [c for c in load_manifest() if c.get("check") == "heartbeat_tasks"]
     assert armed, "components.yaml must carry a heartbeat_tasks check"
+    assert armed[0]["name"] == "heartbeat-tasks"
 
 
 def test_unreadable_heartbeat_md_is_reported_not_swallowed(tmp_path):

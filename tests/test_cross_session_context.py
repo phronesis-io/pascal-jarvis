@@ -515,6 +515,106 @@ def test_facade_keeps_public_types_constants_and_function_signatures():
     ]
 
 
+def test_facade_private_codex_meta_hook_still_drives_parser(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "hello",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "patched-meta", "cwd": "/patched", "source": "vscode",
+    })
+
+    parsed = cross_session._codex_tail(session)
+
+    assert parsed is not None
+    assert parsed.session_id == "patched-meta"
+    assert parsed.workspace == "/patched"
+
+
+def test_facade_private_codex_policy_hooks_still_drive_parser(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "hello",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "patched-policy", "cwd": "/patched", "source": "vscode",
+    })
+    monkeypatch.setattr(cross_session, "redact_text", lambda _value: "patched")
+    monkeypatch.setattr(
+        cross_session, "_turn_identity",
+        lambda *_args: "patched-identity",
+    )
+
+    parsed = cross_session._codex_tail(session)
+
+    assert parsed is not None
+    assert parsed.turns[0].text == "patched"
+    assert parsed.turns[0].identity == "patched-identity"
+
+    monkeypatch.setattr(cross_session, "_codex_is_interactive", lambda _meta: False)
+    assert cross_session._codex_tail(session) is None
+
+
+def test_facade_private_claude_policy_hooks_still_drive_parser(
+    tmp_path, monkeypatch,
+):
+    session = tmp_path / "claude.jsonl"
+    session.write_text(json.dumps({
+        "type": "user", "sessionId": "claude-hook", "cwd": "/patched",
+        "message": {"content": "hello"},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cross_session, "redact_text", lambda _value: "patched")
+    monkeypatch.setattr(
+        cross_session, "_turn_identity", lambda *_args: "patched-identity",
+    )
+
+    parsed = cross_session._claude_tail(session)
+
+    assert parsed is not None
+    assert parsed.turns[0].text == "patched"
+    assert parsed.turns[0].identity == "patched-identity"
+
+    monkeypatch.setattr(cross_session, "_is_synthetic", lambda _text: True)
+    assert cross_session._claude_tail(session) is None
+
+
+def test_facade_one_argument_codex_initial_user_override_is_compatible(
+    tmp_path, monkeypatch,
+):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(json.dumps({"type": "event_msg", "payload": {
+        "type": "user_message", "message": "hello",
+    }}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cross_session, "_codex_meta", lambda _path: {
+        "id": "legacy-hook", "source": "vscode",
+    })
+    monkeypatch.setattr(cross_session, "_codex_initial_user", lambda _path: "hello")
+
+    assert cross_session._codex_tail(session) is not None
+
+
+def test_facade_synthetic_hook_drives_initial_user_filter(tmp_path, monkeypatch):
+    session = tmp_path / "codex.jsonl"
+    session.write_text(
+        json.dumps({"type": "event_msg", "payload": {
+            "type": "user_message", "message": "synthetic-by-policy",
+        }}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cross_session, "_is_synthetic",
+        lambda text: text == "synthetic-by-policy",
+    )
+
+    assert cross_session._codex_initial_user(session) == ""
+
+
 def test_facade_cli_keeps_incremental_and_context_commands(tmp_path, monkeypatch, capsys):
     state = tmp_path / "seen.json"
     calls = []

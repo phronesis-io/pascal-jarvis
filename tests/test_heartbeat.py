@@ -811,6 +811,101 @@ def test_single_task_reply_is_not_envelope_parsed(tmp_path, monkeypatch):
     assert "__envelope_parse__" not in state
 
 
+def test_clean_batch_keeps_not_yet_due_envelope_isolation(tmp_path, monkeypatch):
+    """A normal task succeeding must not release a different deferred task."""
+    hb = """
+### task-a
+- interval: 1h
+- prompt: a
+
+### task-b
+- interval: 1h
+- prompt: b
+
+### task-c
+- interval: 1h
+- prompt: c
+"""
+    runner = _make_runner(tmp_path, hb)
+    now = int(time.time())
+    state = runner.load_state()
+    state["task-a"] = {"last_run": 0, "last_status": "parse_failed"}
+    state["task-b"] = {"last_run": now, "last_status": "parse_failed"}
+    state["task-c"] = {"last_run": 0, "last_status": "idle"}
+    state["__envelope_parse__"] = {
+        "consecutive_failures": 1,
+        "last_failure": now - 1,
+        "isolate_tasks": ["task-a", "task-b"],
+    }
+    runner.save_state(state)
+
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda prompt, **_kwargs: calls.append(prompt) or "completed",
+    )
+
+    runner.run_cycle(force=True)
+
+    assert len(calls) == 2  # task-a isolated, task-c normal single-task call
+    final = runner.load_state()
+    assert final["__envelope_parse__"]["isolate_tasks"] == ["task-b"]
+    assert final["task-a"]["last_status"] == "ok"
+    assert final["task-c"]["last_status"] == "ok"
+
+
+def test_second_malformed_batch_unions_deferred_isolation(tmp_path, monkeypatch):
+    """A new malformed roster must not replace an older deferred retry."""
+    hb = """
+### task-a
+- interval: 1h
+- prompt: a
+
+### task-b
+- interval: 1h
+- prompt: b
+
+### task-c
+- interval: 1h
+- prompt: c
+
+### task-d
+- interval: 1h
+- prompt: d
+"""
+    runner = _make_runner(tmp_path, hb)
+    now = int(time.time())
+    state = runner.load_state()
+    state["task-a"] = {"last_run": 0, "last_status": "parse_failed"}
+    state["task-b"] = {"last_run": now, "last_status": "parse_failed"}
+    state["task-c"] = {"last_run": 0, "last_status": "idle"}
+    state["task-d"] = {"last_run": 0, "last_status": "idle"}
+    state["__envelope_parse__"] = {
+        "consecutive_failures": 1,
+        "last_failure": now - 1,
+        "isolate_tasks": ["task-a", "task-b"],
+    }
+    runner.save_state(state)
+
+    calls = []
+
+    def responder(prompt, **_kwargs):
+        calls.append(prompt)
+        return "completed" if "isolated envelope-retry task: task-a" in prompt \
+            else "{not-json"
+
+    monkeypatch.setattr(runner, "claude_call", responder)
+    runner.run_cycle(force=True)
+
+    assert len(calls) == 2
+    assert "2 tasks due" in calls[1]
+    final = runner.load_state()
+    assert final["__envelope_parse__"]["consecutive_failures"] == 2
+    assert final["__envelope_parse__"]["isolate_tasks"] == [
+        "task-b", "task-c", "task-d",
+    ]
+
+
 def test_missing_slice_acks_intention_check(tmp_path, monkeypatch):
     """REQ-30: envelope parses but omits the ACK task's slice → post still
     invoked with __NO_ENVELOPE__ so the manifest reconciles."""

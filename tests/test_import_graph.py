@@ -66,6 +66,7 @@ def test_json_and_focused_mermaid_reports_are_machine_readable(tmp_path):
     payload = json.loads(import_graph.render_json(graph))
     assert payload["module_count"] == 5
     assert payload["edge_count"] == 5
+    assert payload["direct_cycles"] == [["pkg.beta", "pkg.sub.gamma"]]
     alpha = next(row for row in payload["modules"]
                  if row["module"] == "pkg.alpha")
     assert alpha["fan_out"] == 2
@@ -123,3 +124,40 @@ def test_graph_fails_closed_on_syntax_error(tmp_path):
         assert "broken.py" in str(exc)
     else:
         raise AssertionError("syntax errors must not produce a partial graph")
+
+
+def test_cli_direct_cycle_budget_fails_on_regression(tmp_path):
+    root = _fixture_repo(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "pkg", "--root", str(root),
+            "--max-direct-cycles", "0",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 2
+    assert "pkg.beta<->pkg.sub.gamma" in result.stderr
+
+
+def test_core_direct_cycle_budget_does_not_grow():
+    graph = import_graph.build_graph(ROOT, ["core"])
+    cycles = set(graph.direct_cycles())
+
+    # Existing deferred-import debt is explicit. New cycles fail CI until
+    # they are removed or consciously reviewed into this bounded baseline.
+    allowed = {
+        ("core.actions", "core.memorial"),
+        ("core.attention_roi", "core.memorial"),
+        ("core.companion", "core.memorial"),
+        ("core.continuity", "core.matters"),
+        ("core.continuity", "core.memorial"),
+        ("core.delegation_projection", "core.delegations"),
+        ("core.heartbeat_loop", "core.memorial"),
+        ("core.jobs", "core.matters"),
+        ("core.matter_router", "core.memorial"),
+        ("core.matters", "core.memorial"),
+        ("core.memorial", "core.memorial_thread"),
+    }
+    assert cycles <= allowed

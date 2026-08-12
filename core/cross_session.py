@@ -28,7 +28,6 @@ from core.cross_session_parsing import (
     _AUTOMATED_SESSION_PREFIXES,
     _SECRET_RE,
     _SYNTHETIC_PREFIXES,
-    _codex_initial_user,
     _codex_is_interactive,
     _codex_meta,
     _dedupe_adjacent,
@@ -55,6 +54,7 @@ from core.cross_session_projection import (
     _short_ts,
     _timestamp_epoch,
 )
+from core.textutil import extract_text
 
 
 # Kept mutable on the facade for existing runtime/test overrides.
@@ -66,6 +66,24 @@ def _claude_tail(path: Path) -> SessionTail | None:
         path,
         head_records=_head_records,
         tail_records=_tail_records,
+        extract=extract_text,
+        is_synthetic=_is_synthetic,
+        redact=redact_text,
+        turn_identity=_turn_identity,
+        dedupe_adjacent=_dedupe_adjacent,
+        mtime_iso=_mtime_iso,
+    )
+
+
+def _codex_initial_user(
+    path: Path,
+    *,
+    head_records=None,
+) -> str:
+    return _parsing._codex_initial_user(
+        path,
+        head_records=head_records or _head_records,
+        is_synthetic=_is_synthetic,
     )
 
 
@@ -74,6 +92,16 @@ def _codex_tail(path: Path) -> SessionTail | None:
         path,
         head_records=_head_records,
         tail_records=_tail_records,
+        codex_meta=_codex_meta,
+        # Preserve the legacy one-argument private override while the parsing
+        # module retains an injectable head-reader for direct callers.
+        codex_initial_user=lambda value, **_kwargs: _codex_initial_user(value),
+        codex_is_interactive=_codex_is_interactive,
+        is_synthetic=_is_synthetic,
+        redact=redact_text,
+        turn_identity=_turn_identity,
+        dedupe_adjacent=_dedupe_adjacent,
+        mtime_iso=_mtime_iso,
     )
 
 

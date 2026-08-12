@@ -122,8 +122,14 @@ def default_paths(jarvis_dir: Path | None = None) -> AuditPaths:
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=5)
     conn.row_factory = sqlite3.Row
+    # The scheduled auditor, CLI review, and L3 observer can overlap. WAL
+    # keeps readers off the writer lock; busy_timeout turns a short collision
+    # into bounded waiting instead of a flaky "database is locked" failure.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS audit_runs (
