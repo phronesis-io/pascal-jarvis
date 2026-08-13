@@ -87,7 +87,8 @@ class JobManager:
             return {}
 
     def create_job(self, conv_key: str, description: str,
-                   message_id: str = "", matter_id: str = "") -> str:
+                   message_id: str = "", matter_id: str = "",
+                   context_key: str = "", source_session_id: str = "") -> str:
         """Create a new job entry. Returns job_id."""
         job_id = f"j-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         job_dir = self.jobs_dir / job_id
@@ -112,6 +113,12 @@ class JobManager:
             "output_file": str(job_dir / "output.md"),
             "message_id": message_id,
             "matter_id": matter_id,
+            "context_key": (
+                str(context_key or "").strip()
+                or (f"matter:{matter_id}" if matter_id
+                    else f"conversation:{conv_key}")
+            ),
+            "source_session_id": str(source_session_id or ""),
         }
 
         with _locked(self.registry_path):
@@ -458,7 +465,9 @@ if __name__ == "__main__":
         desc = os.environ.get("JV_DESC", "")
         msg_id = os.environ.get("JV_MSG_ID", "")
         print(jm.create_job(conv_key, desc, msg_id,
-                            os.environ.get("JV_MATTER_ID", "")))
+                            os.environ.get("JV_MATTER_ID", ""),
+                            os.environ.get("JV_CONTEXT_KEY", ""),
+                            os.environ.get("JV_SOURCE_SESSION_ID", "")))
 
     elif cmd == "set-pid":
         job_id = sys.argv[2]

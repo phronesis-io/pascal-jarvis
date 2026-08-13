@@ -17,7 +17,7 @@ from pathlib import Path
 
 from core.memory import load_group_context, load_tiered_memory
 from core.person_registry import owner_people_prompt_context
-from core.session import build_recent_turns, get_session_counter
+from core.session import build_recent_turns, get_session_counter, get_session_state
 from core.compact import read_compact
 
 
@@ -241,6 +241,8 @@ def build_system_prompt(
     tracker_path: str,
     chat_type: str = "p2p",
     max_memory_chars: int | None = None,
+    context_key: str = "",
+    matter_id: str = "",
 ) -> str:
     """Build the full system prompt for handle_message.
 
@@ -256,18 +258,50 @@ def build_system_prompt(
             jarvis_dir, memory_dir, session_dir, session_id, conv_key,
             now_ts, tracker_path)
     memory = load_tiered_memory(memory_dir, max_chars=max_memory_chars)
+    from core.conversation_context import (
+        compact_key_from_context_key,
+        context_snapshot,
+        matter_id_from_context_key,
+    )
+    snapshot = context_snapshot(conv_key, matter_id=matter_id or None)
+    selected_context = context_key or snapshot["context_key"]
+    selected_matter = (
+        matter_id_from_context_key(selected_context)
+        if context_key else (matter_id or snapshot["matter_id"])
+    )
+    compact_key = compact_key_from_context_key(selected_context)
     counter = get_session_counter(tracker_path, conv_key)
-    recent_turns = build_recent_turns(session_dir, session_id, counter, conv_key, 20)
-    compact = read_compact(jarvis_dir, conv_key)
+    session_state = get_session_state(tracker_path, conv_key)
+    allow_previous = (
+        session_state.get("previous_context_key") in {"", selected_context}
+        and session_state.get("rotation_reason") != "reset"
+    )
+    recent_turns = build_recent_turns(
+        session_dir, session_id, counter, conv_key, 20,
+        include_outbox=not bool(selected_matter),
+        allow_previous_session=allow_previous,
+    )
+    compact = read_compact(jarvis_dir, compact_key)
     cross_provider_turns = ""
     try:
         from core.matter_bridge import recent_provider_context
-        cross_provider_turns = recent_provider_context(conv_key)
+        cross_provider_turns = recent_provider_context(
+            conv_key, context_key=selected_context)
     except Exception:
         # Prompt construction must survive a fresh/damaged optional DB.
         cross_provider_turns = ""
-    external_work_context = _external_work_context(jarvis_dir)
+    # A named Matter is an explicit attention boundary. Global coding-session
+    # discovery remains useful in the unbound inbox, but injecting it into a
+    # focused Matter would silently reintroduce unrelated session context.
+    external_work_context = "" if selected_matter else _external_work_context(jarvis_dir)
     people_context = owner_people_prompt_context(jarvis_dir)
+    matter_context = ""
+    if selected_matter:
+        try:
+            from core.matter_bridge import context_for_matter
+            matter_context = context_for_matter(selected_matter)
+        except Exception:
+            matter_context = ""
 
     # 奏折专属对话 (REQ-118): conv_key "memorial:<id>" is a per-card session —
     # pin the card's content at the top so the whole session stays on that
@@ -329,6 +363,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {memory}
 
 {session_compact}
+
+{matter_context}
 
 {cross_provider_turns}
 

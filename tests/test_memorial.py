@@ -17,6 +17,8 @@ import pytest
 
 import core.memorial as memorial
 from core.card import build_card
+from core.matter_bridge import bind_conversation
+from core.matters import create_matter
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────
@@ -586,6 +588,64 @@ def test_chat_sends_opener_and_injects_pending_merge(env):
     assert "💬 聊天中" in body
     labels = [a["text"]["content"] for a in _actions(card)]
     assert labels == ["已阅", "标为重点"]  # no 聊聊这个 button
+
+
+def test_chat_injection_is_scoped_to_matching_matter(env):
+    matter = create_matter("卡片所属事项")
+    bind_conversation("ou_test", matter["id"], destination_id="ou_test")
+    mid, _ = memorial.create(
+        "mail", "事项内卡片", "正文", preset="fyi",
+        matter_id=matter["id"], send=False,
+    )
+
+    memorial.chat(mid)
+
+    entry = json.loads(
+        (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()[0])
+    assert entry["context_key"] == f"matter:{matter['id']}"
+
+
+def test_unrelated_card_never_injects_into_selected_matter(env):
+    selected = create_matter("当前正在做")
+    unrelated = create_matter("另一件事")
+    bind_conversation("ou_test", selected["id"], destination_id="ou_test")
+    mid, _ = memorial.create(
+        "mail", "别的事项卡片", "正文", preset="fyi",
+        matter_id=unrelated["id"], send=False,
+    )
+
+    memorial.chat(mid)
+
+    entry = json.loads(
+        (env.dir / "jobs" / "pending_merge.jsonl").read_text().splitlines()[0])
+    assert entry["context_key"] == "conversation:ou_test"
+
+
+def test_pending_context_db_failure_is_visible_and_fails_to_unbound_scope(
+        env, monkeypatch):
+    events = []
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("core.conversation_context.context_snapshot", fail)
+    monkeypatch.setattr(
+        memorial,
+        "_ops_log",
+        lambda message, **fields: events.append((message, fields)),
+    )
+
+    assert memorial._pending_context_key(
+        "ou_test", {"matter_id": "matter-private"}
+    ) == "conversation:ou_test"
+    assert events == [(
+        "pending_context_lookup_failed",
+        {
+            "level": "warn",
+            "has_matter": True,
+            "error_type": "RuntimeError",
+        },
+    )]
 
 
 def test_chat_on_a_clipped_card_sends_the_full_text(env):

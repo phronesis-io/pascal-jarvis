@@ -6,6 +6,9 @@ import json
 import io
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -94,6 +97,44 @@ def test_run_reuses_thread_for_the_same_lark_conversation(tmp_path, monkeypatch)
     assert calls[0]["thread_id"] == ""
     assert calls[1]["thread_id"] == "thread-persisted"
     assert "second" in calls[1]["prompt"]
+
+
+def test_same_matter_codex_thread_is_serialized_across_transports(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(cf, "resolve_codex_bin", lambda configured="": "/opt/codex")
+    monkeypatch.setattr(cf, "ensure_codex_authenticated", lambda binary: None)
+    guard = threading.Lock()
+    active = 0
+    maximum = 0
+    seen_threads = []
+
+    def invoke(**kwargs):
+        nonlocal active, maximum
+        with guard:
+            active += 1
+            maximum = max(maximum, active)
+            seen_threads.append(kwargs["thread_id"])
+            call_number = len(seen_threads)
+        time.sleep(0.08)
+        with guard:
+            active -= 1
+        return cf.CliResult(
+            text="ok", thread_id=kwargs["thread_id"] or f"matter-thread-{call_number}")
+
+    monkeypatch.setattr(cf, "invoke_codex", invoke)
+
+    def run(conv_key):
+        return cf.run_fallback(
+            content="continue", conv_key=conv_key, context_key="matter:shared",
+            system_prompt="context", model="gpt-test", timeout=10,
+            work_dir=tmp_path, binary="/opt/codex",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(run, ("lark-owner", "mobile-owner"))) == ["ok", "ok"]
+
+    assert maximum == 1
+    assert seen_threads == ["", "matter-thread-1"]
 
 
 def test_missing_saved_thread_is_rebuilt_once(tmp_path, monkeypatch):

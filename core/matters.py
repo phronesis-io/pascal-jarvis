@@ -318,7 +318,7 @@ def update_matter(matter_id: str, actor: str = "user", force: bool = False,
                for k, value in updates.items() if current.get(k) != value}
     if not changes:
         if current.get("status") in {"done", "archived"}:
-            _complete_surface_handoffs(matter_id)
+            complete_surface_handoffs(matter_id)
         return get_matter(matter_id)
     updates["updated_at"] = _now()
     set_clause = ", ".join(f"{key} = ?" for key in updates)
@@ -340,11 +340,11 @@ def update_matter(matter_id: str, actor: str = "user", force: bool = False,
         db.rollback()
         raise
     if updates.get("status") in {"done", "archived"}:
-        _complete_surface_handoffs(matter_id)
+        complete_surface_handoffs(matter_id)
     return get_matter(matter_id)
 
 
-def _complete_surface_handoffs(matter_id: str) -> None:
+def complete_surface_handoffs(matter_id: str) -> None:
     """Best-effort convergence for phone/desktop continuation affordances."""
     try:
         from core.continuity import complete_entity_handoffs

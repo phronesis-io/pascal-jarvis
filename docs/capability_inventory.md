@@ -21,9 +21,9 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **224**
-- Status: keep **224**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **56**, dashboard-api **51**, dashboard-page **20**, heartbeat-task **39**, lark-command **13**, runtime-component **16**
+- Total: **233**
+- Status: keep **233**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **57**, dashboard-api **51**, dashboard-page **20**, heartbeat-task **39**, lark-command **21**, runtime-component **16**
 
 ## Inventory
 
@@ -59,13 +59,13 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `heartbeat:eigenflux-profile` | heartbeat-task | **keep** | `HEARTBEAT.md:255` | `tasks/eigenflux_profile_pre.sh:1`, `tasks/eigenflux_profile_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_dashboard.py:75` | - |
 | `heartbeat:eigenflux-publish` | heartbeat-task | **keep** | `HEARTBEAT.md:193` | `tasks/eigenflux_publish_pre.sh:1`, `tasks/eigenflux_publish_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:179`, `tests/test_card_delivery_closure.py:47`, `tests/test_eigenflux_dashboard.py:52` | - |
 | `heartbeat:engagement-analyze` | heartbeat-task | **keep** | `HEARTBEAT.md:866` | `tasks/engagement_analyze_pre.sh:1`, `tasks/engagement_analyze_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_engagement.py:171`, `tests/test_interaction_quality_p0.py:170` | - |
-| `heartbeat:exercise-week` | heartbeat-task | **keep** | `HEARTBEAT.md:1269` | `tasks/exercise_week_pre.sh:1`, `tasks/exercise_week_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_lifelog.py:209`, `tests/test_memorial.py:1632` | - |
+| `heartbeat:exercise-week` | heartbeat-task | **keep** | `HEARTBEAT.md:1269` | `tasks/exercise_week_pre.sh:1`, `tasks/exercise_week_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_lifelog.py:209`, `tests/test_memorial.py:1692` | - |
 | `heartbeat:explain-card` | heartbeat-task | **keep** | `HEARTBEAT.md:419` | `tasks/explain_card_pre.sh:1`, `tasks/explain_card_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_confused_button.py:109` | - |
 | `heartbeat:intention-check` | heartbeat-task | **keep** | `HEARTBEAT.md:703` | `tasks/intentions_pre.sh:1`, `tasks/intentions_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:119`, `tests/test_brain_health.py:227`, `tests/test_card_delivery_closure.py:146` | - |
 | `heartbeat:iteration-observe` | heartbeat-task | **keep** | `HEARTBEAT.md:1079` | `tasks/iteration_observe_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:107` | - |
 | `heartbeat:log-maintenance` | heartbeat-task | **keep** | `HEARTBEAT.md:1088` | `tasks/log_maintenance_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:108`, `tests/test_log_maintenance.py:32` | - |
 | `heartbeat:mail-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:317` | `tasks/mail_triage_pre.sh:1`, `tasks/mail_triage_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_and_quiet_hours.py:103`, `tests/test_heartbeat.py:106`, `tests/test_heartbeat_loop.py:108` | - |
-| `heartbeat:memorial-escrow` | heartbeat-task | **keep** | `HEARTBEAT.md:1096` | `tasks/memorial_escrow_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:596`, `tests/test_memorial_escrow.py:170`, `tests/test_no_dead_ends.py:66` | - |
+| `heartbeat:memorial-escrow` | heartbeat-task | **keep** | `HEARTBEAT.md:1096` | `tasks/memorial_escrow_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:656`, `tests/test_memorial_escrow.py:170`, `tests/test_no_dead_ends.py:66` | - |
 | `heartbeat:memory-consolidate` | heartbeat-task | **keep** | `HEARTBEAT.md:595` | `tasks/memory_consolidate_pre.sh:1`, `tasks/memory_consolidate_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_cross_session_memory_e2e.py:64`, `tests/test_memory_consolidate_post.py:47` | - |
 | `heartbeat:memory-daily` | heartbeat-task | **keep** | `HEARTBEAT.md:647` | `tasks/memory_daily_pre.sh:1`, `tasks/memory_daily_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:343`, `tests/test_memory_audit_fixes.py:236` | - |
 | `heartbeat:memory-hourly` | heartbeat-task | **keep** | `HEARTBEAT.md:637` | `tasks/memory_hourly_pre.sh:1`, `tasks/memory_hourly_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_brain_health.py:50`, `tests/test_heartbeat.py:327`, `tests/test_heartbeat_regressions.py:275` | - |
@@ -77,7 +77,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `heartbeat:personal-site` | heartbeat-task | **keep** | `HEARTBEAT.md:1207` | `tasks/personal_site_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:1319` | - |
 | `heartbeat:phronesis-monitor` | heartbeat-task | **keep** | `HEARTBEAT.md:1002` | `tasks/phronesis_monitor_pre.sh:1`, `tasks/phronesis_monitor_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:70`, `tests/test_delivery_and_quiet_hours.py:354` | - |
 | `heartbeat:provider-canary` | heartbeat-task | **keep** | `HEARTBEAT.md:1107` | `tasks/provider_canary_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:109`, `tests/test_reliability_v2.py:453` | - |
-| `heartbeat:reply-followup` | heartbeat-task | **keep** | `HEARTBEAT.md:400` | `tasks/reply_followup_pre.sh:1`, `tasks/reply_followup_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:82`, `tests/test_memorial_boundaries.py:27`, `tests/test_reply_followup.py:52` | - |
+| `heartbeat:reply-followup` | heartbeat-task | **keep** | `HEARTBEAT.md:400` | `tasks/reply_followup_pre.sh:1`, `tasks/reply_followup_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:84`, `tests/test_memorial_boundaries.py:27`, `tests/test_reply_followup.py:52` | - |
 | `heartbeat:repos-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:1116` | `tasks/repos_sync_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:325`, `tests/test_card_delivery_closure.py:70`, `tests/test_dashboard_routes.py:818` | - |
 | `heartbeat:routine-run` | heartbeat-task | **keep** | `HEARTBEAT.md:765` | `tasks/routine_run_pre.sh:1`, `tasks/routine_run_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_regressions.py:227`, `tests/test_routines.py:161` | - |
 | `heartbeat:self-diagnostic` | heartbeat-task | **keep** | `HEARTBEAT.md:1186` | `tasks/self_diagnostic_pre.sh:1`, `tasks/self_diagnostic_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:92`, `tests/test_daemon_audit_fixes.py:209`, `tests/test_heartbeat.py:719` | - |
@@ -87,10 +87,11 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.actions` | core-cli | **keep** | `core/actions.py:1017` | `core/actions.py:1017` | python3 -m core.actions | `tests/test_actions.py:288`, `tests/test_bot_trust_boundary.py:24`, `tests/test_card.py:77` | - |
 | `cli:core.attention_roi` | core-cli | **keep** | `core/attention_roi.py:346` | `core/attention_roi.py:346` | python3 -m core.attention_roi | `tests/test_attention_roi.py:51`, `tests/test_import_graph.py:152`, `tests/test_memorial_docket_quality.py:175` | - |
 | `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:564` | `core/aux_model.py:564` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:391` | - |
-| `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:515` | `core/codex_fallback.py:515` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:278`, `tests/test_provider_continuity_e2e.py:209` | - |
+| `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:559` | `core/codex_fallback.py:559` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:278`, `tests/test_provider_continuity_e2e.py:226`, `tests/test_session_lifecycle.py:267` | - |
 | `cli:core.companion` | core-cli | **keep** | `core/companion.py:471` | `core/companion.py:471` | python3 -m core.companion | `tests/test_companion.py:55`, `tests/test_heartbeat_regressions.py:158`, `tests/test_import_graph.py:153` | - |
 | `cli:core.components` | core-cli | **keep** | `core/components.py:449` | `core/components.py:449` | python3 -m core.components | `tests/test_companion.py:189`, `tests/test_components_gating.py:34`, `tests/test_components_heartbeat_tasks.py:167` | - |
 | `cli:core.conversation_audit` | core-cli | **keep** | `core/conversation_audit.py:1082` | `core/conversation_audit.py:1082` | python3 -m core.conversation_audit | `tests/test_components_gating.py:100`, `tests/test_conversation_audit.py:14`, `tests/test_delegation_shadow_review.py:109` | - |
+| `cli:core.conversation_context` | core-cli | **keep** | `core/conversation_context.py:339` | `core/conversation_context.py:339` | python3 -m core.conversation_context | `tests/test_memorial.py:631` | - |
 | `cli:core.cross_session` | core-cli | **keep** | `core/cross_session.py:215` | `core/cross_session.py:215` | python3 -m core.cross_session | `tests/test_cross_session_context.py:243`, `tests/test_cross_session_memory_e2e.py:53`, `tests/test_cross_session_post.py:63` | - |
 | `cli:core.deadman` | core-cli | **keep** | `core/deadman.py:161` | `core/deadman.py:161` | python3 -m core.deadman | `tests/test_deadman.py:23` | - |
 | `cli:core.delegation_cli` | core-cli | **keep** | `core/delegation_cli.py:154` | `core/delegation_cli.py:154` | python3 -m core.delegation_cli | `tests/test_delegation_cli.py:56` | - |
@@ -108,22 +109,22 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:1838` | `core/heartbeat_loop.py:1838` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_loop.py:73`, `tests/test_import_graph.py:157`, `tests/test_integration.py:67` | - |
 | `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3603` | `core/intentions.py:3603` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_capability_contracts.py:187` | - |
 | `cli:core.iteration_loop` | core-cli | **keep** | `core/iteration_loop.py:1467` | `core/iteration_loop.py:1467` | python3 -m core.iteration_loop | `tests/test_dashboard_routes.py:1386`, `tests/test_iteration_loop.py:59` | - |
-| `cli:core.jobs` | core-cli | **keep** | `core/jobs.py:448` | `core/jobs.py:448` | python3 -m core.jobs | `tests/test_actions.py:676`, `tests/test_admin_api.py:397`, `tests/test_aux_model.py:216` | - |
+| `cli:core.jobs` | core-cli | **keep** | `core/jobs.py:455` | `core/jobs.py:455` | python3 -m core.jobs | `tests/test_actions.py:676`, `tests/test_admin_api.py:397`, `tests/test_aux_model.py:216` | - |
 | `cli:core.lark_auth` | core-cli | **keep** | `core/lark_auth.py:185` | `core/lark_auth.py:185` | python3 -m core.lark_auth | `tests/test_lark_auth.py:75`, `tests/test_reply_followup.py:75` | - |
 | `cli:core.lifelog` | core-cli | **keep** | `core/lifelog.py:675` | `core/lifelog.py:675` | python3 -m core.lifelog | `tests/test_lifelog.py:62`, `tests/test_presence.py:212` | - |
 | `cli:core.log_maintenance` | core-cli | **keep** | `core/log_maintenance.py:312` | `core/log_maintenance.py:312` | python3 -m core.log_maintenance | `tests/test_log_maintenance.py:32` | - |
 | `cli:core.mail_draft` | core-cli | **keep** | `core/mail_draft.py:267` | `core/mail_draft.py:267` | python3 -m core.mail_draft | `tests/test_mail_draft.py:42` | - |
-| `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:409` | `core/matter_bridge.py:409` | python3 -m core.matter_bridge | `tests/test_bot_trust_boundary.py:68`, `tests/test_dashboard_routes.py:1283`, `tests/test_prompt.py:116` | - |
+| `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:768` | `core/matter_bridge.py:768` | python3 -m core.matter_bridge | `tests/test_dashboard_routes.py:1283`, `tests/test_prompt.py:116`, `tests/test_session_lifecycle.py:471` | - |
 | `cli:core.matter_executor` | core-cli | **keep** | `core/matter_executor.py:234` | `core/matter_executor.py:234` | python3 -m core.matter_executor | `tests/test_matter_continuity.py:248` | - |
 | `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_continuity.py:307`, `tests/test_dashboard_routes.py:1194`, `tests/test_import_graph.py:154` | - |
-| `cli:core.memorial` | core-cli | **keep** | `core/memorial.py:3450` | `core/memorial.py:3450` | python3 -m core.memorial | `tests/test_attention_roi.py:134`, `tests/test_bot_trust_boundary.py:44`, `tests/test_capability_contracts.py:185` | - |
+| `cli:core.memorial` | core-cli | **keep** | `core/memorial.py:3491` | `core/memorial.py:3491` | python3 -m core.memorial | `tests/test_attention_roi.py:134`, `tests/test_bot_trust_boundary.py:44`, `tests/test_capability_contracts.py:185` | - |
 | `cli:core.memorial_thread` | core-cli | **keep** | `core/memorial_thread.py:135` | `core/memorial_thread.py:135` | python3 -m core.memorial_thread | `tests/test_bot_trust_boundary.py:44`, `tests/test_import_graph.py:161`, `tests/test_matter_continuity.py:307` | - |
 | `cli:core.metrics_digest` | core-cli | **keep** | `core/metrics_digest.py:250` | `core/metrics_digest.py:250` | python3 -m core.metrics_digest | `tests/test_metrics_digest.py:294` | - |
-| `cli:core.model_fallback` | core-cli | **keep** | `core/model_fallback.py:349` | `core/model_fallback.py:349` | python3 -m core.model_fallback | `tests/test_aux_model.py:20`, `tests/test_model_fallback.py:83`, `tests/test_provider_continuity_e2e.py:189` | - |
+| `cli:core.model_fallback` | core-cli | **keep** | `core/model_fallback.py:349` | `core/model_fallback.py:349` | python3 -m core.model_fallback | `tests/test_aux_model.py:20`, `tests/test_model_fallback.py:83`, `tests/test_provider_continuity_e2e.py:206` | - |
 | `cli:core.openai_fallback` | core-cli | **keep** | `core/openai_fallback.py:522` | `core/openai_fallback.py:522` | python3 -m core.openai_fallback | `tests/test_aux_model.py:86`, `tests/test_model_fallback.py:277` | - |
 | `cli:core.perception` | core-cli | **keep** | `core/perception.py:557` | `core/perception.py:557` | python3 -m core.perception | `tests/test_brain_health.py:83`, `tests/test_metrics_digest.py:333`, `tests/test_perception.py:133` | - |
 | `cli:core.presence` | core-cli | **keep** | `core/presence.py:182` | `core/presence.py:182` | python3 -m core.presence | `tests/test_presence.py:56` | - |
-| `cli:core.prompt` | core-cli | **keep** | `core/prompt.py:340` | `core/prompt.py:340` | python3 -m core.prompt | `tests/test_actions.py:244`, `tests/test_admin.py:68`, `tests/test_admin_destructive.py:347` | - |
+| `cli:core.prompt` | core-cli | **keep** | `core/prompt.py:376` | `core/prompt.py:376` | python3 -m core.prompt | `tests/test_actions.py:244`, `tests/test_admin.py:68`, `tests/test_admin_destructive.py:347` | - |
 | `cli:core.provider_health` | core-cli | **keep** | `core/provider_health.py:540` | `core/provider_health.py:540` | python3 -m core.provider_health | `tests/test_dashboard_routes.py:1690` | - |
 | `cli:core.reaction_save` | core-cli | **keep** | `core/reaction_save.py:102` | `core/reaction_save.py:102` | python3 -m core.reaction_save | `tests/test_reaction_save.py:27` | - |
 | `cli:core.release_gate` | core-cli | **keep** | `core/release_gate.py:464` | `core/release_gate.py:464` | python3 -m core.release_gate | `tests/test_release_gate.py:642` | - |
@@ -134,7 +135,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.runtime_provider` | core-cli | **keep** | `core/runtime_provider.py:76` | `core/runtime_provider.py:76` | python3 -m core.runtime_provider | `tests/test_capability_contracts.py:57` | - |
 | `cli:core.sched_events` | core-cli | **keep** | `core/sched_events.py:286` | `core/sched_events.py:286` | python3 -m core.sched_events | `tests/test_admin_api.py:370`, `tests/test_dashboard_routes.py:313`, `tests/test_heartbeat.py:1081` | - |
 | `cli:core.self_improve_cycle` | core-cli | **keep** | `core/self_improve_cycle.py:111` | `core/self_improve_cycle.py:111` | python3 -m core.self_improve_cycle | `tests/test_self_improve_cycle.py:74` | - |
-| `cli:core.selfmon` | core-cli | **keep** | `core/selfmon.py:634` | `core/selfmon.py:634` | python3 -m core.selfmon | `tests/test_memorial.py:125`, `tests/test_memorial_docket_quality.py:83`, `tests/test_reply_followup.py:73` | - |
+| `cli:core.selfmon` | core-cli | **keep** | `core/selfmon.py:634` | `core/selfmon.py:634` | python3 -m core.selfmon | `tests/test_memorial.py:127`, `tests/test_memorial_docket_quality.py:83`, `tests/test_reply_followup.py:73` | - |
 | `cli:core.skip_digest` | core-cli | **keep** | `core/skip_digest.py:437` | `core/skip_digest.py:437` | python3 -m core.skip_digest | `tests/test_skip_digest.py:95`, `tests/test_skip_digest_arm.py:99` | - |
 | `cli:core.taskline_bridge` | core-cli | **keep** | `core/taskline_bridge.py:507` | `core/taskline_bridge.py:507` | python3 -m core.taskline_bridge | `tests/test_delegation_reconcile.py:224` | - |
 | `cli:core.usage_stats` | core-cli | **keep** | `core/usage_stats.py:468` | `core/usage_stats.py:468` | python3 -m core.usage_stats | `tests/test_capability_contracts.py:71` | - |
@@ -240,19 +241,27 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `admin-route:post:/api/intents/cancel` | admin-api | **keep** | `admin.py:1697` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/cancel | `tests/test_admin_api.py:467` | - |
 | `admin-route:post:/api/intents/rearm` | admin-api | **keep** | `admin.py:1716` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/rearm | `tests/test_admin_api.py:489` | - |
 | `admin-route:post:/api/memory` | admin-api | **keep** | `admin.py:1593` | `admin.py:1585` | http://127.0.0.1:3456/api/memory | `tests/test_admin_api.py:130` | - |
-| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:2830` | `bot.sh:2830` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_dashboard.py:27`, `tests/test_eigenflux_publish_post.py:89` | - |
-| `lark:matter:clear` | lark-command | **keep** | `core/matter_bridge.py:324` | `core/matter_bridge.py:324` | /matter clear | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:current` | lark-command | **keep** | `core/matter_bridge.py:323` | `core/matter_bridge.py:323` | /matter current | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:done` | lark-command | **keep** | `core/matter_bridge.py:325` | `core/matter_bridge.py:325` | /matter done | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:handoff` | lark-command | **keep** | `core/matter_bridge.py:325` | `core/matter_bridge.py:325` | /matter handoff | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:list` | lark-command | **keep** | `core/matter_bridge.py:324` | `core/matter_bridge.py:324` | /matter list | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:new` | lark-command | **keep** | `core/matter_bridge.py:322` | `core/matter_bridge.py:322` | /matter new | `tests/test_matter_continuity.py:76` | - |
-| `lark:matter:use` | lark-command | **keep** | `core/matter_bridge.py:322` | `core/matter_bridge.py:322` | /matter use | `tests/test_matter_continuity.py:76` | - |
-| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:2796` | `bot.sh:2796` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:54`, `tests/test_memorial.py:630`, `tests/test_no_dead_ends.py:98` | - |
-| `lark:model:auto` | lark-command | **keep** | `core/matter_bridge.py:257` | `core/matter_bridge.py:257` | /model auto | `tests/test_matter_continuity.py:76` | - |
-| `lark:model:codex` | lark-command | **keep** | `core/matter_bridge.py:244` | `core/matter_bridge.py:244` | /model codex | `tests/test_matter_continuity.py:76` | - |
-| `lark:model:status` | lark-command | **keep** | `core/matter_bridge.py:244` | `core/matter_bridge.py:244` | /model | `tests/test_matter_continuity.py:76` | - |
-| `lark:session:stop` | lark-command | **keep** | `bot.sh:2867` | `bot.sh:2867` | stop / cancel / 结束 / 停止 | `tests/test_actions.py:237`, `tests/test_admin_api.py:465`, `tests/test_admin_destructive.py:115` | - |
+| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:2934` | `bot.sh:2934` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_dashboard.py:27`, `tests/test_eigenflux_publish_post.py:89` | - |
+| `lark:matter:clear` | lark-command | **keep** | `core/matter_bridge.py:590` | `core/matter_bridge.py:590` | /matter clear | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:current` | lark-command | **keep** | `core/matter_bridge.py:589` | `core/matter_bridge.py:589` | /matter current | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:done` | lark-command | **keep** | `core/matter_bridge.py:403` | `core/matter_bridge.py:403` | /matter done | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:handoff` | lark-command | **keep** | `core/matter_bridge.py:594` | `core/matter_bridge.py:594` | /matter handoff | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:list` | lark-command | **keep** | `core/matter_bridge.py:590` | `core/matter_bridge.py:590` | /matter list | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:new` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /matter new | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:matter:use` | lark-command | **keep** | `core/matter_bridge.py:402` | `core/matter_bridge.py:402` | /matter use | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:2900` | `bot.sh:2900` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:54`, `tests/test_memorial.py:690`, `tests/test_no_dead_ends.py:98` | - |
+| `lark:model:auto` | lark-command | **keep** | `core/matter_bridge.py:520` | `core/matter_bridge.py:520` | /model auto | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:model:codex` | lark-command | **keep** | `core/matter_bridge.py:507` | `core/matter_bridge.py:507` | /model codex | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:model:status` | lark-command | **keep** | `core/matter_bridge.py:416` | `core/matter_bridge.py:416` | /model | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:close` | lark-command | **keep** | `core/matter_bridge.py:372` | `core/matter_bridge.py:372` | /session close | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:current` | lark-command | **keep** | `core/matter_bridge.py:344` | `core/matter_bridge.py:344` | /session current | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:help` | lark-command | **keep** | `core/matter_bridge.py:593` | `core/matter_bridge.py:593` | /session help | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:leave` | lark-command | **keep** | `core/matter_bridge.py:372` | `core/matter_bridge.py:372` | /session leave | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:list` | lark-command | **keep** | `core/matter_bridge.py:370` | `core/matter_bridge.py:370` | /session list | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:new` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /session new | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:reset` | lark-command | **keep** | `core/matter_bridge.py:371` | `core/matter_bridge.py:371` | /session reset | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
+| `lark:session:stop` | lark-command | **keep** | `bot.sh:2971` | `bot.sh:2971` | stop / cancel / 结束 / 停止 | `tests/test_actions.py:237`, `tests/test_admin_api.py:465`, `tests/test_admin_destructive.py:115` | - |
+| `lark:session:switch` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /session switch | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 
 ## Resolved Evidence Audit
 

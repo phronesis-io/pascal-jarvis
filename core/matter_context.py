@@ -76,7 +76,21 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
         elif entity_type != "conversation":
             related.append({"type": entity_type, **item})
 
-    events = list(reversed(matter.get("events", [])[:max(1, event_limit)]))
+    # Conversation turns are durable audit events, but reset means "do not put
+    # the old short-term dialog back into the prompt".  Keep all decisions and
+    # domain events while showing conversation events only from the currently
+    # active reset generation.  Legacy events are generation 0.
+    from core.conversation_context import current_context_generation
+    generation = current_context_generation(f"matter:{matter_id}")
+    visible_events = []
+    for event in matter.get("events", []):
+        if str(event.get("event_type") or "").startswith("conversation_"):
+            event_generation = int((event.get("payload") or {}).get(
+                "context_generation", 0) or 0)
+            if event_generation != generation:
+                continue
+        visible_events.append(event)
+    events = list(reversed(visible_events[:max(1, event_limit)]))
     bundle = {
         "schema": "jarvis.matter-context.v1",
         "matter": {

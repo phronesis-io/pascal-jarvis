@@ -63,9 +63,30 @@ def test_deterministic_memorial_continuation_closes_after_commit():
     assert continuation < committed < branch_end
 
 
+def test_auto_promotion_releases_logical_transition_marker():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    promotion = source.index("Promoted to background job")
+    marker_release = source.rfind(
+        'rm -f -- "$dispatch_marker"', 0, promotion)
+    lock_release = source.rfind('rm -f "$LOCK_FILE"', 0, promotion)
+
+    assert lock_release < marker_release < promotion
+    assert 'dispatch_marker=""' in source[marker_release:promotion]
+
+
+def test_stop_covers_queued_handlers_before_provider_lock():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    stop = source[source.index('# "stop" / "cancel"'):
+                  source.index("# ── Normal message", source.index('# "stop" / "cancel"'))]
+
+    assert '.dispatch_conv_${_conv_dispatch_key}_*' in stop
+    assert 'kill "$_queued_pid"' in stop
+    assert "现在可以切换或重置会话" in stop
+
+
 def test_deterministic_matter_reply_closes_only_after_reliable_delivery():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
-    matter = source.index("python3 -m core.matter_bridge")
+    matter = source.index("_matter_cmd=$(run_matter_command")
     handled = source.index(".handled // false", matter)
     send = source.index(
         'if delivery_reply_reliable "$message_id" "$_matter_reply"; then',
@@ -78,3 +99,15 @@ def test_deterministic_matter_reply_closes_only_after_reliable_delivery():
     branch_end = source.index("continue", close)
 
     assert handled < send < close < branch_end
+
+
+def test_deterministic_command_hard_exit_is_not_replayed_through_model():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    helper = source[source.index("run_matter_command()"):
+                    source.index("delivery_send_reliable()")]
+
+    assert "command_would_handle" in helper
+    assert 'deterministic="unknown"' in helper
+    assert 'if [ "$status" -ne 0 ] && [ "$deterministic" != "false" ]' in helper
+    assert '"handled":true' in helper
+    assert "不会交给模型" in helper
