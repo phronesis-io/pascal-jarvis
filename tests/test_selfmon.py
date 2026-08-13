@@ -49,7 +49,10 @@ def seed_intent_db(jdir, monkeypatch):
         CREATE TABLE intentions (
             id TEXT PRIMARY KEY,
             name TEXT,
+            status TEXT DEFAULT 'pending',
+            category TEXT DEFAULT 'none',
             closure_status TEXT,
+            closure_followup_id TEXT,
             created_at TEXT,
             triggered_at TEXT,
             executed_at TEXT
@@ -59,12 +62,15 @@ def seed_intent_db(jdir, monkeypatch):
     conn.close()
     monkeypatch.setattr(selfmon, "_intent_db_path", lambda _jd: db_path)
 
-    def _insert(iid, name, closure_status, executed_at):
+    def _insert(iid, name, closure_status, executed_at, *,
+                status="pending", category="none", closure_followup_id=""):
         c = sqlite3.connect(str(db_path))
         c.execute(
-            "INSERT INTO intentions (id, name, closure_status, created_at, "
-            "triggered_at, executed_at) VALUES (?,?,?,?,?,?)",
-            (iid, name, closure_status, executed_at, executed_at, executed_at))
+            "INSERT INTO intentions (id, name, status, category, closure_status, "
+            "closure_followup_id, created_at, triggered_at, executed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (iid, name, status, category, closure_status, closure_followup_id,
+             executed_at, executed_at, executed_at))
         c.commit()
         c.close()
 
@@ -189,6 +195,45 @@ def test_closure_overdue_db_missing(jdir):
     assert res["db_available"] is False
     assert res["overdue_count"] == 0
     assert not (jdir / "data" / "jarvis.db").exists()
+
+
+def test_closure_overdue_uses_category_policy(jdir, seed_intent_db):
+    now = time.time()
+    seed_intent_db(
+        "int_external_fresh", "external fresh", "awaiting",
+        _ts(now - 7 * 86400, sep="T"), category="external",
+    )
+    seed_intent_db(
+        "int_external_old", "external old", "awaiting",
+        _ts(now - 15 * 86400, sep="T"), category="external",
+    )
+
+    res = selfmon.closure_overdue(jdir, now=now)
+
+    assert res["policy"] == "category"
+    assert {item["id"] for item in res["overdue"]} == {"int_external_old"}
+    assert res["overdue"][0]["ttl_days"] == 14
+    assert "(>14d)" in selfmon.selfmon_report(jdir)
+
+
+def test_closure_overdue_waits_for_live_followup(jdir, seed_intent_db):
+    now = time.time()
+    old = _ts(now - 10 * 86400, sep="T")
+    seed_intent_db("int_followup", "follow-up", "none", old, status="pending")
+    seed_intent_db(
+        "int_parent", "parent", "awaiting", old,
+        closure_followup_id="int_followup",
+    )
+
+    assert selfmon.closure_overdue(jdir, now=now)["overdue_count"] == 0
+
+    conn = sqlite3.connect(str(jdir / "data" / "jarvis.db"))
+    conn.execute("UPDATE intentions SET status='expired' WHERE id='int_followup'")
+    conn.commit()
+    conn.close()
+
+    res = selfmon.closure_overdue(jdir, now=now)
+    assert {item["id"] for item in res["overdue"]} == {"int_parent"}
 
 
 def test_intent_db_opened_read_only(jdir, seed_intent_db):

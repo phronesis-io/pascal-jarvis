@@ -56,9 +56,8 @@ LOW_ENGAGEMENT_THRESHOLD = 0.15
 REFIRE_WINDOW_MIN = 30
 REFIRE_MIN_COUNT = 3
 
-# closure_overdue: an intent stuck closure_status='awaiting' older than this
-# many days is a zombie (REQ-33's awaiting_ttl_days exists precisely so this
-# stays at zero; a nonzero count means the sweeper is wedged).
+# closure_overdue: fallback TTL for an unknown category. Normal production
+# decisions use the same per-category CLOSURE_POLICY as the lifecycle sweeper.
 CLOSURE_OVERDUE_DAYS = 3
 
 # task_finish statuses that mean the cycle ran but the work did not succeed.
@@ -294,29 +293,46 @@ def same_intent_refires(jarvis_dir: Path, since_epoch: float) -> dict:
 # ── metric 3: closure overdue (zombie awaiting intents) ────────────────────
 
 def closure_overdue(jarvis_dir: Path, now: float,
-                    overdue_days: int = CLOSURE_OVERDUE_DAYS) -> dict:
-    """Intents stuck closure_status='awaiting' older than overdue_days.
+                    overdue_days: int | None = None) -> dict:
+    """Awaiting closures past policy TTL with no live follow-up.
 
     Reads the intent DB read-only. The anchor age is taken from the most
     specific timestamp available (closed_at is terminal so it's excluded):
     executed_at → triggered_at → created_at, mirroring intentions._sweep.
+    ``overdue_days`` is a test/diagnostic override; production uses the
+    authoritative per-category lifecycle policy.
     """
+    from core.intentions import CLOSURE_POLICY
+
     conn = _open_intent_db_ro(jarvis_dir)
     if conn is None:
         return {"overdue_count": 0, "overdue": [], "db_available": False}
 
-    cutoff = now - overdue_days * 86400
     overdue: list[dict] = []
     try:
         try:
             rows = conn.execute(
-                "SELECT id, name, created_at, triggered_at, executed_at "
-                "FROM intentions WHERE closure_status = 'awaiting'"
+                "SELECT i.id, i.name, i.category, i.created_at, "
+                "i.triggered_at, i.executed_at, i.closure_followup_id, "
+                "fu.status AS followup_status "
+                "FROM intentions i LEFT JOIN intentions fu "
+                "ON fu.id = i.closure_followup_id "
+                "WHERE i.closure_status = 'awaiting'"
             ).fetchall()
         except sqlite3.Error:
             return {"overdue_count": 0, "overdue": [], "db_available": False}
         for r in rows:
             d = dict(r)
+            if d.get("followup_status") in ("pending", "triggered"):
+                continue
+            category = str(d.get("category") or "none")
+            policy = CLOSURE_POLICY.get(category, CLOSURE_POLICY["none"])
+            ttl_days = int(
+                overdue_days
+                if overdue_days is not None
+                else policy.get("awaiting_ttl_days", CLOSURE_OVERDUE_DAYS)
+            )
+            cutoff = now - ttl_days * 86400
             anchor = d.get("executed_at") or d.get("triggered_at") or d.get("created_at")
             ep = _parse_epoch(anchor)
             # Anchors are ISO ('2026-06-13T09:00:00') or space-separated; both
@@ -325,12 +341,14 @@ def closure_overdue(jarvis_dir: Path, now: float,
             if ep is None or ep <= cutoff:
                 age_days = round((now - ep) / 86400, 1) if ep is not None else None
                 overdue.append({"id": d.get("id"), "name": d.get("name", ""),
-                                "anchor": anchor, "age_days": age_days})
+                                "anchor": anchor, "age_days": age_days,
+                                "category": category, "ttl_days": ttl_days})
     finally:
         conn.close()
 
     return {"overdue_count": len(overdue), "overdue": overdue,
-            "db_available": True, "overdue_days": overdue_days}
+            "db_available": True, "overdue_days": overdue_days,
+            "policy": "override" if overdue_days is not None else "category"}
 
 
 # ── metric 4: model crash / skip ───────────────────────────────────────────
@@ -486,8 +504,9 @@ def selfmon_report(jarvis_dir, window_hours: float = 24) -> str:
         for it in overdue["overdue"]:
             age = it.get("age_days")
             age_str = f"{age}d" if age is not None else "unknown-age"
+            ttl_days = it.get("ttl_days", overdue.get("overdue_days"))
             warns.append(f"  ⚠️ closure zombie '{it.get('name') or it.get('id')}'"
-                         f" awaiting {age_str} (>{overdue.get('overdue_days')}d)")
+                         f" awaiting {age_str} (>{ttl_days}d)")
     else:
         lines.append("  closure-overdue: 0")
 
