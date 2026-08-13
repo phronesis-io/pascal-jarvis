@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from core.sqlite_migrations import ensure_additive_columns
+
 
 ACTIVE_STATUSES = {
     "captured",
@@ -376,22 +378,15 @@ class DelegationStore:
                     ON delegation_projection_queue(updated_at);
                 """
             )
-            evidence_columns = {
-                str(row["name"])
-                for row in db.execute(
-                    "PRAGMA table_info(delegation_evidence)"
-                ).fetchall()
-            }
-            if "trusted" not in evidence_columns:
-                db.execute(
-                    "ALTER TABLE delegation_evidence "
-                    "ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0"
-                )
-            if "verifier_id" not in evidence_columns:
-                db.execute(
-                    "ALTER TABLE delegation_evidence "
-                    "ADD COLUMN verifier_id TEXT NOT NULL DEFAULT ''"
-                )
+            ensure_additive_columns(
+                db,
+                namespace="delegations",
+                table="delegation_evidence",
+                columns=(
+                    ("trusted", "INTEGER NOT NULL DEFAULT 0"),
+                    ("verifier_id", "TEXT NOT NULL DEFAULT ''"),
+                ),
+            )
 
     @contextmanager
     def _tx(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:

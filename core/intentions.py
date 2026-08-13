@@ -25,11 +25,14 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.log import log
+from core.sqlite_migrations import MigrationError, ensure_additive_columns
 from core.timeutil import now_local, now_local_str
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -371,16 +374,46 @@ def _migrate():
     instead of marking an incomplete schema ready for the process lifetime.
     """
     db = _get_db()
-    have = {r[1] for r in db.execute("PRAGMA table_info(intentions)").fetchall()}
-    for col, ddl in _NEW_COLS:
-        if col not in have:
-            try:
-                db.execute(f"ALTER TABLE intentions ADD COLUMN {col} {ddl}")
-            except sqlite3.OperationalError as e:
-                print(
-                    f"[intentions._migrate] defer {col}: {e}",
-                    file=sys.stderr,
-                )
+    try:
+        ensure_additive_columns(
+            db,
+            namespace="intentions",
+            table="intentions",
+            columns=tuple(_NEW_COLS),
+        )
+    except MigrationError as exc:
+        log(
+            "intentions",
+            "migration_schema_drift",
+            level="error",
+            error=str(exc),
+        )
+        raise
+    except sqlite3.OperationalError as exc:
+        remaining = {
+            col for col, _ddl in _NEW_COLS
+            if col not in {
+                row[1]
+                for row in db.execute(
+                    "PRAGMA table_info(intentions)"
+                ).fetchall()
+            }
+        }
+        log(
+            "intentions",
+            "migration_deferred",
+            level="warn",
+            error=str(exc),
+            missing_columns=sorted(remaining),
+        )
+        detail = (
+            "missing columns: " + ", ".join(sorted(remaining))
+            if remaining
+            else str(exc)
+        )
+        raise sqlite3.OperationalError(
+            "intentions migration incomplete; " + detail
+        ) from exc
     migrated = {
         row[1]
         for row in db.execute(
@@ -426,10 +459,19 @@ def _migrate():
 
 
 _table_ready = False
+_init_lock = threading.Lock()
+
 
 def _init():
     global _table_ready
-    if not _table_ready:
+    if _table_ready:
+        return
+    # dashboard.db exposes one check_same_thread=False connection. Serializing
+    # the complete schema bootstrap prevents two callers from interleaving
+    # executescript/commit/migration operations on that shared transaction.
+    with _init_lock:
+        if _table_ready:
+            return
         try:
             _ensure_table()
             _table_ready = True

@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 import pytest
@@ -38,6 +39,20 @@ def _delegation(store, **overrides):
     }
     values.update(overrides)
     return store.create(**values)
+
+
+def test_store_records_named_domain_migrations(tmp_path):
+    _store(tmp_path)
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        markers = db.execute(
+            "SELECT name FROM _domain_migrations "
+            "WHERE namespace='delegations' ORDER BY name"
+        ).fetchall()
+
+    assert markers == [
+        ("delegation_evidence.add_column.trusted",),
+        ("delegation_evidence.add_column.verifier_id",),
+    ]
 
 
 def _step(

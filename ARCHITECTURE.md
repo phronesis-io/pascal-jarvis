@@ -203,6 +203,13 @@ the exact release commit or a healthy resident descendant that contains it.
   `restart.sh --runtime` path is configuration-only: it revalidates release
   authority, requires a clean worktree, and proves the running bot/heartbeat
   already match `HEAD`, so it cannot preserve or deploy unreviewed code.
+- `core.sqlite_migrations`: named, transactional additive migrations for
+  domain stores that must initialize without importing the Dashboard. A
+  pending batch owns an `IMMEDIATE` transaction, so concurrent processes
+  serialize before reading migration state; a marker and its compatible
+  physical column commit together. Type/nullability/default or marker/schema
+  drift fails closed. Destructive or type-changing migrations still require an
+  explicit backup, transform, verification, and rollback plan.
 - `core.aux_model`: bounded Primary/Backup 1/Backup 2/GPT routing for
   background jobs and text-only auxiliary calls. Untrusted or derived text
   enters with all Claude/OpenAI tools disabled. Every configured provider
