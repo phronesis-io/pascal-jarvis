@@ -19,7 +19,7 @@ Enable (after Pascal provides the App Secret from the dev console):
   1. put the secret in the environment:  export LARK_APP_SECRET=...
      (app id auto-read from `lark-cli config show`, or LARK_APP_ID)
   2. export JARVIS_EVENT_BACKEND=sidecar   (read by plugins/lark/client.sh)
-  3. ./restart.sh --yes
+  3. ./restart.sh --runtime --yes
 Rollback: unset JARVIS_EVENT_BACKEND, restart — lark-cli path is untouched.
 """
 

@@ -635,15 +635,17 @@ def test_restart_runs_release_gate_before_touching_deploy_guard():
     script = (
         __import__("pathlib").Path(__file__).parent.parent / "restart.sh"
     ).read_text(encoding="utf-8")
-    full = script.index('  --full|-f)')
-    normal = script.index('  *)', full)
+    deploy = script[
+        script.index("governed_deploy()"):
+        script.index('case "${1:-}"')
+    ]
+    assert deploy.index("_verify_release_gate") < deploy.index(
+        "_set_deploy_guard"
+    )
 
-    assert script.index("_verify_release_gate", full) < script.index(
-        "_set_deploy_guard", full
-    )
-    assert script.index("_verify_release_gate", normal) < script.index(
-        "_set_deploy_guard", normal
-    )
+    case = script[script.index('case "${1:-}"'):]
+    assert '--full|-f)\n    governed_deploy "Governed Full-Runtime Deploy"' in case
+    assert '\"\")\n    governed_deploy "Governed Full-Runtime Deploy"' in case
 
 
 def test_runtime_only_restart_requires_governed_same_revision():

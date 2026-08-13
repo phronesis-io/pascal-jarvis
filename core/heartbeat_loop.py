@@ -1675,7 +1675,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
             restart_trigger.unlink(missing_ok=True)
             log("heartbeat", "Restart trigger detected — handing off to restart.sh")
             try:
-                subprocess.Popen(["bash", str(jd / "restart.sh"), "--yes"],
+                subprocess.Popen(["bash", str(jd / "restart.sh"),
+                                  "--runtime", "--yes"],
                                  start_new_session=True,
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)

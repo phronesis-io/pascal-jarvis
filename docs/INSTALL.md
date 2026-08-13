@@ -192,12 +192,12 @@ gitignored 配置文件 + 中性默认。
 ./bot.sh               # 首次前台启动；Ctrl-C 退出
 ./restart.sh --runtime # 日常配置/状态重启；要求已治理且 live code == clean HEAD
 ./restart.sh --status  # 三进程状态（daemon / bot / 事件监听器）
-./restart.sh           # 代码发布：强制 main/PR/CI/review/branch protection
-./restart.sh --full    # 受治理的完整发布：再同步 Dashboard、手机网关
+./restart.sh           # 代码发布：校验治理证据并同步所有已安装常驻组件
+./restart.sh --full    # 同一条完整发布路径的显式别名
 ./scripts/doctor.sh    # 任何时候的全面体检
 ```
 
-`restart.sh` 的默认和 `--full` 路径是**生产代码发布**，不是普通安装器。
+`restart.sh` 的默认和 `--full` 路径是同一条**完整生产代码发布**，不是普通安装器。
 它需要 `gh` 已安装并登录，而且当前提交必须满足仓库的 PR、CI、审核和分支保护
 规则。普通配置变化使用 `--runtime`；该路径仍会验证当前提交的发布授权，再证明
 正在运行的 bot/heartbeat 已经是当前干净 `HEAD`；任何一项不满足都会拒绝。
@@ -210,8 +210,8 @@ gitignored 配置文件 + 中性默认。
 ./scripts/launchd/install.sh   # 幂等；常驻服务需连续稳定 running，否则事务回滚
 ```
 
-`restart.sh --full` 只同步这台机器上已经启用的 daemon、Dashboard 和手机
-网关定义，不会替新安装擅自启用可选服务。定义切换失败时安装器恢复旧 plist
+默认发布与 `restart.sh --full` 只同步这台机器上已经启用的 daemon 和 Dashboard
+定义，不会替新安装擅自启用可选服务。定义切换失败时安装器恢复旧 plist
 和原加载状态；launchd 状态无法可靠读取时发布会在停止 bot 前失败关闭。
 
 **首装后的健康告警预期**（转述给人类，避免虚惊）：
