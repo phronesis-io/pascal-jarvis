@@ -1,6 +1,6 @@
 # Jarvis Logical Session Lifecycle PRD
 
-Status: Locally verified; pending PR and production release
+Status: Released on 2026-08-13 at `cce89d4f5b326a278455a8cf6ca2ab8339a1a9f3`
 Date: 2026-08-13
 Owner: Pascal / Jarvis
 
@@ -104,5 +104,13 @@ thread; raw provider logs remain intact.
   process exiting after a simulated side effect.
 - Independent adversarial re-review found no remaining P0, P1, or P2 finding
   in the locally verified worktree.
-- PR CI, trusted repository review, merged-main CI, deploy verification, and
-  production smoke remain release gates and are not claimed by this status.
+- PR #74 and merged-main CI passed. The protected release gate verified the
+  final PR head, merge SHA, required GitHub check, branch protection, and the
+  post-merge admin-owner release decision.
+- The governed restart deployed the merge SHA to every resident component.
+  Runtime localtest, component/deploy checks, unified delivery smoke, desktop
+  and 390x844 mobile browser smoke, bounded provider canaries, and the
+  post-release L3 observation all passed.
+- Claude primary remained quota-limited during the release canary; the Claude
+  relay, read-only Codex fallback, and GPT API fallback all answered. Backup2
+  remains intentionally disabled and unconfigured.

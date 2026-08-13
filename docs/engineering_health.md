@@ -28,7 +28,7 @@ work. The supported product surface remains the generated
   and changed implementation lines are review-volume indicators, not coverage
   percentages, and must not be used to compare this repository with another
   codebase.
-- `core/memorial.py` is 3,486 lines with 116 functions; its longest function is
+- `core/memorial.py` is 3,492 lines with 116 functions; its longest function is
   165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
   function is 324 lines. These are verified maintainability risks even though
   line count alone is not a defect.
