@@ -156,6 +156,21 @@ admin:
   # token: "some-long-random-secret"
 
 
+# ── External outage detection ─────────────────────────────────────
+# Optional, but required to detect a powered-off Mac or FileVault/pre-login
+# stall. Create a check at an external dead-man service, configure that service
+# to alert after at least 45 minutes without a ping, and place its HTTPS ping
+# URL below. The URL is a secret: keep it only in gitignored jarvis.yaml (or
+# JARVIS_DEADMAN_URL), never in committed files.
+
+ops:
+  deadman:
+    enabled: false
+    url: ""
+    interval_seconds: 300
+    timeout_seconds: 5
+
+
 # ── Plugins ────────────────────────────────────────────────────────
 # Each plugin is opt-in. Disabled plugins have zero overhead.
 

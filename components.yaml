@@ -110,6 +110,12 @@ components:
     critical: false
     requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.daemon.plist
 
+  - name: external-deadman
+    check: deadman
+    critical: false
+    requires_config: ops.deadman.enabled
+    note: external missed-ping service catches whole-machine/FileVault outages
+
   - name: caffeinate-launchd
     check: launchctl
     label: com.pascal.jarvis.caffeinate

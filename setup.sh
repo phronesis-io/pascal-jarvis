@@ -265,6 +265,10 @@ cat <<'EOF'
      # The plists are templates; the script fills in YOUR paths. Without
      # this step the bot only runs while your terminal session lives.
 
+     For whole-machine/FileVault outage alerts, create an external missed-ping
+     check and set ops.deadman.enabled + ops.deadman.url in jarvis.yaml. Local
+     supervision cannot report while the Mac itself is offline.
+
   7. Admin dashboard (optional, enable admin.enabled: true in jarvis.yaml):
      ./scripts/python.sh admin.py
      # open http://localhost:3456

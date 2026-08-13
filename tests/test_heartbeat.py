@@ -768,18 +768,18 @@ def test_heartbeat_ok_still_acks_intention_check(tmp_path, monkeypatch):
     assert "__NO_ENVELOPE__" in stdin_log.read_text()
 
 
-def test_empty_response_acks_intention_check(tmp_path, monkeypatch):
+def test_empty_response_defers_intention_check_without_attempt_charge(tmp_path, monkeypatch):
     runner, stdin_log = _ack_runner(tmp_path)
     monkeypatch.setattr(runner, "claude_call", lambda p: "")
     runner.run_cycle(force=True)
-    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+    assert "__CALL_FAILED__" in stdin_log.read_text()
 
 
-def test_killed_response_acks_intention_check(tmp_path, monkeypatch):
+def test_killed_response_defers_intention_check_without_attempt_charge(tmp_path, monkeypatch):
     runner, stdin_log = _ack_runner(tmp_path)
     monkeypatch.setattr(runner, "claude_call", lambda p: "__KILLED__")
     runner.run_cycle(force=True)
-    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+    assert "__CALL_FAILED__" in stdin_log.read_text()
 
 
 def test_parse_failure_acks_and_does_not_trip_batched_circuits(tmp_path, monkeypatch):

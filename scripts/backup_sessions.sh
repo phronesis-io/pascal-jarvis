@@ -15,59 +15,107 @@
 
 set -u
 
-REPO_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd -P)
+REPO_DIR="${JARVIS_DIR:-$SCRIPT_DIR}"
 WORK_DIR="${WORK_DIR:-$(cd "$REPO_DIR/../.." 2>/dev/null && pwd)}"
 BACKUP_BASE="${WORK_DIR}/session_backups"
 TODAY=$(date '+%Y-%m-%d')
-BACKUP_DIR="$BACKUP_BASE/$TODAY"
+FINAL_DIR="$BACKUP_BASE/$TODAY"
+BACKUP_DIR="$BACKUP_BASE/.${TODAY}.staging.$$"
 FAILED=0
+OLD_DIR=""
+LATEST_TMP="$BACKUP_BASE/.latest.$$"
 
-_slug() {
-  python3 - "$1" <<'PYEOF'
-import sys
-from pathlib import Path
-
-print(str(Path(sys.argv[1]).resolve()).replace("/", "-").replace(".", "-"))
-PYEOF
+cleanup_staging() {
+  if [ -n "$OLD_DIR" ] && [ -d "$OLD_DIR" ] && [ ! -d "$FINAL_DIR" ]; then
+    mv "$OLD_DIR" "$FINAL_DIR" 2>/dev/null || true
+  fi
+  [ ! -d "$BACKUP_DIR" ] || rm -rf "$BACKUP_DIR"
+  [ ! -L "$LATEST_TMP" ] || rm -f "$LATEST_TMP"
 }
-_SLUGS=$(_slug "$WORK_DIR")$'\n'$(_slug "$WORK_DIR/repos")$'\n'$(_slug "$REPO_DIR")
-_SLUGS=$(echo "$_SLUGS" | sort -u)
+trap cleanup_staging EXIT
+trap 'cleanup_staging; exit 130' INT TERM
+
+mkdir -p "$BACKUP_BASE"
+chmod 700 "$BACKUP_BASE"
+PREVIOUS=""
+if [ -L "$BACKUP_BASE/latest" ]; then
+  PREVIOUS=$(cd "$BACKUP_BASE" && cd "$(readlink latest)" 2>/dev/null && pwd -P) || PREVIOUS=""
+fi
 
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 
-# ── 1. Session transcripts — BOTH project slugs ─────────────────────────
-while IFS= read -r slug; do
-  [ -z "$slug" ] && continue
-  src="$HOME/.claude/projects/$slug"
-  [ -d "$src" ] || continue
-  dest="$BACKUP_DIR/sessions$slug"
-  mkdir -p "$dest"
-  rsync -a --include='*.jsonl' --exclude='*/' --exclude='*' "$src/" "$dest/" || FAILED=1
-done <<< "$_SLUGS"
+# ── 1. Session transcripts — Claude Code AND Codex, every project ───────
+# Hard-link unchanged files from the previous verified snapshot. This keeps
+# all local history recoverable without multiplying ~2.5GB by 30 days.
+if [ -d "$HOME/.claude/projects" ]; then
+  mkdir -p "$BACKUP_DIR/claude_sessions"
+  if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS/claude_sessions" ]; then
+    rsync -a --link-dest="$PREVIOUS/claude_sessions" \
+      --include='*/' --include='*.jsonl' --exclude='*' \
+      "$HOME/.claude/projects/" "$BACKUP_DIR/claude_sessions/" || FAILED=1
+  else
+    rsync -a --include='*/' --include='*.jsonl' --exclude='*' \
+      "$HOME/.claude/projects/" "$BACKUP_DIR/claude_sessions/" || FAILED=1
+  fi
+fi
+if [ -d "$HOME/.codex/sessions" ]; then
+  mkdir -p "$BACKUP_DIR/codex_sessions"
+  if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS/codex_sessions" ]; then
+    rsync -a --link-dest="$PREVIOUS/codex_sessions" \
+      --include='*/' --include='*.jsonl' --exclude='*' \
+      "$HOME/.codex/sessions/" "$BACKUP_DIR/codex_sessions/" || FAILED=1
+  else
+    rsync -a --include='*/' --include='*.jsonl' --exclude='*' \
+      "$HOME/.codex/sessions/" "$BACKUP_DIR/codex_sessions/" || FAILED=1
+  fi
+fi
 
 # ── 2. Memory directories — the most irreplaceable data in the system ───
-while IFS= read -r slug; do
-  [ -z "$slug" ] && continue
-  src="$HOME/.claude/projects/$slug/memory"
-  [ -d "$src" ] || continue
-  dest="$BACKUP_DIR/memory$slug"
-  mkdir -p "$dest"
-  rsync -a "$src/" "$dest/" || FAILED=1
-done <<< "$_SLUGS"
+for provider in claude Codex; do
+  if [ "$provider" = "claude" ]; then
+    memory_root="$HOME/.claude/projects"
+    backup_provider="claude"
+  else
+    memory_root="$HOME/.Codex/projects"
+    backup_provider="codex"
+  fi
+  for src in "$memory_root"/*/memory; do
+    [ -d "$src" ] || continue
+    slug=$(basename "$(dirname "$src")")
+    dest="$BACKUP_DIR/memory/$backup_provider/$slug"
+    mkdir -p "$dest"
+    previous_memory="$PREVIOUS/memory/$backup_provider/$slug"
+    if [ -n "$PREVIOUS" ] && [ -d "$previous_memory" ]; then
+      rsync -a --link-dest="$previous_memory" "$src/" "$dest/" || FAILED=1
+    else
+      rsync -a "$src/" "$dest/" || FAILED=1
+    fi
+  done
+done
 
-# ── 3. SQLite DB — WAL-safe via .backup (a raw file copy would lose every
-#      transaction still in the -wal, currently larger than the db itself) ──
-if [ -f "$REPO_DIR/data/jarvis.db" ]; then
-  python3 - "$REPO_DIR/data/jarvis.db" "$BACKUP_DIR/jarvis.db" <<'PYEOF' \
-    || FAILED=1
+# ── 3. Every SQLite DB — WAL-safe via sqlite backup API ──────────────────
+mkdir -p "$BACKUP_DIR/databases"
+python3 - "$REPO_DIR" "$BACKUP_DIR" <<'PYEOF' || FAILED=1
+from pathlib import Path
 import sqlite3
 import sys
 
-with sqlite3.connect(sys.argv[1]) as source:
-    with sqlite3.connect(sys.argv[2]) as destination:
-        source.backup(destination)
+root = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+databases = sorted(list(root.glob("*.db")) + list((root / "data").glob("*.db")))
+for source_path in databases:
+    rel = source_path.relative_to(root)
+    target = dest / "databases" / ("__".join(rel.parts))
+    with sqlite3.connect(source_path) as source:
+        with sqlite3.connect(target) as destination:
+            source.backup(destination)
+    if rel == Path("data/jarvis.db"):
+        with sqlite3.connect(source_path) as source:
+            with sqlite3.connect(dest / "jarvis.db") as destination:
+                source.backup(destination)
 PYEOF
-fi
 
 # ── 4. Runtime state + config ────────────────────────────────────────────
 mkdir -p "$BACKUP_DIR/state"
@@ -78,6 +126,13 @@ for f in heartbeat_state.json active_sessions.json interval_overrides.json \
          calendar_event_mapping.json perception_state.json; do
   [ -f "$REPO_DIR/$f" ] && cp "$REPO_DIR/$f" "$BACKUP_DIR/state/" 2>/dev/null
 done
+# Preserve all private runtime data (keys, local inputs, queues, reports),
+# excluding SQLite files already copied transactionally and ephemeral locks.
+if [ -d "$REPO_DIR/data" ]; then
+  mkdir -p "$BACKUP_DIR/state/data"
+  rsync -a --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
+    --exclude='*.lock' "$REPO_DIR/data/" "$BACKUP_DIR/state/data/" || FAILED=1
+fi
 # Nested state the flat list above can't reach (7/22 restore drill gaps):
 # eigenflux cooldown/dedup state, intent-card ledger, provider gate, and
 # metrics probe histories. Subdirs mirror the repo layout so a restore is
@@ -105,55 +160,53 @@ if [ -f "$REPO_DIR/jarvis.yaml" ]; then
     chmod 600 "$BACKUP_DIR/state/jarvis.yaml"
 fi
 
+# ── 5. Code assets — branches, commits, dirty diffs, untracked drafts ────
+python3 "$SCRIPT_DIR/scripts/snapshot_code_assets.py" \
+  --root "$WORK_DIR" --destination "$BACKUP_DIR/code" || FAILED=1
+
 count=$(find "$BACKUP_DIR" -type f | wc -l | tr -d ' ')
 echo "[backup] $TODAY: $count files → $BACKUP_DIR (failed=$FAILED)"
 
-# ── 5. Success stamp — the monitoring hook (components.yaml session-backup)
+# ── 6. Verify before promotion, stamp, latest switch, or pruning ─────────
 if [ "$FAILED" -eq 0 ]; then
-  date '+%Y-%m-%dT%H:%M:%S' > "$REPO_DIR/.last_backup_ok"
+  python3 "$SCRIPT_DIR/scripts/verify_backup.py" "$BACKUP_DIR" --write \
+    --source "$REPO_DIR" --home "$HOME" || FAILED=1
 fi
-
-# Cleanup old backups (keep 30 days)
-find "$BACKUP_BASE" -maxdepth 1 -type d -mtime +30 -exec rm -rf {} \; 2>/dev/null
-
-# Also maintain a "latest" symlink
-ln -sfn "$BACKUP_DIR" "$BACKUP_BASE/latest"
-
-# ── 6. Protect OLD session files from accidental deletion (read-only) ───
-# Skip ALL sessions referenced in active_sessions.json (bot may resume them).
-SESSION_DIR="$HOME/.claude/projects/$(_slug "$WORK_DIR")"
-TRACKER="$REPO_DIR/active_sessions.json"
-
-active_ids=""
-if [ -f "$TRACKER" ]; then
-  active_ids=$(python3 - "$TRACKER" <<'PYEOF'
-import json
+if [ "$FAILED" -eq 0 ]; then
+  OLD_DIR="$BACKUP_BASE/.${TODAY}.previous.$$"
+  [ ! -d "$FINAL_DIR" ] || mv "$FINAL_DIR" "$OLD_DIR" || FAILED=1
+  if [ "$FAILED" -eq 0 ]; then
+    mv "$BACKUP_DIR" "$FINAL_DIR" || FAILED=1
+    BACKUP_DIR="$BACKUP_BASE/.promoted-no-staging"
+  fi
+  if [ "$FAILED" -eq 0 ]; then
+    # Switch ``latest`` atomically, then stamp monitoring. Neither failure is
+    # allowed to claim success or authorize retention cleanup.
+    ln -s "$FINAL_DIR" "$LATEST_TMP" && \
+      python3 - "$LATEST_TMP" "$BACKUP_BASE/latest" <<'PYEOF' || FAILED=1
+import os
 import sys
 
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        tracker = json.load(handle)
-    for entry in tracker.values():
-        sid = entry.get("session_id", "")
-        if sid:
-            print(sid)
-except Exception:
-    pass
+# Unlike BSD ``mv``, os.replace does not follow a destination symlink that
+# points at a directory. The switch is atomic and never writes inside the
+# snapshot it is trying to select.
+os.replace(sys.argv[1], sys.argv[2])
 PYEOF
-)
+  fi
+  if [ "$FAILED" -eq 0 ]; then
+    stamp_tmp="$REPO_DIR/.last_backup_ok.tmp.$$"
+    date '+%Y-%m-%dT%H:%M:%S' > "$stamp_tmp" && \
+      mv -f "$stamp_tmp" "$REPO_DIR/.last_backup_ok" || FAILED=1
+  fi
+  if [ "$FAILED" -eq 0 ]; then
+    [ ! -d "$OLD_DIR" ] || rm -rf "$OLD_DIR"
+    # Retention is destructive, so it runs only after a complete verified
+    # replacement snapshot is promoted.
+    find "$BACKUP_BASE" -maxdepth 1 -type d -name '20??-??-??' \
+      -mtime +30 -exec rm -rf {} \; 2>/dev/null
+  elif [ -d "$OLD_DIR" ] && [ ! -d "$FINAL_DIR" ]; then
+    mv "$OLD_DIR" "$FINAL_DIR"
+  fi
 fi
-
-# Also skip any session modified in the last 7 days (might be resumed)
-find "$SESSION_DIR" -name "*.jsonl" -perm +200 -mtime +7 2>/dev/null | while read -r f; do
-  base=$(basename "$f" .jsonl)
-  skip=false
-  for id in $active_ids; do
-    [ "$base" = "$id" ] && skip=true && break
-  done
-  $skip || chmod 444 "$f"
-done
-
-protected=$(find "$SESSION_DIR" -name "*.jsonl" -perm 444 2>/dev/null | wc -l | tr -d ' ')
-echo "[session-protect] $protected old session files set to read-only (active + recent 7d excluded)"
 
 exit "$FAILED"

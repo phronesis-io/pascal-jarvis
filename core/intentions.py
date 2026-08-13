@@ -120,13 +120,10 @@ def breach_queue_lock(queue: Path):
                 pass
 
 # Bounded-retry policy for one-shot date intents stuck in 'triggered'
-# (REQ-31). One failed cycle no longer means permanent silent death: retry up
-# to MAX_ATTEMPTS within RETRY_GRACE of the trigger time, then expire WITH a
-# user-visible breach notification. Intents already ancient at first sweep
-# (> STORM_AGE past trigger — the 2026-06-08 resurrection-storm class) are
-# expired silently, exactly as before.
+# (REQ-31). A model-content failure gets up to MAX_ATTEMPTS while the host is
+# awake enough to obtain real responses. Wall-clock sleep does not consume the
+# retry budget. Intents older than STORM_AGE still retire silently.
 MAX_ATTEMPTS = 3
-RETRY_GRACE = timedelta(hours=2)
 STORM_AGE = timedelta(hours=24)
 
 # Cron catch-up (REQ-32): a missed minute fires on the next check via
@@ -1450,7 +1447,7 @@ def _trigger_dt(intent: dict) -> datetime | None:
         return None
 
 
-def _queue_breach(intent: dict, now: datetime) -> None:
+def _queue_breach(intent: dict, now: datetime) -> bool:
     """Append a dropped-commitment notification to the breach queue (REQ-31).
 
     intentions_pre.sh drains this queue into the next intention-check cycle so
@@ -1460,6 +1457,10 @@ def _queue_breach(intent: dict, now: datetime) -> None:
     rewrite (clear_breaches in the bot process) could be silently destroyed
     by the rewrite's os.replace. Never raises.
     """
+    policy = CLOSURE_POLICY.get(
+        intent.get("category", "none"), CLOSURE_POLICY["none"])
+    if not policy.get("may_notify", False):
+        return False
     try:
         entry = {
             "id": intent["id"], "name": intent.get("name", ""),
@@ -1471,13 +1472,15 @@ def _queue_breach(intent: dict, now: datetime) -> None:
         queue = _breach_queue_path()
         if _using_default_breach_queue():
             _store_breach_sqlite(entry)
-            return
+            return True
         queue.parent.mkdir(parents=True, exist_ok=True)
         with breach_queue_lock(queue):
             with open(queue, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
     except Exception as e:
         print(f"[intentions] breach queue append failed: {e}", file=sys.stderr)
+        return False
 
 
 def lifecycle_sweep(stale_minutes: int = 10) -> int:
@@ -1495,10 +1498,10 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
         next_fire_at is not advanced until a successful fire (REQ-32).
       - one-shot date, ancient (> STORM_AGE past trigger) → expire silently —
         the 2026-06-08 resurrection-storm class, unchanged behavior.
-      - one-shot date, attempt < MAX_ATTEMPTS and within RETRY_GRACE of the
-        trigger → back to pending for another try next cycle.
-      - retries exhausted → expire + user-visible breach notification via the
-        breach queue + still run the closure axis (REQ-33: the reminder
+      - one-shot date, attempt < MAX_ATTEMPTS -> another real content attempt;
+        asleep wall time does not spend the budget.
+      - retries exhausted -> expire, notify only when category policy allows,
+        and still run the closure axis (REQ-33: the reminder
         failed, but the real-world event happened — for hard/external the
         next-day '后来怎么样' is MORE valuable, not less).
 
@@ -1555,7 +1558,7 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
                 {"attempt": attempt, "notified": False,
                  "reason": "storm_class"},
             ))
-        elif attempt < MAX_ATTEMPTS and age < RETRY_GRACE:
+        elif attempt < MAX_ATTEMPTS:
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"retry {attempt}/{MAX_ATTEMPTS} after stuck in triggered", intent["id"]),
@@ -1566,16 +1569,17 @@ def lifecycle_sweep(stale_minutes: int = 10) -> int:
             ))
             reset += 1
         else:
-            # Retries exhausted — expire LOUDLY: breach queue + closure axis.
+            # Close observably. Only may_notify categories enter the breach
+            # queue; private maintenance never becomes a nag.
             db.execute(
                 "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
-                (f"expired after {attempt} attempts — breach notification queued",
+                (f"expired after {attempt} content attempts",
                  intent["id"]),
             )
-            _queue_breach(intent, now)
+            notified = _queue_breach(intent, now)
             lifecycle_events.append((
                 "intent_expired", intent["id"],
-                {"attempt": attempt, "notified": True,
+                {"attempt": attempt, "notified": notified,
                  "reason": "retries_exhausted"},
             ))
             terminal_moments.append(dict(intent))
@@ -2823,6 +2827,46 @@ def clear_inflight() -> None:
         pass
 
 
+def defer_inflight_infrastructure(reason: str = "provider call failed") -> dict:
+    """Return inflight rows to pending without spending a content attempt.
+
+    ``mark_triggered`` increments the attempt at claim time. A timeout, quota
+    error, network failure, or shutdown means the intent was never evaluated,
+    so this transition restores that increment and cannot create a breach.
+    """
+    _init()
+    inflight = read_inflight()
+    out = {"deferred": []}
+    if not inflight:
+        return out
+    db = _get_db()
+    events: list[tuple[str, str, dict]] = []
+    for iid in inflight:
+        row = db.execute(
+            "SELECT attempt, trigger_type FROM intentions "
+            "WHERE id = ? AND status = 'triggered'", (iid,),
+        ).fetchone()
+        if row is None:
+            continue
+        restored = max(0, int(row["attempt"] or 0) - 1)
+        db.execute(
+            "UPDATE intentions SET status = 'pending', attempt = ?, "
+            "last_error = ? WHERE id = ? AND status = 'triggered'",
+            (restored, f"deferred: infrastructure failure ({reason})", iid),
+        )
+        out["deferred"].append(iid)
+        events.append(("intent_deferred", iid, {
+            "attempt": restored,
+            "kind": row["trigger_type"],
+            "reason": "infrastructure_failure",
+        }))
+    db.commit()
+    for event, intent_id, fields in events:
+        _emit_intent(event, intent_id, **fields)
+    clear_inflight()
+    return out
+
+
 def reconcile_inflight(covered_ids: list[str]) -> dict:
     """Resolve manifest ids the envelope did NOT cover (REQ-30c).
 
@@ -2901,7 +2945,19 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
             continue
         target = _trigger_dt(it)
         age = (now - target) if target else (STORM_AGE + timedelta(seconds=1))
-        if attempt < MAX_ATTEMPTS and age < RETRY_GRACE:
+        if age > STORM_AGE:
+            db.execute(
+                "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
+                ("auto-expired: trigger >24h past (storm class)", iid),
+            )
+            lifecycle_events.append((
+                "intent_expired", iid,
+                {"attempt": attempt, "notified": False,
+                 "reason": "storm_class"},
+            ))
+            terminal_moments.append(it)
+            out["expired"].append(iid)
+        elif attempt < MAX_ATTEMPTS:
             db.execute(
                 "UPDATE intentions SET status = 'pending', last_error = ? WHERE id = ?",
                 (f"retry {attempt}/{MAX_ATTEMPTS}: envelope missing", iid))
@@ -2912,16 +2968,17 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
         else:
             db.execute(
                 "UPDATE intentions SET status = 'expired', last_error = ? WHERE id = ?",
-                (f"expired after {attempt} attempts (envelope missing) — breach queued", iid))
-            _queue_breach(it, now)
+                (f"expired after {attempt} content attempts (envelope missing)", iid))
+            notified = _queue_breach(it, now)
             lifecycle_events.append((
                 "intent_expired", iid,
-                {"attempt": attempt, "notified": True,
+                {"attempt": attempt, "notified": notified,
                  "reason": "retries_exhausted"},
             ))
             terminal_moments.append(it)
             out["expired"].append(iid)
-            out["breached"].append(iid)
+            if notified:
+                out["breached"].append(iid)
     db.commit()
     for event, intent_id, fields in lifecycle_events:
         _emit_intent(event, intent_id, **fields)

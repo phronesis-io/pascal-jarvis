@@ -631,7 +631,7 @@ def test_lifecycle_sweep_bounded_retry_then_breach(intent_db, tmp_path, monkeypa
     recent = (now_local() - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S")
     iid = mod.create_intent(name="提醒喝水", trigger_type="date",
                             trigger_config={"datetime": recent},
-                            prompt="提醒 Pascal 喝水")
+                                prompt="提醒 Pascal 喝水", category="hard")
     mod.mark_triggered(iid)
     conn = mod._get_db()
     conn.execute("UPDATE intentions SET triggered_at = datetime('now', '-15 minutes') WHERE id = ?", (iid,))
@@ -1246,7 +1246,7 @@ def test_breach_queue_peek_and_mark_shown(intent_db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "BREACH_QUEUE", tmp_path / "breach.jsonl")
     intent = {"id": "int_x", "name": "n", "prompt": "p", "purpose": "",
-              "attempt": 3, "trigger_type": "date",
+                  "attempt": 3, "trigger_type": "date", "category": "hard",
               "trigger_config": '{"datetime": "2026-06-12T18:00:00"}'}
     mod._queue_breach(intent, now_local())
 
@@ -1278,10 +1278,13 @@ def test_reconcile_breach_survives_post_clear(intent_db, tmp_path, monkeypatch):
     # An old breach already in the queue rode this cycle's PRE prompt (id A);
     # reconcile then exhausts B and queues it fresh.
     old = (now_local() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
-    a = mod.create_intent(name="a", trigger_type="date", trigger_config={"datetime": old})
-    b = mod.create_intent(name="b", trigger_type="date", trigger_config={"datetime": old})
+    a = mod.create_intent(name="a", trigger_type="date",
+                          trigger_config={"datetime": old}, category="hard")
+    b = mod.create_intent(name="b", trigger_type="date",
+                          trigger_config={"datetime": old}, category="hard")
     mod._queue_breach({"id": a, "name": "a", "prompt": "pa", "attempt": 3,
-                       "trigger_type": "date", "trigger_config": '{"datetime": "%s"}' % old},
+                       "trigger_type": "date", "category": "hard",
+                       "trigger_config": '{"datetime": "%s"}' % old},
                       now_local())
     mod.mark_triggered(b)
     # exhaust b's attempts so reconcile expires + breaches it

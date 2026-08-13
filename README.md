@@ -458,7 +458,14 @@ Pre-scripts write to stdout (becomes Claude's input data); post-scripts read std
 
 Utility scripts in `scripts/` for operations and debugging:
 
-- **`backup_sessions.sh`** — Daily session file backup with read-only protection. Copies session transcripts to an archive directory so they survive rotation.
+- **`backup_sessions.sh`** — Daily verified private snapshot: all Claude Code
+  and Codex transcripts, every memory tree, WAL-safe copies of all SQLite
+  databases, private runtime/config data, Git bundles, dirty patches, and
+  non-ignored untracked drafts. Unchanged session files are hard-linked to the
+  previous snapshot; retention runs only after checksum, permissions, class
+  completeness, and SQLite integrity checks pass.
+- **`verify_backup.py`** — Re-run checksum, privacy-permission, class coverage,
+  and SQLite integrity verification for any snapshot.
 - **`memory-viewer.py`** — Interactive TUI for browsing the tiered memory tree. Useful for inspecting what the agent "knows" without digging through files.
 - **`search_v2.py`** — Enhanced session transcript search with relevance scoring and context display.
 - **`session_search.py`** — Simple session search tool for quick keyword lookups.
@@ -473,6 +480,10 @@ Utility scripts in `scripts/` for operations and debugging:
 - Kills stuck Claude processes by detecting stale session lock files
 - Auto-restarts `bot.sh` on crash (up to 3 attempts with 5-minute cooldown)
 - Logs to `daemon.log` with automatic log rotation
+- Optionally pings an external missed-heartbeat service while the stack is
+  genuinely healthy (`ops.deadman` in `jarvis.yaml`). This is the only way to
+  detect a powered-off Mac or FileVault/pre-login stall; the tokenized URL is
+  treated as a secret and never logged.
 
 Run with:
 ```bash

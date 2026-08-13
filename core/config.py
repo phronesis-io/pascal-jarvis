@@ -84,6 +84,14 @@ _DEFAULTS = {
         "port": 3456,
         "host": "127.0.0.1",
     },
+    "ops": {
+        "deadman": {
+            "enabled": False,
+            "url": "",
+            "interval_seconds": 300,
+            "timeout_seconds": 5,
+        },
+    },
     "plugins": {},
 }
 
@@ -174,6 +182,10 @@ class Config:
     @property
     def admin(self) -> dict:
         return self._raw.get("admin", {})
+
+    @property
+    def ops(self) -> dict:
+        return self._raw.get("ops", {})
 
     def get(self, dotpath: str, default=None):
         """Get nested config value by dot-separated path: 'claude.heartbeat_model'."""
