@@ -31,6 +31,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from core.person_registry import (
+    PersonNotFound,
+    PersonRegistry,
+    PersonRegistryError,
+)
+
 
 class EigenFluxMessageError(RuntimeError):
     """Base error for a message that could not be safely completed."""
@@ -633,6 +639,24 @@ class EigenFluxMessenger:
         return friends
 
     def _load_binding(self, query: str) -> str | dict | None:
+        registry = PersonRegistry(root=self.root)
+        if registry.configured:
+            try:
+                person = registry.resolve(query)
+            except PersonNotFound:
+                # The registry is authoritative for aliases once configured.
+                # Unknown input may still exact-match the live friend list,
+                # but a removed alias cannot revive through the legacy file.
+                return None
+            except PersonRegistryError as exc:
+                raise RecipientNotFound("私人人物登记册不可用，未发送") from exc
+            else:
+                binding = person.channels.get("eigenflux")
+                if not binding:
+                    raise RecipientNotFound(
+                        f"“{person.name}”没有已验证的 EigenFlux 身份，未发送"
+                    )
+                return dict(binding)
         try:
             data = json.loads(self.bindings_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):

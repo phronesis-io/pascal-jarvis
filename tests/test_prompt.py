@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from core.prompt import build_system_prompt, load_ef_skills, ACTIONS_DOC
 
 
@@ -26,6 +28,66 @@ def test_build_system_prompt_basic(tmp_path):
     assert "2026-05-25 10:00 Monday" in prompt
     assert "User is a developer" in prompt
     assert "ACTION:" in prompt
+
+
+def test_owner_prompt_includes_id_free_known_people_context(tmp_path):
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "data").mkdir()
+    registry_path = tmp_path / "data" / "person_registry.json"
+    registry_path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "partner",
+            "name": "Partner Name",
+            "aliases": ["my partner"],
+            "relationships": ["spouse"],
+            "channels": {"lark": {
+                "open_id": "ou_partner_verified",
+                "verified_at": "2026-08-13",
+            }},
+        }],
+    }))
+    registry_path.chmod(0o600)
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="owner-key",
+        now_ts="2026-08-13 16:00",
+        tracker_path=str(tmp_path / "tracker.json"),
+    )
+
+    assert "Known People" in prompt
+    assert "Partner Name" in prompt and "my partner" in prompt
+    assert "ou_partner_verified" not in prompt
+
+
+@pytest.mark.parametrize("chat_type", ["group", "external_p2p"])
+def test_untrusted_prompt_never_includes_private_people_registry(tmp_path, chat_type):
+    (tmp_path / "memory" / "hot").mkdir(parents=True)
+    (tmp_path / "data").mkdir()
+    registry_path = tmp_path / "data" / "person_registry.json"
+    registry_path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "private_person",
+            "name": "Private Person",
+            "aliases": ["private relationship"],
+            "channels": {"lark": {
+                "open_id": "ou_private_verified",
+                "verified_at": "2026-08-13",
+            }},
+        }],
+    }))
+    registry_path.chmod(0o600)
+
+    prompt = _group_prompt(tmp_path, chat_type=chat_type)
+
+    assert "Known People" not in prompt
+    assert "Private Person" not in prompt
+    assert "private relationship" not in prompt
 
 
 def test_build_system_prompt_with_compact(tmp_path):
@@ -77,7 +139,8 @@ def test_actions_doc_complete():
     """All action types should be documented."""
     actions = [
         "feed_search", "watchlater", "bg", "jobs", "job_cancel", "job_output",
-        "heartbeat", "calendar_create", "calendar_update", "calendar_delete",
+        "heartbeat", "calendar_create", "calendar_update", "calendar_attendees",
+        "calendar_delete",
         "task_create", "task_complete", "task_capture", "task_commit",
         "task_done", "task_reject", "task_defer",
         "praxis_done", "praxis_add", "praxis_remove",
@@ -104,7 +167,7 @@ def test_load_ef_skills(tmp_path):
 # ── REQ-100/101: group chat prompt — privacy boundary ──────────────────
 
 
-def _group_prompt(tmp_path, **kw):
+def _group_prompt(tmp_path, *, chat_type="group", **kw):
     return build_system_prompt(
         jarvis_dir=str(tmp_path),
         memory_dir=str(tmp_path / "memory"),
@@ -113,7 +176,7 @@ def _group_prompt(tmp_path, **kw):
         conv_key="oc_group1",
         now_ts="2026-07-14 16:00 Tuesday",
         tracker_path=str(tmp_path / "tracker.json"),
-        chat_type="group",
+        chat_type=chat_type,
         **kw,
     )
 

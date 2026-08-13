@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "people": [
+    {
+      "person_id": "partner",
+      "name": "Partner Name",
+      "aliases": ["my partner", "spouse"],
+      "relationships": ["partner"],
+      "channels": {
+        "lark": {
+          "open_id": "ou_xxxxxxxxxxxxxxxx",
+          "chat_id": "oc_xxxxxxxxxxxxxxxx",
+          "name": "Partner Name",
+          "verified_at": "YYYY-MM-DD"
+        },
+        "eigenflux": {
+          "agent_id": "agent-placeholder",
+          "agent_name": "Partner Agent",
+          "verified_at": "YYYY-MM-DD"
+        }
+      },
+      "boundaries": [
+        "Do not treat this person's work opinion as the owner's opinion."
+      ]
+    }
+  ]
+}

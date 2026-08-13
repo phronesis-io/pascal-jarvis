@@ -619,11 +619,11 @@ process_actions() {
     return
   fi
 
-  # REQ-102: non-owner group messages must not drive ANY action — Python
+  # REQ-102: shared/untrusted messages must not drive ANY action — Python
   # (calendar/intents/broadcast) or bash (bg jobs). Strip every marker and
   # say so; executing nothing beats silently pretending.
   if [ "$allow" != "1" ]; then
-    log_info "Actions suppressed (group non-owner): ${actions:0:120}"
+    log_info "Actions suppressed (shared/untrusted chat): ${actions:0:120}"
     printf '%s' "$(JV_REPLY="$reply" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.actions import ActionProcessor
@@ -840,7 +840,7 @@ handle_message() {
   # A group session is visible to and drivable by non-owners: it gets the
   # curated group context instead of personal memory (core/prompt.py), a
   # restricted claude tool surface (no Bash/file access — group members must
-  # not execute anything on this machine), owner-only action markers, and
+  # not execute anything on this machine), no action markers, and
   # speaker attribution so the model knows who is talking.
   local is_group=0 allow_actions=1 claude_tool_flags=()
   local openai_fallback_flags=()
@@ -858,9 +858,10 @@ handle_message() {
     # Otherwise a Claude outage would silently turn an untrusted group prompt
     # into local bash/file access.
     openai_fallback_flags=(--no-tools)
-    if [ -z "$sender_id" ] || [ "$sender_id" != "$USER_ID" ]; then
-      allow_actions=0
-    fi
+    # A shared transcript is an untrusted action surface even when the owner
+    # authored the current turn: prior group content can steer the model, and
+    # private action receipts can disclose names to every member.
+    allow_actions=0
     # tail -c: bash 3.2 has no negative substring offsets
     local _sid_tail
     _sid_tail=$(printf '%s' "$sender_id" | tail -c 6)

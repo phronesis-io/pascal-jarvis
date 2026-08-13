@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.person_registry import Person, PersonRegistryError, normalize_person_label
+
 
 def parse_params(raw: str) -> dict[str, str]:
     """Parse 'key=val|key=val' into a dict. Shared across all handlers."""
@@ -122,6 +124,68 @@ class ActionProcessor:
         self._tm = None  # lazy TaskManager
         self._primary_calendar_id: str | None = None  # lazy, cached for this instance
 
+    def _resolve_lark_people(self, raw: str) -> tuple[list[str], list[str]]:
+        """Resolve comma-separated private names/relationships to Lark IDs."""
+        from core.person_registry import PersonRegistry, PersonRegistryInvalid
+
+        references = [
+            value.strip()
+            for value in re.split(r"[,，;；\n]+", str(raw or ""))
+            if value.strip()
+        ]
+        registry = PersonRegistry(root=self.jarvis_dir)
+        ids: list[str] = []
+        names: list[str] = []
+        resolved: list[tuple[Person, dict[str, str]]] = []
+        for reference in references:
+            person, binding = registry.resolve_channel(reference, "lark")
+            open_id = str(binding.get("open_id") or "")
+            if not open_id:
+                raise PersonRegistryInvalid(f"“{reference}”没有已验证的 Lark open_id")
+            if open_id not in ids:
+                ids.append(open_id)
+                names.append(person.name)
+                resolved.append((person, binding))
+        if not ids:
+            return ids, names
+
+        verification = _run_cmd(
+            [
+                "lark-cli", "contact", "+search-user", "--as", "user",
+                "--user-ids", ",".join(ids), "--format", "json",
+            ],
+            timeout=15,
+            log_file=self.log_file,
+        )
+        if verification.startswith("FAILED"):
+            raise PersonRegistryInvalid("Lark 通讯录身份复核失败")
+        try:
+            payload = json.loads(verification)
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                raise ValueError("contact lookup did not confirm success")
+            rows = payload.get("data", {}).get("users") or []
+            live_by_id = {
+                str(row.get("open_id") or ""): row
+                for row in rows
+                if isinstance(row, dict) and row.get("open_id")
+            }
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PersonRegistryInvalid("Lark 通讯录身份复核返回无效") from exc
+        for person, binding in resolved:
+            open_id = binding["open_id"]
+            row = live_by_id.get(open_id)
+            if not row or row.get("is_activated") is False:
+                raise PersonRegistryInvalid(f"“{person.name}”的 Lark 身份当前不可用")
+            expected_name = binding.get("name") or person.name
+            live_name = str(row.get("localized_name") or row.get("name") or "")
+            if normalize_person_label(live_name) != normalize_person_label(expected_name):
+                raise PersonRegistryInvalid(f"“{person.name}”的 Lark 身份姓名不一致")
+            expected_chat = binding.get("chat_id")
+            live_chat = str(row.get("p2p_chat_id") or "")
+            if expected_chat and live_chat != expected_chat:
+                raise PersonRegistryInvalid(f"“{person.name}”的 Lark 私聊身份不一致")
+        return ids, names
+
     @property
     def tm(self):
         if self._tm is None:
@@ -167,6 +231,10 @@ class ActionProcessor:
         receipt_actions = owner_actions | {
             "eigenflux_friend",
             "eigenflux_message",
+            "calendar_create",
+            "calendar_update",
+            "calendar_attendees",
+            "calendar_delete",
         }
         for marker in markers:
             body = marker[8:-1]  # strip [ACTION: and ]
@@ -548,8 +616,17 @@ class ActionProcessor:
         p = parse_params(raw)
         title, start, end = p.get("title", ""), p.get("start", ""), p.get("end", "")
         desc = p.get("desc", "")
+        attendees = p.get("attendees", "")
         if not (title and start and end):
             return ""
+
+        attendee_ids: list[str] = []
+        attendee_names: list[str] = []
+        if attendees:
+            try:
+                attendee_ids, attendee_names = self._resolve_lark_people(attendees)
+            except PersonRegistryError as exc:
+                return f"❌ 日程创建失败: {title}（参会人解析失败：{exc}）"
 
         # Conflict check
         is_busy = "free"
@@ -570,11 +647,54 @@ class ActionProcessor:
                "--summary", title, "--start", start, "--end", end]
         if desc:
             cmd.extend(["--description", desc])
+        if attendee_ids:
+            cmd.extend(["--attendee-ids", ",".join(attendee_ids)])
         result = _run_cmd(cmd, timeout=15, log_file=self.log_file)
 
         if result.startswith("FAILED"):
             return f"❌ 日程创建失败: {title}（{result[8:].strip() or '未知错误'}）"
-        return conflict_note + f"✅ 已创建日程: {title} ({start} → {end})"
+        invited = f"；已邀请：{'、'.join(attendee_names)}" if attendee_names else ""
+        return conflict_note + f"✅ 已创建日程: {title} ({start} → {end}){invited}"
+
+    def _do_calendar_attendees(self, raw: str) -> str:
+        """Incrementally add/remove known people on an existing event."""
+        p = parse_params(raw)
+        event_id = p.get("event_id", "")
+        add_raw, remove_raw = p.get("add", ""), p.get("remove", "")
+        if not event_id or not (add_raw or remove_raw):
+            return ""
+        try:
+            add_ids, add_names = self._resolve_lark_people(add_raw)
+            remove_ids, remove_names = self._resolve_lark_people(remove_raw)
+        except PersonRegistryError as exc:
+            return f"❌ 日程参会人更新失败: {event_id}（人物解析失败：{exc}）"
+        if not add_ids and not remove_ids:
+            return f"❌ 日程参会人更新失败: {event_id}（没有可执行的人物变更）"
+        if set(add_ids) & set(remove_ids):
+            return f"❌ 日程参会人更新失败: {event_id}（同一人物不能同时邀请和移除）"
+        calendar_id = p.get("calendar_id", "") or self._get_primary_calendar_id()
+        if not calendar_id:
+            return f"❌ 日程参会人更新失败: {event_id}（无法解析主日历 ID）"
+        cmd = [
+            "lark-cli", "calendar", "+update", "--as", "user",
+            "--calendar-id", calendar_id, "--event-id", event_id,
+        ]
+        if add_ids:
+            cmd.extend(["--add-attendee-ids", ",".join(add_ids)])
+        if remove_ids:
+            cmd.extend(["--remove-attendee-ids", ",".join(remove_ids)])
+        result = _run_cmd(cmd, timeout=15, log_file=self.log_file)
+        if result.startswith("FAILED"):
+            return (
+                f"❌ 日程参会人更新失败: {event_id}"
+                f"（{result[8:].strip() or '未知错误'}）"
+            )
+        changes = []
+        if add_names:
+            changes.append(f"已邀请 {'、'.join(add_names)}")
+        if remove_names:
+            changes.append(f"已移除 {'、'.join(remove_names)}")
+        return f"✅ 已更新日程参会人: {'；'.join(changes)}"
 
     def _do_calendar_update(self, raw: str) -> str:
         p = parse_params(raw)

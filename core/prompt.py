@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from core.memory import load_group_context, load_tiered_memory
+from core.person_registry import owner_people_prompt_context
 from core.session import build_recent_turns, get_session_counter
 from core.compact import read_compact
 
@@ -109,8 +110,9 @@ The system will execute it and the result will be available. Actions:
 - [ACTION:job_cancel|id=<id>] — Cancel a background job.
 - [ACTION:job_output|id=<id>] — Get output of a background job.
 - [ACTION:heartbeat] — Trigger an immediate heartbeat cycle.
-- [ACTION:calendar_create|title=<title>|start=<ISO8601>|end=<ISO8601>|desc=<optional>] — Create calendar event.
+- [ACTION:calendar_create|title=<title>|start=<ISO8601>|end=<ISO8601>|desc=<optional>|attendees=<optional comma-separated known names/relationship aliases>] — Create calendar event and invite requested known people.
 - [ACTION:calendar_update|event_id=<id>|field=<summary|start|end>|value=<new_value>] — Update calendar event.
+- [ACTION:calendar_attendees|event_id=<id>|add=<optional names/relationship aliases>|remove=<optional names/relationship aliases>] — Add or remove known people on an existing event.
 - [ACTION:calendar_delete|event_id=<id>|title=<name>] — Delete calendar event.
 - [ACTION:task_create|title=<title>|due=<ISO8601_optional>] — Create a Lark Task.
 - [ACTION:task_complete|task_id=<id>] — Mark a Lark Task as done.
@@ -134,7 +136,8 @@ Rules:
 - Include action markers naturally in your response (stripped before delivery)
 - Multiple actions per response are OK
 - Always respond in Chinese — markers are system signals
-- For calendar: ALWAYS confirm with user before create/delete. ISO8601 times required.
+- For calendar: an explicit imperative such as「创建/加到日历/拉上某人」is confirmation. Ask only when a material time or target ambiguity remains; never re-ask who an exact Known People alias means. ISO8601 times required.
+- If the user requests attendees, include them in `attendees`/`add`; the executor fails closed rather than silently creating an event without them.
 - For task_capture: low friction, don't require confirmation.
 - For task_reject: celebrate rejection — choosing what NOT to do is self-knowledge.
 - For praxis: record praxis_done when user mentions completing a practice.
@@ -264,6 +267,7 @@ def build_system_prompt(
         # Prompt construction must survive a fresh/damaged optional DB.
         cross_provider_turns = ""
     external_work_context = _external_work_context(jarvis_dir)
+    people_context = owner_people_prompt_context(jarvis_dir)
 
     # 奏折专属对话 (REQ-118): conv_key "memorial:<id>" is a per-card session —
     # pin the card's content at the top so the whole session stays on that
@@ -317,6 +321,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {RULES_DOC}
 
 {ef_section}
+
+{people_context}
 
 {memorial_section}
 
