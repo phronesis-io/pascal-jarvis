@@ -925,6 +925,8 @@ def cancel_intent(
             db.commit()
         elif started_transaction:
             db.rollback()
+        _resolve_cancelled_intent_memorials(
+            intent_id, reason or str(row["last_error"] or "意图已取消"))
         return True
     db.execute(
         "UPDATE intentions SET status='cancelled',last_error=?,"
@@ -966,9 +968,30 @@ def cancel_intent(
                 ),
             )
     db.commit()
+    _resolve_cancelled_intent_memorials(
+        intent_id, reason or "意图已取消")
     _matter_intent_event(intent_id, "intent_cancelled",
                          reason or "意图已取消", status="cancelled")
     return True
+
+
+def _resolve_cancelled_intent_memorials(intent_id: str, reason: str) -> None:
+    """Best-effort convergence for cards created before cancellation."""
+    try:
+        from core.memorial import resolve_cancelled_intent_memorials
+        resolved = resolve_cancelled_intent_memorials(
+            intent_id, root=runtime_root(), reason=reason)
+        if resolved:
+            _emit_intent(
+                "intent_card_residue_resolved", intent_id,
+                memorial_count=len(resolved),
+            )
+    except Exception as exc:
+        print(
+            "[intentions] cancelled-intent card convergence failed "
+            f"({type(exc).__name__})",
+            file=sys.stderr,
+        )
 
 
 def restore_cancelled_intent(

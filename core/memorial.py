@@ -2390,11 +2390,13 @@ def _complete_surface_handoffs(memorial_id: str) -> None:
 
 
 def resolve(memorial_id: str, label: str,
-            action_result: str = "") -> bool:
+            action_result: str = "", *, sync_lark: bool = True) -> bool:
     """Converge a memorial to an externally confirmed terminal state.
 
     Unlike ``decide``, this never runs a button action or injects a synthetic
     user reply. It is for state already completed in the source system.
+    ``sync_lark=False`` is reserved for bulk/local residue cleanup where
+    editing old remote cards would itself create noise.
     """
     st = get_memorial(memorial_id)
     if st is None:
@@ -2412,7 +2414,7 @@ def resolve(memorial_id: str, label: str,
         "result": action_result,
     })
     resolved = get_memorial(memorial_id)
-    if resolved is not None:
+    if sync_lark and resolved is not None:
         _sync_lark_card(memorial_id, _decided_card(resolved))
     _complete_surface_handoffs(memorial_id)
     return True
@@ -2436,6 +2438,80 @@ def _claim_terminal_event(
         events.append(entry)
         after = _fold(events).get(memorial_id)
     return True, before, after
+
+
+def _intent_ids_for_state(state: dict) -> set[str]:
+    """Intent ids owned by closure actions on one folded Memorial."""
+    ids: set[str] = set()
+    for option in state.get("options", []) or []:
+        action = option.get("action") or {}
+        if action.get("type") != "intent_close":
+            continue
+        params = action.get("params") or {}
+        value = str(params.get("id") or action.get("id") or "").strip()
+        if value:
+            ids.add(value)
+    for button in state.get("extra_buttons", []) or []:
+        value = button.get("value") or {}
+        if value.get("action") == "intent_close" and value.get("id"):
+            ids.add(str(value["id"]).strip())
+    return ids
+
+
+def resolve_cancelled_intent_memorials(
+    intent_id: str,
+    *,
+    root: str | Path | None = None,
+    reason: str = "",
+) -> list[str]:
+    """Retire pending cards whose closure action targets a cancelled Intent.
+
+    This is ledger convergence, not a user decision: it never executes a card
+    action, records engagement, sends a message, or bulk-edits old Lark cards.
+    A later tap on an old remote card still reaches the idempotent closed-intent
+    path and updates that single card honestly.
+    """
+    target = str(intent_id or "").strip()
+    if not target:
+        return []
+    base = Path(root) if root is not None else runtime_root()
+    ledger = memorial_ledger.ledger_path(base)
+    resolved_ids: list[str] = []
+    now = now_local_str()
+    with ledger_lock(ledger):
+        events = read_jsonl(ledger)
+        states = _fold(events)
+        candidates = [
+            state for state in states.values()
+            if state.get("status") == "pending"
+            and target in _intent_ids_for_state(state)
+        ]
+        if not candidates:
+            return []
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with open(ledger, "a", encoding="utf-8") as stream:
+            for state in candidates:
+                memorial_id = str(state["id"])
+                stream.write(json.dumps({
+                    "ev": "resolve",
+                    "id": memorial_id,
+                    "ts": now,
+                    "label": "已停止追踪",
+                    "result": str(reason or "关联意图已取消"),
+                }, ensure_ascii=False) + "\n")
+                resolved_ids.append(memorial_id)
+    # Handoffs share the live runtime root. Avoid touching an unrelated live
+    # continuity store when a test explicitly targets a different root.
+    if base.resolve() == runtime_root().resolve():
+        for memorial_id in resolved_ids:
+            _complete_surface_handoffs(memorial_id)
+    if resolved_ids:
+        _ops_log(
+            "cancelled_intent_memorials_resolved",
+            intent_id=target,
+            count=len(resolved_ids),
+        )
+    return resolved_ids
 
 
 def resolve_thread_conversation(conv_key: str, reply_summary: str = "") -> bool:

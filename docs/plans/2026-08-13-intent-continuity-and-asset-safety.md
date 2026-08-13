@@ -34,6 +34,9 @@ and the unused X Ads intent is cancelled. The remaining defects are narrower:
 - Only closure categories with `may_notify=true` (`hard`, `external`) may enter
   the breach notification queue. Other categories still close observably in
   lifecycle events without taking Pascal's attention.
+- Cancelling an Intent locally resolves every still-pending Memorial whose
+  closure action targets it, without sending or bulk-editing old Lark cards.
+  User-decided cards and unrelated reminders remain untouched.
 - An optional external dead-man endpoint receives a bounded, secret-safe ping
   from the independent guardian only while the local stack is healthy. Missing
   pings are interpreted by the external service; Jarvis never claims this
