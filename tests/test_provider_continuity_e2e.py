@@ -81,6 +81,43 @@ print(json.dumps({"type": "thread.started", "thread_id": "thread-e2e"}))
     path.chmod(0o755)
 
 
+def _write_usage_limited_codex(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1:3] == ["login", "status"]:
+    print("Logged in")
+    raise SystemExit(0)
+
+print(json.dumps({"type": "thread.started", "thread_id": "thread-limit"}))
+print(json.dumps({"type": "turn.started"}))
+message = "You've hit your usage limit. Try again Aug 18."
+print(json.dumps({"type": "error", "message": message}))
+print(json.dumps({"type": "turn.failed", "error": {"message": message}}))
+raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_openai_python_wrapper(path: Path) -> None:
+    path.write_text(
+        """#!/bin/bash
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "core.openai_fallback" ]; then
+  cat >/dev/null
+  printf '%s\n' '已由最终 GPT 备用通道接管'
+  exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _bot_function(name: str) -> str:
     """Extract one exact top-level production function from bot.sh."""
     start_match = re.search(rf"(?m)^{re.escape(name)}\(\) \{{\n", BOT_SOURCE)
@@ -335,3 +372,116 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     )
     assert "Codex / gpt-bot-e2e" in next_prompt
     assert "继续白皮书节奏安排" in next_prompt
+
+
+def test_production_handler_codex_usage_limit_reaches_final_gpt(
+    tmp_path, monkeypatch,
+):
+    """Real handler: Claude limit -> Codex preturn limit -> GPT -> Lark."""
+    jarvis_dir = tmp_path / "jarvis"
+    memory_dir = jarvis_dir / "memory"
+    work_dir = jarvis_dir / "work"
+    claude_sessions = jarvis_dir / "claude-sessions"
+    jobs_dir = jarvis_dir / "jobs"
+    bin_dir = tmp_path / "bin"
+    for directory in (
+        memory_dir, work_dir, claude_sessions, jobs_dir, bin_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    db_path = jarvis_dir / "data" / "jarvis.db"
+    tracker = jarvis_dir / "active_sessions.json"
+    tracker.write_text(json.dumps({
+        "ou_owner": {"session_id": "session-gpt-e2e", "counter": 1},
+    }), encoding="utf-8")
+    (jarvis_dir / "jarvis.yaml").write_text(
+        "data_dir: " + str(jarvis_dir / "data") + "\n"
+        "work_dir: " + str(work_dir) + "\n"
+        "lark:\n  user_id: ou_owner\n",
+        encoding="utf-8",
+    )
+
+    fake_claude = bin_dir / "claude"
+    fake_codex = bin_dir / "codex-bin"
+    fake_lark = bin_dir / "lark-cli"
+    fake_python = bin_dir / "python3"
+    _write_fake_claude(fake_claude)
+    _write_usage_limited_codex(fake_codex)
+    _write_fake_lark(fake_lark)
+    _write_openai_python_wrapper(fake_python)
+
+    harness = tmp_path / "bot-terminal-fallback-e2e.sh"
+    harness.write_text(
+        "set -uo pipefail\n"
+        "log(){ printf '[%s] %s\\n' \"$1\" \"${*:2}\" >> \"$LOG_FILE\"; }\n"
+        "log_warn(){ log WARN \"$@\"; }\n"
+        "log_info(){ log INFO \"$@\"; }\n"
+        "log_err(){ log ERROR \"$@\"; }\n"
+        "lark_remove_reaction(){ :; }\n"
+        "lark_reply_text(){ printf 'direct:%s\\n' \"$*\" >> \"$FAKE_LARK_LOG\"; }\n"
+        "load_memory(){ printf 'isolated memory'; }\n"
+        "process_actions(){ printf '%s' \"$1\"; }\n"
+        "resolve_memorial_thread_after_reply(){ :; }\n"
+        + _bot_function("looks_like_error")
+        + _bot_function("delivery_reply_reliable")
+        + _bot_function("run_codex_locked")
+        + _bot_function("handle_message")
+        + "handle_message \"$@\"\nwait\n",
+        encoding="utf-8",
+    )
+    syntax = subprocess.run(
+        ["bash", "-n", str(harness)], capture_output=True, text=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+    lark_log = tmp_path / "lark.log"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "REAL_PYTHON": sys.executable,
+        "PYTHONPATH": str(ROOT),
+        "JARVIS_DIR": str(jarvis_dir),
+        "JARVIS_DB_PATH": str(db_path),
+        "MEMORY_DIR": str(memory_dir),
+        "WORK_DIR": str(work_dir),
+        "CLAUDE_PROJECT_DIR": str(claude_sessions),
+        "SESSION_TRACKER": str(tracker),
+        "JOBS_DIR": str(jobs_dir),
+        "LOG_FILE": str(tmp_path / "bot.log"),
+        "USER_ID": "ou_owner",
+        "OWNER_NAME": "Pascal",
+        "MAIN_MODEL": "opus",
+        "MAX_SESSION_SIZE": "512000",
+        "CLAUDE_BACKUP_ENABLED": "false",
+        "CLAUDE_BACKUP2_ENABLED": "false",
+        "CODEX_FALLBACK_ENABLED": "true",
+        "CODEX_FALLBACK_MODEL": "gpt-codex-limited",
+        "CODEX_FALLBACK_BINARY": str(fake_codex),
+        "CODEX_FALLBACK_TIMEOUT": "10",
+        "OPENAI_FALLBACK_ENABLED": "true",
+        "OPENAI_FALLBACK_MODEL": "gpt-api-final",
+        "OPENAI_API_KEY": "sk-test",
+        "FAKE_CLAUDE_LOG": str(tmp_path / "claude.log"),
+        "FAKE_LARK_LOG": str(lark_log),
+    }
+    result = subprocess.run(
+        [
+            "bash", str(harness), "ou_owner", "继续完成白皮书", "om-gpt-e2e",
+            "session-gpt-e2e", "", "p2p", "ou_owner",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    logs = (tmp_path / "bot.log").read_text(encoding="utf-8")
+    assert "Codex fallback failed (exit=75" in logs
+    assert "OpenAI fallback succeeded" in logs
+    delivery_log = lark_log.read_text(encoding="utf-8")
+    assert "已由最终 GPT 备用通道接管" in delivery_log
+    assert "GPT 兜底" in delivery_log
+    turn = _wait_for_turn(db_path, "ou_owner")
+    assert turn["provider"] == "GPT fallback"
+    assert turn["model"] == "gpt-api-final"

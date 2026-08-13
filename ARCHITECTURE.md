@@ -185,6 +185,9 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
   control, and one durable Codex thread per Lark conversation. It uses the
   workspace-write review sandbox and never serves group or non-owner traffic.
+  A later provider may replay the request only when Codex emits a recognized
+  terminal unavailability event before any executable item; incomplete,
+  unknown, or post-tool failures stop fail-closed.
 - `core.runtime_provider`: per-conversation executor preference. Preference
   changes route order only; `conversation_runtime` records what actually ran.
 - `core.cross_session`: bounded, redacted owner-only continuity across
