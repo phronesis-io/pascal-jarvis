@@ -22,6 +22,7 @@ from typing import Iterable
 from core.claude_projects import jarvis_project_dirs
 from core.log import log
 from core.search import load_chat_messages
+from core.sqlite_migrations import ensure_additive_columns
 from core.timeutil import now_local
 
 
@@ -185,17 +186,21 @@ def connect(path: Path) -> sqlite3.Connection:
         );
         """
     )
-    # Closure workflow (REQ-105, approved 2026-07-14): resolved findings carry
-    # a resolution note. Migration guard for pre-existing DBs.
-    try:
-        conn.execute(
-            "ALTER TABLE audit_issues ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        conn.execute("ALTER TABLE audit_runs ADD COLUMN completed_at TEXT")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Closure workflow (REQ-105): compatibility columns and their durable
+    # markers commit together. Existing predecessor schemas are adopted
+    # without rewriting data.
+    ensure_additive_columns(
+        conn,
+        namespace="conversation_audit",
+        table="audit_issues",
+        columns=(("resolution", "TEXT NOT NULL DEFAULT ''"),),
+    )
+    ensure_additive_columns(
+        conn,
+        namespace="conversation_audit",
+        table="audit_runs",
+        columns=(("completed_at", "TEXT"),),
+    )
     migration = "audit_runs_completed_at_backfill_v1"
     migrated = conn.execute(
         "SELECT 1 FROM schema_migrations WHERE name=?",

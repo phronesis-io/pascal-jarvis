@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from core.sqlite_migrations import ensure_additive_columns
+
 
 PROPOSAL_STATES = {
     "pending",
@@ -166,17 +168,12 @@ class IterationStore:
                     ON iteration_events(proposal_id,created_at);
                 """
             )
-            columns = {
-                str(row["name"])
-                for row in db.execute(
-                    "PRAGMA table_info(iteration_proposals)"
-                ).fetchall()
-            }
-            if "item_id" not in columns:
-                db.execute(
-                    "ALTER TABLE iteration_proposals "
-                    "ADD COLUMN item_id TEXT NOT NULL DEFAULT ''"
-                )
+            ensure_additive_columns(
+                db,
+                namespace="iteration_loop",
+                table="iteration_proposals",
+                columns=(("item_id", "TEXT NOT NULL DEFAULT ''"),),
+            )
 
     def record_signal(
         self,

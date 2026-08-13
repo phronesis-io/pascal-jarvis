@@ -6,6 +6,22 @@ from core import conversation_audit as audit
 from core.timeutil import now_local
 
 
+def test_connect_records_named_domain_migrations(tmp_path):
+    conn = audit.connect(tmp_path / "audit.db")
+    try:
+        markers = conn.execute(
+            "SELECT name FROM _domain_migrations "
+            "WHERE namespace='conversation_audit' ORDER BY name"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [row["name"] for row in markers] == [
+        "audit_issues.add_column.resolution",
+        "audit_runs.add_column.completed_at",
+    ]
+
+
 def test_audit_ingests_logs_and_derives_issues(tmp_path):
     log = tmp_path / "jarvis.log"
     base = now_local() - timedelta(minutes=10)

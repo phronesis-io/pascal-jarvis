@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -48,6 +49,22 @@ def test_runtime_sidecars_follow_jarvis_dir_after_import(tmp_path, monkeypatch):
     assert intentions_mod._inflight_path().exists()
     assert intentions_mod._skip_log_once("late-root") is True
     assert intentions_mod._skip_log_seen_path().exists()
+
+
+def test_intention_schema_records_named_migrations(intent_db):
+    import core.intentions as intentions_mod
+
+    with sqlite3.connect(intent_db) as db:
+        markers = db.execute(
+            "SELECT name FROM _domain_migrations "
+            "WHERE namespace='intentions' ORDER BY name"
+        ).fetchall()
+
+    expected = sorted(
+        f"intentions.add_column.{column}"
+        for column, _definition in intentions_mod._NEW_COLS
+    )
+    assert [row[0] for row in markers] == expected
 
 
 def test_intent_telemetry_follows_jarvis_dir_after_import(tmp_path, monkeypatch):
@@ -772,6 +789,73 @@ def test_migrate_adds_columns_idempotent(intent_db):
         assert c in cols, f"missing closure column {c}"
 
 
+def test_init_serializes_shared_connection_bootstrap(monkeypatch):
+    import core.intentions as mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    errors = []
+
+    def bootstrap():
+        calls.append("start")
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test bootstrap release timed out")
+
+    def initialize():
+        try:
+            mod._init()
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(mod, "_table_ready", False)
+    monkeypatch.setattr(mod, "_ensure_table", bootstrap)
+    first = threading.Thread(target=initialize)
+    second = threading.Thread(target=initialize)
+    first.start()
+    assert entered.wait(timeout=5)
+    second.start()
+    time.sleep(0.05)
+    assert calls == ["start"]
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert calls == ["start"]
+    assert mod._table_ready is True
+
+
+def test_schema_drift_keeps_permanent_error_class(intent_db, monkeypatch):
+    import core.intentions as mod
+
+    logs = []
+
+    def drift(*_args, **_kwargs):
+        raise mod.MigrationError("column shape mismatch")
+
+    monkeypatch.setattr(mod, "ensure_additive_columns", drift)
+    monkeypatch.setattr(
+        mod,
+        "log",
+        lambda component, msg, **fields: logs.append(
+            (component, msg, fields)
+        ),
+    )
+
+    with pytest.raises(mod.MigrationError, match="shape mismatch"):
+        mod._migrate()
+
+    assert logs == [(
+        "intentions",
+        "migration_schema_drift",
+        {"level": "error", "error": "column shape mismatch"},
+    )]
+
+
 def test_incomplete_column_migration_retries_before_table_ready(
     intent_db,
     monkeypatch,
@@ -782,11 +866,19 @@ def test_incomplete_column_migration_retries_before_table_ready(
         conn.execute(
             "ALTER TABLE intentions DROP COLUMN cancel_parent_intent_id"
         )
+        # Model a predecessor DB that never recorded this compatibility
+        # migration. A marker without its column is schema drift and must not
+        # be silently repaired by the new fail-closed migration engine.
+        conn.execute(
+            "DELETE FROM _domain_migrations "
+            "WHERE namespace='intentions' "
+            "AND name='intentions.add_column.cancel_parent_intent_id'"
+        )
 
-    class LockedOnce:
+    class LockedUntilBudgetExhausted:
         def __init__(self, connection):
             self.connection = connection
-            self.locked = True
+            self.locks_remaining = 3
 
         @property
         def in_transaction(self):
@@ -794,10 +886,10 @@ def test_incomplete_column_migration_retries_before_table_ready(
 
         def execute(self, sql, *args):
             if (
-                self.locked
+                self.locks_remaining
                 and "ADD COLUMN cancel_parent_intent_id" in sql
             ):
-                self.locked = False
+                self.locks_remaining -= 1
                 raise sqlite3.OperationalError("database is locked")
             return self.connection.execute(sql, *args)
 
@@ -812,7 +904,7 @@ def test_incomplete_column_migration_retries_before_table_ready(
 
     connection = sqlite3.connect(intent_db)
     connection.row_factory = sqlite3.Row
-    locked = LockedOnce(connection)
+    locked = LockedUntilBudgetExhausted(connection)
     monkeypatch.setattr(mod, "_get_db", lambda: locked)
     mod._table_ready = False
 

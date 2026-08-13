@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -48,6 +49,17 @@ def _proposal(store, signal):
         baseline={"failures": 2},
         expected={"failures": 0},
     )[0]
+
+
+def test_store_records_named_domain_migration(tmp_path):
+    _store(tmp_path)
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        markers = db.execute(
+            "SELECT name FROM _domain_migrations "
+            "WHERE namespace='iteration_loop' ORDER BY name"
+        ).fetchall()
+
+    assert markers == [("iteration_proposals.add_column.item_id",)]
 
 
 def test_signal_is_deduplicated_and_accumulates_occurrences(tmp_path):
