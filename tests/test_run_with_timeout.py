@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import time
+import os
 from pathlib import Path
 
 
@@ -37,3 +38,19 @@ def test_portable_timeout_runner_terminates_slow_command():
 
     assert result.returncode == 124
     assert time.monotonic() - started < 4
+
+
+def test_configured_short_grace_hard_kills_term_ignoring_command():
+    started = time.monotonic()
+    result = subprocess.run(
+        [
+            sys.executable, str(RUNNER), "0.1",
+            sys.executable, "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+        ],
+        env={**os.environ, "JARVIS_TIMEOUT_GRACE": "0.1"},
+        timeout=3,
+    )
+
+    assert result.returncode == 124
+    assert time.monotonic() - started < 2

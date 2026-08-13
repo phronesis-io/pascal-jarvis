@@ -21,6 +21,7 @@ from core.prompt import build_system_prompt
 
 ROOT = Path(__file__).resolve().parent.parent
 BOT_SOURCE = (ROOT / "bot.sh").read_text(encoding="utf-8")
+LIFECYCLE_HELPERS = ROOT / "scripts" / "process_lifecycle.sh"
 
 
 @pytest.fixture(autouse=True)
@@ -293,6 +294,7 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     harness = tmp_path / "bot-provider-e2e.sh"
     harness.write_text(
         "set -uo pipefail\n"
+        f'source "{LIFECYCLE_HELPERS}"\n'
         "log(){ printf '[%s] %s\\n' \"$1\" \"${*:2}\" >> \"$LOG_FILE\"; }\n"
         "log_warn(){ log WARN \"$@\"; }\n"
         "log_info(){ log INFO \"$@\"; }\n"
@@ -359,6 +361,7 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    assert "command not found" not in result.stderr
     assert claude_log.read_text(encoding="utf-8").splitlines() == ["called"]
     assert "安排白皮书节奏" in prompt_log.read_text(encoding="utf-8")
     delivery_log = lark_log.read_text(encoding="utf-8")
@@ -430,6 +433,7 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
     harness = tmp_path / "bot-terminal-fallback-e2e.sh"
     harness.write_text(
         "set -uo pipefail\n"
+        f'source "{LIFECYCLE_HELPERS}"\n'
         "log(){ printf '[%s] %s\\n' \"$1\" \"${*:2}\" >> \"$LOG_FILE\"; }\n"
         "log_warn(){ log WARN \"$@\"; }\n"
         "log_info(){ log INFO \"$@\"; }\n"
@@ -494,6 +498,7 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
     )
 
     assert result.returncode == 0, result.stderr
+    assert "command not found" not in result.stderr
     logs = (tmp_path / "bot.log").read_text(encoding="utf-8")
     assert "Codex fallback failed (exit=75" in logs
     assert "OpenAI fallback succeeded" in logs
@@ -540,6 +545,7 @@ def test_queued_handler_refuses_execution_after_logical_session_switch(tmp_path)
     harness = tmp_path / "queued-context.sh"
     harness.write_text(
         "set -uo pipefail\n"
+        f'source "{LIFECYCLE_HELPERS}"\n'
         "log_warn(){ :; }\nlog_info(){ :; }\nlog_err(){ :; }\n"
         "lark_remove_reaction(){ :; }\n"
         "lark_reply_text(){ :; }\n"
@@ -586,6 +592,7 @@ def test_queued_handler_refuses_execution_after_logical_session_switch(tmp_path)
     stdout, stderr = process.communicate(timeout=15)
 
     assert process.returncode == 0, stderr or stdout
+    assert "command not found" not in stderr
     assert "没有跨会话执行" in delivery_log.read_text(encoding="utf-8")
     assert not claude_log.exists()
     assert not list(jarvis_dir.glob(".session_lock_*"))

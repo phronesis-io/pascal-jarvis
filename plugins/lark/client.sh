@@ -127,9 +127,20 @@ lark_add_reaction() {
 lark_remove_reaction() {
   local mid="$1" rid="$2"
   [ -z "$mid" ] || [ -z "$rid" ] && return 0
-  lark-cli im reactions delete \
-    --params "{\"message_id\":\"$mid\",\"reaction_id\":\"$rid\"}" \
-    --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null || true
+  # Handler shutdown has a two-second graceful window before its process group
+  # is hard-killed.  Bound this cosmetic network cleanup so marker/provider
+  # cleanup always gets a chance to finish inside that window.
+  if [ -n "${JARVIS_DIR:-}" ] \
+      && [ -f "$JARVIS_DIR/scripts/run_with_timeout.py" ]; then
+    JARVIS_TIMEOUT_GRACE=0.2 python3 "$JARVIS_DIR/scripts/run_with_timeout.py" 1 \
+      lark-cli im reactions delete \
+      --params "{\"message_id\":\"$mid\",\"reaction_id\":\"$rid\"}" \
+      --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null || true
+  else
+    lark-cli im reactions delete \
+      --params "{\"message_id\":\"$mid\",\"reaction_id\":\"$rid\"}" \
+      --as bot 2>>"${LOG_FILE:-/dev/null}" >/dev/null || true
+  fi
 }
 
 # ── Inbound: event subscription ──────────────────────────────────────

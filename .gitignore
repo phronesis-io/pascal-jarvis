@@ -31,6 +31,7 @@ calendar_event_mapping.json
 *.gone
 *.TEST_GONE
 .session_lock_*
+.dispatch_*
 
 # EigenFlux plugin data (tokens, feed, messages, state)
 # the whole runtime-state dir (anchored: plugins/eigenflux stays tracked) —

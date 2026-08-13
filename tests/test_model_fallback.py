@@ -277,7 +277,7 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
     assert "core.codex_fallback" in bot        # ChatGPT-login Codex escape hatch
     assert bot.count("run_codex_locked") == 3  # definition + preferred + fallback
-    assert '"$_codex_pid" "$_lock_token" > "$_lock_file"' in bot
+    assert 'session_lock_publish "$_lock_file" "$_codex_pid" "$_lock_token"' in bot
     assert "openai_fallback_flags=(--no-tools)" in bot
     assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
@@ -305,6 +305,7 @@ def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
     lock.write_text("acquiring test-token", encoding="utf-8")
     script = tmp_path / "codex-lock-test.sh"
     script.write_text(
+        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n' +
         "python3() { exec sleep 30; }\n" + function + "\n" +
         'run_codex_locked "hello" "conv" "system" "model" "30" ' +
         f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
@@ -313,9 +314,11 @@ def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
     process = subprocess.Popen(["bash", str(script)])
     child_pid = None
     for _ in range(100):
-        first = lock.read_text(encoding="utf-8").split()[0]
-        if first.isdigit():
-            child_pid = int(first)
+        fields = lock.read_text(encoding="utf-8").rstrip("\n").split("\t")
+        if len(fields) == 3 and fields[0].isdigit():
+            child_pid = int(fields[0])
+            assert fields[1]
+            assert fields[2] == "test-token"
             break
         time.sleep(0.02)
     assert child_pid is not None

@@ -147,3 +147,15 @@ def test_bot_sh_shellcheck():
         capture_output=True,
     )
     assert r.returncode == 0, f"ShellCheck errors: {r.stdout.decode()}"
+
+
+def test_process_lifecycle_shellcheck():
+    """The sourced process-group safety helpers must pass the CI severity."""
+    if subprocess.run(["which", "shellcheck"], capture_output=True).returncode != 0:
+        pytest.skip("shellcheck not installed")
+    helper = REPO / "scripts" / "process_lifecycle.sh"
+    r = subprocess.run(
+        ["shellcheck", "-s", "bash", "-S", "error", str(helper)],
+        capture_output=True,
+    )
+    assert r.returncode == 0, f"ShellCheck errors: {r.stdout.decode()}"

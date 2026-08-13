@@ -14,7 +14,12 @@ import subprocess
 import sys
 
 
-def _terminate(process: subprocess.Popen, grace: float = 2) -> None:
+def _terminate(process: subprocess.Popen, grace: float | None = None) -> None:
+    if grace is None:
+        try:
+            grace = max(0.0, float(os.environ.get("JARVIS_TIMEOUT_GRACE", "2")))
+        except ValueError:
+            grace = 2
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
