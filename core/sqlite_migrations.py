@@ -175,12 +175,12 @@ def ensure_additive_columns(
     """Apply and record one atomic batch of ``ADD COLUMN`` migrations.
 
     A pre-existing column without a marker is adopted and marked. A marker
-    without its physical column is schema drift and fails closed. Pending work
-    owns an ``IMMEDIATE`` transaction so concurrent launchd/CLI initializers
-    serialize before reading migration state; lock contention retries the
-    entire transaction from a fresh snapshot. Existing and newly created
-    columns must match SQLite's parsed type, nullability, and default metadata
-    before a marker is accepted.
+    without its physical column is schema drift and fails closed. Calls own an
+    ``IMMEDIATE`` transaction before reading either physical schema or marker
+    state, so concurrent launchd/CLI initializers cannot observe a mixed
+    snapshot; lock contention retries the entire transaction. Existing and
+    newly created columns must match SQLite's parsed type, nullability, and
+    default metadata before a marker is accepted.
     """
     namespace = _identifier(namespace, "migration namespace")
     table = _identifier(table, "table")
@@ -203,15 +203,15 @@ def ensure_additive_columns(
     for attempt in range(_MAX_ATTEMPTS):
         transaction_started = False
         try:
-            if _batch_is_applied(
-                db,
-                namespace=namespace,
-                table=table,
-                columns=normalized,
-                expected_shapes=expected_shapes,
-            ):
-                return
             if db.in_transaction:
+                if _batch_is_applied(
+                    db,
+                    namespace=namespace,
+                    table=table,
+                    columns=normalized,
+                    expected_shapes=expected_shapes,
+                ):
+                    return
                 raise MigrationError(
                     "pending migration requires an autonomous connection: "
                     f"{namespace}/{table}"
@@ -219,6 +219,15 @@ def ensure_additive_columns(
 
             db.execute("BEGIN IMMEDIATE")
             transaction_started = True
+            if _batch_is_applied(
+                db,
+                namespace=namespace,
+                table=table,
+                columns=normalized,
+                expected_shapes=expected_shapes,
+            ):
+                db.commit()
+                return
             db.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {_REGISTRY} (
