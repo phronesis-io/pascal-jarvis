@@ -24,6 +24,17 @@ def test_inline_actions_and_engagement_are_owner_gated():
     assert 'allow_actions=0' in source
 
 
+def test_every_shared_chat_suppresses_actions_even_for_owner_messages():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    shared = source[
+        source.index('if [ "$chat_type" != "p2p" ]; then'):
+        source.index("# ── Non-owner p2p", source.index('if [ "$chat_type" != "p2p" ]; then'))
+    ]
+
+    assert "allow_actions=0" in shared
+    assert 'if [ -z "$sender_id" ] || [ "$sender_id" != "$USER_ID" ]' not in shared
+
+
 def test_memorial_thread_closes_only_after_confirmed_reply_delivery():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
     send = source.index('if ! JARVIS_DELIVERY_PROVIDER=')

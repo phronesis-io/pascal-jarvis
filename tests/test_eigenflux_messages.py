@@ -270,6 +270,116 @@ def test_binding_alias_is_checked_against_live_friend_record(tmp_path):
     assert messenger.send("family", "hello").recipient_id == "agent-spouse"
 
 
+def test_private_person_relationship_resolves_and_checks_live_friend(tmp_path):
+    cli = FakeEigenFlux()
+    data = tmp_path / "data"
+    data.mkdir()
+    registry_path = data / "person_registry.json"
+    registry_path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "partner",
+            "name": "Partner Name",
+            "aliases": ["my spouse"],
+            "relationships": ["spouse"],
+            "channels": {
+                "eigenflux": {
+                    "agent_id": "agent-spouse",
+                    "agent_name": "Family Research Agent",
+                    "verified_at": "2026-08-13",
+                },
+            },
+        }],
+    }))
+    registry_path.chmod(0o600)
+
+    receipt = _messenger(tmp_path, cli).send("my spouse", "hello")
+
+    assert receipt.completed
+    assert receipt.recipient_id == "agent-spouse"
+    assert cli.api_calls == [("agent-spouse", "hello")]
+
+
+def test_known_person_without_eigenflux_identity_never_uses_stale_legacy_binding(tmp_path):
+    cli = FakeEigenFlux()
+    data = tmp_path / "data"
+    data.mkdir()
+    registry_path = data / "person_registry.json"
+    registry_path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "partner",
+            "name": "Partner Name",
+            "aliases": ["my spouse"],
+            "relationships": ["spouse"],
+            "channels": {
+                "lark": {
+                    "open_id": "ou_partner_verified",
+                    "verified_at": "2026-08-13",
+                },
+            },
+        }],
+    }))
+    registry_path.chmod(0o600)
+    (data / "eigenflux_contact_bindings.json").write_text(json.dumps({
+        "bindings": {
+            "spouse": {"agent_id": "agent-spouse"},
+        },
+    }))
+
+    with pytest.raises(RecipientNotFound, match="没有已验证的 EigenFlux"):
+        _messenger(tmp_path, cli).send("spouse", "must not send")
+
+    assert cli.api_calls == []
+
+
+def test_removed_alias_never_revives_from_legacy_binding(tmp_path):
+    cli = FakeEigenFlux()
+    data = tmp_path / "data"
+    data.mkdir()
+    registry_path = data / "person_registry.json"
+    registry_path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "partner",
+            "name": "Partner Name",
+            "aliases": ["current alias"],
+            "channels": {
+                "eigenflux": {
+                    "agent_id": "agent-spouse",
+                    "agent_name": "Family Research Agent",
+                    "verified_at": "2026-08-13",
+                },
+            },
+        }],
+    }))
+    registry_path.chmod(0o600)
+    (data / "eigenflux_contact_bindings.json").write_text(json.dumps({
+        "bindings": {
+            "removed alias": {"agent_id": "agent-spouse"},
+        },
+    }))
+
+    with pytest.raises(RecipientNotFound):
+        _messenger(tmp_path, cli).send("removed alias", "must not send")
+
+    assert cli.api_calls == []
+
+
+def test_configured_registry_still_allows_exact_live_friend_name(tmp_path):
+    cli = FakeEigenFlux()
+    data = tmp_path / "data"
+    data.mkdir()
+    registry_path = data / "person_registry.json"
+    registry_path.write_text(json.dumps({"version": 1, "people": []}))
+    registry_path.chmod(0o600)
+
+    receipt = _messenger(tmp_path, cli).send("Product Agent", "hello")
+
+    assert receipt.completed
+    assert receipt.recipient_id == "agent-product"
+
+
 def test_same_target_and_payload_is_idempotent(tmp_path):
     cli = FakeEigenFlux()
     messenger = _messenger(tmp_path, cli)

@@ -177,7 +177,8 @@ gitignored 的 `data/` 下。不配任何一项也能跑（用中性默认）；
 | `data/checkin_topics_personal.txt` | check-in 话题去重的个人关键词 | 每行一个关键词 |
 | `data/content_queries_personal.txt` | 内容推荐的兴趣搜索词（=用户兴趣画像） | 每行 `category\|platform\|query`，platform: `yt`/`bili`，`#` 开头为注释；缺省时用内置中性 starter 集 |
 | `data/category_keywords_personal.json` | 意图自动分类的个人关键词扩展（项目代号等） | `{"external": ["代号"], "healing": [...]}`，键为分类名 |
-| `data/eigenflux_contact_bindings.json` | EigenFlux 关系称谓/别名到当前好友的确定性绑定 | `{"bindings":{"家人 agent":{"agent_name":"好友显示名"}}}`；也可同时写 `agent_id`，执行时仍会与实时好友表交叉核验 |
+| `data/person_registry.json` | 私人人物关系、称谓与各渠道已验证身份；用于“拉上我老婆”这类跨日历/私信动作 | 复制 `examples/person_registry.example.json` 后填写；真实姓名和 provider ID 不进 Git，文件权限应为 `0600` |
+| `data/eigenflux_contact_bindings.json` | 旧版 EigenFlux 关系称谓绑定，仅在尚未配置 `person_registry.json` 时作为迁移期 fallback | `{"bindings":{"家人 agent":{"agent_name":"好友显示名"}}}`；新安装应统一写入人物登记册 |
 | `data/heartbeat_overlay/<task>.md` | 单个心跳任务的 prompt 追加层 | markdown，追加到该任务 prompt 末尾 |
 
 **纪律**：往任何 tracked 文件写用户个人信息（人名/机构/兴趣/日程）都是 bug，

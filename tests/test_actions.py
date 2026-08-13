@@ -39,6 +39,29 @@ def _make_processor(tmp_path, *, owner_authenticated=False) -> ActionProcessor:
     )
 
 
+def _write_people(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    path = data / "person_registry.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "people": [{
+            "person_id": "partner",
+            "name": "Partner Name",
+            "aliases": ["my partner", "家人"],
+            "relationships": ["spouse"],
+            "channels": {
+                "lark": {
+                    "open_id": "ou_partner_verified",
+                    "name": "Partner Name",
+                    "verified_at": "2026-08-13",
+                },
+            },
+        }],
+    }), encoding="utf-8")
+    path.chmod(0o600)
+
+
 def test_failed_delegation_card_action_raises_instead_of_claiming_success(tmp_path):
     processor = _make_processor(tmp_path, owner_authenticated=True)
 
@@ -242,6 +265,22 @@ def _fake_primary_calendar(cmd, calendar_id="cal_primary_1"):
     return None
 
 
+def _fake_contact_lookup(cmd, *, name="Partner Name", chat_id=""):
+    if cmd[:3] != ["lark-cli", "contact", "+search-user"]:
+        return None
+    open_ids = cmd[cmd.index("--user-ids") + 1].split(",")
+    users = [
+        {
+            "open_id": open_id,
+            "localized_name": name,
+            "p2p_chat_id": chat_id,
+            "is_activated": True,
+        }
+        for open_id in open_ids
+    ]
+    return _CmdResult(0, stdout=json.dumps({"ok": True, "data": {"users": users}}))
+
+
 def test_run_cmd_reports_failure_on_nonzero_exit_with_empty_stdout(monkeypatch):
     """lark-cli's real failure shape: nonzero exit, empty stdout, error on
     stderr. A caller that only checked stdout for the string FAILED would
@@ -386,6 +425,139 @@ def test_calendar_create_reports_failure_reason_instead_of_false_success(monkeyp
     )
     assert result.startswith("❌ 日程创建失败")
     assert "quota exceeded" in result
+
+
+def test_calendar_create_resolves_relationship_to_verified_attendee(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        contact = _fake_contact_lookup(cmd)
+        if contact is not None:
+            return contact
+        if cmd[:3] == ["lark-cli", "calendar", "+freebusy"]:
+            return _CmdResult(0, stdout='{"busy": false}')
+        assert cmd[:3] == ["lark-cli", "calendar", "+create"]
+        return _CmdResult(0, stdout='{"ok": true}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_create(
+        "title=一起运动|start=2026-08-18T17:00:00+08:00|"
+        "end=2026-08-18T18:00:00+08:00|attendees=spouse"
+    )
+
+    create = next(call for call in calls if "+create" in call)
+    assert create[create.index("--attendee-ids") + 1] == "ou_partner_verified"
+    assert "已邀请：Partner Name" in result
+
+
+def test_calendar_create_with_unknown_attendee_makes_no_external_call(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "core.actions.subprocess.run",
+        lambda cmd, **kw: calls.append(cmd) or _CmdResult(0, stdout="{}"),
+    )
+
+    result = ap._do_calendar_create(
+        "title=一起运动|start=2026-08-18T17:00:00+08:00|"
+        "end=2026-08-18T18:00:00+08:00|attendees=unknown person"
+    )
+
+    assert result.startswith("❌ 日程创建失败")
+    assert "参会人解析失败" in result
+    assert calls == []
+
+
+def test_calendar_attendees_updates_existing_event(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        contact = _fake_contact_lookup(cmd)
+        if contact is not None:
+            return contact
+        primary = _fake_primary_calendar(cmd)
+        return primary if primary is not None else _CmdResult(0, stdout='{"ok": true}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_attendees("event_id=evt1|add=my partner")
+
+    update = next(call for call in calls if "+update" in call)
+    assert update[update.index("--add-attendee-ids") + 1] == "ou_partner_verified"
+    assert "已邀请 Partner Name" in result
+
+
+def test_calendar_receipt_replaces_model_authored_success(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+
+    def fake_run(cmd, **kw):
+        contact = _fake_contact_lookup(cmd)
+        if contact is not None:
+            return contact
+        if cmd[:3] == ["lark-cli", "calendar", "+freebusy"]:
+            return _CmdResult(0, stdout='{"busy": false}')
+        return _CmdResult(1, stderr="calendar unavailable")
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    reply = (
+        "已经替你安排好了。"
+        "[ACTION:calendar_create|title=一起运动|"
+        "start=2026-08-18T17:00:00+08:00|"
+        "end=2026-08-18T18:00:00+08:00|attendees=spouse]"
+    )
+
+    result = ap.process(reply)
+
+    assert result.startswith("❌ 日程创建失败")
+    assert "已经替你安排好了" not in result
+
+
+def test_calendar_attendees_rejects_same_person_in_add_and_remove(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        contact = _fake_contact_lookup(cmd)
+        if contact is not None:
+            return contact
+        return _CmdResult(0, stdout='{"ok": true}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_attendees("event_id=evt1|add=spouse|remove=my partner")
+
+    assert "不能同时邀请和移除" in result
+    assert not any(cmd[:3] == ["lark-cli", "calendar", "+update"] for cmd in calls)
+
+
+def test_calendar_create_rejects_live_lark_name_mismatch_before_write(monkeypatch, tmp_path):
+    ap = _make_processor(tmp_path)
+    _write_people(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        contact = _fake_contact_lookup(cmd, name="Different Person")
+        if contact is not None:
+            return contact
+        return _CmdResult(0, stdout='{"ok": true}')
+
+    monkeypatch.setattr("core.actions.subprocess.run", fake_run)
+    result = ap._do_calendar_create(
+        "title=一起运动|start=2026-08-18T17:00:00+08:00|"
+        "end=2026-08-18T18:00:00+08:00|attendees=spouse"
+    )
+
+    assert "身份姓名不一致" in result
+    assert not any(cmd[:3] == ["lark-cli", "calendar", "+create"] for cmd in calls)
 
 
 def test_task_create_reports_failure_instead_of_false_success(monkeypatch, tmp_path):
