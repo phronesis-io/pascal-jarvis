@@ -51,6 +51,52 @@ def test_runtime_sidecars_follow_jarvis_dir_after_import(tmp_path, monkeypatch):
     assert intentions_mod._skip_log_seen_path().exists()
 
 
+def test_cancel_intent_reconciles_pending_memorial_residue(
+    intent_db, monkeypatch,
+):
+    import core.intentions as intentions_mod
+    import core.memorial as memorial
+
+    root = Path(intent_db).parent.parent
+    monkeypatch.setattr(memorial, "JARVIS_DIR", root)
+    sent_cards = []
+    monkeypatch.setattr(
+        memorial, "_send_card",
+        lambda card, chat_id="": sent_cards.append((card, chat_id)) or "om_test",
+    )
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    iid = intentions_mod.create_intent(
+        name="unused source", trigger_type="event",
+        trigger_config={"event": "manual"}, category="external",
+    )
+    mid, _ = memorial.create(
+        "intentions", "stale prompt", "still asking",
+        options=[{
+            "key": "na", "label": "不用追",
+            "action": {"type": "intent_close", "params": {"id": iid}},
+        }],
+    )
+
+    assert len(sent_cards) == 1
+    assert intentions_mod.cancel_intent(iid, "feature retired") is True
+    assert memorial.get_memorial(mid, root=root)["decided_label"] == "已停止追踪"
+    assert len(sent_cards) == 1
+    # Idempotent cancellation also repairs residue created after the first
+    # cancellation (for example, a delayed provider result).
+    late, _ = memorial.create(
+        "intentions", "late stale prompt", "still asking",
+        options=[{
+            "key": "na", "label": "不用追",
+            "action": {"type": "intent_close", "params": {"id": iid}},
+        }],
+    )
+    assert len(sent_cards) == 2
+    assert intentions_mod.cancel_intent(iid, "feature retired") is True
+    assert memorial.get_memorial(late, root=root)["decided_label"] == "已停止追踪"
+    assert len(sent_cards) == 2
+
+
 def test_intention_schema_records_named_migrations(intent_db):
     import core.intentions as intentions_mod
 

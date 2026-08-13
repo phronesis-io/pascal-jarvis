@@ -125,6 +125,43 @@ def test_concurrent_initializers_converge_on_one_marker(tmp_path):
     assert markers == [("things.add_column.label",)]
 
 
+def test_migration_locks_before_reading_schema_or_markers(tmp_path):
+    real = _db(tmp_path)
+
+    class TracedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.statements: list[str] = []
+
+        @property
+        def in_transaction(self):
+            return self.connection.in_transaction
+
+        def execute(self, sql, *args):
+            self.statements.append(sql.strip())
+            return self.connection.execute(sql, *args)
+
+        def commit(self):
+            return self.connection.commit()
+
+        def rollback(self):
+            return self.connection.rollback()
+
+    db = TracedConnection(real)
+    try:
+        ensure_additive_columns(
+            db,
+            namespace="things",
+            table="things",
+            columns=(("label", "TEXT"),),
+        )
+    finally:
+        real.close()
+
+    assert db.statements[0] == "BEGIN IMMEDIATE"
+    assert any(statement == "PRAGMA table_info(things)" for statement in db.statements)
+
+
 def test_lock_contention_retries_entire_migration(tmp_path):
     real = _db(tmp_path)
 

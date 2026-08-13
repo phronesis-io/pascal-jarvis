@@ -844,6 +844,45 @@ def test_list_memorials_and_pending_filter(env):
     assert [s["id"] for s in pending] == [m2]
 
 
+def test_cancelled_intent_convergence_resolves_only_linked_pending_cards(env):
+    linked = [{
+        "key": "done", "label": "做了",
+        "action": {"type": "intent_close", "params": {"id": "int_stop"}},
+    }]
+    other = [{
+        "key": "done", "label": "做了",
+        "action": {"type": "intent_close", "params": {"id": "int_keep"}},
+    }]
+    first, _ = memorial.create("intentions", "旧催办 1", "body", options=linked)
+    second, _ = memorial.create("intentions", "旧催办 2", "body", options=linked)
+    already_done, _ = memorial.create(
+        "intentions", "已处理", "body", options=linked)
+    unrelated, _ = memorial.create("intentions", "别的提醒", "body", options=other)
+    memorial.resolve(already_done, "用户已处理")
+    cards_before = len(env.cards)
+
+    resolved = memorial.resolve_cancelled_intent_memorials(
+        "int_stop", root=env.dir, reason="功能已关闭")
+
+    assert resolved == [first, second]
+    assert memorial.get_memorial(first)["decided_label"] == "已停止追踪"
+    assert memorial.get_memorial(second)["action_result"] == "功能已关闭"
+    assert memorial.get_memorial(already_done)["decided_label"] == "用户已处理"
+    assert memorial.get_memorial(unrelated)["status"] == "pending"
+    assert len(env.cards) == cards_before  # no bulk Lark edits or sends
+
+
+def test_local_resolve_can_close_orphan_without_editing_lark(env):
+    mid, _ = memorial.create("intentions", "orphan", "body", preset="decision")
+    cards_before = len(env.cards)
+
+    assert memorial.resolve(
+        mid, "已停止追踪", "功能已关闭", sync_lark=False) is True
+
+    assert memorial.get_memorial(mid)["status"] == "decided"
+    assert len(env.cards) == cards_before
+
+
 def test_fold_skips_malformed_ledger_lines(env):
     mid, _ = memorial.create("mail", "t", "b", preset="fyi")
     with open(env.dir / "memorials.jsonl", "a") as f:
