@@ -1,4 +1,4 @@
-"""Static trust-boundary contracts for the Bash message dispatcher."""
+"""Trust-boundary contracts for the Bash message dispatcher."""
 
 from pathlib import Path
 
@@ -63,15 +63,15 @@ def test_deterministic_memorial_continuation_closes_after_commit():
     assert continuation < committed < branch_end
 
 
-def test_auto_promotion_releases_logical_transition_marker():
+def test_auto_promotion_rehomes_logical_transition_marker():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
     promotion = source.index("Promoted to background job")
-    marker_release = source.rfind(
-        'rm -f -- "$dispatch_marker"', 0, promotion)
+    marker_rehome = source.rfind(
+        'dispatch_marker_handoff_owned "$dispatch_marker"', 0, promotion)
     lock_release = source.rfind('rm -f "$LOCK_FILE"', 0, promotion)
 
-    assert lock_release < marker_release < promotion
-    assert 'dispatch_marker=""' in source[marker_release:promotion]
+    assert lock_release < marker_rehome < promotion
+    assert 'dispatch_marker="$_promoted_marker"' in source[marker_rehome:promotion]
 
 
 def test_stop_covers_queued_handlers_before_provider_lock():
@@ -79,9 +79,67 @@ def test_stop_covers_queued_handlers_before_provider_lock():
     stop = source[source.index('# "stop" / "cancel"'):
                   source.index("# ── Normal message", source.index('# "stop" / "cancel"'))]
 
-    assert '.dispatch_conv_${_conv_dispatch_key}_*' in stop
-    assert 'kill "$_queued_pid"' in stop
+    assert '".dispatch_conv_${_conv_dispatch_key}_"*' in stop
+    assert 'terminate_registered_group "$_queued_marker" "$$"' in stop
+    assert 'Refusing queued marker that points at the bot PID' in stop
+    assert 'session_lock_identity_for_handler' in stop
+    assert 'process_group_is_owned "$_owner_pid" "$_owner_start" "$$"' in stop
+    assert 'kill -TERM "$_stop_pid"' in stop
     assert "现在可以切换或重置会话" in stop
+
+
+def test_handler_unregisters_before_bounded_reaction_cleanup():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    finish = source[source.index("_finish_message_handler() {"):
+                    source.index("_abort_message_handler() {")]
+
+    assert finish.index("dispatch_markers_remove_owned") < finish.index(
+        "lark_remove_reaction")
+    handler = source[source.index("handle_message() {"):
+                     source.index("resolve_memorial_thread_after_reply()")]
+    assert handler.count("lark_remove_reaction") == 1
+
+
+def test_dispatch_marker_uses_atomic_parent_pid_handoff_and_owned_cleanup():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    handler = source[source.index("handle_message() {"):
+                     source.index("resolve_memorial_thread_after_reply()")]
+    dispatch = source[source.index("# Dispatch to background"):
+                      source.index("done\n}", source.index("# Dispatch to background"))]
+
+    assert '${BASHPID:-$$}' not in handler
+    assert "_finish_message_handler" in handler
+    assert "trap '_abort_message_handler $?' EXIT" in handler
+    assert "trap '_abort_message_handler; exit 143' TERM INT" in handler
+    assert 'dispatch_marker_wait_owned "$dispatch_marker"' in handler
+    assert '"$_handler_pid" "$_handler_token" 100' in handler
+    assert "Dispatch marker handoff timed out" in handler
+    assert 'process_group_is_owned "$_handler_pid" "$_handler_token" "$$"' in handler
+    assert 'kill -TERM -- "-$_handler_pid"' in handler
+    assert "_handler_pid=$!" in dispatch
+    assert 'set -m' in dispatch
+    assert 'set +m' in dispatch
+    assert 'dispatch_marker_publish "$_dispatch_marker"' in dispatch
+    assert '"$_handler_pid" "$_handler_token"' in dispatch
+
+
+def test_promotion_rehomes_but_does_not_unregister_live_handler():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    promotion = source[source.index("if [ \"$is_group\" -ne 1 ]"):
+                       source.index("# Watchdog timeout", source.index("if [ \"$is_group\" -ne 1 ]"))]
+
+    assert ".dispatch_job_${_bg_job_id}_${_handler_pid}" in promotion
+    assert "dispatch_marker_handoff_owned" in promotion
+    assert 'dispatch_marker="$_promoted_marker"' in promotion
+
+
+def test_global_cleanup_terminates_registered_handler_trees():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    cleanup = source[source.index("cleanup() {"):
+                     source.index("trap cleanup EXIT")]
+
+    assert 'for _dispatch_marker in "$JARVIS_DIR"/.dispatch_*' in cleanup
+    assert 'terminate_registered_group "$_dispatch_marker" "$$"' in cleanup
 
 
 def test_deterministic_matter_reply_closes_only_after_reliable_delivery():

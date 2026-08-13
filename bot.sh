@@ -17,6 +17,8 @@ JARVIS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 export JARVIS_DIR
 # shellcheck source=scripts/runtime_env.sh
 source "$JARVIS_DIR/scripts/runtime_env.sh"
+# shellcheck source=scripts/process_lifecycle.sh
+source "$JARVIS_DIR/scripts/process_lifecycle.sh"
 
 # Canonicalize argv before anything else (2026-07-08): every identity check
 # in the stack — the session-lock kill case-glob, restart.sh's pkill, and
@@ -344,8 +346,14 @@ mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
          "$JOBS_DIR" "$JARVIS_DIR/session_compacts"
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
-# Clean up stale session locks from previous crashes/restarts
-rm -f "$JARVIS_DIR"/.session_lock_* "$JARVIS_DIR"/.dispatch_* 2>/dev/null
+# Clean up stale handlers from a previous hard crash before forgetting their
+# identity.  Start-time tokens prevent a recycled PID from being killed.
+for _stale_dispatch in "$JARVIS_DIR"/.dispatch_*; do
+  [ -f "$_stale_dispatch" ] || continue
+  terminate_registered_group "$_stale_dispatch" || true
+  rm -f -- "$_stale_dispatch"
+done
+rm -f "$JARVIS_DIR"/.session_lock_* 2>/dev/null
 
 # Clean up old Claude session files (>30 days, prevents unbounded disk growth)
 if [ -d "$CLAUDE_PROJECT_DIR" ]; then
@@ -836,7 +844,7 @@ run_codex_locked() {
     rm -f "$_stdin_file" "$_stdout_file"
     return 143
   fi
-  printf '%s %s' "$_codex_pid" "$_lock_token" > "$_lock_file"
+  session_lock_publish "$_lock_file" "$_codex_pid" "$_lock_token"
   wait "$_codex_pid" 2>/dev/null
   _codex_rc=$?
 
@@ -862,14 +870,52 @@ handle_message() {
   local reaction_id="$5" chat_type="${6:-unknown}" sender_id="${7:-}"
   local logical_context_key="${8:-}" matter_id="${9:-}"
   local dispatch_marker="${10:-}"
+  local _handler_pid _handler_token
   local _raw_user_content="$content"
   local prompt_chat_type="$chat_type"
   local is_owner_p2p=0
 
-  # Ensure Typing reaction is removed on ANY exit (kill, error, normal)
-  trap '[ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id" 2>/dev/null; [ -n "$dispatch_marker" ] && rm -f -- "$dispatch_marker"; trap - EXIT' EXIT TERM INT
+  # Bash 3.2 does not run an EXIT trap reliably when a backgrounded function
+  # returns.  Keep normal-return cleanup explicit and reserve the signal trap
+  # for interrupted handlers.  The parent writes Bash's authoritative `$!`
+  # into the marker; wait for that handoff before starting provider work.
+  _handler_pid=$(/bin/sh -c 'printf "%s" "$PPID"')
+  _handler_token=$(process_start_token "$_handler_pid" 2>/dev/null || true)
+  _finish_message_handler() {
+    # Promotion rehome happens in the watchdog subshell; this sidecar carries
+    # the new registry path back to the parent handler.
+    [ -f "${ANSWER_FILE:-}.dispatch_marker" ] \
+      && dispatch_marker=$(cat "${ANSWER_FILE}.dispatch_marker" 2>/dev/null)
+    [ -n "$dispatch_marker" ] \
+      && dispatch_marker_remove_owned "$dispatch_marker" \
+        "$_handler_pid" "$_handler_token"
+    # Promotion can be interrupted between publishing the new marker, writing
+    # its sidecar, and retiring the old marker.  Remove every registry entry
+    # that still carries this exact process identity.
+    dispatch_markers_remove_owned "$JARVIS_DIR" \
+      "$_handler_pid" "$_handler_token"
+    dispatch_marker=""
+    [ -n "$reaction_id" ] \
+      && lark_remove_reaction "$message_id" "$reaction_id" 2>/dev/null
+    reaction_id=""
+    trap - EXIT TERM INT
+  }
+  _abort_message_handler() {
+    _finish_message_handler
+    if process_group_is_owned "$_handler_pid" "$_handler_token" "$$"; then
+      # TERM gives provider wrappers a chance to reap detached tool sessions.
+      kill -TERM -- "-$_handler_pid" 2>/dev/null || true
+    fi
+  }
+  trap '_abort_message_handler $?' EXIT
+  trap '_abort_message_handler; exit 143' TERM INT
   if [ -n "$dispatch_marker" ]; then
-    printf '%s' "${BASHPID:-$$}" > "$dispatch_marker"
+    if ! dispatch_marker_wait_owned "$dispatch_marker" \
+      "$_handler_pid" "$_handler_token" 100; then
+      log_err "[$session_id] Dispatch marker handoff timed out"
+      _finish_message_handler
+      return
+    fi
   fi
 
   if [ "$chat_type" = "p2p" ] && [ -n "$sender_id" ] \
@@ -1007,10 +1053,10 @@ $(load_memory "$_mem_budget")"
   # token is still ours. Without ownership checks, a waiter that legitimately
   # reclaimed a stale lock could be silently dispossessed by the original
   # handler's blind writes (the 2026-06-11 review found three such races).
-  # Lock file format: "<pid-or-'acquiring'> <token>" — readers that kill the
-  # holder (restart.sh, /stop, staleness checks) take the FIRST field.
+  # Active lock format is tab-separated provider PID, provider start identity,
+  # and an owner token rooted in this handler's PID/start identity.
   local _lock_token
-  _lock_token="$$.$(date +%s).$RANDOM"
+  _lock_token="${_handler_pid}|${_handler_token}|$(date +%s)|$RANDOM"
   local waited=0
   local _busy_notice_sent=0
   while :; do
@@ -1080,6 +1126,7 @@ except Exception:
           "${ANSWER_FILE}.openai.stderr"
         delivery_reply_reliable "$message_id" \
           "这条排队消息所属的会话已经切换，因此没有跨会话执行。请切回原会话后重发。" || true
+        _finish_message_handler
         return
       fi
       log_info "[$session_id] Conversation rotated to $_cur_sid while waiting — switching"
@@ -1279,7 +1326,7 @@ print(build_system_prompt(
       fi
     fi
     _claude_pid=$!
-    printf '%s %s' "$_claude_pid" "$_lock_token" > "$LOCK_FILE"
+    session_lock_publish "$LOCK_FILE" "$_claude_pid" "$_lock_token"
     # Live activity stream: poll session file every 20s, send new tool calls to user
     # Also acts as watchdog: kills Claude after 6000s
     (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -1416,8 +1463,14 @@ sm.force_rotate(os.environ['JV_KEY'],
              # The turn is now an independently scoped background job.  Let
              # Pascal switch logical sessions while it finishes; its result is
              # queued against the captured context and cannot leak elsewhere.
-             [ -n "$dispatch_marker" ] && rm -f -- "$dispatch_marker"
-             dispatch_marker=""
+             _promoted_marker="$JARVIS_DIR/.dispatch_job_${_bg_job_id}_${_handler_pid}"
+             if dispatch_marker_handoff_owned "$dispatch_marker" \
+               "$_promoted_marker" "${ANSWER_FILE}.dispatch_marker" \
+               "$_handler_pid" "$_handler_token"; then
+               dispatch_marker="$_promoted_marker"
+             else
+               log_warn "[$session_id] Promotion marker rehome failed — retaining conversation marker"
+             fi
              lark_reply_text "$message_id" "⏳ 这个任务跑得比较久，已自动转后台（job \`$_bg_job_id\`）。会话已释放，可以继续找我聊别的；做完我会把结果发回来。发 jobs 可查进度，发 cancel $_bg_job_id 可取消。" >/dev/null 2>&1 || true
              log_info "[$session_id] Promoted to background job $_bg_job_id after ${_elapsed}s — lock released"
            else
@@ -1673,10 +1726,12 @@ print(build_system_prompt(
 
   local _promoted_job=""
   [ -f "${ANSWER_FILE}.promoted" ] && _promoted_job=$(cat "${ANSWER_FILE}.promoted" 2>/dev/null)
+  [ -f "${ANSWER_FILE}.dispatch_marker" ] \
+    && dispatch_marker=$(cat "${ANSWER_FILE}.dispatch_marker" 2>/dev/null)
   rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
     "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.codex.stderr" \
     "${ANSWER_FILE}.codex.stdin" "${ANSWER_FILE}.codex.stdout" \
-    "${ANSWER_FILE}.openai.stderr" "$SYS_PROMPT_FILE"
+    "${ANSWER_FILE}.openai.stderr" "${ANSWER_FILE}.dispatch_marker" "$SYS_PROMPT_FILE"
   # Remove the lock ONLY if we still own it: after promotion released it (or
   # a staleness reclaim), it may belong to another live handler — an
   # unconditional rm here silently unlocked their in-flight session.
@@ -1722,7 +1777,6 @@ print(build_system_prompt(
     if [ -n "$answer" ]; then
       log_warn "[$session_id] Suppressed content: ${answer:0:500}"
     fi
-    [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
       if [ "${_codex_cancelled:-0}" -eq 1 ]; then
@@ -1789,6 +1843,7 @@ print(build_system_prompt(
           "模型通道返回了错误信息，本次操作没有执行成功，具体故障已记录。" >/dev/null
       fi
     fi
+    _finish_message_handler
     return
   fi
 
@@ -1869,8 +1924,8 @@ ${_model_footer}"
 …（回复过长已截断，可能是后台任务输出泄漏，已记录日志）"
   fi
 
-  # Remove the "working on it" reaction and send the real reply
-  [ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id"
+  # Send the real reply. Unified handler cleanup removes the Typing reaction
+  # after it first unregisters this process identity.
   if ! JARVIS_DELIVERY_PROVIDER="${_answer_provider:-}" \
        JARVIS_DELIVERY_MODEL="${_answer_model:-$MAIN_MODEL}" \
        delivery_reply_reliable "$message_id" "$reply"; then
@@ -1896,6 +1951,7 @@ ${_model_footer}"
         --matter-id "$matter_id" >>"$LOG_FILE" 2>&1 & )
     resolve_memorial_thread_after_reply "$conv_key" "$reply"
   fi
+  _finish_message_handler
 }
 
 # A successful reply in a memorial thread is itself a completed handoff.
@@ -2110,6 +2166,14 @@ cleanup() {
   for _lock in "$JARVIS_DIR"/.session_lock_*; do
     [ -f "$_lock" ] || continue
     basename "$_lock" | sed 's/^\.session_lock_//' >> "$_queue_file"
+  done
+  # Stop every live message handler before the bot exits.  Killing only the
+  # top-level bot reparents provider/tool children and lets them keep acting
+  # after a restart; dispatch markers are the authoritative handler registry.
+  for _dispatch_marker in "$JARVIS_DIR"/.dispatch_*; do
+    [ -f "$_dispatch_marker" ] || continue
+    terminate_registered_group "$_dispatch_marker" "$$" || true
+    rm -f -- "$_dispatch_marker"
   done
   # Only remove the pidfile if it is still OURS. During a guardian/daemon
   # restart the new bot.sh writes its pid before the old instance finishes
@@ -2978,28 +3042,29 @@ except Exception:
 " 2>/dev/null || echo "")
         _stop_lock="$JARVIS_DIR/.session_lock_${_stop_sid}"
         _stopped_any=0
+        _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
         if [ -f "$_stop_lock" ]; then
-          # Lock format is "<pid> <token>" — take the first field
-          _stop_pid=$(awk '{print $1}' "$_stop_lock" 2>/dev/null)
-          # Validate PID is numeric and is a descendant of this bot.sh ($$)
-          # before killing — guards against PID reuse and corrupted lock files.
+          _stop_identity=""
           _stop_safe=0
-          if [ -n "$_stop_pid" ] && [[ "$_stop_pid" =~ ^[0-9]+$ ]] && kill -0 "$_stop_pid" 2>/dev/null; then
-            _walk_pid="$_stop_pid"
-            while [ "$_walk_pid" -gt 1 ] 2>/dev/null; do
-              [ "$_walk_pid" = "$$" ] && { _stop_safe=1; break; }
-              _walk_pid=$(ps -o ppid= -p "$_walk_pid" 2>/dev/null | tr -d ' ')
-              [ -z "$_walk_pid" ] && break
-            done
-          fi
-          if [ "$_stop_safe" -eq 1 ]; then
-            pkill -TERM -P "$_stop_pid" 2>/dev/null || true
-            kill "$_stop_pid" 2>/dev/null || true
-            sleep 1
-            if kill -0 "$_stop_pid" 2>/dev/null; then
-              pkill -KILL -P "$_stop_pid" 2>/dev/null || true
-              kill -KILL "$_stop_pid" 2>/dev/null || true
+          # A lock can only authorize a kill when its owner token and provider
+          # ancestry both lead back to a live, bot-owned marker for this exact
+          # conversation.  PID/start validation alone does not prove ownership.
+          for _owner_marker in "$JARVIS_DIR"/".dispatch_conv_${_conv_dispatch_key}_"*; do
+            [ -f "$_owner_marker" ] || continue
+            _owner_record=$(dispatch_marker_record "$_owner_marker" 2>/dev/null || true)
+            IFS=$'\t' read -r _owner_pid _owner_start <<< "$_owner_record"
+            if process_group_is_owned "$_owner_pid" "$_owner_start" "$$"; then
+              _stop_identity=$(session_lock_identity_for_handler \
+                "$_stop_lock" "$_owner_pid" "$_owner_start" 2>/dev/null || true)
+              [ -n "$_stop_identity" ] && { _stop_safe=1; break; }
             fi
+          done
+          IFS=$'\t' read -r _stop_pid _stop_start <<< "$_stop_identity"
+          if [ "$_stop_safe" -eq 1 ]; then
+            # The wrapper handles TERM by reaping its detached model/tool
+            # sessions. The dispatch marker pass below applies the hard group
+            # fallback if that graceful cleanup does not complete.
+            kill -TERM "$_stop_pid" 2>/dev/null || true
             log_info "[$_stop_sid] Killed by user (PID $_stop_pid)"
             _stopped_any=1
           else
@@ -3010,24 +3075,14 @@ except Exception:
         # A handler can be queued before it owns a provider lock.  Its
         # conversation-scoped marker carries the subshell PID so stop remains a
         # truthful escape hatch before, during, and after lock acquisition.
-        _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
-        for _queued_marker in "$JARVIS_DIR"/.dispatch_conv_${_conv_dispatch_key}_*; do
+        for _queued_marker in "$JARVIS_DIR"/".dispatch_conv_${_conv_dispatch_key}_"*; do
           [ -f "$_queued_marker" ] || continue
-          _queued_pid=$(cat "$_queued_marker" 2>/dev/null)
-          _queued_safe=0
-          if [ -n "$_queued_pid" ] && [[ "$_queued_pid" =~ ^[0-9]+$ ]] \
-             && kill -0 "$_queued_pid" 2>/dev/null; then
-            _walk_pid="$_queued_pid"
-            while [ "$_walk_pid" -gt 1 ] 2>/dev/null; do
-              [ "$_walk_pid" = "$$" ] && { _queued_safe=1; break; }
-              _walk_pid=$(ps -o ppid= -p "$_walk_pid" 2>/dev/null | tr -d ' ')
-              [ -z "$_walk_pid" ] && break
-            done
-          fi
-          if [ "$_queued_safe" -eq 1 ]; then
-            kill "$_queued_pid" 2>/dev/null || true
+          _queued_pid=$(dispatch_marker_pid "$_queued_marker" 2>/dev/null || true)
+          if terminate_registered_group "$_queued_marker" "$$"; then
             _stopped_any=1
             log_info "Queued handler killed by user (PID $_queued_pid)"
+          elif [ "$_queued_pid" = "$$" ]; then
+            log_warn "Refusing queued marker that points at the bot PID"
           fi
           rm -f "$_queued_marker"
         done
@@ -3181,11 +3236,20 @@ ${content}"
       _dispatch_suffix=$(printf '%s' "$message_id" | shasum -a 256 | cut -c1-16)
       _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
       _dispatch_marker="$JARVIS_DIR/.dispatch_conv_${_conv_dispatch_key}_${_dispatch_suffix}"
-      : > "$_dispatch_marker"
+      set -m
       handle_message "$conv_key" "$content" "$message_id" "$session_id" \
         "$reaction_id" "$chat_type" "$sender_id" "$logical_context_key" \
         "$matter_id" "$_dispatch_marker" &
-      log_info "[$session_id] Dispatched to background handler (PID $!)"
+      _handler_pid=$!
+      set +m
+      _handler_token=$(process_start_token "$_handler_pid" 2>/dev/null || true)
+      if dispatch_marker_publish "$_dispatch_marker" \
+        "$_handler_pid" "$_handler_token"; then
+        log_info "[$session_id] Dispatched to background handler (PID $_handler_pid)"
+      else
+        log_err "[$session_id] Failed to publish dispatch marker; stopping handler"
+        terminate_owned_process_group "$_handler_pid" "$_handler_token" "$$" || true
+      fi
       done
 }
 
