@@ -18,6 +18,18 @@ action.
 Invariant: Matter is context and continuation, not a competing inbox or a
 completion claim.
 
+### Logical Session
+
+The user's active view into one Matter. Opening or switching a logical session
+rotates the physical provider window while preserving the Matter's goal,
+decisions, artifacts, and next action.
+
+Invariant: recent turns, compact summaries, and provider threads never cross a
+logical-session key. Reset removes derived context, not raw transcripts or the
+Matter ledger. Each reset advances the context generation; receipts and
+background results captured under an older generation are historical evidence,
+not input to the current model window.
+
 ### Intent
 
 A time-bound internal promise to trigger, retry, and optionally ask a closure

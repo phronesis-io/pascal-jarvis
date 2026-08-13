@@ -71,7 +71,7 @@ class SessionManager:
         except (json.JSONDecodeError, OSError):
             return {}
 
-    def get_session(self, conv_key: str) -> tuple[str, bool]:
+    def get_session(self, conv_key: str, context_key: str = "") -> tuple[str, bool]:
         """Get or create a session ID for a conversation key.
 
         Returns (session_id, rotated) where rotated=True if a new session
@@ -92,17 +92,46 @@ class SessionManager:
             sid = entry.get("session_id", "")
             rotated = False
 
+            requested_context = str(context_key or "").strip()
+            stored_context = str(entry.get("context_key") or "")
             needs_new = not sid
-            if sid:
+            rotation_reason = "new" if needs_new else ""
+            legacy_unbound = (
+                not stored_context
+                and requested_context == f"conversation:{conv_key}"
+            )
+            if (sid and requested_context and requested_context != stored_context
+                    and not legacy_unbound):
+                needs_new = True
+                rotated = True
+                rotation_reason = "context"
+            # A logical-context transition outranks capacity.  The previous
+            # transcript belongs to the old context even when it is oversized;
+            # reporting this as a size rotation would compact it into the new
+            # Matter (the exact A -> B leak this ordering prevents).
+            if sid and not needs_new:
                 session_file = self.session_dir / f"{sid}.jsonl"
                 if session_file.exists() and session_file.stat().st_size > self.max_size:
                     needs_new = True
                     rotated = True
+                    rotation_reason = "size"
 
             if needs_new:
                 counter = entry.get("counter", 0) + 1
                 sid = str(uuid.uuid5(NAMESPACE, f"{conv_key}-{counter}"))
-                tracker[conv_key] = {"session_id": sid, "counter": counter}
+                tracker[conv_key] = {
+                    "session_id": sid,
+                    "counter": counter,
+                    "context_key": requested_context or stored_context,
+                    "previous_context_key": stored_context,
+                    "rotation_reason": rotation_reason,
+                }
+                _atomic_write_json(self.tracker_path, tracker)
+            elif requested_context and not stored_context:
+                entry["context_key"] = requested_context
+                entry.setdefault("previous_context_key", "")
+                entry["rotation_reason"] = "attached"
+                tracker[conv_key] = entry
                 _atomic_write_json(self.tracker_path, tracker)
 
         return sid, rotated
@@ -110,7 +139,9 @@ class SessionManager:
     def get_counter(self, conv_key: str) -> int:
         return self._read().get(conv_key, {}).get("counter", 0)
 
-    def force_rotate(self, conv_key: str) -> str:
+    def force_rotate(self, conv_key: str, context_key: str = "",
+                     preserve_previous: bool = True,
+                     reason: str = "manual") -> str:
         """Rotate the conversation to a fresh session id immediately.
 
         Used by background-job auto-promotion (REQ-16 MVP-2): the promoted
@@ -126,9 +157,22 @@ class SessionManager:
             entry = tracker.get(conv_key, {})
             counter = entry.get("counter", 0) + 1
             sid = str(uuid.uuid5(NAMESPACE, f"{conv_key}-{counter}"))
-            tracker[conv_key] = {"session_id": sid, "counter": counter}
+            previous = (
+                str(entry.get("context_key") or f"conversation:{conv_key}")
+                if preserve_previous else ""
+            )
+            tracker[conv_key] = {
+                "session_id": sid,
+                "counter": counter,
+                "context_key": str(context_key or entry.get("context_key") or ""),
+                "previous_context_key": previous,
+                "rotation_reason": str(reason or "manual"),
+            }
             _atomic_write_json(self.tracker_path, tracker)
         return sid
+
+    def get_state(self, conv_key: str) -> dict:
+        return dict(self._read().get(conv_key, {}))
 
 
 def _utc_to_local(ts_raw: str) -> str:
@@ -260,7 +304,8 @@ def read_heartbeat_outbox(outbox_path: str | Path, limit: int = 10) -> list[dict
 def build_recent_turns(session_dir: str | Path, session_id: str,
                        counter: int, conv_key: str,
                        limit: int = 20,
-                       include_outbox: bool = True) -> str:
+                       include_outbox: bool = True,
+                       allow_previous_session: bool = True) -> str:
     """Build recent turns with cross-session backfill + heartbeat outbox merge.
 
     include_outbox=False (REQ-100, group chat): the heartbeat outbox carries
@@ -271,7 +316,7 @@ def build_recent_turns(session_dir: str | Path, session_id: str,
     turns = read_tail_turns(session_dir, session_id, limit)
 
     # Backfill from previous session if current is too young
-    if len(turns) < 5 and counter > 1:
+    if len(turns) < 5 and counter > 1 and allow_previous_session:
         prev_sid = str(uuid.uuid5(NAMESPACE, f"{conv_key}-{counter - 1}"))
         prev_turns = read_tail_turns(session_dir, prev_sid, limit - len(turns))
         turns = prev_turns + turns
@@ -298,3 +343,11 @@ def get_session_counter(tracker_path: str | Path, conv_key: str) -> int:
         return tracker.get(conv_key, {}).get("counter", 0)
     except (json.JSONDecodeError, OSError):
         return 0
+
+
+def get_session_state(tracker_path: str | Path, conv_key: str) -> dict:
+    try:
+        tracker = json.loads(Path(tracker_path).read_text(encoding="utf-8"))
+        return dict(tracker.get(conv_key, {}))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}

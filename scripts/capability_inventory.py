@@ -645,7 +645,10 @@ def _matter_commands(root: Path) -> list[dict[str, Any]]:
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 commands.setdefault(value.value, value.lineno)
     capabilities = []
+    matter_commands = {"new", "use", "current", "list", "clear", "done", "handoff"}
     for command, line in sorted(commands.items()):
+        if command not in matter_commands:
+            continue
         trigger = f"/matter {command}"
         capabilities.append(_capability(
             capability_id=f"lark:matter:{command}",
@@ -660,6 +663,45 @@ def _matter_commands(root: Path) -> list[dict[str, Any]]:
                 "owner_only": True,
             }],
             test_evidence=_test_references(root, [trigger, f'command == "{command}"', "handle_lark_command"]),
+            retirement_evidence=[],
+        ))
+    return capabilities
+
+
+def _session_commands(root: Path) -> list[dict[str, Any]]:
+    path = root / "core" / "matter_bridge.py"
+    lines = _read(path).splitlines()
+    definitions = {
+        "new": "Create and enter a named logical session",
+        "switch": "Resume a named logical session",
+        "current": "Show the current logical session",
+        "list": "List resumable logical sessions",
+        "reset": "Reset derived context while preserving the Matter",
+        "close": "Close and archive the current logical session",
+        "leave": "Leave the current logical session without closing it",
+        "help": "Show the logical-session command reference",
+    }
+    capabilities = []
+    for command, description in definitions.items():
+        trigger = f"/session {command}"
+        line = _line_for(lines, re.compile(rf'"{re.escape(command)}"'))
+        if not line:
+            continue
+        capabilities.append(_capability(
+            capability_id=f"lark:session:{command}",
+            kind="lark-command",
+            name=trigger,
+            description=description,
+            source_evidence=[_ref(root, path, line, "logical-session command")],
+            implementation_evidence=[_ref(root, path, line, "session lifecycle handler")],
+            runtime_evidence=[{
+                "type": "lark-command",
+                "entrypoint": trigger,
+                "owner_only": True,
+            }],
+            test_evidence=_test_references(
+                root, [trigger, "test_session_lifecycle", "handle_lark_command"]
+            ),
             retirement_evidence=[],
         ))
     return capabilities
@@ -783,6 +825,7 @@ def build_inventory(root: Path) -> dict[str, Any]:
     capabilities.extend(_decorated_routes(root))
     capabilities.extend(_admin_routes(root))
     capabilities.extend(_matter_commands(root))
+    capabilities.extend(_session_commands(root))
     capabilities.extend(_model_commands(root))
     capabilities.extend(_bot_inline_commands(root))
     capabilities.sort(key=lambda item: (

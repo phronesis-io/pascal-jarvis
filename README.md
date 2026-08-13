@@ -375,7 +375,7 @@ When a job starts you get a "🚀 后台任务已启动" card with its `<id>`; w
 finishes (or is killed by the watchdog) you get a completion card. Job state
 lives under `jobs/` (gitignored runtime data) and is managed by `core/jobs.py`.
 
-The key invariant — **one conversation = one session file = at most one Claude
+The key invariant — **one physical provider session = at most one provider
 process at a time** — and how apparent parallelism is achieved across three
 separate execution lanes is documented in
 [docs/concurrency_and_bg_jobs.md](docs/concurrency_and_bg_jobs.md).
@@ -392,8 +392,11 @@ Chat with your agent from Lark/Feishu on any device. The plugin:
 - Subscribes to incoming messages (`im.message.receive_v1`)
 - Handles all message types: text, rich text, images, files, audio (with Whisper transcription), video, stickers, interactive cards, locations, contact/chat shares, merged forwards
 - Supports quote replies — fetches the quoted message and passes it as context
-- Maps each conversation (`conv_key`) to stable Claude Code and Codex sessions
+- Exposes named logical sessions backed by durable Matters, while treating
+  Claude sessions and Codex threads as replaceable execution windows
 - Auto-rotates sessions when they cross `claude.max_session_size`
+- Supports `新开会话 <名称>`, `切换会话 <名称>`, `当前会话`, `会话列表`,
+  `重置上下文`, `结束会话 <结果>`, and `退出会话` in the owner's private chat
 - Auto-retries on empty Claude responses (4 attempts, escalating backoff)
 - Shows transient `Thinking...` indicators during Claude calls
 - Saves in-flight messages on shutdown/restart, notifies user to resend on startup

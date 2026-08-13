@@ -569,6 +569,32 @@ def _pending_merge_path() -> Path:
     return memorial_ledger.pending_merge_path(runtime_root())
 
 
+def _pending_context_key(conv_key: str, state: dict | None = None) -> str:
+    """Capture the exact logical context that will consume a card handoff."""
+    from core.conversation_context import context_snapshot
+    key = str(conv_key or "").strip()
+    matter_id = str((state or {}).get("matter_id") or "").strip()
+    try:
+        if matter_id:
+            from core.matter_bridge import get_binding
+            binding = get_binding(key)
+            if binding and binding.get("matter_id") == matter_id:
+                return context_snapshot(key, matter_id=matter_id)["context_key"]
+        # A card unrelated to the currently selected Matter must not enter it.
+        return context_snapshot(key, matter_id="")["context_key"]
+    except Exception as exc:
+        # Card taps must remain available during a transient DB outage.  The
+        # legacy unbound scope is conservative: it can never enter a Matter.
+        _ops_log(
+            "pending_context_lookup_failed",
+            level="warn",
+            has_matter=bool(matter_id),
+            error_type=type(exc).__name__,
+        )
+        from core.conversation_context import logical_context_key
+        return logical_context_key(key)
+
+
 def _outbox_path() -> Path:
     return memorial_ledger.outbox_path(runtime_root())
 
@@ -2765,11 +2791,21 @@ def _status_line(st: dict) -> str:
     return f"待批（选项：{labels}）" if labels else "待处理"
 
 
-def _injection_queued(conv_key: str, job_id: str) -> bool:
+def _injection_queued(conv_key: str, job_id: str,
+                      context_key: str = "") -> bool:
     """True if this memorial's context injection is already waiting in
     pending_merge (queued but not yet consumed by bot.sh)."""
-    return any(e.get("conv_key") == conv_key and e.get("job_id") == job_id
-               for e in read_jsonl(_pending_merge_path()))
+    from core.conversation_context import logical_context_key
+    target = str(context_key or "").strip()
+    return any(
+        e.get("conv_key") == conv_key
+        and e.get("job_id") == job_id
+        and (
+            not target
+            or str(e.get("context_key") or logical_context_key(conv_key)) == target
+        )
+        for e in read_jsonl(_pending_merge_path())
+    )
 
 
 def _bounded_chat_context(st: dict) -> str:
@@ -2813,7 +2849,8 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "",
     if not conv_key:
         return
     job_id = f"memorial-decision:{st['id']}"
-    if _injection_queued(conv_key, job_id):
+    pending_context = _pending_context_key(conv_key, st)
+    if _injection_queued(conv_key, job_id, pending_context):
         return
     if is_reply:
         lines = [
@@ -2829,7 +2866,8 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "",
     if action_result:
         lines.append(f"动作结果: {action_result[:400]}")
     _append_line(_pending_merge_path(), {
-        "conv_key": conv_key, "job_id": job_id,
+        "conv_key": conv_key, "context_key": pending_context,
+        "job_id": job_id,
         "ts": now_local_str(), "summary": "\n".join(lines),
     })
 
@@ -3030,10 +3068,8 @@ def settle_decision_context(memorial_id: str, handled_note: str) -> None:
     would make the conversational session act a SECOND time. The conversation
     must still learn the decision, so the entry is rewritten, not removed.
 
-    Locked rewrite serializes against every Python appender (flocked
-    O_APPEND). bot.sh's consumer still does an unlocked tmp+replace — that
-    pre-existing window degrades to a duplicate/lost merge and is documented
-    as acceptable in bot.sh itself.
+    Locked rewrite serializes against every appender and bot.sh's locked claim
+    path, so settling a reply cannot race a context consumer or lose a row.
     """
     from core.jsonl import rewrite_jsonl_locked
 
@@ -3156,6 +3192,7 @@ def commit_chat_continuation(conv_key: str, state_conv_key: str,
     # Only delivered text becomes model context.
     _append_line(_pending_merge_path(), {
         "conv_key": str(conv_key or "").strip(),
+        "context_key": _pending_context_key(str(conv_key or "").strip(), st),
         "job_id": f"memorial-continuation:{memorial_id}:{computed_next}",
         "ts": now_local_str(),
         "summary": f"[卡片续文：{st['title']}]\n{chunk}",
@@ -3197,11 +3234,15 @@ def chat(memorial_id: str) -> dict:
     #    means Pascal's immediate reply can't race past a slow opener.
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if conv_key:
-        if _injection_queued(conv_key, f"memorial:{memorial_id}"):
+        pending_context = _pending_context_key(conv_key, st)
+        if _injection_queued(
+                conv_key, f"memorial:{memorial_id}", pending_context):
             _ops_log("chat_injection_already_queued", memorial_id=memorial_id)
         else:
             _append_line(_pending_merge_path(), {
-                "conv_key": conv_key, "job_id": f"memorial:{memorial_id}",
+                "conv_key": conv_key,
+                "context_key": pending_context,
+                "job_id": f"memorial:{memorial_id}",
                 "ts": ts, "summary": _bounded_chat_context(st),
             })
     else:

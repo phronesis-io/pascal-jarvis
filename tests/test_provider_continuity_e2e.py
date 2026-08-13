@@ -118,6 +118,23 @@ exec "$REAL_PYTHON" "$@"
     path.chmod(0o755)
 
 
+def _write_crashing_command_python(path: Path) -> None:
+    path.write_text(
+        """#!/bin/bash
+if [ "${1:-}" = "-c" ]; then
+  exec "$REAL_PYTHON" "$@"
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "core.matter_bridge" ]; then
+  printf committed > "$COMMAND_SIDE_EFFECT"
+  exit 70
+fi
+exec "$REAL_PYTHON" "$@"
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _bot_function(name: str) -> str:
     """Extract one exact top-level production function from bot.sh."""
     start_match = re.search(rf"(?m)^{re.escape(name)}\(\) \{{\n", BOT_SOURCE)
@@ -333,6 +350,7 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         [
             "bash", str(harness), "ou_owner", "安排白皮书节奏", "om-user-e2e",
             "session-bot-e2e", "", "p2p", "ou_owner",
+            "conversation:ou_owner", "", "",
         ],
         cwd=ROOT,
         env=env,
@@ -357,7 +375,7 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         session = connection.execute(
             "SELECT thread_id, model FROM codex_conversation_sessions "
             "WHERE conv_key=?",
-            ("ou_owner",),
+            ("conversation:ou_owner",),
         ).fetchone()
     assert session == ("thread-e2e", "gpt-bot-e2e")
     assert not (jarvis_dir / ".session_lock_session-bot-e2e").exists()
@@ -485,3 +503,129 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
     turn = _wait_for_turn(db_path, "ou_owner")
     assert turn["provider"] == "GPT fallback"
     assert turn["model"] == "gpt-api-final"
+
+
+def test_queued_handler_refuses_execution_after_logical_session_switch(tmp_path):
+    """A queued A turn must not follow a physical rotation into Matter B."""
+    jarvis_dir = tmp_path / "jarvis"
+    memory_dir = jarvis_dir / "memory"
+    work_dir = jarvis_dir / "work"
+    sessions = jarvis_dir / "sessions"
+    jobs_dir = jarvis_dir / "jobs"
+    for directory in (memory_dir, work_dir, sessions, jobs_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    tracker = jarvis_dir / "active_sessions.json"
+    tracker.write_text(json.dumps({
+        "ou_owner": {
+            "session_id": "session-a", "counter": 1,
+            "context_key": "matter:alpha",
+        },
+    }), encoding="utf-8")
+    (jarvis_dir / "jarvis.yaml").write_text(
+        "data_dir: " + str(jarvis_dir / "data") + "\n"
+        "work_dir: " + str(work_dir) + "\n"
+        "lark:\n  user_id: ou_owner\n",
+        encoding="utf-8",
+    )
+    lock = jarvis_dir / ".session_lock_session-a"
+    lock.write_text(f"{os.getpid()} occupied", encoding="utf-8")
+    delivery_log = tmp_path / "delivery.log"
+    claude_log = tmp_path / "claude.log"
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        "#!/bin/bash\nprintf called >> \"$FAKE_CLAUDE_LOG\"\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    harness = tmp_path / "queued-context.sh"
+    harness.write_text(
+        "set -uo pipefail\n"
+        "log_warn(){ :; }\nlog_info(){ :; }\nlog_err(){ :; }\n"
+        "lark_remove_reaction(){ :; }\n"
+        "lark_reply_text(){ :; }\n"
+        "load_memory(){ printf isolated; }\n"
+        "delivery_reply_reliable(){ printf '%s' \"$2\" > \"$DELIVERY_LOG\"; }\n"
+        + _bot_function("handle_message")
+        + "handle_message \"$@\"\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+        "PYTHONPATH": str(ROOT),
+        "JARVIS_DIR": str(jarvis_dir),
+        "JARVIS_DB_PATH": str(jarvis_dir / "data" / "jarvis.db"),
+        "MEMORY_DIR": str(memory_dir),
+        "WORK_DIR": str(work_dir),
+        "CLAUDE_PROJECT_DIR": str(sessions),
+        "SESSION_TRACKER": str(tracker),
+        "JOBS_DIR": str(jobs_dir),
+        "LOG_FILE": str(tmp_path / "bot.log"),
+        "USER_ID": "ou_owner",
+        "MAIN_MODEL": "opus",
+        "CLAUDE_BACKUP_ENABLED": "false",
+        "CODEX_FALLBACK_ENABLED": "false",
+        "OPENAI_FALLBACK_ENABLED": "false",
+        "DELIVERY_LOG": str(delivery_log),
+        "FAKE_CLAUDE_LOG": str(claude_log),
+    }
+    process = subprocess.Popen(
+        [
+            "bash", str(harness), "ou_owner", "仍属于 A 的排队消息", "om-queued",
+            "session-a", "", "p2p", "ou_owner", "matter:alpha", "alpha", "",
+        ],
+        cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    tracker.write_text(json.dumps({
+        "ou_owner": {
+            "session_id": "session-b", "counter": 2,
+            "context_key": "matter:beta",
+        },
+    }), encoding="utf-8")
+    lock.unlink(missing_ok=True)
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 0, stderr or stdout
+    assert "没有跨会话执行" in delivery_log.read_text(encoding="utf-8")
+    assert not claude_log.exists()
+    assert not list(jarvis_dir.glob(".session_lock_*"))
+
+
+def test_deterministic_command_process_hard_exit_fails_closed(tmp_path):
+    """A commit followed by os._exit-equivalent must never reach the model."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_python = bin_dir / "python3"
+    _write_crashing_command_python(fake_python)
+    harness = tmp_path / "matter-command-hard-exit.sh"
+    harness.write_text(
+        "set -uo pipefail\n"
+        "log_err(){ printf '%s\\n' \"$*\" >> \"$LOG_FILE\"; }\n"
+        + _bot_function("run_matter_command")
+        + "run_matter_command '新开会话 原子命令' owner owner p2p\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "PYTHONPATH": str(ROOT),
+        "REAL_PYTHON": sys.executable,
+        "COMMAND_SIDE_EFFECT": str(tmp_path / "committed"),
+        "LOG_FILE": str(tmp_path / "bot.log"),
+        "SESSION_TRACKER": str(tmp_path / "tracker.json"),
+        "CLAUDE_PROJECT_DIR": str(tmp_path / "sessions"),
+        "JARVIS_DIR": str(tmp_path),
+    }
+
+    result = subprocess.run(
+        ["bash", str(harness)], cwd=ROOT, env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["handled"] is True
+    assert payload["command_process_error"] is True
+    assert "不会交给模型" in payload["reply"]
+    assert (tmp_path / "committed").read_text(encoding="utf-8") == "committed"
+    assert "status=70" in (tmp_path / "bot.log").read_text(encoding="utf-8")

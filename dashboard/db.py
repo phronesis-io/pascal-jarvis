@@ -444,6 +444,16 @@ MIGRATIONS = [
         ON conversation_turns(conv_key, role, message_id)
         WHERE message_id <> '';
     """,
+    # v11: reset generations for logical conversation contexts.  A reset bumps
+    # the generation instead of deleting provider transcripts, so delayed
+    # writers from the old generation can be rejected deterministically.
+    """
+    CREATE TABLE IF NOT EXISTS logical_context_states (
+        context_key TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL DEFAULT 0,
+        reset_at TEXT NOT NULL DEFAULT ''
+    );
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None
@@ -500,6 +510,52 @@ def _run_migrations(db: sqlite3.Connection):
             (i, now_local_str("%Y-%m-%dT%H:%M:%S")),
         )
     db.commit()
+    # Logical-session scope is an additive domain migration rather than a raw
+    # ALTER in MIGRATIONS: the named markers make a crash/restart re-entrant
+    # and verify the physical column shape before accepting it.
+    from core.sqlite_migrations import ensure_additive_columns
+    ensure_additive_columns(
+        db,
+        namespace="logical_session",
+        table="conversation_turns",
+        columns=(
+            ("context_key", "TEXT NOT NULL DEFAULT ''"),
+            ("matter_id", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    )
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        # These data repairs intentionally run on every startup.  They are
+        # idempotent, which makes the column-add -> backfill boundary safe if a
+        # process crashes after the additive schema transaction commits.
+        db.execute(
+            """UPDATE conversation_turns
+                  SET context_key = 'conversation:' || conv_key
+                WHERE context_key = ''"""
+        )
+        db.execute(
+            """DELETE FROM codex_conversation_sessions AS legacy
+                WHERE legacy.conv_key NOT LIKE 'conversation:%'
+                  AND legacy.conv_key NOT LIKE 'matter:%'
+                  AND EXISTS (
+                      SELECT 1 FROM codex_conversation_sessions AS scoped
+                       WHERE scoped.conv_key = 'conversation:' || legacy.conv_key
+                  )"""
+        )
+        db.execute(
+            """UPDATE codex_conversation_sessions
+                  SET conv_key = 'conversation:' || conv_key
+                WHERE conv_key NOT LIKE 'conversation:%'
+                  AND conv_key NOT LIKE 'matter:%'"""
+        )
+        db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_conversation_turns_context_recent
+               ON conversation_turns(context_key, id DESC)"""
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ── Bookmark operations ──────────────────────────────────────────────

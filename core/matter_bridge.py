@@ -10,10 +10,11 @@ from urllib.parse import quote
 from core.matters import (
     MatterConflict,
     add_event,
+    complete_surface_handoffs,
     create_matter,
     get_matter,
-    link_entity,
     list_matters,
+    open_followups,
     update_matter,
 )
 from core.timeutil import now_local_str
@@ -36,35 +37,94 @@ def bind_conversation(conv_key: str, matter_id: str, channel: str = "lark",
     conv_key = str(conv_key or "").strip()
     if not conv_key:
         raise ValueError("conv_key is required")
+    if channel == "lark" and chat_type != "p2p":
+        raise ValueError("private Matters cannot be bound to shared Lark chats")
     now = _now()
     db = _db()
-    old = db.execute(
-        "SELECT matter_id FROM matter_bindings WHERE conv_key = ?", (conv_key,)
-    ).fetchone()
-    db.execute(
-        """INSERT INTO matter_bindings
-           (conv_key, matter_id, channel, destination_id, chat_type,
-            thread_root_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(conv_key) DO UPDATE SET
-             matter_id=excluded.matter_id, channel=excluded.channel,
-             destination_id=excluded.destination_id, chat_type=excluded.chat_type,
-             thread_root_id=excluded.thread_root_id, updated_at=excluded.updated_at""",
-        (conv_key, matter_id, channel, destination_id, chat_type,
-         thread_root_id, now, now),
-    )
-    db.commit()
-    link_entity(
-        matter_id, "conversation", conv_key, provider=channel,
-        title="飞书对话" if channel == "lark" else f"{channel} conversation",
-        metadata={"destination_id": destination_id, "chat_type": chat_type,
-                  "thread_root_id": thread_root_id},
-        actor=actor, move=True,
-    )
-    if old and old["matter_id"] != matter_id:
-        add_event(matter_id, "conversation_switched",
-                  f"对话从 {old['matter_id']} 切换到此事项", actor=actor,
-                  payload={"conv_key": conv_key, "from": old["matter_id"]})
+    metadata = json.dumps({
+        "destination_id": destination_id, "chat_type": chat_type,
+        "thread_root_id": thread_root_id,
+    }, ensure_ascii=False)
+    title = "飞书对话" if channel == "lark" else f"{channel} conversation"
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        old = db.execute(
+            "SELECT matter_id FROM matter_bindings WHERE conv_key = ?", (conv_key,)
+        ).fetchone()
+        db.execute(
+            """INSERT INTO matter_bindings
+               (conv_key, matter_id, channel, destination_id, chat_type,
+                thread_root_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(conv_key) DO UPDATE SET
+                 matter_id=excluded.matter_id, channel=excluded.channel,
+                 destination_id=excluded.destination_id, chat_type=excluded.chat_type,
+                 thread_root_id=excluded.thread_root_id, updated_at=excluded.updated_at""",
+            (conv_key, matter_id, channel, destination_id, chat_type,
+             thread_root_id, now, now),
+        )
+        link = db.execute(
+            """SELECT * FROM matter_links
+                 WHERE provider=? AND entity_type='conversation' AND entity_id=?""",
+            (channel, conv_key),
+        ).fetchone()
+        if link:
+            prior = dict(link)
+            db.execute(
+                """UPDATE matter_links SET matter_id=?, title=?, metadata=?, updated_at=?
+                     WHERE id=?""",
+                (matter_id, title, metadata, now, prior["id"]),
+            )
+            if prior["matter_id"] != matter_id:
+                db.execute(
+                    """INSERT INTO matter_events
+                       (matter_id,event_type,actor,summary,payload,created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (prior["matter_id"], "link_moved_out", actor, title,
+                     json.dumps({"link_id": prior["id"], "to": matter_id},
+                                ensure_ascii=False), now),
+                )
+                db.execute(
+                    """INSERT INTO matter_events
+                       (matter_id,event_type,actor,summary,payload,created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (matter_id, "link_moved_in", actor, title,
+                     json.dumps({"link_id": prior["id"],
+                                 "from": prior["matter_id"]},
+                                ensure_ascii=False), now),
+                )
+        else:
+            cur = db.execute(
+                """INSERT INTO matter_links
+                   (matter_id,entity_type,provider,entity_id,title,metadata,created_at,updated_at)
+                   VALUES (?,'conversation',?,?,?,?,?,?)""",
+                (matter_id, channel, conv_key, title, metadata, now, now),
+            )
+            db.execute(
+                """INSERT INTO matter_events
+                   (matter_id,event_type,actor,summary,payload,created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (matter_id, "link_added", actor, title,
+                 json.dumps({"link_id": int(cur.lastrowid),
+                             "entity_type": "conversation", "provider": channel,
+                             "entity_id": conv_key}, ensure_ascii=False), now),
+            )
+        if old and old["matter_id"] != matter_id:
+            db.execute(
+                """INSERT INTO matter_events
+                   (matter_id,event_type,actor,summary,payload,created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (matter_id, "conversation_switched",
+                 actor, "对话已切换到此事项",
+                 json.dumps({"conv_key": conv_key,
+                             "from": old["matter_id"]}, ensure_ascii=False), now),
+            )
+        db.execute("UPDATE matters SET updated_at=? WHERE id IN (?, ?)",
+                   (now, matter_id, old["matter_id"] if old else matter_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return get_binding(conv_key) or {}
 
 
@@ -87,10 +147,25 @@ def clear_binding(conv_key: str, actor: str = "user") -> bool:
     binding = get_binding(conv_key)
     if not binding:
         return False
-    _db().execute("DELETE FROM matter_bindings WHERE conv_key = ?", (conv_key,))
-    _db().commit()
-    add_event(binding["matter_id"], "conversation_unbound", "飞书对话已退出事项",
-              actor=actor, payload={"conv_key": conv_key})
+    db = _db()
+    now = _now()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM matter_bindings WHERE conv_key = ?", (conv_key,))
+        db.execute(
+            """INSERT INTO matter_events
+               (matter_id,event_type,actor,summary,payload,created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (binding["matter_id"], "conversation_unbound", actor,
+             "飞书对话已退出事项",
+             json.dumps({"conv_key": conv_key}, ensure_ascii=False), now),
+        )
+        db.execute("UPDATE matters SET updated_at=? WHERE id=?",
+                   (now, binding["matter_id"]))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return True
 
 
@@ -108,27 +183,35 @@ def context_for_conversation(conv_key: str, max_chars: int = 8000) -> str:
     binding = get_binding(conv_key)
     if not binding:
         return ""
+    return context_for_matter(binding["matter_id"], max_chars=max_chars)
+
+
+def context_for_matter(matter_id: str, max_chars: int = 8000) -> str:
     from core.matter_context import build_context_bundle, render_context_markdown
     try:
-        rendered = render_context_markdown(build_context_bundle(binding["matter_id"]))
+        rendered = render_context_markdown(build_context_bundle(matter_id))
     except KeyError:
         return ""
     return rendered[:max_chars]
 
 
 def recent_provider_context(conv_key: str, limit: int = 12,
-                            max_chars: int = 8000) -> str:
+                            max_chars: int = 8000,
+                            context_key: str = "") -> str:
     """Bounded provider-neutral turns for Claude/Codex continuity.
 
     Native provider transcripts remain authoritative for their own sessions.
     This projection carries only the recent delivered conversation across a
     provider switch and never crosses a conv_key boundary.
     """
+    if not context_key:
+        from core.conversation_context import context_snapshot
+        context_key = context_snapshot(conv_key)["context_key"]
     rows = _db().execute(
         """SELECT role, text, provider, model, created_at
-           FROM conversation_turns WHERE conv_key = ?
+           FROM conversation_turns WHERE context_key = ?
            ORDER BY id DESC LIMIT ?""",
-        (str(conv_key), max(1, min(int(limit), 40))),
+        (str(context_key), max(1, min(int(limit), 40))),
     ).fetchall()
     if not rows:
         return ""
@@ -149,7 +232,27 @@ def recent_provider_context(conv_key: str, limit: int = 12,
 
 def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
                 provider: str = "lark", model: str = "",
-                session_id: str = "") -> bool:
+                session_id: str = "", context_key: str = "",
+                matter_id: str | None = None) -> bool:
+    from core.conversation_context import (
+        context_generation_from_key,
+        context_snapshot,
+        matter_id_from_context_key,
+    )
+    if context_key:
+        selected_context = str(context_key).strip()
+        context_matter = matter_id_from_context_key(selected_context)
+        selected_matter = (
+            str(matter_id or "").strip()
+            if matter_id is not None
+            else context_matter
+        )
+        if selected_matter != context_matter:
+            raise ValueError("matter_id does not match logical context key")
+    else:
+        snapshot = context_snapshot(conv_key, matter_id=matter_id)
+        selected_context = snapshot["context_key"]
+        selected_matter = snapshot["matter_id"]
     clean_turn = " ".join(str(text or "").split())[:4000]
     stored = False
     db = _db()
@@ -158,23 +261,31 @@ def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
         db.execute(
             """INSERT OR IGNORE INTO conversation_turns
                (conv_key, role, text, message_id, provider, model,
-                session_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                session_id, created_at, context_key, matter_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (conv_key, role, clean_turn, message_id, provider, model,
-             session_id, _now()),
+             session_id, _now(), selected_context, selected_matter),
         )
         stored = db.total_changes > before
         # Keep this continuity projection bounded. Native provider sessions and
         # Matter events retain their own longer histories.
         db.execute(
             """DELETE FROM conversation_turns
-               WHERE conv_key = ? AND id NOT IN (
-                 SELECT id FROM conversation_turns WHERE conv_key = ?
+               WHERE context_key = ? AND id NOT IN (
+                 SELECT id FROM conversation_turns WHERE context_key = ?
                  ORDER BY id DESC LIMIT 200
                )""",
-            (conv_key, conv_key),
+            (selected_context, selected_context),
         )
-    if role == "assistant" and (provider or model):
+    runtime_is_current = True
+    if context_key:
+        try:
+            runtime_is_current = (
+                context_snapshot(conv_key)["context_key"] == selected_context
+            )
+        except Exception:
+            runtime_is_current = False
+    if role == "assistant" and (provider or model) and runtime_is_current:
         db.execute(
             """INSERT INTO conversation_runtime
                (conv_key, provider, model, session_id, updated_at)
@@ -185,16 +296,18 @@ def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
             (conv_key, provider, model, session_id, _now()),
         )
     db.commit()
-    binding = get_binding(conv_key)
-    if not binding:
+    if not selected_matter:
         return stored
     clean = " ".join(str(text or "").split())[:600]
     if not clean:
         return stored
     add_event(
-        binding["matter_id"], f"conversation_{role}", clean,
+        selected_matter, f"conversation_{role}", clean,
         actor=provider, payload={"conv_key": conv_key, "message_id": message_id,
-                                 "model": model, "session_id": session_id},
+                                 "model": model, "session_id": session_id,
+                                 "context_key": selected_context,
+                                 "context_generation":
+                                     context_generation_from_key(selected_context)},
     )
     return True
 
@@ -224,8 +337,48 @@ def record_channel_message(matter_id: str, channel: str, message_id: str,
     return dict(row)
 
 
-def _match_command(content: str) -> tuple[str, str] | None:
+def _match_command(content: str) -> tuple[str, str, str] | None:
     text = str(content or "").strip()
+    match = re.match(r"^/(session|会话)(?:\s+(.+))?$", text, re.I)
+    if match:
+        rest = (match.group(2) or "current").strip()
+        family = "session"
+    else:
+        match = re.match(
+            r"^(?:新开|新建|创建|开个|打开)(?:一个)?(?:新(?:的)?)?会话(?:聊|讨论)?(?:\s+(.+))?$",
+            text,
+        )
+        if match:
+            rest = f"new {(match.group(1) or '').strip()}".strip()
+            family = "session"
+        else:
+            match = re.match(
+                r"^(切换|进入|恢复|继续|结束|关闭|退出|重置)会话(?:\s+(.+))?$",
+                text,
+            )
+            if not match:
+                match = re.match(
+                    r"^会话\s*(新建|创建|切换|进入|恢复|继续|当前|列表|重置|结束|关闭|退出|帮助)"
+                    r"(?:\s+(.+))?$",
+                    text,
+                )
+            if match:
+                rest = f"{match.group(1)} {(match.group(2) or '').strip()}".strip()
+                family = "session"
+            else:
+                simple = {
+                    "当前会话": "current", "会话列表": "list",
+                    "重置上下文": "reset", "重置会话": "reset",
+                    "退出会话": "leave", "结束会话": "close",
+                    "关闭会话": "close",
+                }
+                if text in simple:
+                    return simple[text], "", "session"
+                match = None
+    if match and family == "session":
+        parts = rest.split(maxsplit=1)
+        return parts[0].lower(), parts[1].strip() if len(parts) > 1 else "", family
+
     match = re.match(r"^/(?:matter|事项)(?:\s+(.+))?$", text, re.I)
     if match:
         rest = (match.group(1) or "current").strip()
@@ -235,7 +388,117 @@ def _match_command(content: str) -> tuple[str, str] | None:
             return None
         rest = f"{match.group(1)} {(match.group(2) or '').strip()}".strip()
     parts = rest.split(maxsplit=1)
-    return parts[0].lower(), parts[1].strip() if len(parts) > 1 else ""
+    return parts[0].lower(), parts[1].strip() if len(parts) > 1 else "", "matter"
+
+
+def command_would_transition(content: str) -> bool:
+    parsed = _match_command(content)
+    if not parsed:
+        return False
+    command, _arg, family = parsed
+    aliases = {
+        "新建": "new", "创建": "new", "切换": "switch", "进入": "switch",
+        "恢复": "switch", "继续": "switch", "重置": "reset", "结束": "close",
+        "关闭": "close", "退出": "leave", "clear": "leave", "use": "use",
+        "使用": "use", "done": "done", "完成": "done",
+    }
+    normalized = aliases.get(command, command)
+    return normalized in ({"new", "switch", "use", "reset", "close", "leave"}
+                          if family == "session" else {"new", "use", "clear", "done"})
+
+
+def command_would_handle(content: str) -> bool:
+    """Return whether owner input belongs to the deterministic command path."""
+    text = str(content or "").strip()
+    if _model_preference_command(text) is not None:
+        return True
+    if text.lower() in {
+            "/model", "当前模型", "现在是什么模型", "你是什么模型"}:
+        return True
+    return _match_command(text) is not None
+
+
+def _close_bound_matter(conv_key: str, matter_id: str, outcome: str,
+                        actor: str) -> dict:
+    """Complete a Matter and unbind its conversation in one transaction."""
+    now = _now()
+    outcome = str(outcome or "")
+    db = _db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM matters WHERE id = ?", (matter_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"matter not found: {matter_id}")
+        current = dict(row)
+        if current.get("status") not in {"done", "archived"}:
+            outstanding = open_followups(matter_id)
+            if outstanding:
+                raise MatterConflict(
+                    f"还有 {len(outstanding)} 项未闭环，确认后才能结束事项",
+                    outstanding,
+                )
+        binding = db.execute(
+            "SELECT matter_id FROM matter_bindings WHERE conv_key = ?",
+            (conv_key,),
+        ).fetchone()
+        if not binding or binding["matter_id"] != matter_id:
+            raise RuntimeError("conversation binding changed during close")
+        changes = {}
+        for field, value in {
+            "status": "done", "outcome": outcome, "closed_at": now,
+        }.items():
+            if current.get(field) != value:
+                changes[field] = {"from": current.get(field), "to": value}
+        if changes:
+            db.execute(
+                """UPDATE matters SET status='done', outcome=?, closed_at=?,
+                          updated_at=? WHERE id=?""",
+                (outcome, now, now, matter_id),
+            )
+            db.execute(
+                """INSERT INTO matter_events
+                   (matter_id,event_type,actor,summary,payload,created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (matter_id, "matter_updated", actor,
+                 "更新了状态、完成结果、完成时间",
+                 json.dumps(changes, ensure_ascii=False), now),
+            )
+        db.execute("DELETE FROM matter_bindings WHERE conv_key = ?", (conv_key,))
+        db.execute(
+            """INSERT INTO matter_events
+               (matter_id,event_type,actor,summary,payload,created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (matter_id, "conversation_unbound", actor, "飞书对话已退出事项",
+             json.dumps({"conv_key": conv_key}, ensure_ascii=False), now),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    complete_surface_handoffs(matter_id)
+    return get_matter(matter_id) or {}
+
+
+def _resolve_session_target(value: str) -> tuple[dict | None, str]:
+    target = str(value or "").strip()
+    if not target:
+        return None, "missing"
+    direct = get_matter(target, include_links=False, include_events=False)
+    if direct:
+        if direct.get("status") in {"done", "archived"}:
+            return None, "closed"
+        return direct, ""
+    matches = [
+        matter for matter in list_matters(
+            status="active,waiting,blocked", limit=100
+        )
+        if str(matter.get("title") or "").casefold() == target.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return None, "ambiguous"
+    return None, "not_found"
 
 
 def _model_preference_command(content: str) -> str | None:
@@ -318,40 +581,82 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
     parsed = _match_command(content)
     if not parsed:
         return {"handled": False}
-    command, arg = parsed
+    command, arg, family = parsed
+    if chat_type != "p2p":
+        return {"handled": True, "reply": "会话和事项管理只在你的私聊中开放。"}
     aliases = {"new": "new", "新建": "new", "use": "use", "switch": "use",
-               "切换": "use", "使用": "use", "current": "current", "status": "current",
+               "创建": "new", "切换": "use", "进入": "use", "恢复": "use",
+               "继续": "use", "使用": "use", "current": "current", "status": "current",
                "当前": "current", "list": "list", "列表": "list", "clear": "clear",
-               "退出": "clear", "done": "done", "完成": "done", "handoff": "handoff",
-               "交接": "handoff"}
+               "leave": "clear", "退出": "clear", "done": "done", "完成": "done",
+               "close": "close", "结束": "close", "关闭": "close",
+               "reset": "reset", "重置": "reset", "help": "help", "帮助": "help",
+               "handoff": "handoff", "交接": "handoff"}
     command = aliases.get(command, command)
     binding = get_binding(conv_key)
+    if family == "session" and command == "help":
+        return {"handled": True, "reply": (
+            "会话命令：\n"
+            "- 新开会话 <名称>\n- 切换会话 <名称>\n- 当前会话 / 会话列表\n"
+            "- 重置上下文\n- 结束会话 <结果>\n- 退出会话"
+        )}
     if command == "new":
         if not arg:
-            return {"handled": True, "reply": "请给事项一个名称，例如：/matter new 整理移动端入口"}
+            noun = "会话" if family == "session" else "事项"
+            return {"handled": True, "reply": f"请给{noun}一个名称，例如：新开会话 整理移动端入口"}
         matter = create_matter(arg, next_action="确认第一步", source="lark", actor=actor)
-        bind_conversation(conv_key, matter["id"], destination_id=destination_id,
-                          chat_type=chat_type, actor=actor)
-        return {"handled": True, "reply": f"已建立并进入事项「{matter['title']}」\n{matter['id']}"}
+        try:
+            bind_conversation(conv_key, matter["id"], destination_id=destination_id,
+                              chat_type=chat_type, actor=actor)
+        except Exception:
+            # Creation and binding are one product action.  Do not leave an
+            # invisible duplicate Matter when the second half fails.
+            db = _db()
+            db.execute("DELETE FROM matters WHERE id = ?", (matter["id"],))
+            db.commit()
+            raise
+        from core.conversation_context import logical_context_key
+        label = "会话" if family == "session" else "事项"
+        return {"handled": True, "reply": f"已新建并进入{label}「{matter['title']}」。接下来只带这个主题的上下文。",
+                "transition": {"context_key": logical_context_key(conv_key, matter["id"])}}
     if command == "list":
         items = list_matters(status="active,waiting,blocked", limit=8)
-        body = "\n".join(f"- {m['id']} · {m['title']} · {m.get('next_action') or '待定下一步'}"
+        body = "\n".join(f"- {m['title']} · {m.get('next_action') or '待定下一步'}"
                          for m in items) or "没有进行中的事项。"
         return {"handled": True, "reply": body}
     if command == "use":
         if not arg:
-            return {"handled": True, "reply": "请提供 Matter ID，例如：/matter use mat_xxx"}
-        matter = get_matter(arg, include_links=False, include_events=False)
+            return {"handled": True, "reply": "请提供会话名称，例如：切换会话 白皮书"}
+        matter, resolution = _resolve_session_target(arg)
         if not matter:
-            return {"handled": True, "reply": f"找不到事项 {arg}"}
-        bind_conversation(conv_key, arg, destination_id=destination_id,
+            if resolution == "ambiguous":
+                return {"handled": True, "reply": f"有多个同名会话「{arg}」，请在网页里改成不同名称后再切换。"}
+            if resolution == "closed":
+                return {"handled": True, "reply": f"会话「{arg}」已经结束；可在网页查看归档结果。"}
+            return {"handled": True, "reply": f"找不到会话「{arg}」。发“会话列表”查看。"}
+        if binding and binding["matter_id"] == matter["id"]:
+            return {"handled": True, "reply": (
+                f"已经在会话「{matter['title']}」。\n"
+                f"下一步：{matter.get('next_action') or '待定'}")}
+        bind_conversation(conv_key, matter["id"], destination_id=destination_id,
                           chat_type=chat_type, actor=actor)
-        return {"handled": True, "reply": f"已切换到「{matter['title']}」\n下一步：{matter.get('next_action') or '待定'}"}
+        from core.conversation_context import logical_context_key
+        return {"handled": True, "reply": f"已回到会话「{matter['title']}」。\n下一步：{matter.get('next_action') or '待定'}",
+                "transition": {"context_key": logical_context_key(conv_key, matter["id"])}}
     if command == "clear":
+        from core.conversation_context import logical_context_key
         clear_binding(conv_key, actor=actor)
-        return {"handled": True, "reply": "这段飞书对话已退出当前事项。"}
+        result = {"handled": True, "reply": "已退出当前会话；原会话仍可随时切回。",
+                  "transition": {"context_key": logical_context_key(conv_key)}}
+        return result
+    if family == "session" and command == "reset" and not binding:
+        from core.conversation_context import logical_context_key
+        return {"handled": True, "reply": "已重置当前未命名会话的短期上下文。",
+                "transition": {"context_key": logical_context_key(conv_key),
+                               "reset": True}}
     if not binding:
-        return {"handled": True, "reply": "这段对话还没有事项。用 /matter new 名称 建立，或 /matter list 查看。"}
+        noun = "会话" if family == "session" else "事项"
+        return {"handled": True, "reply": f"当前没有命名的{noun}。发“新开会话 名称”建立，或发“会话列表”查看。"}
     matter = get_matter(binding["matter_id"])
     if not matter:
         return {"handled": True, "reply": "当前事项已不存在，请重新选择。"}
@@ -361,16 +666,32 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
             f"状态：{matter['status']}\n"
             f"当前共识：{matter.get('summary') or '待整理'}\n"
             f"下一步：{matter.get('next_action') or '待定'}\n"
-            f"{matter['id']}"
+            "发“重置上下文”可换一个干净执行窗口，但保留上述长期上下文。"
         )}
+    if command == "reset":
+        from core.conversation_context import logical_context_key
+        return {"handled": True, "reply": (
+            f"已重置会话「{matter['title']}」的短期上下文；目标、决定和产物仍保留。"
+        ), "transition": {"context_key": logical_context_key(conv_key, matter["id"]),
+                           "reset": True}}
+    if command == "close":
+        try:
+            _close_bound_matter(conv_key, matter["id"], arg, actor)
+        except MatterConflict as exc:
+            titles = "、".join(item["title"] for item in exc.open_items[:4])
+            return {"handled": True, "reply": f"还不能结束：{titles}。请先闭环这些内容。"}
+        from core.conversation_context import logical_context_key
+        return {"handled": True, "reply": f"会话「{matter['title']}」已结束，结果已归档。",
+                "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "done":
         try:
-            update_matter(matter["id"], status="done", outcome=arg,
-                          actor=actor, force=False)
+            _close_bound_matter(conv_key, matter["id"], arg, actor)
         except MatterConflict as exc:
             titles = "、".join(item["title"] for item in exc.open_items[:4])
             return {"handled": True, "reply": f"还不能直接完成：{titles}。请先闭环，或在网页确认保留这些条目。"}
-        return {"handled": True, "reply": f"事项「{matter['title']}」已完成。"}
+        from core.conversation_context import logical_context_key
+        return {"handled": True, "reply": f"事项「{matter['title']}」已完成并归档。",
+                "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "handoff":
         provider = arg.lower() if arg.lower() in {"claude", "codex"} else "codex"
         from core.matter_executor import prepare_handoff
@@ -393,15 +714,53 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="")
     parser.add_argument("--provider", default="lark")
     parser.add_argument("--session-id", default="")
+    parser.add_argument("--tracker", default="")
+    parser.add_argument("--session-dir", default="")
+    parser.add_argument("--jarvis-dir", default="")
+    parser.add_argument("--context-key", default="")
+    parser.add_argument("--matter-id", default=None)
     args = parser.parse_args(argv)
     if args.record_role:
         result = {"recorded": record_turn(
             args.conv_key, args.record_role, args.content,
             args.message_id, provider=args.provider, model=args.model,
-            session_id=args.session_id)}
+            session_id=args.session_id, context_key=args.context_key,
+            matter_id=args.matter_id)}
     else:
-        result = handle_lark_command(
-            args.content, args.conv_key, args.destination_id, args.chat_type)
+        try:
+            result = handle_lark_command(
+                args.content, args.conv_key, args.destination_id, args.chat_type)
+        except Exception as exc:
+            # Deterministic commands must never fall through into an LLM after
+            # an infrastructure failure: that can duplicate a partially
+            # committed create/switch operation.
+            result = {
+                "handled": True,
+                "reply": "会话操作没有完成，请稍后重试同一条命令。",
+                "command_error": type(exc).__name__,
+            }
+        transition = result.get("transition") if isinstance(result, dict) else None
+        if transition and args.tracker and args.session_dir and args.jarvis_dir:
+            from core.conversation_context import apply_runtime_transition
+            try:
+                result["runtime"] = apply_runtime_transition(
+                    conv_key=args.conv_key,
+                    context_key=transition["context_key"],
+                    tracker_path=args.tracker,
+                    session_dir=args.session_dir,
+                    jarvis_dir=args.jarvis_dir,
+                    reset=bool(transition.get("reset")),
+                )
+            except Exception as exc:
+                # The binding is durable and the normal dispatch path will
+                # detect the new context and rotate before the next turn. Keep
+                # this deterministic command handled so it is never replayed
+                # through an LLM after a partial commit.
+                result["runtime_error"] = type(exc).__name__
+                result["reply"] = (
+                    "会话选择已经保存，但执行窗口未能立即切换。"
+                    "本条命令不会交给模型重复执行；请稍后重试，或检查运行状态。"
+                )
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

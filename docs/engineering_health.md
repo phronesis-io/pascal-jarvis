@@ -23,6 +23,18 @@ work. The supported product surface remains the generated
   Codex lock/session -> reliable Lark delivery -> provider/model turn record ->
   next-prompt continuity. It does not claim to start the full listener process;
   startup and wiring are covered separately by shell/install/runtime checks.
+- Runtime line coverage is not currently measured: the repository has no
+  `coverage.py`/`pytest-cov` configuration. Ratios between changed test lines
+  and changed implementation lines are review-volume indicators, not coverage
+  percentages, and must not be used to compare this repository with another
+  codebase.
+- `core/memorial.py` is 3,486 lines with 116 functions; its longest function is
+  165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
+  function is 324 lines. These are verified maintainability risks even though
+  line count alone is not a defect.
+- A Python-wide scan for commented-out `def`/`class` declarations has no
+  production matches. The earlier claim of seven such files is not
+  reproducible and therefore is not an active cleanup task.
 
 ## Verified Audit Decisions
 
@@ -40,6 +52,34 @@ work. The supported product surface remains the generated
 | No pytest config means no timeout | False as a release blocker | CI has a 15-minute job timeout and the strict local suite is the canonical command. Parallel pytest is deliberately not default because tests exercise shared process and SQLite contracts. |
 | Old July plans look current | Fixed | `docs/plans/README.md` marks dated plans as historical evidence; current behavior is governed by product/domain/architecture/decision docs and the PRD portfolio. |
 | Import graph is not a CI gate | Fixed | The core-cycle budget runs in pytest, while adjacency remains a review signal rather than a brittle hard limit for central authority modules. |
+
+## Debt Retirement Sequence
+
+The two large orchestration modules will be reduced in small, behavior-preserving
+changes. They must not be rewritten or split by line count alone.
+
+1. Establish a reproducible runtime coverage baseline for `core/memorial.py`
+   and `core/intentions.py`, publish branch coverage as information, and keep
+   the strict local suite as the release gate until the baseline is stable.
+2. Add characterization tests around the longest workflows and their failure
+   boundaries before moving code. The first targets are
+   `generate_calendar_intents`, `restore_cancelled_intent`,
+   `memorialize_output`, and `decide`.
+3. Continue the existing Memorial extraction by moving orchestration into
+   workflow modules that depend on `memorial_ledger`, `memorial_cards`, and
+   `memorial_transport`; keep `core.memorial` as a compatibility facade while
+   callers migrate.
+4. Split Intentions by lifecycle ownership: repository/schema access,
+   lifecycle transitions, calendar generation, reconciliation, and CLI. Each
+   slice requires an import-graph check, focused regressions, the strict local
+   suite, and an adversarial review.
+5. Remove compatibility facades only after the capability inventory proves
+   there are no live callers. Production data migrations require backup,
+   verification, and rollback evidence.
+
+This debt program follows the current logical-session release. Combining a
+large module split with new session isolation would make regressions harder to
+attribute and would weaken the release evidence for both changes.
 
 ## Retention Rule
 

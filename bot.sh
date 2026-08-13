@@ -345,7 +345,7 @@ mkdir -p "$DATA_DIR" "$MEMORY_DIR" "$MEMORY_DIR/hot" "$MEMORY_DIR/warm" \
 [ -f "$SESSION_TRACKER" ] || echo "{}" > "$SESSION_TRACKER"
 
 # Clean up stale session locks from previous crashes/restarts
-rm -f "$JARVIS_DIR"/.session_lock_* 2>/dev/null
+rm -f "$JARVIS_DIR"/.session_lock_* "$JARVIS_DIR"/.dispatch_* 2>/dev/null
 
 # Clean up old Claude session files (>30 days, prevents unbounded disk growth)
 if [ -d "$CLAUDE_PROJECT_DIR" ]; then
@@ -372,16 +372,18 @@ fi
 get_session_id() {
   local conv_key="$1"
   local max_size="${2:-$MAX_SESSION_SIZE}"
+  local context_key="${3:-}"
   JV_TRACKER="$SESSION_TRACKER" JV_SDIR="$CLAUDE_PROJECT_DIR" \
-    JV_MAX="$max_size" JV_KEY="$conv_key" python3 <<'PYEOF'
+    JV_MAX="$max_size" JV_KEY="$conv_key" JV_CONTEXT_KEY="$context_key" python3 <<'PYEOF'
 import os, sys
 sys.path.insert(0, os.environ["JARVIS_DIR"])
 from core.session import SessionManager
 sm = SessionManager(os.environ["JV_TRACKER"], os.environ["JV_SDIR"],
                     max_size=int(os.environ["JV_MAX"]))
-sid, rotated = sm.get_session(os.environ["JV_KEY"])
+sid, rotated = sm.get_session(os.environ["JV_KEY"], os.environ.get("JV_CONTEXT_KEY", ""))
 if rotated:
-    print("ROTATED", file=sys.stderr)
+    reason = sm.get_state(os.environ["JV_KEY"]).get("rotation_reason", "size")
+    print(f"ROTATED {reason}", file=sys.stderr)
 print(sid)
 PYEOF
 }
@@ -510,6 +512,34 @@ delivery_reply_reliable() {
   return 1
 }
 
+# run_matter_command <content> <conv_key> <destination> <chat_type>
+# A deterministic command is classified before execution. Once classified,
+# even a hard process exit must fail closed instead of handing a potentially
+# committed command to the model for a second interpretation.
+run_matter_command() {
+  local content="$1" conv_key="$2" destination_id="$3" chat_type="$4"
+  local deterministic output status
+  deterministic=$(JV_CONTENT="$content" python3 -c "
+import os
+from core.matter_bridge import command_would_handle
+print('true' if command_would_handle(os.environ.get('JV_CONTENT', '')) else 'false')
+" 2>>"$LOG_FILE") || deterministic="unknown"
+  output=$(python3 -m core.matter_bridge \
+    --content "$content" --conv-key "$conv_key" \
+    --destination-id "$destination_id" --chat-type "$chat_type" \
+    --tracker "$SESSION_TRACKER" --session-dir "$CLAUDE_PROJECT_DIR" \
+    --jarvis-dir "$JARVIS_DIR" \
+    2>>"$LOG_FILE")
+  status=$?
+  if [ "$status" -ne 0 ] && [ "$deterministic" != "false" ]; then
+    log_err "Deterministic command process failed after classification (status=$status)"
+    printf '%s\n' '{"handled":true,"reply":"会话操作执行时中断了。为避免重复执行，本条不会交给模型；请检查当前会话后再重试。","command_process_error":true}'
+    return 0
+  fi
+  printf '%s' "$output"
+  return "$status"
+}
+
 delivery_send_reliable() {
   local content="$1" _json _state
   _json=$(printf '%s' "$content" | python3 -m core.delivery send \
@@ -608,6 +638,8 @@ fi
 # Usage: cleaned_reply=$(process_actions "$reply" "$conv_key" "$message_id")
 process_actions() {
   local reply="$1" conv_key="$2" message_id="$3" allow="${4:-1}"
+  local context_key="${5:-conversation:$conv_key}" matter_id="${6:-}"
+  local source_session_id="${7:-}"
   local action_results=""
 
   # Extract all action markers
@@ -669,6 +701,8 @@ print(ap.process(os.environ['JV_REPLY']))
         local job_id
         job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
           JV_DESC="$bg_desc" JV_MSG_ID="$message_id" \
+          JV_CONTEXT_KEY="$context_key" JV_MATTER_ID="$matter_id" \
+          JV_SOURCE_SESSION_ID="$source_session_id" \
           python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE" || echo "")
         if [ -n "$job_id" ]; then
           log_info "[bg:$job_id] Started via action: $bg_desc"
@@ -776,6 +810,7 @@ run_codex_locked() {
   local _content="$1" _conv_key="$2" _system_prompt_file="$3"
   local _model="$4" _timeout="$5" _work_dir="$6" _binary="$7"
   local _lock_file="$8" _lock_token="$9" _answer_base="${10}"
+  local _context_key="${11:-}"
   local _stdin_file="${_answer_base}.codex.stdin"
   local _stdout_file="${_answer_base}.codex.stdout"
   local _stderr_file="${_answer_base}.codex.stderr"
@@ -786,6 +821,7 @@ run_codex_locked() {
   : > "$_stderr_file"
   python3 -m core.codex_fallback \
     --conv-key "$_conv_key" \
+    --context-key "$_context_key" \
     --system-prompt-file "$_system_prompt_file" \
     --model "$_model" \
     --timeout "$_timeout" \
@@ -824,12 +860,17 @@ run_codex_locked() {
 handle_message() {
   local conv_key="$1" content="$2" message_id="$3" session_id="$4"
   local reaction_id="$5" chat_type="${6:-unknown}" sender_id="${7:-}"
+  local logical_context_key="${8:-}" matter_id="${9:-}"
+  local dispatch_marker="${10:-}"
   local _raw_user_content="$content"
   local prompt_chat_type="$chat_type"
   local is_owner_p2p=0
 
   # Ensure Typing reaction is removed on ANY exit (kill, error, normal)
-  trap '[ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id" 2>/dev/null; trap - EXIT' EXIT TERM INT
+  trap '[ -n "$reaction_id" ] && lark_remove_reaction "$message_id" "$reaction_id" 2>/dev/null; [ -n "$dispatch_marker" ] && rm -f -- "$dispatch_marker"; trap - EXIT' EXIT TERM INT
+  if [ -n "$dispatch_marker" ]; then
+    printf '%s' "${BASHPID:-$$}" > "$dispatch_marker"
+  fi
 
   if [ "$chat_type" = "p2p" ] && [ -n "$sender_id" ] \
       && [ "$sender_id" = "$USER_ID" ]; then
@@ -921,7 +962,8 @@ $content"
   local sys_prompt
   sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
     JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
-    JV_MEM_MAX="$_mem_budget" python3 -c "
+    JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
+    JV_MATTER_ID="$matter_id" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
@@ -936,16 +978,9 @@ print(build_system_prompt(
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
     chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
     max_memory_chars=int(mc) if mc else None,
+    context_key=os.environ.get('JV_CONTEXT_KEY', ''),
+    matter_id=os.environ.get('JV_MATTER_ID', ''),
 ))
-if os.environ.get('JV_CHAT_TYPE', 'p2p') == 'p2p':
-    try:
-        from core.matter_bridge import context_for_conversation
-        matter_context = context_for_conversation(os.environ.get('JV_KEY', ''))
-        if matter_context:
-            print('\n\n=== CURRENT MATTER (authoritative cross-entry context) ===')
-            print(matter_context)
-    except Exception:
-        pass
 " 2>>"$LOG_FILE")
 
   if [ -z "$sys_prompt" ]; then
@@ -1022,14 +1057,31 @@ $(load_memory "$_mem_budget")"
     # session while we waited (background-job auto-promotion does this). Our
     # session_id was resolved at dispatch time — resuming it now would write
     # into the transcript the promoted Claude is still appending to.
-    _cur_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
+    _cur_state=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
 import json, os
 try:
-    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
+    state=json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {})
+    print(state.get('session_id', ''))
+    print(state.get('context_key', ''))
 except Exception:
     print('')
+    print('')
 " 2>/dev/null || echo "")
+    _cur_sid=$(printf '%s\n' "$_cur_state" | sed -n '1p')
+    _cur_context=$(printf '%s\n' "$_cur_state" | sed -n '2p')
     if [ -n "$_cur_sid" ] && [ "$_cur_sid" != "$session_id" ]; then
+      if [ -n "$_cur_context" ] && [ "$_cur_context" != "$logical_context_key" ]; then
+        log_warn "[$session_id] Refusing queued turn after logical context changed to $_cur_context"
+        rm -f "$LOCK_FILE"
+        rm -f "$ANSWER_FILE" "$SYS_PROMPT_FILE" \
+          "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
+          "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.codex.stderr" \
+          "${ANSWER_FILE}.codex.stdin" "${ANSWER_FILE}.codex.stdout" \
+          "${ANSWER_FILE}.openai.stderr"
+        delivery_reply_reliable "$message_id" \
+          "这条排队消息所属的会话已经切换，因此没有跨会话执行。请切回原会话后重发。" || true
+        return
+      fi
       log_info "[$session_id] Conversation rotated to $_cur_sid while waiting — switching"
       rm -f "$LOCK_FILE"
       session_id="$_cur_sid"
@@ -1037,7 +1089,8 @@ except Exception:
       # Rebuild system prompt with the new session's recent turns
       sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
         JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
-        JV_MEM_MAX="$_mem_budget" python3 -c "
+        JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
+        JV_MATTER_ID="$matter_id" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
@@ -1052,6 +1105,8 @@ print(build_system_prompt(
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
     chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
     max_memory_chars=int(mc) if mc else None,
+    context_key=os.environ.get('JV_CONTEXT_KEY', ''),
+    matter_id=os.environ.get('JV_MATTER_ID', ''),
 ))
 " 2>>"$LOG_FILE") || true
       [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
@@ -1098,7 +1153,7 @@ print(build_system_prompt(
       "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
       "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
       "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
-      "$ANSWER_FILE")
+      "$ANSWER_FILE" "$logical_context_key")
     _codex_exit=$?
     if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
       _answer_provider="Codex"
@@ -1338,21 +1393,31 @@ $_formatted_capped" | python3 -m core.aux_model \
        if [ "$is_group" -ne 1 ] && [ "$_elapsed" -ge 120 ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
          _bg_job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
            JV_DESC="auto-promoted: ${content:0:120}" JV_MSG_ID="$message_id" \
+           JV_CONTEXT_KEY="$logical_context_key" JV_MATTER_ID="$matter_id" \
+           JV_SOURCE_SESSION_ID="$session_id" \
            python3 "$JARVIS_DIR/core/jobs.py" create 2>>"$LOG_FILE")
          if [ -n "$_bg_job_id" ]; then
            JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" set-pid "$_bg_job_id" "$_claude_pid" \
              2>>"$LOG_FILE" || true
            printf '%s' "$_bg_job_id" > "${ANSWER_FILE}.promoted"
-           if JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" JV_SDIR="$CLAUDE_PROJECT_DIR" python3 -c "
+           if JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" JV_SDIR="$CLAUDE_PROJECT_DIR" \
+             JV_CONTEXT_KEY="$logical_context_key" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.session import SessionManager
 sm = SessionManager(os.environ['JV_TRACKER'], os.environ['JV_SDIR'])
-sm.force_rotate(os.environ['JV_KEY'])
+sm.force_rotate(os.environ['JV_KEY'],
+                context_key=os.environ.get('JV_CONTEXT_KEY', ''),
+                reason='promotion')
 " 2>>"$LOG_FILE"; then
              # Release only OUR lock (ownership may already have moved)
              if grep -q "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
                rm -f "$LOCK_FILE"
              fi
+             # The turn is now an independently scoped background job.  Let
+             # Pascal switch logical sessions while it finishes; its result is
+             # queued against the captured context and cannot leak elsewhere.
+             [ -n "$dispatch_marker" ] && rm -f -- "$dispatch_marker"
+             dispatch_marker=""
              lark_reply_text "$message_id" "⏳ 这个任务跑得比较久，已自动转后台（job \`$_bg_job_id\`）。会话已释放，可以继续找我聊别的；做完我会把结果发回来。发 jobs 可查进度，发 cancel $_bg_job_id 可取消。" >/dev/null 2>&1 || true
              log_info "[$session_id] Promoted to background job $_bg_job_id after ${_elapsed}s — lock released"
            else
@@ -1541,7 +1606,7 @@ print(build_system_prompt(
             "$SYS_PROMPT_FILE" "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
             "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
             "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
-            "$ANSWER_FILE")
+            "$ANSWER_FILE" "$logical_context_key")
           _codex_exit=$?
           if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
             _answer_provider="Codex"
@@ -1637,10 +1702,11 @@ print(build_system_prompt(
       printf '%s\n' "$reply" > "$JOBS_DIR/$_promoted_job/output.md" 2>>"$LOG_FILE" || true
       JV_JOBS_DIR="$JOBS_DIR" python3 "$JARVIS_DIR/core/jobs.py" finish "$_promoted_job" completed \
         2>>"$LOG_FILE" || true
-      jq -cn --arg key "$conv_key" --arg job "$_promoted_job" \
-        --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg summary "${reply:0:1500}" \
-        '{conv_key:$key,job_id:$job,ts:$ts,summary:$summary}' \
-        >> "$JOBS_DIR/pending_merge.jsonl" 2>>"$LOG_FILE" || true
+      python3 -m core.conversation_context queue-pending \
+        --path "$JOBS_DIR/pending_merge.jsonl" --conv-key "$conv_key" \
+        --context-key "$logical_context_key" --job-id "$_promoted_job" \
+        --timestamp "$(date '+%Y-%m-%d %H:%M')" --summary "${reply:0:1500}" \
+        >>"$LOG_FILE" 2>&1 || true
       log_info "[$session_id] Promoted job $_promoted_job completed (${#reply} chars)"
     else
       printf '（任务失败：模型未产出结果 @ %s）\n' "$(date '+%Y-%m-%d %H:%M')" \
@@ -1761,7 +1827,8 @@ print(build_system_prompt(
   fi
 
   # ── Process [ACTION:...] markers (LLM-driven action system) ──
-  reply=$(process_actions "$reply" "$conv_key" "$message_id" "$allow_actions")
+  reply=$(process_actions "$reply" "$conv_key" "$message_id" "$allow_actions" \
+    "$logical_context_key" "$matter_id" "$session_id")
 
   # ── Detect [SAVE_LATER: title | url] markers and save to watchlater ──
   if echo "$reply" | grep -q '\[SAVE_LATER:'; then
@@ -1820,11 +1887,13 @@ ${_model_footer}"
     # the user-visible reply. A failed Lark send is not recorded as delivered.
     ( JV_CONV_KEY="$conv_key" JV_REPLY="$reply" JV_MSG_ID="$message_id" \
       JV_MODEL="${_answer_model:-$MAIN_MODEL}" JARVIS_DIR="$JARVIS_DIR" \
+      JV_CONTEXT_KEY="$logical_context_key" JV_MATTER_ID="$matter_id" \
       python3 -m core.matter_bridge --conv-key "$conv_key" \
         --record-role assistant --content "$reply" --message-id "$message_id" \
         --model "${_answer_model:-$MAIN_MODEL}" \
         --provider "${_answer_provider:-Claude primary}" \
-        --session-id "$session_id" >>"$LOG_FILE" 2>&1 & )
+        --session-id "$session_id" --context-key "$logical_context_key" \
+        --matter-id "$matter_id" >>"$LOG_FILE" 2>&1 & )
     resolve_memorial_thread_after_reply "$conv_key" "$reply"
   fi
 }
@@ -1847,6 +1916,21 @@ resolve_memorial_thread_after_reply() {
 # Runs a Claude task in an independent session, notifies on completion.
 run_background_job() {
   local job_id="$1" conv_key="$2" content="$3" message_id="$4"
+  local job_context_key="conversation:$conv_key" source_session_id=""
+  _job_scope=$(JV_JOBS_DIR="$JOBS_DIR" JV_JOB_ID="$job_id" python3 -c "
+import json, os
+path = os.path.join(os.environ['JV_JOBS_DIR'], 'registry.json')
+try:
+    job = json.load(open(path)).get(os.environ['JV_JOB_ID'], {})
+    print(job.get('context_key', ''))
+    print(job.get('source_session_id', ''))
+except Exception:
+    print('')
+    print('')
+" 2>>"$LOG_FILE" || true)
+  job_context_key=$(printf '%s\n' "$_job_scope" | sed -n '1p')
+  source_session_id=$(printf '%s\n' "$_job_scope" | sed -n '2p')
+  [ -z "$job_context_key" ] && job_context_key="conversation:$conv_key"
   # claude CLI requires --session-id to be a valid UUID; the old "bg-<jobid>"
   # scheme is rejected ("Invalid session ID. Must be a valid UUID.").
   local bg_session_id
@@ -1897,14 +1981,7 @@ $memory"
   # active session if it has a transcript — the job sees the full dialog
   # history without polluting the main session, and reuses the prompt cache.
   # Falls back to a fresh session for conversations with no history.
-  local _main_sid=""
-  _main_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
-import json, os
-try:
-    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
-except Exception:
-    print('')
-" 2>/dev/null || echo "")
+  local _main_sid="$source_session_id"
 
   # set -m: give the job its OWN process group (REQ-38). Without it the
   # subshell shares bot.sh's group and cancel_job's killpg SIGTERMed the
@@ -1981,10 +2058,11 @@ print(j['status'] if j else 'unknown')
   # message gets this summary prepended, so the dialog "knows" what the job
   # found instead of the result living only in a notification card.
   if [ "$status" = "completed" ]; then
-    jq -cn --arg key "$conv_key" --arg job "$job_id" \
-      --arg ts "$(date '+%Y-%m-%d %H:%M')" --arg summary "${output:0:1500}" \
-      '{conv_key:$key,job_id:$job,ts:$ts,summary:$summary}' \
-      >> "$JOBS_DIR/pending_merge.jsonl" 2>>"$LOG_FILE" || true
+    python3 -m core.conversation_context queue-pending \
+      --path "$JOBS_DIR/pending_merge.jsonl" --conv-key "$conv_key" \
+      --context-key "$job_context_key" --job-id "$job_id" \
+      --timestamp "$(date '+%Y-%m-%d %H:%M')" --summary "${output:0:1500}" \
+      >>"$LOG_FILE" 2>&1 || true
   fi
 
   # Notify user via card
@@ -2775,10 +2853,36 @@ print(content)
       # Explicit Matter commands are deterministic and do not spend a model
       # turn. Ordinary conversation remains untouched.
       if [ "$_inline_cmd_ok" -eq 1 ]; then
-        _matter_cmd=$(python3 -m core.matter_bridge \
-          --content "$content" --conv-key "$conv_key" \
-          --destination-id "${chat_id:-$sender_id}" --chat-type "$chat_type" \
-          2>>"$LOG_FILE" || echo '{"handled":false}')
+        _matter_transition=$(JV_CONTENT="$content" python3 -c "
+import os
+from core.matter_bridge import command_would_transition
+print('true' if command_would_transition(os.environ.get('JV_CONTENT', '')) else 'false')
+" 2>>"$LOG_FILE" || echo false)
+        if [ "$_matter_transition" = "true" ]; then
+          _current_sid=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" python3 -c "
+import json, os
+try:
+    print(json.load(open(os.environ['JV_TRACKER'])).get(os.environ['JV_KEY'], {}).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+          _current_lock="$JARVIS_DIR/.session_lock_${_current_sid}"
+          _dispatch_active=0
+          _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
+          if find "$JARVIS_DIR" -maxdepth 1 \
+               -name ".dispatch_conv_${_conv_dispatch_key}_*" -print -quit 2>/dev/null \
+               | grep -q .; then
+            _dispatch_active=1
+          fi
+          if { [ -n "$_current_sid" ] && [ -f "$_current_lock" ]; } \
+             || [ "$_dispatch_active" -eq 1 ]; then
+            delivery_reply_reliable "$message_id" \
+              "当前回复还在运行。请先发停止，再新开、切换或重置会话。" || true
+            continue
+          fi
+        fi
+        _matter_cmd=$(run_matter_command \
+          "$content" "$conv_key" "${chat_id:-$sender_id}" "$chat_type")
         if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
           if delivery_reply_reliable "$message_id" "$_matter_reply"; then
@@ -2873,6 +2977,7 @@ except Exception:
     print('')
 " 2>/dev/null || echo "")
         _stop_lock="$JARVIS_DIR/.session_lock_${_stop_sid}"
+        _stopped_any=0
         if [ -f "$_stop_lock" ]; then
           # Lock format is "<pid> <token>" — take the first field
           _stop_pid=$(awk '{print $1}' "$_stop_lock" 2>/dev/null)
@@ -2896,13 +3001,40 @@ except Exception:
               kill -KILL "$_stop_pid" 2>/dev/null || true
             fi
             log_info "[$_stop_sid] Killed by user (PID $_stop_pid)"
+            _stopped_any=1
           else
             log_warn "[$_stop_sid] Stale/foreign PID $_stop_pid in lock — refusing to kill"
           fi
           rm -f "$_stop_lock"
-          lark_reply_text "$message_id" "Stopped. Session is free now." >/dev/null
+        fi
+        # A handler can be queued before it owns a provider lock.  Its
+        # conversation-scoped marker carries the subshell PID so stop remains a
+        # truthful escape hatch before, during, and after lock acquisition.
+        _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
+        for _queued_marker in "$JARVIS_DIR"/.dispatch_conv_${_conv_dispatch_key}_*; do
+          [ -f "$_queued_marker" ] || continue
+          _queued_pid=$(cat "$_queued_marker" 2>/dev/null)
+          _queued_safe=0
+          if [ -n "$_queued_pid" ] && [[ "$_queued_pid" =~ ^[0-9]+$ ]] \
+             && kill -0 "$_queued_pid" 2>/dev/null; then
+            _walk_pid="$_queued_pid"
+            while [ "$_walk_pid" -gt 1 ] 2>/dev/null; do
+              [ "$_walk_pid" = "$$" ] && { _queued_safe=1; break; }
+              _walk_pid=$(ps -o ppid= -p "$_walk_pid" 2>/dev/null | tr -d ' ')
+              [ -z "$_walk_pid" ] && break
+            done
+          fi
+          if [ "$_queued_safe" -eq 1 ]; then
+            kill "$_queued_pid" 2>/dev/null || true
+            _stopped_any=1
+            log_info "Queued handler killed by user (PID $_queued_pid)"
+          fi
+          rm -f "$_queued_marker"
+        done
+        if [ "$_stopped_any" -eq 1 ]; then
+          lark_reply_text "$message_id" "已停止。现在可以切换或重置会话。" >/dev/null
         else
-          lark_reply_text "$message_id" "Nothing running." >/dev/null
+          lark_reply_text "$message_id" "当前没有运行或排队中的回复。" >/dev/null
         fi
         continue
       fi
@@ -2926,29 +3058,52 @@ except Exception:
         _session_max="${BACKUP_MAX_SESSION_SIZE:-100000}"
       fi
 
-      session_result=$(get_session_id "$conv_key" "$_session_max" 2>&1)
+      _snapshot_binding_flag=()
+      [ "$_owner_p2p" -eq 1 ] || _snapshot_binding_flag=(--ignore-binding)
+      _context_snapshot=$(python3 -m core.conversation_context snapshot \
+        --conv-key "$conv_key" "${_snapshot_binding_flag[@]}" \
+        2>>"$LOG_FILE" || echo '{}')
+      logical_context_key=$(echo "$_context_snapshot" | jq -r '.context_key // empty')
+      matter_id=$(echo "$_context_snapshot" | jq -r '.matter_id // empty')
+      compact_key=$(echo "$_context_snapshot" | jq -r '.compact_key // empty')
+      if [ -z "$logical_context_key" ]; then
+        logical_context_key="conversation:$conv_key"
+        compact_key="$conv_key"
+      fi
+
+      session_result=$(get_session_id "$conv_key" "$_session_max" \
+        "$logical_context_key" 2>&1)
       session_id=$(echo "$session_result" | tail -1)
       rotated=$(echo "$session_result" | grep ROTATED || true)
+      _rotation_reason=$(echo "$rotated" | awk '{print $2}' | tail -1)
 
       # A bound Lark conversation and its provider session are two pointers to
       # the same Matter. Also record the incoming turn after dedup succeeds.
       ( JV_CONV_KEY="$conv_key" JV_SESSION_ID="$session_id" JV_CONTENT="$content" \
-        JV_MSG_ID="$message_id" JARVIS_DIR="$JARVIS_DIR" python3 -c "
+        JV_MSG_ID="$message_id" JV_CONTEXT_KEY="$logical_context_key" \
+        JV_MATTER_ID="$matter_id" JARVIS_DIR="$JARVIS_DIR" python3 -c "
 import os, sys
 sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.matter_bridge import get_binding, record_turn
+from core.matter_bridge import record_turn
 from core.matters import link_entity
-b = get_binding(os.environ['JV_CONV_KEY'])
 record_turn(os.environ['JV_CONV_KEY'], 'user', os.environ['JV_CONTENT'],
-            os.environ.get('JV_MSG_ID', ''))
-if b:
-    link_entity(b['matter_id'], 'session', os.environ['JV_SESSION_ID'],
+            os.environ.get('JV_MSG_ID', ''),
+            context_key=os.environ['JV_CONTEXT_KEY'],
+            matter_id=os.environ.get('JV_MATTER_ID', ''))
+if os.environ.get('JV_MATTER_ID'):
+    link_entity(os.environ['JV_MATTER_ID'], 'session', os.environ['JV_SESSION_ID'],
                 provider='claude', title='Jarvis 飞书会话',
                 metadata={'conv_key': os.environ['JV_CONV_KEY']}, actor='lark')
 " >>"$LOG_FILE" 2>&1 & )
 
       if [ -n "$rotated" ]; then
-        log_info "Session rotated for $conv_key → $session_id"
+        log_info "Session rotated for $conv_key → $session_id (reason=${_rotation_reason:-unknown})"
+      fi
+
+      # Only a capacity rotation within the SAME logical context may summarize
+      # the previous physical transcript into the selected compact. A context
+      # transition must never write the old topic into the new Matter.
+      if [ "$_rotation_reason" = "size" ]; then
         python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.heartbeat import HeartbeatRunner
@@ -2962,6 +3117,7 @@ runner.run_cycle(force=True, only_task='memory-hourly', lock_wait=120)
         # Generate session compact synchronously — must complete before handle_message
         # reads it, otherwise the new session may see a partial/missing compact.
         if JV_DIR="$JARVIS_DIR" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_KEY="$conv_key" \
+          JV_COMPACT_KEY="$compact_key" \
           JV_WORK="$WORK_DIR" python3 -c "
 import sys, os, json
 sys.path.insert(0, os.environ['JV_DIR'])
@@ -2971,7 +3127,7 @@ counter = tracker.get(os.environ['JV_KEY'], {}).get('counter', 0)
 old_sid = get_old_session_id(os.environ['JV_KEY'], counter)
 if old_sid:
     compact = generate_compact(os.environ['JV_DIR'], os.environ['JV_SDIR'],
-                               old_sid, os.environ['JV_KEY'], os.environ['JV_WORK'])
+                               old_sid, os.environ['JV_COMPACT_KEY'], os.environ['JV_WORK'])
     if not compact:
         raise SystemExit(1)
 " 2>>"$LOG_FILE" >/dev/null; then
@@ -3006,29 +3162,13 @@ if old_sid:
       # instead of the result living only in a notification card.
       _pm_file="$JOBS_DIR/pending_merge.jsonl"
       if [ -f "$_pm_file" ]; then
-        _pm_text=$(JV_PM="$_pm_file" JV_KEY="$conv_key" python3 -c "
-import json, os
-path, key = os.environ['JV_PM'], os.environ['JV_KEY']
-keep, mine = [], []
-try:
-    for line in open(path):
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        (mine if e.get('conv_key') == key else keep).append(e)
-except OSError:
-    raise SystemExit
-if mine:
-    # Small append-vs-rewrite race window with a job finishing right now is
-    # acceptable: a lost merge degrades to card-only delivery.
-    tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        for e in keep:
-            f.write(json.dumps(e, ensure_ascii=False) + '\n')
-    os.replace(tmp, path)
-    for e in mine:
-        print(f\"[后台任务 {e.get('job_id','')} 已完成 @ {e.get('ts','')}]\n{e.get('summary','')}\n\")
+        _pm_text=$(python3 -m core.conversation_context claim-pending \
+          --path "$_pm_file" --conv-key "$conv_key" \
+          --context-key "$logical_context_key" 2>>"$LOG_FILE" \
+          | python3 -c "
+import json, sys
+for e in json.load(sys.stdin):
+    print(f\"[后台任务 {e.get('job_id','')} 已完成 @ {e.get('ts','')}]\n{e.get('summary','')}\n\")
 " 2>>"$LOG_FILE")
         if [ -n "$_pm_text" ]; then
           content="${_pm_text}
@@ -3038,7 +3178,13 @@ ${content}"
       fi
 
       # Dispatch to background — main loop continues immediately
-      handle_message "$conv_key" "$content" "$message_id" "$session_id" "$reaction_id" "$chat_type" "$sender_id" &
+      _dispatch_suffix=$(printf '%s' "$message_id" | shasum -a 256 | cut -c1-16)
+      _conv_dispatch_key=$(printf '%s' "$conv_key" | shasum -a 256 | cut -c1-16)
+      _dispatch_marker="$JARVIS_DIR/.dispatch_conv_${_conv_dispatch_key}_${_dispatch_suffix}"
+      : > "$_dispatch_marker"
+      handle_message "$conv_key" "$content" "$message_id" "$session_id" \
+        "$reaction_id" "$chat_type" "$sender_id" "$logical_context_key" \
+        "$matter_id" "$_dispatch_marker" &
       log_info "[$session_id] Dispatched to background handler (PID $!)"
       done
 }

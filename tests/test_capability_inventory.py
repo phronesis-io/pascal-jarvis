@@ -224,6 +224,10 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
         "admin-route:post:/api/bot/restart",
         "lark:model:codex",
         "lark:matter:handoff",
+        "lark:session:new",
+        "lark:session:switch",
+        "lark:session:reset",
+        "lark:session:close",
         "lark:eigenflux:publish-confirm",
     ):
         assert capability_id in by_id

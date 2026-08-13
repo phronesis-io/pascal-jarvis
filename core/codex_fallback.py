@@ -1,13 +1,15 @@
 """Codex CLI execution rung for owner-initiated Lark conversations.
 
 This route reuses the local ChatGPT/Codex login rather than an API key. Each
-Lark conversation keeps one Codex thread so switching providers does not turn
-every message into a context-free one-shot call.
+logical Matter context keeps one Codex thread so switching providers does not
+turn every message into a context-free one-shot call or cross unrelated work.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -17,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +92,25 @@ class CliResult:
 def _db():
     from dashboard.db import get_db
     return get_db()
+
+
+@contextmanager
+def _logical_context_lock(context_key: str):
+    """Serialize one Codex thread across every transport bound to a Matter."""
+    identity = f"{os.environ.get('JARVIS_DIR', '')}\0{context_key}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    root = Path(tempfile.gettempdir()) / "jarvis-codex-context-locks"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+    with (root / f"{digest}.lock").open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def resolve_codex_bin(configured: str = "") -> str:
@@ -353,10 +375,20 @@ def invoke_codex(
 
 
 def load_session(conv_key: str) -> dict[str, str] | None:
-    row = _db().execute(
+    key = str(conv_key)
+    db = _db()
+    row = db.execute(
         "SELECT * FROM codex_conversation_sessions WHERE conv_key = ?",
-        (str(conv_key),),
+        (key,),
     ).fetchone()
+    # The logical-session data repair migrates an old transport-scoped row into
+    # its explicit unbound key. Preserve the old read API for diagnostics and
+    # callers that have not adopted context_key yet.
+    if row is None and not key.startswith(("conversation:", "matter:")):
+        row = db.execute(
+            "SELECT * FROM codex_conversation_sessions WHERE conv_key = ?",
+            (f"conversation:{key}",),
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -381,9 +413,13 @@ def save_session(conv_key: str, thread_id: str, model: str, work_dir: str) -> No
 
 def clear_session(conv_key: str) -> None:
     db = _db()
+    key = str(conv_key)
+    keys = [key]
+    if not key.startswith(("conversation:", "matter:")):
+        keys.append(f"conversation:{key}")
     db.execute(
-        "DELETE FROM codex_conversation_sessions WHERE conv_key = ?",
-        (str(conv_key),),
+        f"DELETE FROM codex_conversation_sessions WHERE conv_key IN ({','.join('?' for _ in keys)})",
+        keys,
     )
     db.commit()
 
@@ -409,6 +445,7 @@ def run_fallback(
     binary: str = "",
     allow_tools: bool = True,
     process_holder: dict[str, Any] | None = None,
+    context_key: str = "",
 ) -> str:
     key = str(conv_key or "").strip()
     if not key:
@@ -418,32 +455,37 @@ def run_fallback(
         raise CodexUnavailableError("Codex CLI not found")
     ensure_codex_authenticated(resolved)
     work = str(Path(work_dir).expanduser().resolve())
-    saved = load_session(key)
-    thread_id = ""
-    if saved:
-        if saved.get("model") == model and saved.get("work_dir") == work:
-            thread_id = str(saved.get("thread_id") or "")
-        else:
-            clear_session(key)
-    kwargs = {
-        "prompt": compose_prompt(system_prompt, content),
-        "thread_id": thread_id,
-        "model": model,
-        "timeout": timeout,
-        "work_dir": work,
-        "binary": resolved,
-        "allow_tools": allow_tools,
-        "process_holder": process_holder,
-    }
-    try:
-        result = invoke_codex(**kwargs)
-    except StaleSessionError:
-        # A definitely missing local thread has performed no model turn, so a
-        # single fresh retry is safe. All ambiguous failures remain fail-closed.
-        clear_session(key)
-        kwargs["thread_id"] = ""
-        result = invoke_codex(**kwargs)
-    save_session(key, result.thread_id, model, work)
+    # Callers predating logical sessions keep their original storage key. The
+    # resident bot passes context_key explicitly, so new production turns are
+    # isolated by Matter without breaking library/CLI compatibility.
+    storage_key = str(context_key or "").strip() or key
+    with _logical_context_lock(storage_key):
+        saved = load_session(storage_key)
+        thread_id = ""
+        if saved:
+            if saved.get("model") == model and saved.get("work_dir") == work:
+                thread_id = str(saved.get("thread_id") or "")
+            else:
+                clear_session(storage_key)
+        kwargs = {
+            "prompt": compose_prompt(system_prompt, content),
+            "thread_id": thread_id,
+            "model": model,
+            "timeout": timeout,
+            "work_dir": work,
+            "binary": resolved,
+            "allow_tools": allow_tools,
+            "process_holder": process_holder,
+        }
+        try:
+            result = invoke_codex(**kwargs)
+        except StaleSessionError:
+            # A definitely missing local thread has performed no model turn, so a
+            # single fresh retry is safe. All ambiguous failures remain fail-closed.
+            clear_session(storage_key)
+            kwargs["thread_id"] = ""
+            result = invoke_codex(**kwargs)
+        save_session(storage_key, result.thread_id, model, work)
     return result.text
 
 
@@ -462,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     config = Config()
     parser = argparse.ArgumentParser()
     parser.add_argument("--conv-key", required=True)
+    parser.add_argument("--context-key", default="")
     parser.add_argument("--system-prompt-file", default=os.environ.get(
         "JV_SYSTEM_PROMPT_FILE", ""))
     parser.add_argument("--model", default=str(
@@ -496,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             binary=args.binary,
             allow_tools=not args.no_tools,
             process_holder=holder,
+            context_key=args.context_key,
         )
     except CodexUnavailableError as exc:
         print(f"codex fallback error: {exc}", file=sys.stderr)

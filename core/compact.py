@@ -7,6 +7,7 @@ the new session's system prompt so context is preserved across rotations.
 """
 
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -78,7 +79,10 @@ def _extract_all_turns(session_dir: Path, session_id: str,
 
 def get_compact_path(jarvis_dir: str | Path, conv_key: str) -> Path:
     """Return the path where a compact summary is stored for a conv_key."""
-    return Path(jarvis_dir) / COMPACT_DIR_NAME / f"{conv_key}.md"
+    safe_key = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(conv_key or "").strip())
+    if not safe_key:
+        raise ValueError("compact context key is required")
+    return Path(jarvis_dir) / COMPACT_DIR_NAME / f"{safe_key}.md"
 
 
 def read_compact(jarvis_dir: str | Path, conv_key: str) -> str:

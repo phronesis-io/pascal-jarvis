@@ -165,6 +165,12 @@ the exact release commit or a healthy resident descendant that contains it.
   Storage and rendering only — Jarvis has no mail send transport, and no
   status in this module means "sent".
 - `core.matters`: durable topic identity and executor context.
+- `core.conversation_context`: logical-session identity and derived-context
+  reset. A Matter is the user-facing session; Claude/Codex session IDs are
+  disposable provider windows. Compact summaries, recent provider turns, and
+  Codex threads are scoped by the logical key rather than the Lark chat. Reset
+  advances a context generation: old transcripts remain auditable, while old
+  turns, compacts, deferred results, and late receipts cannot re-enter prompts.
 - `core.continuity`: device handoff leases and resume state. Each operation
   owns and closes its SQLite connection; active-handoff creation is atomic.
 - `core.perception`: typed inbound signals and sensitivity.
@@ -183,7 +189,9 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
-  control, and one durable Codex thread per Lark conversation. It uses the
+  control, and one durable Codex thread per logical Matter context. It uses the
+  logical context as a cross-transport process lock, so two entrances cannot
+  concurrently resume the same Codex thread. It uses the
   workspace-write review sandbox and never serves group or non-owner traffic.
   A later provider may replay the request only when Codex emits a recognized
   terminal unavailability event before any executable item; incomplete,

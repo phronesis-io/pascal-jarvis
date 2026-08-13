@@ -23,8 +23,22 @@ def test_create_job(tmp_path):
     assert job["status"] == "running"
     assert job["session_id"] == f"bg-{job_id}"
     assert job["message_id"] == "msg-123"
+    assert job["context_key"] == "conversation:user-1"
     # Job directory should exist
     assert (tmp_path / "jobs" / job_id).is_dir()
+
+
+def test_create_job_preserves_logical_session_scope(tmp_path):
+    jm = JobManager(tmp_path / "jobs")
+    job_id = jm.create_job(
+        "owner", "matter work", matter_id="mat_one",
+        context_key="matter:mat_one", source_session_id="source-one",
+    )
+
+    job = jm.get_job(job_id)
+    assert job["matter_id"] == "mat_one"
+    assert job["context_key"] == "matter:mat_one"
+    assert job["source_session_id"] == "source-one"
 
 
 def test_update_job_reports_presence_and_records_provider_session(tmp_path):
