@@ -35,6 +35,7 @@ from core.intent_lifecycle import mark_executed, mark_failed, get_intent
 from core.intent_closure import record_closure, note_closure_touch
 from core.intent_scheduler import (
     read_inflight, read_inflight_breaches, reconcile_inflight,
+    defer_inflight_infrastructure,
     mark_breaches_shown, validate_envelope,
 )
 from core.card import build_card
@@ -461,6 +462,14 @@ def main():
     inflight = read_inflight()
     if not raw and not inflight:
         return  # nothing to do and no manifest to reconcile
+
+    if raw == "__CALL_FAILED__":
+        result = defer_inflight_infrastructure()
+        if result["deferred"]:
+            print(f"[intentions_post] infrastructure failure deferred "
+                  f"without attempt charge: {result['deferred']}",
+                  file=sys.stderr)
+        return
 
     if not raw or raw == "__NO_ENVELOPE__":
         # Deterministic no-envelope path (REQ-30b): the runner saw

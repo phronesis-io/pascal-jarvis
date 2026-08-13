@@ -146,6 +146,21 @@ def test_no_envelope_sentinel_reconciles_everything(monkeypatch, capsys):
     assert capsys.readouterr().out == ""       # nothing user-facing
 
 
+def test_call_failed_sentinel_defers_without_content_attempt(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(ip, "read_inflight", lambda: ["int_b"])
+    monkeypatch.setattr(
+        ip, "defer_inflight_infrastructure",
+        lambda: (calls.append(True), {"deferred": ["int_b"]})[1],
+    )
+    monkeypatch.setattr("sys.stdin", _Stdin("__CALL_FAILED__"))
+
+    ip.main()
+
+    assert calls == [True]
+    assert capsys.readouterr().out == ""
+
+
 def test_envelope_reconciles_covered_ids(monkeypatch, capsys):
     """A parsed envelope reconciles with exactly the covered ids, so the
     uncovered remainder gets the retry policy."""

@@ -15,11 +15,11 @@ skipped intent's `category` (behavioral_rules §5 — the existing taxonomy):
     which carried tags=[] so a tags whitelist would have missed it) gets
     PER-ITEM backfill: one breach entry per occurrence with the original
     prompt riding along (batch 4, armed 7/9 after the shadow period).
-  - healing/autonomous occurrences are consumed silently: they are private
-    maintenance or non-nagging care, so a scheduler miss is operational data,
-    not a new demand on Pascal's attention.
-  - everything else (other categories, or a KNOWN-absent row — deleted intent)
-    still folds into ONE aggregate entry ("停摆期间跳过了 N 件事").
+  - category='external' occurrences fold into ONE aggregate entry
+    ("停摆期间跳过了 N 件事").
+  - context/healing/autonomous/none/unknown and KNOWN-absent rows are consumed
+    silently: they are operational history, not a new demand on Pascal's
+    attention.
   - an event whose category lookup FAILED (db unreadable, not row-absent) is
     deferred untouched and retried next scan — never consumed on a failure
     (F-13; the old fail-open-to-aggregate permanently downgraded bills).
@@ -68,10 +68,10 @@ CONSUMED_RETENTION_S = 72 * 3600   # prune consumed keys once they age out of
 TS_FMT = "%Y-%m-%d %H:%M:%S"       # sched_events timestamp format
 
 # Intent categories that get per-item backfill instead of the aggregate line.
-# Only ① 硬约束 — the other surfaced classes (context/external) are prep/follow
-# -up whose moment already passed, and ③ healing must never be chased at all.
+# Only ① 硬约束 gets a per-item recovery; external misses aggregate. Context,
+# healing, autonomous, none, unknown, and deleted rows stay operational-only.
 BACKFILL_CATEGORIES = ("hard",)
-SILENT_CATEGORIES = ("healing", "autonomous")
+SURFACE_CATEGORIES = ("hard", "external")
 
 # Sentinel returned by _intent_row when the LOOKUP ITSELF failed (db
 # unreadable / WAL recovery error / disk error) — as opposed to None, which
@@ -137,10 +137,9 @@ def _intent_row(jarvis_dir: Path, intent_id: str):
     (no id, no db at all, or the row is absent — a deleted intent), or
     _LOOKUP_FAILED when the lookup ITSELF failed (WAL read-only recovery
     error after an unclean shutdown, corrupted db, disk error). The caller
-    treats None as "degrade to the aggregate digest and consume" but
-    _LOOKUP_FAILED as "defer — retry next scan" (F-13): a transient sqlite
-    error must not permanently downgrade a 硬约束 bill whose digest copy
-    promises 会单独补发.
+    treats None as "consume silently" but _LOOKUP_FAILED as "defer — retry
+    next scan" (F-13): a transient sqlite error must not permanently
+    downgrade a 硬约束 bill whose digest copy promises 会单独补发.
 
     Deliberately NOT core.intentions.get_intent(): that helper is pinned to
     the repo-ROOT db and runs the table-creation path on first use, while
@@ -296,10 +295,12 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                 continue
             if row and row.get("category") in BACKFILL_CATEGORIES:
                 backfill.append((e, row))
-            elif row and row.get("category") in SILENT_CATEGORIES:
-                silent.append(e)
-            else:
+            elif row and row.get("category") in SURFACE_CATEGORIES:
                 aggregate.append(e)
+            else:
+                # Missing/deleted rows and all may_notify=false categories are
+                # operational history, not a demand on Pascal's attention.
+                silent.append(e)
         if deferred:
             print(f"[skip-digest] {deferred} event(s) deferred — "
                   f"category lookup failed, retrying next scan",
@@ -352,7 +353,7 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                   file=sys.stderr)
 
         # 2. Consumed state — ONLY events whose classification succeeded
-        #    (backfill + aggregate). Deferred events stay unconsumed.
+        #    (backfill + aggregate + silent). Deferred events stay unconsumed.
         consumed = {k: t for k, t in state.get("consumed", {}).items()
                     if now - float(t) < CONSUMED_RETENTION_S}
         for e, _row in backfill:
@@ -397,8 +398,8 @@ def diag_line(jarvis_dir: Path = ROOT) -> str:
         n = 0
         for event in _recent_skip_events(Path(jarvis_dir)):
             row = _intent_row(Path(jarvis_dir), event.get("task", ""))
-            if row is not _LOOKUP_FAILED and row \
-                    and row.get("category") in SILENT_CATEGORIES:
+            if row is not _LOOKUP_FAILED and (
+                    row is None or row.get("category") not in SURFACE_CATEGORIES):
                 continue
             n += 1
         if n > 0:

@@ -72,8 +72,10 @@ def test_filter_consumes_only_skip_classes(tmp_path):
     assert {e["task"] for e in events} == {"int_a", "int_b"}
 
 
-def test_first_run_queues_digest_and_rerun_is_idempotent(tmp_path):
+def test_first_run_queues_digest_and_rerun_is_idempotent(tmp_path, monkeypatch):
     jd = tmp_path
+    monkeypatch.setattr(sd, "_intent_row", lambda *_: {
+        "name": "external", "prompt": "", "category": "external"})
     _emit_skip(jd, "int_a", "信用卡还款提醒", hours_ago=3)
     _emit_skip(jd, "int_b", "Tushare token 提醒", hours_ago=2)
 
@@ -118,6 +120,8 @@ def test_canonical_root_writes_breach_to_sqlite_boundary(
         scheduler, "store_breach_entry",
         lambda entry: captured.append(entry),
     )
+    monkeypatch.setattr(sd, "_intent_row", lambda *_: {
+        "name": "external", "prompt": "", "category": "external"})
     _emit_skip(tmp_path, "int_sql", "SQLite breach")
 
     assert sd.queue_digest(tmp_path, force=True) == 1
@@ -128,6 +132,8 @@ def test_canonical_root_writes_breach_to_sqlite_boundary(
 def test_consumed_written_before_breach_append(tmp_path, monkeypatch):
     """Crash between state write and queue append must lose, not duplicate."""
     jd = tmp_path
+    monkeypatch.setattr(sd, "_intent_row", lambda *_: {
+        "name": "external", "prompt": "", "category": "external"})
     _emit_skip(jd, "int_a", "重要提醒")
 
     real_open = open
@@ -149,8 +155,10 @@ def test_consumed_written_before_breach_append(tmp_path, monkeypatch):
     assert _breach_lines(jd) == []
 
 
-def test_diag_line_two_states(tmp_path):
+def test_diag_line_two_states(tmp_path, monkeypatch):
     jd = tmp_path
+    monkeypatch.setattr(sd, "_intent_row", lambda *_: {
+        "name": "external", "prompt": "", "category": "external"})
     assert sd.diag_line(jd).startswith("✓")
     _emit_skip(jd, "int_a", "x")
     line = sd.diag_line(jd)
@@ -166,6 +174,8 @@ def test_digest_entry_rides_full_breach_chain(tmp_path, monkeypatch):
     jd = tmp_path
     monkeypatch.setattr(intentions, "BREACH_QUEUE",
                         jd / "data" / ".intent_breach_queue.jsonl")
+    monkeypatch.setattr(sd, "_intent_row", lambda *_: {
+        "name": "external", "prompt": "", "category": "external"})
 
     _emit_skip(jd, "int_a", "信用卡还款提醒")
     assert sd.queue_digest(jd, force=True) == 1

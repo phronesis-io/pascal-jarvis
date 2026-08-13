@@ -1523,6 +1523,21 @@ def main():
                     # NOT unlatch (gate logic in _maybe_clear_breaker_latch).
                     _maybe_clear_breaker_latch(result)
                     _maybe_reset_restart_budget(result)
+                    # A local watchdog cannot report a powered-off Mac or a
+                    # FileVault/pre-login stall. An optional external
+                    # missed-ping service can. Ping only from a genuinely
+                    # healthy stack; fake-healthy grace paths carry a note and
+                    # must not mask the outage externally.
+                    if not result.get("note"):
+                        try:
+                            from core.deadman import ping_due
+                            deadman = ping_due(JARVIS_DIR)
+                            if deadman.status == "failed":
+                                log("WARN", f"External dead-man ping failed: "
+                                    f"{deadman.detail}")
+                        except Exception as exc:
+                            log("WARN", "External dead-man check crashed: "
+                                f"{type(exc).__name__}")
                 else:
                     consecutive_failures += 1
                     log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")

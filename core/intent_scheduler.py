@@ -7,6 +7,7 @@ from core import intentions as _legacy
 __all__ = [
     "clear_breaches",
     "clear_inflight",
+    "defer_inflight_infrastructure",
     "generate_calendar_intents",
     "get_due_intents",
     "mark_breaches_shown",

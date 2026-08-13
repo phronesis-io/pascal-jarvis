@@ -77,7 +77,7 @@ def test_hard_category_split_from_aggregate(tmp_path):
 
     assert sd.queue_digest(jd, force=True) == 3
     lines = _breach_lines(jd)
-    assert len(lines) == 2
+    assert len(lines) == 1
 
     item = next(l for l in lines if l["id"].startswith("skipitem_"))
     assert item["id"].startswith("skipitem_int_bill_")
@@ -90,19 +90,16 @@ def test_hard_category_split_from_aggregate(tmp_path):
     for field in ("prompt", "purpose", "trigger_time", "attempt"):
         assert field in item
 
-    digest = next(l for l in lines if l["id"].startswith("skipdigest_"))
-    assert digest["name"] == "停摆期间跳过了 2 件事"
-    assert "会议 prep" in digest["prompt"]
-    assert "已删除的提醒" in digest["prompt"]
-    assert "七月信用卡还款" not in digest["prompt"]   # not double-reported
-    assert "不逐条补发" in digest["prompt"]           # untagged promise kept
-    assert "单独补发" in digest["prompt"]             # …with the carve-out
+    # context and a deleted/unknown row are consumed as operational history;
+    # neither may take Pascal's attention.
+    assert not [entry for entry in lines
+                if entry["id"].startswith("skipdigest_")]
 
     # all three consumed; rerun adds nothing (watchdog-restart scenario)
     state = json.loads((jd / "data" / ".skip_digest_state.json").read_text())
     assert len(state["consumed"]) == 3
     assert sd.queue_digest(jd, force=True) == 0
-    assert len(_breach_lines(jd)) == 2
+    assert len(_breach_lines(jd)) == 1
 
 
 def test_autonomous_and_healing_skips_are_audited_without_user_breach(tmp_path):
@@ -121,13 +118,11 @@ def test_autonomous_and_healing_skips_are_audited_without_user_breach(tmp_path):
     assert sd.diag_line(jd).startswith("✓")
 
 
-def test_no_db_degrades_to_aggregate_only(tmp_path):
+def test_no_db_consumes_silently_without_inventing_attention(tmp_path):
     jd = tmp_path
     _emit_skip(jd, "int_bill", "信用卡还款提醒")
     assert sd.queue_digest(jd, force=True) == 1
-    lines = _breach_lines(jd)
-    assert len(lines) == 1
-    assert lines[0]["id"].startswith("skipdigest_")   # batch-1 behavior
+    assert _breach_lines(jd) == []
 
 
 def test_crash_between_deliver_and_consume_redelivers_without_dup(tmp_path,
@@ -228,10 +223,7 @@ def test_partial_lookup_failure_defers_only_failed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sd, "_intent_row", flaky)
     assert sd.queue_digest(jd, force=True) == 1     # only int_prep consumed
-    lines = _breach_lines(jd)
-    assert len(lines) == 1 and lines[0]["id"].startswith("skipdigest_")
-    assert "会议 prep" in lines[0]["prompt"]
-    assert "信用卡还款提醒" not in lines[0]["prompt"]   # deferred, not folded
+    assert _breach_lines(jd) == []
     state = json.loads((jd / "data" / ".skip_digest_state.json").read_text())
     assert len(state["consumed"]) == 1
 
@@ -288,8 +280,8 @@ def test_backfill_append_holds_shared_writer_lock(tmp_path, monkeypatch):
 
     assert sd.queue_digest(jd, force=True) == 2
     queue = jd / "data" / ".intent_breach_queue.jsonl"
-    assert locked_paths == [queue, queue]       # backfill + aggregate appends
-    assert len(_breach_lines(jd)) == 2
+    assert locked_paths == [queue]              # hard backfill only
+    assert len(_breach_lines(jd)) == 1
 
 
 def test_rewrite_blocks_while_writer_lock_held(tmp_path, monkeypatch):

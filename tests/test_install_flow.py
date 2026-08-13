@@ -368,6 +368,17 @@ def test_session_backup_accepts_apostrophes_in_paths(tmp_path):
     home.mkdir()
     repo.mkdir()
     work.mkdir()
+    claude_memory = home / ".claude" / "projects" / "shared" / "memory"
+    codex_memory = home / ".Codex" / "projects" / "shared" / "memory"
+    claude_memory.mkdir(parents=True)
+    codex_memory.mkdir(parents=True)
+    (claude_memory / "note.md").write_text("claude memory\n")
+    (codex_memory / "note.md").write_text("codex memory\n")
+    old_session = home / ".claude" / "projects" / "shared" / "old.jsonl"
+    old_session.write_text("{}\n")
+    old_session.chmod(0o600)
+    old_time = 1_600_000_000
+    os.utime(old_session, (old_time, old_time))
     (repo / "data").mkdir()
     (repo / "active_sessions.json").write_text(
         '{"main": {"session_id": "session-1"}}',
@@ -392,8 +403,16 @@ def test_session_backup_accepts_apostrophes_in_paths(tmp_path):
     assert result.returncode == 0, result.stderr
     assert (repo / ".last_backup_ok").exists()
     assert (work / "session_backups" / "latest").is_symlink()
+    latest = work / "session_backups" / "latest"
+    assert (latest / "memory" / "claude" / "shared" / "note.md").read_text() == (
+        "claude memory\n"
+    )
+    assert (latest / "memory" / "codex" / "shared" / "note.md").read_text() == (
+        "codex memory\n"
+    )
+    assert old_session.stat().st_mode & 0o777 == 0o600
     with sqlite3.connect(
-        work / "session_backups" / "latest" / "jarvis.db"
+        latest / "jarvis.db"
     ) as backup:
         assert backup.execute("SELECT value FROM proof").fetchone() == (
             "wal-safe",

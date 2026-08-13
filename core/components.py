@@ -227,6 +227,13 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
             f"age {age_h:.1f}h (max {max_h:.0f}h)")
 
 
+def _check_deadman(comp: dict, root: Path) -> tuple[bool, str]:
+    from core.deadman import status
+
+    result = status(root)
+    return result.status == "ok", result.detail
+
+
 def _check_audit_age(comp: dict, root: Path) -> tuple[bool, str]:
     p = root / comp.get("path", "")
     max_h = float(comp.get("max_age_hours", 24))
@@ -370,6 +377,7 @@ _CHECKS = {
     "pgrep": _check_pgrep,
     "http": _check_http,
     "file_age": _check_file_age,
+    "deadman": _check_deadman,
     "audit_age": _check_audit_age,
     "heartbeat_tasks": _check_heartbeat_tasks,
     "launchctl": _check_launchctl,

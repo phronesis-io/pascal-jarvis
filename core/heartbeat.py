@@ -611,22 +611,23 @@ class HeartbeatRunner:
         """
         sched_emit(self.jarvis_dir, event, task=task, run_id=self._cid, **fields)
 
-    def _ack_failed_posts(self, runnable: list) -> None:
-        """Run ACK-required tasks' post-scripts with '__NO_ENVELOPE__' (REQ-30).
+    def _ack_failed_posts(self, runnable: list, *, infrastructure: bool = False) -> None:
+        """Resolve ACK-required tasks when normal post routing is unavailable.
 
-        Called on every path where Claude's reply never reaches the normal
-        post routing (HEARTBEAT_OK early return, empty/failed call, killed,
-        envelope parse failure). For intention-check this resolves the
-        inflight manifest deterministically — retry or expire-with-breach —
-        instead of stranding intents in 'triggered' until they silently die.
+        ``__NO_ENVELOPE__`` means the model did answer but supplied no usable
+        intent content, so it consumes one bounded content attempt.
+        ``__CALL_FAILED__`` means timeout/quota/network/shutdown prevented an
+        evaluation; intention-check restores the claim's attempt budget.
         Output is intentionally discarded (state reconciliation, not content).
         """
+        sentinel = "__CALL_FAILED__" if infrastructure else "__NO_ENVELOPE__"
+        reason = "call_failed_deferred" if infrastructure else "no_envelope_acked"
         for task in runnable:
             if task["name"] in self.ACK_REQUIRED_TASKS and task.get("post"):
                 try:
-                    self.run_script(task["post"], stdin_data="__NO_ENVELOPE__")
+                    self.run_script(task["post"], stdin_data=sentinel)
                     self._event("task_skip", task=task["name"],
-                                reason="no_envelope_acked")
+                                reason=reason)
                 except Exception as e:
                     self._log(f"ACK post for {task['name']} failed: {e}",
                               level="warn")
@@ -677,7 +678,7 @@ class HeartbeatRunner:
             self._event("task_finish", task=name, status="killed",
                         duration_s=dur, heavy=is_heavy,
                         isolation=isolation_reason)
-            self._ack_failed_posts([task])
+            self._ack_failed_posts([task], infrastructure=True)
             return
 
         if not raw:
@@ -712,7 +713,7 @@ class HeartbeatRunner:
                 self._log(f"Context overflow killed isolated task {name} — its "
                           "prompt/DATA payload is too large, a retry cannot "
                           "heal this", level="warn")
-            self._ack_failed_posts([task])
+            self._ack_failed_posts([task], infrastructure=True)
             if tripped:
                 self._log(f"Circuit TRIPPED for isolated task: {name}", level="warn")
                 self._event("circuit_tripped", task=name)
@@ -1796,7 +1797,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 self._event("task_finish", task=task["name"], status="killed",
                             duration_s=call_dur)
             self.save_state(state)
-            self._ack_failed_posts(runnable)
+            self._ack_failed_posts(runnable, infrastructure=True)
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → killed (no penalty)")
             return ""
 
@@ -1840,7 +1841,7 @@ You have access to the user's memory below. Use it to personalize your responses
                           "prompt/DATA payload too large, NOT counted toward "
                           "shared-call backoff", level="warn")
                 self.save_state(state)
-                self._ack_failed_posts(runnable)
+                self._ack_failed_posts(runnable, infrastructure=True)
                 self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
                 return ""
             # One shared streak +1 per failed CYCLE, not per task — six tasks
@@ -1864,7 +1865,7 @@ You have access to the user's memory below. Use it to personalize your responses
                             error=_error_excerpt(self._last_call_error))
             state["__shared_call__"] = shared
             self.save_state(state)
-            self._ack_failed_posts(runnable)
+            self._ack_failed_posts(runnable, infrastructure=True)
             self._log(f"{self._beat_status(due_tasks, skipped, runnable, tasks)} → Claude failed")
             return ""
 
