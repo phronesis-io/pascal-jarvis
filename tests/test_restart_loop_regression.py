@@ -22,6 +22,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 BOT_SH = (ROOT / "bot.sh").read_text()
 RESTART_SH = (ROOT / "restart.sh").read_text()
+HEARTBEAT_LOOP = (ROOT / "core" / "heartbeat_loop.py").read_text()
+LARK_SIDECAR = (ROOT / "scripts" / "lark_event_sidecar.py").read_text()
 
 
 def _existing_work_dir(tmp_path: Path) -> str:
@@ -58,7 +60,10 @@ def test_restart_sh_settles_before_clearing_deploy_guard():
     assert "settle_bot()" in RESTART_SH
     assert "python3 -m core.components --critical" in RESTART_SH
     assert "Settling bot for ${seconds}s" in RESTART_SH
-    full = RESTART_SH[RESTART_SH.index("--full|-f)"):]
+    full = RESTART_SH[
+        RESTART_SH.index("governed_deploy()"):
+        RESTART_SH.index('case "${1:-}"')
+    ]
     assert full.index("_set_deploy_guard") < full.index("kill_bot")
     assert full.index("start_bot") < full.index("settle_bot")
 
@@ -75,12 +80,15 @@ def test_full_restart_refreshes_user_surfaces_and_verifies_all_runtimes():
     assert 'launchctl bootstrap "gui/$UID" "$plist"' in RESTART_SH
     assert 'FULL_RUNTIME_COMPONENTS+=("$runtime_component")' in RESTART_SH
 
-    full = RESTART_SH[RESTART_SH.index("--full|-f)"):]
-    assert full.index("\n    confirm_restart") < full.index(
-        "\n    refresh_launchd_definitions"
+    full = RESTART_SH[
+        RESTART_SH.index("governed_deploy()"):
+        RESTART_SH.index('case "${1:-}"')
+    ]
+    assert full.index("\n  confirm_restart") < full.index(
+        "\n  refresh_launchd_definitions"
     )
-    assert full.index("\n    refresh_launchd_definitions") < full.index(
-        "\n    kill_bot"
+    assert full.index("\n  refresh_launchd_definitions") < full.index(
+        "\n  kill_bot"
     )
     assert full.index("start_bot") < full.index("restart_user_surfaces")
     assert full.index("restart_user_surfaces") < full.index("settle_bot")
@@ -97,6 +105,27 @@ def test_full_restart_refreshes_user_surfaces_and_verifies_all_runtimes():
     assert "python3 -m core.deploy verify" in verify
     assert 'verify_args+=(--require "$component")' in verify
     assert '"${verify_args[@]}"' in verify
+
+
+def test_default_release_and_full_alias_share_the_complete_deploy_path():
+    """A governed code release must never leave launchd residents on old code."""
+    case = RESTART_SH[RESTART_SH.index('case "${1:-}"'):]
+    assert '--full|-f)\n    governed_deploy "Governed Full-Runtime Deploy"' in case
+    assert '\"\")\n    governed_deploy "Governed Full-Runtime Deploy"' in case
+    unknown = case[case.rindex("  *)"):]
+    assert "Unknown option" in unknown
+    assert "governed_deploy" not in unknown
+
+
+def test_admin_restart_handoff_uses_same_revision_runtime_path():
+    """The admin restart button is operational, not an implicit code release."""
+    handoff = '"--runtime", "--yes"'
+    assert handoff in HEARTBEAT_LOOP
+    assert '["bash", str(jd / "restart.sh"), "--yes"]' not in HEARTBEAT_LOOP
+
+
+def test_lark_sidecar_config_restart_does_not_request_a_code_deploy():
+    assert "./restart.sh --runtime --yes" in LARK_SIDECAR
 
 
 def test_full_restart_skips_launchd_work_when_launchctl_is_unavailable():

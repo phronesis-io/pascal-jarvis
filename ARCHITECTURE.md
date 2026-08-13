@@ -196,7 +196,10 @@ the exact release commit or a healthy resident descendant that contains it.
   heartbeat digest; provider transcripts remain the source of truth. The
   choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
-  independent-review evidence before a production code restart. The separate
+  independent-review evidence before a production code restart. The default
+  deploy and its `--full` alias refresh and verify every installed resident
+  component, so launchd-owned daemon/dashboard processes cannot stay on the
+  previous revision. The separate
   `restart.sh --runtime` path is configuration-only: it revalidates release
   authority, requires a clean worktree, and proves the running bot/heartbeat
   already match `HEAD`, so it cannot preserve or deploy unreviewed code.

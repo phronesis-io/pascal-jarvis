@@ -93,8 +93,8 @@ deployment remains governed:
 ```bash
 ./restart.sh --runtime  # config/state only; requires governed clean HEAD == live code
 ./restart.sh --status   # show daemon / bot / lark-cli process status
-./restart.sh            # governed code deploy: main + PR + CI + release authority
-./restart.sh --full     # governed deploy of daemon, bot, dashboard
+./restart.sh            # governed full-runtime deploy: daemon, bot, installed UI
+./restart.sh --full     # alias for the same governed full-runtime deploy
 ```
 
 ---
