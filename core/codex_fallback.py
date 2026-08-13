@@ -47,6 +47,12 @@ _AUTH_FAILURE_MARKERS = (
     "missing bearer or basic authentication",
     "please run codex login",
 )
+_PRETURN_UNAVAILABLE_RE = re.compile(
+    r"usage limit|purchase more credits|insufficient credits"
+    r"|rate limit|too many requests"
+    r"|model (?:is )?(?:currently )?unavailable|model not found|invalid model",
+    re.IGNORECASE,
+)
 _SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9_\-]{8,}|Bearer\s+\S+"
     r"|\b(?:token|secret|api[_-]?key|password)\b\s*[=:]\s*\S+)",
@@ -67,7 +73,7 @@ class CodexFallbackError(RuntimeError):
 
 
 class CodexUnavailableError(CodexFallbackError):
-    """The turn definitely did not start and another provider may run safely."""
+    """No executable item started, so another provider may run safely."""
 
 
 class StaleSessionError(CodexFallbackError):
@@ -145,6 +151,27 @@ def parse_thread_id(stdout: str) -> str:
     return ""
 
 
+def parse_terminal_error(stdout: str) -> str:
+    """Extract the authoritative terminal error from Codex NDJSON output."""
+    message = ""
+    for line in str(stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "error":
+            message = str(event.get("message") or message)
+        elif event.get("type") == "turn.failed":
+            error = event.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or message)
+            elif error:
+                message = str(error)
+    return message
+
+
 def _safe_error(value: object, limit: int = 320) -> str:
     parts = [line.strip() for line in str(value or "").splitlines() if line.strip()]
     line = parts[-1] if parts else ""
@@ -156,16 +183,20 @@ def _has_auth_failure(value: object) -> bool:
     return any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
 
 
-def _is_preturn_auth_failure(stdout: str, stderr: str) -> bool:
-    """Return true only when authentication failed before any executable item."""
-    if not _has_auth_failure(f"{stdout}\n{stderr}"):
-        return False
+def _has_only_preturn_events(stdout: str) -> bool:
+    """Return true when Codex emitted no event that could have changed state."""
     safe_events = {"thread.started", "turn.started", "error", "turn.failed"}
     for line in str(stdout or "").splitlines():
+        if not line.strip():
+            continue
         try:
             event = json.loads(line)
         except (json.JSONDecodeError, TypeError):
-            continue
+            # JSON mode should emit only structured events. Unknown text means
+            # we cannot prove that the event stream is complete.
+            return False
+        if not isinstance(event, dict):
+            return False
         event_type = str(event.get("type") or "")
         if event_type in safe_events:
             continue
@@ -176,6 +207,27 @@ def _is_preturn_auth_failure(stdout: str, stderr: str) -> bool:
         # effects. The caller must not replay the turn on another provider.
         return False
     return True
+
+
+def _is_preturn_auth_failure(stdout: str, stderr: str) -> bool:
+    """Backward-compatible narrow predicate used by boundary regressions."""
+    return _has_auth_failure(f"{stdout}\n{stderr}") and _has_only_preturn_events(
+        stdout
+    )
+
+
+def _is_preturn_unavailability(stdout: str, stderr: str) -> bool:
+    """Prove another provider may retry because no executable item started."""
+    terminal_error = parse_terminal_error(stdout)
+    combined = f"{terminal_error}\n{stdout}\n{stderr}"
+    if _has_auth_failure(combined):
+        return _has_only_preturn_events(stdout)
+    # Authentication can fail before the JSON stream exists. Other provider
+    # failures need an authoritative terminal event, not an incidental stderr
+    # warning, before replaying the request elsewhere.
+    if not terminal_error or not _PRETURN_UNAVAILABLE_RE.search(terminal_error):
+        return False
+    return _has_only_preturn_events(stdout)
 
 
 def ensure_codex_authenticated(binary: str, timeout: int = 5) -> None:
@@ -273,11 +325,15 @@ def invoke_codex(
         except OSError:
             text = ""
         if process.returncode != 0:
-            detail = _safe_error(stderr) or _safe_error(stdout)
+            detail = (
+                _safe_error(parse_terminal_error(stdout))
+                or _safe_error(stderr)
+                or _safe_error(stdout)
+            )
             combined = f"{stdout}\n{stderr}"
             if any(marker in combined.lower() for marker in _STALE_SESSION_MARKERS):
                 error_type = StaleSessionError
-            elif _is_preturn_auth_failure(stdout, stderr):
+            elif _is_preturn_unavailability(stdout, stderr):
                 error_type = CodexUnavailableError
             else:
                 error_type = CodexFallbackError

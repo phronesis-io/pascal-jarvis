@@ -312,6 +312,7 @@ assumption rather than a production-code defect:
 | 128 | The release gate required a formal review to reference the post-merge SHA even though GitHub reviews are attached to the final PR head, leaving a merged personal repository dependent on a special comment from another account | Normal review evidence is now bound to the final PR head. A repository intentionally configured for zero required approvals and no code-owner/last-push review rule also supports an explicit admin-author owner decision bound to the merge SHA with a non-empty reason; missing reason, non-admin author, and repositories requiring any review remain fail-closed |
 | 129 | A component or audit problem could recover while its old signal and pending L3 Proposal remained open forever, leaving the owner with a false decision and the dashboard with stale work | A strictly newer, complete observation from the same source now resolves absent signals transactionally and marks only still-pending Proposals `superseded`; their Item projection lapses locally without external card edits. Incomplete coverage, active signals, accepted work, and shipped post-release verification remain fail-closed; recurrence, lifecycle, and production-snapshot regressions |
 | 130 | A Codex usage-limit failure emitted the authoritative error in its NDJSON stream but also printed an incidental state-database warning to stderr, so the provider panel blamed the warning and hid the real retry date | The canary now prefers structured `error` and `turn.failed` messages, applies the shared secret redaction, and falls back to stderr only when the stream contains no error; precedence, redaction, and fallback regressions |
+| 131 | The live Lark provider chain stopped after Codex returned a usage-limit failure, even though the final GPT API provider was healthy, because every non-auth Codex exit was treated as possibly post-tool and blocked replay | Codex now returns the safe-unavailability exit only when structured terminal events identify a supported provider failure and the complete NDJSON stream contains no executable or unknown item; the production handler then advances to GPT. Stderr-only, malformed-stream, unknown-item, and post-tool failures remain fail-closed; unit boundaries plus the extracted Claude-limit -> Codex-limit -> GPT -> Lark -> turn-ledger scenario cover the chain |
 
 Generic `COMMENTED` reviews do not count as approval. Formal approval must
 reference the final PR head, so a review submitted before the final push cannot
@@ -336,6 +337,7 @@ the owner is accepting release authority.
 | Primary | Official Claude account | Bounded canary; spend-limit trips fallback gate |
 | Backup 1 | First relay | Bounded canary and live routing |
 | Backup 2 | Independent second relay | Fully supported; disabled until a second credential is configured |
+| Codex | ChatGPT-login owner fallback | Owner-private tool-capable routing; replay advances only after proven pre-execution unavailability |
 | GPT agentic | Tool-capable final fallback | Bounded canary; actual response model recorded |
 
 Canary state stores only provider labels, model labels, timestamps, latency, and

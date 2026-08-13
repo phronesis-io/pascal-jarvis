@@ -255,3 +255,110 @@ def test_cli_exit_codes_distinguish_safe_unavailability_from_uncertain_failure(
     assert cf.main([
         "--conv-key", "ou_owner", "--work-dir", str(tmp_path),
     ]) == 74
+
+
+def test_usage_limit_before_any_executable_item_is_safe_unavailability(
+        tmp_path, monkeypatch):
+    class FakeProcess:
+        returncode = 1
+
+        def communicate(self, input, timeout):
+            return (
+                "\n".join([
+                    json.dumps({
+                        "type": "thread.started", "thread_id": "thread-limit",
+                    }),
+                    json.dumps({"type": "turn.started"}),
+                    json.dumps({
+                        "type": "error",
+                        "message": "You've hit your usage limit. Try again Aug 18.",
+                    }),
+                    json.dumps({
+                        "type": "turn.failed",
+                        "error": {
+                            "message": "You've hit your usage limit. Try again Aug 18."
+                        },
+                    }),
+                ]),
+                "WARN rollout state discrepancy: falling_back",
+            )
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    with pytest.raises(cf.CodexUnavailableError, match="usage limit"):
+        cf.invoke_codex(
+            prompt="hello", thread_id="", model="gpt-test", timeout=10,
+            work_dir=tmp_path, binary="/opt/codex", allow_tools=True,
+        )
+
+
+def test_usage_limit_after_executable_item_remains_uncertain(
+        tmp_path, monkeypatch):
+    class FakeProcess:
+        returncode = 1
+
+        def communicate(self, input, timeout):
+            return (
+                "\n".join([
+                    json.dumps({
+                        "type": "thread.started", "thread_id": "thread-limit",
+                    }),
+                    json.dumps({"type": "turn.started"}),
+                    json.dumps({
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "command": "touch /tmp/example",
+                        },
+                    }),
+                    json.dumps({
+                        "type": "turn.failed",
+                        "error": {"message": "You've hit your usage limit."},
+                    }),
+                ]),
+                "",
+            )
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    with pytest.raises(cf.CodexFallbackError, match="usage limit") as exc:
+        cf.invoke_codex(
+            prompt="hello", thread_id="", model="gpt-test", timeout=10,
+            work_dir=tmp_path, binary="/opt/codex", allow_tools=True,
+        )
+    assert not isinstance(exc.value, cf.CodexUnavailableError)
+
+
+@pytest.mark.parametrize("stdout", [
+    "",
+    "not-json",
+    json.dumps({"type": "turn.started"}) + "\ntruncated-event",
+])
+def test_usage_limit_without_complete_structured_terminal_evidence_is_uncertain(
+        tmp_path, monkeypatch, stdout):
+    class FakeProcess:
+        returncode = 1
+
+        def communicate(self, input, timeout):
+            return stdout, "You've hit your usage limit. Try again Aug 18."
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    with pytest.raises(cf.CodexFallbackError, match="usage limit") as exc:
+        cf.invoke_codex(
+            prompt="hello", thread_id="", model="gpt-test", timeout=10,
+            work_dir=tmp_path, binary="/opt/codex", allow_tools=True,
+        )
+    assert not isinstance(exc.value, cf.CodexUnavailableError)
+
+
+def test_terminal_error_parser_ignores_non_object_json_events():
+    stdout = "\n".join([
+        json.dumps(["not", "an", "event"]),
+        json.dumps({
+            "type": "turn.failed",
+            "error": {"message": "You've hit your usage limit."},
+        }),
+    ])
+
+    assert cf.parse_terminal_error(stdout) == "You've hit your usage limit."
