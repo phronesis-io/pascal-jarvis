@@ -346,6 +346,7 @@ def _probe_codex(
             "latency_ms": round((time.monotonic() - started) * 1000),
         }
     text = ""
+    stream_error = ""
     for line in str(completed.stdout or "").splitlines():
         try:
             event = json.loads(line)
@@ -354,6 +355,14 @@ def _probe_codex(
         item = event.get("item") if event.get("type") == "item.completed" else None
         if isinstance(item, dict) and item.get("type") == "agent_message":
             text = str(item.get("text") or "")
+        if event.get("type") == "error":
+            stream_error = str(event.get("message") or stream_error)
+        elif event.get("type") == "turn.failed":
+            error = event.get("error")
+            if isinstance(error, dict):
+                stream_error = str(error.get("message") or stream_error)
+            elif error:
+                stream_error = str(error)
     latency = round((time.monotonic() - started) * 1000)
     if completed.returncode == 0 and text.strip() == CANARY_MARKER:
         return {
@@ -368,7 +377,8 @@ def _probe_codex(
         "detail": (
             "canary returned unexpected content"
             if completed.returncode == 0
-            else _safe_error(completed.stderr)
+            else _safe_error(stream_error)
+            or _safe_error(completed.stderr)
             or f"canary exited {completed.returncode}"
         ),
         "latency_ms": latency,
