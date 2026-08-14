@@ -225,7 +225,7 @@ def _claude_tail(
         raw_text = extract((item.get("message") or {}).get("content"))
         if is_synthetic(raw_text):
             continue
-        if role == "assistant" and is_provider_error(raw_text):
+        if is_provider_error(raw_text):
             continue
         timestamp = str(item.get("timestamp") or "")
         text = redact(raw_text)
@@ -342,7 +342,7 @@ def _codex_tail(
         raw_text = str(payload.get("message") or "").strip()
         if is_synthetic(raw_text):
             continue
-        if role == "assistant" and is_provider_error(raw_text):
+        if is_provider_error(raw_text):
             continue
         timestamp = str(item.get("timestamp") or payload.get("timestamp") or "")
         text = redact(raw_text)

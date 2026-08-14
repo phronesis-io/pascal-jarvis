@@ -71,14 +71,20 @@ claude:
   backup_base_url: ""
   # Model ID for the backup provider. Leave empty to inherit main_model.
   # Use a pinned ID (e.g. "claude-opus-4-6") if the relay doesn't support
-  # the latest model alias.
+  # the latest model alias. A relay may expose a GPT model through this
+  # Claude-compatible adapter: model family and execution harness are tracked
+  # separately by core.model_control.
   backup_model: ""
+  # Optional stable upstream/account name. Empty = derive it from base_url.
+  # Routes with the same upstream are shared-fate, not independent backups.
+  backup_upstream: ""
   # Optional SECOND Claude relay. Same semantics as the primary backup, tried
   # after backup1 fails (e.g. a different billing account / provider).
   backup2_enabled: false
   backup2_auth_token: ""
   backup2_base_url: ""
   backup2_model: ""
+  backup2_upstream: ""
   # Keep relay sessions bounded. With a reduced memory budget Jarvis preserves
   # identity, safety rules, today's calendar, and active commitments before
   # older research notes.
@@ -98,6 +104,8 @@ codex:
   fallback_model: "gpt-5.5"
   # Empty = auto-discover PATH, common install locations, or ChatGPT.app.
   binary: ""
+  # Optional account/failure-domain name used by the diversity report.
+  upstream: "chatgpt-account"
   timeout: 300
 
 
@@ -116,6 +124,8 @@ openai:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   user_agent: ""
+  # Optional account/failure-domain name. Empty = derive from base_url.
+  upstream: ""
   timeout: 120
   max_output_tokens: 4096
 

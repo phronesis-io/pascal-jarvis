@@ -187,8 +187,13 @@ the exact release commit or a healthy resident descendant that contains it.
   post-release outcome observations.
 - `core.taskline_bridge`: L2 sidecar health, claims, leases, isolated
   worktrees, and Delegation links.
+- `core.model_control`: the model control plane. It separates upstream account,
+  requested model, execution adapter, capabilities, trust scope, route order,
+  health cooldown, and real provider diversity. It emits the private
+  compatibility environment consumed by harnesses but never starts a model
+  process or exposes credentials on a status surface.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
-  observability.
+  observability over the shared `model_control` catalog.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
   control, and one durable Codex thread per logical Matter context. It uses the
   logical context as a cross-transport process lock, so two entrances cannot
@@ -204,6 +209,11 @@ the exact release commit or a healthy resident descendant that contains it.
   provider calls and supplies both immediate prompt context and the durable
   heartbeat digest; provider transcripts remain the source of truth. The
   choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
+- `core.cross_session_index`: private, WAL-backed, rebuildable indexing of
+  redacted visible turns from owner-operated Claude Code and Codex sessions.
+  Small heartbeat batches converge through old transcripts; the current owner
+  request retrieves only relevant older turns. It is never injected into a
+  group or named Matter and never turns remembered prose into current truth.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident

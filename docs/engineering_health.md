@@ -7,11 +7,11 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 228 active capabilities: 228 `keep`, 0 `fix`,
+- The generated inventory has 230 active capabilities: 230 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
-- `core.cross_session` is a 190-line facade over discovery, parsing, and
-  projection modules.
+- `core.cross_session` is a small facade over discovery, parsing, historical
+  indexing, and projection modules.
 - Memorial storage, card composition, transport, and shared state contracts
   live in `core.memorial_ledger`, `core.memorial_cards`,
   `core.memorial_transport`, and `core.memorial_contracts`. The facade still

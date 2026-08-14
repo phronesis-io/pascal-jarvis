@@ -73,37 +73,31 @@ def _terminate_process_group(
         pass
 
 
-def _enabled(name: str, default: str = "true") -> bool:
-    return os.environ.get(name, default).lower() == "true"
-
-
 def _provider_candidates(
     model: str,
     gate_state: str,
+    root: str | Path | None = None,
 ) -> list[tuple[str, str, dict[str, str] | None]]:
-    candidates: list[tuple[str, str, dict[str, str] | None]] = []
-    if gate_state != "backup":
-        candidates.append(("Claude primary", model, None))
+    from core.config import Config
+    from core.model_control import route_plan
 
-    for suffix, label, default_enabled in (
-        ("", "Claude backup", "true"),
-        ("2", "Claude backup2", "false"),
-    ):
-        token = os.environ.get(f"CLAUDE_BACKUP{suffix}_AUTH_TOKEN", "")
-        base_url = os.environ.get(f"CLAUDE_BACKUP{suffix}_BASE_URL", "")
-        if not (
-            _enabled(f"CLAUDE_BACKUP{suffix}_ENABLED", default_enabled)
-            and token
-            and base_url
-        ):
-            continue
-        provider_model = (
-            os.environ.get(f"CLAUDE_BACKUP{suffix}_MODEL") or model
-        )
-        env = os.environ.copy()
-        env["ANTHROPIC_AUTH_TOKEN"] = token
-        env["ANTHROPIC_BASE_URL"] = base_url
-        candidates.append((label, provider_model, env))
+    base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
+    config = Config(base / "jarvis.yaml")
+    plan = route_plan(
+        "auxiliary_trusted",
+        config=config,
+        gate_state=gate_state,
+        route_ids=("primary", "backup1", "backup2"),
+    )
+    candidates: list[tuple[str, str, dict[str, str] | None]] = []
+    for route in plan.routes:
+        provider_model = model if route.id == "primary" else route.model
+        provider_env = None
+        if route.id != "primary":
+            provider_env = os.environ.copy()
+            provider_env["ANTHROPIC_AUTH_TOKEN"] = route.credential
+            provider_env["ANTHROPIC_BASE_URL"] = route.base_url
+        candidates.append((route.label, provider_model, provider_env))
     return candidates
 
 
@@ -205,31 +199,34 @@ def _openai_result(
     *,
     allow_tools: bool,
     timeout: int,
+    root: str | Path | None = None,
     process_holder: dict[str, Any] | None = None,
     process_key: str = "model",
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, str]:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not _enabled("OPENAI_FALLBACK_ENABLED") or not api_key:
+    from core.config import Config
+    from core.model_control import model_routes
+
+    base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
+    route = next(
+        item for item in model_routes(Config(base / "jarvis.yaml"))
+        if item.id == "openai"
+    )
+    if not route.enabled or not route.configured:
         return "", ""
+    api_key = route.credential
 
     from core import openai_fallback
 
-    model = (
-        os.environ.get("OPENAI_FALLBACK_MODEL")
-        or os.environ.get("OPENAI_MODEL")
-        or openai_fallback.DEFAULT_MODEL
-    )
-    base_url = os.environ.get(
-        "OPENAI_BASE_URL", openai_fallback.DEFAULT_BASE_URL
-    )
+    model = route.model or openai_fallback.DEFAULT_MODEL
+    base_url = route.base_url or openai_fallback.DEFAULT_BASE_URL
     max_tokens = int(
         os.environ.get(
             "OPENAI_FALLBACK_MAX_OUTPUT_TOKENS",
             str(openai_fallback.DEFAULT_MAX_OUTPUT_TOKENS),
         )
     )
-    user_agent = os.environ.get("OPENAI_USER_AGENT", "")
+    user_agent = route.user_agent
     if allow_tools:
         text = openai_fallback.run_agentic(
             system_prompt,
@@ -256,11 +253,16 @@ def _openai_result(
     return text.strip(), model
 
 
-def _openai_configured() -> bool:
-    return bool(
-        _enabled("OPENAI_FALLBACK_ENABLED")
-        and os.environ.get("OPENAI_API_KEY")
+def _openai_configured(root: str | Path | None = None) -> bool:
+    from core.config import Config
+    from core.model_control import model_routes
+
+    base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
+    route = next(
+        item for item in model_routes(Config(base / "jarvis.yaml"))
+        if item.id == "openai"
     )
+    return route.enabled and route.configured
 
 
 def run_auxiliary_model(
@@ -311,8 +313,8 @@ def run_auxiliary_model(
 
     try:
         attempt_index = 0
-        candidates = _provider_candidates(model, gate_state)
-        gpt_available = _openai_configured()
+        candidates = _provider_candidates(model, gate_state, root_path)
+        gpt_available = _openai_configured(root_path)
         for provider_index, (provider, initial_model, env) in enumerate(
             candidates
         ):
@@ -418,7 +420,7 @@ def run_auxiliary_model(
         remaining = timeout - (time.monotonic() - started)
         if (
             remaining <= 0
-            or not _openai_configured()
+            or not _openai_configured(root_path)
             or (cancelled is not None and cancelled())
         ):
             return AuxiliaryModelResult(attempted=tuple(attempted))
@@ -436,6 +438,7 @@ def run_auxiliary_model(
                 prompt,
                 allow_tools=allow_tools,
                 timeout=max(1, int(remaining)),
+                root=root_path,
                 process_holder=process_holder,
                 process_key=process_key,
                 cancelled=cancelled,

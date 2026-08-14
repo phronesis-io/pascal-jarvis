@@ -29,9 +29,6 @@ from .config import Config
 CANARY_MARKER = "JARVIS_CANARY_OK"
 DEFAULT_TIMEOUT = 45
 STATE_FILE = "data/provider_health.json"
-DEFAULT_UNHEALTHY_COOLDOWN_SECONDS = 30 * 60
-DEFAULT_TRANSIENT_COOLDOWN_SECONDS = 60
-DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60
 _PROVIDER_IDS = {"primary", "backup1", "backup2", "codex", "openai"}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SECRET_RE = re.compile(
@@ -94,137 +91,10 @@ def reason_code_for_error(value: object) -> str:
     return "request_failed"
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return bool(default)
-    return value.strip().lower() == "true"
-
-
 def provider_specs(config: Config) -> list[dict[str, Any]]:
-    claude = config.claude
-    codex = config.codex
-    openai = config.openai
-    main_model = str(claude.get("main_model") or "opus")
-    backup_token = str(
-        os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
-        or claude.get("backup_auth_token")
-        or ""
-    )
-    backup_url = str(
-        os.environ.get("CLAUDE_BACKUP_BASE_URL")
-        or claude.get("backup_base_url")
-        or ""
-    )
-    backup2_token = str(
-        os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
-        or claude.get("backup2_auth_token")
-        or ""
-    )
-    backup2_url = str(
-        os.environ.get("CLAUDE_BACKUP2_BASE_URL")
-        or claude.get("backup2_base_url")
-        or ""
-    )
-    codex_binary = str(
-        os.environ.get("CODEX_FALLBACK_BINARY")
-        or os.environ.get("CODEX_BIN")
-        or codex.get("binary")
-        or ""
-    )
-    openai_token = str(
-        os.environ.get("OPENAI_API_KEY") or openai.get("api_key") or ""
-    )
-    return [
-        {
-            "id": "primary",
-            "label": "Claude primary",
-            "kind": "claude",
-            "enabled": True,
-            "configured": True,
-            "model": main_model,
-            "token": "",
-            "base_url": "",
-        },
-        {
-            "id": "backup1",
-            "label": "Claude backup",
-            "kind": "claude",
-            "enabled": _env_bool(
-                "CLAUDE_BACKUP_ENABLED",
-                bool(claude.get("backup_enabled", True)),
-            ),
-            "configured": bool(backup_token and backup_url),
-            "model": str(
-                os.environ.get("CLAUDE_BACKUP_MODEL")
-                or claude.get("backup_model")
-                or main_model
-            ),
-            "token": backup_token,
-            "base_url": backup_url,
-        },
-        {
-            "id": "backup2",
-            "label": "Claude backup2",
-            "kind": "claude",
-            "enabled": _env_bool(
-                "CLAUDE_BACKUP2_ENABLED",
-                bool(claude.get("backup2_enabled", False)),
-            ),
-            "configured": bool(backup2_token and backup2_url),
-            "model": str(
-                os.environ.get("CLAUDE_BACKUP2_MODEL")
-                or claude.get("backup2_model")
-                or main_model
-            ),
-            "token": backup2_token,
-            "base_url": backup2_url,
-        },
-        {
-            "id": "codex",
-            "label": "Codex fallback",
-            "kind": "codex",
-            "enabled": _env_bool(
-                "CODEX_FALLBACK_ENABLED",
-                bool(codex.get("fallback_enabled", True)),
-            ),
-            "configured": bool(
-                codex_binary or resolve_codex_bin()
-            ),
-            "model": str(
-                os.environ.get("CODEX_FALLBACK_MODEL")
-                or codex.get("fallback_model")
-                or "gpt-5.5"
-            ),
-            "binary": codex_binary,
-        },
-        {
-            "id": "openai",
-            "label": "GPT fallback",
-            "kind": "openai",
-            "enabled": _env_bool(
-                "OPENAI_FALLBACK_ENABLED",
-                bool(openai.get("fallback_enabled", True)),
-            ),
-            "configured": bool(openai_token),
-            "model": str(
-                os.environ.get("OPENAI_FALLBACK_MODEL")
-                or openai.get("fallback_model")
-                or "gpt-5.5"
-            ),
-            "token": openai_token,
-            "base_url": str(
-                os.environ.get("OPENAI_BASE_URL")
-                or openai.get("base_url")
-                or "https://api.openai.com/v1"
-            ),
-            "user_agent": str(
-                os.environ.get("OPENAI_USER_AGENT")
-                or openai.get("user_agent")
-                or ""
-            ),
-        },
-    ]
+    from .model_control import model_routes
+
+    return [route.probe_spec() for route in model_routes(config)]
 
 
 def _base_result(spec: dict[str, Any]) -> dict[str, Any]:
@@ -612,47 +482,26 @@ def preferred_fallback(
     provider_ids: tuple[str, ...] = ("backup1", "backup2", "codex", "openai"),
 ) -> str:
     """Choose the first supported route not in a fresh unhealthy cooldown."""
-    state = snapshot(root)
-    rows = {row["id"]: row for row in state["providers"]}
-    now = float(time.time() if now_epoch is None else now_epoch)
-    cooldown = max(0, int(
-        cooldown_seconds
-        if cooldown_seconds is not None
-        else os.environ.get(
-            "JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS",
-            DEFAULT_UNHEALTHY_COOLDOWN_SECONDS,
-        )
-    ))
-    transient_cooldown = max(0, int(os.environ.get(
-        "JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS",
-        DEFAULT_TRANSIENT_COOLDOWN_SECONDS,
-    )))
-    rate_limit_cooldown = max(0, int(os.environ.get(
-        "JARVIS_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS",
-        DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
-    )))
+    from .model_control import ROUTE_IDS, route_plan
+
     for provider_id in provider_ids:
-        if provider_id not in _PROVIDER_IDS or provider_id == "primary":
+        if provider_id not in ROUTE_IDS or provider_id == "primary":
             raise ValueError(f"unsupported fallback provider: {provider_id}")
-        row = rows[provider_id]
-        if not row.get("enabled") or not row.get("configured"):
-            continue
-        row_cooldown = cooldown
-        if row.get("observation_source") == "real_request":
-            reason = str(row.get("detail") or "").removeprefix(
-                "real request: "
-            )
-            if reason in {"network_error", "timeout"}:
-                row_cooldown = min(cooldown, transient_cooldown)
-            elif reason == "rate_limited":
-                row_cooldown = min(cooldown, rate_limit_cooldown)
-        freshly_unhealthy = (
-            row.get("status") == "unhealthy"
-            and now - _checked_epoch(row) < row_cooldown
+    env = dict(os.environ)
+    if cooldown_seconds is not None:
+        env["JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS"] = str(
+            max(0, int(cooldown_seconds))
         )
-        if not freshly_unhealthy:
-            return provider_id
-    return "none"
+    plan = route_plan(
+        "owner_chat",
+        config=Config(_root(root) / "jarvis.yaml"),
+        env=env,
+        gate_state="backup",
+        health_rows=snapshot(root)["providers"],
+        now_epoch=now_epoch,
+        route_ids=provider_ids,
+    )
+    return plan.routes[0].id if plan.routes else "none"
 
 
 def probe_all(

@@ -51,6 +51,30 @@ def test_owner_prompt_uses_current_message_to_focus_memory(tmp_path):
     assert "董责险关键结论" in prompt
 
 
+def test_named_matter_does_not_receive_global_external_session_history(
+    tmp_path, monkeypatch,
+):
+    (tmp_path / "memory").mkdir()
+    monkeypatch.setattr(
+        "core.prompt._external_work_context",
+        lambda *_args, **_kwargs: "PRIVATE_GLOBAL_HISTORY",
+    )
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="owner-key",
+        now_ts="2026-08-14 10:00",
+        tracker_path=str(tmp_path / "tracker.json"),
+        matter_id="matter-one",
+        focus_text="模型控制",
+    )
+
+    assert "PRIVATE_GLOBAL_HISTORY" not in prompt
+
+
 def test_owner_prompt_includes_id_free_known_people_context(tmp_path):
     (tmp_path / "memory").mkdir()
     (tmp_path / "data").mkdir()
