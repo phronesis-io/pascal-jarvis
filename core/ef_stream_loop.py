@@ -249,7 +249,7 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         root=jd,
         transport=transport,
     )
-    if not result.accepted or result.state == "suppressed":
+    if not result.accepted:
         _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
         return seen, False
     seen = remember_seen(seen, ids)
@@ -260,7 +260,7 @@ def _deliver_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
     else:
         log(
             "ef-stream",
-            f"Accepted real-time message into delivery queue ({result.state})",
+            f"Accepted real-time message durably ({result.state})",
         )
     return seen, True
 
@@ -292,7 +292,15 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
         )
         state = memorial.get_memorial(mid) or {}
         delivery = state.get("delivery_status", "")
-        accepted = memorial.delivery_accepted(state)
+        # A policy suppression is terminal for this external event: the full
+        # card already exists in the append-only memorial ledger. Replaying it
+        # cannot improve delivery and instead wedges the contiguous cursor and
+        # emits a false transport dead-letter. Keep this ingestion receipt
+        # local to EigenFlux; other memorial callers may still distinguish
+        # user-visible acceptance from suppression.
+        accepted = (
+            memorial.delivery_accepted(state) or delivery == "suppressed"
+        )
         if not accepted:
             _deadletter_failed_send(jd, "ef_stream_send_failed", msg)
             return seen, False, False
