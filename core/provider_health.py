@@ -30,6 +30,8 @@ CANARY_MARKER = "JARVIS_CANARY_OK"
 DEFAULT_TIMEOUT = 45
 STATE_FILE = "data/provider_health.json"
 DEFAULT_UNHEALTHY_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_TRANSIENT_COOLDOWN_SECONDS = 60
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60
 _PROVIDER_IDS = {"primary", "backup1", "backup2", "codex", "openai"}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SECRET_RE = re.compile(
@@ -53,6 +55,43 @@ def _safe_error(value: object, limit: int = 240) -> str:
         "",
     )
     return _SECRET_RE.sub("[redacted]", line)[:limit]
+
+
+def reason_code_for_error(value: object) -> str:
+    """Classify only retry-relevant transport failures into bounded codes."""
+    text = str(value or "")
+    lowered = text.lower()
+    try:
+        from .model_fallback import limit_reason
+        if limit_reason(text):
+            return "account_limit"
+    except Exception:
+        pass
+    if any(marker in lowered for marker in (
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "exceeded your current quota",
+        "current quota has been exceeded",
+        "check your plan and billing details",
+    )):
+        return "account_limit"
+    if any(marker in lowered for marker in (
+        "http 429", "rate limit", "rate_limit", "too many requests",
+    )):
+        return "rate_limited"
+    if any(marker in lowered for marker in (
+        "timed out", "timeout", "deadline exceeded",
+    )):
+        return "timeout"
+    if any(marker in lowered for marker in (
+        "unexpected_eof_while_reading",
+        "eof occurred in violation of protocol",
+        "connection reset",
+        "connection aborted",
+        "remote end closed connection",
+    )):
+        return "network_error"
+    return "request_failed"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -584,15 +623,32 @@ def preferred_fallback(
             DEFAULT_UNHEALTHY_COOLDOWN_SECONDS,
         )
     ))
+    transient_cooldown = max(0, int(os.environ.get(
+        "JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS",
+        DEFAULT_TRANSIENT_COOLDOWN_SECONDS,
+    )))
+    rate_limit_cooldown = max(0, int(os.environ.get(
+        "JARVIS_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS",
+        DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
+    )))
     for provider_id in provider_ids:
         if provider_id not in _PROVIDER_IDS or provider_id == "primary":
             raise ValueError(f"unsupported fallback provider: {provider_id}")
         row = rows[provider_id]
         if not row.get("enabled") or not row.get("configured"):
             continue
+        row_cooldown = cooldown
+        if row.get("observation_source") == "real_request":
+            reason = str(row.get("detail") or "").removeprefix(
+                "real request: "
+            )
+            if reason in {"network_error", "timeout"}:
+                row_cooldown = min(cooldown, transient_cooldown)
+            elif reason == "rate_limited":
+                row_cooldown = min(cooldown, rate_limit_cooldown)
         freshly_unhealthy = (
             row.get("status") == "unhealthy"
-            and now - _checked_epoch(row) < cooldown
+            and now - _checked_epoch(row) < row_cooldown
         )
         if not freshly_unhealthy:
             return provider_id

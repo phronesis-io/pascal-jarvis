@@ -3,6 +3,7 @@ import json
 import time
 
 from core import model_fallback as mf
+from core import provider_health as ph
 
 
 def test_model_error_detection():
@@ -616,6 +617,11 @@ def test_heartbeat_reaches_backup2_after_backup1_transport_error(
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert calls == ["", "backup1-token", "backup2-token"]
+    backup1 = next(
+        row for row in ph.snapshot(tmp_path)["providers"]
+        if row["id"] == "backup1"
+    )
+    assert backup1["detail"] == "real request: network_error"
 
 
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
