@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import core.heartbeat as heartbeat_mod
 from core.heartbeat import HeartbeatRunner, parse_heartbeat, parse_interval
 
 
@@ -134,6 +135,28 @@ def test_state_persistence(tmp_path):
     runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
     runner.save_state({"t": {"last_run": 12345}})
     assert runner.load_state() == {"t": {"last_run": 12345}}
+
+
+def test_completion_epoch_is_the_release_time(monkeypatch):
+    monkeypatch.setattr(heartbeat_mod.time, "time", lambda: 1_150.9)
+    assert heartbeat_mod._completion_epoch(1_000) == 1_150
+    # A backwards wall-clock adjustment must not predate the acquire receipt.
+    assert heartbeat_mod._completion_epoch(1_200) == 1_200
+
+
+def test_success_state_records_completion_not_cycle_start(tmp_path, monkeypatch):
+    runner = _make_runner(
+        tmp_path, "### t\n- interval: 1m\n- prompt: hi\n")
+    receipt = int(time.time()) + 300
+    monkeypatch.setattr(
+        heartbeat_mod, "_completion_epoch", lambda _started: receipt)
+    monkeypatch.setattr(runner, "claude_call", lambda _prompt: "done")
+
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()["t"]
+    assert state["last_success"] == receipt
+    assert state["last_run"] < state["last_success"]
 
 
 def test_no_task_due_returns_empty(tmp_path, monkeypatch):

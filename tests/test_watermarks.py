@@ -45,6 +45,39 @@ def test_starved_channel_flagged(tmp_path):
     assert "checkin: " not in report  # healthy channel not listed
 
 
+def test_short_cycle_task_gets_execution_jitter_grace(tmp_path):
+    """A 1m task at 2m30s can be completing inside the current model batch.
+
+    This is the production 2026-08-14 false page: intention-check succeeded,
+    but its prior success receipt used the previous cycle's acquire time.
+    """
+    now = time.time()
+    hb = "### intention-check\n- interval: 1m\n- prompt: p\n"
+    _setup(tmp_path, hb, state={
+        "intention-check": {
+            "last_run": int(now - 30),
+            "last_success": int(now - 150),
+            "last_status": "ok",
+        },
+    })
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "STARVED" not in report
+
+
+def test_short_cycle_task_is_starved_after_jitter_grace(tmp_path):
+    now = time.time()
+    hb = "### intention-check\n- interval: 1m\n- prompt: p\n"
+    _setup(tmp_path, hb, state={
+        "intention-check": {
+            "last_run": int(now - 30),
+            "last_success": int(now - 181),
+            "last_status": "ok",
+        },
+    })
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "intention-check" in report and "STARVED" in report
+
+
 def _age_install_stamp(tmp_path, age_s):
     """Pre-create the install stamp `age_s` seconds in the past."""
     import os
@@ -124,6 +157,66 @@ def test_delivery_failures_and_night_queue_surface(tmp_path):
     report = channel_watermark_report(tmp_path, now=now)
     assert "4 consecutive send failures" in report
     assert "Batch queue: 2" in report
+
+
+def test_unified_delivery_future_window_is_normal(tmp_path):
+    now = time.time()
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)},
+                  "checkin": {"last_run": int(now)}},
+           delivery={
+               "queued": 4,
+               "consec_fails": 0,
+               "queued_items": [{
+                   "created_epoch": now - 300,
+                   "next_attempt_epoch": now + 12 * 3600,
+                   "attempts": 0,
+                   "last_error": "global_daily_cap",
+               }] * 4,
+           })
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "Unified delivery: 4 item(s) deferred" in report
+    assert "⚠️ Unified delivery" not in report
+
+
+def test_unified_delivery_current_flush_window_is_normal(tmp_path):
+    now = time.time()
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)},
+                  "checkin": {"last_run": int(now)}},
+           delivery={
+               "queued": 1,
+               "consec_fails": 0,
+               "queued_items": [{
+                   "created_epoch": now - 60,
+                   "next_attempt_epoch": None,
+                   "attempts": 0,
+                   "last_error": "",
+               }],
+           })
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "automatic flush window" in report
+    assert "⚠️ Unified delivery" not in report
+
+
+def test_unified_delivery_overdue_after_flush_retry_is_warning(tmp_path):
+    now = time.time()
+    _setup(tmp_path, HB,
+           state={"feed": {"last_run": int(now)},
+                  "checkin": {"last_run": int(now)}},
+           delivery={
+               "queued": 2,
+               "consec_fails": 0,
+               "queued_items": [{
+                   "created_epoch": now - 3600,
+                   "next_attempt_epoch": now - 1800,
+                   "attempts": 1,
+                   "last_error": "transport_retry",
+               }],
+           })
+    report = channel_watermark_report(tmp_path, now=now)
+    assert "⚠️ Unified delivery: 1 of 2" in report
+    assert "overdue after automatic flush/retry" in report
 
 
 def test_queue_during_quiet_hours_is_normal(tmp_path):
