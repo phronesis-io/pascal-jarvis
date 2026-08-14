@@ -135,6 +135,28 @@ def code_mtime(
     return max(values, default=0.0)
 
 
+def code_digest(
+    root: str | Path | None = None,
+    *,
+    include_config: bool = True,
+) -> str:
+    """Hash runtime path names and contents; filesystem mtimes are irrelevant."""
+    project = _root(root)
+    paths = RUNTIME_PATHS if include_config else CODE_PATHS
+    digest = hashlib.sha256()
+    for path in sorted(_runtime_files(project, paths)):
+        try:
+            relative = path.relative_to(project).as_posix().encode("utf-8")
+            content = path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _digest(path: Path | None) -> str:
     if not path or not path.is_file():
         return ""
@@ -173,6 +195,8 @@ def register_runtime(
     heartbeat_path = (
         Path(heartbeat_file).resolve() if heartbeat_file else None)
     details = dict(metadata or {})
+    details["code_sha256"] = code_digest(project, include_config=False)
+    details["runtime_sha256"] = code_digest(project, include_config=True)
     if heartbeat_path:
         details.update(_heartbeat_metadata(heartbeat_path))
     row = {
@@ -267,14 +291,27 @@ def verify_runtime(
             status_issues.append("process is not alive")
         if current_head and str(row["git_head"]) != current_head:
             status_issues.append("running git commit differs from HEAD")
-        if alive and current_mtime > float(row["code_mtime"] or 0) + 0.001:
-            status_issues.append("runtime code changed after process start")
         heartbeat_hash = str(row.get("heartbeat_sha256") or "")
         metadata = {}
         try:
             metadata = json.loads(row.get("metadata") or "{}")
         except (json.JSONDecodeError, TypeError):
             pass
+        registered_digest = str(metadata.get(
+            "code_sha256" if allow_config_changes else "runtime_sha256",
+            "",
+        ))
+        if alive and registered_digest:
+            current_digest = code_digest(
+                project,
+                include_config=not allow_config_changes,
+            )
+            if current_digest != registered_digest:
+                status_issues.append("runtime code changed after process start")
+        elif alive and current_mtime > float(row["code_mtime"] or 0) + 0.001:
+            # Backward compatibility for registrations created before content
+            # fingerprints existed. The next restart upgrades the evidence.
+            status_issues.append("runtime code changed after process start")
         heartbeat_path = Path(str(metadata.get("heartbeat_path", "")))
         if heartbeat_hash and not allow_config_changes:
             if _digest(heartbeat_path) != heartbeat_hash:

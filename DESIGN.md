@@ -29,7 +29,7 @@ zero and the phone desk was never successfully paired. Therefore:
 - **Web dashboard is frozen**: archive + ops reference only. No new feature
   investment lands there; content that only reaches the archive gets its one
   shot via the morning-anchor batch line. The mobile gateway (`:3458`) and
-  its Tailscale funnel are retired (2026-08-11, REQ-120).
+  all Jarvis-owned Tailscale setup, routing, and recovery paths are retired.
 - Routines is frozen pending fold-into-Lark or retirement (five days live,
   zero uses).
 
@@ -88,8 +88,8 @@ zero and the phone desk was never successfully paired. Therefore:
 
 ## Mobile Rules
 
-- The dedicated mobile gateway (`:3458`) and its Tailscale funnel are retired
-  (2026-08-11, REQ-120); Lark is the mobile surface.
+- The dedicated mobile gateway (`:3458`) and all Jarvis-owned Tailscale paths
+  are retired; Lark is the only mobile surface.
 
 ## Content and Visual Rules
 

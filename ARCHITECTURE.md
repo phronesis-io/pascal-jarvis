@@ -14,8 +14,9 @@ launchd
   -> dashboard.main :3457
 ```
 
-The mobile gateway (`dashboard.mobile_gateway :3458`) and its Tailscale
-funnel are retired (2026-08-11, REQ-120).
+The mobile gateway (`dashboard.mobile_gateway :3458`) and every Jarvis-owned
+Tailscale path are retired. Jarvis neither installs, configures, probes, nor
+depends on Tailscale; Lark is the only mobile surface.
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
@@ -85,12 +86,12 @@ sources.yaml
 Adding a source extends the adapter registry. It does not add a new scheduler
 or delivery stack.
 
-### Cross-Device Continuity
+### Cross-Entry Continuity
 
 ```text
 Item / Matter
   -> Handoff lease
-  -> exact stable route on phone or desktop
+  -> Lark conversation or desktop executor
   -> action on the same underlying object
   -> all stale handoffs close
 ```

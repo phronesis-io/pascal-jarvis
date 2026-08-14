@@ -703,6 +703,37 @@ class IterationStore:
                 )
         return self.get(proposal_id)
 
+    def record_outcome_observation(
+        self,
+        proposal_id: str,
+        *,
+        actual: dict[str, Any],
+        actor: str = "observer",
+    ) -> dict[str, Any]:
+        """Persist post-release evidence while keeping the proposal shipped."""
+        now = self.now()
+        with closing(self._connect()) as db, db:
+            current = self._require_proposal(db, proposal_id)
+            if current["status"] != "shipped":
+                raise IterationError("only shipped work can record outcomes")
+            db.execute(
+                """
+                UPDATE iteration_proposals
+                   SET actual_json=?,updated_at=? WHERE id=?
+                """,
+                (_json(actual), now, proposal_id),
+            )
+            self._event(
+                db,
+                proposal_id,
+                "proposal.outcome_observed",
+                actor=actor,
+                from_status="shipped",
+                to_status="shipped",
+                metadata={"actual": actual},
+            )
+        return self.get(proposal_id)
+
     def reconcile_absent_signals(
         self,
         *,
@@ -1275,10 +1306,30 @@ class DailyObserver:
                 continue
             is_open = proposal["signal_fingerprint"] in open_fingerprints
             matched = is_open == bool(proposal["expected"]["signal_open"])
+            if matched:
+                prior = proposal.get("actual") or {}
+                prior_observed_at = float(
+                    prior.get("last_clean_observed_at") or 0
+                )
+                clean_count = int(prior.get("clean_observations") or 0)
+                if observed_at > prior_observed_at:
+                    clean_count += 1
+                actual = {
+                    "signal_open": is_open,
+                    "clean_observations": clean_count,
+                    "last_clean_observed_at": observed_at,
+                }
+                if clean_count < 2:
+                    self.store.record_outcome_observation(
+                        proposal["id"],
+                        actual=actual,
+                        actor="iteration-observe",
+                    )
+                    continue
+            else:
+                actual = {"signal_open": is_open}
             updated = self.store.verify_outcome(
-                proposal["id"],
-                actual={"signal_open": is_open},
-                matched=matched,
+                proposal["id"], actual=actual, matched=matched,
                 actor="iteration-observe",
             )
             if updated["status"] == "verified":

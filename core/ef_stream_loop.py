@@ -73,6 +73,48 @@ STALL_POLL_S = 60
 # `failures` forever (observed: failure #27, permanent 300s backoff = ~2h/day
 # of blind windows) and the counter read like an outage.
 HEALTHY_CONN_S = 10 * 60
+STREAM_HEALTH_FILE = "data/ef_stream_health.json"
+QUIET_DEGRADED_THRESHOLD = 6
+
+
+def _write_stream_health(
+    jarvis_dir: str | Path,
+    status: str,
+    *,
+    detail: str = "",
+    failures: int = 0,
+    quiet_streak: int = 0,
+    last_output_epoch: float = 0,
+    now_epoch: float | None = None,
+) -> dict:
+    """Atomically expose protocol health; process existence is not enough."""
+    root = Path(jarvis_dir)
+    path = root / STREAM_HEALTH_FILE
+    payload = {
+        "version": 1,
+        "status": str(status),
+        "updated_epoch": float(time.time() if now_epoch is None else now_epoch),
+        "last_output_epoch": float(last_output_epoch or 0),
+        "failures": max(0, int(failures)),
+        "quiet_streak": max(0, int(quiet_streak)),
+        "detail": str(detail or "")[:240],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(
+        path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return payload
 
 
 def _is_stalled(proc, idle_s: float, threshold: float = STALL_KILL_AFTER_S) -> bool:
@@ -385,6 +427,7 @@ OPTIONS: 就按建议回复 | 先不回"""
 
 def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     jd = Path(jarvis_dir)
+    _write_stream_health(jd, "starting", detail="initializing stream loop")
     # Cursor/seen state lives in the repo's eigenflux/ dir, NOT /tmp (REQ-57):
     # /tmp is wiped on reboot — the cursor was destroyed 3 times in 3 weeks,
     # causing PM re-delivery or gaps. One-time migration picks up a surviving
@@ -408,6 +451,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     eigenflux_bin = resolve_eigenflux_bin()
     if not eigenflux_bin:
         log("ef-stream", "eigenflux CLI not installed, skipping")
+        _write_stream_health(jd, "unavailable", detail="eigenflux CLI missing")
         return
 
     # Graceful shutdown: SIGTERM (bot.sh kill) / SIGINT set the stop flag and
@@ -448,6 +492,14 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     "stalled subprocess to force the reconnect path",
                     level="warn")
                 last_output["ts"] = time.monotonic()
+                _write_stream_health(
+                    jd,
+                    "stalled",
+                    detail=f"no protocol output for {int(idle)}s",
+                    failures=failures,
+                    quiet_streak=quiet_streak,
+                    last_output_epoch=0,
+                )
                 try:
                     p.kill()
                 except Exception:
@@ -485,6 +537,13 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
         replaced = False
         got_output = False
         conn_started = time.monotonic()
+        _write_stream_health(
+            jd,
+            "connecting",
+            detail="stream subprocess starting; protocol not yet verified",
+            failures=failures,
+            quiet_streak=quiet_streak,
+        )
 
         try:
             proc = subprocess.Popen(
@@ -498,6 +557,14 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
             for line in proc.stdout:
                 last_output["ts"] = time.monotonic()
                 got_output = True
+                _write_stream_health(
+                    jd,
+                    "active",
+                    detail="protocol output observed",
+                    failures=0,
+                    quiet_streak=0,
+                    last_output_epoch=time.time(),
+                )
                 if stop.is_set():
                     break
                 line = line.strip()
@@ -652,6 +719,13 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
 
         if exit_code == 4:
             log("ef-stream", "Auth required — token may be expired", level="warn")
+            _write_stream_health(
+                jd,
+                "auth_required",
+                detail="EigenFlux authentication expired",
+                failures=failures,
+                quiet_streak=quiet_streak,
+            )
             _send_memorial_notice(
                 "EigenFlux 需要重新登录",
                 "EigenFlux token 已过期，请运行 `eigenflux auth login` 重新认证。",
@@ -674,6 +748,18 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     "— treating as healthy churn, reconnecting immediately")
             else:
                 quiet_streak += 1
+                degraded = quiet_streak >= QUIET_DEGRADED_THRESHOLD
+                _write_stream_health(
+                    jd,
+                    "degraded" if degraded else "connecting",
+                    detail=(
+                        "repeated long-lived connections produced no protocol output"
+                        if degraded else
+                        "long-lived connection produced no output; reconnecting"
+                    ),
+                    failures=0,
+                    quiet_streak=quiet_streak,
+                )
                 # Every 6th consecutive silent connection (~3h at the 30-min
                 # stall cadence) escalates to warn: could be a quiet day,
                 # could be an up-but-mute server — a human should decide.
@@ -688,11 +774,25 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
             continue
 
         failures += 1
+        _write_stream_health(
+            jd,
+            "unhealthy" if failures >= 3 else "reconnecting",
+            detail=f"stream process exited; retry {failures}",
+            failures=failures,
+            quiet_streak=quiet_streak,
+        )
         log("ef-stream", f"Reconnecting in {backoff}s (failure #{failures})")
         if stop.wait(backoff):
             break
         backoff = min(backoff * 2, max_backoff)
 
+    _write_stream_health(
+        jd,
+        "stopped",
+        detail="stream loop stopped",
+        failures=failures,
+        quiet_streak=quiet_streak,
+    )
     log("ef-stream", "Stream loop stopped")
 
 

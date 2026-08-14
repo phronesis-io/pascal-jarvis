@@ -196,7 +196,8 @@ _STRUCTURED_FACTS_TEMPLATE = """# Structured Facts (load-bearing)
 
 
 def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
-                       max_chars: int | None = None) -> str:
+                       max_chars: int | None = None,
+                       focus_text: str = "") -> str:
     """Load all memory into a single string for system prompt injection.
 
     With 1M context, everything is loaded — but each tier is truncated WITHIN
@@ -214,6 +215,10 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     relay has a smaller context window than the primary (1M) channel. Small
     budgets preserve identity and safety context first; knowledge notes yield
     before the rules that govern degraded operation.
+
+    focus_text: the current owner message. When a provider budget forces
+    truncation, matching knowledge and operational sections are loaded first.
+    Hot identity and safety ordering is never changed.
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -246,6 +251,11 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     if total <= budget:
         blocks = [full[t] for t in ("hot", "warm", "system", "timeline") if full[t]]
         return sep.join(blocks)
+
+    if focus_text:
+        warm_parts = _prioritize_for_focus(warm_parts, focus_text)
+        system_parts = _prioritize_for_focus(system_parts, focus_text)
+        timeline_parts = _prioritize_for_focus(timeline_parts, focus_text)
 
     if budget < MAX_MEMORY_CHARS:
         # Degraded providers used to scale every tier equally. At the live 40k
@@ -287,6 +297,35 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
         keep = max(0, budget - len(marker))
         result = result[:keep] + marker[:budget - keep]
     return result
+
+
+def _focus_terms(value: str) -> set[str]:
+    """Return compact multilingual terms without introducing an index service."""
+    clean = str(value or "").lower()
+    terms = set(re.findall(r"[a-z0-9_]{2,}", clean))
+    for run in re.findall(r"[\u4e00-\u9fff]+", clean):
+        if len(run) == 1:
+            terms.add(run)
+        else:
+            terms.update(run[index:index + 2] for index in range(len(run) - 1))
+    return terms
+
+
+def _prioritize_for_focus(parts: list[str], focus_text: str) -> list[str]:
+    terms = _focus_terms(focus_text)
+    if not terms:
+        return parts
+
+    def score(section: str) -> int:
+        lowered = section.lower()
+        return sum(1 for term in terms if term in lowered)
+
+    return [
+        section for _, section in sorted(
+            enumerate(parts),
+            key=lambda item: (-score(item[1]), item[0]),
+        )
+    ]
 
 
 # ── Tier collectors ──────────────────────────────────────────────────────

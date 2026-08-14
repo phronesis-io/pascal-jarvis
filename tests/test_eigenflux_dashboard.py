@@ -99,6 +99,40 @@ def test_network_overview_marks_stale_success_unhealthy(tmp_path):
     assert task["detail"] == "超过应有周期未成功"
 
 
+def test_network_overview_reports_realtime_stream_separately(tmp_path):
+    root = tmp_path / "jarvis"
+    _write(
+        root / "data" / "ef_stream_health.json",
+        {
+            "status": "degraded",
+            "updated_epoch": 100,
+            "quiet_streak": 6,
+            "detail": "no protocol output",
+        },
+    )
+    telemetry.reset_cache()
+
+    overview = load_network_overview(root, now_epoch=200)
+
+    assert overview["stream"]["healthy"] is False
+    assert overview["stream"]["status"] == "degraded"
+    assert overview["stream"]["quiet_streak"] == 6
+
+    _write(
+        root / "data" / "ef_stream_health.json",
+        {
+            "status": "connecting",
+            "updated_epoch": 200,
+            "quiet_streak": 0,
+            "detail": "protocol not yet verified",
+        },
+    )
+    telemetry.reset_cache()
+    overview = load_network_overview(root, now_epoch=201)
+    assert overview["stream"]["healthy"] is False
+    assert overview["stream"]["status"] == "connecting"
+
+
 def test_network_overview_uses_effective_intervals_and_idle_success(tmp_path):
     root = tmp_path / "jarvis"
     now = 500_000

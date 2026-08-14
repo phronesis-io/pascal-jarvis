@@ -3,8 +3,10 @@
 - Date: 2026-07-22
 - Status: Implemented for personal production use; the mobile-gateway
   portions (Phase 4A/4B: `:3458`, pairing, device credentials, Web Push,
-  Tailscale Serve/Funnel) are retired as of 2026-08-11 (REQ-120) — Lark is
-  the mobile surface. Kept as the historical record of that design.
+  Tailscale Serve/Funnel and private maintenance routing) are fully retired
+  as of 2026-08-14 — Lark is the only mobile surface. Everything below about
+  phone web access or Tailscale is kept only as the historical record of a
+  rejected design and must not be implemented or operated.
 - Owner: Pascal
 - Product principle: one Jarvis, many entrances; entrances are replaceable,
   state is not allowed to fork.
@@ -60,8 +62,8 @@ Implemented on 2026-07-22:
 - The daily phone route now uses Tailscale Funnel to expose only the
   authenticated `:3458` gateway over public HTTPS. The phone does not need the
   Tailscale app connected, so the owner's normal proxy VPN remains untouched.
-- Tailscale remains installed as a private maintenance and recovery path, not
-  a daily product dependency.
+- Historical decision, superseded 2026-08-14: Tailscale was temporarily kept
+  as a private maintenance path; Jarvis now has no such path or dependency.
 - Public hardening adds one-time POST pairing, a bounded pairing-failure
   window, no-referrer and anti-framing headers, HSTS on HTTPS, a restrictive
   pairing-page CSP, and proxy-header trust only when the direct peer is

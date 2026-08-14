@@ -42,8 +42,20 @@ COMPLAINT_PATTERNS = {
     "missed_signal": {
         "severity": "P1",
         "title": "User complained that important signals were not surfaced",
-        "patterns": ("没有收到", "为什么没有推送", "也没有收到", "太差"),
+        "patterns": ("没有收到", "为什么没有推送", "也没有收到"),
         "recommendation": "Route this to the PGC/source-health audit: compare feed ingestion, ranking, and delivery gates for the cited item.",
+    },
+    "memory_context_failure": {
+        "severity": "P1",
+        "title": "User reported missing relationship or cross-session context",
+        "patterns": (
+            "记忆能力太差",
+            "记忆力之类的都不够好",
+            "不知道我老婆是谁",
+            "跨 session 记忆",
+            "上下文管理会很复杂",
+        ),
+        "recommendation": "Audit person-registry resolution, focused tiered-memory projection, and Claude/Codex cross-session ingestion; do not route this to PGC.",
     },
     "hallucination_or_confusion": {
         "severity": "P1",

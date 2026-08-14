@@ -4,6 +4,11 @@
 证据窗口：2026-08-05 至 2026-08-12
 对应 Taskline：`1e2b1ebf-4b65-433b-bcab-a475987500ed`
 
+> 2026-08-14 修订：本文的 25/day 排队溢出规则已被
+> `docs/plans/2026-08-14-audited-product-closure.md` 取代。普通主动投递
+> 现在硬限制为 9/day，溢出直接转为 ledger-only，不进入次日积压；
+> 4/10-minute burst queue 保持不变。
+
 ## 1. 为什么做
 
 本轮回看了近期真实飞书交互的聚合结果、匿名化投递指标、`conversation_audit`、

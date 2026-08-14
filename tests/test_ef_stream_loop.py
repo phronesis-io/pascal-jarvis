@@ -145,7 +145,16 @@ def test_queue_acceptance_does_not_depend_on_deadletter_sink(
 def test_suppressed_external_event_is_not_marked_seen(
     monkeypatch, tmp_path,
 ):
+    from core.delivery import DeliveryResult
+
     monkeypatch.setattr(efsl, "_lark_send", lambda _msg, _uid: True)
+    monkeypatch.setattr(
+        "core.delivery.deliver",
+        lambda *_args, **_kwargs: DeliveryResult(
+            "dlv_suppressed", True, "suppressed", "lark",
+            reason="policy",
+        ),
+    )
     deadletters = []
     monkeypatch.setattr(
         efsl,
@@ -154,18 +163,6 @@ def test_suppressed_external_event_is_not_marked_seen(
     )
     seen = []
     seen_file = tmp_path / ".ef-seen"
-    for index in range(24):
-        seen, accepted = efsl._deliver_and_mark(
-            f"message-{index}",
-            [f"event-{index}"],
-            {},
-            "u1",
-            seen,
-            seen_file,
-            tmp_path,
-        )
-        assert accepted is True
-
     seen, accepted = efsl._deliver_and_mark(
         "message-24",
         ["event-24"],
@@ -222,6 +219,28 @@ def test_stall_predicate():
     assert not efsl._is_stalled(live, t - 1)      # silence within budget
     assert not efsl._is_stalled(dead, t + 1)      # exited → respawn path owns it
     assert not efsl._is_stalled(None, t + 1)      # nothing spawned yet
+
+
+def test_stream_health_state_is_atomic_and_marks_quiet_degradation(tmp_path):
+    healthy = efsl._write_stream_health(
+        tmp_path,
+        "active",
+        detail="protocol output observed",
+        last_output_epoch=90,
+        now_epoch=100,
+    )
+    assert healthy["status"] == "active"
+    saved = json.loads(
+        (tmp_path / efsl.STREAM_HEALTH_FILE).read_text(encoding="utf-8")
+    )
+    assert saved == healthy
+    degraded = efsl._write_stream_health(
+        tmp_path,
+        "degraded",
+        quiet_streak=efsl.QUIET_DEGRADED_THRESHOLD,
+        now_epoch=200,
+    )
+    assert degraded["quiet_streak"] == 6
 
 
 # ---- _healthy_churn: lifetime-based backoff reset (REQ-95) -----------------

@@ -112,18 +112,7 @@ def test_no_surface_reports_the_lark_entrance_as_unavailable():
 # ── 3. a card never names a destination it cannot reach ──────────────────
 
 
-def test_fallback_card_ships_a_link_when_the_desk_is_reachable(env, monkeypatch):
-    monkeypatch.setattr(memorial, "_web_desk_url",
-                        lambda path="/items": "https://desk.example/items/x")
-    mid, _ = memorial.create(source="s", title="t", body="b",
-                             preset="fyi", send=False)
-    card = memorial._replacement_card("", memorial.get_memorial(mid))
-    urls = [b.get("url") for b in _buttons(card) if b.get("url")]
-    assert urls == ["https://desk.example/items/x"]
-
-
-def test_fallback_card_drops_the_instruction_when_there_is_no_link(env, monkeypatch):
-    monkeypatch.setattr(memorial, "_web_desk_url", lambda path="/items": "")
+def test_fallback_card_has_no_retired_phone_web_link(env):
     mid, _ = memorial.create(source="s", title="t", body="b",
                              preset="fyi", send=False)
     card = memorial._replacement_card("", memorial.get_memorial(mid))
@@ -131,20 +120,6 @@ def test_fallback_card_drops_the_instruction_when_there_is_no_link(env, monkeypa
     assert not [b for b in _buttons(card) if b.get("url")]
     # Must not send the user somewhere the card cannot take them.
     assert "请在 Jarvis「事项」中查看" not in text
-
-
-def test_web_desk_url_refuses_anything_not_https(monkeypatch):
-    """A localhost or relative base is unreachable from a phone; "" is honest."""
-    from core import mobile_access
-    monkeypatch.setattr(
-        "core.config.Config",
-        lambda *a, **k: SimpleNamespace(
-            get=lambda *_a, **_k: "http://localhost:3457"))
-    assert mobile_access.web_desk_url("/items") == ""
-    monkeypatch.setattr(
-        "core.config.Config",
-        lambda *a, **k: SimpleNamespace(get=lambda *_a, **_k: ""))
-    assert mobile_access.web_desk_url("/items") == ""
 
 
 # ── 4. never point someone at the page they are standing on ──────────────

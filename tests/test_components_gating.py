@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -218,6 +219,33 @@ def test_format_report_marks_skipped_not_warned(tmp_path):
     assert "○ ef-stream" in report
     assert "⚠️" not in report
     assert "skipped" in report
+
+
+def test_ef_stream_check_combines_process_and_protocol_health(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (True, "pid 123 owned"),
+    )
+    state = tmp_path / "data" / "ef_stream_health.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({
+        "status": "degraded",
+        "updated_epoch": time.time(),
+        "quiet_streak": 6,
+        "detail": "no protocol output",
+    }))
+    comp = {"path": "data/ef_stream_health.json", "max_age_seconds": 2400}
+
+    assert components._check_ef_stream(comp, tmp_path)[0] is False
+    state.write_text(json.dumps({
+        "status": "active",
+        "updated_epoch": time.time(),
+        "quiet_streak": 0,
+        "detail": "output observed",
+    }))
+    assert components._check_ef_stream(comp, tmp_path)[0] is True
 
 
 def test_daemon_critical_probe_ignores_skipped(tmp_path):

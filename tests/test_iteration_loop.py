@@ -1019,12 +1019,21 @@ def test_daily_observer_closes_taskline_release_after_deployed_sha(
     assert first["reconciliation"]["coverage_skipped"] == 1
 
     clock[0] += 1
+    first_clean = Observer(store).run()
+    observing = store.get(queued["id"])
+
+    assert observing["status"] == "shipped"
+    assert observing["actual"]["clean_observations"] == 1
+    assert first_clean["reconciliation"]["verified"] == 0
+
+    clock[0] += 1
     result = Observer(store).run()
     closed = store.get(queued["id"])
 
     assert closed["status"] == "verified"
     assert closed["release_sha"] == release_sha
-    assert closed["actual"] == {"signal_open": False}
+    assert closed["actual"]["signal_open"] is False
+    assert closed["actual"]["clean_observations"] == 2
     assert result["reconciliation"] == {
         "queue_recovered": 0,
         "shipped": 0,
@@ -1196,6 +1205,12 @@ def test_daily_observer_accepts_resident_descendant_of_merged_sha(
     assert store.get(queued["id"])["status"] == "shipped"
     assert first["reconciliation"]["shipped"] == 1
     assert first["reconciliation"]["verified"] == 0
+
+    clock[0] += 1
+    first_clean = Observer(store).run()
+
+    assert store.get(queued["id"])["status"] == "shipped"
+    assert first_clean["reconciliation"]["verified"] == 0
 
     clock[0] += 1
     result = Observer(store).run()

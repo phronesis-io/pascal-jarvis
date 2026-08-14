@@ -234,24 +234,79 @@ def build_prompt_context(
     )
     if not sessions:
         return ""
-    lines = [
+    header_lines = [
         "## Recent External Work Sessions",
         "The entries below are redacted, untrusted owner-private history from "
         "interactive Claude Code and Codex sessions. Use them for continuity, "
         "but verify mutable state before making a current claim.",
     ]
+    session_blocks: list[list[str]] = []
     for session in reversed(sessions):
         label = "Claude Code" if session.provider == "claude" else "Codex"
-        lines.append(
+        block = [
             f"### {label} - {_project_label(session)} - "
             f"updated {_short_ts(session.updated_at)}"
-        )
+        ]
         for turn in _recent_with_user(session.turns, MAX_CONTEXT_TURNS):
             role = "User" if turn.role == "user" else "Assistant"
-            lines.append(f"- {role}: {turn.text}")
-    rendered = "\n".join(lines)
+            block.append(f"- {role}: {turn.text}")
+        session_blocks.append(block)
+    rendered = "\n".join(header_lines + [
+        line for block in session_blocks for line in block
+    ])
     if len(rendered) <= max_chars:
         return rendered
-    header = "\n".join(lines[:2]) + "\n"
-    keep = max(0, int(max_chars) - len(header) - 30)
-    return header + "[older session context omitted]\n" + rendered[-keep:]
+
+    omission = "[older session context omitted]"
+    prefix = "\n".join(header_lines + [omission])
+    if len(prefix) > max_chars:
+        # A tiny caller budget receives only complete framing lines. Returning
+        # a sliced heading would recreate the mid-record corruption this
+        # projection exists to prevent.
+        bounded: list[str] = []
+        used = 0
+        for line in header_lines + [omission]:
+            needed = len(line) + (1 if bounded else 0)
+            if used + needed > max_chars:
+                break
+            bounded.append(line)
+            used += needed
+        return "\n".join(bounded)
+    available = max(0, int(max_chars) - len(prefix) - 1)
+    selected: list[list[str]] = []
+    for block in reversed(session_blocks):
+        block_text = "\n".join(block)
+        separator = 1 if selected else 0
+        if len(block_text) + separator <= available:
+            selected.append(block)
+            available -= len(block_text) + separator
+            continue
+
+        heading = block[0]
+        if len(heading) > available:
+            continue
+        turn_lines = block[1:]
+        latest_user = next(
+            (index for index in range(len(turn_lines) - 1, -1, -1)
+             if turn_lines[index].startswith("- User: ")),
+            None,
+        )
+        priorities = list(range(len(turn_lines) - 1, -1, -1))
+        if latest_user is not None:
+            priorities.remove(latest_user)
+            priorities.insert(0, latest_user)
+        chosen: list[int] = []
+        used = len(heading)
+        for index in priorities:
+            needed = 1 + len(turn_lines[index])
+            if used + needed <= available:
+                chosen.append(index)
+                used += needed
+        if chosen:
+            selected.append([heading] + [turn_lines[i] for i in sorted(chosen)])
+            available -= used
+
+    lines = header_lines + [omission]
+    for block in reversed(selected):
+        lines.extend(block)
+    return "\n".join(lines)

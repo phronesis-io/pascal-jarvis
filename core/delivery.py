@@ -46,7 +46,7 @@ SEND_TIMEOUT_SECONDS = 15
 ATTEMPT_STALE_SECONDS = 90
 DEDUP_WINDOW_SECONDS = 6 * 3600
 DEFAULT_SOURCE_DAILY_CAP = 24
-DEFAULT_GLOBAL_DAILY_CAP = 25
+DEFAULT_GLOBAL_DAILY_CAP = 9
 DEFAULT_BURST_CAP = 4
 DEFAULT_BURST_WINDOW_SECONDS = 10 * 60
 CAP_RESERVATION_RECHECK_SECONDS = 5
@@ -643,9 +643,7 @@ class DeliveryPipeline:
 
     def _throttle_reason(self, db: sqlite3.Connection,
                          envelope: DeliveryEnvelope, now: float) -> str:
-        if (envelope.metadata.get("bypass_throttle")
-                or envelope.kind == "reply"
-                or envelope.attention == "reply"):
+        if _budget_exempt(envelope):
             return ""
         local = datetime.fromtimestamp(now, tz=now_local().tzinfo)
         start = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -675,9 +673,8 @@ class DeliveryPipeline:
         ).fetchone()[0]
         if source_count > source_cap:
             return "source_daily_cap"
-        # The product-wide budget is a send-time capacity limit, not an
-        # acceptance throttle. Overflow must remain queued for the next
-        # window instead of becoming a permanent suppression.
+        # The product-wide cap is enforced atomically at send time. It is not
+        # counted here because a quiet-hours queue may cross a day boundary.
         return ""
 
     def _reserve_attempt_cap(
@@ -693,9 +690,7 @@ class DeliveryPipeline:
         together under BEGIN IMMEDIATE, so concurrent workers cannot both take
         the final slot. The reservation is released after transport resolution.
         """
-        if (envelope.metadata.get("bypass_throttle")
-                or envelope.kind == "reply"
-                or envelope.attention == "reply"):
+        if _budget_exempt(envelope):
             return "", None
         local = datetime.fromtimestamp(now, tz=now_local().tzinfo)
         start = local.replace(
@@ -767,9 +762,11 @@ class DeliveryPipeline:
                 total_held = len(_budgeted_reservations(db, start))
                 if total_sent + total_held >= global_cap:
                     db.commit()
-                    moment = datetime.fromtimestamp(
-                        now, tz=now_local().tzinfo)
-                    return "global_daily_cap", _next_awake_epoch(moment)
+                    # Ordinary proactive overflow is terminal for this
+                    # delivery. Keeping it queued would turn today's noise
+                    # into tomorrow morning's backlog; the source ledger or
+                    # docket remains the durable place to recover the item.
+                    return "global_daily_cap", None
 
                 burst_window = max(1, int(envelope.metadata.get(
                     "burst_window_seconds",
@@ -940,8 +937,7 @@ class DeliveryPipeline:
                 db, envelope, claimed_at)
             if throttled:
                 try:
-                    deferred = throttled in {
-                        "global_daily_cap", "burst_budget"}
+                    deferred = throttled == "burst_budget"
                     self._set_state(
                         db,
                         envelope.id,

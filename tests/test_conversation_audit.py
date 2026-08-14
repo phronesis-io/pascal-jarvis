@@ -62,6 +62,35 @@ def test_audit_ingests_logs_and_derives_issues(tmp_path):
     assert "Issues derived: 3" in report
 
 
+def test_memory_complaint_is_not_misrouted_to_pgc(tmp_path):
+    stamp = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    log = tmp_path / "jarvis.log"
+    log.write_text(
+        f"[{stamp}] [INFO] Event: msg_type=text content_len=20 "
+        "mid=om_memory chat_type=p2p "
+        "content_head=你不知道我老婆是谁，记忆能力太差了\n",
+        encoding="utf-8",
+    )
+    paths = audit.AuditPaths(
+        jarvis_dir=tmp_path,
+        log_paths=[log],
+        session_dirs=[],
+        db_path=tmp_path / "audit.db",
+    )
+
+    run_id = audit.run_audit(paths, hours=48)
+    conn = audit.connect(paths.db_path)
+    rows = conn.execute(
+        "SELECT issue_type FROM audit_issues WHERE run_id=?",
+        (run_id,),
+    ).fetchall()
+    conn.close()
+
+    issue_types = {row["issue_type"] for row in rows}
+    assert "memory_context_failure" in issue_types
+    assert "missed_signal" not in issue_types
+
+
 def test_default_paths_honor_jarvis_dir_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
 

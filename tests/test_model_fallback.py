@@ -402,6 +402,8 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert '&& [ "$_attempt" -ge 2 ]' in bot
     assert 'local _attempt_sequence="1 2 3 4 5"' in bot
     assert "for _attempt in $_attempt_sequence; do" in bot
+    assert 'none) _health_routed=1; _no_healthy_provider=1' in bot
+    assert '[ "$_health_routed" -eq 1 ]' in bot
     fallback_call = bot.index(
         '_fallback=$(printf \'%s\' "$_model_error_text"'
     )
@@ -652,19 +654,20 @@ def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path
 
     openai_calls = []
 
-    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
-        openai_calls.append((payload, api_key, base_url, timeout, user_agent))
-        return {"output_text": "HEARTBEAT_OK"}
+    def fake_openai(system_prompt, user_input, model, max_output_tokens,
+                    api_key, base_url, timeout, user_agent=""):
+        openai_calls.append((model, system_prompt, user_input))
+        return "HEARTBEAT_OK"
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     # No haiku detour on spend limit: one doomed opus call, then straight past
     # the (unconfigured) backup tier to OpenAI.
     assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus"]
     assert openai_calls
-    assert openai_calls[0][0]["model"] == "gpt-test"
+    assert openai_calls[0][0] == "gpt-test"
 
 
 def test_heartbeat_weekly_limit_reaches_openai_fallback(tmp_path, monkeypatch):
@@ -691,14 +694,15 @@ def test_heartbeat_weekly_limit_reaches_openai_fallback(tmp_path, monkeypatch):
     )
     calls = []
 
-    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
-        calls.append(payload)
-        return {"output_text": "HEARTBEAT_OK"}
+    def fake_openai(system_prompt, user_input, model, max_output_tokens,
+                    api_key, base_url, timeout, user_agent=""):
+        calls.append(model)
+        return "HEARTBEAT_OK"
 
-    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
-    assert calls and calls[0]["model"] == "gpt-test"
+    assert calls == ["gpt-test"]
     assert runner.last_provider == "GPT fallback"
 
 
@@ -834,14 +838,15 @@ def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch)
     )
     openai_calls = []
 
-    def fake_openai(payload, api_key, base_url, timeout, user_agent=""):
-        openai_calls.append(payload)
-        return {"output_text": "HEARTBEAT_OK"}
+    def fake_openai(system_prompt, user_input, model, max_output_tokens,
+                    api_key, base_url, timeout, user_agent=""):
+        openai_calls.append(model)
+        return "HEARTBEAT_OK"
 
-    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
+    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
-    assert openai_calls and openai_calls[0]["model"] == "gpt-test"
+    assert openai_calls == ["gpt-test"]
 
 
 def test_heartbeat_probe_nonmodel_failure_falls_back_to_backup(tmp_path, monkeypatch):
