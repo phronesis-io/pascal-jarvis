@@ -64,6 +64,15 @@ def test_successful_send_marks_seen_and_outbox(monkeypatch, tmp_path):
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
+def test_external_lifecycle_event_can_force_named_reconciliation(tmp_path):
+    trigger = tmp_path / "heartbeat-trigger"
+
+    assert efsl._trigger_heartbeat_task("eigenflux-friends", trigger) is True
+    assert efsl._trigger_heartbeat_task("eigenflux-friends", trigger) is True
+    assert trigger.read_text().splitlines() == [
+        "eigenflux-friends", "eigenflux-friends"]
+
+
 def test_memorial_queue_acceptance_marks_event_seen(monkeypatch, tmp_path):
     monkeypatch.setattr(efsl.memorial, "create",
                         lambda **kw: ("mem_queued", False))

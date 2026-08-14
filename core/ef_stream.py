@@ -30,6 +30,19 @@ def parse_cursor(ndjson_line: str) -> str:
     return str(_event_data(ndjson_line).get("next_cursor") or "")
 
 
+def event_type(event_json) -> str:
+    """Return the upstream envelope type for protocol-drift observability."""
+    try:
+        event = (
+            json.loads(event_json)
+            if isinstance(event_json, str)
+            else event_json
+        )
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return str(event.get("type") or "") if isinstance(event, dict) else ""
+
+
 def format_message(event_json: str) -> str:
     """Format an EigenFlux PM event for Lark delivery.
 
@@ -227,13 +240,15 @@ def extract_relation_ids(event_json) -> list[str]:
 
 
 def relation_event_kind(event_json) -> str:
-    """Return ``friend_request``, ``friend_accepted``, or ``""``."""
+    """Classify all relation lifecycle envelopes in the upstream contract."""
     try:
         event = json.loads(event_json) if isinstance(event_json, str) else event_json
     except (json.JSONDecodeError, TypeError):
         return ""
     if not isinstance(event, dict):
         return ""
+    if event.get("type") == "console_friend_accepted":
+        return "console_friend_accepted"
     data = event.get("data") or {}
     if not isinstance(data, dict):
         return ""

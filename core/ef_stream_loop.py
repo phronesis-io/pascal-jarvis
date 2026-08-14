@@ -35,6 +35,7 @@ from core.card import linkify_bare_urls
 from core.aux_model import run_auxiliary_model
 from core.delivery_deadletter import record_overdue
 from core.ef_stream import (
+    event_type,
     extract_detail,
     extract_item_ids,
     extract_metadata,
@@ -143,6 +144,19 @@ def _advance_cursor(cursor_file: Path, cursor: str, *, accepted: bool) -> bool:
     temporary.write_text(cursor, encoding="utf-8")
     temporary.replace(cursor_file)
     return True
+
+
+def _trigger_heartbeat_task(task: str, path: Path | None = None) -> bool:
+    """Queue one named heartbeat task after an external lifecycle change."""
+    trigger = path or Path("/tmp/jarvis-heartbeat-trigger")
+    try:
+        trigger.parent.mkdir(parents=True, exist_ok=True)
+        with trigger.open("a", encoding="utf-8") as stream:
+            stream.write(f"{task}\n")
+        return True
+    except OSError as exc:
+        log("ef-stream", f"Could not trigger {task}: {exc}", level="warn")
+        return False
 
 
 def _can_continue_after_delivery(proc, *, accepted: bool) -> bool:
@@ -587,6 +601,17 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     break
 
                 new_cursor = parse_cursor(line)
+                envelope_type = event_type(line)
+
+                # A web-console acceptance carries no request id and no cursor.
+                # It is not a user-facing message, but the local pending-card
+                # owner must re-read server truth now rather than up to ten
+                # minutes later and keep presenting an already-completed ask.
+                if relation_event_kind(line) == "console_friend_accepted":
+                    _trigger_heartbeat_task("eigenflux-friends")
+                    log("ef-stream", "Console friend acceptance observed; "
+                        "queued immediate relationship reconciliation")
+                    continue
 
                 # Friend-request / friend-accepted events ride a pm_push packet
                 # with an empty `messages` array (or a separate friend_accepted
@@ -626,6 +651,9 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 # Format and deliver
                 msg = format_message(line)
                 if not msg:
+                    if envelope_type and envelope_type != "pm_push":
+                        log("ef-stream", "Unsupported EigenFlux stream event "
+                            f"type observed: {envelope_type}", level="warn")
                     _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 

@@ -75,16 +75,8 @@ def test_preinstalled_skill_docs_reference_upstream_contract_sync():
     assert "static/feed_contract.md" in feed
 
 
-def test_trading_expiry_is_consistent_across_skill_and_reference_docs():
-    skill = _read("ef-trading/SKILL.md")
-    orders = _read("ef-trading/references/orders.md")
-
-    for text in (skill, orders):
-        assert "Expiry closes the order" in text or "expired" in text
-        assert "No payment" in text or "no payment" in text
-        assert "not counted as active" in text.lower()
-    assert "Refund is not automatic" not in skill
-    assert "Refund is not automatic" not in orders
+def test_removed_upstream_trading_skill_is_not_left_preinstalled():
+    assert not any((EF / "ef-trading").rglob("*"))
 
 
 def test_communication_skill_keeps_jarvis_verified_message_contract():
@@ -136,6 +128,17 @@ def test_preinstall_verifier_references_only_live_test_files():
     missing = [name for name in references if not (ROOT / "tests" / name).is_file()]
     assert missing == []
     assert "test_eigenflux_messages.py" in references
+
+
+def test_preinstall_backlog_dedup_treats_checkbox_as_data():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+
+    assert 'grep -Fqx -- "- [ ] $r"' in script
+    assert "open_review_count=$(grep -Ec" in script
+    assert "eigenflux_preinstall_retire.py" in script
+    assert '"skills_removed": int(nd)' in script
+    assert "removed top-level CLI command(s)" in script
 
 
 def test_preinstall_source_repos_can_be_overridden_for_worktrees():

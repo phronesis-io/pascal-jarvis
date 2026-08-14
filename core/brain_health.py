@@ -57,6 +57,8 @@ Three complementary detectors (a brain-dead loop trips at least one):
 
 from __future__ import annotations
 
+from core.interval_config import resolve_effective_interval
+
 # Mirrors core.watermarks.STARVATION_FACTOR (kept local so this daemon-critical
 # module stays import-light and dependency-free for unit tests). 2x tolerates
 # one missed slot before alarming.
@@ -100,13 +102,8 @@ def _fmt_age(seconds: float) -> str:
 def _interval_for(name: str, ts: dict, task_interval: float, overrides: dict) -> float:
     """Same precedence as run_cycle / watermarks: override → legacy
     effective_interval in state → HEARTBEAT.md default."""
-    interval = (overrides.get(name)
-                or ts.get("effective_interval", 0)
-                or task_interval)
-    try:
-        interval = float(interval)
-    except (TypeError, ValueError):
-        interval = 0
+    interval = resolve_effective_interval(
+        name, task_interval, ts.get("effective_interval", 0), overrides)
     return interval if interval > 0 else _DEFAULT_INTERVAL
 
 

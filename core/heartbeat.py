@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from .claude_bin import resolve_claude_bin
-from .interval_config import parse_interval_overrides
+from .interval_config import parse_interval_overrides, resolve_effective_interval
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
@@ -842,9 +842,12 @@ class HeartbeatRunner:
         """
         if overrides is None:
             overrides = self.load_interval_overrides()
-        return overrides.get(task["name"]) \
-            or (ts.effective_interval if ts.effective_interval > 0
-                else task["interval"])
+        return resolve_effective_interval(
+            task["name"],
+            task["interval"],
+            ts.effective_interval,
+            overrides,
+        )
 
     def save_state(self, state: dict):
         """Atomic write: temp + fsync + rename. The rename alone protects

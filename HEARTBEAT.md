@@ -1171,9 +1171,11 @@ OPTIONS 行的**下一行**写：
       broken something — `~/.local/bin/eigenflux.bak` holds the previous CLI for rollback.
     - PREINSTALL_CHANGES → something was newly pre-installed (skills updated, CLI upgraded)
       and/or there are review flags. Produce a brief beat:
-        1. What was newly pre-installed (skill files updated, CLI version change). One line.
-        2. Any "review flags" (new CLI subcommand with no client.sh wrapper, new NDJSON
-           stream event type, changed CLI flags). These are PROPOSALS for Pascal — state
+        1. What changed in the pre-install (skill files added/updated/retired,
+           CLI version change). One line. A retired skill means upstream removed
+           that capability; report it as completed maintenance, not a decision.
+        2. Any "review flags" (new/removed CLI subcommand, new NDJSON stream event
+           type, changed CLI flags). These are PROPOSALS for Pascal — state
            each as a concrete next action (e.g. "CLI added `msg history`; worth wrapping in
            client.sh and pulling prior turns before composing PM replies"). They are also
            appended to eigenflux/parity_todo.md — mention the backlog if it is non-empty.

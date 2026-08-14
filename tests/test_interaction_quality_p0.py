@@ -222,6 +222,54 @@ def test_apply_adaptations_guardrails(tmp_path, monkeypatch):
     assert overrides["chatty-task"] == 4 * 3600
 
 
+def test_protected_preinstall_override_is_repaired_and_never_recreated(
+        tmp_path, monkeypatch):
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "### eigenflux-preinstall\n- interval: 24h\n- prompt: p\n\n"
+        "### content-recommend\n- interval: 4h\n- prompt: q\n")
+    (tmp_path / "interval_overrides.json").write_text(json.dumps({
+        "eigenflux-preinstall": 48 * 3600,
+        "content-recommend": 8 * 3600,
+    }))
+    (tmp_path / "interval_overrides_meta.json").write_text(json.dumps({
+        "eigenflux-preinstall": 1,
+        "content-recommend": 2,
+    }))
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+
+    from tasks.engagement_analyze_post import _apply_adaptations
+    _apply_adaptations([{
+        "target": "eigenflux-preinstall",
+        "direction": "reduce",
+        "suggestion": "低互动，继续降频",
+    }])
+
+    assert json.loads((tmp_path / "interval_overrides.json").read_text()) == {
+        "content-recommend": 8 * 3600,
+    }
+    assert json.loads((tmp_path / "interval_overrides_meta.json").read_text()) == {
+        "content-recommend": 2,
+    }
+
+
+def test_interval_parser_rejects_protected_infrastructure_overrides():
+    from core.interval_config import (
+        parse_interval_overrides,
+        resolve_effective_interval,
+    )
+
+    assert parse_interval_overrides({
+        "eigenflux-preinstall": 48 * 3600,
+        "eigenflux-feed-triage": 2400,
+    }) == {"eigenflux-feed-triage": 2400}
+    assert resolve_effective_interval(
+        "eigenflux-preinstall",
+        24 * 3600,
+        96 * 3600,
+        {"eigenflux-preinstall": 48 * 3600},
+    ) == 24 * 3600
+
+
 def test_apply_adaptations_structured_direction(tmp_path, monkeypatch):
     """The analyzer's structured 'direction' field is authoritative —
     keyword parsing of the prose suggestion is only the legacy fallback

@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.safety import looks_like_error, parse_json_response
 from core.timeutil import now_local_str
+from core.interval_config import ENGAGEMENT_TUNING_PROTECTED_TASKS
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 INSIGHTS_FILE = MEMORY_DIR / "system" / "engagement_insights.md"
@@ -170,20 +171,24 @@ def _apply_adaptations(adaptations: list[dict]):
     sys.path.insert(0, str(jarvis_dir))
     from core.heartbeat import parse_heartbeat
     tasks_def = {t["name"]: t["interval"] for t in parse_heartbeat(jarvis_dir / "HEARTBEAT.md")}
-    # Infrastructure tasks are exempt from engagement tuning: they are silent
-    # by design, so 0% engagement is their NORMAL state, not a signal to slow
-    # them. 2026-06-11 the analyzer slowed Tier-0 calendar-sync to 2h within
-    # hours of the apply path going live — stale-calendar complaints (5/25)
-    # would have recurred with nothing reporting why.
-    # Mirrored from HeartbeatRunner.PRIORITY_TASKS | .TIER0_TASKS — avoids
-    # importing the full HeartbeatRunner class and its dependency tree in this
-    # subprocess post-hook.
-    _PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "intention-check"}
-    _TIER0_TASKS = {"calendar-sync"}
-    protected = _PRIORITY_TASKS | _TIER0_TASKS
+    # Infrastructure tasks are exempt from engagement tuning: their outputs
+    # are silent or exceptional by design, so low click-through is not a
+    # scheduling signal. The shared set also protects readers from stale
+    # sidecar entries left by older releases.
+    protected = ENGAGEMENT_TUNING_PROTECTED_TASKS
 
-    changed = []
+    # Repair legacy state eagerly. In production eigenflux-preinstall had
+    # already been compounded from 24h to the 48h ceiling before it joined the
+    # protected set; merely ignoring new suggestions would leave that drift on
+    # disk and make diagnostics disagree about its true cadence.
+    repaired = []
+    for target in sorted(protected):
+        if target in overrides:
+            overrides.pop(target, None)
+            meta.pop(target, None)
+            repaired.append(f"{target}: removed protected override")
+
+    changed = list(repaired)
     for a in adaptations:
         target = str(a.get("target") or "")
         suggestion = str(a.get("suggestion") or "").lower()
