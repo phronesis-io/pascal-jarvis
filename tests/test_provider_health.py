@@ -287,6 +287,100 @@ def test_recent_real_failure_skips_relay_during_cooldown(tmp_path):
     ) == "backup1"
 
 
+def test_transient_real_failure_uses_short_cooldown(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    monkeypatch.setenv("JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS", "60")
+    ph.observe(
+        "openai", "unhealthy", "network_error",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=10_059,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "none"
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=10_060,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "openai"
+
+
+def test_error_reason_classification_is_bounded():
+    assert ph.reason_code_for_error(
+        "SSL: UNEXPECTED_EOF_WHILE_READING"
+    ) == "network_error"
+    assert ph.reason_code_for_error("request timed out") == "timeout"
+    assert ph.reason_code_for_error(
+        "OpenAI HTTP 429: too many requests"
+    ) == "rate_limited"
+    assert ph.reason_code_for_error(
+        "You've hit your weekly limit"
+    ) == "account_limit"
+    assert ph.reason_code_for_error(
+        "HTTP 429: You have reached your weekly limit"
+    ) == "account_limit"
+    assert ph.reason_code_for_error(
+        'OpenAI HTTP 429: {"code":"insufficient_quota"}'
+    ) == "account_limit"
+    assert ph.reason_code_for_error(
+        "OpenAI HTTP 429: You exceeded your current quota, please check "
+        "your plan and billing details"
+    ) == "account_limit"
+    assert ph.reason_code_for_error(
+        "connection refused by configured endpoint"
+    ) == "request_failed"
+    assert ph.reason_code_for_error(
+        "name or service not known"
+    ) == "request_failed"
+
+
+def test_rate_limit_real_failure_uses_medium_cooldown(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    monkeypatch.setenv("JARVIS_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    ph.observe(
+        "openai", "unhealthy", "rate_limited",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=10_299,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "none"
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=10_300,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "openai"
+
+
+def test_account_limit_with_http_429_keeps_long_cooldown(tmp_path):
+    _write_config(tmp_path)
+    ph.observe(
+        "openai", "unhealthy", "account_limit",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=10_300,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "none"
+    assert ph.preferred_fallback(
+        tmp_path,
+        now_epoch=11_800,
+        cooldown_seconds=1800,
+        provider_ids=("openai",),
+    ) == "openai"
+
+
 def test_preferred_fallback_honors_callers_supported_provider_set(
     tmp_path, monkeypatch
 ):

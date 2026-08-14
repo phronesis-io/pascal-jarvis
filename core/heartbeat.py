@@ -978,9 +978,9 @@ class HeartbeatRunner:
             return text.strip()
         except Exception as e:
             try:
-                from core.provider_health import observe
+                from core.provider_health import observe, reason_code_for_error
                 observe(
-                    "openai", "unhealthy", "request_failed",
+                    "openai", "unhealthy", reason_code_for_error(e),
                     root=self.jarvis_dir,
                 )
             except Exception:
@@ -1316,9 +1316,14 @@ You have access to the user's memory below. Use it to personalize your responses
                         )):
                     if use_backup:
                         try:
-                            from core.provider_health import observe
+                            from core.provider_health import (
+                                observe,
+                                reason_code_for_error,
+                            )
                             observe(
-                                "backup1", "unhealthy", "request_failed",
+                                "backup1",
+                                "unhealthy",
+                                reason_code_for_error(err_text),
                                 root=self.jarvis_dir,
                             )
                         except Exception:
@@ -1337,11 +1342,14 @@ You have access to the user's memory below. Use it to personalize your responses
                 if model_problem or use_backup:
                     if use_backup:
                         try:
-                            from core.provider_health import observe
+                            from core.provider_health import (
+                                observe,
+                                reason_code_for_error,
+                            )
                             observe(
                                 "backup2" if _backup2_active else "backup1",
                                 "unhealthy",
-                                "request_failed",
+                                reason_code_for_error(err_text),
                                 root=self.jarvis_dir,
                             )
                         except Exception:

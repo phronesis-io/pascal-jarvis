@@ -305,6 +305,30 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
     assert runner._last_call_error == "no healthy provider fallback available"
 
 
+def test_openai_transport_failure_records_transient_reason(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    observed = []
+
+    monkeypatch.setattr(
+        "core.openai_fallback.run_agentic",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("SSL: UNEXPECTED_EOF_WHILE_READING")
+        ),
+    )
+    monkeypatch.setattr(
+        "core.provider_health.observe",
+        lambda provider, status, detail, **_kwargs: observed.append(
+            (provider, status, detail)
+        ),
+    )
+
+    assert runner._openai_fallback_call("system", "prompt") == ""
+    assert observed == [("openai", "unhealthy", "network_error")]
+
+
 def test_acting_section_omits_bash_guidance_when_restricted():
     from core.heartbeat import HeartbeatRunner as _HR
     restricted = _HR._acting_section(True)
