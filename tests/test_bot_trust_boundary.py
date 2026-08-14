@@ -16,6 +16,14 @@ def test_private_owner_path_requires_chat_type_and_exact_sender():
     assert "P2P message missing sender_id" in source
 
 
+def test_private_focus_text_uses_stdin_not_child_environment():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+
+    assert "JV_FOCUS_TEXT" not in source
+    assert source.count("focus_text = sys.stdin.read()") == 3
+    assert source.count("focus_text=focus_text") == 3
+
+
 def test_inline_actions_and_engagement_are_owner_gated():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
 

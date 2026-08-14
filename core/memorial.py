@@ -1107,7 +1107,6 @@ def _replacement_card(rendered: str, state: dict) -> dict:
     return memorial_cards.replacement_card(
         rendered,
         state,
-        web_desk_url=_web_desk_url,
         chat_button_label=CHAT_BUTTON_LABEL,
         chat_opt_key=CHAT_OPT_KEY,
     )
@@ -1905,20 +1904,6 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     if not send and should_push_to_lark(state):
         return mid, False
     return mid, _deliver_existing(state, urgent=urgent)
-
-
-def _web_desk_url(path: str = "/items") -> str:
-    """Absolute web-desk URL, or "" when this install has no public entry."""
-    try:
-        from core.mobile_access import web_desk_url
-        return web_desk_url(path)
-    except Exception as exc:
-        _ops_log(
-            "web_desk_url_failed",
-            level="warn",
-            error_type=type(exc).__name__,
-        )
-        return ""
 
 
 def _card_memorial_id(card: dict) -> str:

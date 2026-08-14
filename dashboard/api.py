@@ -55,29 +55,6 @@ async def _write_guard(request: Request) -> None:
 _WRITE = [Depends(_write_guard)]
 
 
-async def _owner_guard(request: Request) -> None:
-    """Require a Bearer token from a still-valid paired-device row.
-
-    NiceGUI's desktop buttons execute their callbacks in-process and do not
-    use these REST mutations. The mobile gateway that used to forward these
-    tokens is retired (REQ-120, 2026-08-11) and pairing no longer mints new
-    ones, so in practice this guard now rejects every request unless a
-    legacy ``mobile_devices`` credential is presented explicitly (tests do;
-    production has none). It stays in place so the owner-only mutations keep
-    failing CLOSED rather than silently opening to any local process.
-    """
-    auth = str(request.headers.get("authorization") or "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if not token:
-        raise HTTPException(401, "authenticated owner device required")
-    from core.mobile_access import validate_device_token
-    if validate_device_token(token) is None:
-        raise HTTPException(401, "authenticated owner device required")
-
-
-_OWNER_WRITE = [Depends(_write_guard), Depends(_owner_guard)]
-
-
 def _validate_task_input(trigger_type: str, trigger_config,
                          action_type: str) -> None:
     """Reject malformed triggers and executor-less actions with a 400."""
@@ -435,16 +412,6 @@ def register_api_routes():
         )
         return {"items": items[:max(1, min(int(limit), 500))]}
 
-    @app.post("/api/items/{memorial_id}/decide", dependencies=_OWNER_WRITE)
-    async def api_item_decide(memorial_id: str, request: Request):
-        from core.memorial import decide
-        data = await request.json()
-        return decide(
-            memorial_id,
-            str(data.get("option", "")),
-            owner_authenticated=True,
-        )
-
     @app.post("/api/items/{memorial_id}/chat", dependencies=_WRITE)
     async def api_item_chat(memorial_id: str, request: Request):
         from core.memorial import chat
@@ -639,78 +606,6 @@ def register_api_routes():
             raise _delegation_error(exc) from exc
         return {"items": detail["evidence"]}
 
-    @app.post(
-        "/api/delegations/{delegation_id}/confirm",
-        dependencies=_OWNER_WRITE,
-    )
-    async def api_delegation_confirm(delegation_id: str, request: Request):
-        from core.delegations import DelegationStore
-        from core.delegation_reconcile import sync_attention_item
-        data = await request.json()
-        owner = str(os.environ.get("USER_ID") or data.get("principal_id") or "")
-        store = DelegationStore()
-        try:
-            detail = await run_in_threadpool(
-                store.confirm,
-                delegation_id,
-                expected_version=int(data.get("expected_version", 0)),
-                principal_id=owner,
-            )
-            await run_in_threadpool(
-                sync_attention_item, detail, store=store, send=False
-            )
-        except Exception as exc:
-            raise _delegation_error(exc) from exc
-        return detail
-
-    @app.post(
-        "/api/delegations/{delegation_id}/cancel",
-        dependencies=_OWNER_WRITE,
-    )
-    async def api_delegation_cancel(delegation_id: str, request: Request):
-        from core.delegations import DelegationStore
-        from core.delegation_reconcile import sync_attention_item
-        data = await request.json()
-        store = DelegationStore()
-        try:
-            detail = await run_in_threadpool(
-                store.terminal,
-                delegation_id,
-                expected_version=int(data.get("expected_version", 0)),
-                status="cancelled",
-                reason_code="owner_cancelled",
-                actor_id=str(os.environ.get("USER_ID") or "owner"),
-            )
-            await run_in_threadpool(
-                sync_attention_item, detail, store=store, send=False
-            )
-        except Exception as exc:
-            raise _delegation_error(exc) from exc
-        return detail
-
-    @app.post(
-        "/api/delegations/{delegation_id}/retry",
-        dependencies=_OWNER_WRITE,
-    )
-    async def api_delegation_retry(delegation_id: str, request: Request):
-        from core.delegations import DelegationStore
-        from core.delegation_reconcile import sync_attention_item
-        data = await request.json()
-        store = DelegationStore()
-        try:
-            detail = await run_in_threadpool(
-                store.retry,
-                delegation_id,
-                expected_version=int(data.get("expected_version", 0)),
-                actor_id=str(os.environ.get("USER_ID") or "owner"),
-            )
-            await run_in_threadpool(
-                sync_attention_item, detail, store=store, send=False
-            )
-        except Exception as exc:
-            raise _delegation_error(exc) from exc
-        return detail
-
     @app.post("/api/delegations/{delegation_id}/handoff", dependencies=_WRITE)
     async def api_delegation_handoff(delegation_id: str, request: Request):
         """Park a delegation in the desktop 接力区.
@@ -762,35 +657,6 @@ def register_api_routes():
             )
         except Exception as exc:
             raise HTTPException(404, str(exc)) from exc
-
-    @app.post(
-        "/api/iteration/proposals/{proposal_id}/review",
-        dependencies=_OWNER_WRITE,
-    )
-    async def api_iteration_proposal_review(
-        proposal_id: str, request: Request
-    ):
-        from core.iteration_loop import IterationStore, sync_proposal_item
-        data = await request.json()
-        decision = str(data.get("decision") or "")
-        if decision not in {"approve", "reject"}:
-            raise HTTPException(400, "decision must be approve or reject")
-        store = IterationStore()
-        try:
-            proposal = await run_in_threadpool(
-                store.review,
-                proposal_id,
-                approved=decision == "approve",
-                actor=str(os.environ.get("USER_ID") or "owner"),
-                reason=str(data.get("reason") or ""),
-                queue=decision == "approve",
-            )
-            await run_in_threadpool(
-                sync_proposal_item, proposal, store=store, send=False
-            )
-        except Exception as exc:
-            raise HTTPException(409, str(exc)) from exc
-        return proposal
 
     # ── Health ───────────────────────────────────────────────────────
 

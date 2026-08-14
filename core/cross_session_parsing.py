@@ -65,6 +65,15 @@ _AUTOMATED_SESSION_PREFIXES = (
     "review the current code changes",
     "reply exactly codex_canary_ok",
 )
+_PROVIDER_FAILURE_RE = re.compile(
+    r"^\s*(?:[^\w\u4e00-\u9fff]+\s*)?(?:"
+    r"api\s+error\s*:\s*(?:4(?:24|29)|5\d\d)\b"
+    r"|you(?:'|’)ve\s+hit\s+your\s+(?:weekly|monthly)(?:\s+spend)?\s+limit\b"
+    r"|claude\s*的回复被安全过滤器拦截了"
+    r"|(?:credit|usage)\s+(?:balance|limit)\s+(?:is\s+)?(?:too\s+low|exceeded)"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -97,6 +106,11 @@ def redact_text(value: object, limit: int = MAX_TURN_CHARS) -> str:
 def _is_synthetic(text: str) -> bool:
     clean = str(text or "").strip()
     return not clean or clean.startswith(_SYNTHETIC_PREFIXES)
+
+
+def is_provider_failure(text: object) -> bool:
+    """Identify raw provider failures that are transport state, not memory."""
+    return bool(_PROVIDER_FAILURE_RE.search(str(text or "").strip()))
 
 
 def _turn_identity(provider: str, role: str, timestamp: str, raw_text: str) -> str:
@@ -186,6 +200,7 @@ def _claude_tail(
     tail_records: Callable[[Path], list[dict]] = _tail_records,
     extract: Callable[[object], str] = extract_text,
     is_synthetic: Callable[[str], bool] = _is_synthetic,
+    is_provider_error: Callable[[object], bool] = is_provider_failure,
     redact: Callable[[object], str] = redact_text,
     turn_identity: Callable[[str, str, str, str], str] = _turn_identity,
     dedupe_adjacent: Callable[[Iterable[Turn]], list[Turn]] = _dedupe_adjacent,
@@ -209,6 +224,8 @@ def _claude_tail(
         role = str(item.get("type") or "")
         raw_text = extract((item.get("message") or {}).get("content"))
         if is_synthetic(raw_text):
+            continue
+        if role == "assistant" and is_provider_error(raw_text):
             continue
         timestamp = str(item.get("timestamp") or "")
         text = redact(raw_text)
@@ -292,6 +309,7 @@ def _codex_tail(
     codex_initial_user: Callable[..., str] = _codex_initial_user,
     codex_is_interactive: Callable[[dict], bool] = _codex_is_interactive,
     is_synthetic: Callable[[str], bool] = _is_synthetic,
+    is_provider_error: Callable[[object], bool] = is_provider_failure,
     redact: Callable[[object], str] = redact_text,
     turn_identity: Callable[[str, str, str, str], str] = _turn_identity,
     dedupe_adjacent: Callable[[Iterable[Turn]], list[Turn]] = _dedupe_adjacent,
@@ -323,6 +341,8 @@ def _codex_tail(
             continue
         raw_text = str(payload.get("message") or "").strip()
         if is_synthetic(raw_text):
+            continue
+        if role == "assistant" and is_provider_error(raw_text):
             continue
         timestamp = str(item.get("timestamp") or payload.get("timestamp") or "")
         text = redact(raw_text)

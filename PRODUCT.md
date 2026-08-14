@@ -41,8 +41,8 @@ cards were read 95.7% while web cards were read 1.8%.
   existing Intents; it is not the engineering task-health calendar.
 - **Dashboard (`:3457`)** — frozen: archive + ops reference. No new features
   land here.
-- **Mobile gateway (`:3458`)** — retired (2026-08-11, REQ-120); the
-  Tailscale funnel no longer runs.
+- **Mobile gateway (`:3458`)** — retired (2026-08-11, completed 2026-08-14);
+  Jarvis has no Tailscale runtime, setup, health check, or recovery path.
 - **Routines** — frozen: pending merge into Lark interaction or retirement.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
@@ -90,6 +90,6 @@ cards were read 95.7% while web cards were read 1.8%.
 - user messages needed to finish one intent;
 - proactive messages per useful outcome;
 - ordinary decisions resolved in batch rather than chat;
-- cross-device continuation success;
+- Lark-to-executor continuation success;
 - silent component outage duration;
 - false completion and private-data leakage, both targeted at zero.

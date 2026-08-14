@@ -3,6 +3,10 @@
 授权：Pascal 2026-08-11 批准四项改动（封 web fallback / 退役 funnel 手机面 / 降噪减卡量 / 修账本口径），
 并要求以 PM 视角基于历史数据重新思考。本文档即该轮 PRD。
 
+> 2026-08-14 修订：REQ-120 的最终产品裁决是**完全退役 Tailscale
+> 思路**。下文涉及保留私网维护通道的旧决策仅是历史记录；当前 Jarvis
+> 不安装、不配置、不探测、不依赖 Tailscale，手机交互只走飞书。
+
 ## 0. 证据基础（三路挖掘，2026-08-11）
 
 数据源：`data/jarvis.db`（delivery_envelopes 等）、`memorials.jsonl`、`engagement_log.jsonl`、
@@ -29,7 +33,8 @@
 1. **飞书是唯一投递面**（8/7 拍板执行到底）：卡片要么走飞书，要么只进台账靠晨匣一行字兜底。
    不存在第三条路。web/phone 不再是投递通道，`route_channel='web'` 从此不再新增。
 2. **归档面诚实化**：dashboard :3457 保留为归档 + ops 参考（不投功能，拍板不变）；
-   mobile gateway :3458 与 Tailscale funnel 退役（本 PRD REQ-120）。Tailscale 私网本体保留作维护通道。
+   mobile gateway :3458 与所有 Jarvis-owned Tailscale 路径退役（本 PRD REQ-120，
+   2026-08-14 完成最终收口）。
 3. **一事一卡的现行定义成文**：一个决策一卡；同类知会合并；一拍 ≤4 张；同一话题线他已读未拍时不追发。
 4. **PRODUCT.md 旧宪法（phone/web = canonical surface）与 8/7 拍板冲突，本轮改正**（REQ-123）。
 

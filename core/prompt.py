@@ -243,6 +243,7 @@ def build_system_prompt(
     max_memory_chars: int | None = None,
     context_key: str = "",
     matter_id: str = "",
+    focus_text: str = "",
 ) -> str:
     """Build the full system prompt for handle_message.
 
@@ -257,7 +258,11 @@ def build_system_prompt(
         return _build_group_prompt(
             jarvis_dir, memory_dir, session_dir, session_id, conv_key,
             now_ts, tracker_path)
-    memory = load_tiered_memory(memory_dir, max_chars=max_memory_chars)
+    memory = load_tiered_memory(
+        memory_dir,
+        max_chars=max_memory_chars,
+        focus_text=focus_text,
+    )
     from core.conversation_context import (
         compact_key_from_context_key,
         context_snapshot,

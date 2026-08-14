@@ -899,13 +899,23 @@ class HeartbeatRunner:
             self._log(f"Script {script_path} error: {e}", level="warn")
             return ""
 
-    def _openai_fallback_call(self, system_prompt: str, prompt: str) -> str:
+    def _openai_fallback_call(
+        self,
+        system_prompt: str,
+        prompt: str,
+        *,
+        restrict_tools: bool = False,
+    ) -> str:
         """Last-resort heartbeat responder when Claude-compatible routes are quota-blocked."""
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if os.environ.get("OPENAI_FALLBACK_ENABLED", "true") != "true" or not api_key:
             return ""
         try:
-            from core.openai_fallback import call_openai, extract_text
+            from core.openai_fallback import (
+                call_openai,
+                extract_text,
+                run_agentic,
+            )
 
             model = (
                 os.environ.get("OPENAI_FALLBACK_MODEL")
@@ -916,29 +926,65 @@ class HeartbeatRunner:
             timeout = int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))
             max_output_tokens = int(os.environ.get("OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", "4096"))
             user_agent = os.environ.get("OPENAI_USER_AGENT", "")
+            capability = (
+                "No local tools are available for this untrusted-input call. "
+                "Use only the task prompt and DATA already included by pre-scripts."
+                if restrict_tools else
+                "Local tools are available. Use them only when needed to verify or "
+                "complete this heartbeat task."
+            )
             instructions = (
                 "You are Jarvis running a heartbeat cycle through an OpenAI-compatible "
                 "fallback because every Claude-compatible provider hit an account/model "
-                "limit. You cannot use local tools here. Use only the task prompt and "
-                "DATA already included by pre-scripts. Return the exact requested "
+                f"limit. {capability} Return the exact requested "
                 "heartbeat format, JSON envelope, or HEARTBEAT_OK."
             )
             if system_prompt.strip():
                 instructions = f"{instructions}\n\nPrimary heartbeat system prompt:\n{system_prompt}"
-            payload = {
-                "model": model,
-                "instructions": instructions,
-                "input": prompt,
-                "max_output_tokens": max_output_tokens,
-            }
             self._log(f"Calling OpenAI heartbeat fallback model={model}")
-            text = extract_text(call_openai(payload, api_key, base_url, timeout, user_agent))
+            if restrict_tools:
+                payload = {
+                    "model": model,
+                    "instructions": instructions,
+                    "input": prompt,
+                    "max_output_tokens": max_output_tokens,
+                }
+                text = extract_text(
+                    call_openai(payload, api_key, base_url, timeout, user_agent)
+                )
+            else:
+                text = run_agentic(
+                    instructions,
+                    prompt,
+                    model,
+                    max_output_tokens,
+                    api_key,
+                    base_url,
+                    timeout,
+                    user_agent,
+                )
             if text:
                 self.last_provider = "GPT fallback"
                 self.last_model = model
+                try:
+                    from core.provider_health import observe
+                    observe(
+                        "openai", "healthy", "request_succeeded",
+                        root=self.jarvis_dir,
+                    )
+                except Exception:
+                    pass
                 self._log(f"OpenAI heartbeat fallback succeeded ({len(text)} chars)")
             return text.strip()
         except Exception as e:
+            try:
+                from core.provider_health import observe
+                observe(
+                    "openai", "unhealthy", "request_failed",
+                    root=self.jarvis_dir,
+                )
+            except Exception:
+                pass
             self._log(f"OpenAI heartbeat fallback failed: {e}", level="warn")
             return ""
 
@@ -993,6 +1039,7 @@ class HeartbeatRunner:
         use_backup = False
         backup_tried = False
         _backup2_active = False
+        direct_gpt = False
         # Sticky provider gate (2026-07-07 spend-limit incident): when the
         # primary account is known-exhausted, start on the backup provider
         # instead of re-probing primary every cycle (2 doomed subprocess
@@ -1004,7 +1051,18 @@ class HeartbeatRunner:
             gate_state = _provider_gate(self.jarvis_dir)
         except Exception:
             gate_state = "primary"
+        health_route = ""
+        if gate_state == "backup":
+            try:
+                from core.provider_health import preferred_fallback
+                health_route = preferred_fallback(
+                    self.jarvis_dir,
+                    provider_ids=("backup1", "backup2", "openai"),
+                )
+            except Exception:
+                health_route = ""
         if (gate_state == "backup"
+                and health_route in {"", "backup1"}
                 and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
                 and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
                 and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
@@ -1012,6 +1070,7 @@ class HeartbeatRunner:
             backup_tried = True
             model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
         elif (gate_state == "backup"
+                and health_route in {"", "backup2"}
                 and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
                 and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
                 and os.environ.get("CLAUDE_BACKUP2_BASE_URL")):
@@ -1019,20 +1078,35 @@ class HeartbeatRunner:
             backup_tried = True
             _backup2_active = True
             model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
+        elif (gate_state == "backup"
+              and health_route == "openai"
+              and os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
+              and os.environ.get("OPENAI_API_KEY")):
+            # Heartbeat prompts already contain deterministic pre-script DATA.
+            # Use the agentic GPT path rather than retrying a relay in cooldown.
+            direct_gpt = True
+
+        if gate_state == "backup" and health_route == "none":
+            self._last_call_error = "no healthy provider fallback available"
+            self._log(
+                "All configured heartbeat fallback routes are cooling or unavailable",
+                level="warn",
+            )
+            return ""
 
         # Provider-aware memory budget: backup relay has a smaller context
         # window than the primary 1M channel.
         mem_budget = None
-        if use_backup:
+        if use_backup or direct_gpt:
             mem_budget = int(os.environ.get("BACKUP_MAX_MEMORY_CHARS", "40000"))
         try:
             memory = load_tiered_memory(
-                self.memory_dir, max_chars=mem_budget)
+                self.memory_dir, max_chars=mem_budget, focus_text=prompt)
         except TypeError as exc:
             # Keep HeartbeatRunner compatible with an older memory module and
             # with lightweight test/plugin adapters that still expose the
             # historical one-argument callable.
-            if "max_chars" not in str(exc):
+            if not any(name in str(exc) for name in ("max_chars", "focus_text")):
                 raise
             memory = load_tiered_memory(self.memory_dir)
         if restrict_tools:
@@ -1060,6 +1134,12 @@ You have access to the user's memory below. Use it to personalize your responses
 {self._acting_section(restrict_tools)}
 
 {memory}"""
+        if direct_gpt:
+            return self._openai_fallback_call(
+                system_prompt,
+                prompt,
+                restrict_tools=restrict_tools,
+            )
         try:
             while True:
                 cmd = [
@@ -1103,6 +1183,18 @@ You have access to the user's memory below. Use it to personalize your responses
                         else ("Claude backup" if use_backup else "Claude primary")
                     )
                     self.last_model = model or self.model
+                    try:
+                        from core.provider_health import observe
+                        observe(
+                            "backup2" if _backup2_active else (
+                                "backup1" if use_backup else "primary"
+                            ),
+                            "healthy",
+                            "request_succeeded",
+                            root=self.jarvis_dir,
+                        )
+                    except Exception:
+                        pass
                     if gate_state != "primary" and not use_backup:
                         # Primary answered while the outage flag was set (we
                         # were the elected prober, or backup env is missing)
@@ -1179,6 +1271,14 @@ You have access to the user's memory below. Use it to personalize your responses
                         _gate_trip(account_limit_reason, self.jarvis_dir)
                     except Exception:
                         pass
+                    try:
+                        from core.provider_health import observe
+                        observe(
+                            "primary", "unhealthy", "account_limit",
+                            root=self.jarvis_dir,
+                        )
+                    except Exception:
+                        pass
                 if nxt and f"{provider}:{nxt}" not in attempted:
                     self._log(
                         f"Retrying Claude heartbeat with {provider} fallback model: {nxt}")
@@ -1214,6 +1314,15 @@ You have access to the user's memory below. Use it to personalize your responses
                             or model_problem
                             or gate_state != "primary"
                         )):
+                    if use_backup:
+                        try:
+                            from core.provider_health import observe
+                            observe(
+                                "backup1", "unhealthy", "request_failed",
+                                root=self.jarvis_dir,
+                            )
+                        except Exception:
+                            pass
                     backup_tried = True
                     use_backup = True
                     _backup2_active = True
@@ -1226,7 +1335,22 @@ You have access to the user's memory below. Use it to personalize your responses
                 # known-dead — dead-ending here would silence the whole
                 # heartbeat even though the OpenAI route works.
                 if model_problem or use_backup:
-                    fallback = self._openai_fallback_call(system_prompt, prompt)
+                    if use_backup:
+                        try:
+                            from core.provider_health import observe
+                            observe(
+                                "backup2" if _backup2_active else "backup1",
+                                "unhealthy",
+                                "request_failed",
+                                root=self.jarvis_dir,
+                            )
+                        except Exception:
+                            pass
+                    fallback = self._openai_fallback_call(
+                        system_prompt,
+                        prompt,
+                        restrict_tools=restrict_tools,
+                    )
                     if fallback:
                         return fallback
                 # Nonzero Claude output is an error surface, not user content.

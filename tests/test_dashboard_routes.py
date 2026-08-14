@@ -1167,14 +1167,6 @@ class TestRoutes:
             trigger_config={"datetime": (now + timedelta(days=2)).isoformat()})
         return TestClient(nicegui_app)
 
-    @staticmethod
-    def owner_headers():
-        # Pairing is retired (REQ-120); _owner_guard still honors a legacy
-        # mobile_devices credential, so mint one the way pairing used to.
-        from tests.conftest import seed_legacy_device
-        token = seed_legacy_device(device_id="dev_owner_test")
-        return {"Authorization": f"Bearer {token}"}
-
     @pytest.mark.parametrize("path", PAGES)
     def test_page_renders_200(self, client, path):
         r = client.get(path)
@@ -1319,7 +1311,6 @@ class TestRoutes:
         assert client.get("/api/mobile/status").status_code == 404
         assert client.post(
             "/api/mobile/pair", json={"label": "x"},
-            headers=self.owner_headers(),
         ).status_code == 404
 
     def test_api_items_decision_and_delivery_confirmation(
@@ -1346,10 +1337,9 @@ class TestRoutes:
         decided = client.post(
             f"/api/items/{memorial_id}/decide",
             json={"option": "approve"},
-            headers=self.owner_headers(),
         )
-        assert decided.status_code == 200
-        assert memorial.get_memorial(memorial_id)["status"] == "decided"
+        assert decided.status_code == 404
+        assert memorial.get_memorial(memorial_id)["status"] == "pending"
 
         from core.delivery import TransportResult
         pipeline = DeliveryPipeline(
@@ -1380,10 +1370,9 @@ class TestRoutes:
         assert confirmed.status_code == 200
         assert confirmed.json()["state"] == "read"
 
-    def test_owner_mutations_reject_direct_worker_http(
+    def test_retired_phone_owner_mutations_have_no_http_route(
             self, client, jarvis_tmp, monkeypatch):
         from core.delegations import DelegationStore
-        from core.iteration_loop import IterationStore
 
         monkeypatch.setenv("USER_ID", "owner")
         captured = client.post(
@@ -1420,99 +1409,19 @@ class TestRoutes:
             authority="feed",
             verification_policy={"verifier": "feed"},
         )
-        iteration_store = IterationStore(root=jarvis_tmp)
-        signal = iteration_store.record_signal(
-            source="components",
-            category="health",
-            key="owner-boundary",
-            severity="critical",
-            summary="Owner review required",
-            evidence={"ok": False},
-        )
-        proposal, _ = iteration_store.propose_from_signal(signal)
-
         assert client.post(
             f"/api/delegations/{delegation['id']}/confirm",
             json={"expected_version": 1, "principal_id": "owner"},
-        ).status_code == 401
+        ).status_code == 404
         assert client.post(
-            f"/api/iteration/proposals/{proposal['id']}/review",
+            "/api/iteration/proposals/prop_retired/review",
             json={"decision": "reject"},
-        ).status_code == 401
-
-        headers = self.owner_headers()
-        confirmed = client.post(
-            f"/api/delegations/{delegation['id']}/confirm",
-            json={"expected_version": 1, "principal_id": "owner"},
-            headers=headers,
-        )
-        rejected = client.post(
-            f"/api/iteration/proposals/{proposal['id']}/review",
-            json={"decision": "reject"},
-            headers=headers,
-        )
-        assert confirmed.status_code == 200
-        assert confirmed.json()["status"] == "bound"
-        assert rejected.status_code == 200
-        assert rejected.json()["status"] == "rejected"
-
-    def test_api_retry_resolves_failed_delegation_attention(
-            self, client, jarvis_tmp, monkeypatch):
-        from core import memorial
-        from core.delegation_reconcile import sync_attention_item
-        from core.delegations import DelegationStore
-
-        monkeypatch.setattr(memorial, "JARVIS_DIR", jarvis_tmp)
-        store = DelegationStore(root=jarvis_tmp)
-        delegation, _ = store.create(
-            principal_id="owner",
-            source="test",
-            source_ref="api-retry-attention",
-            title="Retry failed send",
-            operation="message_send",
-            target_type="agent",
-            target_id="agent-1",
-            authority="message_service",
-            verification_policy={"verifier": "message"},
-            authorized=True,
-        )
-        step = store.add_step(
-            delegation["id"],
-            expected_version=1,
-            sequence=1,
-            kind="message_send",
-            executor="worker",
-        )
-        store.claim_step(
-            delegation["id"],
-            step["id"],
-            expected_version=1,
-            owner="worker",
-        )
-        store.record_attempt(
-            delegation["id"],
-            step["id"],
-            expected_version=1,
-            owner="worker",
-            succeeded=False,
-            error_code="provider_unavailable",
-        )
-        detail = store.get(delegation["id"])
-        memorial_id = sync_attention_item(
-            detail,
-            store=store,
-            send=False,
-        )
-
-        response = client.post(
-            f"/api/delegations/{delegation['id']}/retry",
-            json={"expected_version": 1},
-            headers=self.owner_headers(),
-        )
-
-        assert response.status_code == 200
-        assert response.json()["status"] == "bound"
-        assert memorial.get_memorial(memorial_id)["resolved_label"] == "已处理"
+        ).status_code == 404
+        for action in ("cancel", "retry"):
+            assert client.post(
+                f"/api/delegations/{delegation['id']}/{action}",
+                json={"expected_version": 1},
+            ).status_code == 404
 
     def test_api_cross_device_handoff_lifecycle(
             self, client, jarvis_tmp, monkeypatch):

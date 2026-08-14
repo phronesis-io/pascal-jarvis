@@ -477,7 +477,6 @@ def replacement_card(
     rendered: str,
     state: dict,
     *,
-    web_desk_url: Callable[[str], str],
     chat_button_label: str,
     chat_opt_key: str,
 ) -> dict:
@@ -497,13 +496,9 @@ def replacement_card(
             "opt": chat_opt_key,
         },
     }]
-    desk = web_desk_url(f"/items/{state['id']}")
-    if desk:
-        buttons.insert(0, {"text": "打开事项", "url": desk})
     fallback = build_card(
         "Jarvis · 事项",
-        ("状态已更新。完整记录在下面的「打开事项」里。" if desk
-         else "状态已更新。完整记录已存档，随时可以问我。"),
+        "状态已更新。完整记录已存档，随时可以问我。",
         button_groups=[buttons],
     )
     return json.loads(fallback)

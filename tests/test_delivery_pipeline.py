@@ -356,12 +356,12 @@ def test_global_daily_cap(pipeline):
             requested_channel="lark",
             metadata={"global_daily_cap": 1, "source_daily_cap": 9},
         ))
-    assert result.state == "queued"
+    assert result.state == "suppressed"
     assert result.reason == "global_daily_cap"
     assert len(sent) == 1
 
 
-def test_global_daily_budget_releases_next_morning(tmp_path):
+def test_global_daily_budget_does_not_create_a_next_morning_backlog(tmp_path):
     now = [_local_ts(2026, 8, 12, 14, 0)]
     sent = []
     pipe = DeliveryPipeline(
@@ -375,15 +375,16 @@ def test_global_daily_budget_releases_next_morning(tmp_path):
     assert pipe.deliver(DeliveryEnvelope(
         source="one", payload={"text": "first"},
         metadata=metadata)).state == "delivered"
-    deferred = pipe.deliver(DeliveryEnvelope(
+    overflow = pipe.deliver(DeliveryEnvelope(
         source="two", payload={"text": "second"},
         metadata=metadata))
-    assert deferred.state == "queued"
-    assert pipe.get(deferred.delivery_id)["next_attempt_epoch"] > now[0]
+    assert overflow.state == "suppressed"
+    assert overflow.reason == "global_daily_cap"
+    assert pipe.get(overflow.delivery_id)["next_attempt_epoch"] is None
 
     now[0] = _local_ts(2026, 8, 13, 9, 31)
-    assert pipe.flush_due()[0].state == "delivered"
-    assert sent == ["first", "second"]
+    assert pipe.flush_due() == []
+    assert sent == ["first"]
 
 
 def test_alert_and_reply_bypass_proactive_daily_budget(tmp_path):
@@ -396,15 +397,21 @@ def test_alert_and_reply_bypass_proactive_daily_budget(tmp_path):
             or TransportResult(True, f"om_{len(sent)}")),
         clock=lambda: now[0], sleeper=lambda _: None,
     )
-    metadata = {"global_daily_cap": 1, "source_daily_cap": 9}
+    metadata = {
+        "global_daily_cap": 1,
+        "source_daily_cap": 1,
+        "metric_daily_cap": 1,
+    }
     pipe.deliver(DeliveryEnvelope(
-        source="ordinary", payload={"text": "normal"}, metadata=metadata))
+        source="ordinary", payload={"text": "normal"},
+        throttle_key="same-signal", metadata=metadata))
     alert = pipe.deliver(DeliveryEnvelope(
-        source="guardian", payload={"text": "urgent alert"},
-        attention="alert", metadata=metadata))
+        source="ordinary", payload={"text": "urgent alert"},
+        attention="alert", throttle_key="same-signal", metadata=metadata))
     reply = pipe.deliver(DeliveryEnvelope(
-        source="bot-reply", kind="reply", attention="reply",
-        reply_to="om_user", payload={"text": "reply"}, metadata=metadata))
+        source="ordinary", kind="reply", attention="reply",
+        throttle_key="same-signal", reply_to="om_user",
+        payload={"text": "reply"}, metadata=metadata))
     assert alert.state == reply.state == "delivered"
     assert sent == ["normal", "urgent alert", "reply"]
 

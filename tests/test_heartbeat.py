@@ -252,6 +252,59 @@ def test_claude_call_no_tool_restriction_by_default(tmp_path, monkeypatch):
     assert "--disallowedTools" not in captured_cmds[0]
 
 
+def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_fallback",
+        lambda _root, **_kwargs: "openai",
+    )
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda system, prompt, restrict_tools=False: (
+            calls.append((system, prompt, restrict_tools)) or "GPT_OK"
+        ),
+    )
+    monkeypatch.setattr(
+        "core.heartbeat._run_isolated",
+        lambda *_args, **_kwargs: pytest.fail("Claude relay must be skipped"),
+    )
+
+    assert runner.claude_call("focus on eigenflux") == "GPT_OK"
+    assert calls and calls[0][1:] == ("focus on eigenflux", False)
+
+
+def test_heartbeat_stops_when_every_fallback_route_is_cooling(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_fallback",
+        lambda _root, **_kwargs: "none",
+    )
+    monkeypatch.setattr(
+        "core.heartbeat._run_isolated",
+        lambda *_args, **_kwargs: pytest.fail(
+            "account-limited primary must not be retried"
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cooling OpenAI fallback must not be retried"
+        ),
+    )
+
+    assert runner.claude_call("focus") == ""
+    assert runner._last_call_error == "no healthy provider fallback available"
+
+
 def test_acting_section_omits_bash_guidance_when_restricted():
     from core.heartbeat import HeartbeatRunner as _HR
     restricted = _HR._acting_section(True)

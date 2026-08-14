@@ -252,29 +252,3 @@ def _isolate_daemon_log(monkeypatch, tmp_path):
         monkeypatch.setattr(_daemon, "LOG_FILE", tmp_path / "daemon.log")
     except ImportError:
         pass
-
-
-def seed_legacy_device(device_id: str = "dev_legacy", secret: str = "s3cret",
-                       label: str = "owner test device",
-                       revoked_at: str | None = None) -> str:
-    """Insert a legacy ``mobile_devices`` row and return its Bearer token.
-
-    Pairing is retired (REQ-120) — no production path mints device tokens
-    anymore — but ``validate_device_token`` still honors legacy rows, so
-    tests seed one exactly the way pairing used to: the row stores only the
-    sha256 of the secret (via core.mobile_access's own hash function, so the
-    fixture can never drift from the validator).
-    """
-    import dashboard.db as db_module
-    from core.mobile_access import _hash
-
-    db = db_module.get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO mobile_devices "
-        "(id,label,token_hash,created_at,last_seen_at,revoked_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (device_id, label, _hash(secret),
-         "2026-07-25T10:00:00", "2026-07-25T10:00:00", revoked_at),
-    )
-    db.commit()
-    return f"{device_id}.{secret}"

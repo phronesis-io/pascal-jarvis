@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from core import cross_session
 from core.cross_session import (
@@ -14,6 +15,10 @@ from core.cross_session import (
     collect_incremental,
     discover_interactive_sessions,
     redact_text,
+)
+from core.cross_session_parsing import SessionTail, Turn
+from core.cross_session_projection import (
+    build_prompt_context as build_projected_context,
 )
 from core.prompt import build_system_prompt
 
@@ -96,6 +101,93 @@ def test_discovers_both_providers_and_redacts_before_projection(tmp_path):
     assert "super-secret-value" not in rendered
     assert "tool-secret-must-not-leak" not in rendered
     assert rendered.count("把 Codex 结论同步给主 Agent") == 1
+
+
+def test_provider_failures_are_not_projected_as_assistant_memory(tmp_path):
+    claude_root = tmp_path / "claude"
+    codex_root = tmp_path / "codex"
+    claude_path = claude_root / "project" / "human.jsonl"
+    _claude(claude_path)
+    with claude_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "assistant",
+            "sessionId": "claude-human",
+            "cwd": "/work/alpha",
+            "timestamp": "2026-08-11T10:02:00Z",
+            "message": {"content": "You've hit your weekly limit · resets Friday"},
+        }, ensure_ascii=False) + "\n")
+    codex_path = codex_root / "manual.jsonl"
+    _codex(codex_path)
+    with codex_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "event_msg",
+            "timestamp": "2026-08-11T11:02:00Z",
+            "payload": {
+                "type": "agent_message",
+                "message": "API Error: 424 no account available for model",
+            },
+        }, ensure_ascii=False) + "\n")
+
+    rendered = build_prompt_context(
+        claude_root=claude_root,
+        codex_root=codex_root,
+        tracker_path=tmp_path / "missing.json",
+    )
+
+    assert "weekly limit" not in rendered
+    assert "API Error: 424" not in rendered
+    assert "下一步补回归测试" in rendered
+    assert "已经实现并完成验证" in rendered
+
+
+def test_bounded_projection_keeps_complete_records():
+    sessions = [
+        SessionTail(
+            provider="codex",
+            session_id=f"session-{index}",
+            workspace=f"/work/project-{index}",
+            path=Path(f"/work/session-{index}.jsonl"),
+            updated_at=f"2026-08-11T1{index}:00:00Z",
+            turns=(
+                Turn("user", f"USER_RECORD_{index}_" + "u" * 100),
+                Turn("assistant", f"ASSISTANT_RECORD_{index}_" + "a" * 100),
+            ),
+        )
+        for index in range(3)
+    ]
+
+    rendered = build_projected_context(
+        max_chars=650,
+        discover=lambda **_kwargs: list(reversed(sessions)),
+    )
+
+    assert len(rendered) <= 650
+    assert "[older session context omitted]" in rendered
+    for line in rendered.splitlines():
+        if "_RECORD_" in line:
+            assert line.startswith(("- User: ", "- Assistant: "))
+            assert line.endswith(("u" * 100, "a" * 100))
+
+
+def test_tiny_projection_budget_never_slices_a_framing_line():
+    sessions = [
+        SessionTail(
+            provider="codex",
+            session_id="session",
+            workspace="/work/project",
+            path=Path("/work/session.jsonl"),
+            updated_at="2026-08-11T10:00:00Z",
+            turns=(Turn("user", "objective"),),
+        )
+    ]
+
+    rendered = build_projected_context(
+        max_chars=45,
+        discover=lambda **_kwargs: sessions,
+    )
+
+    assert len(rendered) <= 45
+    assert rendered in {"", "## Recent External Work Sessions"}
 
 
 def test_redaction_does_not_mangle_task_notifications():

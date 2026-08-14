@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import dashboard.db as db_module
-from core import codex_fallback, model_fallback
+from core import codex_fallback, model_fallback, provider_health
 from core.matter_bridge import record_turn
 from core.prompt import build_system_prompt
 
@@ -287,6 +287,11 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     _write_fake_claude(fake_claude)
     _write_fake_codex(fake_codex)
     _write_fake_lark(fake_lark)
+    with (jarvis_dir / "jarvis.yaml").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "codex:\n  fallback_enabled: true\n"
+            f"  binary: {fake_codex}\n  fallback_model: gpt-bot-e2e\n"
+        )
 
     # Exact production handler functions, with only external adapters mocked. The
     # provider branch, lock ownership, reliable delivery CLI, and successful
@@ -382,6 +387,51 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         ).fetchone()
     assert session == ("thread-e2e", "gpt-bot-e2e")
     assert not (jarvis_dir / ".session_lock_session-bot-e2e").exists()
+
+    # The first real failure/success observations now steer the next turn.
+    # Primary remains account-limited and Codex is healthy, so no second
+    # doomed Claude call is allowed.
+    second = subprocess.run(
+        [
+            "bash", str(harness), "ou_owner", "继续下一步", "om-user-e2e-2",
+            "session-bot-e2e", "", "p2p", "ou_owner",
+            "conversation:ou_owner", "", "",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert second.returncode == 0, second.stderr
+    assert claude_log.read_text(encoding="utf-8").splitlines() == ["called"]
+    assert "继续下一步" in prompt_log.read_text(encoding="utf-8")
+
+    # Once the final configured fallback is also cooling, the handler must
+    # fail closed for this turn. It may report the bounded product error, but
+    # must not probe the account-limited primary or replay Codex.
+    provider_health.observe(
+        "codex", "unhealthy", "request_failed", root=jarvis_dir,
+    )
+    codex_prompt_before = prompt_log.read_text(encoding="utf-8")
+    third = subprocess.run(
+        [
+            "bash", str(harness), "ou_owner", "再试一次", "om-user-e2e-3",
+            "session-bot-e2e", "", "p2p", "ou_owner",
+            "conversation:ou_owner", "", "",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert third.returncode == 0, third.stderr
+    assert claude_log.read_text(encoding="utf-8").splitlines() == ["called"]
+    assert prompt_log.read_text(encoding="utf-8") == codex_prompt_before
+    final_log = lark_log.read_text(encoding="utf-8")
+    assert "当前已配置的模型通道都在恢复中" in final_log
+    assert "这次请求没有执行" in final_log
 
     monkeypatch.setattr(db_module, "DB_PATH", db_path)
     monkeypatch.setenv("JARVIS_DIR", str(jarvis_dir))

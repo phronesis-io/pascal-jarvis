@@ -7,7 +7,7 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 222 active capabilities: 222 `keep`, 0 `fix`,
+- The generated inventory has 228 active capabilities: 228 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
 - `core.cross_session` is a 190-line facade over discovery, parsing, and
@@ -28,7 +28,7 @@ work. The supported product surface remains the generated
   and changed implementation lines are review-volume indicators, not coverage
   percentages, and must not be used to compare this repository with another
   codebase.
-- `core/memorial.py` is 3,492 lines with 116 functions; its longest function is
+- `core/memorial.py` is 3,477 lines with 115 functions; its longest function is
   165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
   function is 324 lines. These are verified maintainability risks even though
   line count alone is not a defect.
@@ -77,9 +77,10 @@ changes. They must not be rewritten or split by line count alone.
    there are no live callers. Production data migrations require backup,
    verification, and rollback evidence.
 
-This debt program follows the current logical-session release. Combining a
-large module split with new session isolation would make regressions harder to
-attribute and would weaken the release evidence for both changes.
+This debt program follows the current audited product-closure release.
+Combining a large module split with memory, provider-routing, and attention
+behavior changes would make regressions harder to attribute and weaken the
+release evidence for both changes.
 
 ## Retention Rule
 

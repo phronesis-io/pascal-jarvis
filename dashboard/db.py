@@ -212,6 +212,8 @@ MIGRATIONS = [
         UNIQUE(channel, message_id)
     );
 
+    -- Retention-only schemas from the retired phone web gateway. No active
+    -- route reads or writes these tables; historical rows remain auditable.
     CREATE TABLE IF NOT EXISTS mobile_devices (
         id TEXT PRIMARY KEY,
         label TEXT NOT NULL,

@@ -69,12 +69,14 @@ components:
       the daemon pages on; honors the same post-wake grace; never writes state.
 
   - name: ef-stream
-    check: pgrep
+    check: ef_stream
     pattern: "core.ef_stream_loop"
+    path: data/ef_stream_health.json
+    max_age_seconds: 2400
     owned_by_pidfile: .bot.pid
     critical: true
     requires_cmd: eigenflux
-    note: EigenFlux PM/friend stream; bot watchdog restarts it (REQ-40)
+    note: EigenFlux PM/friend stream; verifies protocol state as well as process ownership
 
   - name: lark-sidecar
     check: pgrep

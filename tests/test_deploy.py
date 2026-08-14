@@ -70,6 +70,28 @@ def test_verify_detects_code_and_heartbeat_changed_after_start(tmp_path):
     assert any("HEARTBEAT.md changed" in issue for issue in result["issues"])
 
 
+def test_verify_ignores_touch_only_mtime_changes(tmp_path):
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "worker.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+    register_runtime(
+        "bot", pid=os.getpid(), root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+    )
+    code = tmp_path / "core" / "worker.py"
+    stat = code.stat()
+    os.utime(code, (stat.st_atime + 60, stat.st_mtime + 60))
+
+    result = verify_runtime(
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        required=["bot"],
+    )
+
+    assert result["ok"] is True
+
+
 def test_verify_config_restart_allows_config_but_not_code_changes(tmp_path):
     (tmp_path / "core").mkdir()
     source = tmp_path / "core" / "worker.py"

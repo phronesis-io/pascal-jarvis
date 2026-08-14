@@ -212,6 +212,121 @@ def test_probe_all_runs_independent_claude_routes_concurrently(tmp_path):
     assert rows["backup1"]["status"] == "healthy"
 
 
+def test_probe_all_preserves_real_failure_written_during_canary(tmp_path):
+    _write_config(tmp_path)
+    probe_started = threading.Event()
+    finish_probe = threading.Event()
+    result = {}
+
+    def runner(cmd, **kwargs):
+        probe_started.set()
+        assert finish_probe.wait(timeout=2)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}), stderr=""
+        )
+
+    def run_probe():
+        result["state"] = ph.probe_all(
+            tmp_path,
+            runner=runner,
+            openai_caller=lambda *a, **k: {"output_text": ph.CANARY_MARKER},
+        )
+
+    thread = threading.Thread(target=run_probe)
+    thread.start()
+    assert probe_started.wait(timeout=2)
+    ph.observe("backup1", "unhealthy", root=tmp_path)
+    finish_probe.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    row = next(
+        item for item in result["state"]["providers"]
+        if item["id"] == "backup1"
+    )
+    assert row["status"] == "unhealthy"
+    assert row["observation_source"] == "real_request"
+    assert row["detail"] == "real request: request_failed"
+
+
+def test_provider_specs_honors_runtime_codex_binary_override(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    monkeypatch.setenv("CODEX_FALLBACK_BINARY", "/runtime/codex")
+    monkeypatch.setenv("CODEX_BIN", "/other/codex")
+
+    row = next(
+        item for item in ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))
+        if item["id"] == "codex"
+    )
+
+    assert row["binary"] == "/runtime/codex"
+
+
+def test_recent_real_failure_skips_relay_during_cooldown(tmp_path):
+    _write_config(tmp_path)
+    config_path = tmp_path / "jarvis.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "codex:\n  fallback_enabled: false",
+            "codex:\n  fallback_enabled: true\n"
+            "  fallback_model: gpt-test\n  binary: /opt/codex",
+        ),
+        encoding="utf-8",
+    )
+
+    ph.observe(
+        "backup1", "unhealthy", "request_failed",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_fallback(
+        tmp_path, now_epoch=10_100, cooldown_seconds=1800
+    ) == "codex"
+    assert ph.preferred_fallback(
+        tmp_path, now_epoch=12_000, cooldown_seconds=1800
+    ) == "backup1"
+
+
+def test_preferred_fallback_honors_callers_supported_provider_set(
+    tmp_path, monkeypatch
+):
+    _write_config(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "false")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+
+    assert ph.preferred_fallback(
+        tmp_path, provider_ids=("backup1", "backup2", "openai")
+    ) == "openai"
+
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "false")
+    assert ph.preferred_fallback(
+        tmp_path, provider_ids=("backup1", "backup2", "openai")
+    ) == "none"
+
+
+def test_real_observation_persists_only_bounded_reason_codes(tmp_path):
+    _write_config(tmp_path)
+
+    ph.observe(
+        "backup1",
+        "unhealthy",
+        "API Error: 424 token=sk-super-secret-value",
+        root=tmp_path,
+        now_epoch=10_000,
+    )
+
+    saved = (tmp_path / ph.STATE_FILE).read_text(encoding="utf-8")
+    row = next(
+        item for item in json.loads(saved)["providers"]
+        if item["id"] == "backup1"
+    )
+    assert row["observation_source"] == "real_request"
+    assert row["detail"] == "real request: request_failed"
+    assert "424" not in saved
+    assert "super-secret" not in saved
+
+
 def test_codex_probe_is_ephemeral_read_only_and_exact(tmp_path, monkeypatch):
     _write_config(tmp_path)
     config_path = tmp_path / "jarvis.yaml"

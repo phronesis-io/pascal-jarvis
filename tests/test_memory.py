@@ -700,6 +700,28 @@ def test_backup_budget_preserves_complete_hot_identity_before_warm_notes(
     assert all(event["expected"] is True for event in events)
 
 
+def test_reduced_budget_prioritizes_memory_relevant_to_current_message(tmp_path):
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "feedback_rules.md").write_text(
+        "GENERAL_GUIDANCE\n" + "g" * 12_000
+    )
+    (warm / "insurance_research.md").write_text(
+        "董事责任保险 董责险 配偶 Agent 转发结论\n" + "i" * 3000
+    )
+
+    unfocused = load_tiered_memory(tmp_path, max_chars=5000)
+    focused = load_tiered_memory(
+        tmp_path,
+        max_chars=5000,
+        focus_text="继续处理董责险并转发给我老婆的 agent",
+    )
+
+    assert "董事责任保险" not in unfocused
+    assert "董事责任保险" in focused
+    assert len(focused) <= 5000
+
+
 def test_warm_per_file_cap_head_keep(tmp_path):
     from core.memory import WARM_FILE_CAP
     warm = tmp_path / "warm"

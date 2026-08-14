@@ -30,6 +30,27 @@ def test_build_system_prompt_basic(tmp_path):
     assert "ACTION:" in prompt
 
 
+def test_owner_prompt_uses_current_message_to_focus_memory(tmp_path):
+    warm = tmp_path / "memory" / "warm"
+    warm.mkdir(parents=True)
+    (warm / "feedback_rules.md").write_text("GENERAL\n" + "g" * 12_000)
+    (warm / "insurance.md").write_text("董责险关键结论\n" + "i" * 3000)
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="test-key",
+        now_ts="2026-08-14 10:00",
+        tracker_path=str(tmp_path / "tracker.json"),
+        max_memory_chars=5000,
+        focus_text="董责险",
+    )
+
+    assert "董责险关键结论" in prompt
+
+
 def test_owner_prompt_includes_id_free_known_people_context(tmp_path):
     (tmp_path / "memory").mkdir()
     (tmp_path / "data").mkdir()

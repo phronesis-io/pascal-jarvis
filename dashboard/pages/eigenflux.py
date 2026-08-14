@@ -153,12 +153,31 @@ def load_network_overview(
             }
         )
 
+    stream = read_json(
+        root / "data" / "ef_stream_health.json", ttl=5, default={}
+    ) or {}
+    stream_status = str(stream.get("status") or "unknown")
+    stream_updated = _number(stream.get("updated_epoch"))
+    stream_fresh = stream_updated > 0 and current_epoch - stream_updated <= 2400
+    # Process startup/reconnect is observable but is not proof that the
+    # protocol has delivered data. Only an active output observation gets the
+    # green product label; connecting/reconnecting remain amber and explicit.
+    stream_healthy = stream_fresh and stream_status == "active"
+    stream = {
+        "status": stream_status,
+        "healthy": stream_healthy,
+        "detail": str(stream.get("detail") or "尚无实时流验真记录"),
+        "quiet_streak": int(_number(stream.get("quiet_streak"))),
+        "updated": _fmt_epoch(stream_updated),
+    }
+
     return {
         "recurring_publish": _truthy(kv.get("recurring_publish")),
         "auto_comment": _truthy(kv.get("auto_comment")),
         "pending": pending,
         "recent": recent,
         "tasks": tasks,
+        "stream": stream,
     }
 
 
@@ -214,7 +233,16 @@ def eigenflux_page():
                     + ("is-green" if healthy_tasks == len(TASKS) else "is-amber")
                 )
                 ui.label(
-                    f"EigenFlux {healthy_tasks}/{len(TASKS)} 条自动链路正常"
+                    f"定时任务 {healthy_tasks}/{len(TASKS)} 正常"
+                )
+            with ui.element("span").classes("status-pill"):
+                ui.element("span").classes(
+                    "status-dot "
+                    + ("is-green" if overview["stream"]["healthy"] else "is-amber")
+                )
+                ui.label(
+                    "实时消息流正常" if overview["stream"]["healthy"]
+                    else f"实时消息流未验真：{overview['stream']['status']}"
                 )
 
             with ui.element("div").classes("metric-strip"):

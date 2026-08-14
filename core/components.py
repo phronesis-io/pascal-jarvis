@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -227,6 +228,27 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
             f"age {age_h:.1f}h (max {max_h:.0f}h)")
 
 
+def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
+    process_ok, process_detail = _check_pgrep(comp, root)
+    if not process_ok:
+        return False, process_detail
+    path = root / comp.get("path", "data/ef_stream_health.json")
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        updated = float(state.get("updated_epoch") or 0)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, f"{process_detail}; protocol health unavailable"
+    age = time.time() - updated
+    if updated <= 0 or age > float(comp.get("max_age_seconds", 2400)):
+        return False, f"{process_detail}; protocol health stale"
+    status = str(state.get("status") or "unknown")
+    quiet = int(state.get("quiet_streak") or 0)
+    if status in {"active", "connecting", "reconnecting"}:
+        return True, f"{status}; quiet streak {quiet}; {process_detail}"
+    detail = str(state.get("detail") or status)
+    return False, f"{status}: {detail}; {process_detail}"[:400]
+
+
 def _check_deadman(comp: dict, root: Path) -> tuple[bool, str]:
     from core.deadman import status
 
@@ -377,6 +399,7 @@ _CHECKS = {
     "pgrep": _check_pgrep,
     "http": _check_http,
     "file_age": _check_file_age,
+    "ef_stream": _check_ef_stream,
     "deadman": _check_deadman,
     "audit_age": _check_audit_age,
     "heartbeat_tasks": _check_heartbeat_tasks,

@@ -1006,7 +1006,8 @@ $content"
     _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
   fi
   local sys_prompt
-  sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+  sys_prompt=$(printf '%s' "$content" | \
+    JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
     JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
     JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
     JV_MATTER_ID="$matter_id" python3 -c "
@@ -1014,6 +1015,7 @@ import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
+focus_text = sys.stdin.read()
 print(build_system_prompt(
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
@@ -1026,6 +1028,7 @@ print(build_system_prompt(
     max_memory_chars=int(mc) if mc else None,
     context_key=os.environ.get('JV_CONTEXT_KEY', ''),
     matter_id=os.environ.get('JV_MATTER_ID', ''),
+    focus_text=focus_text,
 ))
 " 2>>"$LOG_FILE")
 
@@ -1134,7 +1137,8 @@ except Exception:
       session_id="$_cur_sid"
       LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
       # Rebuild system prompt with the new session's recent turns
-      sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+      sys_prompt=$(printf '%s' "$content" | \
+        JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
         JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
         JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
         JV_MATTER_ID="$matter_id" python3 -c "
@@ -1142,6 +1146,7 @@ import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
+focus_text = sys.stdin.read()
 print(build_system_prompt(
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
@@ -1154,6 +1159,7 @@ print(build_system_prompt(
     max_memory_chars=int(mc) if mc else None,
     context_key=os.environ.get('JV_CONTEXT_KEY', ''),
     matter_id=os.environ.get('JV_MATTER_ID', ''),
+    focus_text=focus_text,
 ))
 " 2>>"$LOG_FILE") || true
       [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
@@ -1183,6 +1189,20 @@ print(build_system_prompt(
   # spawn fails with a model-unavailable / spend-limit stderr, instead of
   # looping to empty death ("Continue / No response requested").
   local _cur_model="$MAIN_MODEL"
+  local _active_claude_provider="primary"
+
+  # Account-limit state and route health answer different questions: the
+  # former says primary must not be retried; the latter says which configured
+  # fallback has answered recently. A failed relay gets a short cooldown so
+  # every new Lark turn does not pay for the same known 424 again.
+  local _provider_gate="primary"
+  local _health_route=""
+  local _health_routed=0
+  local _no_healthy_provider=0
+  _provider_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
+  if [ "$_provider_gate" = "backup" ] && [ "$is_group" -ne 1 ]; then
+    _health_route=$(python3 -m core.provider_health route 2>/dev/null || true)
+  fi
 
   # A private conversation may explicitly prefer Codex. This changes only
   # routing order: if Codex is unavailable, the normal Claude chain still
@@ -1191,6 +1211,12 @@ print(build_system_prompt(
   if [ "$is_group" -ne 1 ]; then
     _provider_preference=$(python3 -m core.runtime_provider get "$conv_key" \
       2>>"$LOG_FILE" || echo auto)
+  fi
+  if [ "$_provider_preference" = "auto" ] \
+    && { [ "$_health_route" = "codex" ] || [ "$_health_route" = "openai" ]; }; then
+    _provider_preference="$_health_route"
+    _health_routed=1
+    log_info "[$session_id] Provider health route: skipping cooling relay and trying $_health_route"
   fi
   if [ "$_provider_preference" = "codex" ] \
     && [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ]; then
@@ -1205,9 +1231,13 @@ print(build_system_prompt(
     if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
       _answer_provider="Codex"
       _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
+      python3 -m core.provider_health observe codex healthy \
+        --detail request_succeeded >/dev/null 2>&1 || true
       log_info "[$session_id] Preferred Codex route succeeded (${#answer} chars)"
     elif [ "$_codex_exit" -eq 75 ]; then
       answer=""
+      python3 -m core.provider_health observe codex unhealthy \
+        --detail request_failed >/dev/null 2>&1 || true
       _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
       log_warn "[$session_id] Preferred Codex route failed (exit=$_codex_exit, stderr=${_codex_err:-none}) — continuing to Claude"
     elif [ "$_codex_exit" -eq 143 ]; then
@@ -1222,6 +1252,43 @@ print(build_system_prompt(
     fi
   fi
 
+  # After any safe Codex pre-return failure, re-elect from routes outside
+  # cooldown. This also covers an explicit per-conversation Codex preference:
+  # it must not fall back to an account-limited primary when every fallback is
+  # cooling. An empty route means the health command itself failed, so the
+  # historical bounded chain remains the fail-soft path.
+  if [ "$_provider_gate" = "backup" ] && [ -z "$answer" ] \
+    && [ "$_codex_uncertain" -eq 0 ] && [ "$_codex_cancelled" -eq 0 ]; then
+    _health_route=$(python3 -m core.provider_health route 2>/dev/null || true)
+    case "$_health_route" in
+      codex|openai) _health_routed=1 ;;
+      none) _health_routed=1; _no_healthy_provider=1 ;;
+      *) _health_routed=0 ;;
+    esac
+  fi
+  if [ "$_health_routed" -eq 1 ] && [ -z "$answer" ] \
+    && [ "$_health_route" = "openai" ] \
+    && [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
+    && [ -n "${OPENAI_API_KEY:-}" ]; then
+    _openai_tried=1
+    log_warn "[$session_id] Provider health route: trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
+    answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
+      python3 -m core.openai_fallback \
+      ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
+      2>"${ANSWER_FILE}.openai.stderr")
+    _openai_exit=$?
+    if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
+      _answer_provider="GPT fallback"
+      _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
+      python3 -m core.provider_health observe openai healthy \
+        --detail request_succeeded >/dev/null 2>&1 || true
+    else
+      answer=""
+      python3 -m core.provider_health observe openai unhealthy \
+        --detail request_failed >/dev/null 2>&1 || true
+    fi
+  fi
+
   # Sticky provider gate: account-wide spend/session limits used to make every
   # message re-probe primary from scratch —
   # ~11s of doomed attempts per reply AND two raw error turns written into
@@ -1229,22 +1296,26 @@ print(build_system_prompt(
   # fresh, start attempt 1 on backup; _claude_backup_tried=1 keeps the
   # OpenAI rung reachable if backup itself fails. 'probe' elects this
   # message to try primary once — success clears the flag below.
-  local _provider_gate="primary"
-  _provider_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
   if [ "$_provider_gate" = "backup" ] \
+    && [ "$_health_routed" -eq 0 ] \
+    && { [ -z "$_health_route" ] || [ "$_health_route" = "backup1" ]; } \
     && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
     && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
     && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
     _use_claude_backup=1
     _claude_backup_tried=1
+    _active_claude_provider="backup1"
     _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
     log_info "[$session_id] Provider gate: primary account-limited — starting on backup provider (model=$_cur_model)"
   elif [ "$_provider_gate" = "backup" ] \
+    && [ "$_health_routed" -eq 0 ] \
+    && { [ -z "$_health_route" ] || [ "$_health_route" = "backup2" ]; } \
     && [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
     && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
     && [ -n "${CLAUDE_BACKUP2_BASE_URL:-}" ]; then
     _use_claude_backup=1
     _claude_backup2_tried=1
+    _active_claude_provider="backup2"
     _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
     _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
     _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
@@ -1255,7 +1326,8 @@ print(build_system_prompt(
   # primary opus → sonnet → haiku → Backup 1 → Backup 2. Codex, then the
   # text/API fallback, are invoked after the final Claude-compatible route.
   local _attempt_sequence="1 2 3 4 5"
-  { [ -n "$answer" ] || [ "$_codex_uncertain" -eq 1 ] \
+  { [ -n "$answer" ] || [ "$_health_routed" -eq 1 ] \
+      || [ "$_codex_uncertain" -eq 1 ] \
       || [ "$_codex_cancelled" -eq 1 ]; } && _attempt_sequence=""
   for _attempt in $_attempt_sequence; do
     if [ "$_attempt" -gt 1 ]; then
@@ -1567,6 +1639,8 @@ except Exception:
       fi
       if [ -n "$_account_limit_reason" ]; then
         python3 -m core.model_fallback --trip "$_account_limit_reason" >/dev/null 2>&1 || true
+        python3 -m core.provider_health observe primary unhealthy \
+          --detail account_limit >/dev/null 2>&1 || true
       fi
       # REQ-77: if the empty answer was a MODEL error (unavailable / banned /
       # rate-limited) rather than a transient blip, degrade the model for the
@@ -1589,6 +1663,7 @@ except Exception:
         && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
         _claude_backup_tried=1
         _use_claude_backup=1
+        _active_claude_provider="backup1"
         _claude_backup_token="$CLAUDE_BACKUP_AUTH_TOKEN"
         _claude_backup_base_url="$CLAUDE_BACKUP_BASE_URL"
         # Log BEFORE resetting _cur_model: the old order reported "exhausted
@@ -1597,13 +1672,16 @@ except Exception:
         _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
         # Rebuild system prompt with backup memory budget to avoid oversized context
         _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
-        sys_prompt=$(JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
+        sys_prompt=$(printf '%s' "$content" | \
+          JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
           JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
-          JV_MEM_MAX="$_mem_budget" python3 -c "
+          JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
+          JV_MATTER_ID="$matter_id" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
+focus_text = sys.stdin.read()
 print(build_system_prompt(
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
@@ -1614,6 +1692,9 @@ print(build_system_prompt(
     tracker_path=os.environ.get('JV_TRACKER', 'active_sessions.json'),
     chat_type=os.environ.get('JV_CHAT_TYPE', 'p2p'),
     max_memory_chars=int(mc) if mc else None,
+    context_key=os.environ.get('JV_CONTEXT_KEY', ''),
+    matter_id=os.environ.get('JV_MATTER_ID', ''),
+    focus_text=focus_text,
 ))
 " 2>>"$LOG_FILE") || true
         [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
@@ -1627,6 +1708,9 @@ print(build_system_prompt(
              || [ -z "${CLAUDE_BACKUP_BASE_URL:-}" ]; }; then
         _claude_backup2_tried=1
         _use_claude_backup=1
+        python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
+          --detail request_failed >/dev/null 2>&1 || true
+        _active_claude_provider="backup2"
         log_warn "[$session_id] Backup1 exhausted on $_cur_model → trying Claude Code backup2 provider"
         _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
         _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
@@ -1654,6 +1738,10 @@ print(build_system_prompt(
         if [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ] \
           && [ "$is_group" -ne 1 ] && [ "$_codex_tried" -eq 0 ]; then
           _codex_tried=1
+          if [ "$_use_claude_backup" -eq 1 ]; then
+            python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
+              --detail request_failed >/dev/null 2>&1 || true
+          fi
           log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying Codex fallback (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
           answer=$(run_codex_locked "$content" "$conv_key" \
             "$SYS_PROMPT_FILE" "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
@@ -1664,6 +1752,8 @@ print(build_system_prompt(
           if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
             _answer_provider="Codex"
             _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
+            python3 -m core.provider_health observe codex healthy \
+              --detail request_succeeded >/dev/null 2>&1 || true
             log_warn "[$session_id] Codex fallback succeeded (${#answer} chars)"
             break
           fi
@@ -1674,6 +1764,8 @@ print(build_system_prompt(
             break
           fi
           _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
+          python3 -m core.provider_health observe codex unhealthy \
+            --detail request_failed >/dev/null 2>&1 || true
           log_warn "[$session_id] Codex fallback failed (exit=$_codex_exit, stderr=${_codex_err:-none})"
           if [ "$_codex_exit" -ne 75 ]; then
             # A timeout/nonzero run may already have executed tools. Replaying
@@ -1694,10 +1786,14 @@ print(build_system_prompt(
           if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
             _answer_provider="GPT fallback"
             _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
+            python3 -m core.provider_health observe openai healthy \
+              --detail request_succeeded >/dev/null 2>&1 || true
             log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
             break
           fi
           _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
+          python3 -m core.provider_health observe openai unhealthy \
+            --detail request_failed >/dev/null 2>&1 || true
           log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
         fi
         # Every independent route has now had one bounded attempt. Repeating a
@@ -1720,6 +1816,8 @@ print(build_system_prompt(
         fi
       fi
       _answer_model="$_cur_model"
+      python3 -m core.provider_health observe "$_active_claude_provider" healthy \
+        --detail request_succeeded >/dev/null 2>&1 || true
       break
     fi
   done
@@ -1779,7 +1877,10 @@ print(build_system_prompt(
     fi
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      if [ "${_codex_cancelled:-0}" -eq 1 ]; then
+      if [ "${_no_healthy_provider:-0}" -eq 1 ]; then
+        lark_reply_text "$message_id" \
+          "当前已配置的模型通道都在恢复中，这次请求没有执行。Jarvis 会自动探测恢复，不需要反复重试。" >/dev/null
+      elif [ "${_codex_cancelled:-0}" -eq 1 ]; then
         log_info "[$session_id] Cancelled Codex turn ended — staying silent"
       elif [ "${_codex_uncertain:-0}" -eq 1 ]; then
         lark_reply_text "$message_id" \
