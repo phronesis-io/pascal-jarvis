@@ -106,6 +106,7 @@ def test_memorial_policy_suppression_is_durable_acceptance(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: False)
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setenv("JARVIS_DELIVERY_GLOBAL_DAILY_CAP", "0")
     monkeypatch.setattr(
@@ -127,6 +128,33 @@ def test_memorial_policy_suppression_is_durable_acceptance(
     states = efsl.memorial.list_memorials()
     assert len(states) == 1
     assert states[0]["delivery_status"] == "suppressed"
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+
+
+def test_memorial_quiet_hours_queue_is_durable_acceptance(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: True)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("JARVIS_DELIVERY_GLOBAL_DAILY_CAP", "0")
+    monkeypatch.setattr(
+        efsl.memorial,
+        "_send_card",
+        lambda *_args, **_kwargs: pytest.fail(
+            "quiet-hours queueing must happen before Lark transport"
+        ),
+    )
+
+    seen, accepted, visible = efsl._deliver_memorial_and_mark(
+        "夜间先排队", ["evt-quiet"], {}, "u1", [],
+        tmp_path / ".ef-seen", tmp_path, title="EigenFlux 消息")
+
+    assert accepted is True and visible is False
+    assert seen == ["evt-quiet"]
+    states = efsl.memorial.list_memorials()
+    assert len(states) == 1
+    assert states[0]["delivery_status"] == "queued"
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
