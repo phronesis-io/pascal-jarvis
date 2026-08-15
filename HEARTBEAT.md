@@ -801,6 +801,7 @@ OPTIONS 行的**下一行**写：
 - interval: 6h
 - pre: tasks/memory_tidy_pre.sh
 - post: tasks/memory_tidy_post.py
+- no-tools: true
 - prompt: |
     [MEMORY TIDY]
     Review the memory health report below. Your job:

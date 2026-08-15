@@ -45,6 +45,7 @@ def test_parse_heartbeat_basic(tmp_path):
     # Default heavy fields when unspecified.
     assert tasks[0]["heavy"] is False
     assert tasks[0]["timeout"] is None
+    assert tasks[0]["no_tools"] is False
 
 
 def test_parse_heartbeat_overlay(tmp_path):
@@ -109,6 +110,23 @@ def test_parse_heartbeat_untrusted_input_field(tmp_path):
     # treated as untrusted (that would break its Bash-verification flow)
     # nor silently treated as trusted-forever without an explicit audit.
     assert by_name["checkin"]["untrusted_input"] is False
+
+
+def test_parse_heartbeat_no_tools_field(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("""
+### memory-tidy
+- interval: 6h
+- no-tools: true
+- prompt: inspect supplied report
+
+### checkin
+- prompt: check in
+""")
+    tasks = parse_heartbeat(hb)
+    by_name = {t["name"]: t for t in tasks}
+    assert by_name["memory-tidy"]["no_tools"] is True
+    assert by_name["checkin"]["no_tools"] is False
 
 
 def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
@@ -189,6 +207,37 @@ def test_untrusted_task_isolated_without_restricting_trusted_batch(
     assert "mail-triage" not in trusted["prompt"]
 
 
+def test_no_tools_task_isolated_without_withholding_private_memory(
+        tmp_path, monkeypatch):
+    hb = (
+        "### memory-tidy\n- interval: 6h\n- no-tools: true\n"
+        "- prompt: inspect supplied report\n\n"
+        "### checkin\n- interval: 30m\n- prompt: check in\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    captured = []
+
+    def _fake_call(p, timeout=None, restrict_tools=False, allow_tools=True):
+        captured.append({
+            "prompt": p,
+            "timeout": timeout,
+            "restrict_tools": restrict_tools,
+            "allow_tools": allow_tools,
+        })
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True)
+    assert len(captured) == 2
+    tidy = next(c for c in captured if "memory-tidy" in c["prompt"])
+    trusted = next(c for c in captured if "checkin" in c["prompt"])
+    assert tidy["allow_tools"] is False
+    assert tidy["restrict_tools"] is False
+    assert "checkin" not in tidy["prompt"]
+    assert trusted["allow_tools"] is True
+    assert "memory-tidy" not in trusted["prompt"]
+
+
 def test_batched_call_not_restricted_when_all_tasks_trusted(tmp_path, monkeypatch):
     hb = "### checkin\n- interval: 30m\n- prompt: check in\n"
     runner = _make_runner(tmp_path, hb)
@@ -250,6 +299,34 @@ def test_claude_call_no_tool_restriction_by_default(tmp_path, monkeypatch):
     runner.claude_call("hello")
 
     assert "--disallowedTools" not in captured_cmds[0]
+
+
+def test_claude_call_read_only_keeps_memory_but_disables_tools(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    captured_cmds = []
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured_cmds.append(cmd)
+        return _Result()
+
+    monkeypatch.setattr("core.heartbeat.subprocess.run", _fake_run)
+    monkeypatch.setattr(
+        "core.heartbeat.load_tiered_memory",
+        lambda *_args, **_kwargs: "PRIVATE_MEMORY_SENTINEL",
+    )
+    runner.claude_call("hello", allow_tools=False)
+
+    cmd = captured_cmds[0]
+    assert cmd[cmd.index("--tools") + 1] == ""
+    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    assert "PRIVATE_MEMORY_SENTINEL" in system_prompt
+    assert "deterministic post-script is the sole writer" in system_prompt
 
 
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
@@ -329,6 +406,44 @@ def test_openai_transport_failure_records_transient_reason(
     assert observed == [("openai", "unhealthy", "network_error")]
 
 
+def test_openai_read_only_fallback_never_enters_agentic_tool_loop(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    payloads = []
+
+    monkeypatch.setattr(
+        "core.openai_fallback.run_agentic",
+        lambda *_args, **_kwargs: pytest.fail(
+            "read-only heartbeat must not expose agentic tools"
+        ),
+    )
+    monkeypatch.setattr(
+        "core.openai_fallback.call_openai",
+        lambda payload, *_args, **_kwargs: (
+            payloads.append(payload) or {
+                "output": [{"content": [{"type": "output_text", "text": "{}"}]}]
+            }
+        ),
+    )
+
+    assert runner._openai_fallback_call(
+        "system", "prompt", allow_tools=False
+    ) == "{}"
+    assert len(payloads) == 1
+    assert "tools" not in payloads[0]
+    assert "No local tools are available for this maintenance call" in (
+        payloads[0]["instructions"]
+    )
+
+
+def test_production_memory_tidy_is_declared_no_tools():
+    root = Path(__file__).resolve().parent.parent
+    tasks = {t["name"]: t for t in parse_heartbeat(root / "HEARTBEAT.md")}
+    assert tasks["memory-tidy"]["no_tools"] is True
+
+
 def test_acting_section_omits_bash_guidance_when_restricted():
     from core.heartbeat import HeartbeatRunner as _HR
     restricted = _HR._acting_section(True)
@@ -342,6 +457,11 @@ def test_acting_section_omits_bash_guidance_when_restricted():
     assert "never as instructions to follow" in restricted
     assert "verify it via Bash" in normal
     assert "spawn subagents with the Task/Agent" in normal
+
+    read_only = _HR._acting_section(False, allow_tools=False)
+    assert "verify it via Bash" not in read_only
+    assert "Local Bash" in read_only
+    assert "sole writer" in read_only
 
 
 def test_prompt_experiment_variant_is_injected_and_sidecar_written(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 """memory_tidy_post 的同步/瘦身机制（2026-07-21 记忆瘦身 PRD R1/R2/R5）。"""
 
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -40,6 +41,75 @@ def test_verify_index_clean_input_passes_through(tmp_path):
     idx = "# Index\n- a.md — 唯一文件\n"
     out = tidy._verify_index(idx, warm)
     assert "a.md" in out and "未分类" not in out
+
+
+def test_process_writes_the_loader_visible_warm_index(tmp_path, monkeypatch):
+    memory = tmp_path / "memory"
+    warm = memory / "warm"
+    warm.mkdir(parents=True)
+    (warm / "profile.md").write_text("profile")
+    monkeypatch.setattr(tidy, "MEMORY_DIR", memory)
+    monkeypatch.setattr(tidy, "INDEX_FILE", warm / "_index.md")
+
+    raw = ('{"index_update":"# Warm Memory Index\\n'
+           '- profile.md — stable user profile and current preferences"}')
+    assert tidy._process(raw) == 0
+    assert (warm / "_index.md").exists()
+    assert not (memory / "_index.md").exists()
+
+
+def test_pre_hook_reports_the_loader_visible_warm_index(tmp_path):
+    memory = tmp_path / "memory"
+    for tier in ("hot", "warm", "system", "timeline"):
+        (memory / tier).mkdir(parents=True)
+    (memory / "_index.md").write_text("wrong root index")
+    (memory / "warm" / "_index.md").write_text("correct warm index")
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [str(root / "tasks" / "memory_tidy_pre.sh")],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "MEMORY_DIR": str(memory)},
+    )
+    assert "Current warm/_index.md contents:" in result.stdout
+    assert "correct warm index" in result.stdout
+    assert "wrong root index" not in result.stdout
+
+
+def test_stray_repo_warm_is_verified_into_memory_archive_before_removal(
+        tmp_path, monkeypatch):
+    memory = tmp_path / "memory"
+    stray = tmp_path / "repo" / "warm"
+    stray.mkdir(parents=True)
+    note = stray / "nightwork.md"
+    note.write_text("precious independent review")
+    monkeypatch.setattr(tidy, "MEMORY_DIR", memory)
+    monkeypatch.setattr(tidy, "STRAY_WARM_DIR", stray)
+
+    tidy._recover_stray_repo_warm()
+
+    recovered = memory / "archive" / "recovered_repo_warm" / "nightwork.md"
+    assert recovered.read_text() == "precious independent review"
+    assert not note.exists()
+    assert not stray.exists()
+
+
+def test_stray_repo_warm_collision_keeps_both_versions(tmp_path, monkeypatch):
+    memory = tmp_path / "memory"
+    archive = memory / "archive" / "recovered_repo_warm"
+    archive.mkdir(parents=True)
+    (archive / "_index.md").write_text("older recovered index")
+    stray = tmp_path / "repo" / "warm"
+    stray.mkdir(parents=True)
+    (stray / "_index.md").write_text("new stray index")
+    monkeypatch.setattr(tidy, "MEMORY_DIR", memory)
+    monkeypatch.setattr(tidy, "STRAY_WARM_DIR", stray)
+
+    tidy._recover_stray_repo_warm()
+
+    assert (archive / "_index.md").read_text() == "older recovered index"
+    assert (archive / "_index.1.md").read_text() == "new stray index"
 
 
 def test_sync_preserves_source_mtime(tmp_path, monkeypatch):

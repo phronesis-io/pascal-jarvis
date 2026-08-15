@@ -5,6 +5,7 @@ Also extracts any '→ UPDATE: filename.md: content' directives Claude may have
 emitted and applies them directly to target memory files.
 Entries older than 14 days in daily_log are archived to daily_archive.
 """
+import fcntl
 import os
 import re
 import sys
@@ -22,6 +23,51 @@ HOURLY_ARCHIVE = MEMORY_DIR / "timeline" / "hourly_archive.md"
 DAILY_LOG = MEMORY_DIR / "timeline" / "daily_log.md"
 DAILY_ARCHIVE = MEMORY_DIR / "timeline" / "daily_archive.md"
 ARCHIVE_DAYS = 14
+
+
+def _append_daily_index(index: str, ts_date: str) -> None:
+    """Insert one summary under a single date heading, idempotently.
+
+    Daily retries used to append another ``## YYYY-MM-DD`` block every time.
+    Besides confusing recall, duplicate headings made the tidy task repeatedly
+    report the same problem. Merge all existing same-day bodies under the first
+    heading and add the new summary only when it is not already present.
+    """
+    DAILY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = DAILY_LOG.with_suffix(".lock")
+    with lock_path.open("a") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        content = (DAILY_LOG.read_text(encoding="utf-8")
+                   if DAILY_LOG.exists() else "")
+        matches = list(re.finditer(
+            r"(?m)^## (\d{4}-\d{2}-\d{2})\s*$", content
+        ))
+        preamble = content[:matches[0].start()] if matches else content
+        sections: list[tuple[str, str]] = []
+        for pos, match in enumerate(matches):
+            end = matches[pos + 1].start() if pos + 1 < len(matches) else len(content)
+            sections.append((match.group(1), content[match.end():end].strip()))
+
+        same_day = [body for day, body in sections if day == ts_date and body]
+        if index.strip() and not any(index.strip() == body for body in same_day):
+            same_day.append(index.strip())
+
+        rebuilt: list[str] = [preamble.rstrip()]
+        inserted = False
+        for day, body in sections:
+            if day == ts_date:
+                if inserted:
+                    continue
+                body = "\n\n".join(dict.fromkeys(same_day))
+                inserted = True
+            rebuilt.append(f"## {day}\n{body}".rstrip())
+        if not inserted:
+            rebuilt.append(f"## {ts_date}\n{index.strip()}".rstrip())
+
+        normalized = "\n\n".join(part for part in rebuilt if part).rstrip() + "\n"
+        tmp = DAILY_LOG.with_suffix(".tmp")
+        tmp.write_text(normalized, encoding="utf-8")
+        os.replace(tmp, DAILY_LOG)
 
 
 def _apply_update(memory_dir: Path, filename: str, content: str, ts: str) -> None:
@@ -85,8 +131,7 @@ def main() -> int:
 
     # Append to daily log
     if index:
-        with DAILY_LOG.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {ts_date}\n{index}\n")
+        _append_daily_index(index, ts_date)
 
     # Archive hourly log before clearing
     if HOURLY_LOG.exists() and HOURLY_LOG.stat().st_size > 0:
