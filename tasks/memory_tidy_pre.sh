@@ -75,9 +75,9 @@ done
 echo ""
 
 # Index file
-echo "## _index.md"
-if [ -f "$MEMORY_DIR/_index.md" ]; then
-  chars=$(charcount "$MEMORY_DIR/_index.md")
+echo "## warm/_index.md"
+if [ -f "$MEMORY_DIR/warm/_index.md" ]; then
+  chars=$(charcount "$MEMORY_DIR/warm/_index.md")
   echo "  ${chars} chars"
 else
   echo "  MISSING — needs regeneration"
@@ -105,5 +105,5 @@ if [ -f "$daily" ]; then
 fi
 
 echo ""
-echo "Current _index.md contents:"
-cat "$MEMORY_DIR/_index.md" 2>/dev/null || echo "(missing)"
+echo "Current warm/_index.md contents:"
+cat "$MEMORY_DIR/warm/_index.md" 2>/dev/null || echo "(missing)"

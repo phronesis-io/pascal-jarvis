@@ -24,7 +24,13 @@ from tasks.memory_daily_post import _archive_old_daily_entries
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-INDEX_FILE = MEMORY_DIR / "_index.md"
+JARVIS_DIR = Path(os.environ.get(
+    "JARVIS_DIR", Path(__file__).resolve().parent.parent
+))
+# The loader reads top-level ``warm/*.md`` and never reads memory/_index.md.
+# Keep the generated index beside the knowledge files it describes.
+INDEX_FILE = MEMORY_DIR / "warm" / "_index.md"
+STRAY_WARM_DIR = JARVIS_DIR / "warm"
 
 # Dual-directory paths for one-way sync (auto → heartbeat). CLAUDE.md
 # source-of-truth rule: warm/ 用户画像以 auto-memory 为准; the heartbeat copy
@@ -51,6 +57,64 @@ _AUTO_UPDATE_PREFIX = "<!-- auto-update"
 # the single bullet line that follows (see _apply_update in
 # memory_consolidate_post / memory_daily_post).
 _AUTO_UPDATE_BLOCK = re.compile(r"<!--\s*auto-update[^>]*-->\n(?:[^\n]*\n?)?")
+
+
+def _recover_stray_repo_warm() -> None:
+    """Preserve and remove model-written ``<repo>/warm`` files.
+
+    Before heartbeat tasks had task-level tool policy, the GPT fallback could
+    call ``file_write('warm/...')`` from the repository cwd. Those files are
+    outside MEMORY_DIR and therefore invisible to Jarvis. Archive each file in
+    the real memory tree, verify the bytes, and only then remove the stray.
+    """
+    if not STRAY_WARM_DIR.is_dir():
+        return
+    try:
+        if STRAY_WARM_DIR.resolve() == (MEMORY_DIR / "warm").resolve():
+            return
+    except OSError:
+        return
+    archive = MEMORY_DIR / "archive" / "recovered_repo_warm"
+    recovered: list[str] = []
+    for src in sorted(STRAY_WARM_DIR.glob("*.md")):
+        try:
+            payload = src.read_bytes()
+            archive.mkdir(parents=True, exist_ok=True)
+            dst = archive / src.name
+            suffix = 1
+            while dst.exists() and dst.read_bytes() != payload:
+                dst = archive / f"{src.stem}.{suffix}{src.suffix}"
+                suffix += 1
+            if not dst.exists():
+                tmp = archive / f".{dst.name}.{os.getpid()}.tmp"
+                with tmp.open("wb") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, dst)
+            if dst.read_bytes() != payload:
+                print(
+                    f"[memory-tidy] stray warm verification failed: {src.name}",
+                    file=sys.stderr,
+                )
+                continue
+            src.unlink()
+            recovered.append(src.name)
+        except OSError as exc:
+            print(
+                f"[memory-tidy] stray warm recovery failed for {src.name}: {exc}",
+                file=sys.stderr,
+            )
+    try:
+        STRAY_WARM_DIR.rmdir()
+    except OSError:
+        pass
+    if recovered:
+        print(
+            "[memory-tidy] recovered repo-root warm/ → "
+            f"archive/recovered_repo_warm/: {', '.join(recovered)}",
+            file=sys.stderr,
+        )
 
 
 def _replica_only_update_blocks(src_content: str, dst_content: str) -> list[str]:
@@ -452,6 +516,11 @@ def _warn_tiers_over_budget():
 
 
 def main() -> int:
+    try:
+        _recover_stray_repo_warm()
+    except Exception as e:
+        print(f"[memory-tidy] stray warm recovery failed: {e}", file=sys.stderr)
+
     # Always run daily_log archive check (independent of Claude's response)
     try:
         _archive_old_daily_entries(now_local_str("%Y-%m-%d"))
