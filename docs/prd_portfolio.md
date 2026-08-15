@@ -43,6 +43,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `plans/2026-08-12-evidence-driven-attention-loop.md` | Shipped; daily-cap rule superseded 2026-08-14 | Authoritative Lark-arrival accounting, a hard 9/day ordinary proactive budget with terminal ledger-only overflow, a 4/10-minute burst queue, explicit-only decisions, memorial-thread closure, plain user copy, and worktree-safe EigenFlux/memory harnesses. Alerts, replies, urgent and active-conversation messages remain exempt. |
 | `plans/2026-08-14-audited-product-closure.md` | Current, implementation in release verification | Complete Tailscale retirement, query-focused cross-session memory, whole-turn context projection, provider cooldown routing, hard attention budget, truthful EigenFlux stream health, content-based deploy drift, memory-specific conversation findings, and two-observation L3 verification. |
 | `plans/2026-08-14-model-control-and-cross-product-memory.md` | Current, implementation in release verification | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
+| `plans/2026-08-15-lark-identity-transport.md` | Current, implementation in release verification | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
 
 ## 3. Active Work
 

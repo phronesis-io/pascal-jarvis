@@ -246,13 +246,20 @@ SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
 export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID OWNER_NAME LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+LARK_APP_ID="${LARK_APP_ID:-${APP_ID:-}}"
+export LARK_APP_ID
 
 # Bot's own open_id (REQ-100 group chat): a group @-mention references the
 # bot by open_id (ou_...), NOT by APP_ID (cli_...) — matching mentions against
 # APP_ID alone would silently ignore every group @. Resolved once at startup;
 # empty on failure (the gate then falls back to APP_ID matching only).
 BOT_OPEN_ID=""
-if command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}" ]; then
+if [ -n "${LARK_APP_ID:-}" ] && [ -n "${LARK_APP_SECRET:-}" ]; then
+  BOT_OPEN_ID=$(LARK_APP_ID="$LARK_APP_ID" LARK_APP_SECRET="$LARK_APP_SECRET" \
+    python3 -c 'from core.lark_bot_transport import bot_open_id; print(bot_open_id())' \
+    2>/dev/null || true)
+fi
+if [ -z "$BOT_OPEN_ID" ] && command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}" ]; then
   BOT_OPEN_ID=$(lark-cli api get /open-apis/bot/v3/info --as bot 2>/dev/null \
     | jq -r '.bot.open_id // empty' 2>/dev/null || true)
 fi

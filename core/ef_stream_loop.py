@@ -167,6 +167,17 @@ def _lark_send(text: str, user_id: str) -> bool:
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
+    from core.lark_bot_transport import send as send_as_bot
+
+    direct = send_as_bot(text=text, user_id=user_id)
+    if direct.attempted:
+        if not direct.ok:
+            log(
+                "ef-stream",
+                f"Bot API send failed: {direct.error}",
+                level="warn",
+            )
+        return direct.ok
     try:
         r = subprocess.run(
             ["lark-cli", "im", "+messages-send",

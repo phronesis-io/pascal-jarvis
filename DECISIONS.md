@@ -112,3 +112,25 @@ receipt and must not contain private card bodies or provider stderr.
 
 The current delivery retry and cap decision is documented, with its state
 machine, in `docs/delivery_retry_and_caps.md`.
+
+## ADR-003: Lark Bot Transport Is Independent of User OAuth
+
+**Status:** accepted
+
+- `core.lark_bot_transport` owns application-bot authentication and the direct
+  OpenAPI send/get-info calls. It reads the private app credential at runtime,
+  keeps the tenant token only in memory, and requires a returned Lark
+  `message_id` before reporting success.
+- `core.delivery` remains the authority for retries, deduplication, attention,
+  quiet hours, and terminal delivery state. A transport receipt is evidence
+  for one attempt, not a second delivery state machine.
+- `lark-cli --as user` remains the adapter for owner-identity calendar, docs,
+  mail, task, and other personal APIs. A user OAuth/Keychain failure may
+  degrade those capabilities, but must not disable bot replies, cards,
+  proactive alerts, EigenFlux messages, or bot identity discovery.
+- The old bot-only `lark-cli` send path is a compatibility fallback when an
+  installation has no app secret. It is not the preferred production path.
+
+Never copy the app secret or tenant token into delivery rows, logs, test
+fixtures, command arguments, or Git. Bot API errors are recorded as bounded
+reason codes; only a real provider receipt can advance delivery to delivered.

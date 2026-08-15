@@ -11,6 +11,7 @@ import json
 from types import SimpleNamespace
 
 import core.ef_stream_loop as efsl
+from core import lark_bot_transport
 from core.ef_stream import load_seen
 from core.aux_model import AuxiliaryModelResult
 
@@ -207,6 +208,28 @@ def test_cursor_gap_terminates_stream_before_later_events_can_advance():
 
     assert state["terminated"] is True
     assert efsl._can_continue_after_delivery(process, accepted=True)
+
+
+def test_stream_send_uses_keychain_independent_bot_transport(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or lark_bot_transport.BotSendResult(True, True, "om_stream")
+        ),
+    )
+    monkeypatch.setattr(
+        efsl.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CLI should not run")
+        ),
+    )
+
+    assert efsl._lark_send("hello", "ou_owner") is True
+    assert calls == [{"text": "hello", "user_id": "ou_owner"}]
 
 
 # ---- _is_stalled: alive-but-silent subprocess detection -------------------

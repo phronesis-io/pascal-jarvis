@@ -68,10 +68,40 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str,
     """
     if not user_id:
         return False
+    from core.lark_bot_transport import send as send_as_bot
+
     delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
+        direct = send_as_bot(card_json=card_json, user_id=user_id)
+        if direct.attempted:
+            if direct.ok:
+                if direct.message_id:
+                    _LAST_SENT_IDS.append(direct.message_id)
+                if attempt:
+                    log("heartbeat", f"Card send succeeded on retry {attempt}")
+                return True
+            if direct.error == "timeout":
+                if assume_delivered_on_timeout:
+                    log(
+                        "heartbeat",
+                        "Bot API card send timed out - assuming delivered, no retry",
+                        level="warn",
+                    )
+                    return True
+                log(
+                    "heartbeat",
+                    "Queued Bot API card timed out - keeping it for retry",
+                    level="warn",
+                )
+                return False
+            log(
+                "heartbeat",
+                f"Bot API card send attempt {attempt} failed: {direct.error}",
+                level="warn",
+            )
+            continue
         try:
             r = subprocess.run(
                 ["lark-cli", "im", "+messages-send",
@@ -143,10 +173,40 @@ def _lark_send_text(text: str, user_id: str, *,
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
+    from core.lark_bot_transport import send as send_as_bot
+
     delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
+        direct = send_as_bot(text=text, user_id=user_id)
+        if direct.attempted:
+            if direct.ok:
+                if direct.message_id:
+                    _LAST_SENT_IDS.append(direct.message_id)
+                if attempt:
+                    log("heartbeat", f"Text send succeeded on retry {attempt}")
+                return True
+            if direct.error == "timeout":
+                if assume_delivered_on_timeout:
+                    log(
+                        "heartbeat",
+                        "Bot API text send timed out - assuming delivered, no retry",
+                        level="warn",
+                    )
+                    return True
+                log(
+                    "heartbeat",
+                    "Queued Bot API text timed out - keeping it for retry",
+                    level="warn",
+                )
+                return False
+            log(
+                "heartbeat",
+                f"Bot API text send attempt {attempt} failed: {direct.error}",
+                level="warn",
+            )
+            continue
         try:
             r = subprocess.run(
                 ["lark-cli", "im", "+messages-send",

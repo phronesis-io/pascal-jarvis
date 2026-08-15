@@ -23,6 +23,10 @@ work. The supported product surface remains the generated
   Codex lock/session -> reliable Lark delivery -> provider/model turn record ->
   next-prompt continuity. It does not claim to start the full listener process;
   startup and wiring are covered separately by shell/install/runtime checks.
+- Bot delivery no longer shares the user OAuth/Keychain failure domain.
+  `core.lark_bot_transport` uses the private app credential, in-memory tenant
+  tokens, and verified `message_id` receipts; owner calendar/docs/mail/task
+  capabilities remain independently fail-closed behind user OAuth.
 - Runtime line coverage is not currently measured: the repository has no
   `coverage.py`/`pytest-cov` configuration. Ratios between changed test lines
   and changed implementation lines are review-volume indicators, not coverage

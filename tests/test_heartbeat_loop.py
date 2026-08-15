@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from core.card import build_card
+from core import lark_bot_transport
 from core.heartbeat_loop import (
     _route_output, _write_outbox, _record_engagement, _trim_file,
     _sleep_gap_seconds,
@@ -329,3 +330,52 @@ def test_route_output_clean_lines_still_flow():
         mock_text.return_value = True
         _route_output("正常心跳消息", "user123", Path("/tmp"))
         mock_text.assert_called_once()
+
+
+def test_low_level_text_send_uses_bot_api_and_records_message_id(monkeypatch):
+    from core import heartbeat_loop as hl
+
+    hl._LAST_SENT_IDS.clear()
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **_kwargs: lark_bot_transport.BotSendResult(
+            True, True, "om_heartbeat"
+        ),
+    )
+    monkeypatch.setattr(
+        hl.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CLI should not run")
+        ),
+    )
+
+    assert hl._lark_send_text("hello", "ou_owner", retries=False) is True
+    assert hl._LAST_SENT_IDS == ["om_heartbeat"]
+
+
+def test_bot_api_timeout_preserves_legacy_duplicate_policy(monkeypatch):
+    from core import heartbeat_loop as hl
+
+    calls = []
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or lark_bot_transport.BotSendResult(
+                True, False, error="timeout"
+            )
+        ),
+    )
+
+    assert hl._lark_send_text(
+        "single", "ou_owner", assume_delivered_on_timeout=True,
+    ) is True
+    assert len(calls) == 1
+    calls.clear()
+    assert hl._lark_send_text(
+        "durable queue", "ou_owner", assume_delivered_on_timeout=False,
+    ) is False
+    assert len(calls) == 1

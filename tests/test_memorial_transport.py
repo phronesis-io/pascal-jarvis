@@ -6,6 +6,7 @@ import json
 import subprocess
 
 from core import memorial_transport
+from core.lark_bot_transport import BotSendResult
 
 
 def test_success_extracts_nested_message_id_without_retry():
@@ -72,3 +73,24 @@ def test_broken_log_sink_never_aborts_retries(monkeypatch):
 
     assert result == ""
     assert len(attempts) == 3
+
+
+def test_bot_api_path_skips_cli_and_returns_verified_receipt(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        memorial_transport,
+        "send_from_cli_args",
+        lambda args: (
+            calls.append(list(args)) or BotSendResult(True, True, "om_direct")
+        ),
+    )
+
+    result = memorial_transport.send(
+        ["--user-id", "ou_owner", "--markdown", "hello"],
+        runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CLI should not run")
+        ),
+    )
+
+    assert result == "om_direct"
+    assert calls == [["--user-id", "ou_owner", "--markdown", "hello"]]

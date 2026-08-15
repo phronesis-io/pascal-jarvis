@@ -145,6 +145,12 @@ the exact release commit or a healthy resident descendant that contains it.
   initializes schema once per database inode, and never holds a transaction
   across a network send. Its retry/cap interaction is frozen in
   `docs/delivery_retry_and_caps.md`.
+- `core.lark_bot_transport`: the Keychain-independent application-bot adapter
+  used by replies, cards, proactive delivery, Memorials, and EigenFlux stream
+  messages. It caches tenant tokens only in process memory and returns success
+  only with a provider `message_id`. Owner-identity APIs remain behind the
+  separate `lark-cli --as user` OAuth boundary, so calendar/docs degradation
+  cannot take bot delivery down with it.
 - `docs/capability_inventory.md`: generated evidence map for supported
   components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
   missing contracts and drift; it never authorizes deletion without explicit
@@ -296,6 +302,12 @@ as legacy ledger values from the pre-REQ-119 era.
 | calendar is current | calendar API/sync artifact with freshness |
 
 Model prose and memory summaries are never authorities for these claims.
+
+Lark has two explicit identities. The **bot identity** uses the private app
+credential and direct OpenAPI transport for messaging and bot metadata. The
+**owner identity** uses user OAuth for personal calendar, docs, mail, and task
+mutations. Their health is reported separately; neither identity may silently
+substitute for the other.
 
 ## Dependency Direction
 

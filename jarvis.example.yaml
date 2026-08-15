@@ -41,6 +41,10 @@ lark:
   # ⚙ Your Lark app ID (starts with "cli_"). From your app at
   # https://open.feishu.cn/app
   app_id: ""
+  # Private app credential. jarvis.yaml is gitignored. When configured, bot
+  # replies/cards use direct OpenAPI delivery and remain available if the
+  # owner's separate lark-cli OAuth/Keychain is degraded.
+  app_secret: ""
 
 
 # ── Claude model settings ──────────────────────────────────────────
