@@ -355,27 +355,36 @@ def test_low_level_text_send_uses_bot_api_and_records_message_id(monkeypatch):
     assert hl._LAST_SENT_IDS == ["om_heartbeat"]
 
 
-def test_bot_api_timeout_preserves_legacy_duplicate_policy(monkeypatch):
+def test_bot_api_timeout_retries_safely_and_requires_receipt(monkeypatch):
     from core import heartbeat_loop as hl
 
     calls = []
+    outcomes = [
+        lark_bot_transport.BotSendResult(True, False, error="timeout"),
+        lark_bot_transport.BotSendResult(True, True, "om_after_timeout"),
+    ]
     monkeypatch.setattr(
         lark_bot_transport,
         "send",
         lambda **kwargs: (
             calls.append(kwargs)
-            or lark_bot_transport.BotSendResult(
-                True, False, error="timeout"
-            )
+            or outcomes.pop(0)
         ),
     )
+    monkeypatch.setattr(hl.time, "sleep", lambda _delay: None)
 
     assert hl._lark_send_text(
         "single", "ou_owner", assume_delivered_on_timeout=True,
     ) is True
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0]["idempotency_key"] == calls[1]["idempotency_key"]
+    assert hl._LAST_SENT_IDS[-1] == "om_after_timeout"
     calls.clear()
+    outcomes[:] = [
+        lark_bot_transport.BotSendResult(True, False, error="timeout"),
+    ]
     assert hl._lark_send_text(
         "durable queue", "ou_owner", assume_delivered_on_timeout=False,
+        retries=False,
     ) is False
     assert len(calls) == 1

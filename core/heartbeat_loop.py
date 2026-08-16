@@ -19,12 +19,14 @@ The loop:
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from core.attention_policy import in_quiet_hours
@@ -58,23 +60,28 @@ def _record_sent_lark_id(memorial_id: str, ids_before: int) -> None:
 
 def _lark_send_card(card_json: str, user_id: str, log_file: str,
                     *, assume_delivered_on_timeout: bool = True,
-                    retries: bool = True) -> bool:
+                    retries: bool = True,
+                    idempotency_key: str = "") -> bool:
     """Send a Lark interactive card, with retries. Returns True on success.
 
-    A normal one-off send keeps the historical timeout tradeoff (avoid a
-    duplicate card when the server accepted it but the local response was
-    slow).  A durable queued memorial passes ``False``: its queue entry must
-    survive an ambiguous timeout instead of being deleted as a fake success.
+    Direct Bot API retries reuse one Lark UUID, so an ambiguous timeout can be
+    retried without duplicating the message. ``assume_delivered_on_timeout``
+    remains only for the legacy CLI fallback, which has no idempotency key.
     """
     if not user_id:
         return False
     from core.lark_bot_transport import send as send_as_bot
 
+    delivery_key = idempotency_key or uuid.uuid4().hex
     delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
-        direct = send_as_bot(card_json=card_json, user_id=user_id)
+        direct = send_as_bot(
+            card_json=card_json,
+            user_id=user_id,
+            idempotency_key=delivery_key,
+        )
         if direct.attempted:
             if direct.ok:
                 if direct.message_id:
@@ -83,19 +90,12 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str,
                     log("heartbeat", f"Card send succeeded on retry {attempt}")
                 return True
             if direct.error == "timeout":
-                if assume_delivered_on_timeout:
-                    log(
-                        "heartbeat",
-                        "Bot API card send timed out - assuming delivered, no retry",
-                        level="warn",
-                    )
-                    return True
                 log(
                     "heartbeat",
-                    "Queued Bot API card timed out - keeping it for retry",
+                    "Bot API card timed out - retry remains idempotent",
                     level="warn",
                 )
-                return False
+                continue
             log(
                 "heartbeat",
                 f"Bot API card send attempt {attempt} failed: {direct.error}",
@@ -160,26 +160,29 @@ def _extract_message_id(stdout: str) -> str:
 
 def _lark_send_text(text: str, user_id: str, *,
                     assume_delivered_on_timeout: bool = True,
-                    retries: bool = True) -> bool:
+                    retries: bool = True,
+                    idempotency_key: str = "") -> bool:
     """Send plain text to Lark, with retries on transient failure.
 
-    assume_delivered_on_timeout: the single-message default (True) trades a
-    possible silent loss against guaranteed duplicates (see the card variant).
-    The night-queue digest passes False — inheriting "assume delivered" there
-    let one 15s timeout destroy the whole queue (≤40 entries) while the audit
-    recorded a false "delivered". A retried digest is cheap (entries carry
-    timestamps, retries are spaced and budgeted); a vanished queue is not.
+    Bot API retries are receipt-based and reuse one Lark UUID. The
+    ``assume_delivered_on_timeout`` compatibility flag applies only if bot
+    credentials are unavailable and the legacy CLI fallback is used.
     """
     if not user_id or not text:
         return False
     text = linkify_bare_urls(text)
     from core.lark_bot_transport import send as send_as_bot
 
+    delivery_key = idempotency_key or uuid.uuid4().hex
     delays = (0,) + SEND_RETRY_DELAYS if retries else (0,)
     for attempt, delay in enumerate(delays):
         if delay:
             time.sleep(delay)
-        direct = send_as_bot(text=text, user_id=user_id)
+        direct = send_as_bot(
+            text=text,
+            user_id=user_id,
+            idempotency_key=delivery_key,
+        )
         if direct.attempted:
             if direct.ok:
                 if direct.message_id:
@@ -188,19 +191,12 @@ def _lark_send_text(text: str, user_id: str, *,
                     log("heartbeat", f"Text send succeeded on retry {attempt}")
                 return True
             if direct.error == "timeout":
-                if assume_delivered_on_timeout:
-                    log(
-                        "heartbeat",
-                        "Bot API text send timed out - assuming delivered, no retry",
-                        level="warn",
-                    )
-                    return True
                 log(
                     "heartbeat",
-                    "Queued Bot API text timed out - keeping it for retry",
+                    "Bot API text timed out - retry remains idempotent",
                     level="warn",
                 )
-                return False
+                continue
             log(
                 "heartbeat",
                 f"Bot API text send attempt {attempt} failed: {direct.error}",
@@ -302,13 +298,13 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
             ok = _lark_send_card(
                 str(envelope.payload.get("card_json") or ""),
                 user_id, "", assume_delivered_on_timeout=False,
-                retries=False,
+                retries=False, idempotency_key=envelope.id,
             )
         else:
             ok = _lark_send_text(
                 str(envelope.payload.get("text") or ""),
                 user_id, assume_delivered_on_timeout=False,
-                retries=False,
+                retries=False, idempotency_key=envelope.id,
             )
         message_id = (
             str(_LAST_SENT_IDS[-1])
@@ -1041,8 +1037,10 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
 
     for index, entry in enumerate(selected):
         _ids_before = len(_LAST_SENT_IDS)
-        if _lark_send_card(entry["card_json"], user_id, "",
-                           assume_delivered_on_timeout=False):
+        if _lark_send_card(
+                entry["card_json"], user_id, "",
+                assume_delivered_on_timeout=False,
+                idempotency_key=f"memorial:{entry['memorial_id']}"):
             delivered.append(entry)
             _write_outbox("CARD:" + entry["card_json"], jarvis_dir)
             mid = str(entry.get("memorial_id", ""))
@@ -1236,10 +1234,15 @@ def _flush_text_queue(jarvis_dir: Path, user_id: str) -> str:
 
     # No assume-delivered here: a 15s local timeout counted as success used
     # to unlink the ENTIRE queue and write a false FLUSH_DELIVERED audit row.
-    # Worst case now is one duplicate digest on a slow link — bounded by the
-    # attempt-stamp retry floor and the per-entry retry budget.
+    # The stable digest UUID makes both immediate and later retries safe after
+    # an ambiguous timeout; the queue is only removed after a real receipt.
     sent_id_start = len(_LAST_SENT_IDS)
-    if _lark_send_text(digest, user_id, assume_delivered_on_timeout=False):
+    digest_key = "night:" + hashlib.sha256(
+        digest.encode("utf-8")
+    ).hexdigest()[:40]
+    if _lark_send_text(
+            digest, user_id, assume_delivered_on_timeout=False,
+            idempotency_key=digest_key):
         if len_dropped:
             # Deferred entries go back in for the next flush (NOT the old
             # unconditional unlink). retries++ so an entry that never fits

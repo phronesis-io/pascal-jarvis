@@ -300,6 +300,7 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     harness.write_text(
         "set -uo pipefail\n"
         f'source "{LIFECYCLE_HELPERS}"\n'
+        "process_start_token() { printf 'test-start\\n'; }\n"
         "log(){ printf '[%s] %s\\n' \"$1\" \"${*:2}\" >> \"$LOG_FILE\"; }\n"
         "log_warn(){ log WARN \"$@\"; }\n"
         "log_info(){ log INFO \"$@\"; }\n"
@@ -484,6 +485,7 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
     harness.write_text(
         "set -uo pipefail\n"
         f'source "{LIFECYCLE_HELPERS}"\n'
+        "process_start_token() { printf 'test-start\\n'; }\n"
         "log(){ printf '[%s] %s\\n' \"$1\" \"${*:2}\" >> \"$LOG_FILE\"; }\n"
         "log_warn(){ log WARN \"$@\"; }\n"
         "log_info(){ log INFO \"$@\"; }\n"

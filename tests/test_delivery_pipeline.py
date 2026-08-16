@@ -952,7 +952,8 @@ def test_default_transport_prefers_bot_api_and_keeps_real_receipt(
 
     result = delivery._default_transport(tmp_path)(
         DeliveryEnvelope(
-            source="test", payload={"text": "hello"}, chat_id="oc_chat"
+            source="test", payload={"text": "hello"}, chat_id="oc_chat",
+            id="dlv_test",
         ),
         "lark",
     )
@@ -963,6 +964,7 @@ def test_default_transport_prefers_bot_api_and_keeps_real_receipt(
         "text": "hello",
         "chat_id": "oc_chat",
         "user_id": "",
+        "idempotency_key": "dlv_test",
         "root": tmp_path,
     }]
 

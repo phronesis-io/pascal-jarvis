@@ -120,6 +120,8 @@ def test_markdown_send_uses_bot_token_and_requires_message_receipt():
     assert content["zh_cn"]["content"][0][0] == {
         "tag": "md", "text": "**重点** [链接](https://example.com)",
     }
+    assert body["uuid"].startswith("jv_")
+    assert len(body["uuid"]) <= 50
     assert "private-secret" not in repr(result)
     assert "tenant-token" not in repr(result)
 
@@ -143,6 +145,7 @@ def test_token_is_reused_in_memory_and_never_written(tmp_path):
     assert one.message_id == "om_one"
     assert two.message_id == "om_two"
     assert len(opener.calls) == 3
+    assert _body(opener.calls[1])["uuid"] != _body(opener.calls[2])["uuid"]
     assert list(tmp_path.rglob("*")) == []
 
 
@@ -197,7 +200,28 @@ def test_reply_quotes_message_id_and_card_rejects_invalid_json():
     assert opener.calls[-1][0].full_url.endswith(
         "/open-apis/im/v1/messages/om%2Fa%20b/reply"
     )
-    assert "receive_id" not in _body(opener.calls[-1])
+    reply_body = _body(opener.calls[-1])
+    assert "receive_id" not in reply_body
+    assert reply_body["uuid"].startswith("jv_")
+
+
+def test_explicit_idempotency_key_is_sent_and_bounded():
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "token", "expire": 7200},
+        {"code": 0, "data": {"message_id": "om_sent"}},
+    )
+
+    result = transport.send(
+        text="hello",
+        user_id="ou_owner",
+        idempotency_key="dlv_stable",
+        env=_env(),
+        opener=opener,
+    )
+
+    assert result.ok is True
+    assert _body(opener.calls[1])["uuid"] == "dlv_stable"
+    assert len(transport._delivery_uuid("x" * 80)) <= 50
 
 
 def test_cli_argument_adapter_supports_card_and_emergency_text():
@@ -207,7 +231,8 @@ def test_cli_argument_adapter_supports_card_and_emergency_text():
     )
     card = transport.send_from_cli_args(
         ["--chat-id", "oc_chat", "--msg-type", "interactive",
-         "--content", '{"elements":[]}'],
+         "--content", '{"elements":[]}',
+         "--idempotency-key", "memorial_stable"],
         env=_env(), opener=cards,
     )
     transport.clear_token_cache()
@@ -223,6 +248,7 @@ def test_cli_argument_adapter_supports_card_and_emergency_text():
 
     assert card.message_id == "om_card"
     assert _body(cards.calls[-1])["msg_type"] == "interactive"
+    assert _body(cards.calls[-1])["uuid"] == "memorial_stable"
     assert text.message_id == "om_text"
     assert "warning" in _body(texts.calls[-1])["content"]
 

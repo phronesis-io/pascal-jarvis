@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import time
 from datetime import datetime
 from pathlib import Path
@@ -52,16 +53,28 @@ def _db_path(
 
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=5)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        existing_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        existing_flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, existing_flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"cross-session index is not a regular file: {path}")
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    db = sqlite3.connect(path, timeout=5)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA busy_timeout=5000")
     db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA secure_delete=ON")
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS session_sources (
@@ -390,6 +403,10 @@ def index_sessions(
                 indexed_sources += 1
                 indexed_turns += turn_count
             db.commit()
+        # Deleted or superseded conversation text must not linger in WAL frames.
+        # secure_delete clears freed cells; a truncating checkpoint clears the
+        # prior page images once this bounded writer batch has committed.
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {
             "version": 1,
             "processed_sources": len(selected),

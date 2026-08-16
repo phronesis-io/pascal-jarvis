@@ -297,6 +297,7 @@ def _default_transport(root: Path) -> Transport:
             direct = send_as_bot(
                 text=str(envelope.payload.get("text") or ""),
                 reply_to=envelope.reply_to,
+                idempotency_key=envelope.id,
                 root=root,
             )
             if direct.attempted:
@@ -324,6 +325,7 @@ def _default_transport(root: Path) -> Transport:
                 if envelope.kind != "card" else "",
                 chat_id=envelope.chat_id,
                 user_id="" if envelope.chat_id else user_id,
+                idempotency_key=envelope.id,
                 root=root,
             )
             if direct.attempted:

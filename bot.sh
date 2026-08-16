@@ -833,7 +833,16 @@ run_codex_locked() {
     rm -f "$_stdin_file" "$_stdout_file"
     return 143
   fi
-  session_lock_publish "$_lock_file" "$_codex_pid" "$_lock_token"
+  if ! session_lock_publish \
+      "$_lock_file" "$_codex_pid" "$_lock_token"; then
+    kill "$_codex_pid" 2>/dev/null || true
+    wait "$_codex_pid" 2>/dev/null || true
+    if grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
+      printf 'acquiring %s' "$_lock_token" > "$_lock_file"
+    fi
+    rm -f "$_stdin_file" "$_stdout_file"
+    return 74
+  fi
   wait "$_codex_pid" 2>/dev/null
   _codex_rc=$?
 
@@ -1387,7 +1396,17 @@ print(build_system_prompt(
       fi
     fi
     _claude_pid=$!
-    session_lock_publish "$LOCK_FILE" "$_claude_pid" "$_lock_token"
+    if ! session_lock_publish \
+        "$LOCK_FILE" "$_claude_pid" "$_lock_token"; then
+      log_err "[$session_id] Could not publish provider process identity"
+      kill "$_claude_pid" 2>/dev/null || true
+      wait "$_claude_pid" 2>/dev/null || true
+      if grep -Fq "$_lock_token" "$LOCK_FILE" 2>/dev/null; then
+        printf 'acquiring %s' "$_lock_token" > "$LOCK_FILE"
+      fi
+      answer=""
+      continue
+    fi
     # Live activity stream: poll session file every 20s, send new tool calls to user
     # Also acts as watchdog: kills Claude after 6000s
     (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
@@ -3203,11 +3222,17 @@ except Exception:
         _session_max="${BACKUP_MAX_SESSION_SIZE:-100000}"
       fi
 
-      _snapshot_binding_flag=()
-      [ "$_owner_p2p" -eq 1 ] || _snapshot_binding_flag=(--ignore-binding)
-      _context_snapshot=$(python3 -m core.conversation_context snapshot \
-        --conv-key "$conv_key" "${_snapshot_binding_flag[@]}" \
-        2>>"$LOG_FILE" || echo '{}')
+      # macOS ships Bash 3.2, where expanding an empty array under `set -u`
+      # raises "unbound variable". Keep the two argument lists explicit: the
+      # owner p2p path is the common case and must never kill the event reader.
+      if [ "$_owner_p2p" -eq 1 ]; then
+        _context_snapshot=$(python3 -m core.conversation_context snapshot \
+          --conv-key "$conv_key" 2>>"$LOG_FILE" || echo '{}')
+      else
+        _context_snapshot=$(python3 -m core.conversation_context snapshot \
+          --conv-key "$conv_key" --ignore-binding \
+          2>>"$LOG_FILE" || echo '{}')
+      fi
       logical_context_key=$(echo "$_context_snapshot" | jq -r '.context_key // empty')
       matter_id=$(echo "$_context_snapshot" | jq -r '.matter_id // empty')
       compact_key=$(echo "$_context_snapshot" | jq -r '.compact_key // empty')

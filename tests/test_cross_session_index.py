@@ -1,7 +1,10 @@
 import json
 import os
 import sqlite3
+import stat
 from pathlib import Path
+
+import pytest
 
 from core import cross_session_index
 from core.prompt import _external_work_context
@@ -74,6 +77,57 @@ def test_index_backfills_both_products_and_retrieves_relevant_history(tmp_path):
     assert db.stat().st_mode & 0o777 == 0o600
 
 
+def test_index_is_private_before_sqlite_opens_it(tmp_path, monkeypatch):
+    db = tmp_path / "history.db"
+    real_connect = sqlite3.connect
+    observed_modes = []
+
+    def connect_after_permission_check(path, *args, **kwargs):
+        observed_modes.append(Path(path).stat().st_mode & 0o777)
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(cross_session_index.sqlite3, "connect", connect_after_permission_check)
+
+    connection = cross_session_index._connect(db)
+    connection.close()
+
+    assert observed_modes == [0o600]
+    assert stat.S_ISREG(db.stat().st_mode)
+
+
+def test_existing_index_is_made_private_before_sqlite_opens_it(
+    tmp_path, monkeypatch,
+):
+    db = tmp_path / "history.db"
+    db.write_bytes(b"")
+    db.chmod(0o644)
+    real_connect = sqlite3.connect
+    observed_modes = []
+
+    def connect_after_permission_check(path, *args, **kwargs):
+        observed_modes.append(Path(path).stat().st_mode & 0o777)
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(cross_session_index.sqlite3, "connect", connect_after_permission_check)
+
+    connection = cross_session_index._connect(db)
+    connection.close()
+
+    assert observed_modes == [0o600]
+
+
+def test_index_refuses_a_symlink_database_path(tmp_path):
+    target = tmp_path / "unrelated.db"
+    target.write_text("must remain untouched", encoding="utf-8")
+    db = tmp_path / "history.db"
+    db.symlink_to(target)
+
+    with pytest.raises(OSError):
+        cross_session_index._connect(db)
+
+    assert target.read_text(encoding="utf-8") == "must remain untouched"
+
+
 def test_index_is_incremental_and_replaces_changed_source_without_duplicates(tmp_path):
     codex = tmp_path / "codex"
     path = codex / "one.jsonl"
@@ -105,6 +159,33 @@ def test_index_is_incremental_and_replaces_changed_source_without_duplicates(tmp
     assert "追加最终决策" in cross_session_index.search_history(
         "最终决策", db_path=db,
     )
+
+
+def test_removed_session_text_is_not_left_in_database_or_wal(tmp_path):
+    codex = tmp_path / "codex"
+    path = codex / "one.jsonl"
+    phrase = "SHOULD_NOT_SURVIVE_DELETION_8f31"
+    _codex(path, "codex-one", phrase)
+    db = tmp_path / "history.db"
+    kwargs = {
+        "db_path": db,
+        "claude_root": tmp_path / "claude",
+        "codex_root": codex,
+        "tracker_path": tmp_path / "missing.json",
+        "batch_size": 10,
+    }
+    cross_session_index.index_sessions(**kwargs)
+
+    path.unlink()
+    cross_session_index.index_sessions(**kwargs)
+
+    assert cross_session_index.index_stats(db_path=db)["turns"] == 0
+    raw = b"".join(
+        candidate.read_bytes()
+        for candidate in (db, Path(f"{db}-wal"), Path(f"{db}-shm"))
+        if candidate.exists()
+    )
+    assert phrase.encode("utf-8") not in raw
 
 
 def test_index_excludes_managed_provider_calls_and_removes_deleted_sources(tmp_path):

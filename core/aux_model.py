@@ -43,6 +43,16 @@ class AuxiliaryModelResult:
     attempted: tuple[str, ...] = ()
 
 
+def _provider_health_rows(root: str | Path) -> list[dict[str, Any]]:
+    """Read one sanitized health snapshot; damaged telemetry must fail open."""
+    try:
+        from core.provider_health import snapshot
+
+        return list(snapshot(root).get("providers") or [])
+    except Exception:
+        return []
+
+
 def _terminate_process_group(
     process: subprocess.Popen[str] | None,
     *,
@@ -77,6 +87,8 @@ def _provider_candidates(
     model: str,
     gate_state: str,
     root: str | Path | None = None,
+    *,
+    health_rows: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str, dict[str, str] | None]]:
     from core.config import Config
     from core.model_control import route_plan
@@ -87,6 +99,7 @@ def _provider_candidates(
         "auxiliary_trusted",
         config=config,
         gate_state=gate_state,
+        health_rows=health_rows,
         route_ids=("primary", "backup1", "backup2"),
     )
     candidates: list[tuple[str, str, dict[str, str] | None]] = []
@@ -253,16 +266,22 @@ def _openai_result(
     return text.strip(), model
 
 
-def _openai_configured(root: str | Path | None = None) -> bool:
+def _openai_configured(
+    root: str | Path | None = None,
+    *,
+    health_rows: list[dict[str, Any]] | None = None,
+) -> bool:
     from core.config import Config
-    from core.model_control import model_routes
+    from core.model_control import route_plan
 
     base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
-    route = next(
-        item for item in model_routes(Config(base / "jarvis.yaml"))
-        if item.id == "openai"
+    plan = route_plan(
+        "auxiliary_trusted",
+        config=Config(base / "jarvis.yaml"),
+        health_rows=health_rows,
+        route_ids=("openai",),
     )
-    return route.enabled and route.configured
+    return bool(plan.routes)
 
 
 def run_auxiliary_model(
@@ -313,8 +332,13 @@ def run_auxiliary_model(
 
     try:
         attempt_index = 0
-        candidates = _provider_candidates(model, gate_state, root_path)
-        gpt_available = _openai_configured(root_path)
+        health_rows = _provider_health_rows(root_path)
+        candidates = _provider_candidates(
+            model, gate_state, root_path, health_rows=health_rows
+        )
+        gpt_available = _openai_configured(
+            root_path, health_rows=health_rows
+        )
         for provider_index, (provider, initial_model, env) in enumerate(
             candidates
         ):
@@ -420,7 +444,7 @@ def run_auxiliary_model(
         remaining = timeout - (time.monotonic() - started)
         if (
             remaining <= 0
-            or not _openai_configured(root_path)
+            or not gpt_available
             or (cancelled is not None and cancelled())
         ):
             return AuxiliaryModelResult(attempted=tuple(attempted))

@@ -79,12 +79,17 @@ def test_night_queue_roundtrip(tmp_path, monkeypatch):
     _queue_for_morning("深夜推荐内容 B", tmp_path)
 
     sent = []
-    monkeypatch.setattr(hbl, "_lark_send_text", lambda text, uid, **kw: sent.append(text) or True)
+    monkeypatch.setattr(
+        hbl,
+        "_lark_send_text",
+        lambda text, uid, **kw: sent.append((text, kw)) or True,
+    )
     assert _flush_night_queue(tmp_path, "ou_test")
 
     assert len(sent) == 1  # ONE digest, not N messages
-    assert "深夜推荐内容 A" in sent[0] and "深夜推荐内容 B" in sent[0]
-    assert "2" in sent[0]  # count in header
+    assert "深夜推荐内容 A" in sent[0][0] and "深夜推荐内容 B" in sent[0][0]
+    assert "2" in sent[0][0]  # count in header
+    assert sent[0][1]["idempotency_key"].startswith("night:")
     assert not (tmp_path / NIGHT_QUEUE_FILE).exists()  # cleared after flush
 
 
@@ -113,13 +118,15 @@ def test_memorial_queues_and_flushes_as_intact_card(tmp_path, monkeypatch):
     sent_texts = []
     monkeypatch.setattr(
         hbl, "_lark_send_card",
-        lambda payload, uid, log_file, **kw: sent_cards.append(payload) or True)
+        lambda payload, uid, log_file, **kw:
+        sent_cards.append((payload, kw)) or True)
     monkeypatch.setattr(
         hbl, "_lark_send_text",
         lambda payload, uid, **kw: sent_texts.append(payload) or True)
 
     assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
-    assert sent_cards == [card]
+    assert sent_cards[0][0] == card
+    assert sent_cards[0][1]["idempotency_key"] == "memorial:mem_test"
     assert sent_texts == []
     assert not (tmp_path / hbl.MEMORIAL_QUEUE_FILE).exists()
     # The outbox keeps readable text, while the sent payload kept its buttons.

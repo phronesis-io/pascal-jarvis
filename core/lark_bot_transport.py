@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -29,6 +30,7 @@ ALLOWED_BASE_URLS = frozenset({
 DEFAULT_TIMEOUT_SECONDS = 15
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_IDEMPOTENCY_KEY_CHARS = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,19 @@ def _cache_key(app_id: str, app_secret: str, base_url: str) -> str:
     return hashlib.sha256(
         f"{base_url}\0{app_id}\0{app_secret}".encode("utf-8")
     ).hexdigest()
+
+
+def _delivery_uuid(value: str) -> str:
+    """Return a stable, API-sized key for retry-safe message delivery."""
+    explicit = str(value or "").strip()
+    if explicit and len(explicit) <= MAX_IDEMPOTENCY_KEY_CHARS:
+        return explicit
+    if explicit:
+        return "jv_" + hashlib.sha256(explicit.encode("utf-8")).hexdigest()[:40]
+    # No caller identity means this is a new logical send. Content-derived
+    # keys would incorrectly collapse two legitimate identical messages sent
+    # within Lark's one-hour UUID deduplication window.
+    return "jv_" + uuid.uuid4().hex
 
 
 def _read_json(response) -> dict:
@@ -204,6 +219,7 @@ def send(
     user_id: str = "",
     chat_id: str = "",
     reply_to: str = "",
+    idempotency_key: str = "",
     root: str | Path | None = None,
     env: Mapping[str, str] | None = None,
     opener: Callable = urllib.request.urlopen,
@@ -245,6 +261,7 @@ def send(
                 "msg_type": msg_type,
                 "content": content,
             }
+        body["uuid"] = _delivery_uuid(idempotency_key)
         data = {}
         for auth_attempt in range(2):
             token = _tenant_token(
@@ -328,6 +345,7 @@ def send_from_cli_args(
             if option("--receive-id-type") == "open_id" else ""
         ),
         chat_id=option("--chat-id"),
+        idempotency_key=option("--idempotency-key"),
         root=root,
         env=env,
         opener=opener,

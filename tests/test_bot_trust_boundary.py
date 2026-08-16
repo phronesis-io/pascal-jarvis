@@ -24,6 +24,17 @@ def test_private_focus_text_uses_stdin_not_child_environment():
     assert source.count("focus_text=focus_text") == 3
 
 
+def test_owner_context_snapshot_avoids_bash32_empty_array_crash():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    block = source[source.index("# macOS ships Bash 3.2"):
+                   source.index("logical_context_key=", source.index("# macOS ships Bash 3.2"))]
+
+    assert "_snapshot_binding_flag" not in block
+    assert 'if [ "$_owner_p2p" -eq 1 ]; then' in block
+    assert block.count("python3 -m core.conversation_context snapshot") == 2
+    assert block.count("--ignore-binding") == 1
+
+
 def test_inline_actions_and_engagement_are_owner_gated():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
 
