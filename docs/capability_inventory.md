@@ -21,30 +21,31 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **230**
-- Status: keep **230**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **59**, dashboard-api **46**, dashboard-page **20**, heartbeat-task **39**, lark-command **21**, runtime-component **16**
+- Total: **231**
+- Status: keep **231**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **59**, dashboard-api **46**, dashboard-page **20**, heartbeat-task **39**, lark-command **21**, runtime-component **17**
 
 ## Inventory
 
 | ID | Kind | Status | Definition | Implementation | Runtime / entrypoint | Tests | Evidence gap |
 |---|---|---|---|---|---|---|---|
-| `component:admin` | runtime-component | **keep** | `components.yaml:89` | `core/components.py:400` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
-| `component:bot` | runtime-component | **keep** | `components.yaml:43` | `core/components.py:398` | python3 -m core.components --json | `tests/test_components_gating.py:260`, `tests/test_daemon_audit_fixes.py:520`, `tests/test_delegation_verify.py:274` | - |
-| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:121` | `core/components.py:406` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:196` | - |
-| `component:companion-voice` | runtime-component | **keep** | `components.yaml:144` | `core/components.py:401` | python3 -m core.components --json | `tests/test_companion.py:189` | - |
-| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:136` | `core/components.py:404` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
-| `component:daemon` | runtime-component | **keep** | `components.yaml:36` | `core/components.py:398` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
-| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:109` | `core/components.py:406` | python3 -m core.components --json | `tests/test_install_flow.py:231`, `tests/test_restart_loop_regression.py:194` | - |
-| `component:dashboard` | runtime-component | **keep** | `components.yaml:96` | `core/components.py:400` | python3 -m core.components --json | `tests/test_capability_contracts.py:196`, `tests/test_components_gating.py:43`, `tests/test_daemon_audit_fixes.py:520` | - |
-| `component:dashboard-launchd` | runtime-component | **keep** | `components.yaml:103` | `core/components.py:406` | python3 -m core.components --json | `tests/test_install_flow.py:260`, `tests/test_restart_loop_regression.py:73` | - |
-| `component:ef-stream` | runtime-component | **keep** | `components.yaml:71` | `core/components.py:402` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:469`, `tests/test_reliability_v2.py:25` | - |
-| `component:external-deadman` | runtime-component | **keep** | `components.yaml:115` | `core/components.py:403` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
-| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:49` | `core/components.py:399` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:520`, `tests/test_deploy.py:35`, `tests/test_iteration_loop.py:936` | - |
-| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:56` | `core/components.py:405` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:171` | - |
-| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:81` | `core/components.py:399` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:520`, `tests/test_reliability_v2.py:25` | - |
-| `component:session-backup` | runtime-component | **keep** | `components.yaml:128` | `core/components.py:401` | python3 -m core.components --json | `tests/test_reliability_v2.py:26` | - |
-| `component:taskline` | runtime-component | **keep** | `components.yaml:31` | `core/components.py:407` | python3 -m core.components --json | `tests/test_components_gating.py:275`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:223` | - |
+| `component:admin` | runtime-component | **keep** | `components.yaml:106` | `core/components.py:466` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
+| `component:bot` | runtime-component | **keep** | `components.yaml:45` | `core/components.py:464` | python3 -m core.components --json | `tests/test_components_gating.py:380`, `tests/test_daemon_audit_fixes.py:520`, `tests/test_delegation_verify.py:274` | - |
+| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:138` | `core/components.py:473` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:196` | - |
+| `component:companion-voice` | runtime-component | **keep** | `components.yaml:161` | `core/components.py:467` | python3 -m core.components --json | `tests/test_companion.py:189` | - |
+| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:153` | `core/components.py:470` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
+| `component:daemon` | runtime-component | **keep** | `components.yaml:38` | `core/components.py:464` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
+| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:126` | `core/components.py:473` | python3 -m core.components --json | `tests/test_install_flow.py:231`, `tests/test_restart_loop_regression.py:194` | - |
+| `component:dashboard` | runtime-component | **keep** | `components.yaml:113` | `core/components.py:466` | python3 -m core.components --json | `tests/test_capability_contracts.py:196`, `tests/test_components_gating.py:43`, `tests/test_daemon_audit_fixes.py:520` | - |
+| `component:dashboard-launchd` | runtime-component | **keep** | `components.yaml:120` | `core/components.py:473` | python3 -m core.components --json | `tests/test_install_flow.py:260`, `tests/test_restart_loop_regression.py:73` | - |
+| `component:ef-stream` | runtime-component | **keep** | `components.yaml:88` | `core/components.py:468` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:469`, `tests/test_reliability_v2.py:25` | - |
+| `component:external-deadman` | runtime-component | **keep** | `components.yaml:132` | `core/components.py:469` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
+| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:51` | `core/components.py:465` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:520`, `tests/test_deploy.py:35`, `tests/test_iteration_loop.py:936` | - |
+| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:58` | `core/components.py:471` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:171` | - |
+| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:98` | `core/components.py:465` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:520`, `tests/test_reliability_v2.py:25` | - |
+| `component:session-backup` | runtime-component | **keep** | `components.yaml:145` | `core/components.py:467` | python3 -m core.components --json | `tests/test_reliability_v2.py:26` | - |
+| `component:taskline` | runtime-component | **keep** | `components.yaml:33` | `core/components.py:474` | python3 -m core.components --json | `tests/test_components_gating.py:395`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:223` | - |
+| `component:unified-delivery` | runtime-component | **keep** | `components.yaml:73` | `core/components.py:472` | python3 -m core.components --json | `tests/test_components_gating.py:258` | - |
 | `heartbeat:activity-log` | heartbeat-task | **keep** | `HEARTBEAT.md:906` | `tasks/activity_log_pre.sh:1`, `tasks/activity_log_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:83`, `tests/test_memory.py:140` | - |
 | `heartbeat:calendar-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:678` | `tasks/calendar_sync_pre.sh:1`, `tasks/calendar_sync_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_attention_roi.py:66`, `tests/test_card_residue_leak.py:144`, `tests/test_delivery_and_quiet_hours.py:69` | - |
 | `heartbeat:checkin` | heartbeat-task | **keep** | `HEARTBEAT.md:431` | `tasks/checkin_pre.sh:1`, `tasks/checkin_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:371`, `tests/test_card_delivery_closure.py:60`, `tests/test_checkin_post.py:40` | - |
@@ -89,7 +90,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:591` | `core/aux_model.py:591` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:425` | - |
 | `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:559` | `core/codex_fallback.py:559` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:279`, `tests/test_provider_continuity_e2e.py:227`, `tests/test_session_lifecycle.py:267` | - |
 | `cli:core.companion` | core-cli | **keep** | `core/companion.py:471` | `core/companion.py:471` | python3 -m core.companion | `tests/test_companion.py:55`, `tests/test_heartbeat_regressions.py:158`, `tests/test_import_graph.py:153` | - |
-| `cli:core.components` | core-cli | **keep** | `core/components.py:472` | `core/components.py:472` | python3 -m core.components | `tests/test_companion.py:189`, `tests/test_components_gating.py:35`, `tests/test_components_heartbeat_tasks.py:167` | - |
+| `cli:core.components` | core-cli | **keep** | `core/components.py:539` | `core/components.py:539` | python3 -m core.components | `tests/test_companion.py:189`, `tests/test_components_gating.py:35`, `tests/test_components_heartbeat_tasks.py:167` | - |
 | `cli:core.conversation_audit` | core-cli | **keep** | `core/conversation_audit.py:1094` | `core/conversation_audit.py:1094` | python3 -m core.conversation_audit | `tests/test_components_gating.py:101`, `tests/test_conversation_audit.py:14`, `tests/test_delegation_shadow_review.py:109` | - |
 | `cli:core.conversation_context` | core-cli | **keep** | `core/conversation_context.py:339` | `core/conversation_context.py:339` | python3 -m core.conversation_context | `tests/test_bot_trust_boundary.py:34`, `tests/test_memorial.py:631` | - |
 | `cli:core.cross_session` | core-cli | **keep** | `core/cross_session.py:237` | `core/cross_session.py:237` | python3 -m core.cross_session | `tests/test_cross_session_context.py:335`, `tests/test_cross_session_index.py:55`, `tests/test_cross_session_memory_e2e.py:53` | - |

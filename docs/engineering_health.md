@@ -7,7 +7,7 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 230 active capabilities: 230 `keep`, 0 `fix`,
+- The generated inventory has 231 active capabilities: 231 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
 - `core.cross_session` is a small facade over discovery, parsing, historical

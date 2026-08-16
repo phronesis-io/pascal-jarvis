@@ -40,6 +40,7 @@ def _fake_lark_cli(tmp_path: Path, mode: str) -> None:
     fake = tmp_path / "bin" / "lark-cli"
     fake.write_text(
         "#!/usr/bin/env bash\n"
+        f"echo call >> '{tmp_path}/lark_calls'\n"
         f"mode=$(cat '{tmp_path}/lark_mode')\n"
         "if [ \"$mode\" = fail ]; then\n"
         "  echo 'Error: user access token expired, please re-auth' >&2\n"
@@ -83,6 +84,10 @@ def test_fetch_failure_nonzero_empty_stdout_keeps_annotated_snapshot(tmp_path):
         f"the snapshot with a fresh timestamp; got: {result.stdout!r}"
     )
     assert "lark-cli auth login" in result.stderr
+    assert (tmp_path / "lark_calls").read_text().splitlines() == ["call"], (
+        "an identity-level failure applies to the whole calendar; the sync "
+        "must stop instead of issuing the other 29 doomed requests"
+    )
 
     text = cal.read_text(encoding="utf-8")
     assert "重要会议" in text, "previous snapshot must survive a failed sync"

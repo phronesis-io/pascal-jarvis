@@ -221,6 +221,126 @@ def test_format_report_marks_skipped_not_warned(tmp_path):
     assert "skipped" in report
 
 
+def _delivery_db(tmp_path):
+    path = tmp_path / "data" / "jarvis.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.execute(
+        """
+        CREATE TABLE delivery_envelopes (
+            id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_epoch REAL NOT NULL,
+            next_attempt_epoch REAL,
+            delivered_epoch REAL
+        )
+        """
+    )
+    return path, db
+
+
+def test_delivery_health_detects_recent_failure_streak(tmp_path):
+    _path, db = _delivery_db(tmp_path)
+    now = time.time()
+    db.executemany(
+        "INSERT INTO delivery_envelopes "
+        "(id,state,attempts,created_epoch,next_attempt_epoch) "
+        "VALUES (?,?,?,?,?)",
+        [
+            (f"failed-{index}", "failed", 9, now - index, now - index)
+            for index in range(3)
+        ],
+    )
+    db.commit()
+    db.close()
+    manifest = _manifest(tmp_path, """
+  - name: unified-delivery
+    check: delivery
+    path: data/jarvis.db
+    failure_streak: 3
+""")
+
+    (result,) = check_components(manifest_path=manifest, root=tmp_path)
+
+    assert result["ok"] is False
+    assert "3 consecutive failed" in result["detail"]
+
+
+def test_delivery_health_recovers_after_real_receipt(tmp_path):
+    _path, db = _delivery_db(tmp_path)
+    now = time.time()
+    db.executemany(
+        "INSERT INTO delivery_envelopes "
+        "(id,state,attempts,created_epoch,next_attempt_epoch,delivered_epoch) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            ("old-failure", "failed", 9, now - 30, now - 30, None),
+            ("receipt", "delivered", 1, now - 5, None, now - 4),
+        ],
+    )
+    db.commit()
+    db.close()
+    manifest = _manifest(tmp_path, """
+  - name: unified-delivery
+    check: delivery
+    path: data/jarvis.db
+""")
+
+    (result,) = check_components(manifest_path=manifest, root=tmp_path)
+
+    assert result["ok"] is True
+    assert "failure streak 0" in result["detail"]
+
+
+def test_delivery_health_ignores_future_quiet_queue(tmp_path):
+    _path, db = _delivery_db(tmp_path)
+    now = time.time()
+    db.execute(
+        "INSERT INTO delivery_envelopes "
+        "(id,state,attempts,created_epoch,next_attempt_epoch) "
+        "VALUES ('quiet','queued',0,?,?)",
+        (now - 7200, now + 3600),
+    )
+    db.commit()
+    db.close()
+    manifest = _manifest(tmp_path, """
+  - name: unified-delivery
+    check: delivery
+    path: data/jarvis.db
+""")
+
+    (result,) = check_components(manifest_path=manifest, root=tmp_path)
+
+    assert result["ok"] is True
+    assert "delivery quiet" in result["detail"]
+
+
+def test_delivery_health_detects_overdue_retry_queue(tmp_path):
+    _path, db = _delivery_db(tmp_path)
+    now = time.time()
+    db.execute(
+        "INSERT INTO delivery_envelopes "
+        "(id,state,attempts,created_epoch,next_attempt_epoch) "
+        "VALUES ('overdue','queued',1,?,?)",
+        (now - 1800, now - 1200),
+    )
+    db.commit()
+    db.close()
+    manifest = _manifest(tmp_path, """
+  - name: unified-delivery
+    check: delivery
+    path: data/jarvis.db
+    max_overdue_seconds: 900
+""")
+
+    (result,) = check_components(manifest_path=manifest, root=tmp_path)
+
+    assert result["ok"] is False
+    assert "delivery stalled" in result["detail"]
+    assert "oldest 20min" in result["detail"]
+
+
 def test_ef_stream_check_combines_process_and_protocol_health(
         tmp_path, monkeypatch):
     monkeypatch.setattr(
