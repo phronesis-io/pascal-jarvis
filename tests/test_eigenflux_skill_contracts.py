@@ -75,16 +75,13 @@ def test_preinstalled_skill_docs_reference_upstream_contract_sync():
     assert "static/feed_contract.md" in feed
 
 
-def test_trading_expiry_is_consistent_across_skill_and_reference_docs():
-    skill = _read("ef-trading/SKILL.md")
-    orders = _read("ef-trading/references/orders.md")
+def test_retired_trading_skill_is_not_preinstalled_or_routed():
+    feed = _read("ef-broadcast/references/feed.md")
 
-    for text in (skill, orders):
-        assert "Expiry closes the order" in text or "expired" in text
-        assert "No payment" in text or "no payment" in text
-        assert "not counted as active" in text.lower()
-    assert "Refund is not automatic" not in skill
-    assert "Refund is not automatic" not in orders
+    assert not (EF / "ef-trading" / "SKILL.md").exists()
+    assert not list((EF / "ef-trading" / "references").glob("*.md"))
+    assert "trading flow" not in feed
+    assert "**`trade`**" not in feed
 
 
 def test_communication_skill_keeps_jarvis_verified_message_contract():

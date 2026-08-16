@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,13 @@ from core import companion  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    frozen = datetime(2026, 8, 2, 13, 0)
+    monkeypatch.setattr(companion, "now_local", lambda: frozen)
+    monkeypatch.setattr(
+        companion,
+        "now_local_str",
+        lambda fmt="%Y-%m-%d %H:%M": frozen.strftime(fmt),
+    )
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     yield
 

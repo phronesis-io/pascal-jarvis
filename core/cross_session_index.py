@@ -25,7 +25,7 @@ MAX_HISTORY_TURNS = 240
 MAX_QUERY_CANDIDATES = 240
 MAX_RESULTS = 8
 MAX_RESULT_CHARS = 5000
-INDEX_POLICY_VERSION = 1
+INDEX_POLICY_VERSION = 2
 INDEX_SCHEMA_VERSION = 1
 _GENERIC_QUERY_TERMS = {
     "一个", "一下", "之前", "什么", "可以", "好的", "怎么", "我们",
@@ -428,6 +428,12 @@ def _query_terms(value: str) -> list[str]:
         if token not in _GENERIC_QUERY_TERMS and token not in terms:
             terms.append(token)
     for run in re.findall(r"[\u4e00-\u9fff]+", clean):
+        if (
+            2 <= len(run) <= 12
+            and run not in _GENERIC_QUERY_TERMS
+            and run not in terms
+        ):
+            terms.append(run)
         for index in range(max(0, len(run) - 1)):
             token = run[index:index + 2]
             if token not in _GENERIC_QUERY_TERMS and token not in terms:
@@ -442,6 +448,14 @@ def _occurred_epoch(value: str) -> float:
         ).timestamp()
     except (TypeError, ValueError):
         return 0.0
+
+
+def _required_query_matches(term_count: int) -> int:
+    if term_count <= 2:
+        return 1
+    if term_count <= 5:
+        return 2
+    return 3
 
 
 def search_history(
@@ -460,16 +474,21 @@ def search_history(
         return ""
     db = _read_connect(path)
     try:
+        patterns = [f"%{term}%" for term in terms]
         clauses = " OR ".join("text LIKE ?" for _ in terms)
+        relevance = " + ".join(
+            "CASE WHEN text LIKE ? THEN 1 ELSE 0 END" for _ in terms
+        )
         rows = db.execute(
             f"""SELECT provider, session_id, workspace, role, occurred_at, text
                 FROM session_turns WHERE {clauses}
-                ORDER BY occurred_at DESC LIMIT ?""",
-            (*[f"%{term}%" for term in terms], MAX_QUERY_CANDIDATES),
+                ORDER BY ({relevance}) DESC, occurred_at DESC LIMIT ?""",
+            (*patterns, *patterns, MAX_QUERY_CANDIDATES),
         ).fetchall()
     finally:
         db.close()
     scored = []
+    required_matches = _required_query_matches(len(terms))
     for row in rows:
         state = dict(row)
         epoch = _occurred_epoch(state["occurred_at"])
@@ -477,6 +496,8 @@ def search_history(
             continue
         lowered = state["text"].lower()
         matches = sum(1 for term in terms if term in lowered)
+        if matches < required_matches:
+            continue
         score = matches + (0.25 if state["role"] == "user" else 0)
         scored.append((score, epoch, state))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)

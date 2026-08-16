@@ -17,8 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_TRACKED_FILES = {
     ".admin_token",
     ".env",
+    ".urgent_send",
     "jarvis.yaml",
     "sources.yaml",
+    "todos.md",
 }
 
 FORBIDDEN_TRACKED_PATTERNS = (
@@ -27,14 +29,20 @@ FORBIDDEN_TRACKED_PATTERNS = (
     "*.p12",
     "*.pem",
     "*.pfx",
+    "drafts/*",
+    "drafts/**/*",
     "secrets/*",
     "secrets/**/*",
+    "warm/*",
+    "warm/**/*",
 )
 
 REQUIRED_GITIGNORE_PATTERNS = (
     ".admin_token",
     ".env",
     ".env.*",
+    "/.urgent_send",
+    "/drafts/",
     "*.key",
     "*.p12",
     "*.pem",
@@ -42,6 +50,8 @@ REQUIRED_GITIGNORE_PATTERNS = (
     "jarvis.yaml",
     "secrets/",
     "sources.yaml",
+    "/todos.md",
+    "/warm/",
 )
 
 

@@ -77,6 +77,126 @@ def test_index_backfills_both_products_and_retrieves_relevant_history(tmp_path):
     assert db.stat().st_mode & 0o777 == 0o600
 
 
+def test_relevance_ranking_prevents_recent_broad_matches_from_starving_decision(
+    tmp_path,
+):
+    db_path = tmp_path / "history.db"
+    db = cross_session_index._connect(db_path)
+    try:
+        db.execute(
+            """INSERT INTO session_sources
+               (source_key,provider,session_id,workspace,mtime_ns,size,status,
+                indexed_at,turn_count,policy_version)
+               VALUES ('source','codex','decision','jarvis',1,1,'indexed',
+                       1,301,?)""",
+            (cross_session_index.INDEX_POLICY_VERSION,),
+        )
+        rows = [
+            (
+                "decision", "source", "codex", "decision", "jarvis",
+                "user", "2026-01-01T00:00:00Z",
+                "好友申请通过了100次仍然反复弹窗，这个功能必须修复",
+            )
+        ]
+        rows.extend(
+            (
+                f"noise-{index}", "source", "codex", "decision", "jarvis",
+                "assistant", f"2026-08-15T12:{index % 60:02d}:00Z",
+                f"普通功能状态更新 {index}",
+            )
+            for index in range(300)
+        )
+        db.executemany(
+            """INSERT INTO session_turns
+               (identity,source_key,provider,session_id,workspace,role,
+                occurred_at,text) VALUES (?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    history = cross_session_index.search_history(
+        "好友申请 通过 100 次 功能", db_path=db_path, max_results=1,
+    )
+
+    assert "反复弹窗" in history
+    assert "普通功能状态更新" not in history
+
+
+def test_compact_chinese_phrase_outranks_scattered_term_matches(tmp_path):
+    db_path = tmp_path / "history.db"
+    db = cross_session_index._connect(db_path)
+    try:
+        db.execute(
+            """INSERT INTO session_sources
+               (source_key,provider,session_id,workspace,mtime_ns,size,status,
+                indexed_at,turn_count,policy_version)
+               VALUES ('source','codex','decision','jarvis',1,1,'indexed',
+                       1,2,?)""",
+            (cross_session_index.INDEX_POLICY_VERSION,),
+        )
+        db.executemany(
+            """INSERT INTO session_turns
+               (identity,source_key,provider,session_id,workspace,role,
+                occurred_at,text) VALUES (?,?,?,?,?,?,?,?)""",
+            [
+                (
+                    "decision", "source", "codex", "decision", "jarvis",
+                    "user", "2026-01-01T00:00:00Z",
+                    "好友申请已经通过但仍反复弹窗",
+                ),
+                (
+                    "distractor", "source", "codex", "decision", "jarvis",
+                    "assistant", "2026-08-15T00:00:00Z",
+                    "好友关系需要重新提交申请，检查已经通过",
+                ),
+            ],
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    history = cross_session_index.search_history(
+        "好友申请 通过", db_path=db_path, max_results=1,
+    )
+
+    assert "反复弹窗" in history
+    assert "重新提交申请" not in history
+
+
+def test_multi_concept_query_returns_empty_for_weak_single_topic_noise(
+    tmp_path,
+):
+    db_path = tmp_path / "history.db"
+    db = cross_session_index._connect(db_path)
+    try:
+        db.execute(
+            """INSERT INTO session_sources
+               (source_key,provider,session_id,workspace,mtime_ns,size,status,
+                indexed_at,turn_count,policy_version)
+               VALUES ('source','codex','noise','jarvis',1,1,'indexed',
+                       1,1,?)""",
+            (cross_session_index.INDEX_POLICY_VERSION,),
+        )
+        db.execute(
+            """INSERT INTO session_turns
+               (identity,source_key,provider,session_id,workspace,role,
+                occurred_at,text) VALUES
+               ('noise','source','codex','noise','jarvis','assistant',
+                '2026-08-15T00:00:00Z','普通功能价格是100')"""
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    history = cross_session_index.search_history(
+        "好友申请 通过 100 次 功能", db_path=db_path,
+    )
+
+    assert history == ""
+
+
 def test_index_is_private_before_sqlite_opens_it(tmp_path, monkeypatch):
     db = tmp_path / "history.db"
     real_connect = sqlite3.connect
