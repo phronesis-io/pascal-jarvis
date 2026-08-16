@@ -34,6 +34,34 @@ def test_verify_index_drops_dead_entries_and_appends_omitted(tmp_path):
     assert "未分类" in out
 
 
+def test_index_file_always_targets_warm_even_before_it_exists(tmp_path):
+    assert tidy._index_file(tmp_path) == tmp_path / "warm" / "_index.md"
+
+
+def test_verify_index_keeps_other_tier_notes_and_archive_pointers(tmp_path):
+    warm = tmp_path / "warm"
+    (warm / "archive").mkdir(parents=True)
+    (warm / "alive.md").write_text("x")
+    (warm / "archive" / "old_topic.md").write_text("z")
+    index = (
+        "# Index\n"
+        "- alive.md — live entry\n"
+        "- 📦 archive/old_topic.md — archived pointer\n"
+        "- `daily_archive.md`(46k) is intentionally outside warm.\n"
+        "- **system/open_threads.md 8,284 / 9,000**: guarded separately.\n"
+        "untracked_note.md: plain prose is not an index entry.\n"
+        "- ghost.md — truly gone\n"
+    )
+
+    rendered = tidy._verify_index(index, warm)
+
+    assert "archive/old_topic.md" in rendered
+    assert "daily_archive.md" in rendered
+    assert "system/open_threads.md" in rendered
+    assert "untracked_note.md" in rendered
+    assert "ghost.md" not in rendered
+
+
 def test_verify_index_clean_input_passes_through(tmp_path):
     warm = tmp_path / "warm"
     warm.mkdir()
@@ -55,6 +83,24 @@ def test_process_writes_the_loader_visible_warm_index(tmp_path, monkeypatch):
            '- profile.md — stable user profile and current preferences"}')
     assert tidy._process(raw) == 0
     assert (warm / "_index.md").exists()
+    assert not (memory / "_index.md").exists()
+
+
+def test_process_creates_canonical_warm_index_on_fresh_install(
+    tmp_path, monkeypatch,
+):
+    memory = tmp_path / "memory"
+    index = tidy._index_file(memory)
+    monkeypatch.setattr(tidy, "MEMORY_DIR", memory)
+    monkeypatch.setattr(tidy, "INDEX_FILE", index)
+    raw = (
+        '{"index_update":"# Warm Memory Index\\n'
+        '- `daily_archive.md` stays outside the warm tier and is never loaded"}'
+    )
+
+    assert tidy._process(raw) == 0
+
+    assert index.exists()
     assert not (memory / "_index.md").exists()
 
 

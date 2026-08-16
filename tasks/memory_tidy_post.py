@@ -29,7 +29,12 @@ JARVIS_DIR = Path(os.environ.get(
 ))
 # The loader reads top-level ``warm/*.md`` and never reads memory/_index.md.
 # Keep the generated index beside the knowledge files it describes.
-INDEX_FILE = MEMORY_DIR / "warm" / "_index.md"
+def _index_file(memory_dir: Path) -> Path:
+    """Return the canonical warm-tier index, including on fresh installs."""
+    return memory_dir / "warm" / "_index.md"
+
+
+INDEX_FILE = _index_file(MEMORY_DIR)
 STRAY_WARM_DIR = JARVIS_DIR / "warm"
 
 # Dual-directory paths for one-way sync (auto → heartbeat). CLAUDE.md
@@ -590,19 +595,41 @@ def _verify_index(index_content: str, warm_dir) -> str:
     scan) inherit the drift. Two mechanical passes: ① drop entry lines whose
     file no longer exists in warm/ (archived/deleted), ② append a
     "未分类（自动补录）" section for live files the LLM omitted.
+
+    Only a bullet whose leading token is a bare warm-tier filename is eligible
+    for deletion. Notes about ``system/x.md`` or ``daily_archive.md`` and
+    pointers into ``archive/`` are knowledge, not stale warm entries.
     """
     import re as _re
     from pathlib import Path as _P
     warm_dir = _P(warm_dir)
     live = {f.name for f in warm_dir.glob("*.md")} - {"_index.md"}
+    archived = {f.name for f in warm_dir.glob("archive/*.md")}
     kept_lines, mentioned = [], set()
     for line in index_content.splitlines():
-        names = _re.findall(r"([A-Za-z0-9_\-.]+\.md)", line)
-        entry_names = [n for n in names if n != "_index.md"]
-        if (line.lstrip().startswith("-") and entry_names
-                and not any(n in live for n in entry_names)):
+        refs = _re.findall(
+            r"([A-Za-z0-9_\-./]*?[A-Za-z0-9_\-.]+\.md)", line,
+        )
+        entry_refs = [ref for ref in refs if _P(ref).name != "_index.md"]
+        entry_names = [_P(ref).name for ref in entry_refs]
+        head = _re.sub(r"^-\s*", "", line.lstrip())
+        head = _re.sub(r"^(?:[📦⭐✂🔥⛔]\ufe0f?\s*)+", "", head)
+        match = _re.match(
+            r"^(?:[`*_]+)?(?P<ref>[A-Za-z0-9_\-./]+\.md)"
+            r"(?:[`*_]+)?(?:\s*(?:[—–:：]|$))",
+            head,
+        )
+        leading_ref = match.group("ref") if match else ""
+        owns_entry = (
+            line.lstrip().startswith("-")
+            and bool(leading_ref)
+            and "/" not in leading_ref
+        )
+        if (owns_entry
+                and _P(leading_ref).name not in live
+                and _P(leading_ref).name not in archived):
             print(f"[memory-tidy] index entry dropped (file gone): "
-                  f"{entry_names[0]}", file=sys.stderr)
+                  f"{leading_ref}", file=sys.stderr)
             continue
         mentioned.update(entry_names)
         kept_lines.append(line)
@@ -633,6 +660,7 @@ def _process(raw: str) -> int:
     index_content = data.get("index_update", "")
     if index_content and len(index_content) > 50:
         index_content = _verify_index(index_content, INDEX_FILE.parent)
+        INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = INDEX_FILE.with_suffix(".tmp")
         tmp.write_text(index_content, encoding="utf-8")
         os.replace(tmp, INDEX_FILE)
