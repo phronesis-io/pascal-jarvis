@@ -566,6 +566,68 @@ def record_evidence(run_id: str, sources: list[str]) -> None:
     db.commit()
 
 
+def defer_inflight_infrastructure(reason: str = "模型调用失败",
+                                  retry_minutes: int = 5) -> dict:
+    """Close claimed runs as deferred and re-arm them after channel failure.
+
+    A Routine occurrence is claimed before the model call.  Quota, network and
+    timeout failures are not content decisions, so they must never become
+    ``no_output`` or spend the occurrence.  The current audit row stays
+    terminal and the Routine is made due again on a short bounded cadence; the
+    heartbeat's shared backoff remains the outer retry throttle.
+    """
+    _init()
+    try:
+        inflight = json.loads(_inflight_path().read_text(encoding="utf-8"))
+        if not isinstance(inflight, list):
+            inflight = []
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        inflight = []
+
+    db = _get_db()
+    now = now_local()
+    finished_at = now.strftime("%Y-%m-%d %H:%M")
+    retry_at = (now + timedelta(minutes=max(1, int(retry_minutes)))).strftime(
+        "%Y-%m-%d %H:%M")
+    error = f"模型基础设施失败，已安排重试：{str(reason or 'unknown')[:420]}"
+    deferred: list[str] = []
+
+    try:
+        for entry in inflight:
+            if not isinstance(entry, dict):
+                continue
+            run_id = str(entry.get("run_id") or "")
+            routine_id = str(entry.get("routine_id") or "")
+            if not run_id or not routine_id:
+                continue
+            cur = db.execute(
+                "UPDATE routine_runs SET finished_at = ?, status = 'deferred',"
+                " error = ? WHERE id = ? AND routine_id = ? AND status = 'running'",
+                (finished_at, error[:500], run_id, routine_id),
+            )
+            if cur.rowcount != 1:
+                continue
+            db.execute(
+                "UPDATE routines SET next_fire_at = CASE"
+                " WHEN next_fire_at IS NULL OR next_fire_at > ? THEN ?"
+                " ELSE next_fire_at END, last_status = 'deferred', last_error = ?"
+                " WHERE id = ? AND status = ?",
+                (retry_at, retry_at, error[:500], routine_id, STATUS_ACTIVE),
+            )
+            deferred.append(run_id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    # Clear the receipt only after the database transaction is durable.  If
+    # SQLite fails, keeping the manifest is what makes the claim recoverable.
+    from core.safety import atomic_write
+    atomic_write(_inflight_path(), "[]")
+
+    return {"deferred": deferred}
+
+
 def emit_due_block(now: datetime | None = None) -> str:
     """Pre-hook body: claim due routines and render their grounded evidence.
 

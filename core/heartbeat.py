@@ -1298,6 +1298,37 @@ You have access to the user's memory below. Use it to personalize your responses
                     nxt = None
                     model_problem = False
                     account_limit_reason = None
+                try:
+                    from core.provider_health import reason_code_for_error
+                    failure_reason = reason_code_for_error(err_text)
+                except Exception:
+                    failure_reason = "request_failed"
+                retryable_transport = failure_reason in {
+                    "network_error", "rate_limited", "server_error", "timeout",
+                }
+                safe_transport_replay = restrict_tools or not allow_tools
+                transport_failover = (
+                    failure_reason in {"network_error", "server_error", "timeout"}
+                    and safe_transport_replay
+                )
+                pre_execution_failover = (
+                    model_problem
+                    or failure_reason in {
+                        "account_limit", "auth_error", "rate_limited",
+                    }
+                )
+                gate_failover = (
+                    gate_state != "primary" and safe_transport_replay
+                )
+                if retryable_transport and not use_backup:
+                    try:
+                        from core.provider_health import observe
+                        observe(
+                            "primary", "unhealthy", failure_reason,
+                            root=self.jarvis_dir,
+                        )
+                    except Exception:
+                        pass
                 if account_limit_reason and not use_backup:
                     # Account-wide: persist it so EVERY process (bot replies,
                     # background jobs, next cycles) skips the doomed primary.
@@ -1321,21 +1352,18 @@ You have access to the user's memory below. Use it to personalize your responses
                         f"Retrying Claude heartbeat with {provider} fallback model: {nxt}")
                     model = nxt
                     continue
-                # `or gate_state != "primary"`: while the outage flag is set,
-                # this call is an elected probe — a probe that fails for ANY
-                # reason (403 auth wall, ConnectionRefused, captive portal)
-                # simply failed its probe and must fall back to the known-good
-                # backup, not report a failed cycle. The tight model-error
-                # signatures don't match those errors, so before this the
-                # probe dead-ended: 7/10 two probes burned on '403 Request
-                # not allowed' pushed the shared backoff to 3600s while the
-                # backup was healthy. The gate flag is deliberately NOT
+                # While the outage flag is set, an elected probe that fails
+                # before execution (model/account/auth/rate limit) can use the
+                # known-good backup. Transport failures are replayed only for
+                # no-tools calls: a timed-out tool-capable process may already
+                # have changed local state. The gate flag is deliberately NOT
                 # cleared here — only a primary success (above) clears it.
                 if (not use_backup and not backup_tried
                         and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
                         and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP_BASE_URL")
-                        and (model_problem or gate_state != "primary")):
+                        and (pre_execution_failover or transport_failover
+                             or gate_failover)):
                     backup_tried = True
                     use_backup = True
                     model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
@@ -1347,9 +1375,10 @@ You have access to the user's memory below. Use it to personalize your responses
                         and os.environ.get("CLAUDE_BACKUP2_BASE_URL")
                         and (use_backup or not backup_tried)
                         and (
-                            use_backup
-                            or model_problem
-                            or gate_state != "primary"
+                            (use_backup and safe_transport_replay)
+                            or pre_execution_failover
+                            or transport_failover
+                            or gate_failover
                         )):
                     if use_backup:
                         try:
@@ -1371,12 +1400,12 @@ You have access to the user's memory below. Use it to personalize your responses
                     model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model
                     self._log("Retrying Claude heartbeat with backup2 provider")
                     continue
-                # `or use_backup`: an auth/network error from the backup relay
-                # matches no model-error signature (kept tight after the
-                # red-team fix), but once we're on backup, primary is already
-                # known-dead — dead-ending here would silence the whole
-                # heartbeat even though the OpenAI route works.
-                if model_problem or use_backup:
+                # A backup auth/preflight failure can safely continue to
+                # OpenAI. A transport failure can continue only when the call
+                # had tools disabled; otherwise defer it for the scheduler to
+                # retry from its persisted state.
+                if (pre_execution_failover or transport_failover
+                        or (use_backup and safe_transport_replay)):
                     if use_backup:
                         try:
                             from core.provider_health import (
@@ -1405,7 +1434,41 @@ You have access to the user's memory below. Use it to personalize your responses
             self._call_timed_out = True
             self._last_call_error = f"claude call timed out ({call_timeout}s)"
             self._call_context_overflow = False
-            self._log(f"Claude call timed out ({call_timeout}s)")
+            timed_out_provider = (
+                "backup2" if _backup2_active else
+                ("backup1" if use_backup else "primary")
+            )
+            try:
+                from core.provider_health import observe
+                observe(
+                    timed_out_provider, "unhealthy", "timeout",
+                    root=self.jarvis_dir,
+                )
+            except Exception:
+                pass
+            safe_transport_replay = restrict_tools or not allow_tools
+            if not safe_transport_replay:
+                self._log(
+                    f"Claude call timed out ({call_timeout}s) on "
+                    f"{timed_out_provider}; deferring because tools may have run",
+                    level="warn",
+                )
+                return ""
+            self._log(
+                f"Claude call timed out ({call_timeout}s) on "
+                f"{timed_out_provider}; trying GPT fallback",
+                level="warn",
+            )
+            fallback_kwargs = {"restrict_tools": restrict_tools}
+            if not allow_tools:
+                fallback_kwargs["allow_tools"] = False
+            fallback = self._openai_fallback_call(
+                system_prompt, prompt, **fallback_kwargs,
+            )
+            if fallback:
+                self._call_timed_out = False
+                self._last_call_error = ""
+                return fallback
             return ""
         except FileNotFoundError:
             self._last_call_error = "claude CLI not found"

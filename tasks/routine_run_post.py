@@ -22,15 +22,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.routines import apply_run_result  # noqa: E402
+from core.routines import (  # noqa: E402
+    apply_run_result,
+    defer_inflight_infrastructure,
+)
 from core.safety import parse_json_response  # noqa: E402
 
 
 def main() -> int:
     raw = sys.stdin.read().strip()
+    if raw == "__CALL_FAILED__":
+        result = defer_inflight_infrastructure("模型调用失败")
+        if result["deferred"]:
+            print(f"[routine-run] infrastructure failure deferred: "
+                  f"{result['deferred']}", file=sys.stderr)
+        return 0
+
     # '__NO_ENVELOPE__' is the ACK_REQUIRED_TASKS contract: the Claude call
-    # died, but the pre-script already spent these occurrences, so the post
-    # still runs to close their audit rows deterministically.
+    # answered without a usable Routine slice.  Infrastructure failures use
+    # the distinct __CALL_FAILED__ path above and preserve the occurrence.
     if not raw or raw == "__NO_ENVELOPE__" or "HEARTBEAT_OK" in raw:
         # Nothing usable came back, but runs were already claimed. Closing them
         # as no_output keeps the audit honest and re-arms the next occurrence.

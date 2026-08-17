@@ -15,6 +15,7 @@ to run unattended:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -442,6 +443,49 @@ class TestEmitBlock:
         db.commit()
         routines.emit_due_block()
         assert routines.list_runs(r["id"])[0]["evidence_sources"] == ["calendar"]
+
+    def test_infrastructure_failure_rearms_occurrence_without_calling_it_no_output(
+            self, routine_db):
+        r = _mk(routine_db, trigger_type="interval", trigger_expr="3600")
+        db = db_module.get_db()
+        db.execute("UPDATE routines SET next_fire_at = '2020-01-01 00:00' "
+                   "WHERE id = ?", (r["id"],))
+        db.commit()
+
+        routines.emit_due_block()
+        original = routines.list_runs(r["id"])[0]
+        result = routines.defer_inflight_infrastructure("provider timeout")
+
+        deferred = routines.list_runs(r["id"])[0]
+        assert result == {"deferred": [original["id"]]}
+        assert deferred["status"] == "deferred"
+        assert "provider timeout" in deferred["error"]
+        assert routines.get_routine(r["id"])["last_status"] == "deferred"
+        assert json.loads(routines._inflight_path().read_text()) == []
+
+        retry_at = now_local() + timedelta(minutes=6)
+        retried = routines.claim_due(now=retry_at)
+        assert len(retried) == 1
+        assert retried[0]["id"] == r["id"]
+        assert retried[0]["run_id"] != original["id"]
+
+
+def test_routine_post_distinguishes_call_failure_from_model_no_output(
+        monkeypatch):
+    import tasks.routine_run_post as post
+
+    calls = []
+    monkeypatch.setattr(post, "defer_inflight_infrastructure",
+                        lambda reason="": calls.append(reason) or {"deferred": ["rr_x"]})
+    monkeypatch.setattr(
+        post, "apply_run_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an infrastructure failure must not consume routine content"),
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("__CALL_FAILED__"))
+
+    assert post.main() == 0
+    assert calls == ["模型调用失败"]
 
 
 def test_calendar_evidence_flags_a_stale_snapshot(tmp_path, monkeypatch):

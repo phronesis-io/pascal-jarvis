@@ -77,6 +77,16 @@ def reason_code_for_error(value: object) -> str:
     )):
         return "rate_limited"
     if any(marker in lowered for marker in (
+        "authentication_error",
+        "failed to authenticate",
+        "invalid x-api-key",
+        "invalid api key",
+        "http 401",
+        "http 403",
+        "403 request not allowed",
+    )):
+        return "auth_error"
+    if any(marker in lowered for marker in (
         "timed out", "timeout", "deadline exceeded",
     )):
         return "timeout"
@@ -85,9 +95,33 @@ def reason_code_for_error(value: object) -> str:
         "eof occurred in violation of protocol",
         "connection reset",
         "connection aborted",
+        "connection refused",
+        "connectionrefused",
+        "unable to connect",
+        "can't reach the api server",
+        "cannot reach the api server",
+        "getaddrinfo failed",
+        "name resolution",
+        "nameresolutionerror",
+        "network is unreachable",
+        "nodename nor servname",
+        "enotfound",
         "remote end closed connection",
     )):
         return "network_error"
+    if (
+        re.search(
+            r"\b(?:http(?:\s+status)?|status(?:\s+code)?)"
+            r"[\s:=/-]*(?:500|502|503|504)\b",
+            lowered,
+        )
+        or re.search(
+            r"\b(?:500 internal server error|502 bad gateway|"
+            r"503 service unavailable|504 gateway timeout)\b",
+            lowered,
+        )
+    ):
+        return "server_error"
     return "request_failed"
 
 

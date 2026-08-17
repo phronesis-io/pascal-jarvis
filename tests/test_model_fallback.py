@@ -645,13 +645,123 @@ def test_heartbeat_reaches_backup2_after_backup1_transport_error(
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
     assert calls == ["", "backup1-token", "backup2-token"]
     backup1 = next(
         row for row in ph.snapshot(tmp_path)["providers"]
         if row["id"] == "backup1"
     )
     assert backup1["detail"] == "real request: network_error"
+
+
+def test_heartbeat_primary_dns_failure_reaches_backup(tmp_path, monkeypatch):
+    """A primary ENOTFOUND is channel trouble, not a terminal model response."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        token = (kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", "")
+        calls.append(token)
+        if token == "backup-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        return CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr=(
+                "API Error: Can't reach the API server — check your internet "
+                "or DNS (ENOTFOUND)"
+            ),
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
+    assert calls == ["", "backup-token"]
+    primary = next(
+        row for row in ph.snapshot(tmp_path)["providers"]
+        if row["id"] == "primary"
+    )
+    assert primary["detail"] == "real request: network_error"
+
+
+def test_heartbeat_primary_dns_failure_reaches_gpt_without_relay(
+        tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+    from core import openai_fallback
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.delenv("CLAUDE_BACKUP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_BACKUP_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kwargs: CompletedProcess(
+            cmd, 1, stdout="", stderr="getaddrinfo failed (ENOTFOUND)"),
+    )
+    calls = []
+    monkeypatch.setattr(
+        openai_fallback,
+        "call_openai",
+        lambda *_args, **_kwargs: calls.append("gpt") or {
+            "output": [{
+                "content": [{"type": "output_text", "text": "HEARTBEAT_OK"}]
+            }]
+        },
+    )
+
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
+    assert calls == ["gpt"]
+
+
+def test_heartbeat_tool_capable_transport_failure_does_not_replay(
+        tmp_path, monkeypatch):
+    """A request that may have used tools cannot be replayed on another model."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", ""))
+        return CompletedProcess(
+            cmd, 1, stdout="", stderr="getaddrinfo failed (ENOTFOUND)")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt", allow_tools=True) == ""
+    assert calls == [""]
+
+
+def test_heartbeat_nontransport_request_error_does_not_fan_out(
+        tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", ""))
+        return CompletedProcess(
+            cmd, 1, stdout="", stderr="invalid_request: prompt rejected"),
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt") == ""
+    assert calls == [""]
 
 
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
