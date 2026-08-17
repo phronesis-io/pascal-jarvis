@@ -53,6 +53,11 @@ DEFAULT_BURST_WINDOW_SECONDS = 10 * 60
 CAP_RESERVATION_RECHECK_SECONDS = 5
 RECOVERY_REPLAY_LIMIT = 20
 RECOVERY_RECONCILE_SCAN_LIMIT = 500
+RECOVERY_CAP_REASONS = {
+    "global_daily_cap",
+    "metric_daily_cap",
+    "source_daily_cap",
+}
 RECOVERY_REPLAY_TTL_SECONDS = {
     "decision": 72 * 3600,
     "notice": 24 * 3600,
@@ -540,6 +545,12 @@ def _next_awake_epoch(moment: datetime) -> float:
     return next_awake(moment).timestamp()
 
 
+def _next_budget_window_epoch(moment: datetime) -> float:
+    return (moment + timedelta(days=1)).replace(
+        hour=0, minute=0, second=1, microsecond=0,
+    ).timestamp()
+
+
 def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
     """True for traffic that must not wait behind proactive-card budgets."""
     return bool(
@@ -549,6 +560,20 @@ def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
         or envelope.urgent
         or envelope.conversation_bound
         or envelope.source == "deploy-smoke"
+    )
+
+
+def _recovery_cap_deferral(envelope: DeliveryEnvelope, reason: str) -> bool:
+    """Require the complete recovery receipt before changing cap semantics."""
+    try:
+        replay_count = int(envelope.metadata.get("replay_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        reason in RECOVERY_CAP_REASONS
+        and envelope.metadata.get("defer_on_cap")
+        and replay_count == 1
+        and envelope.metadata.get("recovery_requeued_epoch") is not None
     )
 
 
@@ -986,7 +1011,16 @@ class DeliveryPipeline:
                 db, envelope, claimed_at)
             if throttled:
                 try:
-                    deferred = throttled == "burst_budget"
+                    recovery_deferred = _recovery_cap_deferral(
+                        envelope, throttled,
+                    )
+                    deferred = throttled == "burst_budget" or recovery_deferred
+                    if recovery_deferred and retry_epoch is None:
+                        retry_epoch = _next_budget_window_epoch(
+                            datetime.fromtimestamp(
+                                claimed_at, tz=now_local().tzinfo,
+                            )
+                        )
                     self._set_state(
                         db,
                         envelope.id,
@@ -1099,12 +1133,19 @@ class DeliveryPipeline:
                             # A standalone pipeline DB may intentionally contain
                             # only delivery tables.
                             pass
-                        has_failed = db.execute(
+                        has_recoverable = db.execute(
                             "SELECT 1 FROM delivery_envelopes "
-                            "WHERE state='failed' LIMIT 1"
+                            "WHERE state='failed' OR (state='suppressed' "
+                            "AND last_error IN (?,?,?) "
+                            "AND json_valid(metadata) "
+                            "AND json_extract(metadata,'$.replay_count')=1) "
+                            "AND json_extract(metadata,'$.recovery_requeued_epoch') "
+                            "IS NOT NULL "
+                            "LIMIT 1",
+                            tuple(sorted(RECOVERY_CAP_REASONS)),
                         ).fetchone() is not None
                         db.commit()
-                        if has_failed:
+                        if has_recoverable:
                             try:
                                 self.reconcile_failed_after_recovery(
                                     limit=RECOVERY_REPLAY_LIMIT,
@@ -1209,6 +1250,12 @@ class DeliveryPipeline:
         """Return a suppression reason, or empty when replay is still valid."""
         values = dict(row)
         metadata = self._metadata_from_row(row)
+        cap_blocked_replay = (
+            str(values.get("state") or "") == "suppressed"
+            and str(values.get("last_error") or "") in RECOVERY_CAP_REASONS
+            and int(metadata.get("replay_count") or 0) == 1
+            and metadata.get("recovery_requeued_epoch") is not None
+        )
         if metadata.get("replayable") is False:
             return "recovery_replay_disabled"
         source = str(values.get("source") or "")
@@ -1217,7 +1264,8 @@ class DeliveryPipeline:
             return "recovery_incident_obsolete"
         if str(values.get("route_channel") or "") not in {"lark", "lark_reply"}:
             return "recovery_route_unsupported"
-        if int(metadata.get("replay_count") or 0) >= 1:
+        if (int(metadata.get("replay_count") or 0) >= 1
+                and not cap_blocked_replay):
             return "recovery_replay_exhausted"
         expires = float(metadata.get("expires_epoch") or 0)
         if expires and recovery_epoch > expires:
@@ -1276,11 +1324,20 @@ class DeliveryPipeline:
         requeued: list[str] = []
         with closing(_connect(self.path)) as db, db:
             rows = db.execute(
-                "SELECT * FROM delivery_envelopes WHERE state='failed' "
-                "AND updated_epoch<? ORDER BY "
+                "SELECT * FROM delivery_envelopes WHERE updated_epoch<? "
+                "AND (state='failed' OR (state='suppressed' "
+                "AND last_error IN (?,?,?) "
+                "AND json_valid(metadata) "
+                "AND json_extract(metadata,'$.replay_count')=1 "
+                "AND json_extract(metadata,'$.recovery_requeued_epoch') "
+                "IS NOT NULL)) ORDER BY "
                 "CASE attention WHEN 'decision' THEN 0 WHEN 'reply' THEN 1 "
                 "WHEN 'alert' THEN 2 ELSE 3 END, created_epoch LIMIT ?",
-                (epoch, RECOVERY_RECONCILE_SCAN_LIMIT),
+                (
+                    epoch,
+                    *tuple(sorted(RECOVERY_CAP_REASONS)),
+                    RECOVERY_RECONCILE_SCAN_LIMIT,
+                ),
             ).fetchall()
             for row in rows:
                 reason = self._replay_reason(
@@ -1296,14 +1353,34 @@ class DeliveryPipeline:
                 if len(requeued) >= max(1, int(limit)):
                     break
                 metadata = self._metadata_from_row(row)
+                cap_blocked_replay = (
+                    str(row["state"]) == "suppressed"
+                    and str(row["last_error"] or "")
+                    in RECOVERY_CAP_REASONS
+                    and int(metadata.get("replay_count") or 0) == 1
+                    and metadata.get("recovery_requeued_epoch") is not None
+                )
+                ttl = int(metadata.get("replay_ttl_seconds") or 0)
+                if ttl <= 0:
+                    ttl = RECOVERY_REPLAY_TTL_SECONDS.get(
+                        str(row["attention"] or "notice"), 24 * 3600,
+                    )
                 metadata.update({
-                    "replay_count": int(metadata.get("replay_count") or 0) + 1,
+                    "replay_count": (
+                        int(metadata.get("replay_count") or 0)
+                        if cap_blocked_replay else 1
+                    ),
                     "recovery_requeued_epoch": epoch,
+                    "expires_epoch": float(
+                        metadata.get("expires_epoch")
+                        or float(row["created_epoch"] or 0) + ttl
+                    ),
+                    "defer_on_cap": True,
                 })
                 db.execute(
                     "UPDATE delivery_envelopes SET state='queued',attempts=0,"
                     "updated_epoch=?,next_attempt_epoch=?,last_error='',metadata=? "
-                    "WHERE id=? AND state='failed'",
+                    "WHERE id=? AND state IN ('failed','suppressed')",
                     (
                         epoch,
                         epoch,

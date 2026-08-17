@@ -30,8 +30,10 @@ valid in an interactive shell.
    identity.
 4. Guardian, routine, check-in, morning-anchor, intention-check, and calendar
    sync output is regenerated work and is never replayed after an outage.
-5. Replayed work gets one recovery attempt. Resolved, expired, superseded, or
-   exhausted work becomes an audited suppression.
+5. Replayed work gets one recovery attempt. It does not bypass attention caps:
+   a full cap defers the envelope to the next budget window and rechecks TTL.
+   Resolved, expired, superseded, or exhausted work becomes an audited
+   suppression.
 6. A real provider request is stronger evidence than a successful tiny canary.
    Canary evidence remains visible but cannot erase a production timeout.
 7. Real-request failures create an explicit, escalating cooldown. A timeout
