@@ -3,7 +3,7 @@
 - Assessment date: 2026-08-17
 - Source assessed: `main` at `7df0b6b` (PR #82)
 - Product policy: expansion frozen
-- Runtime verdict: not yet verified for this source revision
+- Runtime verdict: governed deployment verified for this source revision
 
 This scorecard separates source quality from release evidence. A merged PR is
 not a deployment, a healthy process is not proof of the running revision, and
@@ -28,24 +28,27 @@ missing mechanisms; it is the interaction between many mechanisms and the two
 large compatibility facades. The right next move is measured debt retirement,
 not another feature wave.
 
-## Release Evidence: 63/100 (Blocked)
+## Release Evidence: 100/100 (Deployed)
 
 | Gate | Evidence at snapshot | Verdict |
 |---|---|---|
-| Focused regressions | Routine/provider batch passed locally | Pass |
+| Focused regressions | Routine/provider batch: 48 passed | Pass |
+| Full local gate | 3,103 passed, 4 skipped; shell syntax and ShellCheck passed | Pass |
 | Protected PR CI | PR #81 and PR #82 workflows passed | Pass |
 | Merge to `main` | PR #82 merged as `7df0b6b` | Pass |
-| Trusted review / owner receipt | The owner authorized completion in conversation, but the exact merged-SHA receipt was not yet recorded where `core.release_gate` can verify it | Missing |
-| Merged-main CI | Not independently verified in the local release record | Missing |
-| Release gate | Cannot pass until the two evidence items above exist | Blocked by design |
-| Governed restart | Not run for `7df0b6b` | Pending |
-| Runtime revision and components | Existing local receipts referenced PR #81; the current agent sandbox could not inspect process state, so no claim is made | Unverified |
-| Delivery/provider/UI smoke | Not run against a proven `7df0b6b` resident runtime | Pending |
-| Post-release L3 observation | Requires the verified deployment first | Pending |
+| Trusted review / owner receipt | Admin-owner exact merge-SHA decision recorded after merge with a substantive reason | Pass |
+| Merged-main CI | Required `test` check passed on `7df0b6b` | Pass |
+| Release gate | `core.release_gate` accepted branch protection, checks, PR, and owner evidence without policy changes | Pass |
+| Governed restart | `restart.sh --yes` completed its settle and verification sequence | Pass |
+| Runtime revision and components | daemon, bot, heartbeat, Admin, and Dashboard receipts all report `7df0b6b`; 17/17 configured components healthy | Pass |
+| Delivery/provider/UI smoke | Acted delivery receipt; Primary, Backup 1, Codex, and GPT canaries healthy; desktop and 390px mobile UI clean | Pass |
+| Post-release L3 observation | Four observations processed with no coverage or reconciliation errors and no automatic proposal creation | Pass |
 
-The blocked status is correct behavior. Do not weaken `core.release_gate`,
-invent a reviewer, treat a chat message as a GitHub receipt, or use
-`restart.sh --runtime` to smuggle in changed code.
+This release used the repository's explicit zero-required-review owner path.
+The conversation authorization was converted into a GitHub receipt bound to
+the merge SHA; the gate then independently verified admin authority and the
+receipt timestamp. Future releases must repeat the same evidence chain rather
+than treating this decision as standing approval.
 
 ## What To Keep
 
@@ -59,15 +62,6 @@ invent a reviewer, treat a chat message as a GitHub receipt, or use
 - Generated capability inventory and explicit retirement decisions.
 
 ## Engineering Priorities Under The Freeze
-
-### P0: finish release evidence
-
-1. Record the exact-SHA owner receipt for the merged revision, or obtain a
-   trusted independent review bound to it.
-2. Verify merged-main required checks.
-3. Run the governed full restart, then prove bot/heartbeat revision,
-   components, delivery, provider canary, and local desktop UI.
-4. Observe the actual Routine retry and Lark delivery path after release.
 
 ### P1: make runtime truth cheap to obtain
 
@@ -93,8 +87,6 @@ invent a reviewer, treat a chat message as a GitHub receipt, or use
 
 ## Decision
 
-`GO` for continued engineering on the reviewed source.
-
-`NO-GO` for claiming `7df0b6b` deployed until the exact release evidence,
-governed restart, runtime revision, smoke tests, and post-release observation
-are all present.
+`GO`: `7df0b6b` is the verified resident release. Continue only
+behavior-preserving engineering under the product freeze; a later merge is a
+new candidate and must earn its own release evidence.

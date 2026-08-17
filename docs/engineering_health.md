@@ -8,9 +8,10 @@ work. The supported product surface remains the generated
 ## Current Evidence
 
 - Source baseline for this review is `main` at `7df0b6b` (PR #82), following
-  model/memory/delivery hardening in PR #81. Both PR test workflows passed;
-  merged-main release evidence and governed runtime verification are separate
-  requirements and were not complete at this snapshot.
+  model/memory/delivery hardening in PR #81. Both PR test workflows passed.
+  PR #82 also passed merged-main CI, exact-SHA admin-owner release approval,
+  the fail-closed release gate, governed restart, runtime revision checks,
+  component/delivery/provider/UI smoke, and post-release L3 observation.
 - The generated inventory has 231 active capabilities: 231 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
@@ -41,9 +42,9 @@ work. The supported product surface remains the generated
   percentages, and must not be used to compare this repository with another
   codebase.
 - The generated inventory and more than 3,000 collected tests demonstrate a
-  broad executable contract, not uniform branch coverage. Production behavior
-  still requires governed restart, real receipts, canaries, and post-release
-  observation.
+  broad executable contract, not uniform branch coverage. The current release
+  supplied governed restart, real receipts, canaries, and post-release
+  observation; every later revision must supply its own evidence again.
 - `core/memorial.py` is 3,477 lines with 115 functions; its longest function is
   165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
   function is 324 lines. These are verified maintainability risks even though

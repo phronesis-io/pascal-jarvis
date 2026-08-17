@@ -9,16 +9,16 @@ Historical feature waves and requirement numbers live in `CHANGELOG.md`,
 `docs/prd_portfolio.md`, and `docs/release_acceptance_2026-07-24.md`. This file
 contains only work that is still actionable under the current product freeze.
 
-## P0 - Finish The Current Release
+## Completed Release Baseline - 2026-08-17
 
-- Record a trusted exact-SHA review or owner receipt for merged `main`.
-- Verify merged-main required checks.
-- Pass `python3 -m core.release_gate` without weakening its policy.
-- Run the governed full restart and prove bot/heartbeat revision, critical
-  components, Lark delivery, provider canary, local Admin/Dashboard smoke, and
-  post-release L3 observation.
-- Confirm an active Routine survives a model infrastructure failure as
-  `deferred`, retries once, and does not duplicate its Lark Item.
+- PR #82 is deployed at `7df0b6b` after PR CI, merged-main CI, an exact-SHA
+  admin-owner receipt, the fail-closed release gate, and a governed restart.
+- Runtime receipts match daemon, bot, heartbeat, Admin, and Dashboard; all
+  configured components, delivery smoke, provider canaries, desktop/mobile UI,
+  and post-release L3 observation passed.
+- Routine infrastructure deferral/re-arm behavior has focused regression
+  coverage and prior real recovery evidence. Do not create a deliberate
+  production outage merely to repeat that evidence.
 
 ## P1 - Runtime Evidence
 

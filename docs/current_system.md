@@ -5,8 +5,7 @@
   evidence, and debt retirement continue
 - Product surface: Lark
 - Source baseline: `main` at `7df0b6b` (PR #82)
-- Runtime status: release verification pending; a merge or green PR is not
-  deployment evidence
+- Runtime status: governed deployment verified at `7df0b6b` on 2026-08-17
 
 This is the shortest authoritative map of the system as it exists now. Use
 `PRODUCT.md`, `DOMAIN.md`, `ARCHITECTURE.md`, and `DECISIONS.md` for the full
@@ -105,10 +104,16 @@ tested branch -> PR -> protected CI -> trusted review or exact-SHA owner receipt
 -> runtime revision + components + delivery/provider/UI smoke -> L3 observation
 ```
 
-As of this snapshot, PR #81 and PR #82 are merged and their PR CI passed. PR
-#82 contains the Routine infrastructure-recovery fix. The production runtime
-has not yet supplied the complete post-merge evidence for `7df0b6b`; therefore
-this document does not call that revision deployed. See
+PR #82 contains the Routine infrastructure-recovery fix and is deployed. Its
+PR CI and merged-main CI passed; the admin owner recorded an exact merge-SHA
+decision with a reason; `core.release_gate` accepted that evidence; and the
+governed restart loaded `7df0b6b` into daemon, bot, heartbeat, Admin, and
+Dashboard. The post-release checks proved 17/17 configured components healthy,
+an empty due-delivery queue, a real acted delivery smoke receipt, healthy
+Primary/Backup 1/Codex/GPT read-only canaries, desktop and 390px mobile UI
+rendering without console errors or horizontal overflow, and an L3 observation
+with no collection or reconciliation errors. Backup 2 remains intentionally
+disabled because no independent credential is configured. See
 `docs/repository_scorecard.md` for the dated evidence assessment.
 
 ## Where To Look

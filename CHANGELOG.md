@@ -8,10 +8,12 @@ prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
 shipped, superseded, or rejected, and requirements are traced to evidence in
 `docs/release_acceptance_2026-07-24.md`.
 
-## Unreleased - 2026-08-17 - 模型、记忆、投递与例程可靠性收口
+## Deployed - 2026-08-17 - 模型、记忆、投递与例程可靠性收口
 
-These changes are merged on `main` after v1.8.2. They are not called a new
-release until the governed post-merge release and runtime evidence completes.
+These changes are merged on `main` after v1.8.2 and were deployed as
+`7df0b6b` after protected PR/main CI, an exact-SHA owner receipt, the
+fail-closed release gate, a governed restart, runtime smoke, and post-release
+observation. No new version tag is claimed here.
 
 ### Added
 
