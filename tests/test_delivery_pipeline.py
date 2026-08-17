@@ -326,6 +326,202 @@ def test_recovery_scans_past_large_obsolete_prefix_for_valid_work(tmp_path):
                for delivery_id in obsolete_ids)
 
 
+def test_recovery_replay_defers_at_cap_and_delivers_next_window(tmp_path):
+    now = [_local_ts(2026, 8, 17, 20, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.id) or TransportResult(True, "om_ok")
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    filler = pipe.deliver(DeliveryEnvelope(
+        source="ordinary",
+        payload={"text": "今天的预算占位"},
+        metadata={"global_daily_cap": 1},
+    ))
+    assert filler.state == "delivered"
+    replay = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        payload={"text": "仍有效但不应突破预算"},
+        attention="notice",
+        metadata={
+            "force_queue": True,
+            "global_daily_cap": 1,
+            "replay_count": 1,
+            "recovery_requeued_epoch": now[0] - 60,
+            "defer_on_cap": True,
+            "expires_epoch": now[0] + 48 * 3600,
+        },
+    ))
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        pipe._set_state(
+            db, replay.delivery_id, "queued", "recovery due now",
+            next_attempt_epoch=now[0], last_error="",
+        )
+
+    result = next(row for row in pipe.flush_due()
+                  if row.delivery_id == replay.delivery_id)
+
+    assert result.state == "queued"
+    assert result.reason == "global_daily_cap"
+    row = pipe.get(replay.delivery_id)
+    assert row["state"] == "queued"
+    assert row["next_attempt_epoch"] == _local_ts(2026, 8, 18, 0, 0, 1)
+    assert sent == [filler.delivery_id]
+
+    now[0] = _local_ts(2026, 8, 18, 9, 30)
+    delivered = pipe.flush_due()
+    assert any(item.delivery_id == replay.delivery_id
+               and item.state == "delivered" for item in delivered)
+
+
+def test_recovery_reconciles_rows_already_suppressed_by_cap(tmp_path):
+    now = [_local_ts(2026, 8, 17, 20, 0)]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    replay = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        payload={"text": "升级前被预算终止的恢复项"},
+        attention="notice",
+        metadata={
+            "force_queue": True,
+            "replay_count": 1,
+            "recovery_requeued_epoch": now[0] - 60,
+        },
+    ))
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        pipe._set_state(
+            db,
+            replay.delivery_id,
+            "suppressed",
+            "global_daily_cap",
+            next_attempt_epoch=None,
+            last_error="global_daily_cap",
+        )
+
+    now[0] += 1
+    assert pipe.reconcile_failed_after_recovery(
+        recovery_epoch=now[0],
+    ) == [replay.delivery_id]
+
+    row = pipe.get(replay.delivery_id)
+    metadata = json.loads(row["metadata"])
+    assert row["state"] == "queued"
+    assert row["attempts"] == 0
+    assert metadata["replay_count"] == 1
+    assert metadata["defer_on_cap"] is True
+    assert metadata["expires_epoch"] == (
+        row["created_epoch"] + 24 * 3600
+    )
+
+
+def test_recovery_does_not_migrate_unreceipted_cap_suppression(tmp_path):
+    now = [_local_ts(2026, 8, 17, 20, 0)]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    ordinary = pipe.deliver(DeliveryEnvelope(
+        source="ordinary",
+        payload={"text": "不是恢复流程产生的历史行"},
+        attention="notice",
+        metadata={"force_queue": True, "replay_count": 1},
+    ))
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        pipe._set_state(
+            db,
+            ordinary.delivery_id,
+            "suppressed",
+            "global_daily_cap",
+            next_attempt_epoch=None,
+            last_error="global_daily_cap",
+        )
+
+    now[0] += 1
+    assert pipe.reconcile_failed_after_recovery(
+        recovery_epoch=now[0],
+    ) == []
+    assert pipe.get(ordinary.delivery_id)["state"] == "suppressed"
+
+
+def test_unreceipted_defer_marker_cannot_change_cap_policy(tmp_path):
+    now = [_local_ts(2026, 8, 17, 20, 0)]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    assert pipe.deliver(DeliveryEnvelope(
+        source="ordinary",
+        payload={"text": "预算占位"},
+        metadata={"global_daily_cap": 1},
+    )).state == "delivered"
+    fake_recovery = pipe.deliver(DeliveryEnvelope(
+        source="ordinary",
+        payload={"text": "只有布尔标记，没有恢复收据"},
+        metadata={
+            "global_daily_cap": 1,
+            "replay_count": 1,
+            "defer_on_cap": True,
+        },
+    ))
+
+    assert fake_recovery.state == "suppressed"
+    assert fake_recovery.reason == "global_daily_cap"
+
+
+def test_recovery_replay_expires_while_waiting_for_budget(tmp_path):
+    now = [_local_ts(2026, 8, 17, 20, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.id) or TransportResult(True, "om_ok")
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    replay = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        payload={"text": "等待时已经过期"},
+        attention="notice",
+        metadata={
+            "force_queue": True,
+            "replay_count": 1,
+            "defer_on_cap": True,
+            "expires_epoch": now[0] + 10,
+        },
+    ))
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        pipe._set_state(
+            db, replay.delivery_id, "queued", "recovery due now",
+            next_attempt_epoch=now[0], last_error="",
+        )
+
+    now[0] += 11
+    result = next(row for row in pipe.flush_due()
+                  if row.delivery_id == replay.delivery_id)
+
+    assert result.state == "suppressed"
+    assert result.reason == "expired_ttl"
+    assert sent == []
+
+
 def test_transport_health_opens_after_three_attempt_failures_and_recovers(
     tmp_path,
 ):

@@ -147,7 +147,10 @@ the exact release commit or a healthy resident descendant that contains it.
   verified transport recovery reconciles terminal failures but requeues only
   unresolved, unexpired work, once, under its original idempotency identity;
   regenerated routine/Guardian/calendar output and stale alerts become audited
-  suppressions. Its retry/cap interaction is frozen in
+  suppressions. A recovered envelope never bypasses attention budgets: a full
+  daily/source/metric cap defers it to the next budget window, where its TTL is
+  checked again, instead of terminating the still-valid Item. Its retry/cap
+  interaction is frozen in
   `docs/delivery_retry_and_caps.md`.
 - `core.lark_bot_transport`: the Keychain-independent application-bot adapter
   used by replies, cards, proactive delivery, Memorials, and EigenFlux stream

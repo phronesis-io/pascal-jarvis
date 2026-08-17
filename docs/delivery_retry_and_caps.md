@@ -19,8 +19,8 @@ stateDiagram-v2
     queued --> attempting: due worker claims row
     attempting --> attempting: stale claim recovered after 90s
 
-    attempting --> suppressed: metric/source send cap or transport suppression
-    attempting --> queued: global daily or burst capacity deferred
+    attempting --> suppressed: ordinary metric/source/global cap or transport suppression
+    attempting --> queued: burst capacity or recovery cap deferred
     attempting --> delivered: transport returns verified success
     attempting --> queued: retry batch exhausted below cumulative max
     attempting --> failed: cumulative attempts reach 9
@@ -29,6 +29,7 @@ stateDiagram-v2
     delivered --> acted: action confirmation
     read --> acted: action confirmation
 
+    suppressed --> queued: receipted historical recovery cap migration
     suppressed --> [*]
     acted --> [*]
     failed --> [*]: one dead-letter row unless explicitly suppressed
@@ -50,16 +51,20 @@ capacity.
 
 ```mermaid
 flowchart TD
-    Start["Envelope ready to send"] --> HardExempt{"Reply or bypass_throttle?"}
+    Start["Envelope ready to send"] --> HardExempt{"Base attention policy exempt?"}
     HardExempt -->|yes| SendDirect["Proceed without a cap reservation"]
     HardExempt -->|no| Metric{"Metric daily cap available?"}
-    Metric -->|no| SuppressMetric["suppressed: metric_daily_cap"]
+    Metric -->|no| RecoveryMetric{"Recovery replay?"}
+    RecoveryMetric -->|yes| QueueRecovery["queued until next local budget window"]
+    RecoveryMetric -->|no| SuppressMetric["suppressed: metric_daily_cap"]
     Metric -->|yes| Source{"Source daily cap available?"}
-    Source -->|no| SuppressSource["suppressed: source_daily_cap"]
-    Source -->|yes| ProductExempt{"Alert / urgent / conversation-bound / deploy smoke?"}
-    ProductExempt -->|yes| Hold["Atomic SQLite reservation"]
-    ProductExempt -->|no| Global{"Global daily slot available?"}
-    Global -->|no| QueueGlobal["queued until next awake window"]
+    Source -->|no| RecoverySource{"Recovery replay?"}
+    RecoverySource -->|yes| QueueRecovery
+    RecoverySource -->|no| SuppressSource["suppressed: source_daily_cap"]
+    Source -->|yes| Global{"Global daily slot available?"}
+    Global -->|no| RecoveryGlobal{"Recovery replay?"}
+    RecoveryGlobal -->|yes| QueueRecovery
+    RecoveryGlobal -->|no| SuppressGlobal["suppressed: global_daily_cap"]
     Global -->|yes| Burst{"Burst slot available?"}
     Burst -->|no| QueueBurst["queued until earliest slot or 5s reservation recheck"]
     Burst -->|yes| Hold["Atomic SQLite reservation"]
@@ -74,18 +79,20 @@ flowchart TD
 |---|---:|---|---|
 | metric daily | `metadata.metric_daily_cap`, normally 1 | `suppressed` | one `throttle_key` |
 | source daily | 24 | `suppressed` | one producer source |
-| global daily | 25 | `queued` until the next awake window | non-exempt proactive deliveries |
+| global daily | 9 | ordinary work `suppressed`; recovery replay deferred | non-exempt proactive deliveries |
 | burst | 4 per 10 minutes | `queued` until capacity is available | non-exempt proactive deliveries |
 | transport retry | delays 0s, 2s, 5s | queue after a batch; fail at 9 cumulative attempts | one delivery envelope |
 
 Source, global, burst, and burst-window defaults can be overridden by their
-`JARVIS_DELIVERY_*` environment variables or envelope metadata. Metric and
-source exhaustion are permanent policy suppression for that accepted envelope;
-global and burst exhaustion are temporary capacity deferrals.
+`JARVIS_DELIVERY_*` environment variables or envelope metadata. Metric, source,
+and global exhaustion are permanent policy suppression for an ordinary
+accepted envelope. A receipted recovery replay is instead deferred to the next
+local budget window and revalidated against its TTL before transport. Burst
+exhaustion is always a temporary capacity deferral.
 
-`bypass_throttle` and reply traffic bypass every cap. Alerts, urgent work,
-conversation-bound work, and deploy smoke still respect metric/source caps but
-are exempt from the product-wide global and burst budgets.
+`bypass_throttle`, replies, alerts, urgent work, conversation-bound work, and
+deploy smoke bypass every proactive-attention cap. A recovery receipt does not
+add a new exemption; it preserves the envelope's base attention class.
 
 ### Reservation Invariants
 
@@ -96,6 +103,9 @@ are exempt from the product-wide global and burst budgets.
   new reservation is evaluated.
 - Network I/O never runs while the reservation transaction is open.
 - A reply is never stranded behind a proactive-card budget.
+- The recovery marker never bypasses a cap; only an envelope carrying the
+  complete recovery receipt and deferral marker may wait for the next budget
+  window when its base attention class is not already exempt.
 - Producers must not add their own retry or cap loop around `core.delivery`.
 
 ## Review Checklist Before Changing a Number
