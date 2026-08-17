@@ -83,6 +83,7 @@ def fold(
                 "recommend": event.get("recommend") or None,
                 "authoring_protocol": bool(
                     event.get("authoring_protocol", False)),
+                "work_receipt": str(event.get("work_receipt", "")),
                 "authoring_audit_text": (
                     str(event.get("authoring_audit_text", ""))
                     if "authoring_audit_text" in event else None),

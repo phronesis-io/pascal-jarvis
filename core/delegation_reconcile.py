@@ -229,6 +229,11 @@ def sync_attention_item(
         source="delegation",
         title=item_title,
         body=body,
+        work_receipt=(
+            "回读委派状态、执行收据和完成条件，确认仍无权威结论"
+            if attention_state == "stalled"
+            else "核验委派对象与完成条件，确认关键信息仍不足"
+        ),
         options=options,
         matter_id=str(detail.get("matter_id") or ""),
         dedup_key=(

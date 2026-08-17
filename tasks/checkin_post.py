@@ -287,8 +287,11 @@ def main() -> int:
 
     # Output as Lark card (single line). The KIND rides along in the context
     # marker so the ledger can score this card against its own register later.
-    card = build_card(header, message, source="checkin",
-                      context=json.dumps({"kind": kind}, ensure_ascii=False))
+    card = build_card(
+        header, message, source="checkin",
+        context=json.dumps({"kind": kind}, ensure_ascii=False),
+        work_receipt="读取近期对话与关怀记录、完成主题去重和时机判断",
+    )
     if not card:
         return silent("card builder suppressed the output")
     print(card)

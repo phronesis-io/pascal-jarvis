@@ -101,6 +101,7 @@ def main() -> int:
     ]
     mem_id, _ = memorial.create(
         source="eigenflux-publish", title="EigenFlux 广播待确认",
+        work_receipt="完成广播草稿整理、来源绑定和发布参数校验",
         body=preview, options=options, send=False,
         context=f"pending_publish id={pending_id}",
     )

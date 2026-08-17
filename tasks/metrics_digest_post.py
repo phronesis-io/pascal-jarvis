@@ -61,7 +61,10 @@ def main() -> int:
         header = str(card.get("header") or "").strip()
         body = str(card.get("body") or "").strip()
         if header and body:
-            print(build_card(header, body, source="metrics-digest"))
+            print(build_card(
+                header, body, source="metrics-digest",
+                work_receipt="聚合运行指标、完成异常归因和重复信号压缩",
+            ))
     _promote_watermark()
     return 0
 

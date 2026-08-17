@@ -445,6 +445,7 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
             title = (str(spec.get("name", "")).strip() or "跟进")[:24]
             mid, _ = memorial.create(
                 source="intentions", title=title, body=combined,
+                work_receipt="核验触发条件、执行记录和当前完成状态",
                 options=_memorial_closure_options(spec["parent"]),
                 authoring_protocol=True, send=False)
             print(memorial.card_json(mid))
@@ -453,8 +454,10 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
             print(f"[intentions_post] memorial failed, using plain card: {e}",
                   file=sys.stderr)
     buttons = _closure_buttons(button_specs) if button_specs else None
-    print(build_card("🎯 Intent", combined, source="intentions",
-                     buttons=buttons))
+    print(build_card(
+        "🎯 Intent", combined, source="intentions", buttons=buttons,
+        work_receipt="核验触发条件、执行记录和当前完成状态",
+    ))
 
 
 def main():
@@ -503,7 +506,10 @@ def main():
         # Strip simple {...} blobs (incl. nested) from otherwise-prose output.
         text = re.sub(r'\{.*\}', '', raw, flags=re.DOTALL).strip()
         if text and not _is_contentless(text):
-            print(build_card("🎯 Intent", text, source="intentions"))
+            print(build_card(
+                "🎯 Intent", text, source="intentions",
+                work_receipt="核验在途意图、完成失败对账和重试状态更新",
+            ))
         return
 
     user_messages: list = []

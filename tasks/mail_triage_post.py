@@ -145,6 +145,10 @@ def main() -> int:
                           file=sys.stderr)
             mem_id, _ = memorial.create(
                 source="mail", title=item["title"], body=body,
+                work_receipt=(
+                    "读取并去重邮件，完成重要性判断"
+                    + ("并生成可审阅草稿" if draft_id else "")
+                ),
                 preset=preset, options=options, send=False,
                 # A draft turns the card into an ask, so it earns a decision
                 # lane; a plain surfaced email stays a notice.
@@ -160,8 +164,11 @@ def main() -> int:
               file=sys.stderr)
         if urgent:
             for item in surface_items:
-                print(build_card(header=f"📬 {item['title']}", body=item["body"],
-                                 source="mail-triage"))
+                print(build_card(
+                    header=f"📬 {item['title']}", body=item["body"],
+                    source="mail-triage",
+                    work_receipt="读取邮件正文、完成优先级判断和重复项检查",
+                ))
     return 0
 
 
