@@ -1298,6 +1298,23 @@ You have access to the user's memory below. Use it to personalize your responses
                     nxt = None
                     model_problem = False
                     account_limit_reason = None
+                try:
+                    from core.provider_health import reason_code_for_error
+                    failure_reason = reason_code_for_error(err_text)
+                except Exception:
+                    failure_reason = "request_failed"
+                retryable_transport = failure_reason in {
+                    "network_error", "rate_limited", "server_error", "timeout",
+                }
+                if retryable_transport and not use_backup:
+                    try:
+                        from core.provider_health import observe
+                        observe(
+                            "primary", "unhealthy", failure_reason,
+                            root=self.jarvis_dir,
+                        )
+                    except Exception:
+                        pass
                 if account_limit_reason and not use_backup:
                     # Account-wide: persist it so EVERY process (bot replies,
                     # background jobs, next cycles) skips the doomed primary.
@@ -1335,7 +1352,8 @@ You have access to the user's memory below. Use it to personalize your responses
                         and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
                         and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
                         and os.environ.get("CLAUDE_BACKUP_BASE_URL")
-                        and (model_problem or gate_state != "primary")):
+                        and (model_problem or retryable_transport
+                             or gate_state != "primary")):
                     backup_tried = True
                     use_backup = True
                     model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
@@ -1349,6 +1367,7 @@ You have access to the user's memory below. Use it to personalize your responses
                         and (
                             use_backup
                             or model_problem
+                            or retryable_transport
                             or gate_state != "primary"
                         )):
                     if use_backup:
@@ -1376,7 +1395,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 # red-team fix), but once we're on backup, primary is already
                 # known-dead — dead-ending here would silence the whole
                 # heartbeat even though the OpenAI route works.
-                if model_problem or use_backup:
+                if model_problem or retryable_transport or use_backup:
                     if use_backup:
                         try:
                             from core.provider_health import (

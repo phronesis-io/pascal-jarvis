@@ -332,7 +332,12 @@ def test_error_reason_classification_is_bounded():
     ) == "account_limit"
     assert ph.reason_code_for_error(
         "connection refused by configured endpoint"
-    ) == "request_failed"
+    ) == "network_error"
+    assert ph.reason_code_for_error(
+        "API Error: Can't reach the API server (ENOTFOUND)"
+    ) == "network_error"
+    assert ph.reason_code_for_error("HTTP 503 upstream unavailable") == \
+        "server_error"
     assert ph.reason_code_for_error(
         "name or service not known"
     ) == "request_failed"

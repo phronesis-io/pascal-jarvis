@@ -128,7 +128,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.perception` | core-cli | **keep** | `core/perception.py:557` | `core/perception.py:557` | python3 -m core.perception | `tests/test_brain_health.py:83`, `tests/test_metrics_digest.py:333`, `tests/test_perception.py:133` | - |
 | `cli:core.presence` | core-cli | **keep** | `core/presence.py:182` | `core/presence.py:182` | python3 -m core.presence | `tests/test_presence.py:56` | - |
 | `cli:core.prompt` | core-cli | **keep** | `core/prompt.py:393` | `core/prompt.py:393` | python3 -m core.prompt | `tests/test_actions.py:244`, `tests/test_admin.py:68`, `tests/test_admin_destructive.py:347` | - |
-| `cli:core.provider_health` | core-cli | **keep** | `core/provider_health.py:659` | `core/provider_health.py:659` | python3 -m core.provider_health | `tests/test_aux_model.py:82`, `tests/test_dashboard_routes.py:1599`, `tests/test_heartbeat.py:360` | - |
+| `cli:core.provider_health` | core-cli | **keep** | `core/provider_health.py:672` | `core/provider_health.py:672` | python3 -m core.provider_health | `tests/test_aux_model.py:82`, `tests/test_dashboard_routes.py:1599`, `tests/test_heartbeat.py:360` | - |
 | `cli:core.reaction_save` | core-cli | **keep** | `core/reaction_save.py:102` | `core/reaction_save.py:102` | python3 -m core.reaction_save | `tests/test_reaction_save.py:27` | - |
 | `cli:core.release_gate` | core-cli | **keep** | `core/release_gate.py:464` | `core/release_gate.py:464` | python3 -m core.release_gate | `tests/test_release_gate.py:642` | - |
 | `cli:core.reply_closure` | core-cli | **keep** | `core/reply_closure.py:88` | `core/reply_closure.py:88` | python3 -m core.reply_closure | `tests/test_model_fallback.py:274` | - |
