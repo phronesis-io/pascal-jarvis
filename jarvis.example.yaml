@@ -171,11 +171,13 @@ admin:
 
 
 # ── External outage detection ─────────────────────────────────────
-# Optional, but required to detect a powered-off Mac or FileVault/pre-login
-# stall. Create a check at an external dead-man service, configure that service
-# to alert after at least 45 minutes without a ping, and place its HTTPS ping
-# URL below. The URL is a secret: keep it only in gitignored jarvis.yaml (or
-# JARVIS_DEADMAN_URL), never in committed files.
+# Optional, but required to detect a powered-off Mac, FileVault/pre-login stall,
+# or a live process whose Lark transport is failing. The daemon withholds its
+# success ping after three consecutive real Lark delivery failures. Create a
+# check at an external dead-man service, configure it to alert after at least
+# 45 minutes without a ping, and place its HTTPS ping URL below. The URL is a
+# secret: keep it only in gitignored jarvis.yaml (or JARVIS_DEADMAN_URL), never
+# in committed files.
 
 ops:
   deadman:

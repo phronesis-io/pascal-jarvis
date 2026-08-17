@@ -332,6 +332,9 @@ def test_selfmon_auth_warning_binds_the_real_action():
     assert auth["action"] == {"type": "lark_auth_login", "params": {}}
     assert not auth.get("reply"), "the fix button must be an action, not chat"
     assert sdp._options_for("⚠️ 磁盘快满了") is None
+    assert sdp._options_for(
+        "⚠️ 飞书后台 user 凭证暂不可读，不需要重复授权"
+    ) is None
 
 
 def test_action_processor_wires_lark_auth_login(tmp_path, monkeypatch):

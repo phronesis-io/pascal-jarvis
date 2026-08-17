@@ -151,9 +151,46 @@ def _base_result(spec: dict[str, Any]) -> dict[str, Any]:
         "actual_model": "",
         "model_source": "",
         "checked_at": "",
+        "checked_epoch": None,
         "latency_ms": None,
         "detail": detail,
+        "observation_source": None,
+        "consecutive_failures": 0,
+        "cooldown_until_epoch": 0,
+        "last_success_epoch": 0,
+        "last_failure_epoch": 0,
     }
+
+
+def _failure_cooldown_seconds(reason: str, count: int) -> int:
+    """Return an escalating cooldown for repeated real-request failures.
+
+    A 600-second production timeout is not equivalent to a transient canary
+    blip. The first timeout therefore receives the normal 30-minute provider
+    cooldown; repeated failures expand to two and then eight hours. Network
+    and rate-limit failures start smaller but use the same bounded escalation.
+    """
+    defaults = {
+        "network_error": (60, "JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS"),
+        "rate_limited": (300, "JARVIS_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS"),
+        "timeout": (1800, "JARVIS_PROVIDER_TIMEOUT_COOLDOWN_SECONDS"),
+    }
+    default, setting = defaults.get(
+        reason,
+        (1800, "JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS"),
+    )
+    try:
+        base = max(0, int(os.environ.get(setting, str(default))))
+    except (TypeError, ValueError):
+        base = default
+    try:
+        cap = max(base, int(os.environ.get(
+            "JARVIS_PROVIDER_MAX_COOLDOWN_SECONDS", str(12 * 3600)
+        )))
+    except (TypeError, ValueError):
+        cap = 12 * 3600
+    exponent = min(max(0, int(count) - 1), 3)
+    return min(cap, base * (4 ** exponent))
 
 
 def _probe_claude(
@@ -408,7 +445,12 @@ def probe_provider(
     else:
         outcome = _probe_openai(spec, timeout=timeout, caller=openai_caller)
     result.update(outcome)
-    result["checked_at"] = _now()
+    checked_epoch = time.time()
+    result["checked_at"] = datetime.fromtimestamp(
+        checked_epoch
+    ).astimezone().isoformat(timespec="seconds")
+    result["checked_epoch"] = checked_epoch
+    result["observation_source"] = "canary"
     return result
 
 
@@ -461,13 +503,30 @@ def observe(
         state = snapshot(base)
         rows = state["providers"]
         row = next(item for item in rows if item["id"] == provider_id)
-        row.update({
+        previous_failures = int(row.get("consecutive_failures") or 0)
+        updates = {
             "status": status,
             "checked_at": checked_at,
             "checked_epoch": epoch,
             "detail": f"real request: {code}",
             "observation_source": "real_request",
-        })
+        }
+        if status == "healthy":
+            updates.update({
+                "consecutive_failures": 0,
+                "cooldown_until_epoch": 0,
+                "last_success_epoch": epoch,
+            })
+        else:
+            failures = previous_failures + 1
+            updates.update({
+                "consecutive_failures": failures,
+                "cooldown_until_epoch": (
+                    epoch + _failure_cooldown_seconds(code, failures)
+                ),
+                "last_failure_epoch": epoch,
+            })
+        row.update(updates)
         return _write_state(base, rows)
 
 
@@ -492,17 +551,38 @@ def _merge_probe_rows(
     *,
     probe_started_epoch: float,
 ) -> list[dict[str, Any]]:
-    """Keep stronger real-request observations recorded during a canary run."""
+    """Keep real-request truth when a small canary merely answers.
+
+    A successful tiny probe cannot rehabilitate a provider that timed out on
+    production input. A failed canary may still downgrade a previously healthy
+    route. Canary facts are retained beside the authoritative real observation
+    so operators can see both without conflating them.
+    """
     latest_by_id = {str(row.get("id") or ""): row for row in latest}
     merged = []
     for row in probed:
         current = latest_by_id.get(str(row.get("id") or ""))
-        if (
-            current
-            and current.get("observation_source") == "real_request"
-            and _checked_epoch(current) >= probe_started_epoch
-        ):
-            merged.append(current)
+        if (current
+                and current.get("observation_source") == "real_request"
+                and (current.get("status") == "unhealthy"
+                     or row.get("status") == "healthy")):
+            kept = dict(current)
+            kept.update({
+                "canary_status": row.get("status"),
+                "canary_checked_at": row.get("checked_at"),
+                "canary_checked_epoch": row.get("checked_epoch"),
+                "canary_latency_ms": row.get("latency_ms"),
+                "canary_detail": row.get("detail"),
+            })
+            if row.get("status") == "unhealthy":
+                canary_epoch = _checked_epoch(row)
+                kept["cooldown_until_epoch"] = max(
+                    float(current.get("cooldown_until_epoch") or 0),
+                    canary_epoch + _failure_cooldown_seconds(
+                        "request_failed", 1,
+                    ),
+                )
+            merged.append(kept)
         else:
             merged.append(row)
     return merged
@@ -622,6 +702,15 @@ def snapshot(root: str | Path | None = None) -> dict[str, Any]:
                 "detail",
                 "checked_epoch",
                 "observation_source",
+                "consecutive_failures",
+                "cooldown_until_epoch",
+                "last_success_epoch",
+                "last_failure_epoch",
+                "canary_status",
+                "canary_checked_at",
+                "canary_checked_epoch",
+                "canary_latency_ms",
+                "canary_detail",
             ):
                 current[key] = old.get(key, current.get(key))
         rows.append(current)
