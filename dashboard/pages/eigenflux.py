@@ -12,7 +12,10 @@ from pathlib import Path
 from nicegui import run, ui
 
 from core import memorial
-from core.interval_config import parse_interval_overrides
+from core.interval_config import (
+    parse_interval_overrides,
+    resolve_effective_interval,
+)
 
 from ..telemetry import memorial_states, read_json
 from ..uiutil import (
@@ -113,12 +116,12 @@ def load_network_overview(
         state = state if isinstance(state, dict) else {}
         circuit = state.get("circuit") or {}
         circuit = circuit if isinstance(circuit, dict) else {}
-        effective_interval_s = _number(
-            interval_overrides.get(task_id)
-            or state.get("effective_interval")
-            or default_interval_s,
+        effective_interval_s = _number(resolve_effective_interval(
+            task_id,
             default_interval_s,
-        )
+            state.get("effective_interval"),
+            interval_overrides,
+        ), default_interval_s)
         if effective_interval_s <= 0:
             effective_interval_s = default_interval_s
         max_age_s = max(minimum_max_age_s, 2 * effective_interval_s)

@@ -196,17 +196,39 @@ def main(argv: list[str] | None = None) -> int:
     context = sub.add_parser("context")
     context.add_argument("--window-hours", type=int, default=DEFAULT_WINDOW_HOURS)
     context.add_argument("--max-chars", type=int, default=MAX_CONTEXT_CHARS)
+    index = sub.add_parser("index")
+    index.add_argument("--batch-size", type=int, default=16)
+    search = sub.add_parser("search")
+    search.add_argument("query")
+    sub.add_parser("stats")
     args = parser.parse_args(argv)
     if args.command == "incremental":
         output = collect_incremental(
             state_file=args.state_file or None,
             window_hours=args.window_hours,
         )
-    else:
+    elif args.command == "context":
         output = build_prompt_context(
             window_hours=args.window_hours,
             max_chars=args.max_chars,
         )
+    else:
+        from core.cross_session_index import (
+            index_sessions,
+            index_stats,
+            search_history,
+        )
+        if args.command == "index":
+            import json
+            output = json.dumps(
+                index_sessions(batch_size=args.batch_size),
+                ensure_ascii=False,
+            )
+        elif args.command == "search":
+            output = search_history(args.query)
+        else:
+            import json
+            output = json.dumps(index_stats(), ensure_ascii=False)
     if output:
         print(output)
     return 0

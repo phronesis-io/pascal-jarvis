@@ -66,6 +66,43 @@ def test_backup1_transport_failure_advances_to_backup2(tmp_path, monkeypatch):
     assert calls == ["backup1-token", "backup2-token"]
 
 
+def test_fresh_unhealthy_backup_is_skipped_by_auxiliary_route_plan(
+    tmp_path, monkeypatch,
+):
+    model_fallback.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.example")
+    monkeypatch.setenv("CLAUDE_BACKUP2_MODEL", "backup2-model")
+    monkeypatch.setattr(
+        aux_model,
+        "_provider_health_rows",
+        lambda _root: [{
+            "id": "backup1",
+            "status": "unhealthy",
+            "checked_epoch": time.time(),
+            "observation_source": "real_request",
+            "detail": "real request: network_error",
+        }],
+    )
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(kwargs["env"]["ANTHROPIC_AUTH_TOKEN"])
+        return _result(command, 0, stdout="recovered")
+
+    result = aux_model.run_auxiliary_model(
+        "prompt", root=tmp_path, runner=runner
+    )
+
+    assert result.provider == "Claude backup2"
+    assert result.model == "backup2-model"
+    assert calls == ["backup2-token"]
+
+
 def test_text_only_call_disables_claude_and_openai_tools(
     tmp_path, monkeypatch,
 ):

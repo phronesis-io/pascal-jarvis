@@ -327,7 +327,9 @@ def _check_heartbeat_tasks(comp: dict, root: Path) -> tuple[bool, str]:
     tasks = parse_heartbeat(root / "HEARTBEAT.md")
     if not tasks:
         return False, "HEARTBEAT.md unreadable"
-    overrides = _read_json(root / "interval_overrides.json")
+    from core.interval_config import parse_interval_overrides
+    overrides = parse_interval_overrides(
+        _read_json(root / "interval_overrides.json"))
     brain = _read_json(root / ".daemon_brain_state.json")
 
     now = time.time()
@@ -354,6 +356,73 @@ def _check_heartbeat_tasks(comp: dict, root: Path) -> tuple[bool, str]:
     shown = "；".join(alerts[:3])
     more = f"（还有 {len(alerts) - 3} 个）" if len(alerts) > 3 else ""
     return False, f"{len(alerts)} 个心跳任务停摆：{shown}{more}"[:400]
+
+
+def _check_delivery(comp: dict, root: Path) -> tuple[bool, str]:
+    """Detect a live runtime whose user-facing delivery has stopped working."""
+    path = root / str(comp.get("path") or "data/jarvis.db")
+    now = time.time()
+    window = max(60, int(comp.get("window_seconds", 3600) or 3600))
+    failure_limit = max(1, int(comp.get("failure_streak", 3) or 3))
+    max_overdue = max(
+        60, int(comp.get("max_overdue_seconds", 900) or 900)
+    )
+    db = None
+    try:
+        db = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=1,
+        )
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT state,attempts FROM delivery_envelopes "
+            "WHERE created_epoch>=? AND state IN "
+            "('queued','attempting','failed','delivered','read','acted') "
+            "ORDER BY created_epoch DESC LIMIT 100",
+            (now - window,),
+        ).fetchall()
+        overdue = db.execute(
+            "SELECT COUNT(*) AS count,"
+            "MIN(COALESCE(next_attempt_epoch,created_epoch)) AS oldest_due "
+            "FROM delivery_envelopes WHERE state IN ('queued','attempting') "
+            "AND attempts>0 AND COALESCE(next_attempt_epoch,0)<=?",
+            (now,),
+        ).fetchone()
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        return False, f"delivery ledger unreadable ({type(exc).__name__})"
+    finally:
+        if db is not None:
+            db.close()
+
+    failure_streak = 0
+    for row in rows:
+        state = str(row["state"] or "")
+        if state in {"delivered", "read", "acted"}:
+            break
+        if state == "failed" or (
+            state in {"queued", "attempting"}
+            and int(row["attempts"] or 0) >= 3
+        ):
+            failure_streak += 1
+
+    overdue_count = int(overdue["count"] or 0) if overdue else 0
+    oldest_due = float(overdue["oldest_due"] or now) if overdue else now
+    overdue_age = max(0, int(now - oldest_due))
+    if failure_streak >= failure_limit:
+        return False, (
+            f"delivery unavailable: {failure_streak} consecutive failed "
+            f"envelope(s) in {window // 60}min"
+        )
+    if overdue_count and overdue_age > max_overdue:
+        return False, (
+            f"delivery stalled: {overdue_count} due item(s), oldest "
+            f"{overdue_age // 60}min"
+        )
+    if not rows:
+        return True, "delivery quiet; no recent failure streak or due queue"
+    return True, (
+        f"delivery healthy; failure streak {failure_streak}, "
+        f"due queue {overdue_count}"
+    )
 
 
 def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
@@ -403,6 +472,7 @@ _CHECKS = {
     "deadman": _check_deadman,
     "audit_age": _check_audit_age,
     "heartbeat_tasks": _check_heartbeat_tasks,
+    "delivery": _check_delivery,
     "launchctl": _check_launchctl,
     "taskline": _check_taskline,
 }

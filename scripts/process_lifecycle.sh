@@ -5,9 +5,13 @@
 # plus the kernel-reported start time and gives every handler its own group.
 
 process_start_token() {
-  local pid="${1:-}"
+  local pid="${1:-}" start
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  start=$(ps -o lstart= -p "$pid" 2>/dev/null) || return 1
+  start=$(printf '%s' "$start" \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$start" ] || return 1
+  printf '%s\n' "$start"
 }
 
 process_group_id() {

@@ -289,9 +289,21 @@ def _default_transport(root: Path) -> Transport:
         if channel not in {"lark", "lark_reply"}:
             return TransportResult(False, error=f"unknown channel: {channel}")
         user_id = _resolve_user_id(root)
+        from core.lark_bot_transport import send as send_as_bot
+
         if channel == "lark_reply":
             if not envelope.reply_to:
                 return TransportResult(False, error="missing reply_to")
+            direct = send_as_bot(
+                text=str(envelope.payload.get("text") or ""),
+                reply_to=envelope.reply_to,
+                idempotency_key=envelope.id,
+                root=root,
+            )
+            if direct.attempted:
+                return TransportResult(
+                    direct.ok, direct.message_id, direct.error
+                )
             command = [
                 "lark-cli", "im", "+messages-reply",
                 "--message-id", envelope.reply_to,
@@ -306,6 +318,20 @@ def _default_transport(root: Path) -> Transport:
                 target = ["--user-id", user_id]
             else:
                 return TransportResult(False, error="missing Lark user id")
+            direct = send_as_bot(
+                card_json=str(envelope.payload.get("card_json") or "")
+                if envelope.kind == "card" else "",
+                text=str(envelope.payload.get("text") or "")
+                if envelope.kind != "card" else "",
+                chat_id=envelope.chat_id,
+                user_id="" if envelope.chat_id else user_id,
+                idempotency_key=envelope.id,
+                root=root,
+            )
+            if direct.attempted:
+                return TransportResult(
+                    direct.ok, direct.message_id, direct.error
+                )
             if envelope.kind == "card":
                 command = [
                     "lark-cli", "im", "+messages-send", *target,

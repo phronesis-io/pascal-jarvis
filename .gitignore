@@ -23,6 +23,12 @@ jarvis.log.[0-9]
 .heartbeat_last_source
 calendar_event_mapping.json
 .harness_evolve_state
+/.urgent_send
+
+# Owner-private working memory and recovered outgoing drafts
+/drafts/
+/todos.md
+/warm/
 
 # Temp / backup / corrupted artifacts from atomic writes or debugging
 *.bak

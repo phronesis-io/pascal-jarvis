@@ -145,6 +145,12 @@ the exact release commit or a healthy resident descendant that contains it.
   initializes schema once per database inode, and never holds a transaction
   across a network send. Its retry/cap interaction is frozen in
   `docs/delivery_retry_and_caps.md`.
+- `core.lark_bot_transport`: the Keychain-independent application-bot adapter
+  used by replies, cards, proactive delivery, Memorials, and EigenFlux stream
+  messages. It caches tenant tokens only in process memory and returns success
+  only with a provider `message_id`. Owner-identity APIs remain behind the
+  separate `lark-cli --as user` OAuth boundary, so calendar/docs degradation
+  cannot take bot delivery down with it.
 - `docs/capability_inventory.md`: generated evidence map for supported
   components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
   missing contracts and drift; it never authorizes deletion without explicit
@@ -187,8 +193,13 @@ the exact release commit or a healthy resident descendant that contains it.
   post-release outcome observations.
 - `core.taskline_bridge`: L2 sidecar health, claims, leases, isolated
   worktrees, and Delegation links.
+- `core.model_control`: the model control plane. It separates upstream account,
+  requested model, execution adapter, capabilities, trust scope, route order,
+  health cooldown, and real provider diversity. It emits the private
+  compatibility environment consumed by harnesses but never starts a model
+  process or exposes credentials on a status surface.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
-  observability.
+  observability over the shared `model_control` catalog.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
   control, and one durable Codex thread per logical Matter context. It uses the
   logical context as a cross-transport process lock, so two entrances cannot
@@ -204,6 +215,11 @@ the exact release commit or a healthy resident descendant that contains it.
   provider calls and supplies both immediate prompt context and the durable
   heartbeat digest; provider transcripts remain the source of truth. The
   choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
+- `core.cross_session_index`: private, WAL-backed, rebuildable indexing of
+  redacted visible turns from owner-operated Claude Code and Codex sessions.
+  Small heartbeat batches converge through old transcripts; the current owner
+  request retrieves only relevant older turns. It is never injected into a
+  group or named Matter and never turns remembered prose into current truth.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
@@ -286,6 +302,12 @@ as legacy ledger values from the pre-REQ-119 era.
 | calendar is current | calendar API/sync artifact with freshness |
 
 Model prose and memory summaries are never authorities for these claims.
+
+Lark has two explicit identities. The **bot identity** uses the private app
+credential and direct OpenAPI transport for messaging and bot metadata. The
+**owner identity** uses user OAuth for personal calendar, docs, mail, and task
+mutations. Their health is reported separately; neither identity may silently
+substitute for the other.
 
 ## Dependency Direction
 

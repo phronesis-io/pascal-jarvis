@@ -13,6 +13,7 @@ The prompt template is a constant; dynamic parts are injected at build time.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from core.memory import load_group_context, load_tiered_memory
@@ -21,7 +22,7 @@ from core.session import build_recent_turns, get_session_counter, get_session_st
 from core.compact import read_compact
 
 
-def _external_work_context(jarvis_dir: str) -> str:
+def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
     """Load owner-private coding-session context only inside the live runtime.
 
     Tests and library callers often build prompts against temporary roots.  A
@@ -35,8 +36,16 @@ def _external_work_context(jarvis_dir: str) -> str:
         if Path(runtime_root).resolve() != Path(jarvis_dir).resolve():
             return ""
         from core.cross_session import build_prompt_context
-        return build_prompt_context(
+        from core.cross_session_index import search_history
+        recent = build_prompt_context(
             tracker_path=Path(runtime_root) / "active_sessions.json")
+        historical = search_history(
+            focus_text,
+            root=runtime_root,
+            # Recent work is already projected with fuller whole-turn context.
+            before_epoch=time.time() - 24 * 3600,
+        )
+        return "\n\n".join(part for part in (recent, historical) if part)
     except Exception:
         # Provider transcript drift must not make the primary conversation fail.
         return ""
@@ -298,7 +307,10 @@ def build_system_prompt(
     # A named Matter is an explicit attention boundary. Global coding-session
     # discovery remains useful in the unbound inbox, but injecting it into a
     # focused Matter would silently reintroduce unrelated session context.
-    external_work_context = "" if selected_matter else _external_work_context(jarvis_dir)
+    external_work_context = (
+        "" if selected_matter
+        else _external_work_context(jarvis_dir, focus_text=focus_text)
+    )
     people_context = owner_people_prompt_context(jarvis_dir)
     matter_context = ""
     if selected_matter:

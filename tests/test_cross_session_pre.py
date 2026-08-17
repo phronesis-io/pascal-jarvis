@@ -56,6 +56,9 @@ def test_first_run_emits_then_watermark_suppresses(tmp_path):
     assert r2.returncode == 0, r2.stderr
     assert r2.stdout.strip() == ""
     assert _seen_file(tmp_path).exists()
+    # Historical indexing shares the pre-hook but stays in the injected data
+    # root, never the source checkout.
+    assert (tmp_path / "cross_session_memory.db").exists()
 
 
 def test_appended_turn_emits_only_new_plus_context(tmp_path):

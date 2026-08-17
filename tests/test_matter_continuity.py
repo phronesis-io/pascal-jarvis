@@ -84,7 +84,9 @@ def test_lark_matter_commands_create_switch_and_finish():
 
 
 def test_model_command_reports_last_actual_provider_and_model():
-    assert "首选通道" in handle_lark_command("/model", "ou_owner")["reply"]
+    first = handle_lark_command("/model", "ou_owner")["reply"]
+    assert "首选通道" in first
+    assert "Model 控制平面" in first
     record_turn("ou_owner", "assistant", "回答", provider="GPT fallback",
                 model="gpt-test", session_id="sid-1")
     reply = handle_lark_command("当前模型", "ou_owner")["reply"]

@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from .claude_bin import resolve_claude_bin
-from .interval_config import parse_interval_overrides
+from .interval_config import parse_interval_overrides, resolve_effective_interval
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
@@ -363,7 +363,7 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
             current = {"name": line[4:].strip(), "interval": 600,
                         "pre": "", "post": "", "prompt": "",
                         "heavy": False, "timeout": None,
-                        "untrusted_input": False}
+                        "untrusted_input": False, "no_tools": False}
         elif current:
             if line.startswith("- interval:"):
                 current["interval"] = parse_interval(line.split(":", 1)[1])
@@ -384,6 +384,11 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
                 # reach a shell. Do not remove this flag to "simplify" a task
                 # block without re-auditing where its DATA actually comes from.
                 current["untrusted_input"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
+            elif line.startswith("- no-tools:"):
+                # Trusted maintenance tasks can retain private memory context
+                # while still being denied every local tool. This differs
+                # from untrusted-input, which also withholds private memory.
+                current["no_tools"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
             elif line.startswith("- timeout:"):
                 try:
                     current["timeout"] = int(line.split(":", 1)[1].strip())
@@ -414,6 +419,17 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
                 t["prompt"] += "\n" + overlay.read_text(encoding="utf-8")
 
     return tasks
+
+
+def _completion_epoch(cycle_started_at: float) -> int:
+    """Return a success receipt timestamp, never the cycle-acquire time.
+
+    A shared model cycle can run for minutes.  Reusing its start timestamp for
+    ``last_success`` made a task look stale immediately after it completed and
+    let self-diagnostic page while that same task was visibly succeeding.
+    ``last_run`` remains the cadence watermark; success is a release receipt.
+    """
+    return max(int(cycle_started_at), int(time.time()))
 
 
 class HeartbeatRunner:
@@ -664,6 +680,8 @@ class HeartbeatRunner:
         t0 = time.time()
         if task.get("untrusted_input"):
             raw = self.claude_call(prompt, timeout=timeout, restrict_tools=True)
+        elif task.get("no_tools"):
+            raw = self.claude_call(prompt, timeout=timeout, allow_tools=False)
         else:
             raw = self.claude_call(prompt, timeout=timeout)
         dur = round(time.time() - t0, 2)
@@ -720,7 +738,7 @@ class HeartbeatRunner:
             return
 
         if raw.strip() == "HEARTBEAT_OK":
-            ts.last_success = now
+            ts.last_success = _completion_epoch(now)
             ts.last_status = "idle"
             ts.circuit.record_success()
             state[name] = ts.to_dict()
@@ -740,7 +758,7 @@ class HeartbeatRunner:
         else:
             self._collect_output(name, raw, user_messages, producing_tasks)
 
-        ts.last_success = now
+        ts.last_success = _completion_epoch(now)
         ts.last_status = "ok"
         ts.circuit.record_success()
         state[name] = ts.to_dict()
@@ -842,9 +860,12 @@ class HeartbeatRunner:
         """
         if overrides is None:
             overrides = self.load_interval_overrides()
-        return overrides.get(task["name"]) \
-            or (ts.effective_interval if ts.effective_interval > 0
-                else task["interval"])
+        return resolve_effective_interval(
+            task["name"],
+            task["interval"],
+            ts.effective_interval,
+            overrides,
+        )
 
     def save_state(self, state: dict):
         """Atomic write: temp + fsync + rename. The rename alone protects
@@ -905,6 +926,7 @@ class HeartbeatRunner:
         prompt: str,
         *,
         restrict_tools: bool = False,
+        allow_tools: bool = True,
     ) -> str:
         """Last-resort heartbeat responder when Claude-compatible routes are quota-blocked."""
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -930,6 +952,10 @@ class HeartbeatRunner:
                 "No local tools are available for this untrusted-input call. "
                 "Use only the task prompt and DATA already included by pre-scripts."
                 if restrict_tools else
+                "No local tools are available for this maintenance call. "
+                "Return structured output for its deterministic post-script; "
+                "do not claim to have read or written local files."
+                if not allow_tools else
                 "Local tools are available. Use them only when needed to verify or "
                 "complete this heartbeat task."
             )
@@ -942,7 +968,7 @@ class HeartbeatRunner:
             if system_prompt.strip():
                 instructions = f"{instructions}\n\nPrimary heartbeat system prompt:\n{system_prompt}"
             self._log(f"Calling OpenAI heartbeat fallback model={model}")
-            if restrict_tools:
+            if restrict_tools or not allow_tools:
                 payload = {
                     "model": model,
                     "instructions": instructions,
@@ -989,7 +1015,7 @@ class HeartbeatRunner:
             return ""
 
     @staticmethod
-    def _acting_section(restrict_tools: bool) -> str:
+    def _acting_section(restrict_tools: bool, allow_tools: bool = True) -> str:
         """The system prompt's tool-usage guidance.
 
         Bash/Agent access lets the model verify+execute Jarvis actions
@@ -1011,6 +1037,13 @@ class HeartbeatRunner:
   result via [ACTION:...] markers or the requested JSON envelope only —
   those are executed by a separate, deterministic step after this call
   returns, which is the correct path for this task regardless."""
+        if not allow_tools:
+            return """## Acting
+- This is a read-only reasoning task. Local Bash, file tools, subagents and
+  skills are unavailable for this call.
+- Use only the supplied memory and DATA. Return the requested structured
+  output; its deterministic post-script is the sole writer and executor.
+- Do not claim that you read, wrote, moved, deleted, or verified local files."""
         return """## Acting
 - For heavy or parallelizable work, you may spawn subagents with the Task/Agent
   tool — they block and return results to you, so you can fan out, wait, and
@@ -1021,13 +1054,16 @@ class HeartbeatRunner:
     python3 -m core.actions do <type> key=val ...   (e.g. do intent_close id=<parent> outcome=done result=<一句>)"""
 
     def claude_call(self, prompt: str, timeout: int | None = None,
-                     restrict_tools: bool = False) -> str:
+                     restrict_tools: bool = False,
+                     allow_tools: bool = True) -> str:
         """Call Claude with memory injection, no session persistence.
 
         timeout: override the per-call subprocess budget (seconds). Heavy tasks
         that fan out subagents pass a longer budget; None uses self.claude_timeout.
         restrict_tools: True when this prompt's DATA embeds untrusted external
-        content (see UNTRUSTED_INPUT_DISALLOWED_TOOLS docstring above).
+            content (see UNTRUSTED_INPUT_DISALLOWED_TOOLS docstring above).
+        allow_tools: False for trusted read-only maintenance calls. Private
+            memory remains available, but local tools are fail-closed.
         """
         call_timeout = timeout or self.claude_timeout
 
@@ -1131,14 +1167,15 @@ You have access to the user's memory below. Use it to personalize your responses
   第一人称≤14字，覆盖真实分支含「不做」）。不要为了获得推送而虚构选项。
 - 正文说人话：无 SLA/HTTP 码/内部黑话。
 
-{self._acting_section(restrict_tools)}
+{self._acting_section(restrict_tools, allow_tools)}
 
 {memory}"""
         if direct_gpt:
+            fallback_kwargs = {"restrict_tools": restrict_tools}
+            if not allow_tools:
+                fallback_kwargs["allow_tools"] = False
             return self._openai_fallback_call(
-                system_prompt,
-                prompt,
-                restrict_tools=restrict_tools,
+                system_prompt, prompt, **fallback_kwargs,
             )
         try:
             while True:
@@ -1150,7 +1187,7 @@ You have access to the user's memory below. Use it to personalize your responses
                     "--disable-slash-commands",
                     "-p", prompt,
                 ]
-                if restrict_tools:
+                if restrict_tools or not allow_tools:
                     # Claude Code documents --tools "" as the fail-closed way
                     # to make no built-in tools available. A denylist can
                     # silently become incomplete when new tools are added.
@@ -1354,10 +1391,11 @@ You have access to the user's memory below. Use it to personalize your responses
                             )
                         except Exception:
                             pass
+                    fallback_kwargs = {"restrict_tools": restrict_tools}
+                    if not allow_tools:
+                        fallback_kwargs["allow_tools"] = False
                     fallback = self._openai_fallback_call(
-                        system_prompt,
-                        prompt,
-                        restrict_tools=restrict_tools,
+                        system_prompt, prompt, **fallback_kwargs,
                     )
                     if fallback:
                         return fallback
@@ -1664,7 +1702,7 @@ You have access to the user's memory below. Use it to personalize your responses
                         # Only pre_timeout/pre_error/nonzero (above) leave
                         # last_success stale — the real channel-dead signal.
                         ts.last_status = "empty_pre"
-                        ts.last_success = now
+                        ts.last_success = _completion_epoch(now)
                         reason = "empty_pre"
                     state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
@@ -1721,7 +1759,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 status = ts.last_status
                 tier0_failures.append(f"{task['name']}:{status}")
             else:
-                ts.last_success = now
+                ts.last_success = _completion_epoch(now)
                 ts.last_status = "ok"
                 ts.circuit.record_success()
                 status = "ok"
@@ -1773,6 +1811,34 @@ You have access to the user's memory below. Use it to personalize your responses
             self._log(
                 f"Untrusted-input solo: {[t['name'] for t in untrusted_due]}")
 
+        # ── Trusted no-tools maintenance tasks run SOLO ───────────────
+        # A shared call has one capability set. Isolate read-only tasks so
+        # their hard no-tools boundary does not remove tools from unrelated
+        # trusted work in the same cycle.
+        no_tools_due = [
+            t for t in tier2
+            if (t.get("no_tools") and not t.get("heavy")
+                and not t.get("untrusted_input"))
+        ]
+        for task in no_tools_due:
+            self._run_solo_task(
+                task, task_data, state, now, user_messages, producing_tasks,
+                isolation_reason="no-tools",
+            )
+        if no_tools_due:
+            self._log(
+                f"No-tools solo: {[t['name'] for t in no_tools_due]}")
+            stale_isolation = set(
+                state.get("__envelope_parse__", {}).get("isolate_tasks", [])
+            )
+            stale_isolation.difference_update(t["name"] for t in no_tools_due)
+            if stale_isolation:
+                state["__envelope_parse__"]["isolate_tasks"] = sorted(
+                    stale_isolation
+                )
+            else:
+                state.pop("__envelope_parse__", None)
+
         # A malformed multi-task envelope cannot tell us which slice broke it.
         # Retrying the same roster as another batch simply recreates the same
         # failure. On the next due cycle, fan those tasks out once as direct
@@ -1783,6 +1849,7 @@ You have access to the user's memory below. Use it to personalize your responses
         envelope_retry_due = [
             task for task in tier2
             if (not task.get("heavy") and not task.get("untrusted_input")
+                and not task.get("no_tools")
                 and task["name"] in envelope_retry_names)
         ]
         for task in envelope_retry_due:
@@ -1805,6 +1872,7 @@ You have access to the user's memory below. Use it to personalize your responses
         runnable = [
             t for t in tier2
             if (not t.get("heavy") and not t.get("untrusted_input")
+                and not t.get("no_tools")
                 and t["name"] not in envelope_retry_names)
         ]
         if not runnable:
@@ -2014,7 +2082,7 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
-                ts.last_success = now
+                ts.last_success = _completion_epoch(now)
                 ts.last_status = "idle"
                 ts.circuit.record_success()
                 state[task["name"]] = ts.to_dict()
@@ -2182,7 +2250,7 @@ You have access to the user's memory below. Use it to personalize your responses
         for task in runnable:
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
-            ts.last_success = now
+            ts.last_success = _completion_epoch(now)
             ts.last_status = "ok"
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()

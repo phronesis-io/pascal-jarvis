@@ -3,6 +3,7 @@
 import json
 
 from core.ef_stream import (
+    event_type,
     extract_detail,
     extract_item_ids,
     extract_metadata,
@@ -140,6 +141,15 @@ def test_friend_accepted_event():
     assert format_message(ev) == ""                             # not a PM
 
 
+def test_console_friend_acceptance_is_classified_without_fake_card():
+    ev = json.dumps({"type": "console_friend_accepted", "data": None})
+
+    assert event_type(ev) == "console_friend_accepted"
+    assert relation_event_kind(ev) == "console_friend_accepted"
+    assert format_relation_event(ev) == ""
+    assert format_message(ev) == ""
+
+
 def test_relation_event_kind_assigns_single_lifecycle_owner():
     request = _friend_request_event([{"request_id": "1", "from_name": "Ada"}])
     accepted = json.dumps(
@@ -147,6 +157,9 @@ def test_relation_event_kind_assigns_single_lifecycle_owner():
 
     assert relation_event_kind(request) == "friend_request"
     assert relation_event_kind(accepted) == "friend_accepted"
+    assert relation_event_kind(json.dumps({
+        "type": "console_friend_accepted", "data": None,
+    })) == "console_friend_accepted"
     assert relation_event_kind(_event([])) == ""
 
 

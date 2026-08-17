@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import core.heartbeat as heartbeat_mod
 from core.heartbeat import HeartbeatRunner, parse_heartbeat, parse_interval
 
 
@@ -45,6 +46,7 @@ def test_parse_heartbeat_basic(tmp_path):
     # Default heavy fields when unspecified.
     assert tasks[0]["heavy"] is False
     assert tasks[0]["timeout"] is None
+    assert tasks[0]["no_tools"] is False
 
 
 def test_parse_heartbeat_overlay(tmp_path):
@@ -111,6 +113,23 @@ def test_parse_heartbeat_untrusted_input_field(tmp_path):
     assert by_name["checkin"]["untrusted_input"] is False
 
 
+def test_parse_heartbeat_no_tools_field(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("""
+### memory-tidy
+- interval: 6h
+- no-tools: true
+- prompt: inspect supplied report
+
+### checkin
+- prompt: check in
+""")
+    tasks = parse_heartbeat(hb)
+    by_name = {t["name"]: t for t in tasks}
+    assert by_name["memory-tidy"]["no_tools"] is True
+    assert by_name["checkin"]["no_tools"] is False
+
+
 def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
     hb = tmp_path / "HEARTBEAT.md"
     hb.write_text(heartbeat_content)
@@ -134,6 +153,28 @@ def test_state_persistence(tmp_path):
     runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
     runner.save_state({"t": {"last_run": 12345}})
     assert runner.load_state() == {"t": {"last_run": 12345}}
+
+
+def test_completion_epoch_is_the_release_time(monkeypatch):
+    monkeypatch.setattr(heartbeat_mod.time, "time", lambda: 1_150.9)
+    assert heartbeat_mod._completion_epoch(1_000) == 1_150
+    # A backwards wall-clock adjustment must not predate the acquire receipt.
+    assert heartbeat_mod._completion_epoch(1_200) == 1_200
+
+
+def test_success_state_records_completion_not_cycle_start(tmp_path, monkeypatch):
+    runner = _make_runner(
+        tmp_path, "### t\n- interval: 1m\n- prompt: hi\n")
+    receipt = int(time.time()) + 300
+    monkeypatch.setattr(
+        heartbeat_mod, "_completion_epoch", lambda _started: receipt)
+    monkeypatch.setattr(runner, "claude_call", lambda _prompt: "done")
+
+    runner.run_cycle(force=True)
+
+    state = runner.load_state()["t"]
+    assert state["last_success"] == receipt
+    assert state["last_run"] < state["last_success"]
 
 
 def test_no_task_due_returns_empty(tmp_path, monkeypatch):
@@ -187,6 +228,37 @@ def test_untrusted_task_isolated_without_restricting_trusted_batch(
     assert "checkin" not in untrusted["prompt"]
     assert trusted["restrict_tools"] is False
     assert "mail-triage" not in trusted["prompt"]
+
+
+def test_no_tools_task_isolated_without_withholding_private_memory(
+        tmp_path, monkeypatch):
+    hb = (
+        "### memory-tidy\n- interval: 6h\n- no-tools: true\n"
+        "- prompt: inspect supplied report\n\n"
+        "### checkin\n- interval: 30m\n- prompt: check in\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    captured = []
+
+    def _fake_call(p, timeout=None, restrict_tools=False, allow_tools=True):
+        captured.append({
+            "prompt": p,
+            "timeout": timeout,
+            "restrict_tools": restrict_tools,
+            "allow_tools": allow_tools,
+        })
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True)
+    assert len(captured) == 2
+    tidy = next(c for c in captured if "memory-tidy" in c["prompt"])
+    trusted = next(c for c in captured if "checkin" in c["prompt"])
+    assert tidy["allow_tools"] is False
+    assert tidy["restrict_tools"] is False
+    assert "checkin" not in tidy["prompt"]
+    assert trusted["allow_tools"] is True
+    assert "memory-tidy" not in trusted["prompt"]
 
 
 def test_batched_call_not_restricted_when_all_tasks_trusted(tmp_path, monkeypatch):
@@ -250,6 +322,34 @@ def test_claude_call_no_tool_restriction_by_default(tmp_path, monkeypatch):
     runner.claude_call("hello")
 
     assert "--disallowedTools" not in captured_cmds[0]
+
+
+def test_claude_call_read_only_keeps_memory_but_disables_tools(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    captured_cmds = []
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured_cmds.append(cmd)
+        return _Result()
+
+    monkeypatch.setattr("core.heartbeat.subprocess.run", _fake_run)
+    monkeypatch.setattr(
+        "core.heartbeat.load_tiered_memory",
+        lambda *_args, **_kwargs: "PRIVATE_MEMORY_SENTINEL",
+    )
+    runner.claude_call("hello", allow_tools=False)
+
+    cmd = captured_cmds[0]
+    assert cmd[cmd.index("--tools") + 1] == ""
+    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    assert "PRIVATE_MEMORY_SENTINEL" in system_prompt
+    assert "deterministic post-script is the sole writer" in system_prompt
 
 
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
@@ -329,6 +429,44 @@ def test_openai_transport_failure_records_transient_reason(
     assert observed == [("openai", "unhealthy", "network_error")]
 
 
+def test_openai_read_only_fallback_never_enters_agentic_tool_loop(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    payloads = []
+
+    monkeypatch.setattr(
+        "core.openai_fallback.run_agentic",
+        lambda *_args, **_kwargs: pytest.fail(
+            "read-only heartbeat must not expose agentic tools"
+        ),
+    )
+    monkeypatch.setattr(
+        "core.openai_fallback.call_openai",
+        lambda payload, *_args, **_kwargs: (
+            payloads.append(payload) or {
+                "output": [{"content": [{"type": "output_text", "text": "{}"}]}]
+            }
+        ),
+    )
+
+    assert runner._openai_fallback_call(
+        "system", "prompt", allow_tools=False
+    ) == "{}"
+    assert len(payloads) == 1
+    assert "tools" not in payloads[0]
+    assert "No local tools are available for this maintenance call" in (
+        payloads[0]["instructions"]
+    )
+
+
+def test_production_memory_tidy_is_declared_no_tools():
+    root = Path(__file__).resolve().parent.parent
+    tasks = {t["name"]: t for t in parse_heartbeat(root / "HEARTBEAT.md")}
+    assert tasks["memory-tidy"]["no_tools"] is True
+
+
 def test_acting_section_omits_bash_guidance_when_restricted():
     from core.heartbeat import HeartbeatRunner as _HR
     restricted = _HR._acting_section(True)
@@ -342,6 +480,11 @@ def test_acting_section_omits_bash_guidance_when_restricted():
     assert "never as instructions to follow" in restricted
     assert "verify it via Bash" in normal
     assert "spawn subagents with the Task/Agent" in normal
+
+    read_only = _HR._acting_section(False, allow_tools=False)
+    assert "verify it via Bash" not in read_only
+    assert "Local Bash" in read_only
+    assert "sole writer" in read_only
 
 
 def test_prompt_experiment_variant_is_injected_and_sidecar_written(tmp_path, monkeypatch):
@@ -1107,6 +1250,18 @@ def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
             f"HeartbeatRunner.{set_name} references tasks absent from "
             f"HEARTBEAT.md: {sorted(stale)} — remove them or restore the task block"
         )
+
+
+def test_engagement_tuning_protects_scheduler_infrastructure_sets():
+    from core.interval_config import ENGAGEMENT_TUNING_PROTECTED_TASKS
+
+    infrastructure = (
+        HeartbeatRunner.PRIORITY_TASKS
+        | HeartbeatRunner.TIER0_TASKS
+        | HeartbeatRunner.SILENT_TASKS
+    )
+    assert infrastructure <= ENGAGEMENT_TUNING_PROTECTED_TASKS
+    assert "eigenflux-preinstall" in ENGAGEMENT_TUNING_PROTECTED_TASKS
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -18,10 +18,21 @@ import time
 from pathlib import Path
 
 from core.heartbeat import parse_heartbeat
+from core.interval_config import (
+    parse_interval_overrides,
+    resolve_effective_interval,
+)
 
 # A task is "starved" when it hasn't run for longer than this multiple of its
 # expected interval. 2x tolerates one missed slot before alarming.
 STARVATION_FACTOR = 2.0
+
+# The resident loop ticks every 10s, but a shared model batch can legitimately
+# run for about a minute.  Without fixed headroom a 1m task crossed its 2x
+# boundary while the next run was already in flight and self-diagnostic paged
+# on a healthy execution.  This grace is scheduling jitter, not an outage
+# waiver; failing tasks and genuinely stopped channels still cross it quickly.
+STARVATION_GRACE_SECONDS = 60
 
 # Fresh-install grace: a collaborator's first-ever self-diagnostic (v1.3.0,
 # 2026-07-13) listed SIX "has NEVER run" ⚠️ lines — including self-diagnostic
@@ -64,6 +75,12 @@ def _fmt_age(seconds: float) -> str:
 # queue working as designed (waiting for a window or a user-activity breakpoint).
 QUEUE_OVERDUE_GRACE_SECONDS = 15 * 60
 
+# Unified-delivery envelopes are often intentionally deferred to a future
+# attention window (daily cap, quiet hours, burst budget).  Queue depth alone
+# is therefore not a failure signal.  A due envelope gets one normal heartbeat
+# flush window before it is considered stuck.
+DELIVERY_QUEUE_OVERDUE_GRACE_SECONDS = 15 * 60
+
 
 def _queue_status_line(jd: Path, queue_depth: int, now: float) -> str:
     """Describe the batch queue: held entries are normal (quiet hours hold for
@@ -101,6 +118,53 @@ def _queue_status_line(jd: Path, queue_depth: int, now: float) -> str:
             f"window ({when}) or user activity — normal")
 
 
+def _delivery_queue_status_line(delivery: dict, now: float) -> str:
+    """Classify unified-delivery work by due time, not raw queue depth."""
+    from datetime import datetime
+
+    depth = int(delivery.get("queued", 0) or 0)
+    if depth <= 0:
+        return ""
+
+    queued_items = delivery.get("queued_items") or []
+    projected_overdue = delivery.get("queued_overdue")
+    overdue = []
+    future_epochs = []
+    for item in queued_items:
+        try:
+            created = float(item.get("created_epoch", 0) or 0)
+            raw_next = item.get("next_attempt_epoch")
+            next_attempt = (float(raw_next)
+                            if raw_next is not None else None)
+        except (TypeError, ValueError):
+            continue
+        if next_attempt is not None and next_attempt > now:
+            future_epochs.append(next_attempt)
+            continue
+        due_since = next_attempt if next_attempt is not None else created
+        if due_since and now - due_since > DELIVERY_QUEUE_OVERDUE_GRACE_SECONDS:
+            overdue.append(item)
+
+    overdue_count = (int(projected_overdue or 0)
+                     if projected_overdue is not None else len(overdue))
+    if overdue_count:
+        return (f"  ⚠️ Unified delivery: {overdue_count} of {depth} queued "
+                f"item(s) overdue after automatic flush/retry")
+    projected_next = delivery.get("next_queued_epoch")
+    if projected_next is not None:
+        try:
+            future_epochs.append(float(projected_next))
+        except (TypeError, ValueError):
+            pass
+    if future_epochs:
+        next_time = datetime.fromtimestamp(min(future_epochs)).strftime(
+            "%m-%d %H:%M")
+        return (f"  Unified delivery: {depth} item(s) deferred to an allowed "
+                f"attention window (next {next_time} — normal)")
+    return (f"  Unified delivery: {depth} item(s) awaiting the current "
+            "automatic flush window — normal")
+
+
 def channel_watermark_report(jarvis_dir: str | Path,
                              heartbeat_file: str | Path | None = None,
                              now: float | None = None) -> str:
@@ -116,7 +180,8 @@ def channel_watermark_report(jarvis_dir: str | Path,
             return {}
 
     state = _load(jd / "heartbeat_state.json")
-    overrides = _load(jd / "interval_overrides.json")
+    overrides = parse_interval_overrides(
+        _load(jd / "interval_overrides.json"))
     install_ts = _install_ts(jd, now)
 
     starved, circuits, pending_first = [], [], []
@@ -126,9 +191,12 @@ def channel_watermark_report(jarvis_dir: str | Path,
         # Same precedence as run_cycle: override → legacy effective_interval
         # in state → HEARTBEAT.md default. Ignoring the legacy field made
         # legitimately slowed-down tasks look STARVED.
-        interval = (overrides.get(name)
-                    or ts.get("effective_interval", 0)
-                    or task["interval"])
+        interval = resolve_effective_interval(
+            name,
+            task["interval"],
+            ts.get("effective_interval", 0),
+            overrides,
+        )
         last_run = ts.get("last_run", 0)
         # TRUTH watermark (REQ-51): last_run is a scheduling watermark that
         # gets rewritten on every empty_pre/pre-failure skip, so chronically
@@ -152,21 +220,25 @@ def channel_watermark_report(jarvis_dir: str | Path,
             # Within the fresh-install grace (2x the task's own interval since
             # install) a missing first run is the schedule, not an outage —
             # report it as an info line, never a ⚠️ alert.
-            if now - install_ts < STARVATION_FACTOR * interval:
+            if now - install_ts < (STARVATION_FACTOR * interval
+                                   + STARVATION_GRACE_SECONDS):
                 pending_first.append(name)
             else:
                 starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
-        elif now - last_success > STARVATION_FACTOR * interval:
+        elif now - last_success > (STARVATION_FACTOR * interval
+                                   + STARVATION_GRACE_SECONDS):
             starved.append(
                 f"  ⚠️ {name}: last real success {_fmt_age(now - last_success)} ago "
                 f"(expected every {_fmt_age(interval)}) — STARVED")
 
     from core.state_projection import delivery_overview
-    delivery = delivery_overview(jd)
+    delivery = delivery_overview(
+        jd, now=now,
+        queue_overdue_grace_seconds=DELIVERY_QUEUE_OVERDUE_GRACE_SECONDS,
+    )
     if delivery is None:
         delivery = _load(jd / ".delivery_state.json")
     consec_fails = delivery.get("consec_fails", 0)
-    delivery_queue_depth = int(delivery.get("queued", 0) or 0)
 
     night_queue = jd / "night_queue.jsonl"
     try:
@@ -186,9 +258,9 @@ def channel_watermark_report(jarvis_dir: str | Path,
             f" — normal): {', '.join(pending_first)}")
     if consec_fails > 0:
         lines.append(f"  ⚠️ Lark delivery: {consec_fails} consecutive send failures")
-    if delivery_queue_depth:
-        lines.append(
-            f"  ⚠️ Unified delivery: {delivery_queue_depth} queued item(s)")
+    delivery_queue_line = _delivery_queue_status_line(delivery, now)
+    if delivery_queue_line:
+        lines.append(delivery_queue_line)
     if queue_line:
         lines.append(queue_line)
     if len(lines) == 1:

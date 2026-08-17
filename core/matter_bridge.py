@@ -558,8 +558,14 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
             state = dict(row)
             provider = state.get("provider") or "unknown"
             try:
-                from core.provider_health import summary_text
-                chain = "\n\n通道验真：\n" + summary_text()
+                from core.model_control import runtime_status_text
+                from core.model_fallback import gate
+                from core.provider_health import snapshot
+                chain = "\n\nModel 控制平面：\n" + runtime_status_text(
+                    preference=get_preference(conv_key),
+                    gate_state=gate(probe=False),
+                    health_rows=snapshot()["providers"],
+                )
             except Exception:
                 chain = ""
             return {"handled": True, "reply": (
@@ -569,8 +575,14 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
             )}
         from core.config import Config
         try:
-            from core.provider_health import summary_text
-            chain = "\n\n通道验真：\n" + summary_text()
+            from core.model_control import runtime_status_text
+            from core.model_fallback import gate
+            from core.provider_health import snapshot
+            chain = "\n\nModel 控制平面：\n" + runtime_status_text(
+                preference=get_preference(conv_key),
+                gate_state=gate(probe=False),
+                health_rows=snapshot()["providers"],
+            )
         except Exception:
             chain = ""
         model = Config().claude.get("main_model", "opus") or "opus"

@@ -16,7 +16,9 @@
 #   2. SKILL SYNC: mirror eigenflux/skills (main) -> plugins/eigenflux/skills
 #      (jarvis-owned real files), add+update, then apply reviewed local overlays.
 #      Preserves jarvis-local skills (frontmatter `jarvis-local: true`, e.g.
-#      ef-localdev). NEVER deletes: upstream-removed files/skills are flagged.
+#      ef-localdev). Upstream-removed paths are retired only when ownership is
+#      proven by the previously verified upstream SHA; unknown local additions
+#      are preserved and flagged for review.
 #   3. CLI: compare installed vs latest; if behind, launch a detached
 #      test-before-swap upgrade (scripts/eigenflux_cli_upgrade.sh).
 #   4. PARITY DRIFT: diff watched upstream paths since the last stored commit —
@@ -82,7 +84,8 @@ except Exception: print("")
 PY
 }
 
-added=(); updated=(); orphan_files=(); orphan_skills=(); local_skills=()
+added=(); updated=(); removed_files=(); retired_skills=()
+orphan_files=(); orphan_skills=(); local_skills=()
 fail=(); notes=(); review=()
 
 if [ ! -f "$SKILL_OVERLAYS/ef-communication/SKILL.md" ]; then
@@ -140,13 +143,15 @@ for repo in "$PLUGIN_DIR" "$MAIN_DIR"; do
 done
 plugin_head="$(git -C "$PLUGIN_DIR" rev-parse HEAD 2>/dev/null || echo "")"
 main_head="$(git -C "$MAIN_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+plugin_stored="$(state_get plugin_head)"
+main_stored="$(state_get main_head)"
 
 if [ ! -d "$SRC_SKILLS" ]; then
   echo "  FATAL: source skills dir not found: $SRC_SKILLS"; echo ""; echo "PREINSTALL_FAIL"; exit 0
 fi
 mkdir -p "$DST_SKILLS"
 
-# ── 2. Mirror main-repo skills -> jarvis (add+update; never delete) ────
+# ── 2. Mirror main-repo skills -> Jarvis with provenance-gated retirement ─
 managed=()
 while IFS= read -r d; do managed+=("$(basename "$d")"); done \
   < <(find "$SRC_SKILLS" -mindepth 1 -maxdepth 1 -type d | sort)
@@ -159,13 +164,34 @@ if [ ${#managed[@]} -eq 0 ]; then
   echo ""; echo "PREINSTALL_FAIL"; exit 0
 fi
 
+# Propagate intentional upstream deletions through a separately testable,
+# provenance-gated retire step. Unknown local additions are left untouched.
+if [ -n "$main_stored" ]; then
+  retire_output="$(python3 "$SCRIPT_DIR/eigenflux_preinstall_retire.py" \
+    --upstream-repo "$MAIN_DIR" --previous-sha "$main_stored" \
+    --source-skills "$SRC_SKILLS" --destination-skills "$DST_SKILLS" 2>>"$LOG_FILE")"
+  retire_rc=$?
+  if [ "$retire_rc" -ne 0 ]; then
+    fail+=("upstream skill retirement check failed")
+  else
+    while IFS=$'\t' read -r kind value; do
+      [ -n "$value" ] || continue
+      case "$kind" in
+        REMOVED_FILE) removed_files+=("$value") ;;
+        RETIRED_SKILL) retired_skills+=("$value") ;;
+      esac
+    done <<< "$retire_output"
+  fi
+fi
+
 for skill in "${managed[@]}"; do
   while IFS= read -r f; do
     rel="${f#"$SRC_SKILLS"/}"; mirror_one "$f" "$DST_SKILLS/$rel" "$rel"
   done < <(find "$SRC_SKILLS/$skill" -type f | sort)
   if [ -d "$DST_SKILLS/$skill" ]; then
     while IFS= read -r f; do
-      rel="${f#"$DST_SKILLS"/}"; [ -f "$SRC_SKILLS/$rel" ] || orphan_files+=("$rel")
+      rel="${f#"$DST_SKILLS"/}"
+      [ -f "$SRC_SKILLS/$rel" ] || orphan_files+=("$rel")
     done < <(find "$DST_SKILLS/$skill" -type f | sort)
   fi
 done
@@ -181,10 +207,16 @@ done < <(find "$DST_SKILLS" -mindepth 1 -maxdepth 1 -type d | sort)
 
 if [ ${#added[@]} -gt 0 ]; then echo "  NEW skill files (${#added[@]}):"; printf '    + %s\n' "${added[@]}"; fi
 if [ ${#updated[@]} -gt 0 ]; then echo "  UPDATED to match upstream (${#updated[@]}):"; printf '    ~ %s\n' "${updated[@]}"; fi
-[ ${#added[@]} -eq 0 ] && [ ${#updated[@]} -eq 0 ] && echo "  skills: current with eigenflux(main) (${#managed[@]} skills mirrored)"
+if [ ${#removed_files[@]} -gt 0 ]; then echo "  REMOVED upstream files (${#removed_files[@]}):"; printf '    - %s\n' "${removed_files[@]}"; fi
+if [ ${#retired_skills[@]} -gt 0 ]; then echo "  RETIRED upstream skills (${#retired_skills[@]}):"; printf '    - %s\n' "${retired_skills[@]}"; fi
+[ ${#added[@]} -eq 0 ] && [ ${#updated[@]} -eq 0 ] \
+  && [ ${#removed_files[@]} -eq 0 ] && [ ${#retired_skills[@]} -eq 0 ] \
+  && echo "  skills: current with eigenflux(main) (${#managed[@]} skills mirrored)"
 [ ${#local_skills[@]} -gt 0 ] && echo "  jarvis-local skills preserved: ${local_skills[*]}"
 [ ${#orphan_skills[@]} -gt 0 ] && echo "  ⚠ skills in jarvis but NOT in plugin (review): ${orphan_skills[*]}"
 if [ ${#orphan_files[@]} -gt 0 ]; then echo "  ⚠ files removed upstream, kept in jarvis (review):"; printf '    ? %s\n' "${orphan_files[@]}"; fi
+if [ ${#orphan_skills[@]} -gt 0 ]; then review+=("unknown local skill(s) outside upstream: ${orphan_skills[*]} — mark jarvis-local or retire"); fi
+if [ ${#orphan_files[@]} -gt 0 ]; then review+=("unknown local file(s) outside upstream: ${orphan_files[*]} — move to an overlay or retire"); fi
 
 # ── 3. CLI version check + detached upgrade if behind ─────────────────
 echo ""
@@ -233,7 +265,6 @@ report_drift() {
     review+=("$label: cli/cmd/stream.go changed — verify core/ef_stream.py parses any new NDJSON event types")
   fi
 }
-plugin_stored="$(state_get plugin_head)"; main_stored="$(state_get main_head)"
 # Main repo is authoritative for skills + CLI contract. The claude-plugin is
 # watched only for runtime-constant drift (poll interval / backoff / windows).
 report_drift "$MAIN_DIR" "eigenflux(main)" "$main_stored" "$main_head" \
@@ -246,7 +277,9 @@ cli_cmds="$(bounded 5 eigenflux help 2>/dev/null | awk '/Available Commands:/{f=
 prev_cmds="$(state_get cli_commands)"
 if [ -n "$prev_cmds" ] && [ -n "$cli_cmds" ] && [ "$prev_cmds" != "$cli_cmds" ]; then
   new_cmds=$(comm -13 <(echo "$prev_cmds" | tr ' ' '\n' | sort) <(echo "$cli_cmds" | tr ' ' '\n' | sort) | tr '\n' ' ')
+  removed_cmds=$(comm -23 <(echo "$prev_cmds" | tr ' ' '\n' | sort) <(echo "$cli_cmds" | tr ' ' '\n' | sort) | tr '\n' ' ')
   [ -n "${new_cmds// }" ] && review+=("new top-level CLI command(s): ${new_cmds}— evaluate a client.sh wrapper")
+  [ -n "${removed_cmds// }" ] && review+=("removed top-level CLI command(s): ${removed_cmds}— retire any remaining consumers")
 fi
 
 # ── 5. Verify ("测通") ────────────────────────────────────────────────
@@ -402,8 +435,34 @@ if [ ${#review[@]} -gt 0 ]; then
   # Append-dedup to the durable backlog so flags survive SHA advance.
   touch "$BACKLOG"
   for r in "${review[@]}"; do
-    grep -Fqx "- [ ] $r" "$BACKLOG" 2>/dev/null || echo "- [ ] $r" >> "$BACKLOG"
+    grep -Fqx -- "- [ ] $r" "$BACKLOG" 2>/dev/null || echo "- [ ] $r" >> "$BACKLOG"
   done
+fi
+# Old releases called grep without `--`, so checkbox lines beginning with '-'
+# were parsed as options and appended again on every run. Canonicalize exact
+# duplicates before reporting the durable open count.
+open_review_count=0
+if [ -f "$BACKLOG" ]; then
+  python3 - "$BACKLOG" <<'PY' || true
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+original = path.read_text(encoding="utf-8")
+seen = set()
+deduped = []
+for line in original.splitlines():
+    if line in seen:
+        continue
+    seen.add(line)
+    deduped.append(line)
+content = "\n".join(deduped).rstrip() + "\n"
+if content != original:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+PY
+  open_review_count=$(grep -Ec '^- \[ \] ' "$BACKLOG" 2>/dev/null || true)
 fi
 if [ ${#notes[@]} -gt 0 ]; then echo ""; echo "  notes:"; printf '    - %s\n' "${notes[@]}"; fi
 
@@ -412,20 +471,25 @@ if [ ${#notes[@]} -gt 0 ]; then echo ""; echo "  notes:"; printf '    - %s\n' "$
 adv_plugin="$plugin_stored"; adv_main="$main_stored"
 if [ "$verify_ok" = true ]; then adv_plugin="$plugin_head"; adv_main="$main_head"; fi
 python3 - "$STATE_FILE" "$cli_current" "$cli_latest" "$adv_plugin" "$adv_main" "$cli_cmds" \
-  "${#added[@]}" "${#updated[@]}" "$verify_ok" "${#review[@]}" 2>/dev/null <<'PY' || true
+  "${#added[@]}" "${#updated[@]}" \
+  "$(( ${#removed_files[@]} + ${#retired_skills[@]} ))" \
+  "$verify_ok" "$open_review_count" 2>/dev/null <<'PY' || true
 import json, sys, datetime
-path, cur, latest, ph, mh, cmds, na, nu, ok, nr = sys.argv[1:11]
+path, cur, latest, ph, mh, cmds, na, nu, nd, ok, nr = sys.argv[1:12]
 json.dump({
   "updated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
   "cli_version": cur, "cli_latest": latest,
   "plugin_head": ph, "main_head": mh, "cli_commands": cmds,
-  "skills_added": int(na), "skills_updated": int(nu),
+  "skills_added": int(na), "skills_updated": int(nu), "skills_removed": int(nd),
   "verify_ok": ok == "true", "open_review_flags": int(nr),
 }, open(path, "w"), indent=2)
 PY
 
 echo ""
 if [ ${#fail[@]} -gt 0 ]; then echo "PREINSTALL_FAIL"
-elif [ ${#added[@]} -gt 0 ] || [ ${#updated[@]} -gt 0 ] || [ "$cli_upgrade_started" = true ] || [ ${#review[@]} -gt 0 ] || [ ${#notes[@]} -gt 0 ]; then echo "PREINSTALL_CHANGES"
+elif [ ${#added[@]} -gt 0 ] || [ ${#updated[@]} -gt 0 ] \
+    || [ ${#removed_files[@]} -gt 0 ] || [ ${#retired_skills[@]} -gt 0 ] \
+    || [ "$cli_upgrade_started" = true ] || [ ${#review[@]} -gt 0 ] \
+    || [ ${#notes[@]} -gt 0 ]; then echo "PREINSTALL_CHANGES"
 else echo "PREINSTALL_OK"; fi
 exit 0

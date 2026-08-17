@@ -13,17 +13,21 @@ continuity are three different responsibilities.
 
 | Module | Owns | Must not own |
 |---|---|---|
-| `core.runtime_provider` | The owner's durable per-conversation preferred executor (`auto` or `codex`). | Recording which provider actually answered, starting a model process, or reading provider transcripts. |
+| `core.runtime_provider` | The owner's durable per-conversation preferred executor (`auto` or `codex`). | Defining route capabilities/order, recording which provider answered, starting a model process, or reading provider transcripts. |
+| `core.model_control` | The sanitized model catalog, private harness environment, route order, trust/tool policy, health cooldown application, and upstream-diversity truth. | Starting a model process, parsing provider output, storing conversation preference, or treating model prose as a receipt. |
 | `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per Lark conversation. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
-| `core.cross_session` | Bounded discovery, parsing, redaction, and projection of owner-operated Claude Code/Codex sessions into immediate prompt context and the heartbeat digest. | Selecting or invoking a provider, claiming that an external session completed work, or replacing provider transcripts as source of truth. |
+| `core.cross_session` | Bounded discovery, parsing, redaction, recent projection, and incremental digest of owner-operated Claude Code/Codex sessions. | Selecting or invoking a provider, claiming that an external session completed work, or replacing provider transcripts as source of truth. |
+| `core.cross_session_index` | A private, rebuildable SQLite index of redacted owner-operated session turns and query-focused historical projection. | Copying tool payloads, entering groups/Matters, or becoming authority for mutable facts. |
 | `core.matter_bridge` | The provider-neutral Lark conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
 
 The short version is:
 
 ```text
 runtime_provider stores the owner's route preference
+model_control turns config + health + context into an eligible route plan
 codex_fallback executes one allowed Codex turn
-cross_session observes and projects external interactive context
+cross_session observes recent external interactive context
+cross_session_index retrieves relevant older external context
 matter_bridge records the route that actually answered
 ```
 
@@ -32,7 +36,8 @@ matter_bridge records the route that actually answered
 ```mermaid
 flowchart LR
     User["Owner command or saved preference"] --> Choice["runtime_provider: route preference"]
-    Choice --> Router["bot route selection"]
+    Choice --> Policy["model_control: catalog + route plan"]
+    Policy --> Router["harness applies bounded route sequence"]
     Router -->|Codex selected or fallback reached| Codex["codex_fallback: bounded Codex turn"]
     Router -->|Other provider selected| Other["Claude or GPT adapter"]
     Codex --> Actual["matter_bridge: actual provider/model record"]
@@ -41,28 +46,35 @@ flowchart LR
     Interactive["Owner-operated Claude Code / Codex sessions"] --> Continuity["cross_session: discover, parse, redact"]
     Continuity --> Prompt["Prompt context"]
     Continuity --> Digest["Heartbeat digest"]
+    Continuity --> Index["cross_session_index: private historical index"]
+    Index --> Query["Query-focused historical context"]
     Continuity -. no provider invocation .-> Router
 ```
 
 ### Change Routing
 
-- Change “prefer Codex / prefer Claude”, route order, or `/model` truth in
-  `core.runtime_provider` and the caller that applies that preference.
+- Change “prefer Codex / prefer Claude” persistence in `core.runtime_provider`.
+- Change route definitions, order, capability/trust policy, cooldown
+  application, upstream diversity, or `/model` route truth in
+  `core.model_control`.
 - Change Codex CLI arguments, timeout/process behavior, sandboxing, or durable
   Lark-to-Codex thread reuse in `core.codex_fallback`.
 - Change which external sessions are found, excluded, redacted, parsed, or
   projected in `core.cross_session`.
+- Change historical indexing, retention, or query ranking in
+  `core.cross_session_index`.
 - A model response is never completion evidence. Cross-session context may
   help reconstruct intent, but authoritative receipts and domain state still
   decide whether work finished.
 
 ### Dependency Rule
 
-`cross_session` must not call `codex_fallback`, and `codex_fallback` must not
-consult cross-session projections to decide whether to run. Route selection may
-call the execution adapter and then record the actual result through
+`model_control` must not call an execution adapter. `cross_session` and
+`cross_session_index` must not call `codex_fallback`, and `codex_fallback` must
+not consult cross-session projections to decide whether to run. A harness may
+apply the route plan, call an adapter, and record the actual result through
 `matter_bridge`, but execution, continuity, and the conversation ledger must
-not create a second preference store.
+not create a second preference or route-policy store.
 
 ## Architecture Adjacency Check
 
@@ -100,3 +112,25 @@ receipt and must not contain private card bodies or provider stderr.
 
 The current delivery retry and cap decision is documented, with its state
 machine, in `docs/delivery_retry_and_caps.md`.
+
+## ADR-003: Lark Bot Transport Is Independent of User OAuth
+
+**Status:** accepted
+
+- `core.lark_bot_transport` owns application-bot authentication and the direct
+  OpenAPI send/get-info calls. It reads the private app credential at runtime,
+  keeps the tenant token only in memory, and requires a returned Lark
+  `message_id` before reporting success.
+- `core.delivery` remains the authority for retries, deduplication, attention,
+  quiet hours, and terminal delivery state. A transport receipt is evidence
+  for one attempt, not a second delivery state machine.
+- `lark-cli --as user` remains the adapter for owner-identity calendar, docs,
+  mail, task, and other personal APIs. A user OAuth/Keychain failure may
+  degrade those capabilities, but must not disable bot replies, cards,
+  proactive alerts, EigenFlux messages, or bot identity discovery.
+- The old bot-only `lark-cli` send path is a compatibility fallback when an
+  installation has no app secret. It is not the preferred production path.
+
+Never copy the app secret or tenant token into delivery rows, logs, test
+fixtures, command arguments, or Git. Bot API errors are recorded as bounded
+reason codes; only a real provider receipt can advance delivery to delivered.

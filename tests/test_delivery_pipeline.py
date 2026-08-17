@@ -11,6 +11,7 @@ from datetime import datetime
 import pytest
 
 import core.delivery as delivery
+from core import lark_bot_transport
 from core.delivery import (
     DeliveryEnvelope,
     DeliveryPipeline,
@@ -927,3 +928,66 @@ def test_confirm_rejects_undelivered_state(tmp_path):
         requested_channel="lark"))
     with pytest.raises(ValueError):
         pipe.confirm(result.delivery_id, "read")
+
+
+def test_default_transport_prefers_bot_api_and_keeps_real_receipt(
+    tmp_path, monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or lark_bot_transport.BotSendResult(True, True, "om_direct")
+        ),
+    )
+    monkeypatch.setattr(
+        delivery.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("lark-cli must not run when bot API is configured")
+        ),
+    )
+
+    result = delivery._default_transport(tmp_path)(
+        DeliveryEnvelope(
+            source="test", payload={"text": "hello"}, chat_id="oc_chat",
+            id="dlv_test",
+        ),
+        "lark",
+    )
+
+    assert result == TransportResult(True, "om_direct", "")
+    assert calls == [{
+        "card_json": "",
+        "text": "hello",
+        "chat_id": "oc_chat",
+        "user_id": "",
+        "idempotency_key": "dlv_test",
+        "root": tmp_path,
+    }]
+
+
+def test_default_transport_bot_api_failure_is_not_fabricated(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **_kwargs: lark_bot_transport.BotSendResult(
+            True, False, error="message_receipt_missing"
+        ),
+    )
+
+    result = delivery._default_transport(tmp_path)(
+        DeliveryEnvelope(
+            source="reply", kind="reply", payload={"text": "answer"},
+            reply_to="om_incoming",
+        ),
+        "lark_reply",
+    )
+
+    assert result.ok is False
+    assert result.message_id == ""
+    assert result.error == "message_receipt_missing"

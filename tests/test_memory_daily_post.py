@@ -35,6 +35,27 @@ def test_plain_summary_writes_daily_log(tmp_path):
     assert (tl / "hourly_log.md").read_text() == ""
 
 
+def test_same_day_retries_merge_under_one_heading(tmp_path):
+    from datetime import date
+
+    tl = tmp_path / "timeline"
+    tl.mkdir()
+    today = date.today().strftime("%Y-%m-%d")
+    (tl / "daily_log.md").write_text(
+        f"## {today}\n- first summary\n\n"
+        f"## {today}\n- second summary\n"
+    )
+
+    assert _run("- second summary", tmp_path).returncode == 0
+    assert _run("- third summary", tmp_path).returncode == 0
+
+    daily = (tl / "daily_log.md").read_text()
+    assert daily.count(f"## {today}") == 1
+    assert daily.count("- second summary") == 1
+    assert "- first summary" in daily
+    assert "- third summary" in daily
+
+
 def test_summary_with_update_directives_applies_directly(tmp_path):
     """UPDATE directives are applied directly to existing target files."""
     # Create target files so updates can be applied

@@ -7,11 +7,11 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 228 active capabilities: 228 `keep`, 0 `fix`,
+- The generated inventory has 231 active capabilities: 231 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
-- `core.cross_session` is a 190-line facade over discovery, parsing, and
-  projection modules.
+- `core.cross_session` is a small facade over discovery, parsing, historical
+  indexing, and projection modules.
 - Memorial storage, card composition, transport, and shared state contracts
   live in `core.memorial_ledger`, `core.memorial_cards`,
   `core.memorial_transport`, and `core.memorial_contracts`. The facade still
@@ -23,6 +23,10 @@ work. The supported product surface remains the generated
   Codex lock/session -> reliable Lark delivery -> provider/model turn record ->
   next-prompt continuity. It does not claim to start the full listener process;
   startup and wiring are covered separately by shell/install/runtime checks.
+- Bot delivery no longer shares the user OAuth/Keychain failure domain.
+  `core.lark_bot_transport` uses the private app credential, in-memory tenant
+  tokens, and verified `message_id` receipts; owner calendar/docs/mail/task
+  capabilities remain independently fail-closed behind user OAuth.
 - Runtime line coverage is not currently measured: the repository has no
   `coverage.py`/`pytest-cov` configuration. Ratios between changed test lines
   and changed implementation lines are review-volume indicators, not coverage

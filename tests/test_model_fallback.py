@@ -278,7 +278,7 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
     assert "core.codex_fallback" in bot        # ChatGPT-login Codex escape hatch
     assert bot.count("run_codex_locked") == 3  # definition + preferred + fallback
-    assert 'session_lock_publish "$_lock_file" "$_codex_pid" "$_lock_token"' in bot
+    assert '"$_lock_file" "$_codex_pid" "$_lock_token"; then' in bot
     assert "openai_fallback_flags=(--no-tools)" in bot
     assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
@@ -307,6 +307,7 @@ def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
     script = tmp_path / "codex-lock-test.sh"
     script.write_text(
         f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n' +
+        "process_start_token() { printf 'test-start\\n'; }\n" +
         "python3() { exec sleep 30; }\n" + function + "\n" +
         'run_codex_locked "hello" "conv" "system" "model" "30" ' +
         f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
@@ -326,6 +327,35 @@ def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
     os.kill(child_pid, signal.SIGTERM)
     lock.unlink(missing_ok=True)
     assert process.wait(timeout=5) == 143
+
+
+def test_codex_locked_runner_stops_when_identity_receipt_cannot_publish(
+        tmp_path):
+    import subprocess
+    from pathlib import Path
+
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+    start = bot.index("run_codex_locked() {")
+    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
+    function = bot[start:end]
+    lock = tmp_path / "session.lock"
+    lock.write_text("acquiring test-token", encoding="utf-8")
+    script = tmp_path / "codex-lock-fail-closed.sh"
+    script.write_text(
+        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n'
+        "process_start_token() { return 1; }\n"
+        "python3() { exec sleep 30; }\n" + function + "\n"
+        'run_codex_locked "hello" "conv" "system" "model" "30" '
+        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", str(script)], check=False, timeout=5,
+    )
+
+    assert result.returncode == 74
+    assert lock.read_text(encoding="utf-8") == "acquiring test-token"
 
 
 def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():

@@ -15,6 +15,8 @@
 #   taskline  — CLI reports both server healthy and workspace registered
 #   heartbeat_tasks — heartbeat TASKS are succeeding, not merely the process
 #               being alive (reuses the daemon's brain_health.assess verdict)
+#   delivery  — recent envelopes include real provider receipts rather than a
+#               streak of terminal failures or an overdue retry queue
 #
 # critical: true → daemon.py checks it every 30s (alert-only for components
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
@@ -67,6 +69,21 @@ components:
       was wedged 11h, and memory-tidy/self-diagnostic had gone 16h/15h without
       a success — this manifest reported 15/15 healthy throughout. Same verdict
       the daemon pages on; honors the same post-wake grace; never writes state.
+
+  - name: unified-delivery
+    check: delivery
+    path: data/jarvis.db
+    window_seconds: 3600
+    failure_streak: 3
+    max_overdue_seconds: 900
+    critical: false
+    requires_file: data/jarvis.db
+    note: >-
+      Process and HTTP health do not prove that Pascal receives anything. A
+      recent streak of failed envelopes, or an overdue retry queue, makes the
+      product unhealthy even while bot/admin/dashboard remain alive. The
+      daemon's independent dead-letter path owns paging; this check is
+      observation-only and must not create a credential restart loop.
 
   - name: ef-stream
     check: ef_stream

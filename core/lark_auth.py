@@ -60,6 +60,11 @@ def _send_dm(text: str, run=subprocess.run) -> bool:
     uid = _owner_open_id()
     if not uid:
         return False
+    from core.lark_bot_transport import send as send_as_bot
+
+    direct = send_as_bot(text=text, user_id=uid, root=JARVIS_DIR)
+    if direct.attempted:
+        return direct.ok
     try:
         r = run(["lark-cli", "im", "+messages-send", "--as", "bot",
                  "--user-id", uid, "--markdown", text],

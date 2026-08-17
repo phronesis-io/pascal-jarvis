@@ -24,7 +24,18 @@ from tasks.memory_daily_post import _archive_old_daily_entries
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
     Path.home() / ".jarvis" / "memory"))
-INDEX_FILE = MEMORY_DIR / "_index.md"
+JARVIS_DIR = Path(os.environ.get(
+    "JARVIS_DIR", Path(__file__).resolve().parent.parent
+))
+# The loader reads top-level ``warm/*.md`` and never reads memory/_index.md.
+# Keep the generated index beside the knowledge files it describes.
+def _index_file(memory_dir: Path) -> Path:
+    """Return the canonical warm-tier index, including on fresh installs."""
+    return memory_dir / "warm" / "_index.md"
+
+
+INDEX_FILE = _index_file(MEMORY_DIR)
+STRAY_WARM_DIR = JARVIS_DIR / "warm"
 
 # Dual-directory paths for one-way sync (auto → heartbeat). CLAUDE.md
 # source-of-truth rule: warm/ 用户画像以 auto-memory 为准; the heartbeat copy
@@ -51,6 +62,64 @@ _AUTO_UPDATE_PREFIX = "<!-- auto-update"
 # the single bullet line that follows (see _apply_update in
 # memory_consolidate_post / memory_daily_post).
 _AUTO_UPDATE_BLOCK = re.compile(r"<!--\s*auto-update[^>]*-->\n(?:[^\n]*\n?)?")
+
+
+def _recover_stray_repo_warm() -> None:
+    """Preserve and remove model-written ``<repo>/warm`` files.
+
+    Before heartbeat tasks had task-level tool policy, the GPT fallback could
+    call ``file_write('warm/...')`` from the repository cwd. Those files are
+    outside MEMORY_DIR and therefore invisible to Jarvis. Archive each file in
+    the real memory tree, verify the bytes, and only then remove the stray.
+    """
+    if not STRAY_WARM_DIR.is_dir():
+        return
+    try:
+        if STRAY_WARM_DIR.resolve() == (MEMORY_DIR / "warm").resolve():
+            return
+    except OSError:
+        return
+    archive = MEMORY_DIR / "archive" / "recovered_repo_warm"
+    recovered: list[str] = []
+    for src in sorted(STRAY_WARM_DIR.glob("*.md")):
+        try:
+            payload = src.read_bytes()
+            archive.mkdir(parents=True, exist_ok=True)
+            dst = archive / src.name
+            suffix = 1
+            while dst.exists() and dst.read_bytes() != payload:
+                dst = archive / f"{src.stem}.{suffix}{src.suffix}"
+                suffix += 1
+            if not dst.exists():
+                tmp = archive / f".{dst.name}.{os.getpid()}.tmp"
+                with tmp.open("wb") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, dst)
+            if dst.read_bytes() != payload:
+                print(
+                    f"[memory-tidy] stray warm verification failed: {src.name}",
+                    file=sys.stderr,
+                )
+                continue
+            src.unlink()
+            recovered.append(src.name)
+        except OSError as exc:
+            print(
+                f"[memory-tidy] stray warm recovery failed for {src.name}: {exc}",
+                file=sys.stderr,
+            )
+    try:
+        STRAY_WARM_DIR.rmdir()
+    except OSError:
+        pass
+    if recovered:
+        print(
+            "[memory-tidy] recovered repo-root warm/ → "
+            f"archive/recovered_repo_warm/: {', '.join(recovered)}",
+            file=sys.stderr,
+        )
 
 
 def _replica_only_update_blocks(src_content: str, dst_content: str) -> list[str]:
@@ -452,6 +521,11 @@ def _warn_tiers_over_budget():
 
 
 def main() -> int:
+    try:
+        _recover_stray_repo_warm()
+    except Exception as e:
+        print(f"[memory-tidy] stray warm recovery failed: {e}", file=sys.stderr)
+
     # Always run daily_log archive check (independent of Claude's response)
     try:
         _archive_old_daily_entries(now_local_str("%Y-%m-%d"))
@@ -521,19 +595,41 @@ def _verify_index(index_content: str, warm_dir) -> str:
     scan) inherit the drift. Two mechanical passes: ① drop entry lines whose
     file no longer exists in warm/ (archived/deleted), ② append a
     "未分类（自动补录）" section for live files the LLM omitted.
+
+    Only a bullet whose leading token is a bare warm-tier filename is eligible
+    for deletion. Notes about ``system/x.md`` or ``daily_archive.md`` and
+    pointers into ``archive/`` are knowledge, not stale warm entries.
     """
     import re as _re
     from pathlib import Path as _P
     warm_dir = _P(warm_dir)
     live = {f.name for f in warm_dir.glob("*.md")} - {"_index.md"}
+    archived = {f.name for f in warm_dir.glob("archive/*.md")}
     kept_lines, mentioned = [], set()
     for line in index_content.splitlines():
-        names = _re.findall(r"([A-Za-z0-9_\-.]+\.md)", line)
-        entry_names = [n for n in names if n != "_index.md"]
-        if (line.lstrip().startswith("-") and entry_names
-                and not any(n in live for n in entry_names)):
+        refs = _re.findall(
+            r"([A-Za-z0-9_\-./]*?[A-Za-z0-9_\-.]+\.md)", line,
+        )
+        entry_refs = [ref for ref in refs if _P(ref).name != "_index.md"]
+        entry_names = [_P(ref).name for ref in entry_refs]
+        head = _re.sub(r"^-\s*", "", line.lstrip())
+        head = _re.sub(r"^(?:[📦⭐✂🔥⛔]\ufe0f?\s*)+", "", head)
+        match = _re.match(
+            r"^(?:[`*_]+)?(?P<ref>[A-Za-z0-9_\-./]+\.md)"
+            r"(?:[`*_]+)?(?:\s*(?:[—–:：]|$))",
+            head,
+        )
+        leading_ref = match.group("ref") if match else ""
+        owns_entry = (
+            line.lstrip().startswith("-")
+            and bool(leading_ref)
+            and "/" not in leading_ref
+        )
+        if (owns_entry
+                and _P(leading_ref).name not in live
+                and _P(leading_ref).name not in archived):
             print(f"[memory-tidy] index entry dropped (file gone): "
-                  f"{entry_names[0]}", file=sys.stderr)
+                  f"{leading_ref}", file=sys.stderr)
             continue
         mentioned.update(entry_names)
         kept_lines.append(line)
@@ -564,6 +660,7 @@ def _process(raw: str) -> int:
     index_content = data.get("index_update", "")
     if index_content and len(index_content) > 50:
         index_content = _verify_index(index_content, INDEX_FILE.parent)
+        INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = INDEX_FILE.with_suffix(".tmp")
         tmp.write_text(index_content, encoding="utf-8")
         os.replace(tmp, INDEX_FILE)

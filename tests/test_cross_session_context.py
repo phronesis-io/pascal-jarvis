@@ -208,6 +208,20 @@ def test_redaction_does_not_mangle_task_notifications():
     assert "example.test/path" in uri
 
 
+def test_redaction_removes_private_absolute_paths_but_keeps_file_names():
+    rendered = redact_text(
+        "read /Users/pascal/Desktop/jarvis/private/notes.md, "
+        "inspect /tmp/jarvis-run.log; then C:\\Users\\pascal\\secret\\plan.txt"
+    )
+
+    assert "/Users/pascal" not in rendered
+    assert "/tmp/" not in rendered
+    assert "C:\\Users\\pascal" not in rendered
+    assert "[local-path]/notes.md," in rendered
+    assert "[local-path]/jarvis-run.log;" in rendered
+    assert "[local-path]/plan.txt" in rendered
+
+
 def test_filters_jarvis_owned_claude_codex_exec_and_subagents(tmp_path):
     claude_root = tmp_path / "claude"
     codex_root = tmp_path / "codex"

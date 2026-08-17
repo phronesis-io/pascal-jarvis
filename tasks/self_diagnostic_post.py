@@ -140,6 +140,11 @@ def _send(text: str, user_id: str) -> bool:
     # Emergency fallback: if memorial imports/storage itself is broken, keep
     # the old independent plain-text path and then the macOS local alert.
     try:
+        from core.lark_bot_transport import send as send_as_bot
+
+        direct = send_as_bot(text=text, user_id=user_id)
+        if direct.attempted:
+            return direct.ok
         # --as bot: without it lark-cli falls back to the USER identity, which
         # fails on installs that never ran `lark-cli auth login` — exactly the
         # machines where this emergency path matters (daemon.py's own sends

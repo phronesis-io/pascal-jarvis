@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 
 from core.log import log
+from core.lark_bot_transport import send_from_cli_args
 
 
 def _ops_log(message: str, **fields) -> None:
@@ -34,6 +35,18 @@ def send(
     for attempt, delay in enumerate(delays, start=1):
         if delay:
             sleeper(delay)
+        direct = send_from_cli_args(args)
+        if direct.attempted:
+            if direct.ok:
+                return direct.message_id
+            _ops_log(
+                "lark_bot_api_rejected",
+                level="error",
+                attempt=attempt,
+                attempts=len(delays),
+                reason=direct.error,
+            )
+            continue
         try:
             result = runner(
                 ["lark-cli", "im", "+messages-send", *args,

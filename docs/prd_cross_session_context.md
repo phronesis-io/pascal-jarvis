@@ -13,7 +13,9 @@ decisions, blockers, or next steps from those conversations.
 
 The next owner-private Jarvis turn understands recent work discussed in either
 Claude Code or Codex without asking Pascal to repeat it. Important context also
-survives as a durable digest after native provider sessions age out.
+survives as a durable digest after native provider sessions age out. Relevant
+older work can be retrieved from a private local index without loading the full
+archive into every prompt.
 
 ## Requirements
 
@@ -36,6 +38,12 @@ survives as a durable digest after native provider sessions age out.
    as PR, deploy, task, or calendar state still require authoritative checks.
 7. Provider transcript formats may fail independently; a bad or drifting file
    must degrade to missing context, never break the main conversation.
+8. Build a private, gitignored, WAL-backed SQLite index in bounded batches.
+   Persist only redacted visible user/assistant turns and hashed source paths;
+   transcripts remain the rebuildable source of truth.
+9. Retrieve older turns only when they match the current owner request. Generic
+   continuation text must not surface a historical archive, and historical
+   context never enters a shared chat or a named Matter.
 
 ## Acceptance
 
@@ -49,6 +57,11 @@ survives as a durable digest after native provider sessions age out.
   subagents never appear.
 - Secret fixtures are replaced with `[redacted]`.
 - Owner prompts include the projection; group prompts do not.
+- Historical Claude Code and Codex fixtures are indexed incrementally, survive
+  process restarts, update after append, disappear after source deletion or
+  later managed-session ownership, and are queryable by topic.
+- Identical turns in different sessions do not collide; credentials, tool
+  payloads, and provider failure text are absent from the index and projection.
 - Full tests, independent review, protected CI, release gate, restart, and a
   production read-only context canary all pass.
 

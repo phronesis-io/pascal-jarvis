@@ -54,7 +54,10 @@ mkdir -p "$JARVIS_DIR/tmp"
 for i in $(seq 0 29); do
   day_start="${BOUNDS[$i]}"
   day_end="${BOUNDS[$((i+1))]}"
-  day_data=$("${_TO[@]}" lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>>"$_err_file") || _fetch_fail=1
+  if ! day_data=$("${_TO[@]}" lark-cli calendar +agenda --as user --format json --start "$day_start" --end "$day_end" 2>>"$_err_file"); then
+    _fetch_fail=1
+    break
+  fi
   export "DAY${i}_DATA=$day_data"
 done
 

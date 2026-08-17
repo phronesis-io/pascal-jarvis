@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import core.lark_auth as lark_auth  # noqa: E402
+from core import lark_bot_transport  # noqa: E402
 
 FLOW_JSON = json.dumps({
     "verification_url": "https://accounts.feishu.cn/oauth/v1/device/verify?x=1",
@@ -80,6 +81,28 @@ def test_start_sends_link_and_detaches_poller():
     (argv, kwargs), = spawned
     assert argv[-3:] == ["core.lark_auth", "poll", "dc_test123"]
     assert kwargs.get("start_new_session") is True
+
+
+def test_device_flow_receipt_prefers_keychain_independent_bot_api(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or lark_bot_transport.BotSendResult(True, True, "om_auth")
+        ),
+    )
+
+    assert lark_auth._send_dm(
+        "authorize",
+        run=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CLI should not run")
+        ),
+    ) is True
+    assert calls == [{
+        "text": "authorize", "user_id": "ou_test", "root": lark_auth.JARVIS_DIR,
+    }]
 
 
 def test_start_failure_raises_never_claims_success():

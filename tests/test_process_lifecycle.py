@@ -41,6 +41,20 @@ def _wait_until(predicate, timeout: float = 5.0) -> None:
     raise AssertionError("condition did not become true before timeout")
 
 
+def test_process_start_token_rejects_empty_ps_output(tmp_path):
+    script = tmp_path / "empty-token.sh"
+    script.write_text(
+        f'source "{HELPERS}"\n'
+        "ps() { return 0; }\n"
+        "if process_start_token 123; then exit 9; fi\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(["/bin/bash", str(script)], check=False)
+
+    assert result.returncode == 0
+
+
 def test_identity_guard_rejects_root_pid(tmp_path):
     script = tmp_path / "identity.sh"
     script.write_text(
