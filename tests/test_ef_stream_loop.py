@@ -10,6 +10,8 @@ forever, wedging the blocking stdout read past every process-existence check.
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import core.ef_stream_loop as efsl
 from core import lark_bot_transport
 from core.ef_stream import load_seen
@@ -63,6 +65,15 @@ def test_successful_send_marks_seen_and_outbox(monkeypatch, tmp_path):
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
+def test_external_lifecycle_event_can_force_named_reconciliation(tmp_path):
+    trigger = tmp_path / "heartbeat-trigger"
+
+    assert efsl._trigger_heartbeat_task("eigenflux-friends", trigger) is True
+    assert efsl._trigger_heartbeat_task("eigenflux-friends", trigger) is True
+    assert trigger.read_text().splitlines() == [
+        "eigenflux-friends", "eigenflux-friends"]
+
+
 def test_memorial_queue_acceptance_marks_event_seen(monkeypatch, tmp_path):
     monkeypatch.setattr(efsl.memorial, "create",
                         lambda **kw: ("mem_queued", False))
@@ -90,6 +101,62 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
         [], tmp_path / ".ef-seen", tmp_path, title="EigenFlux 好友动态")
 
     assert accepted is True and visible is True
+
+
+def test_memorial_policy_suppression_is_durable_acceptance(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("JARVIS_DELIVERY_GLOBAL_DAILY_CAP", "0")
+    monkeypatch.setattr(
+        efsl.memorial,
+        "_send_card",
+        lambda *_args, **_kwargs: pytest.fail(
+            "policy suppression must happen before Lark transport"
+        ),
+    )
+    seen_file = tmp_path / ".ef-seen"
+
+    seen, accepted, visible = efsl._deliver_memorial_and_mark(
+        "已落账但不打扰", ["evt-suppressed"], {}, "u1",
+        [], seen_file, tmp_path, title="EigenFlux 消息")
+
+    assert accepted is True and visible is False
+    assert seen == ["evt-suppressed"]
+    assert load_seen(seen_file) == ["evt-suppressed"]
+    states = efsl.memorial.list_memorials()
+    assert len(states) == 1
+    assert states[0]["delivery_status"] == "suppressed"
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+
+
+def test_memorial_quiet_hours_queue_is_durable_acceptance(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: True)
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("JARVIS_DELIVERY_GLOBAL_DAILY_CAP", "0")
+    monkeypatch.setattr(
+        efsl.memorial,
+        "_send_card",
+        lambda *_args, **_kwargs: pytest.fail(
+            "quiet-hours queueing must happen before Lark transport"
+        ),
+    )
+
+    seen, accepted, visible = efsl._deliver_memorial_and_mark(
+        "夜间先排队", ["evt-quiet"], {}, "u1", [],
+        tmp_path / ".ef-seen", tmp_path, title="EigenFlux 消息")
+
+    assert accepted is True and visible is False
+    assert seen == ["evt-quiet"]
+    states = efsl.memorial.list_memorials()
+    assert len(states) == 1
+    assert states[0]["delivery_status"] == "queued"
+    assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
 def test_memorial_model_analysis_keeps_segmented_authoring_provenance(
@@ -143,7 +210,7 @@ def test_queue_acceptance_does_not_depend_on_deadletter_sink(
     assert accepted is True and seen == ["id2"]
 
 
-def test_suppressed_external_event_is_not_marked_seen(
+def test_suppressed_external_event_is_durably_marked_seen(
     monkeypatch, tmp_path,
 ):
     from core.delivery import DeliveryResult
@@ -174,9 +241,40 @@ def test_suppressed_external_event_is_not_marked_seen(
         tmp_path,
     )
 
+    assert accepted is True
+    assert "event-24" in seen
+    assert "event-24" in load_seen(seen_file)
+    assert deadletters == []
+
+
+def test_non_durable_external_event_still_deadletters_and_blocks_seen(
+    monkeypatch, tmp_path,
+):
+    from core.delivery import DeliveryResult
+
+    monkeypatch.setattr(
+        "core.delivery.deliver",
+        lambda *_args, **_kwargs: DeliveryResult(
+            "dlv_failed", False, "failed", "lark",
+            reason="database receipt missing",
+        ),
+    )
+    deadletters = []
+    monkeypatch.setattr(
+        efsl,
+        "record_overdue",
+        lambda *_args, **kwargs: deadletters.append(kwargs),
+    )
+    seen_file = tmp_path / ".ef-seen"
+
+    seen, accepted = efsl._deliver_and_mark(
+        "message-failed", ["event-failed"], {}, "u1", [], seen_file,
+        tmp_path,
+    )
+
     assert accepted is False
-    assert "event-24" not in seen
-    assert "event-24" not in load_seen(seen_file)
+    assert "event-failed" not in seen
+    assert "event-failed" not in load_seen(seen_file)
     assert deadletters[-1]["kind"] == "ef_stream_send_failed"
 
 

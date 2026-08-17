@@ -18,6 +18,10 @@ import time
 from pathlib import Path
 
 from core.heartbeat import parse_heartbeat
+from core.interval_config import (
+    parse_interval_overrides,
+    resolve_effective_interval,
+)
 
 # A task is "starved" when it hasn't run for longer than this multiple of its
 # expected interval. 2x tolerates one missed slot before alarming.
@@ -116,7 +120,8 @@ def channel_watermark_report(jarvis_dir: str | Path,
             return {}
 
     state = _load(jd / "heartbeat_state.json")
-    overrides = _load(jd / "interval_overrides.json")
+    overrides = parse_interval_overrides(
+        _load(jd / "interval_overrides.json"))
     install_ts = _install_ts(jd, now)
 
     starved, circuits, pending_first = [], [], []
@@ -126,9 +131,12 @@ def channel_watermark_report(jarvis_dir: str | Path,
         # Same precedence as run_cycle: override → legacy effective_interval
         # in state → HEARTBEAT.md default. Ignoring the legacy field made
         # legitimately slowed-down tasks look STARVED.
-        interval = (overrides.get(name)
-                    or ts.get("effective_interval", 0)
-                    or task["interval"])
+        interval = resolve_effective_interval(
+            name,
+            task["interval"],
+            ts.get("effective_interval", 0),
+            overrides,
+        )
         last_run = ts.get("last_run", 0)
         # TRUTH watermark (REQ-51): last_run is a scheduling watermark that
         # gets rewritten on every empty_pre/pre-failure skip, so chronically

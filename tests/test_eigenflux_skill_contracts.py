@@ -135,6 +135,17 @@ def test_preinstall_verifier_references_only_live_test_files():
     assert "test_eigenflux_messages.py" in references
 
 
+def test_preinstall_backlog_dedup_treats_checkbox_as_data():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+
+    assert 'grep -Fqx -- "- [ ] $r"' in script
+    assert "open_review_count=$(grep -Ec" in script
+    assert "eigenflux_preinstall_retire.py" in script
+    assert '"skills_removed": int(nd)' in script
+    assert "removed top-level CLI command(s)" in script
+
+
 def test_preinstall_source_repos_can_be_overridden_for_worktrees():
     script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
         encoding="utf-8")

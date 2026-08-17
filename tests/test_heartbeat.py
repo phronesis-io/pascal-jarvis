@@ -1229,6 +1229,18 @@ def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
         )
 
 
+def test_engagement_tuning_protects_scheduler_infrastructure_sets():
+    from core.interval_config import ENGAGEMENT_TUNING_PROTECTED_TASKS
+
+    infrastructure = (
+        HeartbeatRunner.PRIORITY_TASKS
+        | HeartbeatRunner.TIER0_TASKS
+        | HeartbeatRunner.SILENT_TASKS
+    )
+    assert infrastructure <= ENGAGEMENT_TUNING_PROTECTED_TASKS
+    assert "eigenflux-preinstall" in ENGAGEMENT_TUNING_PROTECTED_TASKS
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # REQ-80 — failed/parse_failed task_finish events carry an error excerpt
 # (866 failed events with zero error info made 6/19's ~247-failure night

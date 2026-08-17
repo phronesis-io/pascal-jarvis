@@ -327,7 +327,9 @@ def _check_heartbeat_tasks(comp: dict, root: Path) -> tuple[bool, str]:
     tasks = parse_heartbeat(root / "HEARTBEAT.md")
     if not tasks:
         return False, "HEARTBEAT.md unreadable"
-    overrides = _read_json(root / "interval_overrides.json")
+    from core.interval_config import parse_interval_overrides
+    overrides = parse_interval_overrides(
+        _read_json(root / "interval_overrides.json"))
     brain = _read_json(root / ".daemon_brain_state.json")
 
     now = time.time()

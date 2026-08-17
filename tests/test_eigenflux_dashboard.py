@@ -133,7 +133,8 @@ def test_network_overview_reports_realtime_stream_separately(tmp_path):
     assert overview["stream"]["status"] == "connecting"
 
 
-def test_network_overview_uses_effective_intervals_and_idle_success(tmp_path):
+def test_network_overview_uses_content_overrides_but_ignores_infra_drift(
+        tmp_path):
     root = tmp_path / "jarvis"
     now = 500_000
     _write(
@@ -172,12 +173,16 @@ def test_network_overview_uses_effective_intervals_and_idle_success(tmp_path):
     assert task_by_id["eigenflux-feed-triage"]["healthy"] is True
     assert task_by_id["eigenflux-preinstall"]["healthy"] is True
     assert task_by_id["eigenflux-preinstall"]["detail"] == "正常"
-    assert task_by_id["eigenflux-friends"]["healthy"] is True
+    assert task_by_id["eigenflux-friends"]["healthy"] is False
 
     stale = load_network_overview(root, now_epoch=now + 50 * 60)
     stale_by_id = {item["id"]: item for item in stale["tasks"]}
     assert stale_by_id["eigenflux-feed-triage"]["healthy"] is False
     assert stale_by_id["eigenflux-friends"]["healthy"] is False
+
+    much_later = load_network_overview(root, now_epoch=now + 9 * 3600)
+    much_later_by_id = {item["id"]: item for item in much_later["tasks"]}
+    assert much_later_by_id["eigenflux-preinstall"]["healthy"] is False
 
 
 def test_network_overview_rejects_entire_invalid_override_sidecar(tmp_path):
