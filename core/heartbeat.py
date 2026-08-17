@@ -421,6 +421,17 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
     return tasks
 
 
+def _completion_epoch(cycle_started_at: float) -> int:
+    """Return a success receipt timestamp, never the cycle-acquire time.
+
+    A shared model cycle can run for minutes.  Reusing its start timestamp for
+    ``last_success`` made a task look stale immediately after it completed and
+    let self-diagnostic page while that same task was visibly succeeding.
+    ``last_run`` remains the cadence watermark; success is a release receipt.
+    """
+    return max(int(cycle_started_at), int(time.time()))
+
+
 class HeartbeatRunner:
     """Drives the task scheduling loop."""
 
@@ -727,7 +738,7 @@ class HeartbeatRunner:
             return
 
         if raw.strip() == "HEARTBEAT_OK":
-            ts.last_success = now
+            ts.last_success = _completion_epoch(now)
             ts.last_status = "idle"
             ts.circuit.record_success()
             state[name] = ts.to_dict()
@@ -747,7 +758,7 @@ class HeartbeatRunner:
         else:
             self._collect_output(name, raw, user_messages, producing_tasks)
 
-        ts.last_success = now
+        ts.last_success = _completion_epoch(now)
         ts.last_status = "ok"
         ts.circuit.record_success()
         state[name] = ts.to_dict()
@@ -1691,7 +1702,7 @@ You have access to the user's memory below. Use it to personalize your responses
                         # Only pre_timeout/pre_error/nonzero (above) leave
                         # last_success stale — the real channel-dead signal.
                         ts.last_status = "empty_pre"
-                        ts.last_success = now
+                        ts.last_success = _completion_epoch(now)
                         reason = "empty_pre"
                     state[task["name"]] = ts.to_dict()
                     skipped.append(task["name"])
@@ -1748,7 +1759,7 @@ You have access to the user's memory below. Use it to personalize your responses
                 status = ts.last_status
                 tier0_failures.append(f"{task['name']}:{status}")
             else:
-                ts.last_success = now
+                ts.last_success = _completion_epoch(now)
                 ts.last_status = "ok"
                 ts.circuit.record_success()
                 status = "ok"
@@ -2071,7 +2082,7 @@ You have access to the user's memory below. Use it to personalize your responses
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now
-                ts.last_success = now
+                ts.last_success = _completion_epoch(now)
                 ts.last_status = "idle"
                 ts.circuit.record_success()
                 state[task["name"]] = ts.to_dict()
@@ -2239,7 +2250,7 @@ You have access to the user's memory below. Use it to personalize your responses
         for task in runnable:
             ts = TaskState.from_dict(state.get(task["name"], {}))
             ts.last_run = now
-            ts.last_success = now
+            ts.last_success = _completion_epoch(now)
             ts.last_status = "ok"
             ts.circuit.record_success()
             state[task["name"]] = ts.to_dict()

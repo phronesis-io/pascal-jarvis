@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -25,8 +26,15 @@ def _open(root: str | Path) -> sqlite3.Connection | None:
         return None
 
 
-def delivery_overview(root: str | Path) -> dict | None:
+def delivery_overview(
+    root: str | Path,
+    *,
+    now: float | None = None,
+    queue_overdue_grace_seconds: float = 15 * 60,
+) -> dict | None:
     """Return queue/dead-letter counts, or None before the migration exists."""
+    now = time.time() if now is None else float(now)
+    overdue_before = now - max(0.0, float(queue_overdue_grace_seconds))
     db = _open(root)
     if db is None:
         return None
@@ -46,6 +54,17 @@ def delivery_overview(root: str | Path) -> dict | None:
                 "next_attempt_epoch,attempts FROM delivery_envelopes "
                 "WHERE state='queued' ORDER BY created_epoch LIMIT 20")
         ]
+        queued_overdue = int(db.execute(
+            "SELECT COUNT(*) FROM delivery_envelopes WHERE state='queued' "
+            "AND ((next_attempt_epoch IS NULL AND created_epoch<=?) "
+            "OR next_attempt_epoch<=?)",
+            (overdue_before, overdue_before),
+        ).fetchone()[0])
+        next_queued_epoch = db.execute(
+            "SELECT MIN(next_attempt_epoch) FROM delivery_envelopes "
+            "WHERE state='queued' AND next_attempt_epoch>?",
+            (now,),
+        ).fetchone()[0]
     except sqlite3.Error:
         return None
     finally:
@@ -62,6 +81,8 @@ def delivery_overview(root: str | Path) -> dict | None:
         # Compatibility key for the existing ops metric.
         "consec_fails": dead_letters,
         "queued_items": queued_rows,
+        "queued_overdue": queued_overdue,
+        "next_queued_epoch": next_queued_epoch,
         "source": "sqlite",
     }
 
