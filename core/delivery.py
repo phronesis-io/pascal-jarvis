@@ -32,6 +32,7 @@ from typing import Callable
 from core.attention_policy import in_quiet_hours, next_awake
 from core.card import extract_card_text
 from core.log import log
+from core.memorial_ledger import current_status as memorial_status
 from core.runtime_paths import database_path
 from core.timeutil import now_local
 
@@ -50,6 +51,23 @@ DEFAULT_GLOBAL_DAILY_CAP = 9
 DEFAULT_BURST_CAP = 4
 DEFAULT_BURST_WINDOW_SECONDS = 10 * 60
 CAP_RESERVATION_RECHECK_SECONDS = 5
+RECOVERY_REPLAY_LIMIT = 20
+RECOVERY_RECONCILE_SCAN_LIMIT = 500
+RECOVERY_REPLAY_TTL_SECONDS = {
+    "decision": 72 * 3600,
+    "notice": 24 * 3600,
+    "alert": 30 * 60,
+    "reply": 6 * 3600,
+}
+NON_REPLAYABLE_SOURCES = {
+    "calendar-sync",
+    "checkin",
+    "guardian-daemon",
+    "intention-check",
+    "morning-anchor",
+}
+NON_REPLAYABLE_SOURCE_PREFIXES = ("routine:",)
+TRANSPORT_FAILURE_STREAK = 3
 
 _STATE_UPDATE_FIELDS = frozenset({
     "attempts",
@@ -868,6 +886,11 @@ class DeliveryPipeline:
         now = self.clock()
         route = _route(envelope)
         content_hash = raw_content_hash if blocked else _content_hash(envelope)
+        if envelope.attention == "alert" and not envelope.dedup_key:
+            incident = str(
+                envelope.metadata.get("incident_key") or content_hash[:24]
+            ).strip()
+            envelope.dedup_key = f"alert:{envelope.source}:{incident}"
         with closing(_connect(self.path)) as db, db:
             duplicate = (
                 None if envelope.metadata.get("bypass_dedup")
@@ -1076,7 +1099,23 @@ class DeliveryPipeline:
                             # A standalone pipeline DB may intentionally contain
                             # only delivery tables.
                             pass
+                        has_failed = db.execute(
+                            "SELECT 1 FROM delivery_envelopes "
+                            "WHERE state='failed' LIMIT 1"
+                        ).fetchone() is not None
                         db.commit()
+                        if has_failed:
+                            try:
+                                self.reconcile_failed_after_recovery(
+                                    limit=RECOVERY_REPLAY_LIMIT,
+                                    recovery_epoch=delivered_at,
+                                )
+                            except Exception as exc:
+                                _ops_log(
+                                    "recovery_reconcile_failed",
+                                    level="warn",
+                                    error_type=type(exc).__name__,
+                                )
                         return DeliveryResult(
                             envelope.id, True, "delivered", route,
                             result.message_id)
@@ -1151,6 +1190,167 @@ class DeliveryPipeline:
             )
             return DeliveryResult(
                 envelope.id, True, state, route, reason=last_error)
+
+    @staticmethod
+    def _metadata_from_row(row: sqlite3.Row | dict) -> dict:
+        try:
+            value = json.loads(dict(row).get("metadata") or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            value = {}
+        return value if isinstance(value, dict) else {}
+
+    def _replay_reason(
+        self,
+        db: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        recovery_epoch: float,
+    ) -> str:
+        """Return a suppression reason, or empty when replay is still valid."""
+        values = dict(row)
+        metadata = self._metadata_from_row(row)
+        if metadata.get("replayable") is False:
+            return "recovery_replay_disabled"
+        source = str(values.get("source") or "")
+        if (source in NON_REPLAYABLE_SOURCES
+                or source.startswith(NON_REPLAYABLE_SOURCE_PREFIXES)):
+            return "recovery_incident_obsolete"
+        if str(values.get("route_channel") or "") not in {"lark", "lark_reply"}:
+            return "recovery_route_unsupported"
+        if int(metadata.get("replay_count") or 0) >= 1:
+            return "recovery_replay_exhausted"
+        expires = float(metadata.get("expires_epoch") or 0)
+        if expires and recovery_epoch > expires:
+            return "recovery_replay_expired"
+        ttl = int(metadata.get("replay_ttl_seconds") or 0)
+        if ttl <= 0:
+            ttl = RECOVERY_REPLAY_TTL_SECONDS.get(
+                str(values.get("attention") or "notice"), 24 * 3600
+            )
+        if recovery_epoch - float(values.get("created_epoch") or 0) > ttl:
+            return "recovery_replay_expired"
+        memorial_id = str(values.get("memorial_id") or "")
+        if memorial_id:
+            try:
+                status = memorial_status(self.root, memorial_id)
+            except OSError as exc:
+                _ops_log(
+                    "recovery_memorial_read_failed",
+                    level="warn",
+                    delivery_id=str(values.get("id") or ""),
+                    error_type=type(exc).__name__,
+                )
+                status = ""
+            if status != "pending":
+                return "recovery_item_resolved"
+        dedup_key = str(values.get("dedup_key") or "")
+        if dedup_key:
+            twin = db.execute(
+                "SELECT 1 FROM delivery_envelopes WHERE id<>? "
+                "AND dedup_key=? AND state IN ('delivered','read','acted') "
+                "AND delivered_epoch>=? LIMIT 1",
+                (values["id"], dedup_key, values["created_epoch"]),
+            ).fetchone()
+        else:
+            twin = db.execute(
+                "SELECT 1 FROM delivery_envelopes WHERE id<>? "
+                "AND content_hash=? AND state IN ('delivered','read','acted') "
+                "AND delivered_epoch>=? LIMIT 1",
+                (values["id"], values["content_hash"], values["created_epoch"]),
+            ).fetchone()
+        return "recovery_superseded" if twin else ""
+
+    def reconcile_failed_after_recovery(
+        self,
+        *,
+        limit: int = RECOVERY_REPLAY_LIMIT,
+        recovery_epoch: float | None = None,
+    ) -> list[str]:
+        """Requeue still-valid terminal failures after a verified Lark send.
+
+        The original envelope and idempotency key are retained. Stale alerts,
+        resolved Memorials, superseded twins and already-replayed rows become
+        audited suppressions instead of being dumped on Pascal after recovery.
+        """
+        epoch = self.clock() if recovery_epoch is None else float(recovery_epoch)
+        requeued: list[str] = []
+        with closing(_connect(self.path)) as db, db:
+            rows = db.execute(
+                "SELECT * FROM delivery_envelopes WHERE state='failed' "
+                "AND updated_epoch<? ORDER BY "
+                "CASE attention WHEN 'decision' THEN 0 WHEN 'reply' THEN 1 "
+                "WHEN 'alert' THEN 2 ELSE 3 END, created_epoch LIMIT ?",
+                (epoch, RECOVERY_RECONCILE_SCAN_LIMIT),
+            ).fetchall()
+            for row in rows:
+                reason = self._replay_reason(
+                    db, row, recovery_epoch=epoch,
+                )
+                delivery_id = str(row["id"])
+                if reason:
+                    self._set_state(
+                        db, delivery_id, "suppressed", reason,
+                        next_attempt_epoch=None, last_error=reason,
+                    )
+                    continue
+                if len(requeued) >= max(1, int(limit)):
+                    break
+                metadata = self._metadata_from_row(row)
+                metadata.update({
+                    "replay_count": int(metadata.get("replay_count") or 0) + 1,
+                    "recovery_requeued_epoch": epoch,
+                })
+                db.execute(
+                    "UPDATE delivery_envelopes SET state='queued',attempts=0,"
+                    "updated_epoch=?,next_attempt_epoch=?,last_error='',metadata=? "
+                    "WHERE id=? AND state='failed'",
+                    (
+                        epoch,
+                        epoch,
+                        json.dumps(metadata, ensure_ascii=False),
+                        delivery_id,
+                    ),
+                )
+                self._event(
+                    db, delivery_id, "queued", "transport recovery replay",
+                )
+                requeued.append(delivery_id)
+        if requeued:
+            _ops_log(
+                "recovery_requeued",
+                delivery_count=len(requeued),
+            )
+        return requeued
+
+    def transport_health(self, *, failure_streak: int = TRANSPORT_FAILURE_STREAK) -> dict:
+        """Summarize verified transport attempts for the external dead-man."""
+        with closing(_connect(self.path)) as db, db:
+            rows = db.execute(
+                "SELECT a.status,a.finished_epoch FROM delivery_attempts a "
+                "JOIN delivery_envelopes e ON e.id=a.delivery_id "
+                "WHERE a.finished_epoch IS NOT NULL "
+                "AND e.route_channel IN ('lark','lark_reply') "
+                "AND a.status IN ('delivered','failed') "
+                "ORDER BY a.finished_epoch DESC LIMIT 100"
+            ).fetchall()
+        consecutive = 0
+        last_success = 0.0
+        last_failure = 0.0
+        for row in rows:
+            status = str(row["status"])
+            finished = float(row["finished_epoch"] or 0)
+            if status == "delivered":
+                last_success = max(last_success, finished)
+                break
+            consecutive += 1
+            last_failure = max(last_failure, finished)
+        threshold = max(1, int(failure_streak))
+        return {
+            "healthy": consecutive < threshold,
+            "consecutive_failures": consecutive,
+            "last_success_epoch": last_success,
+            "last_failure_epoch": last_failure,
+        }
 
     def flush_due(self, limit: int = 50) -> list[DeliveryResult]:
         now = self.clock()
@@ -1337,8 +1537,10 @@ class DeliveryPipeline:
     def pending_dead_letters(self, limit: int = 100) -> list[dict]:
         with closing(_connect(self.path)) as db, db:
             rows = db.execute(
-                "SELECT * FROM delivery_dead_letters "
-                "WHERE notified_epoch IS NULL ORDER BY created_epoch LIMIT ?",
+                "SELECT d.* FROM delivery_dead_letters d "
+                "JOIN delivery_envelopes e ON e.id=d.delivery_id "
+                "WHERE d.notified_epoch IS NULL AND e.state='failed' "
+                "ORDER BY d.created_epoch LIMIT ?",
                 (max(1, min(int(limit), 500)),),
             ).fetchall()
         return [dict(row) for row in rows]

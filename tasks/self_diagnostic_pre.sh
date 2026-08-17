@@ -76,15 +76,20 @@ fi
 #     death pages HERE, deterministically — doctor.sh only probes the bot
 #     identity. (_GATE_TRIGGERS in the post redacts auth failure details.)
 if [ -n "$_LARK_UID" ] && command -v lark-cli >/dev/null 2>&1; then
+  _user_probe_err="$JARVIS_DIR/tmp/.lark_user_probe_err"
+  mkdir -p "$JARVIS_DIR/tmp"
+  : > "$_user_probe_err"
   _probe_start=$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   _probe_end=$(python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
   if "${_TO[@]}" lark-cli calendar +agenda --as user --format json \
-       --start "$_probe_start" --end "$_probe_end" >/dev/null 2>&1; then
+       --start "$_probe_start" --end "$_probe_end" >/dev/null 2>"$_user_probe_err"; then
     echo "User-token probe: ✓"
-  else
-    # Keep the "user token 探针失败" marker verbatim: self_diagnostic_post
-    # keys the「现在授权」action button off it.
+  elif grep -Eqi 'keychain (Get failed|access blocked)|credential manager.*(locked|accessible)' "$_user_probe_err"; then
+    echo "⚠️ 飞书后台 user 凭证暂不可读 — 日历/邮件等使用最后成功快照；这是运行环境问题，不需要重复授权，系统会继续自动重试"
+  elif grep -Eqi 'token.*(expired|invalid)|failed to authenticate|HTTP (401|403)|Request not allowed' "$_user_probe_err"; then
     echo "⚠️ 日历 user token 探针失败 — 日历/邮件等信道只能用旧快照兜底，点「现在授权」我发你授权链接一键修复"
+  else
+    echo "⚠️ 飞书 user 数据通道暂不可用 — 日历/邮件等使用最后成功快照，系统会继续自动重试"
   fi
 fi
 

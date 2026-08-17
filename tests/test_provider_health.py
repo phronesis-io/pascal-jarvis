@@ -249,6 +249,109 @@ def test_probe_all_preserves_real_failure_written_during_canary(tmp_path):
     assert row["detail"] == "real request: request_failed"
 
 
+def test_successful_canary_cannot_erase_older_real_timeout(tmp_path):
+    _write_config(tmp_path)
+    ph.observe(
+        "backup1", "unhealthy", "timeout",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    state = ph.probe_all(
+        tmp_path,
+        runner=lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}),
+            stderr="",
+        ),
+        openai_caller=lambda *a, **k: {"output_text": ph.CANARY_MARKER},
+    )
+
+    row = next(item for item in state["providers"]
+               if item["id"] == "backup1")
+    assert row["status"] == "unhealthy"
+    assert row["detail"] == "real request: timeout"
+    assert row["observation_source"] == "real_request"
+    assert row["canary_status"] == "healthy"
+    assert row["canary_checked_epoch"] > 0
+
+
+def test_failed_canary_preserves_real_failure_streak_and_refreshes_cooldown(
+    tmp_path,
+):
+    _write_config(tmp_path)
+    ph.observe(
+        "backup1", "unhealthy", "timeout",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    state = ph.probe_all(
+        tmp_path,
+        runner=lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="upstream still unavailable",
+        ),
+        openai_caller=lambda *a, **k: (_ for _ in ()).throw(
+            TimeoutError("canary timed out")
+        ),
+    )
+
+    row = next(item for item in state["providers"]
+               if item["id"] == "backup1")
+    assert row["status"] == "unhealthy"
+    assert row["observation_source"] == "real_request"
+    assert row["detail"] == "real request: timeout"
+    assert row["consecutive_failures"] == 1
+    assert row["canary_status"] == "unhealthy"
+    assert row["cooldown_until_epoch"] >= (
+        row["canary_checked_epoch"] + 1800
+    )
+
+
+def test_repeated_real_timeouts_escalate_until_real_success(tmp_path):
+    _write_config(tmp_path)
+
+    ph.observe("backup1", "unhealthy", "timeout",
+               root=tmp_path, now_epoch=10_000)
+    first = next(row for row in ph.snapshot(tmp_path)["providers"]
+                 if row["id"] == "backup1")
+    ph.observe("backup1", "unhealthy", "timeout",
+               root=tmp_path, now_epoch=20_000)
+    second = next(row for row in ph.snapshot(tmp_path)["providers"]
+                  if row["id"] == "backup1")
+
+    assert first["consecutive_failures"] == 1
+    assert first["cooldown_until_epoch"] == 10_000 + 1800
+    assert second["consecutive_failures"] == 2
+    assert second["cooldown_until_epoch"] == 20_000 + 7200
+    assert ph.preferred_fallback(
+        tmp_path, now_epoch=21_000, provider_ids=("backup1",)
+    ) == "none"
+
+    ph.observe("backup1", "healthy", "request_succeeded",
+               root=tmp_path, now_epoch=21_001)
+    recovered = next(row for row in ph.snapshot(tmp_path)["providers"]
+                     if row["id"] == "backup1")
+    assert recovered["consecutive_failures"] == 0
+    assert recovered["cooldown_until_epoch"] == 0
+    assert recovered["last_success_epoch"] == 21_001
+
+
+def test_single_real_timeout_gets_long_cooldown_not_transient_minute(
+    tmp_path, monkeypatch,
+):
+    _write_config(tmp_path)
+    monkeypatch.setenv("JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS", "60")
+    ph.observe(
+        "backup1", "unhealthy", "timeout",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_fallback(
+        tmp_path, now_epoch=10_061, provider_ids=("backup1",)
+    ) == "none"
+    assert ph.preferred_fallback(
+        tmp_path, now_epoch=11_800, provider_ids=("backup1",)
+    ) == "backup1"
+
+
 def test_provider_specs_honors_runtime_codex_binary_override(tmp_path, monkeypatch):
     _write_config(tmp_path)
     monkeypatch.setenv("CODEX_FALLBACK_BINARY", "/runtime/codex")

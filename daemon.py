@@ -215,11 +215,14 @@ def notify_lark(msg: str) -> bool:
                 attention="alert",
                 requested_channel="lark",
                 urgent=True,
+                dedup_key=f"guardian:{metric}",
                 throttle_key=f"guardian:{metric}",
                 metadata={
                     "metric_daily_cap": 1,
-                    # A failed alert remains queued. A dead letter about that
-                    # dead letter would recurse forever during a Lark outage.
+                    "incident_key": metric,
+                    "replayable": False,
+                    # A dead letter about this dead letter would recurse
+                    # forever during a Lark outage.
                     "suppress_dead_letter": True,
                 },
             ),
@@ -658,14 +661,20 @@ def consume_delivery_deadletters():
                 if DEADLETTER_FILE == _DEFAULT_DEADLETTER_FILE else []
             )
             if sql_rows:
+                grouped: dict[tuple[str, str], int] = {}
+                for row in sql_rows:
+                    key = (
+                        str(row.get("source") or "unknown"),
+                        str(row.get("kind") or "message"),
+                    )
+                    grouped[key] = grouped.get(key, 0) + 1
                 detail_lines = [
-                    f"- {row.get('source', 'unknown')} / "
-                    f"{row.get('kind', 'message')}："
-                    f"{str(row.get('detail', ''))[:100]}"
-                    for row in sql_rows
+                    f"- {source}：{count} 条"
+                    for (source, _kind), count in sorted(grouped.items())
                 ]
                 delivered = notify_lark(
-                    "⚠️ 有消息暂未送达，已保留在统一投递队列：\n"
+                    f"⚠️ 有 {len(sql_rows)} 条消息最终未送达。失败记录还在；"
+                    "投递恢复后只补发仍有效、仍未处理的事项，过期提醒不会补发：\n"
                     + "\n".join(detail_lines)
                 )
                 if delivered is not False:
@@ -1451,6 +1460,39 @@ def release_singleton():
         pass
 
 
+def _ping_external_deadman() -> str:
+    """Ping only while process and delivery health are both verified.
+
+    A missed-ping service is useful only if Jarvis stops saying "healthy" when
+    the sole user channel has failed. Returning a small status string keeps the
+    daemon loop testable without ever exposing the configured endpoint.
+    """
+    try:
+        from core.deadman import ping_due, status
+
+        configured = status(JARVIS_DIR)
+        if configured.status == "disabled":
+            return "disabled"
+        from core.delivery import DeliveryPipeline
+
+        transport = DeliveryPipeline(JARVIS_DIR).transport_health()
+        if not transport["healthy"]:
+            log(
+                "WARN",
+                "External dead-man ping withheld: Lark transport has "
+                f"{transport['consecutive_failures']} consecutive failures",
+            )
+            return "withheld_transport_unhealthy"
+        result = ping_due(JARVIS_DIR)
+        if result.status == "failed":
+            log("WARN", f"External dead-man ping failed: {result.detail}")
+        return result.status
+    except Exception as exc:
+        log("WARN", "External dead-man check crashed: "
+            f"{type(exc).__name__}")
+        return "failed"
+
+
 def main():
     global running
 
@@ -1529,15 +1571,7 @@ def main():
                     # healthy stack; fake-healthy grace paths carry a note and
                     # must not mask the outage externally.
                     if not result.get("note"):
-                        try:
-                            from core.deadman import ping_due
-                            deadman = ping_due(JARVIS_DIR)
-                            if deadman.status == "failed":
-                                log("WARN", f"External dead-man ping failed: "
-                                    f"{deadman.detail}")
-                        except Exception as exc:
-                            log("WARN", "External dead-man check crashed: "
-                                f"{type(exc).__name__}")
+                        _ping_external_deadman()
                 else:
                     consecutive_failures += 1
                     log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")

@@ -76,6 +76,294 @@ def test_state_machine_deliver_read_acted(pipeline):
     assert pipe.get(result.delivery_id)["acted_epoch"]
 
 
+def test_alert_without_explicit_key_gets_stable_incident_identity(pipeline):
+    pipe, sent, _ = pipeline
+    first = pipe.deliver(DeliveryEnvelope(
+        source="guardian-daemon", payload={"text": "组件失联"},
+        attention="alert",
+    ))
+    second = pipe.deliver(DeliveryEnvelope(
+        source="guardian-daemon", payload={"text": "组件失联"},
+        attention="alert",
+    ))
+
+    row = pipe.get(first.delivery_id)
+    assert row["dedup_key"].startswith("alert:guardian-daemon:")
+    assert second.delivery_id == first.delivery_id
+    assert second.reason == "duplicate"
+    assert len(sent) == 1
+
+
+def test_verified_transport_recovery_replays_valid_terminal_failure(tmp_path):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    healthy = [False]
+    sent = []
+
+    def transport(envelope, _channel):
+        sent.append(envelope.id)
+        return TransportResult(
+            healthy[0],
+            f"om_{len(sent)}" if healthy[0] else "",
+            "transport unavailable" if not healthy[0] else "",
+        )
+
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "jarvis.db", transport=transport,
+        clock=lambda: now[0], sleeper=lambda _seconds: None,
+    )
+    original = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux", payload={"text": "仍然有效的研究结论"},
+        attention="notice", dedup_key="signal:42",
+    ))
+    for _ in range(2):
+        now[0] += 301
+        pipe.flush_due()
+    assert pipe.get(original.delivery_id)["state"] == "failed"
+    assert len(pipe.pending_dead_letters()) == 1
+
+    healthy[0] = True
+    now[0] += 1
+    recovery = pipe.deliver(DeliveryEnvelope(
+        source="transport-probe", payload={"text": "恢复确认"},
+        metadata={"bypass_throttle": True},
+    ))
+
+    assert recovery.state == "delivered"
+    assert pipe.get(original.delivery_id)["state"] == "queued"
+    assert pipe.get(original.delivery_id)["attempts"] == 0
+    assert pipe.pending_dead_letters() == []
+    replay = pipe.flush_due()
+    assert any(row.delivery_id == original.delivery_id
+               and row.state == "delivered" for row in replay)
+
+
+def test_recovery_suppresses_stale_alert_instead_of_replaying(tmp_path):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    healthy = [False]
+    sent = []
+
+    def transport(envelope, _channel):
+        sent.append(envelope.id)
+        return TransportResult(healthy[0], error="down" if not healthy[0] else "")
+
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "jarvis.db", transport=transport,
+        clock=lambda: now[0], sleeper=lambda _seconds: None,
+    )
+    alert = pipe.deliver(DeliveryEnvelope(
+        source="selfmon", payload={"text": "十分钟前的异常"},
+        attention="alert",
+    ))
+    for _ in range(2):
+        now[0] += 301
+        pipe.flush_due()
+    assert pipe.get(alert.delivery_id)["state"] == "failed"
+
+    healthy[0] = True
+    now[0] += 30 * 60 + 1
+    pipe.deliver(DeliveryEnvelope(
+        source="transport-probe", payload={"text": "恢复确认"},
+        metadata={"bypass_throttle": True},
+    ))
+
+    assert pipe.get(alert.delivery_id)["state"] == "suppressed"
+    assert pipe.get(alert.delivery_id)["last_error"] == \
+        "recovery_replay_expired"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "calendar-sync",
+        "checkin",
+        "guardian-daemon",
+        "intention-check",
+        "morning-anchor",
+        "routine:午间活动",
+    ],
+)
+def test_recovery_never_replays_regenerated_ephemeral_work(tmp_path, source):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    healthy = [False]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(
+            healthy[0], error="down" if not healthy[0] else ""
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    failed = pipe.deliver(DeliveryEnvelope(
+        source=source,
+        payload={"text": "会由下一轮重新计算的内容"},
+        attention="notice",
+    ))
+    for _ in range(2):
+        now[0] += 301
+        pipe.flush_due()
+    assert pipe.get(failed.delivery_id)["state"] == "failed"
+
+    healthy[0] = True
+    now[0] += 1
+    pipe.deliver(DeliveryEnvelope(
+        source="transport-probe",
+        payload={"text": "恢复确认"},
+        metadata={"bypass_throttle": True},
+    ))
+
+    row = pipe.get(failed.delivery_id)
+    assert row["state"] == "suppressed"
+    assert row["last_error"] == "recovery_incident_obsolete"
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "expected_state"),
+    [(None, "queued"), ("decide", "suppressed")],
+)
+def test_recovery_reads_memorial_lifecycle_without_high_level_facade(
+    tmp_path, terminal_event, expected_state,
+):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    healthy = [False]
+    memorial_id = "mem_recovery_contract"
+    events = [{
+        "ev": "create",
+        "id": memorial_id,
+        "source": "eigenflux",
+        "title": "仍然有效的待处理项",
+        "body": "正文",
+        "epoch": now[0],
+    }]
+    if terminal_event:
+        events.append({
+            "ev": terminal_event,
+            "id": memorial_id,
+            "opt": "read",
+            "label": "已阅",
+        })
+    (tmp_path / "memorials.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in events),
+        encoding="utf-8",
+    )
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(
+            healthy[0], error="down" if not healthy[0] else ""
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    failed = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        payload={"text": "待处理项"},
+        attention="decision",
+        memorial_id=memorial_id,
+        dedup_key="memorial:recovery-contract",
+    ))
+    for _ in range(2):
+        now[0] += 301
+        pipe.flush_due()
+
+    healthy[0] = True
+    now[0] += 1
+    pipe.deliver(DeliveryEnvelope(
+        source="transport-probe",
+        payload={"text": "恢复确认"},
+        metadata={"bypass_throttle": True},
+    ))
+
+    assert pipe.get(failed.delivery_id)["state"] == expected_state
+    if terminal_event:
+        assert pipe.get(failed.delivery_id)["last_error"] == \
+            "recovery_item_resolved"
+
+
+def test_recovery_scans_past_large_obsolete_prefix_for_valid_work(tmp_path):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(True, "om_ok"),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    obsolete_ids = []
+    for index in range(201):
+        result = pipe.deliver(DeliveryEnvelope(
+            source="guardian-daemon",
+            payload={"text": f"旧告警 {index}"},
+            attention="decision",
+            metadata={
+                "force_queue": True,
+                "bypass_dedup": True,
+                "bypass_throttle": True,
+            },
+        ))
+        obsolete_ids.append(result.delivery_id)
+    valid = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        payload={"text": "仍然有效的待处理研究"},
+        attention="notice",
+        dedup_key="eigenflux:valid-after-obsolete-prefix",
+        metadata={"force_queue": True, "bypass_throttle": True},
+    ))
+    with delivery.closing(delivery._connect(pipe.path)) as db, db:
+        db.execute(
+            "UPDATE delivery_envelopes SET state='failed',attempts=?",
+            (delivery.MAX_DELIVERY_ATTEMPTS,),
+        )
+
+    now[0] += 1
+    requeued = pipe.reconcile_failed_after_recovery(
+        limit=20, recovery_epoch=now[0],
+    )
+
+    assert valid.delivery_id in requeued
+    assert pipe.get(valid.delivery_id)["state"] == "queued"
+    assert all(pipe.get(delivery_id)["state"] == "suppressed"
+               for delivery_id in obsolete_ids)
+
+
+def test_transport_health_opens_after_three_attempt_failures_and_recovers(
+    tmp_path,
+):
+    now = [_local_ts(2026, 8, 17, 10, 0)]
+    healthy = [False]
+
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda _envelope, _channel: TransportResult(
+            healthy[0], error="down" if not healthy[0] else ""
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+    pipe.deliver(DeliveryEnvelope(
+        source="selfmon", payload={"text": "transport check"},
+        attention="alert",
+    ))
+    assert pipe.transport_health() == {
+        "healthy": False,
+        "consecutive_failures": 3,
+        "last_success_epoch": 0.0,
+        "last_failure_epoch": now[0],
+    }
+
+    healthy[0] = True
+    now[0] += 1
+    pipe.deliver(DeliveryEnvelope(
+        source="transport-probe", payload={"text": "recovered"},
+        metadata={"bypass_throttle": True},
+    ))
+    status = pipe.transport_health()
+    assert status["healthy"] is True
+    assert status["consecutive_failures"] == 0
+    assert status["last_success_epoch"] == now[0]
+
+
 def test_every_delivery_connection_is_closed(monkeypatch, tmp_path):
     """A resident heartbeat must not leak one SQLite FD per state change."""
     opened = []

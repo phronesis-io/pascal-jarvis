@@ -188,6 +188,30 @@ gitignored 的 `data/` 下。不配任何一项也能跑（用中性默认）；
 `tests/test_public_repo_hygiene.py` 会挡；新增个人化维度时照上表模式加
 gitignored 配置文件 + 中性默认。
 
+## Phase 5.8 — 外部断联监控（可选但生产推荐）
+
+Guardian 本身是独立进程，但它的普通告警仍走飞书，所以飞书投递链路坏掉时不能靠
+Guardian 给自己报信。生产环境建议在任意 missed-heartbeat 服务创建一个 HTTPS ping
+检查，并把“未收到 ping”的告警阈值设为至少 45 分钟。
+
+**🧑 NEEDS HUMAN**：服务会生成一条带 token 的私有 ping URL。不要发到群聊、Issue
+或 Git；在运行 Jarvis 的 Mac 上把它放进 launchd 的私有环境变量
+`JARVIS_DEADMAN_URL`，或放进已 gitignore 的 `jarvis.yaml`：
+
+```yaml
+ops:
+  deadman:
+    enabled: true
+    url: "https://你的服务/私有-token"
+    interval_seconds: 300
+    timeout_seconds: 5
+```
+
+验证：`./scripts/python.sh -m core.deadman ping` 返回 `ok`，随后
+`./scripts/python.sh -m core.deadman status` 返回最近成功时间。URL 不会出现在日志或
+状态输出。连续三次真实飞书投递失败时，daemon 会主动停止发送健康 ping，让外部服务
+发现“机器还活着但唯一沟通渠道已断”的情况。
+
 ---
 
 ## Phase 6 — 启动与日常运维
@@ -246,6 +270,8 @@ gitignored 配置文件 + 中性默认。
 | 消息收不到但进程都在 | 两条事件连接互抢 | 确认只有一个监听器：`pgrep -fl 'lark-cli event|lark_event_sidecar'` 只应有一行 |
 | 改了 daemon.py 没生效/守护进程误报 | 常驻进程没重载 | `./restart.sh --full` |
 | claude 调用超时/很慢 | API 高峰 | 等待即可；看门狗与重试都已内置 |
+| 日历提示后台读不到凭证，但交互终端已登录 | launchd/后台上下文被 Keychain 拒绝，不是 token 过期 | 不要重复授权；系统保留旧快照并自动重试，检查 Keychain/launchd 访问上下文 |
+| 进程全绿但飞书消息连续失败 | Guardian 与业务消息共用飞书通道 | 检查 direct bot transport；生产应配置 Phase 5.8 的外部断联监控 |
 | 语音消息没转写 | 未配 OPENAI_API_KEY（Whisper 用） | 可选：export OPENAI_API_KEY=...；不配则提示用户打字 |
 | `timeout: command not found` 类告警 | macOS 无 coreutils | 可忽略（内置 bash 后备），或 `brew install coreutils` |
 

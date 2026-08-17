@@ -12,11 +12,69 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import daemon as daemon_mod
+
+
+def test_guardian_alert_has_durable_incident_identity(
+    tmp_path, monkeypatch,
+):
+    from core import delivery
+
+    captured = []
+    monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        delivery,
+        "deliver",
+        lambda envelope, **kwargs: (
+            captured.append(envelope)
+            or SimpleNamespace(state="delivered", reason="")
+        ),
+    )
+
+    assert daemon_mod.notify_lark("⚠️ 组件失联：admin") is True
+    envelope = captured[0]
+    assert envelope.dedup_key.startswith("guardian:")
+    assert envelope.throttle_key == envelope.dedup_key
+    assert envelope.metadata["incident_key"]
+    assert envelope.metadata["replayable"] is False
+
+
+def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
+    tmp_path, monkeypatch,
+):
+    from core import deadman, delivery
+
+    pinged = []
+
+    class Pipe:
+        def __init__(self, _root):
+            pass
+
+        def transport_health(self):
+            return {"healthy": False, "consecutive_failures": 3}
+
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        deadman, "status", lambda _root: deadman.DeadmanResult("ok")
+    )
+    monkeypatch.setattr(
+        deadman,
+        "ping_due",
+        lambda _root: pinged.append(True) or deadman.DeadmanResult("ok"),
+    )
+    monkeypatch.setattr(delivery, "DeliveryPipeline", Pipe)
+
+    assert daemon_mod._ping_external_deadman() == \
+        "withheld_transport_unhealthy"
+    assert pinged == []
 
 
 def test_pid_parse_with_boot_timestamp(tmp_path, monkeypatch):
@@ -708,6 +766,55 @@ def test_deadletter_consume_groups_same_kind(deadletter_env):
     daemon_mod.consume_delivery_deadletters()
     assert len(sent) == 1                      # one page, not three
     assert "共 3 条" in sent[0]
+
+
+def test_sql_deadletter_notice_is_human_and_does_not_claim_failed_is_queued(
+    tmp_path, monkeypatch,
+):
+    from core import delivery
+
+    deadletter = tmp_path / "data" / ".delivery_deadletter.jsonl"
+    sent = []
+    marked = []
+
+    class Pipe:
+        def __init__(self, _root):
+            pass
+
+        def pending_dead_letters(self, _limit):
+            return [
+                {"id": 1, "source": "eigenflux", "kind": "card",
+                 "detail": '{"ok":false,"error":"keychain Get failed"}'},
+                {"id": 2, "source": "eigenflux", "kind": "card",
+                 "detail": "raw internal error"},
+                {"id": 3, "source": "mail", "kind": "card",
+                 "detail": "API Error: secret transport detail"},
+            ]
+
+        def mark_dead_letters_notified(self, ids):
+            marked.extend(ids)
+
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_DEFAULT_DEADLETTER_FILE", deadletter)
+    monkeypatch.setattr(daemon_mod, "DEADLETTER_FILE", deadletter)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        daemon_mod, "notify_lark",
+        lambda message: sent.append(message) or True,
+    )
+    monkeypatch.setattr(delivery, "DeliveryPipeline", Pipe)
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert marked == [1, 2, 3]
+    assert len(sent) == 1
+    assert "最终未送达" in sent[0]
+    assert "只补发仍有效、仍未处理" in sent[0]
+    assert "eigenflux：2 条" in sent[0]
+    assert "mail：1 条" in sent[0]
+    assert "已保留在统一投递队列" not in sent[0]
+    assert "keychain" not in sent[0].lower()
+    assert "API Error" not in sent[0]
 
 
 def test_deadletter_consume_noop_on_missing_or_empty(deadletter_env):

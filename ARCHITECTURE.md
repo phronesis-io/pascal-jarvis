@@ -143,7 +143,11 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.delivery`: the only user-facing retry, dedup, quiet-hour, throttle,
   routing, and delivery-state machine. It uses short-lived connections,
   initializes schema once per database inode, and never holds a transaction
-  across a network send. Its retry/cap interaction is frozen in
+  across a network send. Every alert receives a stable incident identity. A
+  verified transport recovery reconciles terminal failures but requeues only
+  unresolved, unexpired work, once, under its original idempotency identity;
+  regenerated routine/Guardian/calendar output and stale alerts become audited
+  suppressions. Its retry/cap interaction is frozen in
   `docs/delivery_retry_and_caps.md`.
 - `core.lark_bot_transport`: the Keychain-independent application-bot adapter
   used by replies, cards, proactive delivery, Memorials, and EigenFlux stream
@@ -199,7 +203,10 @@ the exact release commit or a healthy resident descendant that contains it.
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
-  observability over the shared `model_control` catalog.
+  observability over the shared `model_control` catalog. Canary and real-request
+  evidence remain separate: a green tiny canary cannot erase a production
+  timeout. Real failures own an explicit escalating cooldown; only a real
+  success clears the failure streak.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
   control, and one durable Codex thread per logical Matter context. It uses the
   logical context as a cross-transport process lock, so two entrances cannot
@@ -298,7 +305,7 @@ as legacy ledger values from the pre-REQ-119 era.
 | Item was decided | Memorial ledger projected into delivery state |
 | Intent completed | Intent lifecycle and closure evidence |
 | deployment is complete | git revision + runtime version + components + smoke |
-| model fallback is usable | bounded provider canary plus live routing state |
+| model fallback is usable | real-request outcome plus non-authoritative bounded canary and live routing state |
 | calendar is current | calendar API/sync artifact with freshness |
 
 Model prose and memory summaries are never authorities for these claims.
@@ -307,7 +314,16 @@ Lark has two explicit identities. The **bot identity** uses the private app
 credential and direct OpenAPI transport for messaging and bot metadata. The
 **owner identity** uses user OAuth for personal calendar, docs, mail, and task
 mutations. Their health is reported separately; neither identity may silently
-substitute for the other.
+substitute for the other. An interactive token can remain valid while a
+background process is denied Keychain access; that runtime-context failure is
+reported as retryable degradation and never presented as an authorization
+request.
+
+The Guardian is an independent process path, not an independent communication
+channel. Its Lark alerts can fail with Lark. A configured external dead-man is
+the actual out-of-band detector: the daemon withholds its success ping after
+three consecutive real Lark transport failures, as well as when the local
+stack is unhealthy.
 
 ## Dependency Direction
 

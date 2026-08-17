@@ -67,8 +67,13 @@ done
 # snapshot is kept and annotated as stale — the next successful sync rewrites
 # the file and the annotation disappears with it.
 if [ "$_fetch_fail" -ne 0 ]; then
-  _err_summary=$(head -c 200 "$_err_file" | tr '\n' ' ')
-  echo "[calendar-sync] fetch FAILED — keeping previous snapshot (user token expired? run: lark-cli auth login): $_err_summary" >&2
+  if grep -Eqi 'keychain (Get failed|access blocked)|credential manager.*(locked|accessible)' "$_err_file"; then
+    echo "[calendar-sync] fetch FAILED — 后台进程暂时读不到飞书 user 凭证；保留旧快照并自动重试，这不是重复授权能解决的问题" >&2
+  elif grep -Eqi 'token.*(expired|invalid)|failed to authenticate|HTTP (401|403)|Request not allowed' "$_err_file"; then
+    echo "[calendar-sync] fetch FAILED — 飞书 user 授权已失效；保留旧快照（run: lark-cli auth login）" >&2
+  else
+    echo "[calendar-sync] fetch FAILED — 飞书 user 数据通道暂不可用；保留旧快照并自动重试" >&2
+  fi
   CALENDAR_FILE="$calendar_file" python3 - <<'PY' >&2
 # Idempotent stale annotation — never raises, never touches stdout.
 import os, re, sys

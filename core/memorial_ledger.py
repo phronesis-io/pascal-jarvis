@@ -180,6 +180,24 @@ def get(
     ).get(str(memorial_id))
 
 
+def current_status(root: Path, memorial_id: str) -> str:
+    """Read only the folded lifecycle status without importing the facade.
+
+    Infrastructure consumers such as delivery recovery need to know whether
+    an Item is still pending, but importing ``core.memorial`` would reverse the
+    dependency back into card rendering and transport. Attention is irrelevant
+    to lifecycle folding, so a neutral default keeps this reader at the ledger
+    boundary.
+    """
+    state = get(
+        Path(root),
+        memorial_id,
+        default_attention=lambda _source, _options, _extra: "notice",
+        lapsed_status="lapsed",
+    )
+    return str(state.get("status") or "") if state else ""
+
+
 def list_all(
     root: Path,
     *,

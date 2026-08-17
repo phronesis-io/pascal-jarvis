@@ -327,14 +327,24 @@ def _in_health_cooldown(
 ) -> bool:
     if row.get("status") != "unhealthy":
         return False
+    try:
+        explicit_until = float(row.get("cooldown_until_epoch") or 0)
+    except (TypeError, ValueError):
+        explicit_until = 0
+    if explicit_until:
+        return now_epoch < explicit_until
     cooldown = max(0, int(env.get(
         "JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS", "1800"
     )))
     if row.get("observation_source") == "real_request":
         reason = str(row.get("detail") or "").removeprefix("real request: ")
-        if reason in {"network_error", "timeout"}:
+        if reason == "network_error":
             cooldown = min(cooldown, max(0, int(env.get(
                 "JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS", "60"
+            ))))
+        elif reason == "timeout":
+            cooldown = max(cooldown, max(0, int(env.get(
+                "JARVIS_PROVIDER_TIMEOUT_COOLDOWN_SECONDS", "1800"
             ))))
         elif reason == "rate_limited":
             cooldown = min(cooldown, max(0, int(env.get(

@@ -46,6 +46,10 @@ def _fake_lark_cli(tmp_path: Path, mode: str) -> None:
         "  echo 'Error: user access token expired, please re-auth' >&2\n"
         "  exit 1\n"
         "fi\n"
+        "if [ \"$mode\" = keychain ]; then\n"
+        "  echo 'keychain Get failed: keychain access blocked' >&2\n"
+        "  exit 1\n"
+        "fi\n"
         "echo '[]'\n",
         encoding="utf-8",
     )
@@ -109,6 +113,21 @@ def test_repeated_failures_annotate_exactly_once(tmp_path):
     text = cal.read_text(encoding="utf-8")
     assert text.count("> ⚠️ 日历同步失败") == 1, "annotation must not stack"
     assert "重要会议" in text
+
+
+def test_keychain_context_failure_does_not_recommend_reauthorization(tmp_path):
+    cal = _seed_snapshot(tmp_path)
+    _fake_lark_cli(tmp_path, "keychain")
+
+    result = _run_pre(tmp_path)
+
+    assert result.returncode != 0
+    assert result.stdout.strip() == ""
+    assert "后台进程暂时读不到" in result.stderr
+    assert "自动重试" in result.stderr
+    assert "lark-cli auth login" not in result.stderr
+    assert "keychain Get failed" not in result.stderr
+    assert "重要会议" in cal.read_text(encoding="utf-8")
 
 
 def test_recovery_rewrites_snapshot_and_clears_annotation(tmp_path):
