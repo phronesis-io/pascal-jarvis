@@ -645,7 +645,7 @@ def test_heartbeat_reaches_backup2_after_backup1_transport_error(
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
     assert calls == ["", "backup1-token", "backup2-token"]
     backup1 = next(
         row for row in ph.snapshot(tmp_path)["providers"]
@@ -682,7 +682,7 @@ def test_heartbeat_primary_dns_failure_reaches_backup(tmp_path, monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
     assert calls == ["", "backup-token"]
     primary = next(
         row for row in ph.snapshot(tmp_path)["providers"]
@@ -709,12 +709,38 @@ def test_heartbeat_primary_dns_failure_reaches_gpt_without_relay(
     calls = []
     monkeypatch.setattr(
         openai_fallback,
-        "run_agentic",
-        lambda *_args, **_kwargs: calls.append("gpt") or "HEARTBEAT_OK",
+        "call_openai",
+        lambda *_args, **_kwargs: calls.append("gpt") or {
+            "output": [{
+                "content": [{"type": "output_text", "text": "HEARTBEAT_OK"}]
+            }]
+        },
     )
 
-    assert runner.claude_call("prompt") == "HEARTBEAT_OK"
+    assert runner.claude_call("prompt", allow_tools=False) == "HEARTBEAT_OK"
     assert calls == ["gpt"]
+
+
+def test_heartbeat_tool_capable_transport_failure_does_not_replay(
+        tmp_path, monkeypatch):
+    """A request that may have used tools cannot be replayed on another model."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", ""))
+        return CompletedProcess(
+            cmd, 1, stdout="", stderr="getaddrinfo failed (ENOTFOUND)")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt", allow_tools=True) == ""
+    assert calls == [""]
 
 
 def test_heartbeat_nontransport_request_error_does_not_fan_out(

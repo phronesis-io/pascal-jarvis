@@ -766,6 +766,7 @@ OPTIONS 行的**下一行**写：
 - interval: 5m
 - pre: tasks/routine_run_pre.sh
 - post: tasks/routine_run_post.py
+- no-tools: true
 - prompt: |
     [ROUTINE RUN]
     这些是 Pascal 自己建的例程（不是我写死的任务）。每条都自带：

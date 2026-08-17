@@ -336,8 +336,17 @@ def test_error_reason_classification_is_bounded():
     assert ph.reason_code_for_error(
         "API Error: Can't reach the API server (ENOTFOUND)"
     ) == "network_error"
+    assert ph.reason_code_for_error(
+        "authentication_error: invalid x-api-key"
+    ) == "auth_error"
+    assert ph.reason_code_for_error(
+        "API Error: 403 Request not allowed"
+    ) == "auth_error"
     assert ph.reason_code_for_error("HTTP 503 upstream unavailable") == \
         "server_error"
+    assert ph.reason_code_for_error("max_output_tokens=500") == \
+        "request_failed"
+    assert ph.reason_code_for_error("502 bad gateway") == "server_error"
     assert ph.reason_code_for_error(
         "name or service not known"
     ) == "request_failed"

@@ -130,6 +130,13 @@ def test_parse_heartbeat_no_tools_field(tmp_path):
     assert by_name["checkin"]["no_tools"] is False
 
 
+def test_production_routine_run_is_declared_no_tools():
+    heartbeat_file = Path(__file__).parents[1] / "HEARTBEAT.md"
+    tasks = {task["name"]: task for task in parse_heartbeat(heartbeat_file)}
+
+    assert tasks["routine-run"]["no_tools"] is True
+
+
 def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
     hb = tmp_path / "HEARTBEAT.md"
     hb.write_text(heartbeat_content)
@@ -446,6 +453,25 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     })]
     assert ("backup1", "unhealthy", "timeout") in observed
     assert runner._call_timed_out is False
+
+
+def test_tool_capable_timeout_does_not_replay_on_gpt(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat._run_isolated",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(
+            heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a tool-capable timed-out request must not be replayed"
+        ),
+    )
+
+    assert runner.claude_call("tool-capable payload", allow_tools=True) == ""
+    assert runner._call_timed_out is True
 
 
 def test_openai_transport_failure_records_transient_reason(
