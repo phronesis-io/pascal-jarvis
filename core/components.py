@@ -243,8 +243,40 @@ def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
         return False, f"{process_detail}; protocol health stale"
     status = str(state.get("status") or "unknown")
     quiet = int(state.get("quiet_streak") or 0)
-    if status in {"active", "connecting", "reconnecting"}:
-        return True, f"{status}; quiet streak {quiet}; {process_detail}"
+    started = float(state.get("started_epoch") or updated)
+    grace = float(comp.get("connect_grace_seconds", 600))
+    reconcile_path = root / comp.get(
+        "reconcile_path", "data/ef_ingress_health.json"
+    )
+    try:
+        reconcile = json.loads(reconcile_path.read_text(encoding="utf-8"))
+        reconcile_success = float(reconcile.get("last_success_epoch") or 0)
+        reconcile_status = str(reconcile.get("status") or "unknown")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        reconcile_success = 0
+        reconcile_status = "unavailable"
+    reconcile_age = time.time() - reconcile_success
+    reconcile_max_age = float(comp.get("reconcile_max_age_seconds", 900))
+    reconcile_ok = (
+        reconcile_success > 0
+        and reconcile_age <= reconcile_max_age
+        and reconcile_status == "ok"
+    )
+    if status in {"active", "connecting", "reconnecting", "degraded"}:
+        if reconcile_ok:
+            return True, (
+                f"{status}; poll verified {int(max(0, reconcile_age))}s ago; "
+                f"quiet streak {quiet}; {process_detail}"
+            )
+        if status != "degraded" and time.time() - started <= grace:
+            return True, (
+                f"{status}; startup grace, poll {reconcile_status}; "
+                f"{process_detail}"
+            )
+        return False, (
+            f"{status}; polling safety net {reconcile_status}/stale; "
+            f"{process_detail}"
+        )
     detail = str(state.get("detail") or status)
     return False, f"{status}: {detail}; {process_detail}"[:400]
 

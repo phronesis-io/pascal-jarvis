@@ -13,11 +13,12 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parent.parent / "tasks" / "eigenflux_feed_post.py"
 
 
-def _run(payload: str, tmp_path) -> str:
+def _run(payload: str, tmp_path, env_overrides: dict | None = None) -> str:
     # Force "awake" so these card-rendering assertions are time-independent;
     # the quiet-hours hold/digest behavior is covered in test_ef_delivery.py.
     env = {"JARVIS_DIR": str(tmp_path), "PATH": "/usr/bin:/bin",
            "JARVIS_EF_QUIET_OVERRIDE": "awake"}
+    env.update(env_overrides or {})
     r = subprocess.run([sys.executable, str(SCRIPT)], input=payload,
                        capture_output=True, text=True, env=env)
     return r.stdout
@@ -102,6 +103,89 @@ def test_urgent_surface_bypasses_daily_budget(tmp_path):
     out = _run(json.dumps({"user_message": "真正紧急", "urgent": True}),
                tmp_path)
     assert "真正紧急" in out
+
+
+def _seed_feed_delivery(tmp_path, state: str):
+    import sqlite3
+    from core.delivery import (
+        DeliveryEnvelope,
+        DeliveryPipeline,
+        TransportResult,
+    )
+
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "data" / "jarvis.db",
+        transport=lambda _envelope, _route: TransportResult(
+            True, message_id="om_feed"
+        ),
+    )
+    result = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux-feed-triage",
+        kind="text",
+        payload={"text": "feed receipt"},
+        requested_channel="lark",
+    ))
+    if state != "delivered":
+        with sqlite3.connect(tmp_path / "data" / "jarvis.db") as db:
+            db.execute(
+                "UPDATE delivery_envelopes SET state=?,delivered_epoch=NULL "
+                "WHERE id=?",
+                (state, result.delivery_id),
+            )
+
+
+def test_terminal_failure_does_not_spend_feed_visibility_budget(tmp_path):
+    import time
+
+    _seed_feed_delivery(tmp_path, "failed")
+    history = tmp_path / "eigenflux" / ".feed_surface_history.jsonl"
+    history.parent.mkdir(parents=True, exist_ok=True)
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    history.write_text("".join(
+        json.dumps({"epoch": int(time.time()), "day": day}) + "\n"
+        for _ in range(3)
+    ))
+
+    out = _run(json.dumps({"user_message": "故障恢复后的第一条"}), tmp_path)
+    assert "故障恢复后的第一条" in out
+
+
+def test_confirmed_delivery_is_authoritative_for_feed_cooldown(tmp_path):
+    _seed_feed_delivery(tmp_path, "delivered")
+
+    out = _run(json.dumps({"user_message": "九十分钟内不重复打扰"}), tmp_path)
+    assert out.strip() == ""
+
+
+def test_feed_delivery_accounting_honors_database_override(tmp_path):
+    from core.delivery import (
+        DeliveryEnvelope,
+        DeliveryPipeline,
+        TransportResult,
+    )
+
+    isolated_db = tmp_path / "isolated" / "delivery.db"
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=isolated_db,
+        transport=lambda _envelope, _route: TransportResult(
+            True, message_id="om_feed_override"
+        ),
+    )
+    pipe.deliver(DeliveryEnvelope(
+        source="eigenflux-feed-triage",
+        kind="text",
+        payload={"text": "feed receipt"},
+        requested_channel="lark",
+    ))
+
+    out = _run(
+        json.dumps({"user_message": "要尊重隔离库的冷却回执"}),
+        tmp_path,
+        {"JARVIS_DB_PATH": str(isolated_db)},
+    )
+    assert out.strip() == ""
 
 
 def test_cooldown_bootstraps_from_existing_memorial_queue(tmp_path):

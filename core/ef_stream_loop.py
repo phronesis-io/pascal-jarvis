@@ -4,7 +4,7 @@
 Replaces the bash eigenflux_stream_loop() in bot.sh. Manages:
   - eigenflux stream subprocess (single instance, gateway-aware)
   - Message formatting and Lark delivery
-  - PM dedup (item_id) so a reconnect can't re-deliver / re-analyze a message
+  - PM dedup (canonical msg_id; legacy item_id accepted) across stream and poll
   - Outbox writing for main session visibility
   - Background Claude analysis for follow-up context (with conversation history)
   - Graceful shutdown on SIGTERM/SIGINT (reap children, stop without restart)
@@ -42,6 +42,7 @@ from core.ef_stream import (
     extract_relation_ids,
     format_message,
     format_relation_event,
+    ingress_lock,
     is_duplicate_event,
     load_seen,
     parse_cursor,
@@ -86,15 +87,24 @@ def _write_stream_health(
     failures: int = 0,
     quiet_streak: int = 0,
     last_output_epoch: float = 0,
+    started_epoch: float | None = None,
     now_epoch: float | None = None,
 ) -> dict:
     """Atomically expose protocol health; process existence is not enough."""
     root = Path(jarvis_dir)
     path = root / STREAM_HEALTH_FILE
+    now = float(time.time() if now_epoch is None else now_epoch)
+    if started_epoch is None:
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            started_epoch = float(previous.get("started_epoch") or 0)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            started_epoch = 0
     payload = {
         "version": 1,
         "status": str(status),
-        "updated_epoch": float(time.time() if now_epoch is None else now_epoch),
+        "updated_epoch": now,
+        "started_epoch": float(started_epoch or now),
         "last_output_epoch": float(last_output_epoch or 0),
         "failures": max(0, int(failures)),
         "quiet_streak": max(0, int(quiet_streak)),
@@ -312,6 +322,7 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
             recommend=authored_recommend,
             context=json.dumps(metadata or {}, ensure_ascii=False)[:1500],
             matter_id=str((metadata or {}).get("matter_id", "")),
+            dedup_key=(f"eigenflux:{ids[0]}" if ids else ""),
             authoring_protocol=authoring_audit_text is not None,
             authoring_audit_text=authoring_audit_text,
         )
@@ -458,6 +469,140 @@ OPTIONS: 就按建议回复 | 先不回"""
     return result.text
 
 
+_UNSAFE_ANALYSIS_MARKERS = (
+    "**tool:",
+    "<tool_call",
+    "<function_calls",
+    '"output_mode":',
+    '"tool_use_id":',
+)
+
+
+def _safe_analysis_text(value: str) -> str:
+    """Reject provider/tool transcripts before they can become card content."""
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if any(marker in lowered for marker in _UNSAFE_ANALYSIS_MARKERS):
+        log(
+            "ef-stream",
+            "Discarded analysis containing provider/tool transcript",
+            level="warn",
+        )
+        return ""
+    return text
+
+
+def handle_pm_event(
+    line: str,
+    *,
+    user_id: str,
+    seen_file: Path,
+    jarvis_dir: str | Path,
+    log_file: str = "",
+    procs: dict | None = None,
+    stop_event: threading.Event | None = None,
+    analyze: bool = True,
+    force: bool = False,
+) -> bool:
+    """Durably accept one PM event through the shared stream/polling path."""
+    jd = Path(jarvis_dir)
+    msg = format_message(line)
+    if not msg:
+        return True
+    ids = extract_item_ids(line)
+
+    # Avoid spending a model call on an event another ingress already handled.
+    with ingress_lock(seen_file):
+        seen = load_seen(seen_file)
+        if not force and is_duplicate_event(ids, set(seen)):
+            log("ef-stream", "Skipping already-delivered message (dedup)")
+            return True
+
+    # Model analysis deliberately runs outside the cross-process receipt lock.
+    # If polling accepts the raw message while this is running, the second
+    # duplicate check below drops the enriched copy instead of blocking the
+    # deterministic safety net for up to the model timeout.
+    analysis = ""
+    details = extract_detail(line)
+    stopped = stop_event is not None and stop_event.is_set()
+    if analyze and details and not stopped:
+        detail_str = "\n".join(
+            json.dumps(detail, ensure_ascii=False) for detail in details
+        )
+        conv_id = str(details[0].get("conv_id") or "")
+        analysis = _safe_analysis_text(
+            _run_analysis(
+                detail_str,
+                conv_id,
+                str(jd),
+                log_file,
+                procs,
+                stop_event,
+            ) or ""
+        )
+
+    body = msg
+    authored_options = None
+    authored_recommend = None
+    authoring_audit_text = ""
+    if analysis and "HEARTBEAT_OK" not in analysis:
+        authored = memorial.parse_authored_cards(analysis)[0]
+        analysis_body = str(authored["body"])
+        analysis_title = str(authored["title"])
+        if analysis_title and analysis_title not in analysis_body:
+            analysis_body = (
+                f"**{analysis_title}**\n{analysis_body}"
+            ).strip()
+        body = f"{msg}\n\n💡 {analysis_body}" if analysis_body else msg
+        authored_options = authored["options"]
+        authored_recommend = authored["recommend"]
+        authoring_audit_text = analysis_body
+
+    match = re.search(r"\*\*(.+?)\*\*", msg)
+    title = f"{match.group(1)} 来信" if match else "EigenFlux 消息"
+    metadata = extract_metadata(line)
+    metadata["external_event_ids"] = list(ids)
+    metadata["ingress"] = "stream" if analyze else "poll_reconcile"
+
+    # The stream and polling reconciler can observe the same PM. Recheck and
+    # hold the shared lock through the durable receipt so only one can win.
+    with ingress_lock(seen_file):
+        seen = load_seen(seen_file)
+        if not force and is_duplicate_event(ids, set(seen)):
+            log("ef-stream", "Skipping concurrently accepted message (dedup)")
+            return True
+        try:
+            from core.matter_router import ingest_signal
+
+            routed = ingest_signal({
+                "source_id": "eigenflux",
+                "source_type": "cli_stream" if analyze else "cli_poll",
+                "event_id": ids[0] if ids else parse_cursor(line),
+                "title": title,
+                "summary": analysis,
+                "body": body,
+                "metadata": metadata,
+            })
+            metadata = {**metadata, **routed}
+        except Exception as exc:
+            log("ef-stream", f"Matter routing skipped: {exc}", level="warn")
+
+        _, accepted, _ = _deliver_memorial_and_mark(
+            body,
+            ids,
+            metadata,
+            user_id,
+            seen,
+            seen_file,
+            jd,
+            title=title,
+            authored_options=authored_options,
+            authored_recommend=authored_recommend,
+            authoring_audit_text=authoring_audit_text,
+        )
+        return accepted
+
+
 def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     jd = Path(jarvis_dir)
     _write_stream_health(jd, "starting", detail="initializing stream loop")
@@ -541,6 +686,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
     threading.Thread(target=_stall_watchdog, daemon=True,
                      name="ef-stall-watchdog").start()
 
+    loop_started_epoch = time.time()
     if stop.wait(5):
         return
     log("ef-stream", "Starting real-time message stream")
@@ -576,6 +722,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
             detail="stream subprocess starting; protocol not yet verified",
             failures=failures,
             quiet_streak=quiet_streak,
+            started_epoch=loop_started_epoch,
         )
 
         try:
@@ -631,25 +778,27 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 rel = format_relation_event(line)
                 if rel:
                     rel_ids = extract_relation_ids(line)
-                    if relation_event_kind(line) == "friend_request":
-                        # The 10-minute eigenflux-friends task owns request
-                        # review and execution. Sending here as well created a
-                        # second, non-actionable card for the same request.
-                        seen = remember_seen(seen, rel_ids)
-                        save_seen(seen_file, seen)
-                        log("ef-stream", "Friend request observed; lifecycle "
-                            "delegated to eigenflux-friends")
-                        _advance_cursor(
-                            cursor_file, new_cursor, accepted=True
-                        )
-                        continue
-                    if rel_ids and is_duplicate_event(rel_ids, set(seen)):
-                        log("ef-stream", "Skipping already-delivered friend event (dedup)")
-                        accepted = True
-                    else:
-                        seen, accepted, _ = _deliver_memorial_and_mark(
-                            rel, rel_ids, {"kind": "relation"}, user_id,
-                            seen, seen_file, jd, title="EigenFlux 好友动态")
+                    # Relation and PM receipts share one bounded file. Reload
+                    # it under the same lock so a friend event cannot overwrite
+                    # msg_ids written concurrently by the polling reconciler.
+                    with ingress_lock(seen_file):
+                        seen = load_seen(seen_file)
+                        if relation_event_kind(line) == "friend_request":
+                            # The 10-minute eigenflux-friends task owns request
+                            # review and execution. Sending here as well created
+                            # a second non-actionable card for the same request.
+                            seen = remember_seen(seen, rel_ids)
+                            save_seen(seen_file, seen)
+                            accepted = True
+                            log("ef-stream", "Friend request observed; lifecycle "
+                                "delegated to eigenflux-friends")
+                        elif rel_ids and is_duplicate_event(rel_ids, set(seen)):
+                            log("ef-stream", "Skipping already-delivered friend event (dedup)")
+                            accepted = True
+                        else:
+                            seen, accepted, _ = _deliver_memorial_and_mark(
+                                rel, rel_ids, {"kind": "relation"}, user_id,
+                                seen, seen_file, jd, title="EigenFlux 好友动态")
                     _advance_cursor(
                         cursor_file, new_cursor, accepted=accepted
                     )
@@ -668,75 +817,19 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                     _advance_cursor(cursor_file, new_cursor, accepted=True)
                     continue
 
-                # Dedup: skip a re-delivered event (reconnect after a cursor-write gap)
-                ids = extract_item_ids(line)
-                if is_duplicate_event(ids, set(seen)):
-                    log("ef-stream", "Skipping already-delivered message (dedup)")
-                    _advance_cursor(cursor_file, new_cursor, accepted=True)
-                    continue
-
-                # ONE card per incoming message (7/22: the old raw-card-then-
-                # analysis-card pair doubled every conversation into 2 pushes
-                # — 12 cards in 32min during one chat). Analysis runs FIRST;
-                # the single combined card carries 原文+💡. No-loss contract
-                # is preserved because `seen` is only marked after the card
-                # is accepted — a crash mid-analysis just re-delivers the
-                # event on reconnect. Analysis failure degrades to a raw card.
-                analysis = ""
-                details = extract_detail(line)
-                if details and not stop.is_set():
-                    detail_str = "\n".join(json.dumps(d, ensure_ascii=False) for d in details)
-                    conv_id = details[0].get("conv_id", "")
-                    analysis = _run_analysis(
-                        detail_str,
-                        conv_id,
-                        jarvis_dir,
-                        log_file,
-                        procs,
-                        stop,
-                    ) or ""
-                body = msg
-                authored_options = None
-                authored_recommend = None
-                # Empty still means "segmented external text": literal protocol
-                # tokens in the network message are content, not Jarvis residue.
-                authoring_audit_text = ""
-                if analysis and "HEARTBEAT_OK" not in analysis:
-                    authored = memorial.parse_authored_cards(analysis)[0]
-                    analysis_body = str(authored["body"])
-                    analysis_title = str(authored["title"])
-                    if analysis_title and analysis_title not in analysis_body:
-                        analysis_body = f"**{analysis_title}**\n{analysis_body}".strip()
-                    body = f"{msg}\n\n💡 {analysis_body}" if analysis_body else msg
-                    authored_options = authored["options"]
-                    authored_recommend = authored["recommend"]
-                    authoring_audit_text = analysis_body
-                m = re.search(r"\*\*(.+?)\*\*", msg)
-                title = f"{m.group(1)} 来信" if m else "EigenFlux 消息"
-                metadata = extract_metadata(line)
-                # Attach network traffic to an existing Matter when explicit
-                # metadata, conversation binding, or a strong lexical match is
-                # available. Never auto-create Matters from ambient feed data.
-                try:
-                    from core.matter_router import ingest_signal
-                    routed = ingest_signal({
-                        "source_id": "eigenflux",
-                        "source_type": "cli_stream",
-                        "event_id": ids[0] if ids else new_cursor,
-                        "title": title,
-                        "summary": analysis,
-                        "body": body,
-                        "metadata": metadata,
-                    })
-                    metadata = {**metadata, **routed}
-                except Exception as e:
-                    log("ef-stream", f"Matter routing skipped: {e}", level="warn")
-                seen, accepted, _ = _deliver_memorial_and_mark(
-                    body, ids, metadata, user_id,
-                    seen, seen_file, jd, title=title,
-                    authored_options=authored_options,
-                    authored_recommend=authored_recommend,
-                    authoring_audit_text=authoring_audit_text)
+                # The HTTP polling safety net calls this same handler. It owns
+                # cross-process locking and reloads the receipt set, so neither
+                # path can double-deliver a PM observed by both transports.
+                accepted = handle_pm_event(
+                    line,
+                    user_id=user_id,
+                    seen_file=seen_file,
+                    jarvis_dir=jd,
+                    log_file=log_file,
+                    procs=procs,
+                    stop_event=stop,
+                    analyze=True,
+                )
                 if not _can_continue_after_delivery(
                     proc, accepted=accepted
                 ):

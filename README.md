@@ -165,8 +165,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  │   ├── Priority tasks bypass batch cap                    │
 │  │   ├── Batch Claude call                                  │
 │  │   └── Run post-scripts (act on output)                   │
-│  ├── EigenFlux stream (background) → core/ef_stream_loop.py │
-│  │   └── WebSocket → real-time PM delivery + Claude analysis│
+│  ├── EigenFlux ingress → core/ef_stream_loop.py             │
+│  │   ├── WebSocket → instant PM delivery + analysis         │
+│  │   └── 5m poll/cache reconcile → no-loss fallback         │
 │  └── Admin console (background, optional) → admin.py        │
 │                                                             │
 │  core/                            (system)                  │
@@ -206,7 +207,8 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  │   memory_hourly → daily → weekly,                        │
 │  │   memory_consolidate, memory_tidy                        │
 │  ├── EigenFlux:                                             │
-│  │   feed, friends, publish, profile, preinstall + stream   │
+│  │   inbox reconcile, feed, friends, publish, profile,      │
+│  │   preinstall + stream                                    │
 │  ├── Content:                                               │
 │  │   content_recommend (reaction = one-tap watch-later)    │
 │  └── Monitoring & ops:                                      │
@@ -418,19 +420,20 @@ lark:
 
 📖 **Full docs: [plugins/eigenflux/README.md](plugins/eigenflux/README.md)**
 
-[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Five heartbeat tasks plus a real-time stream integrate it:
+[EigenFlux](https://eigenflux.ai) is a broadcast network where AI agents share and receive real-time signals. Six heartbeat tasks plus a real-time stream integrate it:
 
 | Task | Interval | What it does |
 |---|---|---|
+| `eigenflux-inbox-reconcile` | 5m | Poll/cache safety net for private messages; repairs proven no-send failures |
 | `eigenflux-feed-triage` | 10m | Pull feed, score items, push actionable ones to you |
 | `eigenflux-friends`     | 10m | Detect incoming friend requests (**priority**) |
 | `eigenflux-publish`     | 1h  | Auto-broadcast useful signals from your conversations |
 | `eigenflux-profile`     | 24h | Sync your EigenFlux bio with memory changes |
 | `eigenflux-preinstall`  | 24h | Sync and verify the installed EigenFlux capability set |
 
-`eigenflux-friends` is a **priority task** and bypasses the regular batch cap.
+`eigenflux-inbox-reconcile` and `eigenflux-friends` are **priority tasks** and bypass the regular batch cap. Inbox reconciliation is deterministic and never calls a model.
 
-Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers private messages in real time with background analysis. This replaces the old polling message task. The stream is managed exclusively by `ef_stream_loop.py` — the `openclaw-eigenflux` gateway plugin must be disabled to avoid "Connection replaced" conflicts.
+Additionally, `bot.sh` runs a continuous EigenFlux stream (WebSocket) that delivers private messages in real time with background analysis. The five-minute reconciler supplements it using `msg fetch` and the CLI's durable cache, as required by the EigenFlux client contract. Both paths share the canonical `msg_id` receipt and a local ingestion lock. The stream is managed exclusively by `ef_stream_loop.py` — the `openclaw-eigenflux` gateway plugin must be disabled to avoid "Connection replaced" conflicts.
 
 **Enable** — add to `jarvis.yaml`:
 ```yaml

@@ -290,8 +290,10 @@ if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
      "$JARVIS_DIR/tests/test_eigenflux_feed_search.py" \
      "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" \
      "$JARVIS_DIR/tests/test_ef_stream.py" \
+     "$JARVIS_DIR/tests/test_ef_stream_loop.py" \
+     "$JARVIS_DIR/tests/test_eigenflux_ingress.py" \
      "$JARVIS_DIR/tests/test_eigenflux_messages.py" >/tmp/ef_pi_pytest.out 2>&1; then
-  echo "    ✓ pytest (prompt + feed_search + publish_post + ef_stream + messages)"
+  echo "    ✓ pytest (prompt + feed + stream + ingress + messages)"
 else
   echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"; fail+=("pytest failed")
 fi
