@@ -405,6 +405,49 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
     assert runner._last_call_error == "no healthy provider fallback available"
 
 
+def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_fallback",
+        lambda _root, **_kwargs: "backup1",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://relay.invalid")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "core.heartbeat._run_isolated",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(
+            heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])),
+    )
+    fallback_calls = []
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda system, prompt, **kwargs: (
+            fallback_calls.append((prompt, kwargs)) or "GPT_RECOVERED"
+        ),
+    )
+    observed = []
+    monkeypatch.setattr(
+        "core.provider_health.observe",
+        lambda provider, status, detail, **_kwargs: observed.append(
+            (provider, status, detail)
+        ),
+    )
+
+    assert runner.claude_call("routine payload", allow_tools=False) == "GPT_RECOVERED"
+    assert fallback_calls == [("routine payload", {
+        "restrict_tools": False,
+        "allow_tools": False,
+    })]
+    assert ("backup1", "unhealthy", "timeout") in observed
+    assert runner._call_timed_out is False
+
+
 def test_openai_transport_failure_records_transient_reason(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")

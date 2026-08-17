@@ -1405,7 +1405,33 @@ You have access to the user's memory below. Use it to personalize your responses
             self._call_timed_out = True
             self._last_call_error = f"claude call timed out ({call_timeout}s)"
             self._call_context_overflow = False
-            self._log(f"Claude call timed out ({call_timeout}s)")
+            timed_out_provider = (
+                "backup2" if _backup2_active else
+                ("backup1" if use_backup else "primary")
+            )
+            try:
+                from core.provider_health import observe
+                observe(
+                    timed_out_provider, "unhealthy", "timeout",
+                    root=self.jarvis_dir,
+                )
+            except Exception:
+                pass
+            self._log(
+                f"Claude call timed out ({call_timeout}s) on "
+                f"{timed_out_provider}; trying GPT fallback",
+                level="warn",
+            )
+            fallback_kwargs = {"restrict_tools": restrict_tools}
+            if not allow_tools:
+                fallback_kwargs["allow_tools"] = False
+            fallback = self._openai_fallback_call(
+                system_prompt, prompt, **fallback_kwargs,
+            )
+            if fallback:
+                self._call_timed_out = False
+                self._last_call_error = ""
+                return fallback
             return ""
         except FileNotFoundError:
             self._last_call_error = "claude CLI not found"
