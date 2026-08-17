@@ -1,5 +1,12 @@
 # PRD — Card delivery closure: reachable surfaces, honest taps, durable approvals
 
+> **Current status (2026-08-17): partially superseded.** Honest tap outcomes
+> and durable approvals remain current. The web/phone desk routing below is a
+> historical failure record: Lark is now the sole delivery and decision
+> surface, and ambient exhaust is ledger-only. See
+> [`prd_portfolio.md`](prd_portfolio.md) and
+> [`prd_2026_08_11_signal_over_noise.md`](prd_2026_08_11_signal_over_noise.md).
+
 Status: implemented 2026-08-03
 Owner complaint (2026-08-03, verbatim intent): 飞书收到的消息很少很少了；卡片系统经常打不开；
 有些选项点了以后也没有后续。

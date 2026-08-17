@@ -1,5 +1,11 @@
 # Jarvis 交互质量 PRD v4.0 — 交付可靠性与自监控盲区
 
+> **Portfolio status (2026-08-17): historical with two deliberate shadows.**
+> Most requirements shipped; REQ-79.2 was rejected, REQ-86/88 remain
+> observation-only, and REQ-87 was never allocated. The old “评审通过” label
+> records the 2026-07-01 review, not permission to implement residual ideas.
+> See [`prd_portfolio.md`](prd_portfolio.md).
+
 - 日期：2026-07-01（评审定稿 v4.1）
 - 状态：**评审通过**（三路独立评审：必要性/简单性、证据真实性、风险回归；裁决记录见 §6）
 - 编号：REQ-78 ~ REQ-90（接续 v3 的 REQ-59~77，v3 已全部上线并封版 v1.0.0）

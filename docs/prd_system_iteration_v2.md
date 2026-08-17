@@ -1,5 +1,10 @@
 # PRD：Jarvis 系统迭代 v2.0（查漏补全 · Intent 闭环 · Dashboard · 管理后台）
 
+> **Portfolio status (2026-08-17): historical, shipped.** “留下期” and P2
+> sections below are the June design record, not today's queue. Dashboard
+> expansion is frozen; current work is listed only in
+> [`prd_portfolio.md`](prd_portfolio.md) and [`../TODO.md`](../TODO.md).
+
 - 版本：v2.0（2026-06-13）
 - 作者：Claude（基于 55-agent 全模块审计：10 子系统地图 + 8 维度交叉审计 + 对抗验证）
 - 编号：延续 prd_interaction_quality.md（v1.0 用掉 REQ-01~29），本期 REQ-30 起

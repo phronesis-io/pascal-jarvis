@@ -1,5 +1,11 @@
 # PRD：Jarvis 交互质量与可靠性（Interaction Quality & Reliability）
 
+> **Portfolio status (2026-08-17): historical, substantially shipped.** This
+> file preserves the June evidence and requirement lineage; its remaining
+> “路线图” text is not an active backlog. Current scope and unresolved work are
+> governed by [`prd_portfolio.md`](prd_portfolio.md), [`../PRODUCT.md`](../PRODUCT.md),
+> and [`../TODO.md`](../TODO.md).
+
 - 版本：v1.0（2026-06-11）
 - 作者：Claude（基于全量过往交互审计）
 - 状态：P0 全部上线；P1 中 REQ-11/12/13/25/26/28 已上线、REQ-15 部分上线、REQ-22 验证已存在；其余为路线图（多数需 Pascal 形态决策）

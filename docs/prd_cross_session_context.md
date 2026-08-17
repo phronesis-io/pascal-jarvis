@@ -1,5 +1,10 @@
 # Cross-Session Context for the Main Agent
 
+> **Status (2026-08-17): current and shipped.** Runtime evidence for a specific
+> release is tracked separately from this product contract. Product expansion
+> is frozen; changes here must improve privacy, correctness, recovery, or
+> maintainability without creating another user-facing surface.
+
 ## Problem
 
 Pascal works in Lark, Claude Code, and Codex, but the main Jarvis conversation

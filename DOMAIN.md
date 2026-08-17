@@ -53,6 +53,12 @@ Invariant: the autonomy level is enforced by code against the stored Routine.
 A model may request anything and is granted only what its Routine already
 holds. Every claimed run reaches a terminal audit row.
 
+`no_output` and `deferred` are different facts. `no_output` means a model call
+returned but did not supply usable content for that occurrence. `deferred`
+means model infrastructure failed before a content decision; the claimed row
+is closed for audit, the Routine is re-armed on a short bounded delay, and the
+occurrence is not treated as spent.
+
 Distinguished from Intent: an Intent is one promise at one future moment. A
 Routine is a standing rhythm that gathers its own evidence each time.
 
@@ -136,6 +142,8 @@ completion is not automatically product-outcome completion.
 - Delivery transports an Item or reply; it does not own their business state.
 - A Handoff closes when its exact Item or Matter continuation is consumed.
 - Memory summarizes objects but never replaces their authoritative stores.
+- A tool-capable provider call with an uncertain end cannot be replayed
+  automatically; a text-only call may follow the bounded fallback plan.
 - L3 proposes, L2 schedules engineering work, and L1 proves delivery; none of
   these may infer a product outcome from an Agent's completion sentence.
 

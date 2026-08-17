@@ -1,7 +1,14 @@
 # PRD: Delivery Connectors — 输出信道对称化
 
-Status: DRAFT — awaiting owner sign-off on scope (esp. §6 phasing)
+Status: Rejected as current scope; retained as historical design evidence
 Date: 2026-07-15
+
+> **Current ruling (2026-08-17):** Lark is the product and sole delivery
+> surface. `core.delivery` owns the one durable delivery state machine, while
+> `core.lark_bot_transport` is the application-bot adapter. Telegram, Slack,
+> email, neutral-card portability, and multi-backend fan-out are not backlog
+> without a committed adopter and an explicit product thaw. Do not implement
+> the phases below from this document.
 
 ## 1. Problem
 

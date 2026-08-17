@@ -1,5 +1,12 @@
 # Jarvis Task System — Complete Design
 
+> **Current status (2026-08-17): consolidated and partly stale.** The
+> praxis/poiesis vocabulary, capture, decay, and weekly review remain useful.
+> Free-time nudges were retired by engagement evidence, and user-visible work
+> now follows the Item/Matter/Intent boundaries. Do not recreate a parallel
+> task inbox from this historical design. See
+> [`prd_portfolio.md`](prd_portfolio.md) and [`../DOMAIN.md`](../DOMAIN.md).
+
 ## Philosophy (50 words)
 
 Tasks are commitments to finite time, not obligations to productivity. The system practices 知行合一: a task uncommitted-to is noise; a task stale is a signal about desire. Praxis (becoming) is protected before poiesis (producing). Whitespace is sacred. Explicit rejection is freedom. Decay is mercy.

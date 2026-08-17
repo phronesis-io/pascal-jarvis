@@ -6,7 +6,7 @@ This is one of the two **built-in plugins** (the other is [EigenFlux](../eigenfl
 
 - Subscribes to `im.message.receive_v1` events (foreground in `bot.sh`)
 - Sends replies back as the bot identity
-- Shows a transient `Thinking...` indicator while Claude is working
+- Shows a transient `Thinking...` indicator while the selected model route is working
 - Exposes calendar free/busy checks (used by the `checkin` task)
 
 ---
@@ -15,7 +15,7 @@ This is one of the two **built-in plugins** (the other is [EigenFlux](../eigenfl
 
 Built on the official [larksuite/cli](https://github.com/larksuite/cli) — **3 commands from zero to live bot**.
 
-### If your assistant (Claude Code etc) is driving
+### If your coding assistant (Codex, Claude Code, etc.) is driving
 
 Paste this to your assistant:
 
@@ -51,23 +51,39 @@ print('open_id:', json.load(sys.stdin)['data']['user']['open_id'])
 "
 ```
 
-Paste it into `jarvis.yaml`:
+Paste it into `jarvis.yaml`. For a production resident process, also copy the
+App ID and App Secret from the developer console's credentials page so bot
+delivery does not depend on the user's macOS Keychain:
 
 ```yaml
 lark:
   user_id: "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  app_id: ""  # optional — lark-cli remembers it internally, but setting it here is fine
+  app_id: "cli_xxxxxxxxxxxxxxxx"
+  app_secret: "your private app secret"
 ```
 
 Now `./bot.sh` will start the Lark listener. Send your bot a message on Lark — it replies.
+
+`jarvis.yaml` is gitignored. Never place the secret in tracked docs, logs,
+delivery rows, or command arguments. Without these two fields the legacy
+`lark-cli --as bot` path remains a compatibility fallback; the direct transport
+is the preferred production path.
 
 ---
 
 ## How it wires into the system
 
-- **Event subscription**: `bot.sh` pipes `lark_subscribe_messages` into a `while read` loop → parses each NDJSON event with `jq` → routes to `claude -p`.
-- **Session mapping**: Each Lark `conv_key` (sender's `open_id` for p2p, `chat_id` for groups) maps to a stable UUID5 session in `active_sessions.json`, auto-rotating when the session file crosses `claude.max_session_size`.
-- **Replies**: `lark_reply` for the main markdown answer; `lark_reply_text` for short acks; `lark_delete_message` clears the `Thinking...` placeholder.
+- **Event subscription**: `bot.sh` consumes `lark_subscribe_messages` NDJSON,
+  parses each event, binds it to a logical context, and sends eligible text to
+  the model route selected by `core.model_control`.
+- **Session mapping**: Each Lark `conv_key` (sender `open_id` for p2p,
+  `chat_id` for groups) maps to a logical context and a current physical
+  provider session in `active_sessions.json`. Claude-compatible sessions and
+  Codex threads remain separate underneath the same context.
+- **Replies and proactive delivery**: `core.lark_bot_transport` uses the app
+  credential and requires a real Lark `message_id`. The shell client remains a
+  compatibility adapter. `lark_delete_message` clears the `Thinking...`
+  placeholder.
 - **Calendar**: `tasks/checkin_pre.sh` sources this plugin and calls `lark_freebusy` to skip check-ins when you're busy.
 
 ---
@@ -105,14 +121,19 @@ The bot recognizes these as case-insensitive shortcuts you can send from Lark:
 
 ## Identity switching — `--as user` vs `--as bot`
 
-lark-cli supports two identities after login. Jarvis always uses the **bot** identity for replies (so the conversation UI shows the bot avatar), but you as a human can also issue commands as yourself (`--as user`):
+lark-cli supports two identities after login. Jarvis uses the **bot** identity
+for replies, cards, proactive alerts, and EigenFlux messages. The preferred
+bot transport authenticates directly with the app credential. Personal
+calendar, docs, mail, and task operations use the separate **user** OAuth
+identity (`--as user`):
 
 ```bash
 lark-cli calendar +agenda --as user              # your agenda
 lark-cli im +messages-send --as bot --user-id ou_xxx --text "hi"  # bot replies
 ```
 
-The plugin's `client.sh` hard-codes `--as bot` for outbound messages.
+The plugin's `client.sh` hard-codes `--as bot` for its compatibility outbound
+functions. Unified production delivery prefers `core.lark_bot_transport`.
 
 ---
 
@@ -140,7 +161,10 @@ lark-cli auth login --scope "im:message,im:message:send_as_bot,calendar:calendar
 Benign. `lark-cli` receives event types we don't subscribe to (like `message_read_v1`); the bot ignores them.
 
 **Bot stuck on "Thinking..." forever**
-Check `work_dir` in `jarvis.yaml` matches the Claude project dir (`~/.claude/projects/<slug>/`). See top-level [Troubleshooting](../../README.md#troubleshooting).
+Check `jarvis.log`, run `./restart.sh --status`, and confirm `work_dir` is the
+intended accessible project root. Use `/session reset` for a bounded owner-chat
+context reset; do not delete the durable session tracker. See top-level
+[Troubleshooting](../../README.md#troubleshooting).
 
 **`lark-cli auth status` says "not authenticated" after login**
 You likely missed `npx skills add larksuite/cli -y -g` (the Skill bundle is required for the CLI to know how to format commands). Re-run it and try again.

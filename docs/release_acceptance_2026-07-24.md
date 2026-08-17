@@ -11,8 +11,8 @@
 
 | Item | Outcome contract | Implementation | Deterministic evidence | Production evidence |
 |---|---|---|---|---|
-| PRD-1 Unified Delivery | One policy/state machine for replies, proactive output, cards, web, and push | `core/delivery.py`; bot, heartbeat, Memorial, EigenFlux stream integrations | delivery, reply, heartbeat, Memorial, stream, quiet-hour tests | post-restart delivery smoke |
-| PRD-2 Memorial-first Items | One user inbox; Matter is topic; Intent is timer; old inboxes redirect | `/items`, Item APIs, Matter detail, Intent closure bridge, route redirects | dashboard, Item, Matter, continuity, mobile tests | desktop/mobile browser smoke |
+| PRD-1 Unified Delivery | One policy/state machine for replies, proactive output, Lark cards, and ledger-only ambient output; legacy web/push routing is retired | `core/delivery.py`; bot, heartbeat, Memorial, EigenFlux stream integrations | delivery, reply, heartbeat, Memorial, stream, quiet-hour tests | post-restart Lark delivery smoke |
+| PRD-2 Memorial-first Items | One Item ledger; Matter is topic; Intent is timer; Lark is the only decision surface | Item APIs, Matter detail, Intent closure bridge, historical route redirects | dashboard archive, Item, Matter, continuity, retirement tests | local archive smoke plus real Lark mobile flow |
 | PRD-3 Module boundaries | Policy leaves producers; lifecycle/scheduler/closure have stable imports | `core.delivery`, `core.intent_*`; low-level transport remains an adapter only | intent-boundary and producer integration tests | runtime paths use unified pipeline |
 | PRD-4 Deploy as verify | A restart is forbidden without merged/reviewed/green code and runtime proof | `core/release_gate.py`, `core/deploy.py`, `restart.sh` | release-gate and deploy tests | merged PR, CI, restart, component verify, smoke |
 | PRD-5 Cross-process state | Shared mutable truth uses short-lived SQLite WAL connections | Delivery, continuity, schedule, runtime, Delegation, iteration tables | connection, concurrency, queue, continuity tests | bounded live process descriptors |
@@ -316,6 +316,7 @@ assumption rather than a production-code defect:
 | 132 | Self-monitoring labeled every awaiting closure older than three days a zombie, even though the lifecycle authority gives external closures fourteen days and keeps any category alive while its follow-up is still pending or triggered | The read-only monitor now uses the authoritative per-category closure TTL and the same live-follow-up exclusion as the lifecycle sweeper; explicit diagnostic overrides remain available. External 7/15-day boundaries, live/dead follow-up transitions, and human-readable threshold output have regressions |
 | 133 | The documented default code-release command restarted only the bot tree, while launchd-owned daemon and Dashboard kept the previous revision; the script nevertheless printed a successful runtime-version verdict, and this half-deploy recurred on two consecutive releases | The default command and `--full` now call one complete governed-deploy function that refreshes installed launchd definitions, restarts daemon/bot/UI, and verifies every resident component. Admin and sidecar operational restarts explicitly use the same-revision `--runtime` path; source regressions pin both dispatch boundaries |
 | 134 | Four domain bootstraps still performed unregistered `ALTER TABLE ADD COLUMN` operations, so a partial migration had no durable identity and a marker could not be checked against the physical schema | A shared SQLite migration executor now applies each domain's additive compatibility columns under a named `IMMEDIATE` transaction; concurrent processes serialize before reading state and retry whole transactions after bounded lock contention. Compatible pre-existing columns are adopted without rewriting data, failed batches leave neither columns nor markers, and type/nullability/default or marker/schema disagreement fails closed. Intentions also serializes its shared-connection bootstrap; migration-engine, concurrency, and existing legacy-schema regressions cover the path |
+| 135 | A Routine occurrence was claimed and its next fire advanced before the model call, but quota/timeout failure reached the post-hook as empty or malformed output and was stored as `no_output`, silently spending a valid reminder | Heartbeat emits a distinct infrastructure sentinel. The Routine post-hook closes the claimed audit row as `deferred`, re-arms the definition after a bounded delay, and clears the inflight receipt only after the database commit. A successful model call with no usable content remains `no_output`; text-only transport failover and uncertain tool-capable no-replay boundaries have focused regressions |
 
 Generic `COMMENTED` reviews do not count as approval. Formal approval must
 reference the final PR head, so a review submitted before the final push cannot
@@ -362,7 +363,8 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2115 passed` for this candidate);
+- full local test result for the exact candidate, with environment-restricted
+  checks identified rather than silently omitted;
 - public-repository hygiene and secret scan;
 - independent review, or an explicit admin-owner release decision where branch
   policy intentionally requires zero approvals and no other review rule, and
@@ -370,6 +372,7 @@ Each production release must carry:
 - required CI checks;
 - merged commit on protected `main`;
 - release-gated restart;
-- component health, delivery smoke, desktop/mobile browser smoke;
+- component health, delivery smoke, local Admin/Dashboard browser smoke, and a
+  real Lark mobile conversation (the old mobile web gateway is retired);
 - provider read-only canary;
 - post-release L3 observation.

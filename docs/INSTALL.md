@@ -1,6 +1,6 @@
 # Jarvis 安装指南（为 AI Agent 设计 / Agent-Oriented Install Guide)
 
-> **读者设定**：你大概率是一个正在替人类安装 Jarvis 的 AI 助手（Claude Code / Cursor）。
+> **读者设定**：你大概率是一个正在替人类安装 Jarvis 的 coding agent（Codex / Claude Code / Cursor）。
 > 本指南按这个前提写：每个阶段给出**可执行命令 + 验证方法**；凡是必须人类亲手做的
 > 步骤（浏览器授权、控制台点击、复制密钥）都标注 **🧑 NEEDS HUMAN** 并给出精确的
 > 点击路径——请把那段话原样转述给你的人类。
@@ -20,16 +20,17 @@
 
 | 组件 | 必需？ | 作用 | 人类要做的事 |
 |---|---|---|---|
-| Claude Code CLI | ✅ 必需 | Jarvis 的大脑（每次心跳/对话都是一次 claude 调用） | 登录一次（订阅或 API 计费） |
+| Claude Code CLI | ✅ 当前安装必需 | 默认主 harness；模型路由可继续到 relay / Codex / GPT | 登录一次（订阅或 API 计费） |
 | Codex CLI | 可选但推荐 | Claude 限额时接管私聊；也可手动切为首选 | `codex login` 登录 ChatGPT |
 | python3.10+ / jq / requirements-dev.txt | ✅ 必需 | 运行时与安装验收 | 无 |
 | GitHub CLI (`gh`) | 仅生产发布 | PR/CI/review 发布门禁 | 首次 `gh auth login` |
-| Lark/飞书插件 | 可选 | 手机上和 bot 双向聊天 | 浏览器创建应用 + 授权（约 5 分钟） |
+| Lark/飞书插件 | 可选但属唯一产品面 | 手机上和 bot 双向聊天 | 浏览器创建应用 + 授权（约 5 分钟） |
 | 卡片按钮（sidecar） | 可选 | 卡片上的交互按钮 | 控制台开回调 + 复制 App Secret（约 5 分钟） |
 | EigenFlux 插件 | 可选 | Agent 广播网络 | 邮箱收一次 OTP |
 | 感知层信源（含邮箱） | 可选 | 把群聊/邮件/文件变更灌进记忆 | 编辑 sources.yaml |
 
 **不配任何可选项也能跑**：headless 模式（心跳 + 记忆 + 感知照常工作，没有 IM）。
+但 Jarvis 的当前产品定义是 Lark；headless 是运行模式，不是一套平行产品体验。
 
 Jarvis 不需要也不支持 Tailscale、设备配对码、Web Push 或手机网页入口。
 手机端只需安装飞书并与机器人对话；`:3457` 只供本机归档/运维查看。
@@ -73,7 +74,7 @@ cd pascal-jarvis
 
 然后编辑 `jarvis.yaml`（setup.sh 已从 example 生成）：
 - `data_dir`: Jarvis 数据目录（会话/记忆），建议保持默认生成值
-- `work_dir`: Claude 的工作目录（它能读写这里的文件）
+- `work_dir`: 各执行 harness 的共同工作目录（允许模型工具读写的项目根）
 
 **验证**：`./scripts/doctor.sh` 的 1/6 和 2/6 段**无 FAIL**（WARN 可以有——比如 macOS 默认没有 coreutils timeout，属可选项）。
 此时已可启动 headless 模式：`./bot.sh`（Ctrl-C 退出；正式运行见 Phase 6）。
@@ -102,7 +103,23 @@ lark-cli auth list        # 输出里有 "YourName (ou_xxxxxxxx)" — 那个 ou_
 #     user_id: "ou_xxxxxxxx"
 ```
 
-**验证**：doctor 3/6 段——`lark-cli bot auth works (API probe succeeded)` PASS。
+**强烈建议生产安装同时配置 bot 直连凭证**。从开发者后台「凭证与基础信息」复制
+App ID 和 App Secret，写入 gitignored 的 `jarvis.yaml`：
+
+```yaml
+lark:
+  user_id: "ou_xxxxxxxx"
+  app_id: "cli_xxxxxxxxxxxxxxxx"
+  app_secret: "粘贴 App Secret"
+```
+
+这让回复、卡片、主动提醒和 EigenFlux 来信通过应用 bot 的 OpenAPI 身份投递，
+不依赖 macOS Keychain 里的个人 OAuth。个人日历、文档、邮箱和任务仍使用
+`lark-cli --as user`，失效时只降级这些个人能力，不应拖垮 bot 投递。密钥不得写入
+Git、日志、命令行参数或投递台账。
+
+**验证**：doctor 3/6 段——`lark-cli bot auth works (API probe succeeded)` PASS；
+生产配置还应通过 `./scripts/python.sh -c 'from core.lark_bot_transport import configured; assert configured()'`。
 完整流程见 [plugins/lark/README.md](../plugins/lark/README.md)。
 
 ## Phase 3 — EigenFlux（可选：Agent 广播网络）
@@ -131,11 +148,13 @@ curl -fsSL https://www.eigenflux.ai/install.sh | sh
    切到「**回调配置**」tab（注意：和"事件订阅"是两个独立 tab）→ 订阅方式选
    「**使用长连接接收回调**」→「添加回调」勾选 **card.action.trigger（卡片回传交互）**
    → **发布新版本**（不发版不生效——这是最常见的坑）
-2. 同应用「**凭证与基础信息**」页 → 复制 **App Secret**
+2. 同应用「**凭证与基础信息**」页 → 复制 **App ID / App Secret**（Phase 2
+   已配置则不用重复）
 
 写入 `jarvis.yaml`（此文件被 gitignore，secret 不会进仓库）：
 ```yaml
 lark:
+  app_id: "粘贴 App ID"
   app_secret: "粘贴 App Secret"
   event_backend: sidecar
 ```
@@ -246,6 +265,8 @@ gitignored 配置文件 + 中性默认。
 | 消息收不到但进程都在 | 两条事件连接互抢 | 确认只有一个监听器：`pgrep -fl 'lark-cli event|lark_event_sidecar'` 只应有一行 |
 | 改了 daemon.py 没生效/守护进程误报 | 常驻进程没重载 | `./restart.sh --full` |
 | claude 调用超时/很慢 | API 高峰 | 等待即可；看门狗与重试都已内置 |
+| Routine 到点但没有卡 | 模型基础设施失败或模型返回空内容 | 查最近 run：`deferred` 会短延迟自动重试；`no_output` 表示模型已回答但无可用内容。不要删除全局 heartbeat state |
+| bot 消息在终端能发、launchd 下失败 | 用户 OAuth/Keychain 对后台进程不可用 | 配置 `lark.app_id` + `lark.app_secret`，让 bot 走 `core.lark_bot_transport`；个人 API 继续单独修 OAuth |
 | 语音消息没转写 | 未配 OPENAI_API_KEY（Whisper 用） | 可选：export OPENAI_API_KEY=...；不配则提示用户打字 |
 | `timeout: command not found` 类告警 | macOS 无 coreutils | 可忽略（内置 bash 后备），或 `brew install coreutils` |
 

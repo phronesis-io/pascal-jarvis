@@ -1,8 +1,13 @@
 # Pascal Jarvis
 
-Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI agent with continuous heartbeat, self-evolving memory, closed-loop proactive intents, and bidirectional IM integration.
+Run a persistent personal AI system across Claude-compatible providers, Codex,
+and GPT, with Lark conversation, continuous heartbeat, cross-session memory,
+closed-loop proactive work, and verified external actions.
 
-**Release: `v1.8.2` (2026-07-29)** — see [CHANGELOG.md](CHANGELOG.md). 2513 tests passing.
+**Release: `v1.8.2` (2026-07-29)** — the tagged release remains v1.8.2;
+current `main` includes later reviewed hardening. Read
+[the current system snapshot](docs/current_system.md) before operating or
+releasing it, and see [CHANGELOG.md](CHANGELOG.md) for history.
 
 **Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -10,7 +15,8 @@ Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI
 
 ## 🚀 Fastest way to install (AI-guided setup)
 
-If you're reading this via an AI assistant (Claude Code, Cursor, etc), paste this to it:
+If you're reading this via a coding assistant (Codex, Claude Code, Cursor,
+etc.), paste this to it:
 
 > Clone `https://github.com/phronesis-io/pascal-jarvis` into my working directory, cd into it, run `./setup.sh`, then follow `docs/INSTALL.md` phase by phase — run `./scripts/doctor.sh` after each phase and fix any FAIL until green. Relay every step marked 🧑 NEEDS HUMAN to me verbatim.
 
@@ -20,7 +26,8 @@ Two things make the agent-driven install smooth:
 
 The `setup.sh` wizard is **non-interactive, idempotent, and safe to re-run**. It:
 
-1. Checks for `python3` / `jq` / Claude Code (prints install commands if missing)
+1. Checks required Python, `jq`, and Claude Code, plus optional Codex, Lark,
+   EigenFlux, and GitHub tooling (and prints install guidance)
 2. Installs and import-verifies every runtime/test dependency; when the selected
    Python is externally managed it creates and consistently uses
    `~/.jarvis/runtime-venv`
@@ -74,7 +81,9 @@ Also clone the EigenFlux skills repo if not already present:
 git clone https://github.com/phronesis-io/openclaw-eigenflux ../openclaw-eigenflux
 ```
 
-Then apply the same-revision runtime restart: `./restart.sh --runtime`.
+Code pulled from Git must go through the governed full release path:
+`./restart.sh`. `./restart.sh --runtime` is only for configuration/state
+changes when the already-running revision is the same clean `HEAD`.
 
 ### Start it up
 
@@ -101,16 +110,21 @@ deployment remains governed:
 
 ## What is this?
 
-Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
+Pascal Jarvis coordinates several model harnesses inside one personal-agent
+runtime:
 
-1. **Heartbeat Loop + Guardian Daemon** — A background scheduler runs tasks on configurable intervals (defined in `HEARTBEAT.md`, executed via pre/post shell scripts + a batched Claude call). A guardian daemon (`daemon.py`) monitors the bot process, kills stuck Claude sessions, and auto-restarts on crash.
+1. **Heartbeat Loop + Guardian Daemon** — A background scheduler runs tasks on configurable intervals (defined in `HEARTBEAT.md`, executed through deterministic pre/model/post phases and the bounded heartbeat model route). A guardian daemon (`daemon.py`) monitors the bot and critical channels, terminates only owned stale provider processes, and performs bounded restart/recovery.
 
-2. **Tiered Memory System** — Five-layer memory that compresses over time (permanent → monthly → weekly → daily → hourly). Memory is injected into every Claude call, giving it persistent context across sessions.
+2. **Tiered + Cross-Session Memory** — Local hot/warm/timeline/system memory is
+   selected within explicit budgets. Owner-operated Claude Code and Codex
+   transcripts are discovered, redacted, incrementally indexed, and retrieved
+   by relevance so one product can continue work begun in another. Memory is
+   context, not authority for mutable external facts.
 
 3. **Multi-format Message Handling** — Beyond plain text, the bot processes:
-   - *Images* — downloaded and passed to Claude for visual understanding
+   - *Images* — downloaded and passed to the selected capable model route
    - *Files* — downloaded to local storage, contents available via Read tool
-   - *Voice messages* — transcribed via Whisper API, transcript passed to Claude
+   - *Voice messages* — transcribed via Whisper API, then passed as text to the selected route
    - *Quote replies* — fetches the quoted message and prepends as context
    - *Interactive cards, stickers, locations, contact/chat shares* — extracted and described
    - *Merged forwards (合并转发)* — expanded via batch API, content truncated to 5KB
@@ -123,26 +137,33 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
    - *Task triage* — philosophical task system (praxis/poiesis capture → commit → decay)
    - *Weekly review* — end-of-week summary and planning
 
-4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
+5. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
    - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with feed triage, verified friend actions, private messaging, and a real-time stream.
    - *Content recommend* and *watch-later* — curates content for you; saved items remain queryable without creating nagging reminder intents.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
-5. **Background Jobs & Auto-Promotion** — Any Claude call running longer than ~2 minutes is automatically promoted to a background job: the conversation is released immediately (you can keep chatting), the long task keeps running, and its result is delivered as a reply *and* merged into the conversation's context. Send `jobs` to list them, `cancel <id>` to kill one; a sweeper reconciles jobs whose process died so you're never left waiting on a ghost.
+6. **Background Jobs & Auto-Promotion** — Eligible owner-private provider work running longer than the bounded foreground threshold is promoted to a background job: the physical conversation session rotates, the captured logical context remains stable, and the result is delivered and merged only if that same context is still active. Jobs run through the shared model router, so they are not Claude-only. Send `jobs` to list them, `cancel <id>` to stop one; a sweeper reconciles jobs whose process died so you're never left waiting on a ghost.
 
-6. **Attention Engineering** — Proactive output is classified before delivery and records where Pascal should act. Ordinary decisions wait for one morning docket in Lark; urgent, calendar-bound, and active-conversation decisions can arrive immediately. Urgent non-choice alerts say `无需批`, while ambient monitoring stays ledger-only and is summarized in the morning anchor instead of creating a card storm. Every record remains in one durable ledger, so a decision closes once. Quiet hours, batching, deduplication, and aggregated delivery-failure alerts protect time for higher-value work instead of maximizing notification handling.
+7. **Attention Engineering** — Proactive output is classified before delivery and records where Pascal should act. Ordinary decisions wait for one morning docket in Lark; urgent, calendar-bound, and active-conversation decisions can arrive immediately. Urgent non-choice alerts say `无需批`, while ambient monitoring stays ledger-only and is summarized in the morning anchor instead of creating a card storm. Every record remains in one durable ledger, so a decision closes once. Quiet hours, batching, deduplication, and aggregated delivery-failure alerts protect time for higher-value work instead of maximizing notification handling.
 
-7. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source* — no new scripts. Signals are deduplicated across sources, buffered into memory (so the next Claude call "knows"), and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. A new source type = one `sources/<type>.py` adapter implementing `collect(cfg, state)`.
+8. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source*. Signals are deduplicated across sources, buffered into memory for the next authorized model turn, and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. The core is shipped; because product expansion is frozen, a new `sources/<type>.py` adapter now requires a named blind spot and a privacy test.
 
-8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). The L3 iteration loop turns observed product and engineering signals into reviewed proposals instead of letting a background model edit behavior rules directly. Cross-session sync imports recent Claude Code/Codex context, while a private local index retrieves relevant older work without injecting the whole archive.
+9. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). The L3 iteration loop turns observed product and engineering signals into reviewed proposals instead of letting a background model edit behavior rules directly. Cross-session sync imports recent Claude Code/Codex context, while a private local index retrieves relevant older work without injecting the whole archive.
 
-9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
+10. **Admin Console & Ops Tooling** — Local operator console (`python3 admin.py`) for browsing memory and session history. Background tasks handle repo sync, system self-diagnostics (channel watermarks that catch silently dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging. The separate NiceGUI dashboard on `:3457` is a frozen archive/diagnostic surface.
 
-10. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced on the dashboard, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, owner Lark conversations route through the configured Claude chain, local Codex CLI, then the OpenAI-compatible Responses fallback. `core.model_control` keeps upstream account, model, harness, tools, health, and route order as separate facts, so GPT can run through Codex, Responses, or a Claude-compatible relay without confusing the product layer. Send `切到 Codex` or `切回 Claude` in the private chat to change the preferred executor; `/model` reports the actual responder, current plan, and real upstream diversity. Heartbeat and untrusted conversations do not receive the local Codex tool route.
+11. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced on the dashboard, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, owner Lark conversations route through the configured Claude chain, local Codex CLI, then the OpenAI-compatible Responses fallback. `core.model_control` keeps upstream account, model, harness, tools, health, and route order as separate facts, so GPT can run through Codex, Responses, or a Claude-compatible relay without confusing the product layer. Send `切到 Codex` or `切回 Claude` in the private chat to change the preferred executor; `/model` reports the actual responder, current plan, and real upstream diversity. Heartbeat and untrusted conversations do not receive the local Codex tool route.
 
-11. **Items, Topics & Continuity** — A Memorial is the only user-facing Item, Matter is an optional topic and handoff context, and Intent appears only as a timed-reminder attribute. Lark is the sole delivery and decision surface; the dashboard is a frozen archive and operator reference. A durable Matter connects Lark, Claude/Codex sessions, jobs, and artifacts under the surface, so `电脑继续` can move work into an executor without forking the object or its completion state. All Memorial, heartbeat, bot-reply, and Guardian output crosses one SQLite-backed delivery state machine with global sanitization, 6-hour deduplication, throttling, quiet hours, retry, dead-letter, and delivered/read/acted confirmation. Bot replies and cards use the app's direct OpenAPI identity and do not depend on the owner's Keychain-backed OAuth; calendar/docs/mail/task user APIs degrade separately and honestly. The authenticated mobile gateway on `:3458` and its Tailscale Funnel are retired (2026-08-11, REQ-120); Lark is the mobile surface. See [the cross-device continuity PRD](docs/prd_cross_device_continuity.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+12. **Items, Topics & Continuity** — A Memorial is the only user-facing Item, Matter is an optional topic and handoff context, and Intent appears only as a timed-reminder attribute. Lark is the sole delivery and decision surface; the dashboard is a frozen archive and operator reference. A durable Matter connects Lark, Claude/Codex sessions, jobs, and artifacts under the surface, so `电脑继续` can move work into an executor without forking the object or its completion state. All Memorial, heartbeat, bot-reply, and Guardian output crosses one SQLite-backed delivery state machine with global sanitization, 6-hour deduplication, throttling, quiet hours, retry, dead-letter, and delivered/read/acted confirmation. Bot replies and cards use the app's direct OpenAPI identity and do not depend on the owner's Keychain-backed OAuth; calendar/docs/mail/task user APIs degrade separately and honestly. The authenticated mobile gateway on `:3458` and its Tailscale Funnel are retired (2026-08-11, REQ-120); Lark is the mobile surface. See [the cross-device continuity PRD](docs/prd_cross_device_continuity.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+
+13. **User-Defined Routines** — Existing Routines gather declared read-only
+    evidence, run at a deterministic schedule, and enforce stored
+    `observe`/`propose`/`act` authority in code. Provider infrastructure
+    failures defer and re-arm an occurrence; they are not mislabeled as model
+    `no_output`. Routine product expansion is frozen, but active definitions
+    remain supported.
 
 ## Architecture
 
@@ -153,8 +174,8 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  bot.sh (entry point)                                       │
 │  ├── Startup: process conflict detection, message replay    │
 │  ├── Lark event listener (foreground)                       │
-│  │   ├── Text/rich text → claude -p                         │
-│  │   ├── Images → download + visual Claude                  │
+│  │   ├── Text/rich text → model route → selected harness    │
+│  │   ├── Images → download + capable selected model         │
 │  │   ├── Audio → download + Whisper transcribe              │
 │  │   ├── Files/video/sticker/card/location → parse + desc   │
 │  │   ├── Quote replies → fetch parent + prepend context     │
@@ -163,10 +184,10 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  │   ├── Parse HEARTBEAT.md                                 │
 │  │   ├── Run pre-scripts (gather data)                      │
 │  │   ├── Priority tasks bypass batch cap                    │
-│  │   ├── Batch Claude call                                  │
+│  │   ├── Bounded model call                                 │
 │  │   └── Run post-scripts (act on output)                   │
 │  ├── EigenFlux stream (background) → core/ef_stream_loop.py │
-│  │   └── WebSocket → real-time PM delivery + Claude analysis│
+│  │   └── WebSocket → durable PM delivery + bounded analysis│
 │  └── Admin console (background, optional) → admin.py        │
 │                                                             │
 │  core/                            (system)                  │
@@ -174,6 +195,11 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 │  ├── heartbeat.py        — task scheduler + priority tasks  │
 │  ├── heartbeat_loop.py   — Python heartbeat runner          │
 │  ├── ef_stream_loop.py   — EigenFlux WebSocket manager      │
+│  ├── model_control.py    — route/capability/trust policy    │
+│  ├── cross_session*.py   — private Claude/Codex continuity │
+│  ├── delivery.py         — unified receipt/retry authority  │
+│  ├── lark_bot_transport.py — Keychain-free bot delivery    │
+│  ├── routines.py         — recurring work + run audit       │
 │  ├── memory.py           — tiered memory loader             │
 │  ├── session.py          — session rotation + fcntl lock    │
 │  ├── search.py           — session history parser           │
@@ -359,9 +385,10 @@ if response == "HEARTBEAT_OK":
 
 Long-running requests (deep research, multi-step builds) don't have to block the
 conversation. When a task would take a while, the bot can spin it off into an
-**independent background job** — a separate Claude session that runs in its own
-process and notifies you with a result card when it finishes. Your foreground
-chat stays responsive the whole time.
+**independent background job** — a separate, registered provider session that
+runs in its own process group and notifies you with a result card when it
+finishes. Your foreground chat stays responsive, and the result can return only
+to the logical context captured when the job started.
 
 From Lark you control jobs with three commands:
 
@@ -469,6 +496,9 @@ Utility scripts in `scripts/` for operations and debugging:
   completeness, and SQLite integrity checks pass.
 - **`verify_backup.py`** — Re-run checksum, privacy-permission, class coverage,
   and SQLite integrity verification for any snapshot.
+- **[docs/RESTORE.md](docs/RESTORE.md)** — verified recovery of code assets,
+  Claude/Codex transcripts, memory, SQLite, runtime state, identities, and the
+  governed restart.
 - **`memory-viewer.py`** — Interactive TUI for browsing the tiered memory tree. Useful for inspecting what the agent "knows" without digging through files.
 - **`search_v2.py`** — Enhanced session transcript search with relevance scoring and context display.
 - **`session_search.py`** — Simple session search tool for quick keyword lookups.
@@ -480,7 +510,8 @@ Utility scripts in `scripts/` for operations and debugging:
 `daemon.py` is a lightweight supervisor process that keeps the bot alive:
 
 - Monitors `bot.sh` health every 30 seconds — checks PID, heartbeat freshness, and session locks (suspended during `restart.sh` deploy windows via the `.deploying` flag)
-- Kills stuck Claude processes by detecting stale session lock files
+- Terminates stuck provider processes only after session-lock ownership and
+  process-start identity checks
 - Auto-restarts `bot.sh` on crash (up to 3 attempts with 5-minute cooldown)
 - Logs to `daemon.log` with automatic log rotation
 - Optionally pings an external missed-heartbeat service while the stack is
@@ -501,13 +532,18 @@ Memory files live in `~/.jarvis/memory/` (or your configured `data_dir/memory/`)
 
 ### How it works
 
-1. **Hourly**: Indexes the last hour's conversation into 1-3 lookup lines
-2. **Daily**: Compresses hourly entries into 3-6 bullet points
-3. **Weekly**: Merges daily entries into a 5-10 point digest
-4. **Monthly**: Compresses weekly digest into a long-term archive
-5. **Consolidation**: Nightly review that proposes updates to permanent memory files
+1. **Hourly index**: adds compact lookup lines for recent conversation work.
+2. **Rolling daily index**: compacts hourly entries on its configured cadence.
+3. **Long-term digest**: periodically merges daily entries and supported
+   behavioral evidence.
+4. **Consolidation**: proposes bounded updates to durable profile/project
+   memory from Lark, cross-session context, and repo activity.
+5. **Tidy**: enforces tier budgets, refreshes the warm-memory index, and
+   synchronizes only the explicitly owned mirrors.
 
-Each layer archives before clearing, so nothing is ever lost.
+Provider transcripts and verified backups remain the recovery evidence; memory
+files are compact projections, not a promise that every raw turn is retained in
+every tier. See [the restore runbook](docs/RESTORE.md).
 
 ### Adding permanent memory
 
@@ -547,6 +583,10 @@ A richer [NiceGUI](https://nicegui.io) app with live pages for home, tasks,
 Items, topic drill-down, bookmarks, "thinking" stream, agent calendar, and settings. It keeps
 its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
 
+The dashboard is a frozen local archive and operations reference. New
+user-facing workflows belong in Lark; dashboard work is limited to repair,
+truthful diagnosis, and maintenance of existing views.
+
 ```bash
 ./dashboard/start.sh             # foreground
 ./dashboard/start.sh --bg        # background (daemonized)
@@ -559,8 +599,10 @@ its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
 
 **Bot stuck on "Thinking..." forever**
 - Check `jarvis.log` for errors
-- Verify `work_dir` in `jarvis.yaml` matches where your Claude Code sessions live (`~/.claude/projects/<hash>/`)
-- Delete `active_sessions.json` to start fresh sessions in the correct project dir
+- Verify `work_dir` in `jarvis.yaml` is the intended accessible project root
+- Run `./restart.sh --status` and inspect the active provider/lock evidence
+- In the owner Lark chat, use `/session reset` for a bounded context reset; do
+  not delete `active_sessions.json`, which is durable session authority
 
 **`[SDK Error] handle message failed` in logs**
 - Benign — lark-cli receives event types (like `message_read_v1`, `reaction.created_v1`) it doesn't have a handler for. The bot ignores these.
@@ -590,23 +632,35 @@ its own SQLite store (`data/jarvis.db`) for bookmarks and cached views.
 
 **Heartbeat not running tasks**
 - Check `heartbeat_state.json` for last-run timestamps
-- Delete it to force all tasks to run on next cycle
+- Check the task's latest scheduler event and pre/post-hook result; an empty
+  pre-hook is an intentional skip, while `__CALL_FAILED__` is infrastructure
+  deferral
+- Force only the named task through the authenticated Admin operation when a
+  diagnostic replay is required; never delete the global state file as a
+  routine repair
 - Tasks also skip if their pre-script exits with empty output (see `tasks/*.sh`)
 
 **Tests**
 ```bash
-python3 -m pytest tests/
+./scripts/python.sh -m pytest tests/
 ```
 
 ## Developer Documentation
 
 Deeper design notes live in [`docs/`](docs/):
 
+- [docs/README.md](docs/README.md) — authority map for current contracts,
+  operational runbooks, evidence, and historical PRDs.
+- [docs/current_system.md](docs/current_system.md) — dated map of the current
+  product surfaces, mechanisms, frozen scope, and release truth.
+- [PRODUCT.md](PRODUCT.md), [DOMAIN.md](DOMAIN.md),
+  [ARCHITECTURE.md](ARCHITECTURE.md), [DECISIONS.md](DECISIONS.md), and
+  [DESIGN.md](DESIGN.md) — the current product and engineering contracts.
 - [docs/design_task_system.md](docs/design_task_system.md) — the philosophical task
   system (praxis/poiesis capture → commit → decay): data model, lifecycle, and rationale.
-- [docs/concurrency_and_bg_jobs.md](docs/concurrency_and_bg_jobs.md) — how the bot
-  stays responsive while running long tasks: the three execution lanes and the
-  one-conversation-one-session-file rule.
+- [docs/concurrency_and_bg_jobs.md](docs/concurrency_and_bg_jobs.md) — logical
+  contexts, physical Claude/Codex sessions, safe provider switching, and the
+  three execution lanes.
 
 Operational reference for the heartbeat tasks themselves lives in `HEARTBEAT.md`;
 the roadmap and explicitly-out-of-scope ideas are in `TODO.md`.

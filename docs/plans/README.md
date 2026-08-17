@@ -7,11 +7,14 @@ retired.
 
 Use these current sources instead:
 
-1. `PRODUCT.md`, `DOMAIN.md`, `DESIGN.md`, and `ARCHITECTURE.md` for behavior
+1. `docs/current_system.md` for the dated system and release snapshot.
+2. `PRODUCT.md`, `DOMAIN.md`, `DESIGN.md`, and `ARCHITECTURE.md` for behavior
    and boundaries.
-2. `DECISIONS.md` for accepted architecture choices.
-3. `docs/prd_portfolio.md` for PRD status.
-4. `docs/capability_inventory.md` for generated active-surface evidence.
-5. `docs/engineering_health.md` for verified current engineering debt.
+3. `DECISIONS.md` for accepted architecture choices.
+4. `docs/prd_portfolio.md` for PRD status.
+5. `docs/capability_inventory.md` for generated active-surface evidence.
+6. `docs/engineering_health.md` for verified current engineering debt.
 
 Never implement a dated plan merely because it remains in this directory.
+Product expansion is frozen as of 2026-08-17; old plans cannot implicitly thaw
+retired surfaces, proactive lanes, or authority.

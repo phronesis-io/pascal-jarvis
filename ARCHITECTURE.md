@@ -61,7 +61,8 @@ user sentence in Lark
   -> core.routines definition (trigger + evidence + autonomy)
   -> routine-run pre-hook: claim due, advance watermark, gather evidence
   -> HeartbeatRunner batches model work
-  -> post-hook: authorize actions against the STORED autonomy level
+  -> model infrastructure failure: close run as deferred + short re-arm
+  -> usable answer: authorize actions against the STORED autonomy level
   -> Memorial (propose/act) or audit-only record (observe)
   -> routine_runs audit row, always terminal
 ```
@@ -71,6 +72,12 @@ than adding a scheduler, and everything they show the user is an ordinary
 Memorial routed by `core.delivery`. `observe` output exists only in the audit
 trail. The `act` allow-list is internal and reversible; external mutation stays
 with Verified Delegation, which owns read-back evidence.
+
+`no_output` is reserved for a successful model call that omitted usable
+Routine content. Quota, timeout, network, and shutdown failures use the
+distinct `__CALL_FAILED__` contract: claimed runs become `deferred`, their
+Routine is re-armed after a bounded delay, and the inflight receipt is cleared
+only after the database commit.
 
 ### Perception
 
@@ -198,6 +205,11 @@ the exact release commit or a healthy resident descendant that contains it.
   health cooldown, and real provider diversity. It emits the private
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
+- `core.heartbeat`: the scheduled model harness. Text-only/no-tools calls may
+  continue through bounded provider transport failures. Tool-capable timeout
+  or network failures stop fail-closed because the first process may already
+  have produced local effects; the scheduler, not another provider replay,
+  owns recovery.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog.
 - `core.codex_fallback`: owner-private Codex CLI execution, bounded process
@@ -302,6 +314,9 @@ as legacy ledger values from the pre-REQ-119 era.
 | calendar is current | calendar API/sync artifact with freshness |
 
 Model prose and memory summaries are never authorities for these claims.
+A tiny canary proves credentials and a bounded request path, not production
+context capacity; real route failures update provider health and may override
+an otherwise green canary.
 
 Lark has two explicit identities. The **bot identity** uses the private app
 credential and direct OpenAPI transport for messaging and bot metadata. The

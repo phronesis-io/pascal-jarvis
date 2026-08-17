@@ -7,11 +7,19 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
+- Source baseline for this review is `main` at `7df0b6b` (PR #82), following
+  model/memory/delivery hardening in PR #81. Both PR test workflows passed;
+  merged-main release evidence and governed runtime verification are separate
+  requirements and were not complete at this snapshot.
 - The generated inventory has 231 active capabilities: 231 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
 - `core.cross_session` is a small facade over discovery, parsing, historical
   indexing, and projection modules.
+- Routine infrastructure failure no longer spends an occurrence as
+  `no_output`: the post-hook records `deferred`, re-arms on a bounded delay,
+  and keeps receipt removal behind the SQLite commit. Focused Routine and
+  heartbeat regressions cover the distinction.
 - Memorial storage, card composition, transport, and shared state contracts
   live in `core.memorial_ledger`, `core.memorial_cards`,
   `core.memorial_transport`, and `core.memorial_contracts`. The facade still
@@ -32,6 +40,10 @@ work. The supported product surface remains the generated
   and changed implementation lines are review-volume indicators, not coverage
   percentages, and must not be used to compare this repository with another
   codebase.
+- The generated inventory and more than 3,000 collected tests demonstrate a
+  broad executable contract, not uniform branch coverage. Production behavior
+  still requires governed restart, real receipts, canaries, and post-release
+  observation.
 - `core/memorial.py` is 3,477 lines with 115 functions; its longest function is
   165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
   function is 324 lines. These are verified maintainability risks even though
@@ -85,6 +97,10 @@ This debt program follows the current audited product-closure release.
 Combining a large module split with memory, provider-routing, and attention
 behavior changes would make regressions harder to attribute and weaken the
 release evidence for both changes.
+
+The 2026-08-17 product freeze makes this sequence the default development
+direction: preserve behavior, improve evidence, and reduce coupling before
+considering any new product capability.
 
 ## Retention Rule
 

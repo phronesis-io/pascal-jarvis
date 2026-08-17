@@ -1,6 +1,6 @@
 # Jarvis PRD Portfolio
 
-- Date: 2026-07-24
+- Last reviewed: 2026-08-17
 - Status: Authoritative portfolio index
 - Purpose: distinguish current product contracts from historical records,
   superseded designs, observation-only experiments, and rejected scope.
@@ -19,6 +19,11 @@ decisions. A requirement is executable only when it is:
 
 Historical PRDs remain evidence. This file is the portfolio authority.
 
+Product expansion is frozen from 2026-08-17. Current contracts may be
+repaired, tested, documented, observed, and simplified, but a new product
+surface, notification lane, task system, or autonomous authority is not an
+implicit continuation of an old PRD. It requires an explicit owner thaw.
+
 ## 2. Portfolio
 
 | Document | Portfolio status | Critical judgment |
@@ -31,7 +36,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `plans/2026-07-20-self-improve-round.md` | Historical, shipped | REQ-103 to 111 shipped and were deployed. |
 | REQ-112 to 118 implementation wave | Historical, shipped; documentation backfilled here | Geography, weather, life-log/anchors, one-card-one-matter, and Memorial-bound conversations are in code and tests. |
 | `prd_perception_ingestion.md` | Core accepted and shipped; expansion demand-gated | Registry, Signal, dedup, sensitivity, buffers, dry-run, and several adapters exist. Adding every possible Lark/API source would increase noise and permissions without a current outcome. New adapters require a named blind spot and privacy test. |
-| `prd_delivery_connectors.md` | Rejected as current scope; partially superseded | `core.delivery` already unifies product delivery across Lark reply, Lark, web, and push. Telegram/Slack/email portability has no current user and would force neutral-card and callback abstractions before evidence. Reopen only with a committed second backend/user. |
+| `prd_delivery_connectors.md` | Rejected as current scope; partially superseded | `core.delivery` is the single product delivery authority, but Lark is now its only user-facing transport; web/push are retired. Telegram/Slack/email portability has no current user and would force neutral-card and callback abstractions before evidence. Reopen only with a committed second backend/user and an explicit scope thaw. |
 | `design_task_system.md` | Consolidated and partly stale | Praxis/poiesis, capture, decay, and weekly review exist. Free-time nudge was later retired by engagement evidence. User-facing work now belongs to Item/Matter/Intent boundaries; do not resurrect a parallel task inbox from this design. |
 | `prd_matter_workspace_mobile.md` | Superseded; fully retired 2026-08-14 | The Matter topic contract (cross-entry continuity, Matter detail) lives on in code. The mobile workspace, pairing, Web Push, `:3458`, and every Jarvis-owned Tailscale path are gone; Lark is the only mobile and delivery surface. Do not build against this document's phone/web sections. |
 | `prd_unified_delivery_items.md` | Current, shipped | Canonical Item, attention routing, and delivery contract. |
@@ -39,11 +44,11 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `prd_companion_checkin.md` | Current, shipped 2026-08-03 | Checkin as a self-improving companion: tap gradient (「这类不必」), per-kind budget with floor/ceiling, silence as a recorded+alarmable state, conversation feedback into the prompt. |
 | `prd_card_delivery_closure.md` | Partially superseded 2026-08-11 (REQ-119) | Honest tap outcomes (no-op ≠ ✓) and durable broadcast approvals remain current. The C1 reachable-surface routing (desk gate) is superseded: measured 14d read rates (Lark 95.7% vs web 1.8%) retired the web/phone desk as a delivery surface — Lark is the only surface, ambient exhaust is ledger-only with a morning-anchor digest line. |
 | `prd_verified_delegation.md` | Current, implementation complete; production graduation gated | The generic control plane, deterministic verifiers, projections, reconciler, shadow evaluation, and connector receipts are implemented. Automatic promotion remains fail-closed until the production shadow sample meets the PRD thresholds. |
-| `prd_2026_08_11_signal_over_noise.md` | Active, current round (REQ-119 to REQ-123) | Lark as the only delivery surface (ledger-only ambient exhaust with a morning digest line), mobile gateway/funnel retirement, per-source noise reduction, one ledger accounting (待批/已办/留中 summing to created), and this constitution alignment. Evidence-based: 14d read rates, ghost-rate by hour, per-source批红 conversion. |
-| `plans/2026-08-12-evidence-driven-attention-loop.md` | Shipped; daily-cap rule superseded 2026-08-14 | Authoritative Lark-arrival accounting, a hard 9/day ordinary proactive budget with terminal ledger-only overflow, a 4/10-minute burst queue, explicit-only decisions, memorial-thread closure, plain user copy, and worktree-safe EigenFlux/memory harnesses. Alerts, replies, urgent and active-conversation messages remain exempt. |
-| `plans/2026-08-14-audited-product-closure.md` | Current, implementation in release verification | Complete Tailscale retirement, query-focused cross-session memory, whole-turn context projection, provider cooldown routing, hard attention budget, truthful EigenFlux stream health, content-based deploy drift, memory-specific conversation findings, and two-observation L3 verification. |
-| `plans/2026-08-14-model-control-and-cross-product-memory.md` | Current, implementation in release verification | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
-| `plans/2026-08-15-lark-identity-transport.md` | Current, implementation in release verification | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
+| `prd_2026_08_11_signal_over_noise.md` | Current contract, implementation merged | Lark as the only delivery surface (ledger-only ambient exhaust with a morning digest line), mobile gateway/funnel retirement, per-source noise reduction, one ledger accounting (待批/已办/留中 summing to created), and this constitution alignment. Evidence-based: 14d read rates, ghost-rate by hour, per-source批红 conversion. |
+| `plans/2026-08-12-evidence-driven-attention-loop.md` | Shipped; daily-cap rule superseded 2026-08-14 | The original hard 9/day ordinary budget was replaced by the current layered policy: metric cap normally 1, source cap 24, global cap 25, and burst cap 4/10 minutes. Authoritative Lark-arrival accounting, explicit-only decisions, Memorial-thread closure, and worktree-safe EigenFlux/memory harnesses remain current. See `delivery_retry_and_caps.md`. |
+| `plans/2026-08-14-audited-product-closure.md` | Implementation merged in PR #81; runtime evidence tracked separately | Complete Tailscale retirement, query-focused cross-session memory, whole-turn context projection, provider cooldown routing, hard attention budget, truthful EigenFlux stream health, content-based deploy drift, memory-specific conversation findings, and two-observation L3 verification. |
+| `plans/2026-08-14-model-control-and-cross-product-memory.md` | Implementation merged in PR #81; runtime evidence tracked separately | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
+| `plans/2026-08-15-lark-identity-transport.md` | Implementation merged in PR #81; runtime evidence tracked separately | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
 
 ## 3. Active Work
 
@@ -110,6 +115,22 @@ narration, EigenFlux message analysis, and heartbeat noise classification.
 Only owner-initiated background jobs retain local tools; derived conversation
 text and external-agent text are routed in a text-only sandbox.
 
+### Completed in source: Routine infrastructure recovery
+
+Real incident: a Routine occurrence was claimed and its next fire advanced,
+then provider quota/timeout failure reached the post-hook as malformed or empty
+output. The run was labeled `no_output`, so a valid reminder occurrence was
+silently spent.
+
+The merged contract now distinguishes model content from model
+infrastructure. `__CALL_FAILED__` closes the claimed audit row as `deferred`,
+re-arms the Routine after a short bounded delay, and clears its inflight
+receipt only after the database commit. A successful call with no usable
+Routine content remains `no_output`. Text-only heartbeat calls may continue
+through bounded transport failover; uncertain tool-capable calls do not replay
+automatically. Runtime acceptance remains subject to the Definition of Done
+below.
+
 ### Completed: Resident SQLite descriptor exhaustion
 
 Real incident: the heartbeat process approached launchd's 256-FD soft limit,
@@ -155,6 +176,8 @@ The following are not hidden backlog:
 - REQ-79.2 batch parse clamping after safe retry proved sufficient.
 - A second personal task system beside Item/Matter/Intent.
 - A home-grown clone of taskline inside Jarvis; the external service owns L2.
+- New Routine product features, new web/mobile surfaces, or another proactive
+  lane while the 2026-08-17 product freeze remains in force.
 
 Current external constraints and accepted residuals:
 

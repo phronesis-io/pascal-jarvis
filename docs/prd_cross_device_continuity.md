@@ -1,13 +1,21 @@
 # PRD: Cross-Device Continuity
 
 - Date: 2026-07-24
-- Status: Implemented
+- Status: Partially superseded 2026-08-14
 - Owner: Pascal
 - Product principle: changing devices must move attention, not duplicate work.
 
+> **Current ruling:** the phone/PWA surface, Push, pairing, `:3458`, and every
+> Jarvis-owned Tailscale path described below are retired. Lark is the only
+> mobile and delivery surface. The durable Handoff concept remains current only
+> for continuing an existing Item/Matter into a desktop executor. The rest of
+> this document is retained as historical design evidence and must not be used
+> as an implementation plan.
+
 ## 1. Decision
 
-Desktop and phone are complementary Jarvis work surfaces:
+Historical decision, now superseded: desktop and phone were designed as
+complementary Jarvis work surfaces:
 
 - phone owns discovery, quick decisions, short reading, and sending complex
   work back to the computer;

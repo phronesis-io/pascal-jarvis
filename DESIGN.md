@@ -30,8 +30,9 @@ zero and the phone desk was never successfully paired. Therefore:
   investment lands there; content that only reaches the archive gets its one
   shot via the morning-anchor batch line. The mobile gateway (`:3458`) and
   all Jarvis-owned Tailscale setup, routing, and recovery paths are retired.
-- Routines is frozen pending fold-into-Lark or retirement (five days live,
-  zero uses).
+- Existing Routines keep running and reach the user through ordinary Lark
+  Items. Routine product expansion is frozen pending evidence for
+  consolidation or retirement; “frozen” never means silently disabled.
 
 ### Lark
 
@@ -85,6 +86,8 @@ zero and the phone desk was never successfully paired. Therefore:
   Handoff moves attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
   activity signals mean inactivity.
+- A provider outage is system work: repair or defer it first. Notify the user
+  only when recovery is exhausted or owner action is genuinely required.
 
 ## Mobile Rules
 

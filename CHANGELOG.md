@@ -8,6 +8,58 @@ prd_interaction_v4, REQ-78~90; self-improvement waves REQ-91~118). From
 shipped, superseded, or rejected, and requirements are traced to evidence in
 `docs/release_acceptance_2026-07-24.md`.
 
+## Unreleased - 2026-08-17 - 模型、记忆、投递与例程可靠性收口
+
+These changes are merged on `main` after v1.8.2. They are not called a new
+release until the governed post-merge release and runtime evidence completes.
+
+### Added
+
+- A model control plane that separates upstream account, requested model,
+  harness, tools, trust scope, route order, health, and actual responder.
+- Owner-private Codex execution with durable per-conversation threads, plus a
+  bounded GPT API adapter and Claude-compatible Backup 1 / optional Backup 2.
+- Private cross-session discovery, redaction, whole-turn projection, and a
+  WAL-backed relevance index across owner-operated Claude Code and Codex
+  sessions.
+- Direct Lark application-bot transport with in-memory tenant tokens and real
+  `message_id` receipts, independent of user OAuth/Keychain.
+- Session acquire/run/release receipts, recovery gates, verified private
+  backups, generated capability inventory, and stricter repository-write
+  isolation.
+
+### Changed
+
+- Lark is the sole product and mobile surface. Dashboard `:3457` is a frozen
+  local archive/ops reference; gateway `:3458`, device pairing, Web Push, and
+  all Jarvis-owned Tailscale paths are retired.
+- Product expansion is frozen. Existing behavior remains supported while
+  reliability, privacy, evidence, documentation, and debt retirement continue.
+- Model fallback is capability-aware: text-only calls may continue after
+  bounded transport failures, while uncertain tool-capable calls stop
+  fail-closed to prevent duplicate local effects.
+- Cross-session context is query-focused and owner-only; it never becomes
+  authority for mutable external state.
+
+### Fixed
+
+- Routine occurrences are no longer silently spent when quota, timeout,
+  network, or shutdown prevents a model answer. Infrastructure failure records
+  `deferred`, re-arms the occurrence after a bounded delay, and preserves
+  `no_output` for a real answer with no usable Routine content.
+- Bot replies, cards, proactive alerts, and EigenFlux messages no longer share
+  the owner's Keychain-backed OAuth failure domain.
+- Provider cooldown and fallback state now apply across live conversation,
+  heartbeat, background, compaction, narration, and EigenFlux analysis paths
+  without granting local tools to untrusted text.
+
+### Documentation
+
+- Added `docs/current_system.md` as the dated product/runtime/release map.
+- Reconciled product, design, domain, architecture, decisions, installation,
+  PRD portfolio, health, roadmap, and scorecard language around the product
+  freeze and the distinction between merged source and deployed runtime.
+
 ## [1.8.2] — 2026-07-29 — 心跳终于能看见你的私人邮件
 
 例行体检发现 `tier_truncated` 每拍都在报，而且在恶化（早上丢 9,504 字 → 下午

@@ -1,118 +1,143 @@
-# Jarvis — Heartbeat Tasks & the pre/post Pattern
+# Jarvis Heartbeat Tasks And The Pre/Post Contract
 
-How the ~30 background behaviours (checkin, daily plan, calendar sync, eigenflux
-feed, memory upkeep …) are structured, and the conventions every task follows so
-they stay consistent instead of each re-inventing the same plumbing.
+- Reviewed: 2026-08-17
+- Runtime authority: `HEARTBEAT.md` plus `core.heartbeat`
+- Product output: Lark or ledger-only; never the retired web/mobile gateway
 
----
+The heartbeat runs Jarvis's scheduled background work: memory upkeep, Intent
+closure, Routines, calendar sync, EigenFlux, delivery recovery, health, backup,
+and L3 observation. The generated component check currently recognizes 39 task
+definitions. This document explains the shared execution contract; the task
+file remains the authority for names, intervals, priorities, and hooks.
 
-## The shape of a task
+## Execution Shape
 
-Each task is a **pair** of files in `tasks/`:
+Most tasks have a gather/apply pair:
 
-```
-tasks/<name>_pre.sh     # GATHER  — read-only, fetch fresh data, print to stdout
-tasks/<name>_post.py    # APPLY   — read Claude's reply on stdin, write state, emit card
-```
-
-The heartbeat runs them as a pipeline, with Claude in the middle:
-
-```
-<name>_pre.sh ──stdout──▶ Claude (HEARTBEAT.md prompt + DATA) ──stdout──▶ <name>_post.py ──stdout──▶ Lark
-   (gather)                        (decide / write prose)                      (apply + format)        (user)
+```text
+pre hook -> typed DATA -> model route -> bounded output -> post hook
+         -> deterministic state/Item -> core.delivery -> Lark receipt
 ```
 
-- **pre.sh** never mutates state. It only collects context (calendar, feed items,
-  recent logs) and prints it. Silent on error (empty output, no stderr noise).
-- **post.py** is where all side effects live: parse Claude's response, write to
-  memory/logs, and decide whether to surface a Lark card or stay silent.
-- The two share **no in-process state** — the pipe is the only channel. This makes
-  each task idempotent and individually testable (pipe a fixture into the post
-  script, assert on stdout + files).
+- A pre-hook normally gathers fresh evidence and prints it to stdout. Empty
+  stdout means “not due/no evidence” and skips the model call.
+- A pre-hook may reserve or claim state only when its domain contract requires
+  crash recovery, as Routines do. The receipt for that reservation must be
+  durable and the post-hook must terminalize or defer it.
+- The model writes analysis or content. It never owns schedule watermarks,
+  authorization, side effects, delivery truth, or completion.
+- A post-hook parses the bounded contract, applies deterministic policy, writes
+  private state, and emits either an Item/reply or nothing.
+- Tier-0 tasks have no model call: deterministic pre-hook output passes directly
+  to deterministic apply/delivery code.
 
-A handful of tasks are **Tier 0** (e.g. `calendar-sync`): the pre-script output is
-already the product, so it pipes straight to the post-script with no Claude call.
+## Scheduler Cycle
 
-## Who runs them
+`core.heartbeat_loop` invokes `HeartbeatRunner` on a short loop. A cycle:
 
-`core/heartbeat.py` (`HeartbeatRunner`) is the orchestrator; `core/heartbeat_loop.py`
-is the I/O loop that calls it every ~10s and routes output to Lark. Per cycle:
+1. Parses and caches `HEARTBEAT.md` by mtime.
+2. Selects due tasks and runs their pre-hooks.
+3. Applies priority, batch, isolation, and retry rules only to tasks with data.
+4. Runs trusted `no-tools: true` tasks alone so their sandbox cannot alter an
+   unrelated task's tool policy.
+5. Calls the bounded heartbeat model route: Claude primary, configured Claude-
+   compatible backups, then the text-only GPT API path. Heartbeat never uses
+   the local Codex tool route.
+6. Splits a usable envelope by task and invokes each post-hook.
+7. Routes user-facing output through the unified Delivery ledger and records
+   scheduler events and watermarks.
 
-1. Parse `HEARTBEAT.md` (task defs + intervals; cached on mtime).
-2. Pick tasks whose interval is due.
-3. Run their `*_pre.sh`, collect DATA.
-4. One batched Claude call with all due prompts + DATA.
-5. Split the response per task, pipe each into its `*_post.py`.
-6. Route post-script stdout: `CARD:`/card-JSON → `lark_send_card`, plain text →
-   `lark_send`, raw JSON → **blocked**. Update state.
+Provider selection comes from `core.model_control`; harness code executes the
+call. A tiny canary informs health but does not override a real production-call
+failure.
 
-`daemon.py` is a separate guardian that restarts `bot.sh` if the loop dies or goes
-stale. See `docs/concurrency_and_bg_jobs.md` for the three execution lanes.
+## Failure Contracts
 
----
+The runner distinguishes three outcomes that must not be collapsed:
 
-## The post-hook contract (and the shared primitives)
+| Input to post-hook | Meaning | Scheduler/domain behavior |
+|---|---|---|
+| usable task envelope | Model made a content decision | Apply deterministic policy and close normally |
+| `__NO_ENVELOPE__` | Model answered without a usable task slice | Domain records an honest no-content/parse outcome |
+| `__CALL_FAILED__` | Quota, timeout, network, shutdown, or model infrastructure prevented a content decision | Domain defers/retries without pretending the model chose silence |
 
-Every `*_post.py` does the same four things. Use the shared helpers — **do not
-re-handroll them per file.** This is a hard convention: the recurring "raw JSON /
-internal field leaked to the user" bugs all came from each hook parsing and
-truncating slightly differently.
+For Routines, `__CALL_FAILED__` closes each claimed run as `deferred`, re-arms
+the definition after a short bounded delay, and clears the inflight receipt
+only after the database commit. A usable call that omits Routine content is
+`no_output`.
 
-| Step | Use | Not |
-|------|-----|-----|
-| **Guard** error/empty/heartbeat output | `core.safety.looks_like_error`, check `HEARTBEAT_OK` | bespoke regexes |
-| **Parse** Claude's JSON envelope | `core.safety.parse_json_response(raw) -> dict\|None` | local `extract_json` + `json.loads` + find-`{}` retries |
-| **Store** a rolling log | `core.jsonl.read_jsonl / write_jsonl / append_jsonl` | inline read-loop + tmp-rename |
-| **Emit** to the user | `core.card.build_card / build_rich_card`, `core.safety.summarize` for the card preview | hand-built card dicts, `splitlines()[:4]` |
+Text-only/no-tools calls may continue through bounded network, timeout, server,
+quota, authentication, and model-availability failures. A tool-capable process
+may have changed local state before failing; uncertain transport/post-tool
+failures stop fail-closed and return control to scheduler recovery instead of
+being replayed through another provider.
 
-Supporting rules baked into those helpers:
+## Post-Hook Rules
 
-- **Never print raw JSON to stdout.** `parse_json_response` returns `None` on
-  unparseable input; the caller then either salvages a human field
-  (`safety.salvage_field` / `salvage_task_ids`) or suppresses. The heartbeat
-  loop also blocks any line that parses as JSON as a backstop.
-- **All file writes are atomic** (`safety.atomic_write`, which `core.jsonl` uses):
-  the main session and the heartbeat read these files concurrently, so a
-  half-written file must never be observable.
-- **Time** always via `core.timeutil` (`now_local` / `now_local_str`) — robust to
-  TZ-env corruption; never `datetime.now()` directly.
+Use shared primitives instead of inventing a parser or transport per task:
 
-### core/ module map (what a task may lean on)
+| Concern | Current boundary |
+|---|---|
+| Error/sentinel handling | `core.safety` plus the task's explicit ACK contract |
+| JSON envelope parsing | `core.safety.parse_json_response` |
+| Atomic files / JSONL | `core.safety.atomic_write`, `core.jsonl` |
+| Time | `core.timeutil` with injected clocks in tests |
+| Cards | `core.card`, `core.memorial_cards` |
+| User-visible state and batching | `core.memorial` |
+| Delivery/retry/dedup/dead-letter | `core.delivery` |
+| Bot transport | `core.lark_bot_transport` |
+| Model route and health | `core.model_control`, `core.provider_health` |
+| Routine authority and run audit | `core.routines`, `core.routine_evidence` |
 
-| Module | Responsibility |
-|--------|----------------|
-| `safety.py` | Output gate: error detection, JSON parse/salvage, summarize, atomic_write |
-| `jsonl.py` | Rolling JSONL store (read/write/append) |
-| `card.py` | Lark interactive card JSON (+ `richview.py` for full-page detail links) |
-| `timeutil.py` | TZ-robust local time |
-| `memory.py` | Load tiered memory (hot/warm/timeline/system) — used by the prompt builder |
-| `heartbeat.py` / `heartbeat_loop.py` | Task scheduling/orchestration vs. the I/O loop |
-| `tasks.py` / `intentions.py` | Persistent stores for the task-triage and intent subsystems |
+Hard rules:
 
-Other `core/` modules (`session`, `prompt`, `actions`, `jobs`, `compact`,
-`ef_stream*`) belong to the **interactive** `bot.sh` path, not the heartbeat
-tasks, and are not part of this contract.
+- Never print raw provider JSON, stderr, credentials, or tool payloads to the
+  user-facing stdout channel.
+- Never use a model sentence as proof that a mutation, delivery, or schedule
+  transition completed.
+- Never maintain a producer-local retry/dedup truth beside `core.delivery`.
+- Time-dependent tests inject an aware clock; tests never write production
+  runtime paths.
+- Derived/external text uses a no-tools boundary and does not receive private
+  owner memory unless its task contract explicitly permits the purpose.
 
----
+## Task Families
 
-## Task families
+The exact roster is generated from `HEARTBEAT.md`; current families include:
 
-| Family | Members | Shares |
-|--------|---------|--------|
-| Memory upkeep | hourly / daily / weekly / monthly / consolidate / tidy | timeline files, archive logic |
-| EigenFlux | feed / research / friends / messages / profile / publish | `eigenflux` CLI calls, the publish-confirm flow |
-| Daily rhythm | daily-plan / daily-reflect / activity-log / free-time-nudge / checkin | rich cards, JSONL logs |
-| Task system | task-triage / weekly-review | `core.tasks` store |
-| Standalone | calendar-sync, intentions, content-recommend, cross-session, engagement-analyze, phronesis-monitor, thinking-review, perception-collect | — |
+- memory and cross-session continuity;
+- daily rhythm, check-in, calendar, Intent closure, and active Routines;
+- EigenFlux feed, profile, friendship, publish, preinstall, and stream support;
+- perception and content curation;
+- Delivery flush/dead-letter recovery and provider health;
+- components, self-diagnostic, Guardian support, backup, log maintenance, and
+  repository sync;
+- Delegation reconciliation, Taskline bridging, and L3 observation.
 
----
+Retired task names in historical PRDs are not a reason to recreate them. Check
+`docs/capability_inventory.md` and the parsed live roster before changing a
+family.
 
-## Deliberately NOT done: a `PostScript` base class
+## Adding Or Changing A Task
 
-A base class could absorb the `sys.path` line and the read-guard boilerplate, but
-it would force all ~27 working scripts into a class shape and add a layer of
-indirection. For a system maintained by one or two people, the explicit
-small-script form reads better and is easier to debug. The chosen lever is
-**small composable helpers** (above), adopted incrementally, not a framework.
-If a hook ever needs something new, add a tested helper to `core/` rather than a
-local copy.
+Product expansion is frozen. A new product-facing task, proactive lane, or
+authority requires an explicit owner thaw and updated Product/Domain/Design
+contracts. Reliability and maintenance changes should:
+
+1. reproduce the real incident from scheduler events and domain receipts;
+2. add a regression for the observed failure class;
+3. keep evidence gathering, model content, authority, and delivery separate;
+4. test skip, malformed, infrastructure-failure, retry, duplicate, and
+   terminal outcomes as applicable;
+5. update `HEARTBEAT.md`, the capability inventory, and this document when the
+   shared contract changes;
+6. pass focused tests, the full protected CI suite, governed release, runtime
+   revision checks, real delivery/provider smoke, and post-release observation.
+
+## Why There Is No PostScript Framework
+
+The small-hook form remains deliberate. Shared correctness belongs in narrow
+tested helpers, while task-specific transformation remains explicit. Introduce
+an abstraction only when it removes repeated policy or a demonstrated failure
+class; do not force every working hook through a framework for visual
+uniformity.

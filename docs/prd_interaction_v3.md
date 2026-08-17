@@ -1,5 +1,9 @@
 # PRD：Jarvis 交互质量 v3.0（真实交互历史驱动）
 
+> **Portfolio status (2026-08-17): historical, shipped.** This is the evidence
+> and requirement record for REQ-59 to REQ-77, not a current product roadmap.
+> See [`prd_portfolio.md`](prd_portfolio.md) for present authority.
+
 - 版本：v3.0（2026-06-15）
 - 作者：Claude（基于 Pascal↔Jarvis 真实交互记录的 6-agent 审计）
 - 编号：延续 v1（REQ-01~29）、v2（REQ-30~58），本期 **REQ-59 起**

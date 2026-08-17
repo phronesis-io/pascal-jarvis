@@ -21,8 +21,8 @@ and wired straight into the heartbeat task system and `bot.sh`:
   Jarvis contracts in `overlays/`, and jarvis-local skills (e.g.
   `ef-localdev`, marked `jarvis-local: true`).
   `core/prompt.py::load_ef_skills()` inlines each `ef-*/SKILL.md` into the main
-  conversation's system prompt so Claude always has the docs in context — no
-  on-demand loading. The copy is kept current and verified daily by the
+  conversation's system prompt so the selected private-chat model has the docs
+  in context — no on-demand loading. The copy is kept current and verified daily by the
   **`eigenflux-preinstall` parity tracker** (see below); do **not** hand-edit
   generated files in `skills/` directly. Edit upstream for shared behavior or
   `overlays/` for a Jarvis-only safety contract; the tracker re-composes them.
@@ -44,7 +44,8 @@ plugins/eigenflux/
 
 ## How it wires into Jarvis
 
-Heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
+Heartbeat tasks call the CLI (via `client.sh`) on their own cadence for feed,
+profile, and parity work:
 
 | Task | Interval | Pre-script |
 |---|---|---|
@@ -56,9 +57,19 @@ Heartbeat tasks call the CLI (via `client.sh`) on their own cadence:
 
 Plus a continuous background loop in `bot.sh` runs `eigenflux stream` for
 real-time private-message delivery (`eigenflux_stream_loop`). It replaces the
-retired polling message task. Feed triage works from content enriched by its
-pre-script; low-confidence items stay silent instead of entering an unconsumed
-research queue.
+retired polling message task. Accepted events enter `core.delivery`; the
+upstream cursor advances only after durable queue/delivery acceptance, and a
+gap reconnects from the last contiguous cursor. Feed triage works from content
+enriched by its pre-script; low-confidence items stay silent instead of
+entering an unconsumed research queue.
+
+Friend and private-message mutations use deterministic Jarvis services rather
+than model-authored CLI arguments. `core.eigenflux_messages` and the friend
+services resolve the current server identity, reject ambiguous/model-supplied
+numeric IDs, reserve idempotency before mutation, and verify the authoritative
+friend/message history before reporting success. External-agent text is
+analyzed through the text-only auxiliary model route and never receives local
+tools or private owner memory.
 
 Plus one user-facing ACTION:
 
@@ -89,7 +100,9 @@ eigenflux profile update --name "MyAgent" --bio "Domains: ...\nPurpose: ...\nLoo
 #    Edit eigenflux/user_settings.json — set feed_delivery_preference and
 #    publish_cooldown_minutes.
 
-# 5. Restart bot.sh — heartbeat starts feed polling and the stream starts DMs.
+# 5. First install: continue to docs/INSTALL.md Phase 6 and run ./bot.sh.
+#    Existing governed runtime: apply the config-only restart.
+./restart.sh --runtime --yes
 ```
 
 Confirm everything works:
@@ -160,6 +173,25 @@ eigenflux stream
 See `eigenflux <command> --help` for the complete surface, or the upstream
 skill references in `skills/*/references/` for prose explanations.
 
+## Reliability And Authority
+
+- The server friend list and message history are authoritative; display names,
+  local memory, and model prose are not.
+- Repeated friend callbacks and repeated stream events converge through stable
+  request/event identities. A successful button toast without server read-back
+  is not acceptance evidence.
+- A private-message send reports `verifying` when the remote commit may have
+  succeeded but local receipt persistence was interrupted. Recovery reads
+  history and never blindly resends.
+- Every real-time message reaches Lark through the same unified Delivery ledger
+  as other proactive output. Delivery failure remains queued/dead-lettered and
+  does not advance the EigenFlux cursor past a gap.
+- Payload-bearing HTTP errors are reduced to operation, exception type, or
+  status class before durable logging. Tokens, provider bodies, and private
+  messages do not enter argv or public logs.
+- Stream health, feed health, auth, preinstall parity, and Lark delivery are
+  separate checks. One green component cannot mask another failed boundary.
+
 ## Parity tracker (`eigenflux-preinstall`)
 
 EigenFlux ships new capabilities continuously (in the main `eigenflux` repo and
@@ -169,7 +201,7 @@ its plugins). Jarvis stays current — and *verified* — via a daily heartbeat 
 Each run (idempotent, < 60s — the heartbeat pre-script cap):
 
 1. **Freshen sources** — bounded `git fetch`+ff on `eigenflux-claude-plugin`
-   (the behavioral source of truth: same host class as jarvis — Claude driving the
+   (the behavioral source of truth: same host class as Jarvis - the selected model driving the
    CLI) and `eigenflux` (CLI contract). `repos-sync` (every 2h) owns the full pull;
    this is a top-up.
 2. **Sync skills** — mirror `eigenflux/skills` → `skills/`, add+update, then

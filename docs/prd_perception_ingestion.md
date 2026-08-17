@@ -1,5 +1,15 @@
 # PRD：统一感知层 / Unified Perception & Ingestion Layer
 
+> **Current status (2026-08-17): core shipped; expansion frozen.** The registry,
+> typed Signal envelope, cross-source deduplication, sensitivity boundary,
+> durable buffers, dry-run path, and several adapters described here now exist.
+> The implementation-status statements and line references below are preserved
+> as the June design record; they are not current inventory. See
+> [`prd_portfolio.md`](prd_portfolio.md) and
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md) for current authority. A new source
+> now requires a named user blind spot, a privacy test, and an explicit product
+> scope thaw; “ingest everything available” is not an active objective.
+
 > **一句话**：把"任何我能拿到的上下文"——飞书各群/邮件/文档/妙记、report 改动、EigenFlux、行情持仓、健康、web——统一灌进 Personal Agent 的感知里；**新增一类信息 = 加一条配置,而不是写一对新脚本**。
 >
 > Status: Draft **v2**(经一轮对抗式多视角审查 + 事实核对后定稿) · Owner: Pascal · 调研日期: 2026-06-09 · 适用仓库: `pascal-jarvis`(= Jarvis 本身)

@@ -134,3 +134,44 @@ machine, in `docs/delivery_retry_and_caps.md`.
 Never copy the app secret or tenant token into delivery rows, logs, test
 fixtures, command arguments, or Git. Bot API errors are recorded as bounded
 reason codes; only a real provider receipt can advance delivery to delivered.
+
+## ADR-004: Product Expansion Is Frozen Around Lark
+
+**Status:** accepted (2026-08-17)
+
+- Lark is the sole user-facing delivery and decision surface.
+- Admin `:3456` is an operator console. Dashboard `:3457` is a frozen archive
+  and operations reference. Mobile gateway `:3458`, device pairing, Web Push,
+  and every Jarvis-owned Tailscale path are retired.
+- Existing Routines remain active and deliver through ordinary Lark Items.
+  Their product surface and authority model are frozen; reliability repairs do
+  not require a product thaw.
+- The freeze blocks new surfaces, inboxes, notification lanes, and autonomous
+  authority. It does not block security, privacy, tests, observability,
+  documentation, incident repair, or behavior-preserving module extraction.
+
+Historical PRDs do not reopen retired scope. A thaw requires an explicit owner
+decision, a named human outcome, retirement of equivalent complexity, and
+updated product/authority/privacy contracts before implementation.
+
+## ADR-005: Provider Replay Safety And Routine Deferral
+
+**Status:** accepted (2026-08-17)
+
+- Model policy belongs to `core.model_control`; harness adapters execute calls.
+  A provider route is not a new product surface.
+- Text-only/no-tools calls may fail over after bounded network, timeout,
+  server, quota, authentication, or model-availability failures.
+- A tool-capable call may have changed local state before timing out. Unknown,
+  post-tool, and transport-ambiguous failures therefore stop fail-closed; they
+  are not replayed automatically through another provider.
+- Routine occurrences are claimed before the model call. Infrastructure
+  failure closes the run as `deferred` and re-arms the Routine after a short
+  bounded delay. A model answer with no usable Routine content closes as
+  `no_output`. These states must never be collapsed.
+- The scheduler owns deferred recovery. User notification is reserved for
+  exhausted recovery or a genuine owner action, not the first internal retry.
+
+This decision prevents two opposite failures: silently spending a reminder
+because a provider was unavailable, and duplicating local effects by replaying
+an uncertain agentic call.

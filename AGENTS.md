@@ -7,16 +7,17 @@ Treat correctness, privacy, and user attention as production constraints.
 
 Read these current-state documents before changing behavior:
 
-1. `PRODUCT.md` - who Jarvis serves and what outcomes matter.
-2. `DOMAIN.md` - vocabulary and invariants.
-3. `ARCHITECTURE.md` - process, module, and authority boundaries.
-4. `DECISIONS.md` - easy-to-confuse ownership decisions and change routing.
-5. `DESIGN.md` - interaction and surface rules.
-6. `docs/prd_portfolio.md` - which historical PRDs are shipped, superseded,
+1. `docs/current_system.md` - the dated product/runtime/release snapshot.
+2. `PRODUCT.md` - who Jarvis serves and what outcomes matter.
+3. `DOMAIN.md` - vocabulary and invariants.
+4. `ARCHITECTURE.md` - process, module, and authority boundaries.
+5. `DECISIONS.md` - easy-to-confuse ownership decisions and change routing.
+6. `DESIGN.md` - interaction and surface rules.
+7. `docs/prd_portfolio.md` - which historical PRDs are shipped, superseded,
    rejected, or active.
-7. `docs/release_acceptance_2026-07-24.md` - the current requirement-to-evidence
+8. `docs/release_acceptance_2026-07-24.md` - the requirement-to-evidence
    ledger.
-8. `docs/engineering_health.md` - verified current debt and rejected audit
+9. `docs/engineering_health.md` - verified current debt and rejected audit
    false positives.
 
 Then inspect the worktree:
@@ -42,6 +43,11 @@ reviewed explicitly, and new cycles do not enter unnoticed.
 
 Never discard changes you did not create. A dirty live-runtime worktree is
 normal; stage only your own files or hunks.
+
+Product expansion is frozen. Repairs, tests, observability, documentation,
+privacy work, and behavior-preserving debt retirement remain in scope. A new
+surface, notification lane, user workflow, or authority level requires an
+explicit owner decision to thaw the product first.
 
 ## Change Lifecycle
 

@@ -19,19 +19,31 @@ Thanks for helping improve Jarvis! This repo uses a simple collaboration model:
 
 2. **Make your changes and run the tests locally** before pushing:
    ```bash
-   pip install -r requirements.txt pytest   # once (pytest is not in requirements.txt)
-   python3 -m pytest tests/
+   ./setup.sh            # once, or after dependency changes
+   ./scripts/localtest.sh
    ```
    All tests must pass. New behavior needs new tests — this repo's rule of thumb
    is that every bug fix ships with the regression test that would have caught it.
 
 3. **Open a Pull Request targeting `main`.**
-   `main` is protected: direct pushes are blocked, the `test` CI check must be
-   green, and Pascal's review (via CODEOWNERS) is required. CI runs
-   automatically on every PR.
+   Direct pushes are not a release path. Required CI must be green and review
+   evidence must satisfy `core.release_gate`; an explicit owner release
+   decision is accepted only when it is recorded after merge, bound to the
+   exact merged SHA, and includes a reason. CI runs automatically on every PR.
 
 4. **Pascal reviews and merges.** Keep PRs focused — one topic per PR merges
    faster than a grab-bag.
+
+5. **Deploy code through the governed full restart.** A merge is not a
+   deployment. After merged-main checks and review evidence are available,
+   run `./restart.sh`, then verify runtime revision, critical components,
+   delivery/provider smoke, and post-release observation. `--runtime` is only
+   for configuration/state changes on the same already-deployed revision.
+
+Product expansion is frozen as of 2026-08-17. Reliability, privacy, tests,
+documentation, evidence, and behavior-preserving debt retirement remain open.
+A new surface, notification lane, workflow, or authority needs an explicit
+owner thaw and updated current-state contracts before code.
 
 ## Personal data is config, not code
 
@@ -89,7 +101,8 @@ state.
 
 ## Getting your environment running
 
-Follow README Quick Start + `docs/INSTALL.md`. You can develop and run the full
+Read `docs/current_system.md`, then follow README Quick Start +
+`docs/INSTALL.md`. You can develop and run the full
 test suite without any Lark/EigenFlux credentials — plugins are optional and
 tests are self-contained.
 

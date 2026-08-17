@@ -24,6 +24,12 @@ Jarvis should let the user:
 
 ## Product Surfaces
 
+Product expansion is frozen as of 2026-08-17. Existing behavior remains
+supported, and reliability, privacy, documentation, evidence, and engineering
+debt work continue. The freeze forbids silently adding another surface,
+notification lane, task system, or authority level; it does not turn off an
+existing user-defined Routine.
+
 Ruling (2026-08-07, reaffirmed 2026-08-11): **Lark is the product.** A
 feature counts as delivered only when the user can complete it inside Lark —
 see it, decide, see the result. Web pages are archives and operator
@@ -43,7 +49,8 @@ cards were read 95.7% while web cards were read 1.8%.
   land here.
 - **Mobile gateway (`:3458`)** — retired (2026-08-11, completed 2026-08-14);
   Jarvis has no Tailscale runtime, setup, health check, or recovery path.
-- **Routines** — frozen: pending merge into Lark interaction or retirement.
+- **Routines** — existing definitions remain active in Lark; product expansion
+  is frozen pending evidence for consolidation or retirement.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
 - **Claude Code and Codex**: deep execution environments attached to the same
@@ -82,6 +89,8 @@ cards were read 95.7% while web cards were read 1.8%.
 - Letting an LLM invent completion, identity, delivery, or health facts.
 - Building a company-wide project-management suite inside the personal
   assistant.
+- Adding a second mobile/web inbox, Tailscale path, device pairing flow, or
+  product surface while the product freeze is in force.
 
 ## Success Measures
 
