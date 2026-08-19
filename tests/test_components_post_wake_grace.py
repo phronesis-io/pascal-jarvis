@@ -209,7 +209,8 @@ def test_a_genuinely_dead_component_still_reads_as_down(tmp_path, monkeypatch):
     assert C.ALIVE_BUT_SILENT not in detail
 
     text = daemon._component_down_text("EigenFlux 实时消息接收", detail)
-    assert "组件失联" in text and "没有在运行" in text
+    assert "EigenFlux 实时消息接收停了" in text
+    assert "进程已经不在了" in text
 
 
 # ── the hole the grace window left open ──────────────────────────────

@@ -62,6 +62,15 @@ def _is_status(argv):
 @pytest.fixture(autouse=True)
 def owner(monkeypatch):
     monkeypatch.setenv("USER_ID", "ou_test")
+    # Default every test to the injected CLI runner.  Without this isolation
+    # the keychain-independent bot transport reads the production jarvis.yaml
+    # and can send a real DM even though this suite promises no real Feishu
+    # traffic.  The dedicated direct-transport test overrides this stub.
+    monkeypatch.setattr(
+        lark_bot_transport,
+        "send",
+        lambda **kwargs: lark_bot_transport.BotSendResult(False, False),
+    )
     yield
 
 

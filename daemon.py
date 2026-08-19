@@ -79,6 +79,10 @@ RESTART_COOLDOWN = 300        # 5 min between restart attempts
 LOG_FILE = Path(os.environ.get("JARVIS_DAEMON_LOG") or JARVIS_DIR / "daemon.log")
 DAEMON_PID_FILE = JARVIS_DIR / ".daemon.pid"
 BOT_PID_FILE = JARVIS_DIR / ".bot.pid"
+# macOS banner fallback (see _raise_banner). Persisted so hot-reload respawns
+# cannot reset the rate limit — the same reason PROBE_ALERT_STATE_FILE exists.
+BANNER_STAMP_FILE = JARVIS_DIR / "data" / ".daemon_banner_stamp"
+BANNER_MIN_INTERVAL = 3600
 # Restart budget persisted across daemon hot-reloads (REQ-42 respawns): the
 # in-memory counters reset on every reincarnation, so a crash-looping stack
 # used to get MAX_RESTART_ATTEMPTS fresh attempts per respawn, defeating the
@@ -124,6 +128,14 @@ DIAG_CYCLE_START_SKEW = 15 * 60
 # stays red across TWO consecutive probes at least this far apart — a
 # watchdog-healed transient never pages, a real outage pages within ~4min.
 MANIFEST_CONFIRM_WINDOW = 2 * 60
+# A repair request is asynchronous: bot.sh's watchdog checks children every
+# 30s and launchd may need a few seconds to recreate a UI process.  Give the
+# repaired component enough time to complete a real heartbeat cycle before a
+# user-facing alert.  The timestamp is persisted in the existing probe/brain
+# state files, so daemon hot reloads cannot accidentally skip the wait.
+COMPONENT_RECOVERY_GRACE = 2 * 60
+BRAIN_RECOVERY_GRACE = 20 * 60
+DIAG_RECOVERY_GRACE = 20 * 60
 
 # Lark config (read from jarvis.yaml)
 USER_ID = ""
@@ -191,21 +203,107 @@ def log(level: str, msg: str):
         pass
 
 
-def notify_lark(msg: str) -> bool:
+# How the delivery state machine can dispose of a Guardian alert. Only the
+# LOST set means "Pascal will never see this" — everything else either already
+# reached him, is still in flight, or is a deliberate de-duplication of an
+# alert he has. Treating them all as failure is what produced 322 ERROR lines
+# and 322 macOS banners titled "Lark链路不通" over two days in which the Lark
+# link was fine (2026-08-16/17): the dead-letter consumer only marks its rows
+# notified when notify_lark returns True, so every "duplicate" verdict left
+# the rows pending and re-alerted them ~2min later, forever.
+_ALERT_REACHED_STATES = {"delivered", "read", "acted"}
+_ALERT_IN_FLIGHT_STATES = {"queued", "attempting"}
+# A metric cap is reached only when another active envelope with the same
+# incident throttle key already exists. It therefore means "covered by the
+# existing incident", not "this new row was delivered".
+_ALERT_COVERED_REASONS = {"metric_daily_cap"}
+
+
+def _alert_disposition(result) -> tuple[str, str]:
+    """(disposition, one-line explanation) for a Guardian delivery result.
+
+    ``confirmed`` and ``covered`` may close the source incident. ``pending``
+    means the durable envelope is still responsible for delivery, so it must
+    neither close a dead-letter row nor raise a local failure banner. ``lost``
+    is the only state that escalates out of band.
+    """
+    state = str(getattr(result, "state", "") or "")
+    reason = str(getattr(result, "reason", "") or "")
+    if state in _ALERT_REACHED_STATES:
+        return "confirmed", "delivered"
+    if not getattr(result, "accepted", False):
+        return "lost", f"delivery refused the alert (state={state}, {reason})"
+    if state in _ALERT_IN_FLIGHT_STATES:
+        return "pending", f"queued for delivery ({reason or 'retrying'})"
+    if state == "suppressed" and reason in _ALERT_COVERED_REASONS:
+        return "covered", f"same incident already active ({reason})"
+    return "lost", f"alert dropped (state={state}, reason={reason})"
+
+
+def _raise_banner(msg: str, why: str) -> None:
+    """Local macOS notification — the daemon's only out-of-band channel.
+
+    Rate-limited and persisted: a banner storm is indistinguishable from
+    wallpaper, and the whole point of this channel is that it still means
+    something when the Lark link is down. The text is the alert itself in
+    plain Chinese; the reason goes to the log, not to the notification centre.
+    """
+    now = time.time()
+    try:
+        last = float(BANNER_STAMP_FILE.read_text().strip())
+    except (OSError, ValueError):
+        last = 0.0
+    if now - last < BANNER_MIN_INTERVAL:
+        log("INFO", f"Guardian banner suppressed (last one "
+            f"{int(now - last)}s ago, limit 1/{BANNER_MIN_INTERVAL}s): {why}")
+        return
+    try:
+        body = " ".join(str(msg).split())[:180]
+        result = subprocess.run(
+            ["osascript", "-e",
+             'on run argv\n'
+             'display notification (item 1 of argv) with title '
+             '"Jarvis：这条没能发到飞书"\n'
+             'end run', body],
+            capture_output=True, timeout=5)
+        if result.returncode != 0:
+            log("WARN", f"Guardian banner failed: osascript exit "
+                f"{result.returncode}")
+            return
+    except Exception:
+        return
+    try:
+        BANNER_STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = BANNER_STAMP_FILE.with_suffix(".tmp")
+        tmp.write_text(str(now))
+        os.replace(tmp, BANNER_STAMP_FILE)
+    except OSError:
+        pass
+
+
+def notify_lark(msg: str, incident_key: str = "") -> bool | None:
     """Submit a Guardian alert to the unified delivery state machine.
 
     The daemon remains model-independent and keeps the macOS banner as its
     truly out-of-band fallback. Retry, dedup, throttle, and queueing are no
     longer reimplemented here.
+
+    Returns True only when the alert was confirmed or an existing incident
+    already covers it, None while a durable envelope remains in flight, and
+    False only when it was genuinely lost. This three-way receipt prevents a
+    queued warning from being called delivered while also preventing a local
+    banner storm for work that is still retrying.
     """
     if not USER_ID:
         log("WARN", "No USER_ID configured, cannot notify Lark")
+        _raise_banner(msg, "no user_id configured")
         return False
     try:
         import hashlib
         from core.delivery import DeliveryEnvelope, deliver
 
-        metric = hashlib.sha256(
+        stable = re.sub(r"[^a-zA-Z0-9:_-]+", "-", str(incident_key).strip())
+        metric = stable[:80] if stable else hashlib.sha256(
             " ".join(str(msg).split()).encode("utf-8")).hexdigest()[:20]
         result = deliver(
             DeliveryEnvelope(
@@ -220,6 +318,8 @@ def notify_lark(msg: str) -> bool:
                 metadata={
                     "metric_daily_cap": 1,
                     "incident_key": metric,
+                    "audience": "owner_private",
+                    "recipient_type": "open_id",
                     "replayable": False,
                     # A dead letter about this dead letter would recurse
                     # forever during a Lark outage.
@@ -228,22 +328,21 @@ def notify_lark(msg: str) -> bool:
             ),
             root=JARVIS_DIR,
         )
-        if result.state in {"delivered", "read", "acted"}:
+        disposition, why = _alert_disposition(result)
+        if disposition in {"confirmed", "covered"}:
+            if disposition == "covered":
+                log("INFO", f"Guardian incident already covered: {why}")
             return True
-        log("ERROR", "Guardian alert not delivery-confirmed "
-            f"(state={result.state}, reason={result.reason})")
+        if disposition == "pending":
+            log("INFO", f"Guardian alert remains in flight: {why}")
+            return None
+        log("ERROR", f"Guardian alert lost: {why}")
     except Exception as e:
         log("ERROR", f"Lark notify failed: {e}")
+        _raise_banner(msg, f"notify raised {type(e).__name__}")
+        return False
 
-    # Lark failed or remains queued: local notification is independent.
-    try:
-        safe = msg.replace('"', "'")[:200]
-        subprocess.run(
-            ["osascript", "-e",
-             f'display notification "{safe}" with title "Jarvis Guardian (Lark链路不通)"'],
-            capture_output=True, timeout=5)
-    except Exception:
-        pass
+    _raise_banner(msg, why)
     return False
 
 
@@ -430,6 +529,74 @@ def _has_ancestor(pid: int, ancestor: int, procs: dict[int, tuple[int, str]]) ->
     return False
 
 
+_OWNED_COMPONENT_PATTERNS = {
+    "heartbeat-loop": re.compile(r"(?:^|\s)-m\s+core\.heartbeat_loop(?:\s|$)"),
+    "ef-stream": re.compile(r"(?:^|\s)-m\s+core\.ef_stream_loop(?:\s|$)"),
+}
+
+
+def _request_component_recovery(name: str) -> bool:
+    """Ask the component's existing supervisor to recreate it.
+
+    This deliberately does not start a second copy.  For bot-owned children we
+    terminate only an exact command that descends from this repo's live bot;
+    bot.sh's 30s watchdog performs the restart.  Dashboard is launchd-owned,
+    so launchd gets the request directly.  Unknown/foreign processes are never
+    touched.  Returns whether a bounded recovery request was made.
+    """
+    if _in_deploy_window():
+        return False
+    if name == "dashboard :3457":
+        job = f"gui/{os.getuid()}/com.pascal.jarvis.dashboard"
+        try:
+            result = subprocess.run(
+                ["launchctl", "kickstart", "-k", job],
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception as exc:
+            log("WARN", "Guardian recovery request failed for dashboard: "
+                f"{type(exc).__name__}")
+            return False
+        if result.returncode == 0:
+            log("INFO", "Guardian requested dashboard recovery from launchd")
+            return True
+        log("WARN", "Guardian recovery request failed for dashboard: "
+            f"launchctl exit {result.returncode}")
+        return False
+
+    bot_pid = _bot_pid()
+    if not bot_pid:
+        return False
+    pattern = _OWNED_COMPONENT_PATTERNS.get(name)
+    admin_path = str(JARVIS_DIR / "admin.py")
+    procs = _ps_processes()
+    owned: list[int] = []
+    for pid, (_, cmd) in procs.items():
+        matches = bool(pattern.search(cmd)) if pattern else (
+            name == "admin :3456" and admin_path in cmd)
+        if matches and _has_ancestor(pid, bot_pid, procs):
+            owned.append(pid)
+    if not owned:
+        # The bot watchdog may already be between noticing the exit and
+        # spawning the replacement.  That still counts as recovery underway.
+        log("INFO", f"Guardian found no live owned {name} process; "
+            "owner watchdog will recreate it")
+        return name in {"heartbeat-loop", "ef-stream", "admin :3456"}
+    requested = False
+    for pid in owned:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            requested = True
+        except ProcessLookupError:
+            requested = True
+        except (PermissionError, OSError) as exc:
+            log("WARN", f"Guardian refused/failed to recycle owned {name} "
+                f"pid {pid}: {type(exc).__name__}")
+    if requested:
+        log("INFO", f"Guardian requested {name} recovery via its owner watchdog")
+    return requested
+
+
 def _is_lark_listener_alive(bot_pid: int | None = None) -> bool:
     """Check for a Lark listener owned by the current bot process.
 
@@ -446,6 +613,37 @@ def _is_lark_listener_alive(bot_pid: int | None = None) -> bool:
                 and _has_ancestor(pid, bot_pid, procs):
             return True
     return False
+
+
+# check_health's issue strings are internal identifiers (logs, tests,
+# conversation_audit all match on them). Anything that reaches a card goes
+# through here first: Pascal reads 「bot.sh is not running」as noise, and the
+# card-style contract says every user-facing line is plain Chinese.
+_ISSUE_TEXTS = {
+    "bot.sh is not running": "机器人主进程停了",
+    "Lark event listener is not running": "飞书消息监听停了",
+    "No heartbeat found in any log file": "心跳完全没有动静",
+}
+_ISSUE_STALE_RE = re.compile(r"^Heartbeat stale \((\d+)s since last beat\)$")
+
+
+def _issue_text(issue: str) -> str:
+    """One internal issue string → one plain-Chinese line."""
+    issue = str(issue or "").strip()
+    if issue in _ISSUE_TEXTS:
+        return _ISSUE_TEXTS[issue]
+    match = _ISSUE_STALE_RE.match(issue)
+    if match:
+        minutes = max(1, int(match.group(1)) // 60)
+        return f"心跳停了 {minutes} 分钟"
+    # Unknown issue: keep the raw text rather than hide the incident, but say
+    # plainly that it is internal wording so the card never pretends to be
+    # written for him.
+    return f"另有异常（原文）：{issue}"
+
+
+def _issues_block(issues: list) -> str:
+    return "\n".join(f"- {_issue_text(i)}" for i in issues)
 
 
 def check_health() -> dict:
@@ -523,10 +721,9 @@ def check_health() -> dict:
     return result
 
 
-# Components the daemon observes but does NOT own (REQ-40): :3456 admin and
-# :3457 dashboard belong to bot.sh's watchdog and launchd respectively. The
-# daemon's job here is ALERT-ONLY — it must never start new fights (the 6/12
-# restart spiral lesson). One Lark line per component per 4h.
+# Components stay owned by bot.sh/launchd. Guardian may request a bounded
+# recovery from that existing owner, but it never starts an unsupervised copy.
+# One Lark line per persistent incident per 4h.
 _probe_alert_stamps: dict = {}
 PROBE_ALERT_WINDOW = 4 * 3600
 # The stamps must survive hot-reload respawns (REQ-42): on 7/7 the daemon
@@ -592,6 +789,12 @@ def _health_payload(body: bytes) -> dict | None:
 # What each component is called when talking to Pascal — alerts carry these,
 # never the internal names/raw /health fields (feedback 7/8: he should not
 # have to decode status=degraded / priority_wedged=[...]).
+# Guardian messages are receipts after bounded self-repair, not requests for
+# Pascal to operate the machine.  Exact diagnostics stay in daemon.log.
+_REPAIR_FAILED_TAIL = "我已经自动重启并复查过，仍未恢复；我会继续处理，你暂时不用操作。"
+_REPAIR_UNAVAILABLE_TAIL = "我已经复查并保留了诊断证据，但自动恢复请求没有成功；这次需要人工排查。"
+_DEGRADED_TAIL = "系统已经在自动重试和切换备用路径；我会继续观察，你暂时不用操作。"
+
 _COMPONENT_LABELS = {
     "admin :3456": "管理面板",
     "dashboard :3457": "监控看板",
@@ -650,8 +853,9 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     if time.time() - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
         _probe_alert_stamps[key] = time.time()
         _save_probe_alert_stamps()
-        notify_lark(f"⚠️ {label}进程还活着，但内部报告自己有问题："
-                    f"{'；'.join(reasons)}。（守护进程只告警不代管）")
+        notify_lark(f"⚠️ {label}还在跑，但它自己报告有问题："
+                    f"{'；'.join(reasons)}。{_DEGRADED_TAIL}",
+                    incident_key=f"component:{name}:degraded")
 
 
 _DEFAULT_DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
@@ -659,12 +863,46 @@ DEADLETTER_FILE = _DEFAULT_DEADLETTER_FILE
 
 _DEADLETTER_KIND_LABELS = {
     "delivery_failures": "消息发送连续失败",
+    "memorial_queue_expired": "奏折卡过期没送出去",
     "night_queue_expired": "攒批消息过期没送出去",
     "night_queue_undeliverable": "攒批消息无法投递",
     "provider_failover": "模型通道切换通知",
     "reply_send_failed": "对话回复没送出去",
     "ef_stream_send_failed": "EigenFlux 实时消息没送出去",
 }
+# An unlabelled kind used to render its own snake_case identifier into the
+# card (memorial_queue_expired had no label and shipped like that). The kind
+# still goes to the log; the card gets a sentence.
+_DEADLETTER_FALLBACK_LABEL = "有消息没送出去"
+# Producer details are written for whoever reads the JSONL, not for Pascal:
+# ef-stream dead-letters the raw message body (a card's JSON when a card
+# failed), and delivery_failures writes English. A boss-facing card carries
+# neither (feedback-card-style-contract, feedback-no-jargon-dashboards).
+_DETAIL_TRANSLATIONS = (
+    (re.compile(r"^(\d+) consecutive send failures$"), r"连续 \1 次没发出去"),
+)
+
+
+def _humanize_detail(detail: str) -> str:
+    """Producer detail → one short Chinese fragment, or '' to say nothing.
+
+    Dropping a detail is deliberate: the label already names what went wrong,
+    and a truncated JSON blob adds nothing he can act on.
+    """
+    text = " ".join(str(detail or "").split())
+    if not text:
+        return ""
+    if text.startswith(("{", "[")) or '":' in text or '": ' in text:
+        return ""
+    for pattern, replacement in _DETAIL_TRANSLATIONS:
+        if pattern.match(text):
+            return pattern.sub(replacement, text)
+    # Anything still mostly ASCII is internal wording (English error strings,
+    # module names). Keep short Chinese details, drop the rest.
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    if ascii_chars > len(text) * 0.7:
+        return ""
+    return text[:60]
 
 
 def consume_delivery_deadletters():
@@ -705,9 +943,12 @@ def consume_delivery_deadletters():
                 delivered = notify_lark(
                     f"⚠️ 有 {len(sql_rows)} 条消息最终未送达。失败记录还在；"
                     "投递恢复后只补发仍有效、仍未处理的事项，过期提醒不会补发：\n"
-                    + "\n".join(detail_lines)
+                    + "\n".join(detail_lines),
+                    incident_key="delivery-terminal",
                 )
-                if delivered is not False:
+                # SQLite rows remain authoritative until the Guardian notice
+                # is confirmed or covered by an already confirmed incident.
+                if delivered:
                     pipeline.mark_dead_letters_notified(
                         [int(row["id"]) for row in sql_rows])
         except Exception as e:
@@ -719,11 +960,10 @@ def consume_delivery_deadletters():
         with open(DEADLETTER_FILE, "r+", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
-                lines = f.read().splitlines()
-                f.seek(0)
-                f.truncate()
+                snapshot = f.read()
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
+        lines = snapshot.splitlines()
         by_kind: dict = {}
         for ln in lines:
             try:
@@ -732,7 +972,9 @@ def consume_delivery_deadletters():
                 continue
             by_kind.setdefault(str(row.get("kind", "unknown")), []).append(row)
         if not by_kind:
-            return
+            outcomes: list[bool | None] = []
+        else:
+            outcomes = []
         n = sum(len(v) for v in by_kind.values())
         log("WARN", f"Delivery dead-letters: {n} row(s), kinds={sorted(by_kind)}")
         # provider_failover 是状态通知，不是没送出去的消息 —— 内容本身就是
@@ -744,28 +986,62 @@ def consume_delivery_deadletters():
         failover = by_kind.pop("provider_failover", None)
         if failover:
             detail = str(failover[-1].get("detail", "")).strip()
-            notify_lark(detail or _DEADLETTER_KIND_LABELS["provider_failover"])
-        if not by_kind:
-            return
-        parts = []
-        for kind, items in sorted(by_kind.items()):
-            label = _DEADLETTER_KIND_LABELS.get(kind, kind)
-            first = items[0]
-            extra = f"（共 {len(items)} 条）" if len(items) > 1 else ""
-            since = str(first.get("due_since", "")).strip()
-            since_txt = f"，自 {since} 起" if since else ""
-            detail = str(first.get("detail", ""))[:80]
-            parts.append(f"- {label}{extra}{since_txt}：{detail}")
-        notify_lark("⚠️ 有本该送到你手上的消息没送出去（心跳自己的告警可能"
-                    "也发不出来，这条走的是守护进程的独立通道）：\n"
-                    + "\n".join(parts))
+            if detail.startswith(("{", "[")):
+                detail = ""  # raw payload never goes out as a card body
+            outcomes.append(notify_lark(
+                detail or _DEADLETTER_KIND_LABELS["provider_failover"],
+                incident_key="provider-failover",
+            ))
+        if by_kind:
+            parts = []
+            for kind, items in sorted(by_kind.items()):
+                label = _DEADLETTER_KIND_LABELS.get(
+                    kind, _DEADLETTER_FALLBACK_LABEL)
+                first = items[0]
+                extra = f"（共 {len(items)} 条）" if len(items) > 1 else ""
+                since = str(first.get("due_since", "")).strip()
+                since_txt = f"，自 {since} 起" if since else ""
+                detail = _humanize_detail(first.get("detail", ""))
+                detail_txt = f"：{detail}" if detail else ""
+                parts.append(f"- {label}{extra}{since_txt}{detail_txt}")
+            outcomes.append(notify_lark(
+                "⚠️ 有本该送到你手上的消息没送出去。失败记录仍然保留；"
+                "飞书恢复后只会补仍有效的事项：\n" + "\n".join(parts),
+                incident_key="delivery-legacy",
+            ))
+
+        # Only remove the exact snapshot after every notice was accepted by
+        # the durable pipeline (None means queued).  A genuine loss keeps the
+        # source evidence for the next pass.  Concurrent appends survive.
+        if all(outcome is not False for outcome in outcomes):
+            with open(DEADLETTER_FILE, "r+", encoding="utf-8") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    current = f.read()
+                    if current.startswith(snapshot):
+                        remainder = current[len(snapshot):]
+                        f.seek(0)
+                        f.write(remainder)
+                        f.truncate()
+                    else:
+                        log("WARN", "legacy deadletter changed before consume; "
+                            "leaving evidence intact")
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
         log("ERROR", f"deadletter consume failed: {e}")
 
 
+def _clear_probe_keys(*keys: str) -> None:
+    changed = False
+    for key in keys:
+        changed |= _probe_alert_stamps.pop(key, None) is not None
+    if changed:
+        _save_probe_alert_stamps()
+
+
 def probe_observed_components():
-    """Alert (never restart) when :3456/:3457 are down — the dashboard died
-    for 23 days because nothing watched it. Errors here never raise."""
+    """Repair, verify, then alert when :3456/:3457 remain down."""
     # During a restart window the stack is legitimately down — probing here
     # would fire false 'component DOWN' alerts (red-team fix: the probe ran
     # OUTSIDE check_health's deploy guard).
@@ -799,18 +1075,34 @@ def probe_observed_components():
             alive = payload is not None or e.code < 500
         except Exception:
             pass
+        pending_key = f"{name}|pending"
+        repair_key = f"{name}|repair"
         if alive:
-            if _probe_alert_stamps.pop(name, None) is not None:  # recovered
-                _save_probe_alert_stamps()
+            _clear_probe_keys(name, pending_key, repair_key)
             _note_degraded_health(name, payload, code)
             continue
-        last = _probe_alert_stamps.get(name, 0)
-        if time.time() - last >= PROBE_ALERT_WINDOW:
-            _probe_alert_stamps[name] = time.time()
+        now = time.time()
+        first_seen = _probe_alert_stamps.get(pending_key, 0)
+        if not first_seen:
+            _probe_alert_stamps[pending_key] = now
+            if _request_component_recovery(name):
+                _probe_alert_stamps[repair_key] = now
             _save_probe_alert_stamps()
-            log("WARN", f"Observed component DOWN: {name}")
-            notify_lark(f"⚠️ 组件失联：{name} 探测不通。"
-                        f"（守护进程只告警不代管；如未自愈请重启或查 launchd）")
+            log("INFO", f"Observed component red (1st probe); recovery "
+                f"requested before alert: {name}")
+            continue
+        if now - first_seen < COMPONENT_RECOVERY_GRACE:
+            continue
+        last = _probe_alert_stamps.get(name, 0)
+        if now - last >= PROBE_ALERT_WINDOW:
+            _probe_alert_stamps[name] = now
+            _save_probe_alert_stamps()
+            log("WARN", f"Observed component DOWN after recovery: {name}")
+            label = _COMPONENT_LABELS.get(name, name)
+            tail = (_REPAIR_FAILED_TAIL if _probe_alert_stamps.get(repair_key)
+                    else _REPAIR_UNAVAILABLE_TAIL)
+            notify_lark(f"⚠️ {label}连续两次连不上。{tail}",
+                        incident_key=f"component:{name}:down")
 
 
 # Manifest criticals that check_health / probe_observed_components already
@@ -822,7 +1114,8 @@ _MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar",
                      "admin", "dashboard"}
 
 
-def _component_down_text(label: str, detail: str) -> str:
+def _component_down_text(label: str, detail: str,
+                         recovery_requested: bool = True) -> str:
     """What to tell Pascal about a red manifest-critical component.
 
     Every red used to render as 「组件失联：X 没有在运行」. On 2026-08-18 02:16
@@ -836,18 +1129,21 @@ def _component_down_text(label: str, detail: str) -> str:
         from core.components import ALIVE_BUT_SILENT
     except Exception:
         ALIVE_BUT_SILENT = "进程在跑但没在报状态"
-    tail = "（守护进程只告警不代管；一直没恢复的话需要人工重启）"
+    tail = (_REPAIR_FAILED_TAIL if recovery_requested
+            else _REPAIR_UNAVAILABLE_TAIL)
     if ALIVE_BUT_SILENT in detail:
         return (f"⚠️ {label}不太对劲：进程还活着，但很久没报状态了。"
-                f"重启前先确认它是真卡住了{tail}")
-    return f"⚠️ 组件失联：{label}没有在运行。{tail}"
+                f"{tail}")
+    # 「组件失联：X没有在运行」said the same thing twice and led with the word
+    # 「组件」—— the label already names the thing in his vocabulary.
+    return f"⚠️ {label}停了，进程已经不在了。{tail}"
 
 
 def _probe_manifest_criticals():
-    """Alert (never restart) on dead critical components from components.yaml.
+    """Repair, verify, then alert on dead manifest-critical components.
     The manifest promised 'critical: true → daemon checks it' but the daemon
     kept its own hardcoded list, so critical ef-stream had no daemon coverage
-    on any path (audit 7/8). Alert-only, deploy-guarded, same persisted 4h
+    on any path (audit 7/8). Owner-mediated, deploy-guarded, same persisted 4h
     dedup as the hardcoded probes, debounced across two consecutive red
     probes so a watchdog-healed transient never pages (red-team 7/9).
     Never raises."""
@@ -868,13 +1164,11 @@ def _probe_manifest_criticals():
             if name in _MANIFEST_COVERED:
                 continue
             pending_key = f"{name}|pending"
+            repair_key = f"{name}|repair"
             if r.get("ok"):
                 # Recovered: re-arm the 4h dedup AND clear any pending
                 # first-seen mark, so a healed transient never pages later.
-                popped = (_probe_alert_stamps.pop(name, None) is not None)
-                popped |= (_probe_alert_stamps.pop(pending_key, None) is not None)
-                if popped:
-                    _save_probe_alert_stamps()
+                _clear_probe_keys(name, pending_key, repair_key)
                 continue
             # Debounce (red-team 7/9): bot.sh's watchdog respawns a dead
             # ef-stream within ≤30s, and a single crash landing inside a
@@ -885,10 +1179,14 @@ def _probe_manifest_criticals():
             # consecutive red probe >= MANIFEST_CONFIRM_WINDOW later.
             first_seen = _probe_alert_stamps.get(pending_key, 0)
             if not first_seen:
-                _probe_alert_stamps[pending_key] = time.time()
+                now = time.time()
+                _probe_alert_stamps[pending_key] = now
+                if _request_component_recovery(name):
+                    _probe_alert_stamps[repair_key] = now
                 _save_probe_alert_stamps()
                 log("INFO", f"Manifest-critical component red (1st probe, "
-                    f"awaiting confirmation): {name} — {r.get('detail')}")
+                    f"recovery requested, awaiting confirmation): {name} — "
+                    f"{r.get('detail')}")
                 continue
             if time.time() - first_seen < MANIFEST_CONFIRM_WINDOW:
                 continue
@@ -898,7 +1196,14 @@ def _probe_manifest_criticals():
                 log("WARN", f"Manifest-critical component DOWN: {name} — "
                     f"{r.get('detail')}")
                 label = _COMPONENT_LABELS.get(name, name)
-                notify_lark(_component_down_text(label, str(r.get("detail") or "")))
+                notify_lark(
+                    _component_down_text(
+                        label, str(r.get("detail") or ""),
+                        recovery_requested=bool(
+                            _probe_alert_stamps.get(repair_key)),
+                    ),
+                    incident_key=f"component:{name}:down",
+                )
     except Exception as e:
         log("ERROR", f"manifest component probe failed: {e}")
 
@@ -919,7 +1224,7 @@ def _network_reachable() -> bool:
 
 
 def _check_brain_health():
-    """Alert (never restart) when the heartbeat loop is ALIVE BUT BRAIN-DEAD —
+    """Recycle, verify, then alert when heartbeat is ALIVE BUT BRAIN-DEAD —
     ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
     was missing from the launchd PATH for ~1h and EVERY liveness signal stayed
     fresh (beat-marker, /health heartbeat_age, per-task circuit), so nothing
@@ -961,6 +1266,8 @@ def _check_brain_health():
         last_alert = prev.get("last_alert", 0) or 0
         last_check_ts = prev.get("last_check_ts", 0) or 0
         grace_until = prev.get("grace_until", 0) or 0
+        repair_requested_at = prev.get("repair_requested_at", 0) or 0
+        repair_request_ok = bool(prev.get("repair_request_ok", True))
         # Suppression ledger (audit 7/10): {"since": ts, "windows": n} — how
         # long / across how many awake windows the SAME brain-dead verdict
         # has been swallowed by grace. Persisted so it survives sleeps and
@@ -997,6 +1304,8 @@ def _check_brain_health():
 
         if not result["brain_dead"]:
             suppressed = {}
+            repair_requested_at = 0
+            repair_request_ok = True
         elif in_grace:
             if not suppressed:
                 suppressed = {"since": now, "windows": 1}
@@ -1025,15 +1334,32 @@ def _check_brain_health():
                     "(Lark endpoint unreachable) — deferring; grace re-armed "
                     f"for {BRAIN_WAKE_GRACE // 60}min while the network returns")
             else:
-                new_last_alert = now
-                # Tag goes at the END: conversation_audit.py classifies on
-                # the literal "BRAIN-DEAD heartbeat:" prefix.
-                tag = (" [persisted across post-wake grace]" if in_grace
-                       else "")
-                log("WARN", "BRAIN-DEAD heartbeat: "
-                    + "; ".join(result["alerts"]) + tag)
-                notify_lark(result["summary"])
-                suppressed = {}
+                if not repair_requested_at:
+                    requested = _request_component_recovery("heartbeat-loop")
+                    repair_requested_at = now
+                    repair_request_ok = requested
+                    log("WARN", "BRAIN-DEAD heartbeat: recovery requested "
+                        f"before alert ({'accepted' if requested else 'owner pending'}): "
+                        + "; ".join(result["alerts"]))
+                elif now - repair_requested_at < BRAIN_RECOVERY_GRACE:
+                    log("INFO", "brain-health: recovery in progress; waiting "
+                        f"{BRAIN_RECOVERY_GRACE // 60}min before alert")
+                else:
+                    new_last_alert = now
+                    # Tag goes at the END: conversation_audit.py classifies on
+                    # the literal "BRAIN-DEAD heartbeat:" prefix.
+                    tag = (" [persisted across post-wake grace]" if in_grace
+                           else "")
+                    log("WARN", "BRAIN-DEAD heartbeat: "
+                        + "; ".join(result["alerts"]) + tag)
+                    summary = result["summary"] if repair_request_ok else (
+                        "⚠️ 我有后台任务持续卡住。模型备用链路和任务重试已经"
+                        "跑过，但 Guardian 没能发起心跳自动恢复。我已经保留"
+                        "诊断证据；这次需要人工排查。"
+                    )
+                    notify_lark(summary,
+                                incident_key="heartbeat-brain-dead")
+                    suppressed = {}
         elif result["brain_dead"] and in_grace:
             log("INFO", "brain-health: would alert but in post-wake grace "
                 f"(suppressed {int(now - float(suppressed.get('since', now)))}s "
@@ -1045,7 +1371,9 @@ def _check_brain_health():
         # drive the sleep-gap detection above; suppressed drives grace penetration.
         new_state = {"samples": result["samples"], "last_alert": new_last_alert,
                      "last_check_ts": now, "grace_until": grace_until,
-                     "suppressed": suppressed}
+                     "suppressed": suppressed,
+                     "repair_requested_at": repair_requested_at,
+                     "repair_request_ok": repair_request_ok}
         tmp = BRAIN_STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(new_state))
         os.replace(tmp, BRAIN_STATE_FILE)
@@ -1054,7 +1382,7 @@ def _check_brain_health():
 
 
 def _check_diag_staleness():
-    """Alert (never restart) when self-diagnostic — the system's only
+    """Repair, verify, then alert when self-diagnostic — the system's only
     aggregated health alarm — stops running, or when its ⚠️ warnings die on
     the heartbeat-side delivery path (stability backlog #5: nothing watched
     the watcher, the same structural silence that let the dashboard die for
@@ -1065,7 +1393,7 @@ def _check_diag_staleness():
          after the pre run → the post-script's own send failed; re-deliver
          through our channel. (The pre mtime only proves the PRE stage ran —
          leg B is what covers the delivery half.)
-    Alert-only, deploy-guarded, never raises."""
+    Self-healing, deploy-guarded, never raises."""
     if _in_deploy_window():
         return
     try:
@@ -1090,24 +1418,39 @@ def _check_diag_staleness():
             pre_age = None
 
         key = "self-diagnostic|stale"
+        repair_key = "self-diagnostic|repair"
+        repair_ok_key = "self-diagnostic|repair-ok"
         if pre_age is None or pre_age > DIAG_STALE_THRESHOLD:
+            repair_at = _probe_alert_stamps.get(repair_key, 0)
+            if not repair_at:
+                _probe_alert_stamps[repair_key] = now
+                if _request_component_recovery("heartbeat-loop"):
+                    _probe_alert_stamps[repair_ok_key] = now
+                _save_probe_alert_stamps()
+                log("WARN", "self-diagnostic stale; heartbeat recovery "
+                    "requested before alert")
+                return
+            if now - repair_at < DIAG_RECOVERY_GRACE:
+                return
             if now - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
                 _probe_alert_stamps[key] = now
                 _save_probe_alert_stamps()
+                repair_ok = bool(_probe_alert_stamps.get(repair_ok_key))
+                tail = (_REPAIR_FAILED_TAIL if repair_ok
+                        else _REPAIR_UNAVAILABLE_TAIL)
                 if pre_age is None:
                     log("WARN", "self-diagnostic pre report missing")
                     notify_lark("⚠️ 自诊断任务好像一直没跑成过（找不到它的"
-                                "体检报告），系统健康这块现在没人盯。"
-                                "（守护进程只告警不代管）")
+                                f"体检报告）。{tail}",
+                                incident_key="self-diagnostic-stale")
                 else:
                     log("WARN", f"self-diagnostic stale "
                         f"({int(pre_age)}s since last pre run)")
                     notify_lark(f"⚠️ 自诊断任务已经 {int(pre_age // 3600)} 小时"
-                                "没有运行了（正常每 4 小时一次），这段时间系统"
-                                "健康没人体检。（守护进程只告警不代管）")
+                                f"没有运行了（正常每 4 小时一次）。{tail}",
+                                incident_key="self-diagnostic-stale")
             return
-        if _probe_alert_stamps.pop(key, None) is not None:  # running again
-            _save_probe_alert_stamps()
+        _clear_probe_keys(key, repair_key, repair_ok_key)
 
         # Leg B — only on EVIDENCE the post had its turn (red-team 7/9: the
         # old 15min wall-clock grace fired mid-cycle whenever pre→post ran
@@ -1158,11 +1501,16 @@ def _check_diag_staleness():
             return
         log("WARN", f"self-diagnostic warnings unsent by post "
             f"({len(warnings)}) — sending via daemon channel")
-        notify_lark("🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
-                    "（这条由守护进程代发）：\n"
-                    + "\n".join(warnings[:12])
-                    + ("\n…（其余略）" if len(warnings) > 12 else "")
-                    + "\n（同样的问题一天最多提醒一次）")
+        receipt = notify_lark(
+            "🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
+            "（这条由守护进程代发）：\n"
+            + "\n".join(warnings[:12])
+            + ("\n…（其余略）" if len(warnings) > 12 else "")
+            + "\n（同样的问题一天最多提醒一次）",
+            incident_key="self-diagnostic-delivery",
+        )
+        if receipt is False:
+            return
         try:
             tmp = DIAG_ALERT_STAMP.with_suffix(".tmp")
             tmp.write_text(json.dumps(
@@ -1202,8 +1550,9 @@ def _remind_breaker_latched():
         return  # can't record the stamp — skip rather than page every check
     log("WARN", "Restart breaker still latched — daily reminder sent")
     notify_lark("⚠️ 提醒：我这边的自动重启还停着（之前连续重启失败后暂停的），"
-                "系统可能还没恢复。修好之后删掉这个文件，我就恢复自动看护：\n"
-                f"{BREAKER_LATCH_FILE}")
+                "系统可能还没恢复。我会继续保留诊断证据并每天复查一次；"
+                "这次确实需要人工排查。",
+                incident_key="bot-restart-breaker")
 
 
 def _clear_breaker_latch(reason: str):
@@ -1222,7 +1571,8 @@ def _clear_breaker_latch(reason: str):
     last_restart_time = 0
     _save_restart_state()
     log("INFO", f"Restart breaker re-armed ({reason})")
-    notify_lark("✅ 系统恢复正常了，我已经解除自动重启的暂停，恢复正常看护。")
+    notify_lark("✅ 系统恢复正常了，我已经解除自动重启的暂停，恢复正常看护。",
+                incident_key="bot-restart-recovered")
 
 
 def _maybe_clear_breaker_latch(result: dict):
@@ -1321,9 +1671,9 @@ def diagnose_and_fix(issues: list[str]) -> str:
             pass
         notify_lark(f"⚠️ 我连续重启了 {MAX_RESTART_ATTEMPTS} 次都没能把系统救回来，"
                     "为了不无限折腾，我已经暂停自动重启，需要你人工看一下。\n\n"
-                    "问题：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
-                    f"处理好之后删掉这个文件，我就恢复自动看护：\n{BREAKER_LATCH_FILE}\n"
-                    "（系统自己恢复的话我也会自动解除并告诉你；解除前我每天提醒一次。）")
+                    "问题：\n" + _issues_block(issues) + "\n\n"
+                    "我会每天复查一次；系统自己恢复后也会自动解除并告诉你。",
+                    incident_key="bot-restart-breaker")
         # The latch flag now gates all restarts, so zeroing the counter is
         # safe — deleting the flag deliberately re-arms with a fresh budget.
         restart_count = 0
@@ -1405,7 +1755,10 @@ def diagnose_and_fix(issues: list[str]) -> str:
     except Exception as e:
         msg = f"Failed to start bot.sh: {e}"
         log("ERROR", msg)
-        notify_lark(f"❌ {msg}")
+        notify_lark("❌ 我发现系统停了，想自己重启但启动失败了，现在还是停的，"
+                    "需要你手动看一下。\n\n"
+                    f"（启动时的报错原文：{str(e)[:120]}）",
+                    incident_key="bot-restart-failed")
         return msg
 
     last_restart_time = now
@@ -1425,8 +1778,12 @@ def diagnose_and_fix(issues: list[str]) -> str:
     if post_check["healthy"] and "note" not in post_check:
         msg = f"Auto-restart successful (attempt {restart_count})"
         log("INFO", msg)
-        notify_lark(f"✅ Jarvis was down. {msg}.\n\nOriginal issues:\n" +
-                    "\n".join(f"- {i}" for i in issues))
+        # The log line above keeps its English wording (conversation_audit
+        # classifies on "Auto-restart successful"); the card does not.
+        notify_lark("✅ 刚才我这边停了，已经自动重启好，现在恢复正常了。\n\n"
+                    "停的原因：\n" + _issues_block(issues) + "\n\n知道就行，"
+                    "不用你做什么。",
+                    incident_key="bot-restart-recovered")
         restart_count = 0
         _save_restart_state()
         # Defensive: a latch created out-of-band must not outlive a verified
@@ -1591,7 +1948,7 @@ def main():
                 except OSError:
                     pass
 
-                # Observed-component probes (alert-only) every ~4th check
+                # Observed-component repair/verify probes every ~4th check
                 probe_tick += 1
                 if probe_tick % 4 == 0:
                     probe_observed_components()
@@ -1599,7 +1956,7 @@ def main():
                     # Delivery dead-letters (backlog #7): alarms the heartbeat
                     # loop couldn't send ride our independent channel.
                     consume_delivery_deadletters()
-                # Brain-death detection (alert-only) every ~8th check (~4min).
+                # Brain-death repair/verify detection every ~8th check (~4min).
                 # Cheaper than a restart-spiral; runs in the daemon because it
                 # must survive a dead claude binary that the heartbeat can't.
                 if probe_tick % 8 == 0:

@@ -352,6 +352,17 @@ the actual out-of-band detector: the daemon withholds its success ping after
 three consecutive real Lark transport failures, as well as when the local
 stack is unhealthy.
 
+Guardian follows `observe -> bounded repair -> verify -> notify`. It may only
+recycle a process after proving that process descends from this repository's
+live bot and matches the exact component command; the launchd-owned dashboard
+is addressed by its exact job label. A first red probe starts recovery and is
+silent. A user-facing alert means the repair grace expired and a second probe
+was still red. Delivery receipts are three-valued: confirmed/covered closes an
+incident, queued/attempting leaves it durably in flight without a local banner,
+and only a refused or dropped alert invokes the rate-limited macOS fallback.
+All Guardian and external dead-man payloads are `owner_private`; a failed owner
+route fails closed and never falls back to a group or public monitoring route.
+
 The host itself is not a component and cannot be supervised into existence. A
 closed lid on battery sleeps the Mac whatever any `caffeinate` assertion says,
 and while it sleeps the runtime, the Guardian watching it, and the surface it

@@ -38,12 +38,118 @@ def test_guardian_alert_has_durable_incident_identity(
         ),
     )
 
-    assert daemon_mod.notify_lark("⚠️ 组件失联：admin") is True
+    assert daemon_mod.notify_lark(
+        "⚠️ 组件失联：admin", incident_key="component:admin:down") is True
     envelope = captured[0]
-    assert envelope.dedup_key.startswith("guardian:")
+    assert envelope.dedup_key == "guardian:component:admin:down"
     assert envelope.throttle_key == envelope.dedup_key
-    assert envelope.metadata["incident_key"]
+    assert envelope.metadata["incident_key"] == "component:admin:down"
+    assert envelope.metadata["audience"] == "owner_private"
+    assert envelope.metadata["recipient_type"] == "open_id"
     assert envelope.metadata["replayable"] is False
+
+
+@pytest.mark.parametrize(
+    ("result", "expected", "banner_count"),
+    [
+        (SimpleNamespace(state="queued", reason="quiet_hours", accepted=True),
+         None, 0),
+        (SimpleNamespace(state="attempting", reason="retry", accepted=True),
+         None, 0),
+        (SimpleNamespace(state="suppressed", reason="metric_daily_cap",
+                         accepted=True), True, 0),
+        (SimpleNamespace(state="suppressed", reason="source_daily_cap",
+                         accepted=True), False, 1),
+        (SimpleNamespace(state="failed", reason="transport", accepted=False),
+         False, 1),
+    ],
+)
+def test_guardian_delivery_receipt_is_honest(
+    tmp_path, monkeypatch, result, expected, banner_count,
+):
+    from core import delivery
+
+    banners = []
+    monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(daemon_mod, "_raise_banner",
+                        lambda msg, why: banners.append((msg, why)))
+    monkeypatch.setattr(delivery, "deliver", lambda *a, **k: result)
+
+    assert daemon_mod.notify_lark(
+        "同一个事故，文字可以变化", incident_key="stable-incident") is expected
+    assert len(banners) == banner_count
+
+
+def test_local_banner_is_argument_safe_and_persistently_rate_limited(
+        tmp_path, monkeypatch):
+    calls = []
+    stamp = tmp_path / ".banner"
+    monkeypatch.setattr(daemon_mod, "BANNER_STAMP_FILE", stamp)
+    monkeypatch.setattr(daemon_mod.time, "time", lambda: 10_000.0)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        daemon_mod.subprocess, "run",
+        lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
+    )
+
+    body = '异常 "quoted" text'
+    daemon_mod._raise_banner(body, "lost")
+    daemon_mod._raise_banner(body, "lost again")
+
+    assert len(calls) == 1
+    assert calls[0][-1] == body
+    assert body not in calls[0][2]  # message is argv, never AppleScript source
+    assert stamp.exists()
+
+
+def test_failed_local_banner_does_not_consume_rate_limit(tmp_path, monkeypatch):
+    stamp = tmp_path / ".banner"
+    monkeypatch.setattr(daemon_mod, "BANNER_STAMP_FILE", stamp)
+    monkeypatch.setattr(daemon_mod.time, "time", lambda: 10_000.0)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        daemon_mod.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=1),
+    )
+
+    daemon_mod._raise_banner("lost", "osascript failed")
+
+    assert not stamp.exists()
+
+
+def test_component_recovery_only_terminates_owned_exact_child(monkeypatch):
+    killed = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        200: (100, "python3 -m core.heartbeat_loop"),
+        300: (1, "python3 -m core.heartbeat_loop"),
+        400: (100, "python3 -m core.heartbeat_loop_debug"),
+    })
+    monkeypatch.setattr(daemon_mod.os, "kill",
+                        lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    assert daemon_mod._request_component_recovery("heartbeat-loop") is True
+    assert killed == [(200, daemon_mod.signal.SIGTERM)]
+
+
+def test_dashboard_recovery_uses_exact_launchd_job(monkeypatch):
+    calls = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        daemon_mod.subprocess, "run",
+        lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    assert daemon_mod._request_component_recovery("dashboard :3457") is True
+    assert calls == [["launchctl", "kickstart", "-k",
+                      "gui/501/com.pascal.jarvis.dashboard"]]
 
 
 def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
@@ -355,8 +461,8 @@ def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
 
 @pytest.fixture
 def probe_env(monkeypatch, tmp_path):
-    """Wire probe_observed_components with capture sinks; returns (logs, alerts)."""
-    logs, alerts = [], []
+    """Wire probes with capture sinks; no test may touch live processes."""
+    logs, alerts, recoveries = [], [], []
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
     monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
     # Stamps persist on every mutation — point the state file at tmp so tests
@@ -364,13 +470,18 @@ def probe_env(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE",
                         tmp_path / ".daemon_probe_alert_state.json")
     monkeypatch.setattr(daemon_mod, "log", lambda lvl, msg: logs.append((lvl, msg)))
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
-    return logs, alerts
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery",
+        lambda name: recoveries.append(name) or True,
+    )
+    return logs, alerts, recoveries
 
 
 def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env):
     """503 + health-JSON body (admin's 'error' convention) → alive, not DOWN."""
-    logs, alerts = probe_env
+    logs, alerts, recoveries = probe_env
     body = json.dumps({"status": "error", "circuits_open": ["newsapi"],
                        "error": "boom"}).encode()
 
@@ -380,7 +491,7 @@ def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     daemon_mod.probe_observed_components()
 
-    assert not any("失联" in a for a in alerts), alerts
+    assert not any("连不上了" in a for a in alerts), alerts
     assert not any("DOWN" in msg for _, msg in logs), logs
     degraded = [msg for _, msg in logs if "DEGRADED" in msg]
     assert degraded, logs
@@ -388,12 +499,12 @@ def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env
     assert "newsapi" in degraded[0]  # circuits_open surfaced
     # alert-only discipline: a degraded (not 失联) Lark line went out — in the
     # 2026-07-09 plain-Chinese wording (Pascal killed the status=/HTTP jargon)
-    assert any("内部报告自己有问题" in a and "newsapi" in a for a in alerts)
+    assert any("它自己报告有问题" in a and "newsapi" in a for a in alerts)
 
 
 def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
     """Admin's other convention: HTTP 200 with {"status": "degraded"} body."""
-    logs, alerts = probe_env
+    logs, alerts, recoveries = probe_env
     body = json.dumps({"status": "degraded",
                        "priority_wedged": ["morning_brief"]}).encode()
 
@@ -413,13 +524,13 @@ def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
                         lambda url, timeout=None: FakeResp())
     daemon_mod.probe_observed_components()
 
-    assert not any("失联" in a for a in alerts), alerts
+    assert not any("连不上了" in a for a in alerts), alerts
     assert any("DEGRADED" in msg and "priority_wedged" in msg
                for _, msg in logs), logs
 
 
 def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
-    logs, alerts = probe_env
+    logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
         raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
@@ -427,13 +538,23 @@ def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     daemon_mod.probe_observed_components()
 
-    assert any("失联" in a for a in alerts), alerts
+    assert alerts == []
+    assert recoveries == ["admin :3456", "dashboard :3457"]
+    for name in recoveries:
+        daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
+            time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
+    daemon_mod.probe_observed_components()
+
+    assert any("管理面板连续两次连不上" in a for a in alerts), alerts
+    # The card names the component the way he knows it — never ":3456" or
+    # "launchd" (feedback-no-jargon-dashboards).
+    assert not any(":3456" in a or "launchd" in a for a in alerts), alerts
     assert any("DOWN" in msg for _, msg in logs), logs
 
 
 def test_probe_non_json_5xx_still_alerts_down(monkeypatch, probe_env):
     """A 502 HTML error page is NOT a health report — still a probe failure."""
-    logs, alerts = probe_env
+    logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
         raise _http_error(502, b"<html>Bad Gateway</html>")
@@ -441,7 +562,16 @@ def test_probe_non_json_5xx_still_alerts_down(monkeypatch, probe_env):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     daemon_mod.probe_observed_components()
 
-    assert any("失联" in a for a in alerts), alerts
+    assert alerts == []
+    for name in recoveries:
+        daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
+            time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
+    daemon_mod.probe_observed_components()
+
+    assert any("管理面板连续两次连不上" in a for a in alerts), alerts
+    # The card names the component the way he knows it — never ":3456" or
+    # "launchd" (feedback-no-jargon-dashboards).
+    assert not any(":3456" in a or "launchd" in a for a in alerts), alerts
     assert any("DOWN" in msg for _, msg in logs), logs
 
 
@@ -515,7 +645,8 @@ def test_max_attempts_latches_breaker(monkeypatch, restart_env):
     monkeypatch.setattr(daemon_mod, "check_health",
                         lambda: {"healthy": True, "issues": []})
     alerts = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
     popens = []
     monkeypatch.setattr(subprocess, "Popen",
                         lambda *a, **k: popens.append(a) or None)
@@ -526,7 +657,8 @@ def test_max_attempts_latches_breaker(monkeypatch, restart_env):
     assert latch.exists()
     assert popens == []                                # no restart attempted
     assert len(alerts) == 1
-    assert "restart_breaker.latched" in alerts[0]      # tells Pascal how to re-arm
+    assert "每天复查" in alerts[0]
+    assert "restart_breaker.latched" not in alerts[0]  # no internal path in chat
     # Counter reset is safe now that the flag gates all restarts; the flag
     # survives hot-reload respawns because it lives on disk.
     assert json.loads(state_file.read_text())["restart_count"] == 0
@@ -552,12 +684,14 @@ def test_latched_breaker_daily_reminder(monkeypatch, restart_env):
     latch.write_text(json.dumps(
         {"latched_at": 0, "last_reminder": time.time() - 25 * 3600}))
     alerts = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
 
     daemon_mod.diagnose_and_fix(["bot.sh is not running"])
     assert len(alerts) == 1
     assert "自动重启" in alerts[0]
-    assert "restart_breaker.latched" in alerts[0]
+    assert "人工排查" in alerts[0]
+    assert "restart_breaker.latched" not in alerts[0]
 
     # stamp refreshed → a second check within the day stays silent
     daemon_mod.diagnose_and_fix(["bot.sh is not running"])
@@ -574,7 +708,8 @@ def test_clear_breaker_latch_rearms_and_persists(monkeypatch, restart_env):
     latch.write_text(json.dumps({"latched_at": 0, "last_reminder": 0}))
     monkeypatch.setattr(daemon_mod, "restart_count", 2)
     alerts = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
 
     daemon_mod._clear_breaker_latch("test recovery")
 
@@ -598,7 +733,8 @@ def test_fake_healthy_via_session_lock_does_not_unlatch(monkeypatch, restart_env
     latch.parent.mkdir(parents=True, exist_ok=True)
     latch.write_text(json.dumps({"latched_at": 0, "last_reminder": 0}))
     alerts = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
     monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
     monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat",
@@ -693,7 +829,7 @@ def test_corrupt_probe_alert_state_falls_back_to_empty(tmp_path, monkeypatch, co
 def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
     """The DOWN page's dedup stamp must hit disk so a hot-reload respawn
     can't re-page within the 4h window."""
-    logs, alerts = probe_env
+    logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
         raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
@@ -701,7 +837,13 @@ def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     daemon_mod.probe_observed_components()
 
-    assert any("失联" in a for a in alerts)
+    assert alerts == []
+    for name in recoveries:
+        daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
+            time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
+    daemon_mod.probe_observed_components()
+
+    assert any("管理面板连续两次连不上" in a for a in alerts)
     saved = json.loads(daemon_mod.PROBE_ALERT_STATE_FILE.read_text())
     assert "admin :3456" in saved and "dashboard :3457" in saved
 
@@ -735,7 +877,8 @@ def deadletter_env(tmp_path, monkeypatch):
     # pollutes production logs with fake WARN/ERROR lines.
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     sent = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: sent.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: sent.append(msg))
     return f, sent
 
 
@@ -800,7 +943,7 @@ def test_sql_deadletter_notice_is_human_and_does_not_claim_failed_is_queued(
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     monkeypatch.setattr(
         daemon_mod, "notify_lark",
-        lambda message: sent.append(message) or True,
+        lambda message, *a, **k: sent.append(message) or True,
     )
     monkeypatch.setattr(delivery, "DeliveryPipeline", Pipe)
 
@@ -837,8 +980,31 @@ def test_deadletter_consume_never_raises(deadletter_env, monkeypatch):
     f, sent = deadletter_env
     f.write_text(_dl_line("delivery_failures"))
     monkeypatch.setattr(daemon_mod, "notify_lark",
-                        lambda msg: (_ for _ in ()).throw(RuntimeError("boom")))
+                        lambda msg, *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     daemon_mod.consume_delivery_deadletters()   # must not propagate
+
+
+def test_deadletter_genuine_alert_loss_preserves_source_evidence(
+        deadletter_env, monkeypatch):
+    f, sent = deadletter_env
+    original = _dl_line("delivery_failures", "3 consecutive send failures")
+    f.write_text(original)
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: False)
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert f.read_text() == original
+
+
+def test_deadletter_pending_durable_envelope_consumes_legacy_copy(
+        deadletter_env, monkeypatch):
+    f, sent = deadletter_env
+    f.write_text(_dl_line("delivery_failures", "3 consecutive send failures"))
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: None)
+
+    daemon_mod.consume_delivery_deadletters()
+
+    assert f.read_text() == ""
 
 
 # ── provider_failover rendering (red-team 7/8) ──

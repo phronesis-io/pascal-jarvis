@@ -229,8 +229,8 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
         summary = (
             "⚠️ 我有后台任务卡住了，一直没有成功跑完：\n"
             + "\n".join(f"· {a}" for a in shown) + more
-            + "\n\n通常是我调用 Claude 的环节出了问题。我只会提醒、不会自己动手修。"
-            + "方便的时候在电脑上对 Jarvis 说一句「查一下后台任务为什么失败」就能排查。")
+            + "\n\n模型备用链路和任务重试已经自动跑过，Guardian 也重启并复查了"
+            + "心跳调度，但问题仍然存在。我会继续处理，你暂时不用操作。")
 
     return {"brain_dead": brain_dead, "alerts": alerts,
             "summary": summary, "samples": samples}

@@ -75,10 +75,12 @@ def brain_env(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "log",
                         lambda lvl, msg: logs.append((lvl, msg)))
     monkeypatch.setattr(daemon_mod, "notify_lark",
-                        lambda msg: alerts.append(msg))
+                        lambda msg, *a, **k: alerts.append(msg))
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: 10)
     monkeypatch.setattr(daemon_mod, "_network_reachable", lambda: True)
+    monkeypatch.setattr(daemon_mod, "_request_component_recovery",
+                        lambda name: True)
     monkeypatch.setattr(daemon_mod, "last_wake_time", 0.0)
     (tmp_path / "HEARTBEAT.md").write_text(
         "### intention-check\n- interval: 30m\n")
@@ -116,7 +118,9 @@ def test_wedge_crossing_second_wake_window_penetrates_grace(brain_env,
     now = time.time()
     _write_hb_state(tmp_path, wedged=True)
     _seed_brain_state(tmp_path, last_check_ts=now - 2 * 3600,
-                      suppressed={"since": now - 10 * 3600, "windows": 1})
+                      suppressed={"since": now - 10 * 3600, "windows": 1},
+                      repair_requested_at=(
+                          now - daemon_mod.BRAIN_RECOVERY_GRACE - 1))
     monkeypatch.setattr(daemon_mod, "last_wake_time", now - 60)  # in grace
 
     daemon_mod._check_brain_health()
@@ -143,7 +147,8 @@ def test_cumulative_hour_of_suppression_penetrates_grace(brain_env,
         tmp_path, last_check_ts=now - 60,
         grace_until=now + 900,
         suppressed={"since": now - daemon_mod.BRAIN_SUPPRESS_MAX_SECONDS - 100,
-                    "windows": 1})
+                    "windows": 1},
+        repair_requested_at=now - daemon_mod.BRAIN_RECOVERY_GRACE - 1)
 
     daemon_mod._check_brain_health()
 
@@ -197,9 +202,25 @@ def test_offline_defers_page_and_rearms_grace(brain_env, monkeypatch):
     assert _persisted(tmp_path)["suppressed"]["windows"] == 1
 
 
-def test_out_of_grace_online_pages_as_before(brain_env):
+def test_out_of_grace_online_repairs_before_page(brain_env):
     tmp_path, logs, alerts = brain_env
     _write_hb_state(tmp_path, wedged=True)
+
+    daemon_mod._check_brain_health()
+
+    assert alerts == []
+    assert _persisted(tmp_path)["repair_requested_at"] > 0
+    assert any("recovery requested before alert" in m for _, m in logs)
+
+
+def test_persistent_failure_after_recovery_grace_pages(brain_env):
+    tmp_path, logs, alerts = brain_env
+    now = time.time()
+    _write_hb_state(tmp_path, wedged=True)
+    _seed_brain_state(
+        tmp_path,
+        repair_requested_at=now - daemon_mod.BRAIN_RECOVERY_GRACE - 1,
+    )
 
     daemon_mod._check_brain_health()
 
@@ -215,12 +236,14 @@ def test_healthy_check_clears_suppression_ledger(brain_env, monkeypatch):
     now = time.time()
     _write_hb_state(tmp_path, wedged=False)
     _seed_brain_state(tmp_path, last_check_ts=now - 60,
-                      suppressed={"since": now - 50000, "windows": 5})
+                      suppressed={"since": now - 50000, "windows": 5},
+                      repair_requested_at=now - 60)
 
     daemon_mod._check_brain_health()
 
     assert alerts == []
     assert _persisted(tmp_path)["suppressed"] == {}
+    assert _persisted(tmp_path)["repair_requested_at"] == 0
     assert _no_errors(logs)
 
 

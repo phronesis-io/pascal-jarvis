@@ -485,13 +485,24 @@ Utility scripts in `scripts/` for operations and debugging:
 - Monitors `bot.sh` health every 30 seconds — checks PID, heartbeat freshness, and session locks (suspended during `restart.sh` deploy windows via the `.deploying` flag)
 - Kills stuck Claude processes by detecting stale session lock files
 - Auto-restarts `bot.sh` on crash (up to 3 attempts with 5-minute cooldown)
+- Repairs owned child failures before notifying: exact repo-owned
+  `heartbeat-loop`, `ef-stream`, and admin children are handed back to the
+  `bot.sh` watchdog; the dashboard is handed back to its exact `launchd` job.
+  Guardian waits for a second failed probe (and a full task-cycle grace for
+  scheduler failures) before sending one owner-private incident receipt.
+- Treats queued delivery as in progress, not failed. A local macOS banner is
+  raised only for a genuinely lost alert and is rate-limited to one per hour.
+  Legacy dead-letter evidence is removed only after the durable delivery
+  pipeline has accepted it.
 - Logs to `daemon.log` with automatic log rotation
 - Optionally pings an external missed-heartbeat service while the stack is
   genuinely healthy (`ops.deadman` in `jarvis.yaml`). The ping is also withheld
   after three consecutive real Lark transport failures, because Guardian's
   normal alerts use Lark too. This is the only way to detect a powered-off Mac,
   FileVault/pre-login stall, or a silent delivery outage; the tokenized URL is
-  treated as a secret and never logged.
+  treated as a secret and never logged. Private host/runtime status must route
+  only to the configured owner; it may never fall back to a group or public
+  monitoring channel.
 
 The repository cannot enable this by itself: create a private check at a
 missed-heartbeat service, configure its alert threshold to at least 45 minutes,

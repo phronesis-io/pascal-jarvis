@@ -162,7 +162,10 @@ def diag_env(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: 60.0)
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     alerts = []
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "_request_component_recovery",
+                        lambda name: True)
     return pre, stamp, alerts
 
 
@@ -190,6 +193,10 @@ def test_diag_missing_pre_pages_once(diag_env):
     assert not pre.exists()
 
     daemon_mod._check_diag_staleness()
+    assert alerts == []  # first observation repairs, it does not page
+    daemon_mod._probe_alert_stamps["self-diagnostic|repair"] = (
+        time.time() - daemon_mod.DIAG_RECOVERY_GRACE - 1)
+    daemon_mod._check_diag_staleness()
     daemon_mod._check_diag_staleness()  # dedup: still one page
 
     assert len(alerts) == 1
@@ -202,6 +209,10 @@ def test_diag_stale_pre_pages_with_hours(diag_env):
     _age_file(pre, 10 * 3600)
 
     daemon_mod._check_diag_staleness()
+    assert alerts == []
+    daemon_mod._probe_alert_stamps["self-diagnostic|repair"] = (
+        time.time() - daemon_mod.DIAG_RECOVERY_GRACE - 1)
+    daemon_mod._check_diag_staleness()
 
     assert len(alerts) == 1
     assert "自诊断" in alerts[0] and "10 小时" in alerts[0]
@@ -213,11 +224,15 @@ def test_diag_fresh_pre_rearms_staleness_dedup(diag_env):
     pre, stamp, alerts = diag_env
     pre.write_text("✓ all good\n")  # fresh mtime, no warnings
     daemon_mod._probe_alert_stamps["self-diagnostic|stale"] = time.time() - 10
+    daemon_mod._probe_alert_stamps["self-diagnostic|repair"] = time.time() - 20
+    daemon_mod._probe_alert_stamps["self-diagnostic|repair-ok"] = time.time() - 20
 
     daemon_mod._check_diag_staleness()
 
     assert alerts == []
     assert "self-diagnostic|stale" not in daemon_mod._probe_alert_stamps
+    assert "self-diagnostic|repair" not in daemon_mod._probe_alert_stamps
+    assert "self-diagnostic|repair-ok" not in daemon_mod._probe_alert_stamps
 
 
 def test_diag_redelivers_undelivered_warnings_and_writes_stamp(diag_env):
@@ -238,6 +253,19 @@ def test_diag_redelivers_undelivered_warnings_and_writes_stamp(diag_env):
 
     daemon_mod._check_diag_staleness()            # stamp now fresh → silent
     assert len(alerts) == 1
+
+
+def test_diag_genuine_delivery_loss_does_not_consume_shared_stamp(
+        diag_env, monkeypatch):
+    pre, stamp, alerts = diag_env
+    pre.write_text("⚠️ 备份已经 60 小时没跑了\n")
+    _age_file(pre, 20 * 60)
+    _diag_cycle_completed(pre)
+    monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: False)
+
+    daemon_mod._check_diag_staleness()
+
+    assert not stamp.exists()
 
 
 def test_diag_no_redelivery_while_cycle_in_flight(diag_env):
@@ -362,7 +390,7 @@ def test_diag_check_never_raises(diag_env, monkeypatch):
     _age_file(pre, 20 * 60)
     _diag_cycle_completed(pre)
     monkeypatch.setattr(daemon_mod, "notify_lark",
-                        lambda msg: (_ for _ in ()).throw(RuntimeError("boom")))
+                        lambda msg, *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
 
     daemon_mod._check_diag_staleness()  # must not propagate
 
@@ -449,7 +477,10 @@ def manifest_env(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "last_restart_time", 0)
     monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 123)
     monkeypatch.setattr(daemon_mod, "log", lambda lvl, msg: logs.append((lvl, msg)))
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "_request_component_recovery",
+                        lambda name: True)
     return logs, alerts
 
 
@@ -471,6 +502,7 @@ def test_manifest_dead_ef_stream_pages_on_second_confirmed_probe(
     daemon_mod._probe_manifest_criticals()   # 1st red probe: pending only
     assert alerts == []
     assert "ef-stream|pending" in daemon_mod._probe_alert_stamps
+    assert "ef-stream|repair" in daemon_mod._probe_alert_stamps
 
     daemon_mod._probe_manifest_criticals()   # 2nd probe too soon (<2min)
     assert alerts == []
@@ -480,7 +512,7 @@ def test_manifest_dead_ef_stream_pages_on_second_confirmed_probe(
     daemon_mod._probe_manifest_criticals()   # 4h dedup: still one page
 
     assert len(alerts) == 1
-    assert "组件失联" in alerts[0]
+    assert "停了" in alerts[0]
     assert "EigenFlux" in alerts[0]
     # no raw checker detail leaks into the Lark line
     assert "no process" not in alerts[0]
@@ -603,7 +635,8 @@ def degraded_env(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE",
                         tmp_path / ".daemon_probe_alert_state.json")
     monkeypatch.setattr(daemon_mod, "log", lambda lvl, msg: logs.append((lvl, msg)))
-    monkeypatch.setattr(daemon_mod, "notify_lark", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(daemon_mod, "notify_lark",
+                        lambda msg, *a, **k: alerts.append(msg))
     return logs, alerts
 
 
