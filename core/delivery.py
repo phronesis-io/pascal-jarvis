@@ -551,6 +551,15 @@ def _next_budget_window_epoch(moment: datetime) -> float:
     ).timestamp()
 
 
+# Sources whose traffic is system-generated, rare, and bounded by something
+# other than the attention budget. `host-absence` sends at most one card per
+# qualifying absence episode and it is the receipt explaining why the day's
+# other cards are missing — on 2026-08-19 the wake-up backlog spent all nine
+# budgeted slots between 13:03 and 13:26, and the first thing the full budget
+# dropped was the card that said "I was gone for 39 hours".
+BUDGET_EXEMPT_SOURCES = {"deploy-smoke", "host-absence"}
+
+
 def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
     """True for traffic that must not wait behind proactive-card budgets."""
     return bool(
@@ -559,7 +568,7 @@ def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
         or envelope.attention in {"reply", "alert"}
         or envelope.urgent
         or envelope.conversation_bound
-        or envelope.source == "deploy-smoke"
+        or envelope.source in BUDGET_EXEMPT_SOURCES
     )
 
 
@@ -589,7 +598,7 @@ def _row_budget_exempt(row: sqlite3.Row | dict) -> bool:
         or values.get("attention") in {"reply", "alert"}
         or metadata.get("urgent")
         or metadata.get("conversation_bound")
-        or values.get("source") == "deploy-smoke"
+        or values.get("source") in BUDGET_EXEMPT_SOURCES
     )
 
 

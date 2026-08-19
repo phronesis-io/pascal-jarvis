@@ -76,9 +76,14 @@ self-improve round. It is kept, with three deliberate replacements:
 5. That card is a receipt, not an alarm: it states the span, what the absence
    actually cost from the scheduler's own ledger, that a closed lid on battery
    is not a malfunction, and that nothing is required of the reader.
-6. Reporting waits for a confirmed wake. A card emitted inside a DarkWake
+6. The receipt is exempt from the daily attention budget. It is bounded to
+   one per episode by policy, and the day it is most needed is exactly the day
+   a wake-up backlog has already spent the budget — observed live on 08-19:
+   nine budgeted slots gone between 13:03 and 13:26, the receipt suppressed at
+   14:18 with `global_daily_cap`.
+7. Reporting waits for a confirmed wake. A card emitted inside a DarkWake
    window would understate the absence and queue behind the next sleep.
-7. No mechanism here claims to keep the host awake, and none reports an
+8. No mechanism here claims to keep the host awake, and none reports an
    absence while it is happening. Only the external dead-man can do that.
 
 ## Boundaries
