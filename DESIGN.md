@@ -43,6 +43,9 @@ zero and the phone desk was never successfully paired. Therefore:
 - Start every proactive card with a compact `已完成` receipt. A proposal may
   ask for the remaining irreversible choice, never for research Jarvis could
   have completed first.
+- A clipped card exposes `查看全文` as a first-class action. One tap sends the
+  complete source in receipt-backed chunks; transport failure keeps the last
+  confirmed offset so the same button resumes instead of restarting.
 - Do not expose retries, tool calls, scheduler logs, or duplicate cards.
 - A thread about one Memorial retains that Memorial as its context.
 
@@ -102,6 +105,8 @@ zero and the phone desk was never successfully paired. Therefore:
 ## Content and Visual Rules
 
 - Cards are compact and decision-first.
+- Compact is not lossy: the card is a summary surface, while its full source
+  remains reachable in the same Lark conversation without typing a command.
 - Use familiar icons for controls and text for consequential commands.
 - Avoid cards nested inside cards and explanatory marketing copy inside the
   product.

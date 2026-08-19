@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import core.memorial as memorial
+import core.memorial_reader as memorial_reader
 from core.card import build_card
 from core.matter_bridge import bind_conversation
 from core.matters import create_matter
@@ -835,6 +836,123 @@ def test_chatting_card_on_a_clipped_body_keeps_the_chat_button(env):
     card = payload["card"]["data"]
     labels = [a["text"]["content"] for a in _actions(card)]
     assert memorial.CHAT_BUTTON_LABEL in labels
+
+
+def test_clipped_card_exposes_a_dedicated_full_text_button(env):
+    body = "\n".join(f"第{i}件事，细节在这里" for i in range(30))
+    mid, _ = memorial.create("mail", "长卡", body, preset="fyi")
+
+    card = json.loads(memorial.card_json(mid))
+    actions = _actions(card)
+    full = next(action for action in actions
+                if action["text"]["content"] == memorial.FULL_TEXT_BUTTON_LABEL)
+
+    assert full["type"] == "primary"
+    assert full["value"] == {
+        "action": "memorial",
+        "id": mid,
+        "opt": memorial.FULL_TEXT_OPT_KEY,
+    }
+    assert "查看全文" in card["elements"][0]["text"]["content"]
+
+
+def test_view_full_sends_every_chunk_without_more_user_input(env):
+    body = "\n".join(f"自动段{i:03d}:" + (chr(65 + i % 26) * 90)
+                     for i in range(120))
+    mid, _ = memorial.create("mail", "一次发完的长文", body, preset="fyi")
+
+    payload = memorial.read_full(mid)
+    memorial_reader.current_thread().join(timeout=10)
+
+    assert payload["toast"]["type"] == "success"
+    assert memorial_reader.current_thread().is_alive() is False
+    assert len(env.texts) > 1
+    delivered = "\n".join(text for text, _chat_id in env.texts)
+    assert "自动段000:" in delivered and "自动段119:" in delivered
+    assert "再回一句「继续发」" not in delivered
+    assert "原文已发完" in env.texts[-1][0]
+    state = memorial._latest_chat_continuation(["ou_test"], memorial_id=mid)
+    assert state["done"] is True and state["offset"] == len(body)
+    assert not (env.dir / "jobs" / "pending_merge.jsonl").exists()
+
+    first_transfer_count = len(env.texts)
+    memorial.read_full(mid)
+    memorial_reader.current_thread().join(timeout=10)
+    assert len(env.texts) == first_transfer_count * 2
+    transfers = {
+        event.get("transfer_id")
+        for event in _ledger_events(env.dir)
+        if event.get("ev") == "chat_continuation"
+    }
+    assert len(transfers) == 2
+
+
+def test_view_full_resumes_from_last_confirmed_chunk(env, monkeypatch):
+    body = "\n".join(f"断点段{i:03d}:" + ("正文" * 80) for i in range(80))
+    mid, _ = memorial.create("mail", "需要断点续传", body, preset="fyi")
+    outcomes = iter([True, False])
+    monkeypatch.setattr(
+        memorial_reader,
+        "_deliver_chunk",
+        lambda _api, chunk, _chat_id: next(outcomes),
+    )
+
+    memorial.read_full(mid)
+    memorial_reader.current_thread().join(timeout=10)
+    interrupted = memorial._latest_chat_continuation(
+        ["ou_test"], memorial_id=mid)
+
+    assert interrupted["done"] is False
+    assert 0 < interrupted["offset"] < len(body)
+
+    resumed_offsets = []
+
+    def succeed(chunk, _chat_id):
+        resumed_offsets.append(chunk["expected_offset"])
+        return True
+
+    monkeypatch.setattr(
+        memorial_reader,
+        "_deliver_chunk",
+        lambda _api, chunk, chat_id: succeed(chunk, chat_id),
+    )
+    memorial.read_full(mid)
+    memorial_reader.current_thread().join(timeout=10)
+
+    assert resumed_offsets[0] == interrupted["offset"]
+    completed = memorial._latest_chat_continuation(
+        ["ou_test"], memorial_id=mid)
+    assert completed["done"] is True and completed["offset"] == len(body)
+
+
+def test_view_full_ignores_duplicate_taps_while_worker_is_active(
+        env, monkeypatch):
+    body = "\n".join(f"并发段{i}:" + ("正文" * 80) for i in range(30))
+    mid, _ = memorial.create("mail", "不要并发重发", body, preset="fyi")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_worker(memorial_id, _conv_key, _chat_id):
+        started.set()
+        release.wait(timeout=5)
+        memorial_reader.finish_job(memorial_id)
+
+    monkeypatch.setattr(
+        memorial_reader,
+        "_run",
+        lambda _api, memorial_id, conv_key, chat_id:
+        blocked_worker(memorial_id, conv_key, chat_id),
+    )
+
+    first = memorial.read_full(mid)
+    assert started.wait(timeout=2)
+    duplicate = memorial.read_full(mid)
+    release.set()
+    memorial_reader.current_thread().join(timeout=5)
+
+    assert first["toast"]["type"] == "success"
+    assert duplicate["toast"]["type"] == "info"
+    assert "不用重复点" in duplicate["toast"]["content"]
 
 
 def test_chat_context_keeps_state_when_body_and_background_are_huge(env):

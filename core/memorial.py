@@ -104,6 +104,7 @@ def _ops_log(message: str, *, level: str = "info", **fields) -> None:
 # The chat button is framework-owned: every memorial gets it, emitters can't
 # claim the key for their own options.
 CHAT_OPT_KEY = "chat"
+FULL_TEXT_OPT_KEY = "full_text"
 # 「看不懂」(2026-08-03, owner: 「很多东西我都看不懂他在说什么」). Not a 批红:
 # the card stays pending — he hasn't answered it, he couldn't parse it. The
 # tap is (1) an honest style-failure signal on the ledger, (2) a request for
@@ -112,6 +113,7 @@ CHAT_OPT_KEY = "chat"
 CONFUSED_OPT_KEY = "confused"
 CHAT_BUTTON_TEXT = "聊聊这个"
 CHAT_BUTTON_LABEL = f"💬 {CHAT_BUTTON_TEXT}"
+FULL_TEXT_BUTTON_LABEL = "📖 查看全文"
 
 # Same retry profile as core.heartbeat_loop (REQ-11).
 SEND_RETRY_DELAYS = (2, 5)
@@ -149,7 +151,7 @@ CHAT_OPENER_CONTEXT_MAX = 1000
 CHAT_CONTEXT_MAX_CHARS = 6000
 
 # Says what the button DOES, not that context exists somewhere.
-CLIP_NOTICE = f"…还有下半段，点「{CHAT_BUTTON_TEXT}」我把全文发给你"
+CLIP_NOTICE = "…还有下半段，点「查看全文」一次发完"
 
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
@@ -1027,7 +1029,7 @@ def _button_groups(state: dict, include_options: bool = True,
     decision, opening a source is supporting context, and Chat is the escape
     hatch that must remain available after a decision.
     """
-    return memorial_cards.button_groups(
+    groups = memorial_cards.button_groups(
         state,
         include_options=include_options,
         include_chat=include_chat,
@@ -1035,6 +1037,19 @@ def _button_groups(state: dict, include_options: bool = True,
         chat_opt_key=CHAT_OPT_KEY,
         confused_opt_key=CONFUSED_OPT_KEY,
     )
+    if (include_chat
+            and body_was_clipped(str(state.get("body", "")))
+            and groups):
+        groups[-1].insert(0, {
+            "text": FULL_TEXT_BUTTON_LABEL,
+            "type": "primary",
+            "value": {
+                "action": "memorial",
+                "id": state["id"],
+                "opt": FULL_TEXT_OPT_KEY,
+            },
+        })
+    return groups
 
 
 def _cut_at_boundary(text: str, limit: int) -> str:
@@ -1163,6 +1178,19 @@ def _chatting_card(state: dict, ts: str) -> dict:
             # if the opener send failed this is the only retry surface — a
             # rendered pointer to a missing button would be a dead end.
             include_chat=body_was_clipped(str(state.get("body", ""))),
+        ),
+        state,
+    )
+
+
+def _full_text_status_card(state: dict, status: str) -> dict:
+    """Keep decisions available while full text is sent beside the card."""
+    return _replacement_card(
+        _render_card(
+            state,
+            status_line=status,
+            include_options=state["status"] == "pending",
+            include_chat=True,
         ),
         state,
     )
@@ -1555,7 +1583,7 @@ def _normalize_options(options: list[dict] | None, preset: str | None) -> list[d
         options,
         preset,
         presets=PRESETS,
-        reserved_keys={CHAT_OPT_KEY, CONFUSED_OPT_KEY},
+        reserved_keys={CHAT_OPT_KEY, FULL_TEXT_OPT_KEY, CONFUSED_OPT_KEY},
     )
 
 
@@ -3220,8 +3248,13 @@ def _latest_chat_continuation(conv_keys: list[str],
     return None
 
 
-def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
-                       memorial_id: str = "") -> dict:
+def continue_chat_body(
+    conv_key: str,
+    *,
+    lookup_keys: list[str] | None = None,
+    memorial_id: str = "",
+    automatic: bool = False,
+) -> dict:
     """Prepare the next promised chunk without advancing delivery state."""
     key = str(conv_key or "").strip()
     continuation = _latest_chat_continuation(
@@ -3254,16 +3287,20 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
         next_offset += 1
     rest = max(len(full) - next_offset, 0)
     state_key = str(continuation.get("conv_key") or key)
-    tail = (
-        f"（原文还有约 {rest} 字，再回一句「继续发」）"
-        if rest else "（原文已发完）"
-    )
+    if not rest:
+        tail = "（原文已发完）"
+    elif automatic:
+        tail = f"（正在自动发送，剩余约 {rest} 字）"
+    else:
+        tail = f"（原文还有约 {rest} 字，再回一句「继续发」）"
+    section = "全文" if start == 0 else "续文"
     return {
         "handled": True,
-        "reply": f"📜 「{st['title']}」续文：\n\n{chunk}\n\n{tail}",
+        "reply": f"📜 「{st['title']}」{section}：\n\n{chunk}\n\n{tail}",
         "remaining_chars": rest,
         "memorial_id": memorial_id,
         "state_conv_key": state_key,
+        "transfer_id": str(continuation.get("transfer_id") or "legacy"),
         "expected_offset": int(continuation.get("offset") or 0),
         "next_offset": next_offset,
     }
@@ -3271,7 +3308,8 @@ def continue_chat_body(conv_key: str, *, lookup_keys: list[str] | None = None,
 
 def commit_chat_continuation(conv_key: str, state_conv_key: str,
                              memorial_id: str, expected_offset: int,
-                             next_offset: int) -> bool:
+                             next_offset: int, *,
+                             record_context: bool = True) -> bool:
     """Advance one prepared chunk only after Lark confirms delivery."""
     continuation = _latest_chat_continuation(
         [state_conv_key], memorial_id=memorial_id)
@@ -3299,17 +3337,26 @@ def commit_chat_continuation(conv_key: str, state_conv_key: str,
     _append_line(_ledger_path(), {
         "ev": "chat_continuation", "id": memorial_id,
         "conv_key": state_conv_key, "offset": computed_next, "done": done,
+        "transfer_id": str(continuation.get("transfer_id") or "legacy"),
         "ts": now_local_str(), "epoch": int(time.time()),
     })
     # Only delivered text becomes model context.
-    _append_line(_pending_merge_path(), {
-        "conv_key": str(conv_key or "").strip(),
-        "context_key": _pending_context_key(str(conv_key or "").strip(), st),
-        "job_id": f"memorial-continuation:{memorial_id}:{computed_next}",
-        "ts": now_local_str(),
-        "summary": f"[卡片续文：{st['title']}]\n{chunk}",
-    })
+    if record_context:
+        _append_line(_pending_merge_path(), {
+            "conv_key": str(conv_key or "").strip(),
+            "context_key": _pending_context_key(
+                str(conv_key or "").strip(), st),
+            "job_id": f"memorial-continuation:{memorial_id}:{computed_next}",
+            "ts": now_local_str(),
+            "summary": f"[卡片续文：{st['title']}]\n{chunk}",
+        })
     return True
+
+
+def read_full(memorial_id: str) -> dict:
+    """Stable facade for the extracted one-tap reading workflow."""
+    from core.memorial_reader import read_full as _read_full
+    return _read_full(memorial_id, api=sys.modules[__name__])
 
 
 def chat(memorial_id: str) -> dict:

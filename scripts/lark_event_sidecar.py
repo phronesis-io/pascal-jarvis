@@ -259,7 +259,8 @@ def _handle_card_action(
         return payload
     if action == "memorial":
         # 奏折 batch route: every memorial card's buttons land here —
-        # opt=="chat" opens a conversation, anything else is a 批红.
+        # Framework options open a conversation, send clipped full text, or
+        # request a plain-language retelling; anything else is a 批红.
         # Lazy import like intent_close (works via the repo-root sys.path
         # bootstrap at the top of this file — cwd alone is NOT enough).
         mem_id = str(value.get("id", ""))
@@ -269,6 +270,8 @@ def _handle_card_action(
             payload = (
                 memorial.chat(mem_id)
                 if opt == "chat"
+                else memorial.read_full(mem_id)
+                if opt == memorial.FULL_TEXT_OPT_KEY
                 else memorial.confused(mem_id)
                 if opt == "confused"
                 else memorial.decide(

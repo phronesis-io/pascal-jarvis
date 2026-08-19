@@ -61,6 +61,12 @@ builders carry the producer's receipt in an internal structured marker; the
 adoption boundary removes and persists it. It never invents a generic receipt
 for an unprepared legacy card.
 
+Clipped Memorials keep the complete source in the append-only ledger.
+`core.memorial` owns card rendering and continuation offsets, while
+`core.memorial_reader` runs the user-triggered background transfer through
+`core.delivery`. Each chunk advances only after a confirmed Lark receipt; an
+interrupted transfer resumes from its last confirmed offset.
+
 ### Routines
 
 ```text
