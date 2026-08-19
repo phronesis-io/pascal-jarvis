@@ -887,3 +887,50 @@ def test_deadletter_mixed_batch_keeps_wrapper_for_failure_kinds(deadletter_env):
     assert len(wrapped) == 1
     assert "消息发送连续失败" in wrapped[0]
     assert "模型通道切换" not in wrapped[0]     # failover row not double-listed
+
+
+# ── Absence receipts (2026-08-19 audit) ──────────────────────────────────
+# The daemon detected the 39h lid-close 38 times and every observation ended
+# in "post-wake grace, NOT restarting". Correct about restarts, silent about
+# the absence: nobody told Pascal his agent had been gone for a working day.
+
+
+def test_daemon_records_and_reports_a_working_day_absence(tmp_path, monkeypatch):
+    from core import absence, hostclock
+
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    sent = []
+    monkeypatch.setattr(absence, "emit",
+                        lambda root, report: sent.append(report) or True)
+
+    slept = 39 * 3600
+    daemon_mod._observe_absence(slept)
+    assert hostclock.slept_between(tmp_path, time.time() - slept - 60,
+                                   time.time()) >= slept - 60
+    assert sent == []  # the wake is not confirmed yet
+
+    # Two ticks later the host is still up: the receipt goes out once.
+    state = json.loads((tmp_path / absence.STATE_FILE).read_text())
+    state["end"] = time.time() - absence.AWAKE_CONFIRM_SECONDS - 1
+    (tmp_path / absence.STATE_FILE).write_text(json.dumps(state))
+    daemon_mod._observe_absence(0)
+    daemon_mod._observe_absence(0)
+    assert len(sent) == 1
+    assert round(sent[0].slept_seconds / 3600) == 39
+
+
+def test_absence_receipt_failure_never_kills_the_daemon_loop(tmp_path, monkeypatch):
+    from core import absence
+
+    logged = []
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log",
+                        lambda level, msg: logged.append((level, msg)))
+
+    def boom(*_a, **_k):
+        raise RuntimeError("ledger on fire")
+
+    monkeypatch.setattr(absence, "observe", boom)
+    daemon_mod._observe_absence(3600)  # must not raise
+    assert any(level == "ERROR" for level, _ in logged)

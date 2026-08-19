@@ -98,6 +98,35 @@ def _post_wake_grace(root: Path, now: float | None = None) -> str | None:
     return f"post-wake grace — settles in {int((grace_until - now) / 60)}min"
 
 
+def _awake_age(root: Path, since_epoch: float,
+               now: float | None = None) -> tuple[float, float]:
+    """``(age counting only awake time, host sleep discounted)`` in seconds.
+
+    The bounded post-wake grace above is an *excuse* with a timer on it, and
+    its own author flagged the hole: on a laptop that naps hourly the window
+    re-arms nearly continuously (23 wakes in 24h here), so a component that is
+    genuinely wedged can hide behind a hold that never lapses. Subtracting the
+    sleep the daemon actually recorded (`core.hostclock`) answers the real
+    question instead — "have we been UP this long without hearing from it?" —
+    and cannot be renewed by another nap.
+
+    Grace remains the fallback only where there is NO recorded sleep in the
+    window (a fresh install, or the first wake after this ships). Once an
+    episode exists, awake-age is the answer and the timer does not get to
+    override it — that is exactly the renewing-hold hole.
+    """
+    from core import hostclock
+
+    moment = time.time() if now is None else now
+    return (hostclock.awake_age(root, since_epoch, now=moment),
+            hostclock.slept_between(root, since_epoch, moment))
+
+
+def _slept_note(slept_s: float) -> str:
+    return (f"; {slept_s / 3600:.1f}h host sleep not counted"
+            if slept_s >= 3600 else "")
+
+
 def _gate_reason(comp: dict, root: Path) -> str | None:
     """Fresh-install/optional-feature gate (2026-07-13): components.yaml used
     to mark ef-stream/lark-sidecar/admin critical UNCONDITIONALLY while
@@ -268,7 +297,11 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
     except OSError:
         return False, "file missing"
     if age_h > max_h:
-        grace = _post_wake_grace(root)
+        awake_s, slept_s = _awake_age(root, p.stat().st_mtime)
+        if awake_s / 3600 <= max_h:
+            return True, (f"age {awake_s / 3600:.1f}h (max {max_h:.0f}h)"
+                          f"{_slept_note(slept_s)}")
+        grace = _post_wake_grace(root) if slept_s <= 0 else None
         if grace:
             return True, f"{grace} (age {age_h:.1f}h)"
     return (age_h <= max_h,
@@ -290,7 +323,11 @@ def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
     if updated <= 0 or age > float(comp.get("max_age_seconds", 2400)):
         # The stream writes its health file from inside this host. A host that
         # was asleep produces exactly this reading with nothing wrong.
-        grace = _post_wake_grace(root)
+        awake_s, slept_s = _awake_age(root, updated) if updated > 0 else (age, 0)
+        if updated > 0 and awake_s <= float(comp.get("max_age_seconds", 2400)):
+            return True, (f"quiet {awake_s / 60:.0f}min while awake"
+                          f"{_slept_note(slept_s)}; {process_detail}")
+        grace = _post_wake_grace(root) if slept_s <= 0 else None
         if grace and updated > 0:
             # Carry the real age: on a laptop that naps hourly the window can
             # re-arm often, and a hold that keeps renewing over a genuinely
@@ -343,7 +380,12 @@ def _check_audit_age(comp: dict, root: Path) -> tuple[bool, str]:
     except (TypeError, ValueError, OverflowError):
         return False, "invalid completed audit timestamp"
     if not 0 <= age_h <= max_h:
-        grace = _post_wake_grace(root)
+        completed_epoch = completed.astimezone(timezone.utc).timestamp()
+        awake_s, slept_s = _awake_age(root, completed_epoch)
+        if 0 <= awake_s / 3600 <= max_h:
+            return True, (f"completed age {awake_s / 3600:.1f}h "
+                          f"(max {max_h:.0f}h){_slept_note(slept_s)}")
+        grace = _post_wake_grace(root) if slept_s <= 0 else None
         if grace and age_h >= 0:
             return True, f"{grace} (completed age {age_h:.1f}h)"
     return (
@@ -476,7 +518,13 @@ def _check_delivery(comp: dict, root: Path) -> tuple[bool, str]:
     if overdue_count and overdue_age > max_overdue:
         # Everything queued goes overdue while the lid is shut; the failure
         # streak above is the signal that survives sleep, this one does not.
-        grace = _post_wake_grace(root, now)
+        awake_s, slept_s = _awake_age(root, oldest_due, now)
+        if awake_s <= max_overdue:
+            return True, (
+                f"delivery catching up: {overdue_count} due item(s), oldest "
+                f"{int(awake_s) // 60}min awake{_slept_note(slept_s)}"
+            )
+        grace = _post_wake_grace(root, now) if slept_s <= 0 else None
         if grace:
             return True, (
                 f"{grace} ({overdue_count} due item(s), oldest "

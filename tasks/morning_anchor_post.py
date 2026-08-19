@@ -61,18 +61,18 @@ def main() -> int:
     # ledger-only cards (ambient exhaust that never reaches Feishu, REQ-119)
     # get their one batched shot at being seen here (style contract
     # 攒批≥5条晨匣提一行).
+    # Host absence is NOT reported here. It has its own receipt at the moment
+    # of the wake (core.absence), which arrives while the gap is still the
+    # thing on his mind and names what it cost; a second, vaguer line the next
+    # morning would be the same fact told twice.
     try:
-        from core.presence import absence_line, morning_digest_line
+        from core.presence import morning_digest_line
         digest = morning_digest_line()
-        # A night the host spent asleep is the other thing the anchor owes
-        # him: on 2026-08-19 the machine had been shut ~39h and no surface
-        # ever said so out loud.
-        absence = absence_line()
     except Exception as exc:
         print(f"[morning-anchor] presence digest failed: {exc}",
               file=sys.stderr)
-        digest = absence = ""
-    footer = "\n".join(line for line in (absence, digest) if line)
+        digest = ""
+    footer = digest
 
     # REQ-121: a line substantively identical to yesterday's carries no new
     # information — skip the resend (the window is already stamped). The

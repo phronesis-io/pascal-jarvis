@@ -336,6 +336,36 @@ def _in_wake_grace(now: float | None = None) -> bool:
     return bool(last_wake_time and 0 <= now - last_wake_time < WAKE_GRACE_SECONDS)
 
 
+def _observe_absence(gap_seconds: float) -> None:
+    """Account for host sleep and hand the owner a receipt when it mattered.
+
+    The grace paths above are deliberately quiet about sleep — a restart or a
+    component page over a lid-close would be wrong. But quiet about the
+    *restart* became quiet about the absence itself: 08-17→08-19 the host was
+    gone 39h, this daemon said so 38 times in its own log, and Pascal found
+    out from an audit. Sleep is normal; a working day spent asleep is worth
+    one card (policy lives in core.absence).
+
+    Recording every episode is also what lets core.components age against
+    time the host was actually up instead of excusing staleness by the clock.
+    """
+    try:
+        from core import absence, hostclock
+
+        if gap_seconds:
+            hostclock.record(JARVIS_DIR, gap_seconds)
+        report = absence.observe(JARVIS_DIR, gap_seconds, time.time())
+        if report is None:
+            return
+        hours = report.slept_seconds / 3600
+        accepted = absence.emit(JARVIS_DIR, report)
+        log("INFO", f"Absence receipt for {hours:.1f}h host sleep "
+                    f"({report.gaps} gaps): "
+                    f"{'accepted' if accepted else 'not delivery-confirmed'}")
+    except Exception as e:
+        log("ERROR", f"Absence receipt failed: {e}")
+
+
 def _is_bot_alive() -> bool:
     """Check if bot.sh is alive via PID file (primary) or pgrep (fallback)."""
     return _bot_pid() is not None
@@ -1546,6 +1576,9 @@ def main():
     # launchd KeepAlive respawn us on fresh code within seconds.
     _code_mtime = os.path.getmtime(__file__)
     probe_tick = 0
+    from core.hostclock import Meter
+
+    host_meter = Meter(threshold_s=SLEEP_GAP_THRESHOLD)
 
     try:
         while running:
@@ -1616,7 +1649,14 @@ def main():
                     break
                 time.sleep(1)
             if running:
-                _record_wake_gap(time.time() - sleep_started, CHECK_INTERVAL)
+                # Two ways the loop loses time: our own naps overshot (any
+                # stall, including CPU starvation) or the host slept somewhere
+                # else in the tick — inside the health check itself, which the
+                # nap measurement cannot see. Take the larger.
+                overshoot = time.time() - sleep_started - CHECK_INTERVAL
+                lost = max(overshoot, host_meter.gap())
+                _observe_absence(
+                    _record_wake_gap(CHECK_INTERVAL + lost, CHECK_INTERVAL))
     finally:
         release_singleton()
         log("INFO", "Guardian daemon stopped")

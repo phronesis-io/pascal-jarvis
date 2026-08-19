@@ -442,3 +442,68 @@ def test_launchd_installer_skips_optional_taskline_before_bootstrap():
 
     assert guard < bootstrap
     assert "optional Taskline binary not installed" in script
+
+
+# ── Host-sleep-aware ages (2026-08-19 audit) ─────────────────────────────
+# A 39h lid-close turned every age check red at once (companion-voice
+# "48.5h", ef-stream "protocol health stale") while the components themselves
+# were fine. What these checks mean is "we were up this long and never heard
+# from it", so recorded host sleep is discounted.
+
+
+def test_file_age_discounts_host_sleep(tmp_path):
+    from core import hostclock
+
+    stamp = tmp_path / ".last_backup_ok"
+    stamp.write_text("")
+    now = time.time()
+    os.utime(stamp, (now - 47 * 3600, now - 47 * 3600))
+    hostclock.record(tmp_path, 40 * 3600, end_epoch=now - 600)
+
+    m = _manifest(tmp_path, """
+  - name: session-backup
+    check: file_age
+    path: .last_backup_ok
+    max_age_hours: 24
+""")
+    (r,) = check_components(manifest_path=m, root=tmp_path)
+    assert r["ok"] is True
+    assert "host sleep not counted" in r["detail"]
+
+
+def test_file_age_still_fails_when_the_host_was_up(tmp_path):
+    stamp = tmp_path / ".last_backup_ok"
+    stamp.write_text("")
+    now = time.time()
+    os.utime(stamp, (now - 47 * 3600, now - 47 * 3600))
+
+    m = _manifest(tmp_path, """
+  - name: session-backup
+    check: file_age
+    path: .last_backup_ok
+    max_age_hours: 24
+""")
+    (r,) = check_components(manifest_path=m, root=tmp_path)
+    assert r["ok"] is False
+
+
+def test_ef_stream_staleness_discounts_host_sleep(tmp_path, monkeypatch):
+    from core import hostclock
+
+    monkeypatch.setattr(components, "_check_pgrep",
+                        lambda comp, root: (True, "pids ['1']"))
+    now = time.time()
+    (tmp_path / "ef_stream_health.json").write_text(json.dumps({
+        "status": "active", "quiet_streak": 0,
+        "updated_epoch": now - 9 * 3600,
+    }))
+    hostclock.record(tmp_path, 8.4 * 3600, end_epoch=now - 600)
+
+    m = _manifest(tmp_path, """
+  - name: ef-stream
+    check: ef_stream
+    path: ef_stream_health.json
+    max_age_seconds: 2400
+""")
+    (r,) = check_components(manifest_path=m, root=tmp_path)
+    assert r["ok"] is True, r["detail"]
