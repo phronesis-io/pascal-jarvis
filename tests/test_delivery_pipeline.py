@@ -846,6 +846,53 @@ def test_global_daily_cap(pipeline):
     assert len(sent) == 1
 
 
+def test_absence_receipt_is_not_eaten_by_a_spent_budget(pipeline):
+    """The card that explains a missing day cannot be dropped for being late.
+
+    2026-08-19: 39h of backlog woke up at once and spent all nine budgeted
+    slots between 13:03 and 13:26. The first thing the full budget dropped was
+    the host-absence receipt — the one card that said why the others were
+    missing. It is system-generated and bounded to one per episode, so it
+    rides with deploy-smoke outside the attention budget.
+    """
+    pipe, sent, _ = pipeline
+    for index in range(2):
+        pipe.deliver(DeliveryEnvelope(
+            source=f"s{index}", payload={"text": f"message {index}"},
+            requested_channel="lark",
+            metadata={"global_daily_cap": 1, "source_daily_cap": 9},
+        ))
+    assert len(sent) == 1  # budget spent
+
+    result = pipe.deliver(DeliveryEnvelope(
+        source="host-absence", attention="notice",
+        payload={"text": "我离线了 1 天 15 小时"},
+        requested_channel="lark",
+        metadata={"global_daily_cap": 1, "source_daily_cap": 9},
+    ))
+
+    assert result.state == "delivered"
+    assert len(sent) == 2
+
+
+def test_absence_receipt_does_not_consume_the_budget_either(pipeline):
+    pipe, sent, _ = pipeline
+    pipe.deliver(DeliveryEnvelope(
+        source="host-absence", attention="notice",
+        payload={"text": "我离线了 1 天 15 小时"},
+        requested_channel="lark",
+        metadata={"global_daily_cap": 1, "source_daily_cap": 9},
+    ))
+    ordinary = pipe.deliver(DeliveryEnvelope(
+        source="checkin", payload={"text": "ordinary card"},
+        requested_channel="lark",
+        metadata={"global_daily_cap": 1, "source_daily_cap": 9},
+    ))
+
+    assert ordinary.state == "delivered"
+    assert len(sent) == 2
+
+
 def test_global_daily_budget_does_not_create_a_next_morning_backlog(tmp_path):
     now = [_local_ts(2026, 8, 12, 14, 0)]
     sent = []

@@ -221,7 +221,14 @@ def build_card(root: Path | str, report: Report) -> tuple[str, str]:
 
 
 def emit(root: Path | str, report: Report) -> bool:
-    """Deliver the receipt as one ordinary notice card."""
+    """Deliver the receipt as one notice card.
+
+    Notice class, never alert: nothing here is a fault to chase. It is exempt
+    from the daily attention budget by source (``core.delivery``) for the
+    reason the 08-19 live smoke exposed — the wake-up backlog spent all nine
+    budgeted slots in 23 minutes and the receipt explaining the missing day
+    was the first card the full budget dropped.
+    """
     from core.memorial import create
 
     title, body = build_card(root, report)
