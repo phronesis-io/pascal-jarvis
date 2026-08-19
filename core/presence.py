@@ -12,6 +12,9 @@ traffic. Feishu arrival volume IS the product's pulse, so:
 - ``morning-digest``: ledger-only cards batched into the morning anchor (the
   style contract's 「攒批≥5条晨匣提一行」clause, PR #36 — never implemented
   until now), instead of silently rotting in an archive nobody opens.
+- ``absence``: the receipt for the other reason the pulse goes flat — the
+  host was asleep. Same anchor, same batching, so a 39h outage is something
+  Jarvis says rather than something Pascal has to infer from thinner cards.
 
 Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
 has a successful receipt in the unified delivery database or stayed
@@ -40,6 +43,15 @@ DIGEST_TITLES = 3
 # changing count would re-page every 4h for one persisting condition.
 FLOOR_WARNING = ("⚠️ 过去24h真正到飞书的卡片不足5张——产出可能正被路由进"
                  "没人看的归档，Jarvis 正在消失。先查投递链路（7/24悬崖同款）")
+
+# A shut lid produces the same reading as a broken pipe, and on 2026-08-18/19
+# it did: the host slept ~39h, card output fell 76/day → 2, and this sentinel
+# would have sent whoever read it to audit the delivery chain — which was
+# fine. Volume is only evidence about routing when the machine was awake to
+# route anything.
+ABSENCE_HOURS = 3.0
+ABSENCE_WARNING = ("⚠️ 过去24h这台机器有大段时间是睡着的（合盖或断电），"
+                   "卡片少是因为 Jarvis 没醒着，不是投递坏了——投递链路不用查。")
 
 
 def _ledger_path() -> Path:
@@ -130,6 +142,49 @@ def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
             and str(e.get("id")) in ledger_ids]
 
 
+def host_asleep_seconds(hours: float = 24,
+                        now: datetime | None = None) -> float:
+    """Recorded host sleep inside the window, in seconds.
+
+    Reads the `sleep_gap` events heartbeat_loop emits. Those events became
+    trustworthy on 2026-08-19: until then the loop bracketed only its own 10s
+    sleep, so it logged 0.7h of the 39.4h that daemon.py measured. Anything
+    reading this before that fix would have under-read absence by ~50x.
+    """
+    moment = now or datetime.now()
+    cutoff = moment - timedelta(hours=hours)
+    try:
+        from core.sched_events import query
+        rows = query(JARVIS_DIR, since=cutoff.strftime("%Y-%m-%d %H:%M:%S"),
+                     event="sleep_gap")
+    except Exception:
+        return 0.0
+    total = 0.0
+    for row in rows:
+        try:
+            total += float(row.get("duration_s") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def absence_line(now: datetime | None = None) -> str:
+    """A receipt for time Jarvis was not there, or "".
+
+    2026-08-19: the laptop was shut for ~39h and nothing ever said so. The
+    system detected it 38 separate times and routed every one of those
+    detections into a decision about whether to RESTART — never into a
+    sentence for Pascal. He found out because the cards thinned out.
+
+    No action is being asked for, so the line says so (style contract).
+    """
+    hours = host_asleep_seconds(24, now=now) / 3600
+    if hours < ABSENCE_HOURS:
+        return ""
+    return (f"🌙 过去24h我有约 {hours:.0f} 小时不在（机器休眠），"
+            f"那段时间的例行任务和卡片都没跑——知道就行。")
+
+
 def check(now: datetime | None = None) -> str:
     """Selfmon sentinel line, or "" when presence is healthy.
 
@@ -143,6 +198,8 @@ def check(now: datetime | None = None) -> str:
         return ""
     count = delivered if delivered is not None else sent_count(24, now=moment)
     if count < SENT_FLOOR_24H:
+        if host_asleep_seconds(24, now=moment) >= ABSENCE_HOURS * 3600:
+            return ABSENCE_WARNING
         return FLOOR_WARNING
     return ""
 
@@ -174,7 +231,12 @@ def main(argv: list[str]) -> int:
         if line:
             print(line)
         return 0
-    print("usage: python3 -m core.presence [check|morning-digest]",
+    if cmd == "absence":
+        line = absence_line()
+        if line:
+            print(line)
+        return 0
+    print("usage: python3 -m core.presence [check|morning-digest|absence]",
           file=sys.stderr)
     return 2
 

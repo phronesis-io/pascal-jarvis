@@ -297,3 +297,71 @@ def test_morning_anchor_fresh_line_is_sent_and_remembered(monkeypatch, capsys):
     assert post.main() == 0
     assert "死活题" in capsys.readouterr().out
     assert remembered == ["早。今天的锚点：死活题。"]
+
+
+# ── absence: a shut lid reads exactly like a broken pipe ─────────────
+#
+# 2026-08-18/19 the MacBook was closed for ~39h. Card output fell 76/day → 2,
+# so the floor sentinel fired — pointing at the delivery chain, which was
+# healthy. Meanwhile nothing anywhere told Pascal he had been offline for a
+# day and a half; he found out because the cards thinned out.
+
+
+def _sleep_gaps(tmp_path, *durations_s, ts="2026-08-07 03:00"):
+    lines = "\n".join(json.dumps({
+        "ts": ts, "event": "sleep_gap", "task": "", "run_id": "",
+        "source": "heartbeat_loop", "duration_s": d,
+    }, ensure_ascii=False) for d in durations_s)
+    (tmp_path / "sched_events.jsonl").write_text(lines + "\n", encoding="utf-8")
+
+
+def test_quiet_because_the_host_slept_does_not_blame_delivery(tmp_path):
+    events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
+    _write_ledger(tmp_path, events)
+    _sleep_gaps(tmp_path, 4181, 5481, 4286, 4568, 3674)   # 8/18, ~6h of it
+
+    line = presence.check(now=NOW)
+
+    assert line == presence.ABSENCE_WARNING
+    assert line != presence.FLOOR_WARNING
+    assert "投递" in line          # names the thing it is ruling OUT
+
+
+def test_quiet_on_an_awake_host_still_blames_delivery(tmp_path):
+    """The 7/24 cliff must keep firing — that outage had no host sleep."""
+    events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
+    _write_ledger(tmp_path, events)
+    _sleep_gaps(tmp_path, 300)     # one nap, nowhere near the threshold
+
+    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+
+
+def test_a_healthy_day_is_silent_even_after_a_nap(tmp_path):
+    """Sleep is not itself an alert — only an explanation for a quiet one."""
+    events = []
+    for i in range(20):
+        events += [_created(i), _sent(i)]
+    _write_ledger(tmp_path, events)
+    _sleep_gaps(tmp_path, 4181, 5481, 4286)
+
+    assert presence.check(now=NOW) == ""
+
+
+def test_absence_line_reports_the_hours_and_asks_for_nothing(tmp_path):
+    _sleep_gaps(tmp_path, 4181, 5481, 4286, 4568, 3674, 3595)  # 7.2h
+
+    line = presence.absence_line(now=NOW)
+
+    assert "7 小时" in line
+    assert "知道就行" in line       # style contract: no action ⇒ say so
+
+
+def test_absence_line_stays_quiet_for_an_ordinary_nap(tmp_path):
+    _sleep_gaps(tmp_path, 900, 1200)      # 35min — not a receipt-worthy gap
+
+    assert presence.absence_line(now=NOW) == ""
+
+
+def test_absence_line_survives_a_missing_event_log(tmp_path):
+    assert presence.host_asleep_seconds(now=NOW) == 0.0
+    assert presence.absence_line(now=NOW) == ""

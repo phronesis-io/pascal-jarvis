@@ -1590,14 +1590,31 @@ def _hourly_housekeeping(jd: Path):
 SLEEP_GAP_THRESHOLD_S = 120
 
 
-def _sleep_gap_seconds(slept_for_s: float, expected_s: float,
+def _sleep_gap_seconds(wall_elapsed_s: float, mono_elapsed_s: float,
                        threshold_s: float = SLEEP_GAP_THRESHOLD_S) -> float:
-    """Return host sleep/pause gap beyond the expected sleep interval.
+    """Host sleep = wall-clock time the monotonic clock did not see.
 
-    This is measured only around the loop's own short sleep, not around Claude
-    calls, so long model runs are not mislabeled as host sleep.
+    The old instrument bracketed only the loop's own 10s sleep and subtracted
+    the expected interval. That deliberately avoided mislabeling a long Claude
+    call as host sleep — but it also meant sleep that began DURING a Claude
+    call was invisible, and most sleep does: the lid closes mid-cycle, not in
+    the 10s window at the bottom of the tick. Over 2026-08-18/19 daemon.py
+    measured 39.4h of host sleep across 38 gaps while this instrument recorded
+    0.7h into sched_events. The audit read "the machine was briefly asleep"
+    from a system that had been absent for 39 hours.
+
+    time.monotonic() is mach_absolute_time() on macOS and CLOCK_MONOTONIC on
+    Linux; neither advances while the host is suspended, while time.time()
+    does. Their divergence is therefore sleep and nothing else — measured on
+    this host at 39.69h against a 118.32h uptime, matching daemon.log. That
+    makes the whole tick safe to bracket: a 10-minute model call advances both
+    clocks equally and still reports a zero gap.
+
+    A forward wall-clock correction (NTP) also shows up here. It is rare, it
+    is bounded by the same threshold, and an event log entry is the right
+    place for it either way.
     """
-    gap = slept_for_s - expected_s
+    gap = wall_elapsed_s - mono_elapsed_s
     return gap if gap >= threshold_s else 0.0
 
 
@@ -1704,8 +1721,22 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
 
     ticks = 0
     was_active = False  # previous tick produced output (working↔idle edge)
+    prev_wall = prev_mono = None
     while True:
         ticks += 1
+        # Absence check, first thing in the tick: the marks are taken at the
+        # top of the PREVIOUS tick, so this covers the model call, the delivery
+        # attempt and the sleep alike — every path out of the tick body,
+        # including the ones that `continue`.
+        now_wall, now_mono = time.time(), time.monotonic()
+        if prev_wall is not None:
+            gap = _sleep_gap_seconds(now_wall - prev_wall, now_mono - prev_mono)
+            if gap:
+                sched_emit(jd, "sleep_gap", source="heartbeat_loop",
+                           duration_s=round(gap, 1),
+                           wall_elapsed_s=round(now_wall - prev_wall, 1),
+                           mono_elapsed_s=round(now_mono - prev_mono, 1))
+        prev_wall, prev_mono = now_wall, now_mono
         # Background-job sweeper (REQ-16 MVP-3, ~every 60s): a job whose
         # handler died (crash/restart) would otherwise stay "running" forever
         # and the user waits on a result that will never come.
@@ -1888,14 +1919,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 _beat("idle", force=True)
         was_active = bool(output)
 
-        sleep_started = time.time()
         time.sleep(check_interval)
-        gap = _sleep_gap_seconds(time.time() - sleep_started, check_interval)
-        if gap:
-            sched_emit(jd, "sleep_gap", source="heartbeat_loop",
-                       duration_s=round(gap, 1),
-                       slept_for_s=round(gap + check_interval, 1),
-                       expected_s=check_interval)
 
 
 if __name__ == "__main__":

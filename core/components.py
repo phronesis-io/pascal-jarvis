@@ -55,6 +55,49 @@ def _config_get(root: Path, dotpath: str):
         return None
 
 
+# A red verdict from a check that VERIFIED the process is alive. The daemon
+# renders every manifest-critical red as 「组件失联：X 没有在运行」, which on
+# 2026-08-18 02:16 was simply false: ef-stream's process ran the whole time,
+# it was the health file that had gone stale behind a sleeping host. An alert
+# that names the wrong failure sends the reader to restart something that is
+# already running (feedback: 老板面的卡不能喊错狼).
+ALIVE_BUT_SILENT = "进程在跑但没在报状态"
+
+
+def _post_wake_grace(root: Path, now: float | None = None) -> str | None:
+    """The daemon's persisted post-wake hold, or None when it is not active.
+
+    Only the daemon watches the host sleep/wake gap, so it alone decides how
+    long "everything looks stale" is explained by a closed lid. Every age- or
+    overdue-derived verdict in this module reads that one window instead of
+    inventing its own — otherwise each check re-decides the same question and
+    they disagree.
+
+    2026-08-18/19: the host slept ~39h across 38 gaps. `heartbeat-tasks` was
+    the only check reading this window, so it correctly held green while
+    `ef-stream` — same host, same wake, process alive the whole time — went
+    critical on "protocol health stale" and paged Pascal with "EigenFlux 实时
+    消息接收没有在运行". The one alert that reached him in 39 hours named the
+    wrong thing, because a check that could not see the sleep blamed the only
+    thing it could see.
+
+    Grace covers staleness only. Liveness (pid/pgrep/http) is never excused:
+    a process that died during sleep is dead when we wake, and the window is
+    bounded (30min), so a component that is genuinely stuck still turns red
+    shortly after the host is back.
+    """
+    now = time.time() if now is None else now
+    try:
+        brain = json.loads(
+            (root / ".daemon_brain_state.json").read_text(encoding="utf-8"))
+        grace_until = float(brain.get("grace_until", 0) or 0)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if now >= grace_until:
+        return None
+    return f"post-wake grace — settles in {int((grace_until - now) / 60)}min"
+
+
 def _gate_reason(comp: dict, root: Path) -> str | None:
     """Fresh-install/optional-feature gate (2026-07-13): components.yaml used
     to mark ef-stream/lark-sidecar/admin critical UNCONDITIONALLY while
@@ -224,6 +267,10 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
         age_h = (time.time() - p.stat().st_mtime) / 3600
     except OSError:
         return False, "file missing"
+    if age_h > max_h:
+        grace = _post_wake_grace(root)
+        if grace:
+            return True, f"{grace} (age {age_h:.1f}h)"
     return (age_h <= max_h,
             f"age {age_h:.1f}h (max {max_h:.0f}h)")
 
@@ -237,16 +284,23 @@ def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
         state = json.loads(path.read_text(encoding="utf-8"))
         updated = float(state.get("updated_epoch") or 0)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False, f"{process_detail}; protocol health unavailable"
+        return False, (f"{ALIVE_BUT_SILENT}；{process_detail}; "
+                       f"protocol health unavailable")
     age = time.time() - updated
     if updated <= 0 or age > float(comp.get("max_age_seconds", 2400)):
-        return False, f"{process_detail}; protocol health stale"
+        # The stream writes its health file from inside this host. A host that
+        # was asleep produces exactly this reading with nothing wrong.
+        grace = _post_wake_grace(root)
+        if grace and updated > 0:
+            return True, f"{grace}; {process_detail}"
+        return False, f"{ALIVE_BUT_SILENT}；{process_detail}; protocol health stale"
     status = str(state.get("status") or "unknown")
     quiet = int(state.get("quiet_streak") or 0)
     if status in {"active", "connecting", "reconnecting"}:
         return True, f"{status}; quiet streak {quiet}; {process_detail}"
     detail = str(state.get("detail") or status)
-    return False, f"{status}: {detail}; {process_detail}"[:400]
+    return False, (f"{ALIVE_BUT_SILENT}；{status}: {detail}; "
+                   f"{process_detail}")[:400]
 
 
 def _check_deadman(comp: dict, root: Path) -> tuple[bool, str]:
@@ -284,6 +338,10 @@ def _check_audit_age(comp: dict, root: Path) -> tuple[bool, str]:
         ).total_seconds() / 3600
     except (TypeError, ValueError, OverflowError):
         return False, "invalid completed audit timestamp"
+    if not 0 <= age_h <= max_h:
+        grace = _post_wake_grace(root)
+        if grace and age_h >= 0:
+            return True, f"{grace} (completed age {age_h:.1f}h)"
     return (
         0 <= age_h <= max_h,
         f"completed age {age_h:.1f}h (max {max_h:.0f}h)",
@@ -333,10 +391,9 @@ def _check_heartbeat_tasks(comp: dict, root: Path) -> tuple[bool, str]:
     brain = _read_json(root / ".daemon_brain_state.json")
 
     now = time.time()
-    grace_until = float(brain.get("grace_until", 0) or 0)
-    if now < grace_until:
-        mins = int((grace_until - now) / 60)
-        return True, f"post-wake grace — task ages settle in {mins}min"
+    grace = _post_wake_grace(root, now)
+    if grace:
+        return True, grace
 
     result = brain_health.assess(
         state=state, tasks=tasks, overrides=overrides,
@@ -413,6 +470,14 @@ def _check_delivery(comp: dict, root: Path) -> tuple[bool, str]:
             f"envelope(s) in {window // 60}min"
         )
     if overdue_count and overdue_age > max_overdue:
+        # Everything queued goes overdue while the lid is shut; the failure
+        # streak above is the signal that survives sleep, this one does not.
+        grace = _post_wake_grace(root, now)
+        if grace:
+            return True, (
+                f"{grace} ({overdue_count} due item(s), oldest "
+                f"{overdue_age // 60}min)"
+            )
         return False, (
             f"delivery stalled: {overdue_count} due item(s), oldest "
             f"{overdue_age // 60}min"
