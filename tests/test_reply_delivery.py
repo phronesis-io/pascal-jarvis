@@ -7,8 +7,8 @@ exact REQ-11 pain, previously fixed only on the heartbeat channel
 mirrors those semantics for the reply path: per-attempt timeout (lark-cli has
 no socket timeout, so a half-open connection could wedge the handler subshell
 forever), (2,5)s backoff retries, then a core.delivery_deadletter row
-(kind=reply_send_failed) so daemon.py's independent channel can tell the user
-a reply was lost.
+(kind=reply_send_failed) so daemon.py's independent process can retry and
+retain evidence until the shared Lark channel accepts the notice.
 
 The fix lives in shell, so this file combines static-source wiring guards
 (the test_restart_loop_regression.py approach) with behavioral tests that

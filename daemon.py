@@ -910,12 +910,13 @@ def consume_delivery_deadletters():
     backlog #7, consumer half — producer contract in
     core/delivery_deadletter.py): the loop's own delivery alert rides the
     failing channel from the possibly-dead loop, so it also writes each
-    overdue delivery here for us to page through our independent channel.
+    overdue delivery here for the independent Guardian process to retry.
 
-    Per the contract we flock before read and truncate IN PLACE (keep the
-    inode) — read+unlink would divert a concurrent locked append onto a dead
-    inode. Truncate-then-notify is safe: notify_lark self-dead-letters on
-    failure (REQ-58) and flushes on its next successful send. Never raises.
+    Guardian is an independent process path, not an independent channel: its
+    Lark delivery can fail with Lark.  We therefore snapshot under flock,
+    notify, and consume only the accepted snapshot.  A genuine send loss
+    leaves the source evidence intact; concurrent appends are preserved.
+    Never raises.
     """
     try:
         # SQLite is authoritative for all new envelopes. Mark rows notified
@@ -1233,7 +1234,9 @@ def _check_brain_health():
     detectors (ran-but-failing starvation, priority failure windows, and the
     priority WEDGE rule mirrored from admin /health — the 7/8 intention-check
     wedge class whose only page used to be the deleted degraded-channel
-    alert). Alert-only, 4h dedup, deploy-guarded. Never raises."""
+    alert). It requests one bounded heartbeat recycle, waits a full task-cycle
+    grace, then pages only if verification is still red. 4h dedup,
+    deploy-guarded. Never raises."""
     if _in_deploy_window():
         return
     try:
@@ -1391,8 +1394,9 @@ def _check_diag_staleness():
          (scheduler wedge, open circuit, task removed).
       B. pre fresh with ⚠️ lines but the shared alert stamp never advanced
          after the pre run → the post-script's own send failed; re-deliver
-         through our channel. (The pre mtime only proves the PRE stage ran —
-         leg B is what covers the delivery half.)
+         from the independent Guardian process path through the same Lark
+         channel. (The pre mtime only proves the PRE stage ran — leg B is
+         what covers the delivery half.)
     Self-healing, deploy-guarded, never raises."""
     if _in_deploy_window():
         return
@@ -1953,8 +1957,9 @@ def main():
                 if probe_tick % 4 == 0:
                     probe_observed_components()
                     _probe_manifest_criticals()
-                    # Delivery dead-letters (backlog #7): alarms the heartbeat
-                    # loop couldn't send ride our independent channel.
+                    # Delivery dead-letters (backlog #7): retry from an
+                    # independent process path.  Lark remains the same channel,
+                    # so evidence stays pending when that channel is down.
                     consume_delivery_deadletters()
                 # Brain-death repair/verify detection every ~8th check (~4min).
                 # Cheaper than a restart-spiral; runs in the daemon because it

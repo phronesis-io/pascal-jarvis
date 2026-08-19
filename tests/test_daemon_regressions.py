@@ -898,7 +898,7 @@ def test_deadletter_consume_notifies_and_truncates_in_place(deadletter_env):
     assert "消息发送连续失败" in sent[0]
     assert "攒批消息过期没送出去" in sent[0]
     assert "2026-07-07 08:00" in sent[0]
-    # Contract: truncate IN PLACE — same inode, now empty
+    # The accepted snapshot is consumed in place; the append inode remains.
     assert f.stat().st_ino == inode_before
     assert f.stat().st_size == 0
 
