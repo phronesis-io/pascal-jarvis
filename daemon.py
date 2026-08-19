@@ -792,6 +792,27 @@ _MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar",
                      "admin", "dashboard"}
 
 
+def _component_down_text(label: str, detail: str) -> str:
+    """What to tell Pascal about a red manifest-critical component.
+
+    Every red used to render as 「组件失联：X 没有在运行」. On 2026-08-18 02:16
+    that sentence went out about ef-stream while the ef-stream process was
+    alive and owned — the host had been asleep and the health file had gone
+    stale. It was the only alert to reach him in 39 hours and it pointed at
+    the wrong thing. A check that verified liveness says so, and we repeat
+    what it found rather than diagnosing on its behalf.
+    """
+    try:
+        from core.components import ALIVE_BUT_SILENT
+    except Exception:
+        ALIVE_BUT_SILENT = "进程在跑但没在报状态"
+    tail = "（守护进程只告警不代管；一直没恢复的话需要人工重启）"
+    if ALIVE_BUT_SILENT in detail:
+        return (f"⚠️ {label}不太对劲：进程还活着，但很久没报状态了。"
+                f"重启前先确认它是真卡住了{tail}")
+    return f"⚠️ 组件失联：{label}没有在运行。{tail}"
+
+
 def _probe_manifest_criticals():
     """Alert (never restart) on dead critical components from components.yaml.
     The manifest promised 'critical: true → daemon checks it' but the daemon
@@ -847,8 +868,7 @@ def _probe_manifest_criticals():
                 log("WARN", f"Manifest-critical component DOWN: {name} — "
                     f"{r.get('detail')}")
                 label = _COMPONENT_LABELS.get(name, name)
-                notify_lark(f"⚠️ 组件失联：{label}没有在运行。（守护进程只告警"
-                            f"不代管；一直没恢复的话需要人工重启）")
+                notify_lark(_component_down_text(label, str(r.get("detail") or "")))
     except Exception as e:
         log("ERROR", f"manifest component probe failed: {e}")
 

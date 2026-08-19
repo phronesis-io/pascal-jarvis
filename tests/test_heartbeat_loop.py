@@ -32,11 +32,36 @@ def test_trim_file_missing(tmp_path):
 
 
 def test_sleep_gap_seconds_ignores_normal_loop_sleep():
-    assert _sleep_gap_seconds(slept_for_s=10.5, expected_s=10, threshold_s=120) == 0
+    assert _sleep_gap_seconds(wall_elapsed_s=10.5, mono_elapsed_s=10.5,
+                              threshold_s=120) == 0
 
 
 def test_sleep_gap_seconds_detects_host_sleep_pause():
-    assert _sleep_gap_seconds(slept_for_s=400, expected_s=10, threshold_s=120) == 390
+    assert _sleep_gap_seconds(wall_elapsed_s=400, mono_elapsed_s=10,
+                              threshold_s=120) == 390
+
+
+def test_a_long_model_call_is_not_mislabeled_as_host_sleep():
+    """Both clocks advance together while Claude thinks for 10 minutes.
+
+    This is what the old expected-interval instrument was protecting, and the
+    new one must keep: a slow cycle is not an absence.
+    """
+    assert _sleep_gap_seconds(wall_elapsed_s=612.0, mono_elapsed_s=612.0,
+                              threshold_s=120) == 0
+
+
+def test_sleep_that_began_inside_a_model_call_is_seen():
+    """The 2026-08-18/19 blind spot. The lid closed mid-cycle, so the gap fell
+    outside the loop's own 10s sleep and the old instrument logged nothing:
+    daemon.py measured 39.4h of host sleep, sched_events recorded 0.7h.
+
+    Bracketing the whole tick against the monotonic clock sees it: 3868s of
+    wall time (the real 2026-08-19 13:03 gap) against ~12s of monotonic time.
+    """
+    gap = _sleep_gap_seconds(wall_elapsed_s=3880.0, mono_elapsed_s=12.0,
+                             threshold_s=120)
+    assert round(gap) == 3868
 
 
 def test_write_outbox(tmp_path):

@@ -62,25 +62,30 @@ def main() -> int:
     # get their one batched shot at being seen here (style contract
     # 攒批≥5条晨匣提一行).
     try:
-        from core.presence import morning_digest_line
+        from core.presence import absence_line, morning_digest_line
         digest = morning_digest_line()
+        # A night the host spent asleep is the other thing the anchor owes
+        # him: on 2026-08-19 the machine had been shut ~39h and no surface
+        # ever said so out loud.
+        absence = absence_line()
     except Exception as exc:
         print(f"[morning-anchor] presence digest failed: {exc}",
               file=sys.stderr)
-        digest = ""
+        digest = absence = ""
+    footer = "\n".join(line for line in (absence, digest) if line)
 
     # REQ-121: a line substantively identical to yesterday's carries no new
     # information — skip the resend (the window is already stamped). The
     # digest footer overrides the skip: its counts/titles are fresh content,
     # and it has no other surface (dropping it would silence the ledger-only
     # bin).
-    if not digest and _normalized(message) == _normalized(previous_line):
+    if not footer and _normalized(message) == _normalized(previous_line):
         print("[morning-anchor] same line as yesterday, no digest — "
               "skipping resend", file=sys.stderr)
         return 0
 
-    if digest:
-        message = f"{message}\n{digest}"
+    if footer:
+        message = f"{message}\n{footer}"
 
     print(build_card("🌅 晨间锚点", message, source="morning-anchor"))
     return 0
