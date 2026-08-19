@@ -60,6 +60,7 @@ def test_ef_stream_stale_only_because_the_host_slept_is_not_critical(
     assert "grace" in detail
     assert "stale" not in detail          # do not page for a closed lid
     assert "owned by" in detail           # still says what it actually saw
+    assert "8.6h old" in detail           # a renewing hold stays visible
 
 
 def test_ef_stream_genuinely_stale_on_an_awake_host_still_pages(

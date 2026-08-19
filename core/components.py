@@ -292,7 +292,11 @@ def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
         # was asleep produces exactly this reading with nothing wrong.
         grace = _post_wake_grace(root)
         if grace and updated > 0:
-            return True, f"{grace}; {process_detail}"
+            # Carry the real age: on a laptop that naps hourly the window can
+            # re-arm often, and a hold that keeps renewing over a genuinely
+            # wedged stream must still be visible to whoever reads the report.
+            return True, (f"{grace}; health {age / 3600:.1f}h old; "
+                          f"{process_detail}")
         return False, f"{ALIVE_BUT_SILENT}；{process_detail}; protocol health stale"
     status = str(state.get("status") or "unknown")
     quiet = int(state.get("quiet_streak") or 0)
