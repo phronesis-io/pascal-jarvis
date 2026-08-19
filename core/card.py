@@ -32,6 +32,7 @@ _LOCAL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1", ""}
 # Lark interactive card content cap is ~8000 chars; stay under it for JSON
 # overhead and the header.
 _CARD_BODY_LIMIT = 7000
+_FULL_BODY_FIELD = "__jarvis_full_body"
 # Lark truncates long button captions on phone; keep them short everywhere.
 _MAX_BUTTON_TEXT = 14
 # Lark header display truncates at ~40 chars on mobile; the assembled header
@@ -140,9 +141,15 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     if header and len(header) > _MAX_HEADER_CHARS:
         header = header[:_MAX_HEADER_CHARS]
     elements = []
+    full_body = ""
     if body:
         body = linkify_bare_urls(body)
         if len(body) > _CARD_BODY_LIMIT:
+            # This JSON is an internal envelope before Memorial adoption.  The
+            # visible fallback remains bounded for callers that send it
+            # directly, while the adopter can still persist and serve every
+            # word through the phone-friendly full-text reader.
+            full_body = body
             body = _safe_truncate(body, _CARD_BODY_LIMIT)
         elements.append({"tag": "div", "text": {"content": body, "tag": "lark_md"}})
     if buttons and button_groups:
@@ -191,6 +198,8 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
         card["__jarvis_work_receipt"] = " ".join(
             str(work_receipt).split()
         )
+    if full_body:
+        card[_FULL_BODY_FIELD] = full_body
     return json.dumps(card, ensure_ascii=False)
 
 
@@ -289,8 +298,6 @@ def build_rich_card(
     # Localhost / unreachable view: render the full content inline so the user
     # can read everything in the card, and drop the dead "查看完整内容" link.
     body = _sections_to_markdown(sections) or summary
-    if len(body) > _CARD_BODY_LIMIT:
-        body = _safe_truncate(body, _CARD_BODY_LIMIT, "\n\n…（内容较长，已截断）")
     return build_card(
         header=header,
         body=body,
@@ -298,6 +305,17 @@ def build_rich_card(
         source=source,
         work_receipt=work_receipt,
     )
+
+
+def strip_internal_fields(card_json: str) -> str:
+    """Remove Jarvis-only envelope fields at the outbound transport edge."""
+    value = json.loads(str(card_json or ""))
+    if not isinstance(value, dict):
+        raise ValueError("card_not_object")
+    for key in list(value):
+        if str(key).startswith("__jarvis_"):
+            value.pop(key, None)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def extract_card_text(card_json: str) -> str:

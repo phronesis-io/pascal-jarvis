@@ -13,6 +13,7 @@ from core.card import (
     extract_card_text,
     extract_readable_from_output,
     linkify_bare_urls,
+    strip_internal_fields,
 )
 
 
@@ -65,6 +66,29 @@ def test_build_card_basic():
     card = json.loads(result)
     assert card["header"]["title"]["content"] == "Test Header"
     assert card["elements"][0]["text"]["content"] == "Hello world"
+
+
+def test_build_card_preserves_overlong_body_for_memorial_adoption():
+    body = "完整正文" * 2200
+    card = json.loads(build_card("长文", body))
+
+    assert "已截断" in card["elements"][0]["text"]["content"]
+    assert card["__jarvis_full_body"] == body
+
+
+def test_transport_sanitizer_removes_all_internal_card_fields():
+    raw = json.dumps({
+        "config": {"wide_screen_mode": True},
+        "elements": [],
+        "__jarvis_full_body": "private full body",
+        "__jarvis_context": "private context",
+        "__jarvis_work_receipt": "internal receipt",
+    })
+
+    card = json.loads(strip_internal_fields(raw))
+
+    assert not any(key.startswith("__jarvis_") for key in card)
+    assert card["config"]["wide_screen_mode"] is True
 
 
 def test_build_card_with_buttons():

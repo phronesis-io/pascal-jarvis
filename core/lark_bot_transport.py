@@ -204,12 +204,9 @@ def _markdown_payload(text: str) -> tuple[str, str]:
 
 
 def _card_payload(card_json: str) -> tuple[str, str]:
-    value = json.loads(str(card_json or ""))
-    if not isinstance(value, dict):
-        raise ValueError("card_not_object")
-    return "interactive", json.dumps(
-        value, ensure_ascii=False, separators=(",", ":")
-    )
+    from core.card import strip_internal_fields
+
+    return "interactive", strip_internal_fields(card_json)
 
 
 def send(

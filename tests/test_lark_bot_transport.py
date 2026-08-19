@@ -253,6 +253,28 @@ def test_cli_argument_adapter_supports_card_and_emergency_text():
     assert "warning" in _body(texts.calls[-1])["content"]
 
 
+def test_bot_api_strips_internal_card_envelope_fields():
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "token", "expire": 7200},
+        {"code": 0, "data": {"message_id": "om_card"}},
+    )
+
+    result = transport.send(
+        card_json=json.dumps({
+            "elements": [],
+            "__jarvis_full_body": "private full body",
+            "__jarvis_context": "private context",
+        }),
+        user_id="ou_owner",
+        env=_env(),
+        opener=opener,
+    )
+
+    assert result.ok is True
+    sent_card = json.loads(_body(opener.calls[-1])["content"])
+    assert sent_card == {"elements": []}
+
+
 def test_bot_open_id_uses_same_cached_tenant_token():
     opener = _Opener(
         {"code": 0, "tenant_access_token": "token", "expire": 7200},

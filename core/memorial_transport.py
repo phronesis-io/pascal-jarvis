@@ -7,8 +7,9 @@ import subprocess
 import time
 from collections.abc import Callable, Sequence
 
-from core.log import log
+from core.card import strip_internal_fields
 from core.lark_bot_transport import send_from_cli_args
+from core.log import log
 
 
 def _ops_log(message: str, **fields) -> None:
@@ -31,6 +32,21 @@ def send(
     Every failed attempt emits a structured event without copying provider
     stderr, which can contain private payloads or credentials.
     """
+    args = list(args)
+    try:
+        if "--msg-type" in args and "--content" in args:
+            kind_index = args.index("--msg-type") + 1
+            content_index = args.index("--content") + 1
+            if (kind_index < len(args) and content_index < len(args)
+                    and args[kind_index] == "interactive"):
+                args[content_index] = strip_internal_fields(
+                    args[content_index]
+                )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Preserve the established invalid-payload behavior: the direct API
+        # or CLI will reject it and the caller records a failed delivery.
+        pass
+
     delays = (0, *retry_delays) if retries else (0,)
     for attempt, delay in enumerate(delays, start=1):
         if delay:

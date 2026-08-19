@@ -94,3 +94,37 @@ def test_bot_api_path_skips_cli_and_returns_verified_receipt(monkeypatch):
 
     assert result == "om_direct"
     assert calls == [["--user-id", "ou_owner", "--markdown", "hello"]]
+
+
+def test_cli_fallback_strips_internal_card_envelope_fields(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        memorial_transport,
+        "send_from_cli_args",
+        lambda _args: BotSendResult(
+            False, False, error="bot_credentials_unavailable"
+        ),
+    )
+    raw = json.dumps({
+        "elements": [],
+        "__jarvis_full_body": "private full body",
+        "__jarvis_work_receipt": "internal receipt",
+    })
+
+    result = memorial_transport.send(
+        ["--user-id", "ou_owner", "--msg-type", "interactive",
+         "--content", raw],
+        retries=False,
+        runner=lambda argv, **_kwargs: (
+            calls.append(argv)
+            or subprocess.CompletedProcess(
+                argv, 0,
+                stdout=json.dumps({"data": {"message_id": "om_cli"}}),
+                stderr="",
+            )
+        ),
+    )
+
+    assert result == "om_cli"
+    content_index = calls[0].index("--content") + 1
+    assert json.loads(calls[0][content_index]) == {"elements": []}
