@@ -152,6 +152,7 @@ def scrub_embedded_authoring_directives(
     any_options_line_re: re.Pattern,
     any_recommend_line_re: re.Pattern,
     any_title_line_re: re.Pattern,
+    any_worked_line_re: re.Pattern,
 ) -> str:
     lines = str(text or "").splitlines()
     protected = protected_lines(lines)
@@ -160,7 +161,9 @@ def scrub_embedded_authoring_directives(
         if index in protected:
             cleaned.append(line)
             continue
-        if any_options_line_re.match(line) or any_recommend_line_re.match(line):
+        if (any_options_line_re.match(line)
+                or any_recommend_line_re.match(line)
+                or any_worked_line_re.match(line)):
             continue
         title_match = any_title_line_re.match(line)
         if title_match:
@@ -448,6 +451,9 @@ def render_card(
     content = render_body(state["body"] if body is None else body)
     if audit_text is not None:
         content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
+    work_receipt = " ".join(str(state.get("work_receipt") or "").split())
+    if work_receipt:
+        content = f"**已完成：** {work_receipt}\n\n{content}"
     recommendation = state.get("recommend") or {}
     if (include_options and recommendation.get("label")
             and recommendation.get("why")):

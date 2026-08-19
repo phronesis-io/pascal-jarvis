@@ -28,12 +28,20 @@ the end of the body — these become suggested-reply buttons whose label IS the
 sentence Pascal would have typed; (2) ``SOURCE_DEFAULT_PRESET`` for sources
 that inherently ask for a decision or a follow-up; (3)「已阅／标为重点」.
 
+Every new user-visible card also carries a short work receipt. Proactive model
+output must author it as ``WORKED: ...``; deterministic callers pass
+``work_receipt=...``. The receipt says what Jarvis already completed before
+asking for Pascal's attention. Missing receipts fail closed at model and
+Routine boundaries instead of turning unfinished work into a card.
+
 CLI (any emitter can send a memorial in one line):
     python3 -m core.memorial send --source mail --title "..." --body "..." \
-        --preset fyi
+        --worked "read and classified the message" --preset fyi
     python3 -m core.memorial send --source x --title t --body b \
+        --worked "verified trigger and current state" \
         --option '准=intent_close:id=xxx,outcome=done' --option '缓'
     python3 -m core.memorial send --source x --title t --body b \
+        --worked "compared the available paths" \
         --options '加钱|限流到月底|让它自然停'
     python3 -m core.memorial list [--pending]
 """
@@ -212,12 +220,13 @@ _FYI_KEYS = {"read", "watch", "ack", "not_this_kind", "pause"}
 # Deadlines are measured, not guessed (7/29, over memorials decided since 7/01):
 #   decision  median 2.1h, 75% inside 24h, 90% inside 48h, only 3% ever later
 #   alert     median 0.2h, 78% inside 24h — a stale alert has no salvage value
-#   notice    24h/48h/72h response is FLAT at 48% while the median lands at
-#             75h: Pascal taps some the same day and sweeps the rest days
-#             later. 7d clears the dead tail without stealing from that sweep.
+#   notice    is informational, not work Pascal owes the system. The 2026-08-17
+#             owner reset made this explicit: after one day it leaves the live
+#             queue and remains recoverable as 留中. This bounds attention debt
+#             even when a delivery outage creates a large historical backlog.
 ESCROW_DEADLINE_H = {
     ATTENTION_ALERT: 24,
-    ATTENTION_NOTICE: 24 * 7,
+    ATTENTION_NOTICE: 24,
     ATTENTION_DECISION: 48,
 }
 # A decision past its deadline is NOT archived — it is re-surfaced in the daily
@@ -483,6 +492,15 @@ _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
 # under a header nobody opens.
 _TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
 _ANY_TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：](.*)$", re.I)
+# Work receipt: a card is an output of completed preparation, never a request
+# that Pascal do the preparation himself. TITLE remains first so concatenated
+# authored cards can still be split mechanically; WORKED belongs immediately
+# below it (the parser accepts any unquoted top-level line for graceful
+# recovery). Quoted/fenced examples are protected by _markdown_protected_lines.
+_WORKED_LINE_RE = re.compile(
+    r"^\s*(?:WORKED|已完成)\s*[:：]\s*(.+?)\s*$", re.I)
+_ANY_WORKED_LINE_RE = re.compile(
+    r"^\s*(?:WORKED|已完成)\s*[:：].*$", re.I)
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _MARKDOWN_LIST_FENCE_OPEN_RE = re.compile(
     r"^( {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+)(`{3,}|~{3,})(.*)$")
@@ -504,6 +522,7 @@ _ANY_RECOMMEND_LINE_RE = re.compile(
 _RECOMMEND_SPLIT_RE = re.compile(r"\s*(?:—+|--+|－+|·)\s*")
 MAX_RECOMMEND_WHY_CHARS = 60
 MAX_TITLE_CHARS = 40
+MAX_WORK_RECEIPT_CHARS = 180
 MAX_INLINE_OPTIONS = 4
 # Lark truncates long button captions on a phone; clip rather than reject, so
 # a verbose OPTIONS line degrades to a short button instead of losing the card.
@@ -1442,7 +1461,35 @@ def _scrub_embedded_authoring_directives(text: str) -> str:
         any_options_line_re=_ANY_OPTIONS_LINE_RE,
         any_recommend_line_re=_ANY_RECOMMEND_LINE_RE,
         any_title_line_re=_ANY_TITLE_LINE_RE,
+        any_worked_line_re=_ANY_WORKED_LINE_RE,
     )
+
+
+def _extract_work_receipt(text: str) -> tuple[str, str]:
+    """Remove one top-level ``WORKED:`` line and return its compact receipt.
+
+    The directive is accepted only outside Markdown quotes/code. Multiple
+    directives are rejected: one card must have one auditable statement of
+    completed preparation, not a list of vague claims.
+    """
+    lines = str(text or "").splitlines()
+    protected = _markdown_protected_lines(lines)
+    matches: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        if index in protected:
+            continue
+        match = _WORKED_LINE_RE.match(line)
+        if match:
+            compact = " ".join(match.group(1).split())
+            if compact:
+                matches.append((index, compact[:MAX_WORK_RECEIPT_CHARS]))
+        elif _ANY_WORKED_LINE_RE.match(line):
+            matches.append((index, ""))
+    if len(matches) != 1 or not matches[0][1]:
+        return text, ""
+    index, receipt = matches[0]
+    cleaned = "\n".join(lines[:index] + lines[index + 1:]).strip()
+    return cleaned, receipt
 
 
 def parse_authored_cards(text: str) -> list[dict]:
@@ -1455,12 +1502,14 @@ def parse_authored_cards(text: str) -> list[dict]:
     parsed: list[dict] = []
     for block in _split_authored_card_blocks(str(text or "")):
         title, remainder = _extract_title_line(block)
+        remainder, work_receipt = _extract_work_receipt(remainder)
         remainder, recommend = _extract_recommendation(remainder)
         body, options = _extract_inline_options(remainder)
         body = _scrub_embedded_authoring_directives(body)
         parsed.append({
             "title": title,
             "body": body,
+            "work_receipt": work_receipt,
             "options": options,
             "recommend": recommend,
         })
@@ -1523,6 +1572,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                            context: str, chat_id: str,
                            matter_id: str = "",
                            dedup_key: str = "",
+                           work_receipt: str = "",
                            attention: str = "",
                            review_at: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
@@ -1541,6 +1591,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                 and st.get("context", "") == context
                 and st.get("chat_id", "") == chat_id
                 and st.get("matter_id", "") == matter_id
+                and st.get("work_receipt", "") == work_receipt
                 and str(st.get("attention", "")) == attention
                 and review_surface(st) == review_at
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
@@ -1601,6 +1652,7 @@ def _deliver_existing(
                 "dedup_text": json.dumps({
                     "title": state.get("title", ""),
                     "body": state.get("body", ""),
+                    "work_receipt": state.get("work_receipt", ""),
                     "options": state.get("options", []),
                 }, ensure_ascii=False, sort_keys=True),
                 "force_queue": force_queue,
@@ -1804,6 +1856,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            attention: str = "",
            review_at: str = "",
            recommend: dict | None = None,
+           work_receipt: str = "",
+           require_work_receipt: bool = False,
            authoring_protocol: bool = False,
            authoring_audit_text: str | None = None) -> tuple[str, bool]:
     """Create a memorial, append it to the ledger, and route it.
@@ -1828,15 +1882,22 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
     # Generic callers carry mail, research and network quotations, where a
     # leading TITLE or trailing OPTIONS/RECOMMEND may be legitimate content.
     parsed_recommend = None
+    parsed_work_receipt = ""
     inline_options = None
     if authoring_protocol and authoring_audit_text is None:
         authored = parse_authored_cards(body)[0]
         body = str(authored["body"])
+        parsed_work_receipt = str(authored.get("work_receipt") or "")
         parsed_recommend = authored["recommend"]
         inline_options = authored["options"]
         leading_title = str(authored["title"])
         if leading_title and not str(title).strip():
             title = leading_title
+    work_receipt = " ".join(
+        str(work_receipt or parsed_work_receipt).split()
+    )[:MAX_WORK_RECEIPT_CHARS]
+    if require_work_receipt and not work_receipt:
+        raise ValueError("model-authored memorial requires a WORKED receipt")
     if source in PRESET_LOCKED_SOURCES:
         # The model imitating historical cards must not displace the preset
         # (8/3: an OPTIONS line cost checkin its「这类不必」button on every
@@ -1874,7 +1935,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id),
-        str(matter_id), str(dedup_key), attention, review_at)
+        str(matter_id), str(dedup_key), work_receipt, attention, review_at)
     if dup is not None:
         _ops_log(
             "pending_duplicate_reused",
@@ -1895,7 +1956,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context),
           "attention": attention, "review_surface": review_at,
-          "authoring_protocol": bool(authoring_protocol)}
+          "authoring_protocol": bool(authoring_protocol),
+          "work_receipt": work_receipt}
     if authoring_audit_text is not None:
         ev["authoring_audit_text"] = str(authoring_audit_text)
     # An explicit caller outranks the parsed line, same precedence the options
@@ -1957,7 +2019,8 @@ def _clean_adopted_title(header: str, source: str) -> str:
 
 def adopt_card(source: str, legacy_card_json: str, context: str = "",
                suppress_accepted: bool = False,
-               skip_ledger_only: bool = False) -> str:
+               skip_ledger_only: bool = False,
+               require_work_receipt: bool = False) -> str:
     """Adopt an existing Lark card into the memorial interaction surface.
 
     Task-native actions/links are preserved. Cards that already offer a real
@@ -1970,6 +2033,9 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     """
     card = json.loads(legacy_card_json)
     source = str(card.pop("__jarvis_source", "") or source).strip()
+    structured_work_receipt = " ".join(
+        str(card.pop("__jarvis_work_receipt", "") or "").split()
+    )[:MAX_WORK_RECEIPT_CHARS]
     # Same marker convention as __jarvis_source: an emitter that only owns
     # stdout (a task post-hook printing a card) has no other way to attach
     # structured context to the memorial it will become. core.companion uses
@@ -2027,10 +2093,15 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
                     text_element.pop("actions", None)
                 block_card = copy.deepcopy(card)
                 block_card["elements"] = block_elements
+                if structured_work_receipt:
+                    block_card["__jarvis_work_receipt"] = (
+                        structured_work_receipt
+                    )
                 adopted = adopt_card(
                     source, json.dumps(block_card, ensure_ascii=False),
                     context=context, suppress_accepted=suppress_accepted,
-                    skip_ledger_only=skip_ledger_only)
+                    skip_ledger_only=skip_ledger_only,
+                    require_work_receipt=require_work_receipt)
                 if adopted:
                     outputs.append(adopted)
         return "\n".join(outputs)
@@ -2041,6 +2112,13 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # daily-reflect 7/22–7/27). The header of a directly-built card is a
     # decorative source label ("🌙 回顾"); an explicit TITLE line is the one
     # thing that says what THIS card is about, so it wins.
+    body, adopted_work_receipt = _extract_work_receipt(body)
+    adopted_work_receipt = (
+        structured_work_receipt or adopted_work_receipt
+    )
+    if require_work_receipt and not adopted_work_receipt:
+        _ops_log("work_receipt_missing", level="warn", source=source)
+        return ""
     body, adopted_recommend = _extract_recommendation(body)
     body, inline_options = _extract_inline_options(body)
     explicit_title, rest = _extract_title_line(body)
@@ -2074,6 +2152,8 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         mid, _ = create(
             source=source or "heartbeat", title=title, body=matter,
             options=options, recommend=adopted_recommend,
+            work_receipt=adopted_work_receipt,
+            require_work_receipt=require_work_receipt,
             authoring_protocol=True,
             preset=None if (has_native_action or inline_options)
             else fallback_preset,
@@ -2190,7 +2270,12 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
     return SOURCE_TITLE.get(source, source or "一件事"), chunk
 
 
-def memorialize_output(output: str, source: str = "heartbeat") -> str:
+def memorialize_output(
+    output: str,
+    source: str = "heartbeat",
+    *,
+    require_work_receipt: bool = False,
+) -> str:
     """Convert proactive heartbeat output to one memorial card per event.
 
     Existing decision cards pass through. Legacy cards are adopted while
@@ -2232,6 +2317,14 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                 flush_prose()
             return
         explicit_title, text = _extract_title_line(text)
+        text, work_receipt = _extract_work_receipt(text)
+        if require_work_receipt and not work_receipt:
+            _ops_log(
+                "work_receipt_missing", level="warn", source=active_source,
+            )
+            return
+        if not text and explicit_title:
+            text = explicit_title
         if not text:
             return
         # Buttons follow the card: an OPTIONS line authored by the task wins;
@@ -2264,6 +2357,8 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
             mid, _ = create(active_source, chunk_title, chunk_body,
                             options=inline_options, preset=preset,
                             recommend=authored_recommend,
+                            work_receipt=work_receipt,
+                            require_work_receipt=require_work_receipt,
                             authoring_protocol=True, send=False,
                             attention=(ATTENTION_ALERT
                                        if _can_infer_alert_from_prose(active_source)
@@ -2343,6 +2438,7 @@ def memorialize_output(output: str, source: str = "heartbeat") -> str:
                 adopted = adopt_card(
                     active_source, card_raw, suppress_accepted=True,
                     skip_ledger_only=True,
+                    require_work_receipt=require_work_receipt,
                 )
             if adopted:
                 rendered.append(adopted)
@@ -3385,6 +3481,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--source", required=True)
     sp.add_argument("--title", required=True)
     sp.add_argument("--body", required=True)
+    sp.add_argument(
+        "--worked", required=True,
+        help="what Jarvis completed before asking for attention",
+    )
     sp.add_argument("--preset", choices=sorted(PRESETS))
     sp.add_argument("--option", action="append", default=[],
                     metavar="'标签[=动作类型:k=v,k=v]'")
@@ -3449,6 +3549,7 @@ def main(argv: list[str] | None = None) -> int:
                 options = (options or []) + reply_options
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
+                               work_receipt=args.worked,
                                context=args.context, chat_id=args.chat_id,
                                urgent=args.urgent)
         except ValueError as e:

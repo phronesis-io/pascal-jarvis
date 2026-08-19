@@ -1872,7 +1872,9 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                 try:
                     from core.memorial import memorialize_output
                     memorialized = memorialize_output(
-                        output, _peek_source(jd) or "heartbeat")
+                        output, _peek_source(jd) or "heartbeat",
+                        require_work_receipt=True,
+                    )
                     # Empty is meaningful: the content is durably ledgered
                     # (ledger-only ambient exhaust or an already-accepted
                     # card, REQ-119) and must not fall through as the

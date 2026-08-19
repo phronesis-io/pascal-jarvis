@@ -87,7 +87,10 @@ def main() -> int:
     if footer:
         message = f"{message}\n{footer}"
 
-    print(build_card("🌅 晨间锚点", message, source="morning-anchor"))
+    print(build_card(
+        "🌅 晨间锚点", message, source="morning-anchor",
+        work_receipt="汇总今日日程、待办和留中摘要并完成重复项压缩",
+    ))
     return 0
 
 

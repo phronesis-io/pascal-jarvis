@@ -41,9 +41,15 @@ def main() -> int:
             url = url_match.group(0)
             body = text.replace(url, "").strip()
             buttons = [{"text": "去看看", "url": url}]
-            print(build_card("📺 推荐", body, buttons, source="content-recommend"))
+            print(build_card(
+                "📺 推荐", body, buttons, source="content-recommend",
+                work_receipt="完成内容筛选、链接提取和历史推荐去重",
+            ))
         elif text:
-            print(build_card("📺 推荐", text, source="content-recommend"))
+            print(build_card(
+                "📺 推荐", text, source="content-recommend",
+                work_receipt="完成内容筛选和历史推荐去重",
+            ))
         return 0
 
     url = data.get("url", "")
@@ -95,7 +101,11 @@ def main() -> int:
         })
 
     # Use build_card for header + body, then add note element manually
-    card_str = build_card(header_text, user_message, buttons if buttons else None, source="content-recommend")
+    card_str = build_card(
+        header_text, user_message, buttons if buttons else None,
+        source="content-recommend",
+        work_receipt="完成内容筛选、链接校验和历史推荐去重",
+    )
     if url:
         # Inject note element before closing the elements array
         card_obj = json.loads(card_str)

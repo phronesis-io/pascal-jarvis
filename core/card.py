@@ -102,7 +102,8 @@ def linkify_bare_urls(text: str) -> str:
 def build_card(header: str, body: str, buttons: list[dict] | None = None,
                source: str = "",
                button_groups: list[list[dict]] | None = None,
-               context: str = "") -> str:
+               context: str = "",
+               work_receipt: str = "") -> str:
     """Build a Lark interactive card JSON string (single line).
 
     Args:
@@ -120,6 +121,9 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
             ``__jarvis_source``). A task post-hook owns only stdout, so this is
             its only channel for attaching machine-readable state — e.g.
             checkin's KIND, which per-kind learning depends on.
+        work_receipt: Concrete preparation completed before producing this
+            card. The heartbeat adoption gate removes this internal marker,
+            persists the receipt, and renders it as user-visible evidence.
 
     Returns:
         Single-line JSON string starting with {"config":...}, or "" when the
@@ -183,6 +187,10 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     }
     if context:
         card["__jarvis_context"] = str(context)
+    if work_receipt:
+        card["__jarvis_work_receipt"] = " ".join(
+            str(work_receipt).split()
+        )
     return json.dumps(card, ensure_ascii=False)
 
 
@@ -238,6 +246,7 @@ def build_rich_card(
     button_text: str = "查看完整内容",
     extra_buttons: list[dict] | None = None,
     source: str = "",
+    work_receipt: str = "",
 ) -> str:
     """Build a Lark card carrying full rich content.
 
@@ -272,7 +281,10 @@ def build_rich_card(
         buttons = [{"text": button_text, "url": url}]
         if extra_buttons:
             buttons.extend(extra_buttons)
-        return build_card(header=header, body=summary, buttons=buttons, source=source)
+        return build_card(
+            header=header, body=summary, buttons=buttons, source=source,
+            work_receipt=work_receipt,
+        )
 
     # Localhost / unreachable view: render the full content inline so the user
     # can read everything in the card, and drop the dead "查看完整内容" link.
@@ -284,6 +296,7 @@ def build_rich_card(
         body=body,
         buttons=list(extra_buttons) if extra_buttons else None,
         source=source,
+        work_receipt=work_receipt,
     )
 
 

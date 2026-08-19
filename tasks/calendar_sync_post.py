@@ -249,7 +249,10 @@ def main() -> int:
     # its own memorial downstream (core.memorial.memorialize_output).
     bodies = change_card_bodies(lines)
     for body in bodies:
-        print(build_card("📅 日程变动", body, source="calendar-sync"))
+        print(build_card(
+            "📅 日程变动", body, source="calendar-sync",
+            work_receipt="读取日历快照、完成变更比对和重复事件过滤",
+        ))
     print(f"[calendar-sync] Notified {len(bodies)} card(s): "
           f"{'; '.join(lines)!r}", file=sys.stderr)
 

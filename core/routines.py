@@ -15,7 +15,8 @@ same idea reduced to a durable record the user owns:
     observe  — runs and records into the audit trail. Never delivers, never
                acts. The read-only mode: use it to watch a routine's judgment
                for a week before letting it interrupt anyone.
-    propose  — delivers one memorial card. Any consequence needs 批红. Default.
+    propose  — delivers one evidence-backed result card. Any consequence needs
+               批红. A suggestion with no completed preparation is withheld.
     act      — propose, plus a bounded allow-list of internal, reversible
                actions it may take on its own. External mutations are NOT on
                that list and never will be: those belong to verified
@@ -47,7 +48,7 @@ AUTONOMY_LEVELS = (AUTONOMY_OBSERVE, AUTONOMY_PROPOSE, AUTONOMY_ACT)
 
 AUTONOMY_HELP = {
     AUTONOMY_OBSERVE: "只看不说：跑完只进审计记录，永不打扰",
-    AUTONOMY_PROPOSE: "提方案等你点头：出一张卡，动作要你确认（默认）",
+    AUTONOMY_PROPOSE: "先完成分析：只把剩余关键取舍交给你（默认）",
     AUTONOMY_ACT: "可自己动手：限内部可逆动作（建 intent / 记任务 / 写笔记）",
 }
 
@@ -711,11 +712,23 @@ def apply_run_result(payload: dict) -> list[dict]:
             item = {}
         title = str(item.get("title") or routine["name"]).strip()[:MAX_TITLE]
         body = str(item.get("body") or item.get("user_message") or "").strip()[:MAX_BODY]
+        work_receipt = " ".join(
+            str(item.get("work_receipt") or "").split()
+        )[:240]
 
         if not body:
             finish_run(run_id, "no_output",
                        error="模型没有为这个例程产出内容")
             out.append({"run_id": run_id, "status": "no_output"})
+            continue
+
+        if (routine["autonomy"] != AUTONOMY_OBSERVE
+                and not work_receipt):
+            finish_run(
+                run_id, "withheld", output=body,
+                error="缺少 work_receipt：未确认先完成工作，卡片已拦截",
+            )
+            out.append({"run_id": run_id, "status": "withheld"})
             continue
 
         permitted, refused = authorize_actions(routine["autonomy"],
@@ -745,6 +758,7 @@ def apply_run_result(payload: dict) -> list[dict]:
             memorial_id, _ = memorial.create(
                 source=f"routine:{routine['name']}"[:40],
                 title=title, body=card_body,
+                work_receipt=work_receipt,
                 options=_card_options(routine),
                 dedup_key=f"routine:{routine['id']}:{run_id}",
                 context=json.dumps({"kind": "routine_run",

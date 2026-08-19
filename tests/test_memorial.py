@@ -157,11 +157,9 @@ def test_routine_card_is_notice_not_pending_decision(env):
 
     from datetime import datetime, timedelta
     created = datetime.strptime(st["ts"], "%Y-%m-%d %H:%M")
-    # Past the decision deadline it must NOT surface as 待批 …
+    # Past the decision deadline it must NOT surface as 待批; notices leave
+    # the live attention queue after 24h instead.
     scan = memorial.escrow_scan(now=created + timedelta(hours=72))
-    assert scan["overdue"] == [] and scan["lapse"] == []
-    # … and past the notice deadline it lapses quietly instead.
-    scan = memorial.escrow_scan(now=created + timedelta(days=8))
     assert scan["overdue"] == []
     assert [s["id"] for s, _ in scan["lapse"]] == [mid]
 
@@ -979,6 +977,120 @@ def test_adopt_action_card_preserves_native_choice_and_adds_chat_only(env):
     assert actions[0]["value"]["action"] == "intent_close"
 
 
+def test_strict_native_card_requires_structured_work_receipt(env):
+    legacy = build_card("📡 EigenFlux", "一件外部动态")
+
+    assert memorial.adopt_card(
+        "eigenflux-feed-triage", legacy, require_work_receipt=True,
+    ) == ""
+    assert memorial.list_memorials() == []
+
+
+def test_strict_native_card_persists_its_producers_work_receipt(env):
+    legacy = build_card(
+        "📡 EigenFlux", "一件外部动态",
+        work_receipt="拉取信号、核验来源并完成重复性筛选",
+    )
+
+    rendered = memorial.adopt_card(
+        "eigenflux-feed-triage", legacy, require_work_receipt=True,
+    )
+
+    state = memorial.list_memorials()[0]
+    assert state["work_receipt"] == "拉取信号、核验来源并完成重复性筛选"
+    assert "__jarvis_work_receipt" not in rendered
+    assert "**已完成：** 拉取信号、核验来源并完成重复性筛选" in rendered
+
+
+def test_strict_multisection_native_card_keeps_receipt_on_each_split(env):
+    legacy = json.loads(build_card(
+        "📋 汇总", "第一件事",
+        work_receipt="读取两组证据并分别完成核验",
+    ))
+    legacy["elements"].append({
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": "第二件事"},
+    })
+
+    rendered = memorial.adopt_card(
+        "heartbeat", json.dumps(legacy, ensure_ascii=False),
+        require_work_receipt=True,
+    )
+
+    assert len(rendered.splitlines()) == 2
+    assert [row["work_receipt"] for row in memorial.list_memorials()] == [
+        "读取两组证据并分别完成核验",
+        "读取两组证据并分别完成核验",
+    ]
+
+
+def test_proactive_work_receipt_is_required_stored_and_rendered(env):
+    missing = memorial.memorialize_output(
+        "TITLE: 需要拍板\n方案已经列好。\nOPTIONS: 同意 | 不做",
+        "intention-check",
+        require_work_receipt=True,
+    )
+    assert missing == ""
+    assert memorial.list_memorials() == []
+
+    rendered = memorial.memorialize_output(
+        "TITLE: 需要拍板\n"
+        "WORKED: 对照了三份记录并复算影响范围\n"
+        "方案已经列好。\nOPTIONS: 同意 | 不做",
+        "intention-check",
+        require_work_receipt=True,
+    )
+
+    state = memorial.list_memorials()[0]
+    assert state["work_receipt"] == "对照了三份记录并复算影响范围"
+    assert "WORKED" not in state["body"]
+    card_body = json.loads(rendered)["elements"][0]["text"]["content"]
+    assert "**已完成：** 对照了三份记录并复算影响范围" in card_body
+
+
+def test_quoted_worked_example_does_not_satisfy_receipt_gate(env):
+    rendered = memorial.memorialize_output(
+        "TITLE: 协议示例\n> WORKED: 这只是外部引文\n正文",
+        "intention-check",
+        require_work_receipt=True,
+    )
+    assert rendered == ""
+    assert memorial.list_memorials() == []
+
+
+def test_malformed_worked_directive_never_leaks_as_body_text(env):
+    memorial.memorialize_output(
+        "TITLE: 兼容输入\nWORKED:\n正文",
+        "intention-check",
+    )
+    state = memorial.list_memorials()[0]
+    assert state["body"] == "正文"
+
+
+def test_title_only_card_with_work_receipt_keeps_title_as_body(env):
+    rendered = memorial.memorialize_output(
+        "TITLE: 检查完成\nWORKED: 跑完组件检查，17 项全部健康",
+        "selfmon",
+        require_work_receipt=True,
+    )
+    state = memorial.list_memorials()[0]
+    assert state["title"] == "检查完成"
+    assert state["body"] == "检查完成"
+    assert json.loads(rendered)["elements"]
+
+
+def test_content_dedup_distinguishes_new_work_receipt(env):
+    first, _ = memorial.create(
+        "mail", "同一标题", "同一正文", preset="fyi",
+        work_receipt="只读了标题",
+    )
+    second, _ = memorial.create(
+        "mail", "同一标题", "同一正文", preset="fyi",
+        work_receipt="读完正文并核验发件人",
+    )
+    assert first != second
+
+
 def test_memorialize_output_keeps_ambient_prose_ledger_only(env):
     output = "跨 Session 有一件进展\n---\n另一件独立进展"
     rendered = memorial.memorialize_output(output, "cross-session-sync")
@@ -1352,7 +1464,8 @@ def test_quiet_hours_queue_records_delivery_without_direct_send(env, monkeypatch
 
 def test_cli_send_prints_id(env, capsys):
     rc = memorial.main(["send", "--source", "mail", "--title", "T",
-                        "--body", "B", "--preset", "fyi"])
+                        "--body", "B", "--worked", "读完并分类邮件",
+                        "--preset", "fyi"])
     assert rc == 0
     mid = capsys.readouterr().out.strip()
     assert mid.startswith("mem_")
@@ -1362,7 +1475,8 @@ def test_cli_send_prints_id(env, capsys):
 def test_cli_urgent_bypasses_quiet_hours(env, monkeypatch, capsys):
     monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: True)
     rc = memorial.main(["send", "--source", "selfmon", "--title", "T",
-                        "--body", "B", "--preset", "fyi", "--urgent"])
+                        "--body", "B", "--worked", "完成健康检查",
+                        "--preset", "fyi", "--urgent"])
     assert rc == 0
     assert len(env.cards) == 1
     assert not (env.dir / memorial.MEMORIAL_QUEUE_FILE).exists()
@@ -1372,6 +1486,7 @@ def test_cli_urgent_bypasses_quiet_hours(env, monkeypatch, capsys):
 def test_cli_option_spec_parsing(env, capsys):
     rc = memorial.main([
         "send", "--source", "intent", "--title", "T", "--body", "B",
+        "--worked", "核验触发与状态",
         "--option", "准=intent_close:id=xxx,outcome=done",
         "--option", "缓",
     ])
@@ -1387,7 +1502,8 @@ def test_cli_option_spec_parsing(env, capsys):
 def test_cli_send_failure_returns_1_but_prints_id(env, capsys):
     env.send_ok = False
     rc = memorial.main(["send", "--source", "mail", "--title", "T",
-                        "--body", "B", "--preset", "fyi", "--urgent"])
+                        "--body", "B", "--worked", "读完并分类邮件",
+                        "--preset", "fyi", "--urgent"])
     assert rc == 1
     assert capsys.readouterr().out.strip().startswith("mem_")
 
@@ -1406,7 +1522,8 @@ def test_cli_list_pending(env, capsys):
 
 def test_cli_bad_option_spec_is_usage_error(env, capsys):
     rc = memorial.main(["send", "--source", "x", "--title", "t",
-                        "--body", "b", "--option", "  "])
+                        "--body", "b", "--worked", "完成检查",
+                        "--option", "  "])
     assert rc == 2
     assert "ERROR" in capsys.readouterr().err
     assert _ledger_events(env.dir) == []
@@ -1700,7 +1817,8 @@ def test_exercise_week_feedback_buttons_do_not_create_a_decision(env):
 
 def test_cli_options_flag_builds_reply_buttons(env, capsys):
     rc = memorial.main(["send", "--source", "mail", "--title", "t",
-                        "--body", "b", "--options", "加钱|限流"])
+                        "--body", "b", "--worked", "读完并分类邮件",
+                        "--options", "加钱|限流"])
     assert rc == 0
     mid = capsys.readouterr().out.strip().splitlines()[0]
     opts = memorial.get_memorial(mid)["options"]

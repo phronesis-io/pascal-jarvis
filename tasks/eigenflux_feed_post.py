@@ -215,8 +215,11 @@ def _emit_legacy_backlog_cards() -> None:
     for entry in held:
         message = str(entry.get("message", "")).strip()
         if message:
-            print(build_card(header="📡 EigenFlux", body=message,
-                             source=str(entry.get("source") or "eigenflux-feed")))
+            print(build_card(
+                header="📡 EigenFlux", body=message,
+                source=str(entry.get("source") or "eigenflux-feed"),
+                work_receipt="读取历史积压信号并完成迁移去重",
+            ))
 
 
 def main() -> int:
@@ -317,6 +320,7 @@ def main() -> int:
                 body=msg,
                 buttons=buttons,
                 source="eigenflux-feed",
+                work_receipt="拉取个性化信号、提交反馈并完成价值与重复性筛选",
             ))
         _mark_surfaced()
     return 0

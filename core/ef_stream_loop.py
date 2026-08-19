@@ -317,6 +317,7 @@ def _deliver_memorial_and_mark(msg, ids, metadata, user_id, seen, seen_file, jd,
     try:
         mid, _ = memorial.create(
             source="eigenflux", title=title, body=msg,
+            work_receipt="校验 EigenFlux 事件身份、完成去重和联系人上下文匹配",
             options=authored_options,
             preset=None if authored_options else "fyi",
             recommend=authored_recommend,
@@ -359,6 +360,7 @@ def _send_memorial_notice(title: str, body: str, user_id: str,
     try:
         mid, _ = memorial.create(
             source="eigenflux", title=title, body=body, preset="fyi",
+            work_receipt="核验 EigenFlux 流状态并完成重复通知检查",
             urgent=urgent,
         )
         state = memorial.get_memorial(mid) or {}
