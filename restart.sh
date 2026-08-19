@@ -161,6 +161,7 @@ kill_bot() {
   # stale loop survives a restart.
   pkill -f "core\\.heartbeat_loop" 2>/dev/null || true
   pkill -f "core\\.ef_stream_loop" 2>/dev/null || true
+  pkill -f "eigenflux stream" 2>/dev/null || true
   pkill -f "$JARVIS_DIR/admin\\.py" 2>/dev/null || true
 
   # Kill stuck claude sessions (lock format: "<pid> <token>"). Verify process
@@ -191,6 +192,25 @@ kill_bot() {
 
   # Wait for processes to die
   sleep 2
+
+  # A helper may still be inside its graceful child wait when the two-second
+  # hand-off expires. Leaving it alive is worse than a hard stop: the old and
+  # new EigenFlux streams then replace each other forever, while orphaned
+  # heartbeat/admin processes keep executing the previous release. The bot is
+  # still stopped here and the deploy guard is active, so this exact-identity
+  # sweep cannot hit a newly started runtime.
+  force_kill_pattern() {
+    local label="$1" pattern="$2"
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+      echo "  Force killing lingering $label..."
+      pkill -9 -f "$pattern" 2>/dev/null || true
+    fi
+  }
+  force_kill_pattern "heartbeat loop" "core\\.heartbeat_loop"
+  force_kill_pattern "EigenFlux loop" "core\\.ef_stream_loop"
+  force_kill_pattern "EigenFlux stream child" "eigenflux stream"
+  force_kill_pattern "Lark sidecar" "lark-cli event|lark_event_sidecar"
+  force_kill_pattern "admin process" "$JARVIS_DIR/admin\\.py"
 
   # Verify
   if pgrep -f "bash.*$JARVIS_DIR/bot\\.sh" >/dev/null 2>&1; then

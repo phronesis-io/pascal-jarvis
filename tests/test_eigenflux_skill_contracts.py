@@ -94,6 +94,15 @@ def test_communication_skill_keeps_jarvis_verified_message_contract():
     assert "--repeat-token" in skill
 
 
+def test_public_skill_bundle_does_not_activate_staged_v2_commands():
+    broadcast = _read("ef-broadcast/SKILL.md")
+    profile = _read("ef-profile/SKILL.md")
+
+    assert "eigenflux context pull" not in broadcast
+    assert "onboarding-v2.md" not in profile
+    assert not (EF / "ef-profile" / "references" / "onboarding-v2.md").exists()
+
+
 def test_skill_overlay_is_deterministic_and_replaces_old_copy():
     base = (
         "# Skill\n\n"
@@ -153,3 +162,4 @@ def test_preinstall_source_repos_can_be_overridden_for_worktrees():
     assert 'REPOS_DIR="${JARVIS_REPOS_DIR:-$(dirname "$JARVIS_DIR")}"' in script
     assert 'PLUGIN_DIR="${EIGENFLUX_PLUGIN_DIR:-$REPOS_DIR/eigenflux-claude-plugin}"' in script
     assert 'MAIN_DIR="${EIGENFLUX_MAIN_DIR:-$REPOS_DIR/eigenflux}"' in script
+    assert 'mkdir -p "$(dirname "$STATE_FILE")"' in script

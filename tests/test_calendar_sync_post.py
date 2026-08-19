@@ -5,8 +5,20 @@ import io
 import json
 from datetime import datetime
 
+import pytest
+
 import tasks.calendar_sync_post as csp
 from tasks.calendar_sync_post import change_card_bodies, format_change_lines
+
+
+@pytest.fixture(autouse=True)
+def _calendar_clock(monkeypatch):
+    """Keep formatting tests independent from the wall-clock month."""
+    import core.timeutil
+
+    monkeypatch.setattr(
+        core.timeutil, "now_local", lambda: datetime(2026, 7, 14, 12, 0)
+    )
 
 
 def test_move_is_one_line_not_add_cancel_pair():
@@ -115,3 +127,43 @@ def test_main_emits_one_card_per_reschedule(tmp_path, monkeypatch, capsys):
         assert card["header"]["title"]["content"] == "📅 日程变动"
         body = card["elements"][0]["text"]["content"]
         assert body.count("改期") == 1  # exactly one matter per card
+
+
+def test_elapsed_events_are_not_reported_as_cancelled(monkeypatch):
+    """Regression for 2026-08-19 13:04: after a quiet stretch the resync
+    diffed a stale snapshot against a fresh window and fired two cards —
+    '取消：8/17 羽毛球' and '取消：8/18 白皮书 + Vic 讨论' — for events Pascal
+    had already attended. Pascal: 也不叫取消吧，做完了？
+
+    Anything dated before today is dropped; a same-day removal is a genuine
+    cancellation and must survive.
+    """
+    import core.timeutil
+    monkeypatch.setattr(core.timeutil, "now_local", lambda: datetime(2026, 8, 19, 13, 4))
+
+    elapsed = {"08/17|17:00|羽毛球", "08/18|16:00|白皮书 + Vic 讨论"}
+    assert csp.format_change_lines(set(), elapsed) == []
+
+    today_cancel = csp.format_change_lines(set(), {"08/19|21:00|邹"})
+    assert today_cancel == ["取消：8/19(周三) 21:00 邹"]
+
+    # A reschedule out of an elapsed slot into a future one is still news.
+    moved = csp.format_change_lines({"08/22|15:00|周会"}, {"08/18|15:00|周会"})
+    assert moved == ["改期：周会 — 8/18(周二) 15:00 → 8/22(周六) 15:00"]
+
+
+def test_elapsed_events_resolve_across_month_and_year_boundaries(monkeypatch):
+    import core.timeutil
+
+    monkeypatch.setattr(
+        core.timeutil, "now_local", lambda: datetime(2026, 8, 2, 9, 0)
+    )
+    assert csp.format_change_lines(set(), {"07/31|17:00|月末复盘"}) == []
+
+    monkeypatch.setattr(
+        core.timeutil, "now_local", lambda: datetime(2027, 1, 2, 9, 0)
+    )
+    assert csp.format_change_lines(set(), {"12/31|17:00|年末复盘"}) == []
+    assert csp.format_change_lines({"01/03|10:00|新年计划"}, set()) == [
+        "新增：1/3(周日) 10:00 新年计划"
+    ]
