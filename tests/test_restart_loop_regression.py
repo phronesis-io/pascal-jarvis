@@ -1028,5 +1028,26 @@ def test_sigterm_cleanup_exits_bot():
     assert "_CLEANED_UP" in BOT_SH
 
 
+def test_restart_force_reaps_runtime_helpers_after_grace_period():
+    """A graceful helper must not survive into the next release.
+
+    2026-08-19: an old ``core.ef_stream_loop`` survived a restart and fought
+    the new stream for the singleton server connection until both degraded.
+    """
+    kill_bot = RESTART_SH[
+        RESTART_SH.index("kill_bot()") : RESTART_SH.index("kill_daemon()")
+    ]
+    assert 'pkill -f "eigenflux stream"' in kill_bot
+    assert kill_bot.index("sleep 2") < kill_bot.index("force_kill_pattern()")
+    for label, pattern in (
+        ("heartbeat loop", "core\\\\.heartbeat_loop"),
+        ("EigenFlux loop", "core\\\\.ef_stream_loop"),
+        ("EigenFlux stream child", "eigenflux stream"),
+        ("Lark sidecar", "lark-cli event|lark_event_sidecar"),
+        ("admin process", '$JARVIS_DIR/admin\\\\.py'),
+    ):
+        assert f'force_kill_pattern "{label}" "{pattern}"' in kill_bot
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

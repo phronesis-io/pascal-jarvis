@@ -71,6 +71,12 @@ if ! command -v eigenflux >/dev/null 2>&1 \
   exit 0
 fi
 
+# Runtime state is intentionally untracked, so a clean clone or isolated
+# worktree does not contain this directory. Create it before the parity backlog
+# and verified-SHA state are written; otherwise verification can pass while the
+# durable review record is silently lost.
+mkdir -p "$(dirname "$STATE_FILE")"
+
 # ── Bounded runner (portable across macOS/Linux) ──────────────────────
 bounded() {
   local s="$1"; shift

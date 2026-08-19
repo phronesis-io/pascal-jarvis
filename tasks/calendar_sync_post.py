@@ -91,17 +91,54 @@ def _date_label(mmdd: str) -> str:
     if not mmdd:
         return ""
     try:
-        from datetime import date
         from core.timeutil import now_local
         m, d = (int(x) for x in mmdd.split("/"))
         today = now_local().date()
-        # A month before the current one almost certainly means next year
-        # (calendar snapshots only cover near-term dates).
-        year = today.year + (1 if m < today.month else 0)
-        wd = "一二三四五六日"[date(year, m, d).weekday()]
+        wd = "一二三四五六日"[_nearby_date(m, d, today).weekday()]
         return f"{m}/{d}(周{wd})"
     except (ValueError, IndexError):
         return mmdd
+
+
+def _nearby_date(month: int, day: int, today):
+    """Resolve MM/DD to the nearest valid date around today.
+
+    Calendar snapshots span both sides of New Year and stale snapshots may
+    retain last month's events. A simple ``month < current month`` rule turns
+    every elapsed July event into July next year when run in August.
+    """
+    from datetime import date
+
+    candidates = []
+    for year in (today.year - 1, today.year, today.year + 1):
+        try:
+            candidates.append(date(year, month, day))
+        except ValueError:
+            continue
+    if not candidates:
+        raise ValueError("invalid month/day")
+    return min(candidates, key=lambda value: abs((value - today).days))
+
+
+def _is_past(mmdd: str) -> bool:
+    """True when 'MM/DD' resolves to a date strictly before today.
+
+    An event that merely slid out of the rolling 30-day window is not a
+    cancellation — it already happened. Before this guard, a resync after a
+    quiet stretch reported every elapsed event as 取消 (2026-08-19: two cards
+    at once, '取消：8/17 羽毛球' and '取消：8/18 白皮书 + Vic 讨论', for
+    things Pascal had already done — "也不叫取消吧，做完了？"). A same-day
+    removal IS a real cancellation and is deliberately kept.
+    """
+    if not mmdd:
+        return False
+    try:
+        from core.timeutil import now_local
+        m, d = (int(x) for x in mmdd.split("/"))
+        today = now_local().date()
+        return _nearby_date(m, d, today) < today
+    except (ValueError, IndexError):
+        return False
 
 
 def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
@@ -132,6 +169,14 @@ def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
         else:
             still_added.append(a)
     still_removed = [t for t in removed_ev if t[2] in removed_by_title]
+
+    # Drop anything dated before today (see _is_past). A reschedule whose new
+    # slot is still ahead stays, even if its old slot has already elapsed.
+    moved = [(o, n) for o, n in moved if not _is_past(n[0])]
+    still_added = [t for t in still_added if not _is_past(t[0])]
+    still_removed = [t for t in still_removed if not _is_past(t[0])]
+    if not moved and not still_added and not still_removed:
+        return []
 
     lines = []
     for old, new in moved[:cap]:
