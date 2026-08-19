@@ -30,6 +30,7 @@ def main() -> int:
         summary=message[:200],
         sections=[{"type": "markdown", "content": message}],
         source="thinking-review",
+        work_receipt="回看近期思考记录、完成主题聚类和后续价值判断",
     ))
     return 0
 

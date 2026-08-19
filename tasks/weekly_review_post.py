@@ -49,6 +49,7 @@ def main() -> int:
                     "source": "weekly_review",
                     "date": now_local_str("%Y-%m-%d"),
                 },
+                work_receipt="复核本周任务状态并完成可逆的整理动作",
             ))
             _stamp_success()
             return 0
@@ -81,6 +82,7 @@ def main() -> int:
                 "source": "weekly_review",
                 "date": now_local_str("%Y-%m-%d"),
             },
+            work_receipt="复核本周任务状态并完成可逆的整理动作",
         ))
 
     # Stamp this week so the pre-script skips on restart (dedup)

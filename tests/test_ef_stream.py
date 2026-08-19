@@ -12,6 +12,7 @@ from core.ef_stream import (
     format_relation_event,
     is_duplicate_event,
     load_seen,
+    mark_seen,
     parse_cursor,
     relation_event_kind,
     remember_seen,
@@ -71,6 +72,17 @@ def test_extract_item_ids_skips_empty():
     assert extract_item_ids("null") == []
 
 
+def test_extract_item_ids_prefers_native_msg_id_contract():
+    ev = _event([
+        {"msg_id": "server-receipt", "item_id": "legacy-alias"},
+        {"msg_id": "server-only"},
+    ])
+
+    assert extract_item_ids(ev) == ["server-receipt", "server-only"]
+    assert extract_detail(ev)[0]["msg_id"] == "server-receipt"
+    assert extract_detail(ev)[0]["item_id"] == "server-receipt"
+
+
 def test_is_duplicate_event():
     seen = {"1", "2", "3"}
     assert is_duplicate_event(["1", "2"], seen) is True        # all seen
@@ -96,6 +108,14 @@ def test_seen_roundtrip(tmp_path):
     assert load_seen(p) == ["1", "2"]
     p.write_text("not json")
     assert load_seen(p) == []                                   # corrupt → []
+
+
+def test_mark_seen_merges_receipts_under_shared_lock(tmp_path):
+    path = tmp_path / "state" / ".ef-seen"
+
+    assert mark_seen(path, ["msg-1"]) == ["msg-1"]
+    assert mark_seen(path, ["msg-2", "msg-1"]) == ["msg-1", "msg-2"]
+    assert load_seen(path) == ["msg-1", "msg-2"]
 
 
 def test_dedup_end_to_end():

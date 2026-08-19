@@ -1475,6 +1475,7 @@ def sync_proposal_item(
         source="iteration-observe",
         title=proposal["title"],
         body=body,
+        work_receipt="聚合反馈、核对历史记录并完成产品与工程方向比较",
         options=options,
         dedup_key=f"iteration-proposal:{proposal['id']}",
         context=_json(

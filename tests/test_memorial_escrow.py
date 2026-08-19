@@ -83,11 +83,10 @@ def test_stale_notice_and_alert_are_archived_but_decision_is_not(env):
     assert [s["id"] for s in scan["overdue"]] == [decision]
 
 
-def test_notice_inside_seven_days_survives_pascals_later_sweep(env):
-    """24h/48h/72h response is flat at 48% and the median lands at 75h: the
-    deadline must not steal notices he still sweeps by hand on day 3-4."""
+def test_notice_older_than_one_day_leaves_the_live_attention_queue(env):
+    """An informational card is not work Pascal owes the system."""
     _make(env, "metrics-digest", memorial.ATTENTION_NOTICE, age_h=24 * 4)
-    assert memorial.escrow_scan(now=NOW)["lapse"] == []
+    assert len(memorial.escrow_scan(now=NOW)["lapse"]) == 1
 
 
 def test_decision_past_hard_ceiling_stops_nagging(env):

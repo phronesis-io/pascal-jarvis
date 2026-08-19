@@ -13,7 +13,7 @@ forgot to mention (closed as `no_output`). A run left `running` is how a task
 dies silently, so that path is not allowed to exist.
 
 Input (stdin): {"routines": {"<run_id>": {"title": "...", "body": "...",
-                                          "actions": [...]}}}
+    "work_receipt": "what was completed first", "actions": [...]}}}
 """
 from __future__ import annotations
 

@@ -31,6 +31,8 @@ import dashboard.db as db_module  # noqa: E402
 from core import routine_evidence, routines  # noqa: E402
 from core.timeutil import now_local  # noqa: E402
 
+WORK_RECEIPT = "读取声明证据并完成结果核对"
+
 
 @pytest.fixture()
 def routine_db(tmp_path, monkeypatch):
@@ -207,7 +209,8 @@ class TestAutonomy:
         r = _mk(routine_db, autonomy=routines.AUTONOMY_PROPOSE)
         run_id = _claim_one(r)
         routines.apply_run_result({"routines": {run_id: {
-            "title": "t", "body": "b", "autonomy": "act",
+            "title": "t", "body": "b", "work_receipt": WORK_RECEIPT,
+            "autonomy": "act",
             "actions": [{"type": "note", "text": "sneaky"}]}}})
         run = routines.list_runs(r["id"])[0]
         assert run["actions"] == []          # nothing executed
@@ -283,10 +286,14 @@ class TestApply:
         r = _mk(routine_db)
         run_id = _claim_one(r)
         out = routines.apply_run_result(
-            {"routines": {run_id: {"title": "本周 12 次提交", "body": "正文"}}})
+            {"routines": {run_id: {
+                "title": "本周 12 次提交", "body": "正文",
+                "work_receipt": WORK_RECEIPT,
+            }}})
         assert out[0]["status"] == "delivered"
         assert len(sent) == 1
         assert sent[0]["title"] == "本周 12 次提交"
+        assert sent[0]["work_receipt"] == WORK_RECEIPT
         assert routines.list_runs(r["id"])[0]["memorial_id"] == "mem_1"
 
     def test_observe_delivers_nothing(self, routine_db, monkeypatch):
@@ -317,7 +324,9 @@ class TestApply:
         _stub_memorial(monkeypatch, sent)
         r = _mk(routine_db)
         run_id = _claim_one(r)
-        payload = {"routines": {run_id: {"title": "t", "body": "b"}}}
+        payload = {"routines": {run_id: {
+            "title": "t", "body": "b", "work_receipt": WORK_RECEIPT,
+        }}}
         routines.apply_run_result(payload)
         routines.apply_run_result(payload)   # same batch replayed
         assert len(sent) == 1
@@ -330,7 +339,10 @@ class TestApply:
         r = _mk(routine_db)
         run_id = _claim_one(r)
         out = routines.apply_run_result(
-            {"routines": {run_id: {"title": "t", "body": "b"}}})
+            {"routines": {run_id: {
+                "title": "t", "body": "b",
+                "work_receipt": WORK_RECEIPT,
+            }}})
         assert out[0]["status"] == "failed"
         run = routines.list_runs(r["id"])[0]
         assert run["status"] == "failed" and "发卡失败" in run["error"]
@@ -343,7 +355,7 @@ class TestApply:
         r = _mk(routine_db, autonomy=routines.AUTONOMY_ACT)
         run_id = _claim_one(r)
         routines.apply_run_result({"routines": {run_id: {
-            "title": "t", "body": "正文",
+            "title": "t", "body": "正文", "work_receipt": WORK_RECEIPT,
             "actions": [{"type": "note", "text": "记一笔"}]}}})
         run = routines.list_runs(r["id"])[0]
         assert run["actions"][0]["type"] == "note"
@@ -358,11 +370,30 @@ class TestApply:
         r = _mk(routine_db, autonomy=routines.AUTONOMY_ACT)
         run_id = _claim_one(r)
         routines.apply_run_result({"routines": {run_id: {
-            "title": "t", "body": "正文",
+            "title": "t", "body": "正文", "work_receipt": WORK_RECEIPT,
             "actions": [{"type": "add_task"}]}}})   # missing title
         run = routines.list_runs(r["id"])[0]
         assert run["actions"][0]["ok"] is False
         assert "✗" in sent[0]["body"]
+
+    def test_missing_work_receipt_withholds_card_and_actions(
+            self, routine_db, monkeypatch):
+        sent = []
+        _stub_memorial(monkeypatch, sent)
+        r = _mk(routine_db, autonomy=routines.AUTONOMY_ACT)
+        run_id = _claim_one(r)
+
+        out = routines.apply_run_result({"routines": {run_id: {
+            "title": "t", "body": "看起来该记一笔",
+            "actions": [{"type": "note", "text": "不能执行"}],
+        }}})
+
+        assert out == [{"run_id": run_id, "status": "withheld"}]
+        run = routines.list_runs(r["id"])[0]
+        assert run["status"] == "withheld"
+        assert "work_receipt" in run["error"]
+        assert run["actions"] == []
+        assert sent == []
 
 
 # ── evidence providers ───────────────────────────────────────────────────

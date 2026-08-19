@@ -128,6 +128,7 @@ def _send(text: str, user_id: str) -> bool:
         from core import memorial
         mid, _ = memorial.create(
             source="selfmon", title="自诊断发现问题", body=text,
+            work_receipt="完成确定性健康检查、同类告警去重和可恢复性判断",
             options=_options_for(text), preset="fyi", urgent=True,
             attention="alert")
         state = memorial.get_memorial(mid) or {}

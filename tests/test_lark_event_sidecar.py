@@ -166,6 +166,32 @@ def test_handle_card_memorial_chat_routes_to_chat(monkeypatch, capsys):
     assert "card memorial handled: id=mem_2 opt=chat" in capsys.readouterr().err
 
 
+def test_handle_card_memorial_full_text_routes_to_reader(monkeypatch, capsys):
+    import core.memorial as memorial
+    sentinel = {"toast": {"type": "success", "content": "开始发送全文"}}
+    calls = []
+
+    def fake_read_full(mid):
+        calls.append(mid)
+        return sentinel
+
+    monkeypatch.setattr(memorial, "read_full", fake_read_full)
+    monkeypatch.setattr(
+        memorial,
+        "decide",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("decide called")),
+    )
+
+    payload = sidecar._handle_card_action(
+        {"action": "memorial", "id": "mem_full", "opt": "full_text"},
+        owner_authenticated=True,
+    )
+
+    assert payload is sentinel
+    assert calls == ["mem_full"]
+    assert "card memorial handled: id=mem_full opt=full_text" in capsys.readouterr().err
+
+
 def test_handle_card_memorial_failure_returns_info_toast(monkeypatch, capsys):
     import core.memorial as memorial
     monkeypatch.setattr(

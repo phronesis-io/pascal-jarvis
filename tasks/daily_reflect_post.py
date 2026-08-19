@@ -71,8 +71,9 @@ def main():
         summary=summary,
         sections=sections,
         meta={"source": "daily_reflect", "date": date_str},
-    source="daily-reflect",
-))
+        source="daily-reflect",
+        work_receipt="汇总当日记录、提炼模式并写入纵向日志",
+    ))
 
     # Stamp today so the pre-script skips on restart (dedup)
     jarvis_dir = Path(os.environ.get("JARVIS_DIR", Path(__file__).resolve().parent.parent))

@@ -6,7 +6,11 @@ Extracted from bot.sh inline Python blocks. Used by eigenflux_stream_loop.
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
+
+import fcntl
 
 
 def _event_data(event_json) -> dict:
@@ -85,13 +89,18 @@ def extract_metadata(event_json: str) -> dict:
 # A reconnect between delivery and the cursor write can re-deliver the same
 # event, which would fire a duplicate Lark message AND a duplicate (costly)
 # background Claude analysis. We suppress that with a bounded, persisted
-# seen-set keyed on item_id.
+# seen-set keyed on the canonical msg_id.
 
 SEEN_CAP = 200
 
 
 def extract_item_ids(event_json) -> list[str]:
-    """Non-empty item_ids of all messages in an event, in order."""
+    """Non-empty message receipt ids in event order.
+
+    The native stream contract calls this field ``msg_id``. Early Jarvis
+    fixtures used ``item_id`` instead, so accept that legacy alias without
+    letting it override the server's canonical receipt.
+    """
     messages = _event_data(event_json).get("messages")
     if not isinstance(messages, list):
         return []
@@ -99,7 +108,9 @@ def extract_item_ids(event_json) -> list[str]:
     for message in messages:
         if not isinstance(message, dict):
             continue
-        item_id = str(message.get("item_id", "") or "")
+        item_id = str(
+            message.get("msg_id") or message.get("item_id", "") or ""
+        )
         if item_id:
             ids.append(item_id)
     return ids
@@ -141,11 +152,39 @@ def remember_seen(seen_list, new_ids, cap: int = SEEN_CAP) -> list[str]:
 
 
 def save_seen(path, seen_list) -> None:
-    """Persist the seen-item_id list (best-effort)."""
+    """Atomically persist the seen-message list (best-effort)."""
     try:
-        Path(path).write_text(json.dumps(list(seen_list)))
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(
+            destination.suffix + f".tmp.{os.getpid()}"
+        )
+        temporary.write_text(json.dumps(list(seen_list)))
+        temporary.replace(destination)
     except Exception:
         pass
+
+
+@contextmanager
+def ingress_lock(seen_path):
+    """Serialize stream and polling ingestion across local processes."""
+    path = Path(seen_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def mark_seen(seen_path, message_ids) -> list[str]:
+    """Merge receipt ids under the shared ingestion lock."""
+    with ingress_lock(seen_path):
+        seen = remember_seen(load_seen(seen_path), message_ids)
+        save_seen(seen_path, seen)
+        return seen
 
 
 def extract_detail(event_json: str) -> list[dict]:
@@ -158,7 +197,9 @@ def extract_detail(event_json: str) -> list[dict]:
             "sender": message.get("sender_name", "Unknown"),
             "sender_id": message.get("sender_id", ""),
             "content": message.get("content", ""),
-            "item_id": message.get("item_id", ""),
+            "msg_id": message.get("msg_id") or message.get("item_id", ""),
+            # Kept for prompt compatibility with older stored analyses.
+            "item_id": message.get("msg_id") or message.get("item_id", ""),
             "conv_id": message.get("conv_id", ""),
         }
         for message in messages

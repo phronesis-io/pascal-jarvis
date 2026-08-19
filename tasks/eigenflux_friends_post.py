@@ -139,6 +139,7 @@ def _create_review(review: dict) -> bool:
     memorial.create(
         source="eigenflux-friends",
         title="EigenFlux · 好友申请",
+        work_receipt="读取好友申请、核验身份字段并完成重复申请检查",
         body=body,
         options=options,
         context=context,
@@ -223,8 +224,11 @@ def main() -> int:
     # above come only from CLI return codes.
     body = "\n".join(action_results)
     if body:
-        print(build_card("📡 EigenFlux · 好友申请", body,
-                         source="eigenflux-friends"))
+        print(build_card(
+            "📡 EigenFlux · 好友申请", body,
+            source="eigenflux-friends",
+            work_receipt="执行已授权好友动作并逐项核验返回结果",
+        ))
 
     return 0
 

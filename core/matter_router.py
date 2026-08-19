@@ -128,6 +128,7 @@ def ingest_signal(signal: dict, *, create_decision_memorial: bool = False) -> di
         mid, _ = create(
             source=source, title=title,
             body=str(signal.get("body") or signal.get("summary") or title),
+            work_receipt="完成信号归档、事项绑定和决策必要性判断",
             preset="decision", context=json.dumps(payload, ensure_ascii=False),
             matter_id=matter_id,
         )

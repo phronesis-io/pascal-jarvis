@@ -81,6 +81,7 @@ def main() -> int:
         from core import memorial
         mem_id, _ = memorial.create(
             source="exercise-week", title="本周运动", body=body,
+            work_receipt="汇总本周日历运动事件与手记记录并完成次数核对",
             options=OPTIONS, authoring_protocol=True, send=False,
             context="每周日晚的运动小结（REQ-116）：数据来自日历运动事件 + 手记运动条目，纯记录不说教。",
         )
@@ -90,7 +91,10 @@ def main() -> int:
         print(f"[exercise-week] memorial failed, using plain card: {e}",
               file=sys.stderr)
         from core.card import build_card
-        print(build_card("📊 本周运动", body, source="exercise-week"))
+        print(build_card(
+            "📊 本周运动", body, source="exercise-week",
+            work_receipt="汇总本周日历运动事件与手记记录并完成次数核对",
+        ))
     return 0
 
 

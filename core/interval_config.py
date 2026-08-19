@@ -14,6 +14,7 @@ ENGAGEMENT_TUNING_PROTECTED_TASKS = frozenset({
     "daily-plan",
     "delegation-reconcile",
     "eigenflux-friends",
+    "eigenflux-inbox-reconcile",
     "eigenflux-preinstall",
     "intention-check",
     "iteration-observe",

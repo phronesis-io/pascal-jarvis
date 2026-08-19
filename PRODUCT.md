@@ -43,7 +43,9 @@ cards were read 95.7% while web cards were read 1.8%.
   land here.
 - **Mobile gateway (`:3458`)** — retired (2026-08-11, completed 2026-08-14);
   Jarvis has no Tailscale runtime, setup, health check, or recovery path.
-- **Routines** — frozen: pending merge into Lark interaction or retirement.
+- **Routines** — constrained recurring analysis: exercise nags and test
+  schedules are retired; retained Routines may surface only an evidence-backed
+  result with a work receipt. New product expansion remains frozen.
 - **Matter detail**: durable topic context and continuation, not a second
   inbox.
 - **Claude Code and Codex**: deep execution environments attached to the same
@@ -73,6 +75,9 @@ cards were read 95.7% while web cards were read 1.8%.
 14. Where a source sits in the attention hierarchy is answered by measured
     engagement, not by a hand-edited list nobody revisits — and every
     adjustment is announced.
+15. Work precedes interruption: every new visible card states what Jarvis
+    already completed. Missing work evidence suppresses the card; informational
+    cards leave the live attention queue after 24 hours.
 
 ## Non-Goals
 
@@ -89,6 +94,9 @@ cards were read 95.7% while web cards were read 1.8%.
 - wrong-target and duplicate-action rate;
 - user messages needed to finish one intent;
 - proactive messages per useful outcome;
+- user-visible cards with a non-empty work receipt, targeted at 100%;
+- informational cards older than 24 hours still occupying the live queue,
+  targeted at zero;
 - ordinary decisions resolved in batch rather than chat;
 - Lark-to-executor continuation success;
 - silent component outage duration;

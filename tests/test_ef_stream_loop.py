@@ -14,7 +14,7 @@ import pytest
 
 import core.ef_stream_loop as efsl
 from core import lark_bot_transport
-from core.ef_stream import load_seen
+from core.ef_stream import load_seen, mark_seen
 from core.aux_model import AuxiliaryModelResult
 
 
@@ -103,19 +103,17 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
     assert accepted is True and visible is True
 
 
-def test_memorial_policy_suppression_is_durable_acceptance(
+def test_private_eigenflux_pm_bypasses_proactive_global_cap(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: False)
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setenv("JARVIS_DELIVERY_GLOBAL_DAILY_CAP", "0")
+    sent = []
     monkeypatch.setattr(
-        efsl.memorial,
-        "_send_card",
-        lambda *_args, **_kwargs: pytest.fail(
-            "policy suppression must happen before Lark transport"
-        ),
+        efsl.memorial, "_send_card",
+        lambda *args, **_kwargs: sent.append(args) or "om_private",
     )
     seen_file = tmp_path / ".ef-seen"
 
@@ -123,13 +121,21 @@ def test_memorial_policy_suppression_is_durable_acceptance(
         "已落账但不打扰", ["evt-suppressed"], {}, "u1",
         [], seen_file, tmp_path, title="EigenFlux 消息")
 
-    assert accepted is True and visible is False
+    assert accepted is True and visible is True
+    assert sent
     assert seen == ["evt-suppressed"]
     assert load_seen(seen_file) == ["evt-suppressed"]
     states = efsl.memorial.list_memorials()
     assert len(states) == 1
-    assert states[0]["delivery_status"] == "suppressed"
+    assert states[0]["delivery_status"] == "delivered"
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
+
+
+def test_analysis_tool_transcript_is_discarded():
+    assert efsl._safe_analysis_text("简短中文建议") == "简短中文建议"
+    assert efsl._safe_analysis_text(
+        '**Tool: Grep**\n```json\n{"output_mode":"content"}\n```'
+    ) == ""
 
 
 def test_memorial_quiet_hours_queue_is_durable_acceptance(
@@ -196,6 +202,43 @@ def test_external_message_without_analysis_still_has_segmented_provenance(
         tmp_path / ".ef-seen", tmp_path, title="EigenFlux 消息")
     assert captured["authoring_audit_text"] == ""
     assert captured["authoring_protocol"] is True
+
+
+def test_poll_can_accept_while_stream_analysis_runs(monkeypatch, tmp_path):
+    event = json.dumps({
+        "type": "pm_push",
+        "data": {
+            "messages": [{
+                "msg_id": "msg-concurrent",
+                "conv_id": "conv-1",
+                "sender_name": "Peer",
+                "content": "hello",
+            }],
+            "next_cursor": "msg-concurrent",
+        },
+    })
+    seen_file = tmp_path / ".ef-seen"
+
+    def analysis(*_args, **_kwargs):
+        # Simulate polling completing while stream enrichment is in flight.
+        # This would deadlock if analysis still held ingress_lock.
+        mark_seen(seen_file, ["msg-concurrent"])
+        return "brief note"
+
+    monkeypatch.setattr(efsl, "_run_analysis", analysis)
+    monkeypatch.setattr(
+        efsl,
+        "_deliver_memorial_and_mark",
+        lambda *_args, **_kwargs: pytest.fail("duplicate reached delivery"),
+    )
+
+    assert efsl.handle_pm_event(
+        event,
+        user_id="u1",
+        seen_file=seen_file,
+        jarvis_dir=tmp_path,
+        analyze=True,
+    ) is True
 
 
 def test_queue_acceptance_does_not_depend_on_deadletter_sink(

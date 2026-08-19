@@ -294,6 +294,7 @@ def refresh(announce: bool = True) -> list[str]:
             memorial.create(
                 source="attention-roi",
                 title="调整了几个来源的打扰级别",
+                work_receipt="复算最近两周读卡反馈并应用新的来源打扰级别",
                 body=("按最近两周你实际回应的情况自动调整：\n\n"
                       + "\n".join(f"- {c}" for c in changes)
                       + "\n\n改错了就告诉我，我改回去。"),

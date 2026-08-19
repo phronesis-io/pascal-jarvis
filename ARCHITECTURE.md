@@ -47,12 +47,25 @@ HEARTBEAT.md task
   -> pre-hook gathers typed evidence
   -> HeartbeatRunner batches model work
   -> post-hook parses a bounded contract
+  -> work-receipt gate (missing receipt => withhold)
   -> Memorial / Intent / verified action
   -> core.delivery
 ```
 
-The model authors content. Deterministic code owns scheduling, side effects,
-state transitions, retries, and completion.
+The model authors content and a compact statement of the preparation it
+completed. Deterministic code owns scheduling, side effects, state transitions,
+retries, completion, and the work-receipt gate. `core.heartbeat_loop` invokes
+`memorialize_output(require_work_receipt=True)`; missing evidence returns an
+empty delivery payload instead of falling through as raw prose. Native card
+builders carry the producer's receipt in an internal structured marker; the
+adoption boundary removes and persists it. It never invents a generic receipt
+for an unprepared legacy card.
+
+Clipped Memorials keep the complete source in the append-only ledger.
+`core.memorial` owns card rendering and continuation offsets, while
+`core.memorial_reader` runs the user-triggered background transfer through
+`core.delivery`. Each chunk advances only after a confirmed Lark receipt; an
+interrupted transfer resumes from its last confirmed offset.
 
 ### Routines
 
@@ -61,7 +74,7 @@ user sentence in Lark
   -> core.routines definition (trigger + evidence + autonomy)
   -> routine-run pre-hook: claim due, advance watermark, gather evidence
   -> HeartbeatRunner batches model work
-  -> post-hook: authorize actions against the STORED autonomy level
+  -> post-hook: require work_receipt, then authorize actions against the STORED autonomy level
   -> Memorial (propose/act) or audit-only record (observe)
   -> routine_runs audit row, always terminal
 ```
@@ -69,7 +82,9 @@ user sentence in Lark
 Routines reuse the Intent scheduler's `next_fire_at` catch-up primitive rather
 than adding a scheduler, and everything they show the user is an ordinary
 Memorial routed by `core.delivery`. `observe` output exists only in the audit
-trail. The `act` allow-list is internal and reversible; external mutation stays
+trail. A `propose` or `act` run without `work_receipt` becomes terminal
+`withheld`: it sends nothing and executes no requested action. The `act`
+allow-list is internal and reversible; external mutation stays
 with Verified Delegation, which owns read-back evidence.
 
 ### Perception
@@ -158,11 +173,20 @@ the exact release commit or a healthy resident descendant that contains it.
   only with a provider `message_id`. Owner-identity APIs remain behind the
   separate `lark-cli --as user` OAuth boundary, so calendar/docs degradation
   cannot take bot delivery down with it.
+- `core.ef_stream_loop` + `core.eigenflux_ingress`: one EigenFlux private-
+  message ingestion boundary with two transports. WebSocket is the instant
+  path; a deterministic five-minute `msg fetch` + CLI-cache reconciliation is
+  the no-loss path. Both serialize on the same local lock, deduplicate on the
+  server's canonical `msg_id`, and mark the receipt only after a Memorial or
+  delivery envelope is durable. Terminal retries are automatic only for a
+  typed, definitive no-send failure; closed user decisions never reopen.
 - `docs/capability_inventory.md`: generated evidence map for supported
   components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
   missing contracts and drift; it never authorizes deletion without explicit
   retirement, replacement, migration, and data-retention evidence.
-- `core.memorial`: visible Item and decision ledger.
+- `core.memorial`: visible Item and decision ledger. New cards persist a
+  `work_receipt`, rendered above the body; proactive model output must supply
+  one `WORKED:` directive per card block.
 - `core.intentions` and `core.intent_*`: time, trigger, retry, and closure.
 - `core.routines`: user-authored recurring work — definition, claim, autonomy
   enforcement, action allow-list, and the per-run audit trail.

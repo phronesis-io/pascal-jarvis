@@ -8,7 +8,8 @@ Every user-facing output declares one attention class:
 - `decision`: a Lark card awaiting 批红 (REQ-119: the phone/web review desk
   is retired — Lark is the only surface a decision can wait on);
 - `alert`: interrupt only when time or safety materially requires it;
-- `notice`: a Lark card that demands nothing — except ambient monitoring
+- `notice`: a Lark card that demands nothing and leaves the live queue after
+  24 hours — except ambient monitoring
   exhaust (`AMBIENT_SOURCES`), which stays ledger-only and reaches the user
   as one batched morning-anchor line.
 
@@ -30,20 +31,28 @@ zero and the phone desk was never successfully paired. Therefore:
   investment lands there; content that only reaches the archive gets its one
   shot via the morning-anchor batch line. The mobile gateway (`:3458`) and
   all Jarvis-owned Tailscale setup, routing, and recovery paths are retired.
-- Routines is frozen pending fold-into-Lark or retirement (five days live,
-  zero uses).
+- Routines is retained only for completed, evidence-backed recurring analysis.
+  Exercise nags and integration-test schedules are retired; product expansion
+  stays frozen.
 
 ### Lark
 
 - Short, immediate, conversational.
 - Clarify ambiguous targets before an external action.
 - Report verified outcomes in one line with the human recipient/object name.
+- Start every proactive card with a compact `已完成` receipt. A proposal may
+  ask for the remaining irreversible choice, never for research Jarvis could
+  have completed first.
+- A clipped card exposes `查看全文` as a first-class action. One tap sends the
+  complete source in receipt-backed chunks; transport failure keeps the last
+  confirmed offset so the same button resumes instead of restarting.
 - Do not expose retries, tool calls, scheduler logs, or duplicate cards.
 - A thread about one Memorial retains that Memorial as its context.
 
 ### Ledger and Desktop Archive
 
-- One ledger row represents one matter requiring one reading or decision.
+- One ledger row represents one matter requiring one reading or decision; an
+  informational row older than 24 hours becomes 留中, not attention debt.
 - Actionable Items are delivered and resolved in Lark; the dashboard mirrors
   history for archive and diagnosis, not as a second inbox.
 - Pending decisions lead the Lark docket; ambient notices stay ledger-only and
@@ -81,6 +90,8 @@ zero and the phone desk was never successfully paired. Therefore:
 - A repeated callback or retry returns the original receipt.
 - An explicit "send again" creates a new contract version.
 - Missing evidence means unknown, not failure and not success.
+- Missing work receipt means no card. It is recorded as withheld at the
+  producing boundary and cannot fall through as raw proactive prose.
 - Lark and executor sessions operate the same Item and Delegation IDs. A
   Handoff moves attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
@@ -94,6 +105,8 @@ zero and the phone desk was never successfully paired. Therefore:
 ## Content and Visual Rules
 
 - Cards are compact and decision-first.
+- Compact is not lossy: the card is a summary surface, while its full source
+  remains reachable in the same Lark conversation without typing a command.
 - Use familiar icons for controls and text for consequential commands.
 - Avoid cards nested inside cards and explanatory marketing copy inside the
   product.

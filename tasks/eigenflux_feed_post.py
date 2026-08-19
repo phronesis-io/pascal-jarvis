@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.card import build_card
+from core.runtime_paths import database_path
 from core.safety import parse_json_response
 import _ef_delivery as efd
 
@@ -72,8 +74,49 @@ def _surface_history() -> Path:
     return JARVIS_DIR / "eigenflux" / ".feed_surface_history.jsonl"
 
 
+def _delivery_surface_epochs(now: float) -> list[float] | None:
+    """Confirmed or still-retryable feed cards on the current local day.
+
+    ``None`` means the unified-delivery database is unavailable and callers
+    should use the legacy stamp. An empty list is authoritative: terminal
+    failures do not spend Pascal's visibility budget.
+    """
+    path = database_path(JARVIS_DIR)
+    if not path.exists():
+        return None
+    local = time.localtime(now)
+    start = time.mktime((
+        local.tm_year, local.tm_mon, local.tm_mday,
+        0, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst,
+    ))
+    try:
+        db = sqlite3.connect(path, timeout=3)
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='delivery_envelopes'"
+        ).fetchone()
+        if not table:
+            return None
+        rows = db.execute(
+            "SELECT created_epoch FROM delivery_envelopes "
+            "WHERE source='eigenflux-feed-triage' AND created_epoch>=? "
+            "AND state IN ('queued','attempting','delivered','read','acted') "
+            "ORDER BY created_epoch",
+            (start,),
+        ).fetchall()
+        return [float(row[0]) for row in rows]
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        if "db" in locals():
+            db.close()
+
+
 def _daily_surface_count(now: float) -> int:
     """Non-urgent interruptions already spent on the user's local day."""
+    delivered = _delivery_surface_epochs(now)
+    if delivered is not None:
+        return len(delivered)
     day = time.strftime("%Y-%m-%d", time.localtime(now))
     count = 0
     try:
@@ -96,6 +139,9 @@ def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     if _daily_surface_count(now) >= FEED_SURFACE_MAX_PER_DAY:
         return False
+    delivered = _delivery_surface_epochs(now)
+    if delivered is not None:
+        return not delivered or now - delivered[-1] >= FEED_SURFACE_MIN_GAP_S
     try:
         last = float(_surface_stamp().read_text().strip())
     except (OSError, ValueError):
@@ -169,8 +215,11 @@ def _emit_legacy_backlog_cards() -> None:
     for entry in held:
         message = str(entry.get("message", "")).strip()
         if message:
-            print(build_card(header="📡 EigenFlux", body=message,
-                             source=str(entry.get("source") or "eigenflux-feed")))
+            print(build_card(
+                header="📡 EigenFlux", body=message,
+                source=str(entry.get("source") or "eigenflux-feed"),
+                work_receipt="读取历史积压信号并完成迁移去重",
+            ))
 
 
 def main() -> int:
@@ -271,6 +320,7 @@ def main() -> int:
                 body=msg,
                 buttons=buttons,
                 source="eigenflux-feed",
+                work_receipt="拉取个性化信号、提交反馈并完成价值与重复性筛选",
             ))
         _mark_surfaced()
     return 0

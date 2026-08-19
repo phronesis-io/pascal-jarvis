@@ -46,6 +46,7 @@ def main() -> int:
         sections=[{"type": "markdown", "content": raw}],
         meta={"source": "phronesis_monitor"},
         source="phronesis-monitor",
+        work_receipt="读取仓库状态、完成审慎原则复核和异常筛选",
     )
     if not card:  # sentinel gate in the card builder chose silence
         return 0
