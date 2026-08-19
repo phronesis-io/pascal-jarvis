@@ -347,21 +347,11 @@ def test_a_healthy_day_is_silent_even_after_a_nap(tmp_path):
     assert presence.check(now=NOW) == ""
 
 
-def test_absence_line_reports_the_hours_and_asks_for_nothing(tmp_path):
-    _sleep_gaps(tmp_path, 4181, 5481, 4286, 4568, 3674, 3595)  # 7.2h
-
-    line = presence.absence_line(now=NOW)
-
-    assert "7 小时" in line
-    assert "知道就行" in line       # style contract: no action ⇒ say so
+# Saying the absence out loud belongs to core.absence (tests/test_absence.py):
+# it lands on the wake with the cost attached, instead of a vaguer line the
+# next morning. This module only has to stop misreading a sleeping host as a
+# broken delivery chain.
 
 
-def test_absence_line_stays_quiet_for_an_ordinary_nap(tmp_path):
-    _sleep_gaps(tmp_path, 900, 1200)      # 35min — not a receipt-worthy gap
-
-    assert presence.absence_line(now=NOW) == ""
-
-
-def test_absence_line_survives_a_missing_event_log(tmp_path):
+def test_host_asleep_seconds_survives_a_missing_event_log(tmp_path):
     assert presence.host_asleep_seconds(now=NOW) == 0.0
-    assert presence.absence_line(now=NOW) == ""

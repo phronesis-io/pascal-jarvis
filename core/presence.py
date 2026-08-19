@@ -12,9 +12,9 @@ traffic. Feishu arrival volume IS the product's pulse, so:
 - ``morning-digest``: ledger-only cards batched into the morning anchor (the
   style contract's 「攒批≥5条晨匣提一行」clause, PR #36 — never implemented
   until now), instead of silently rotting in an archive nobody opens.
-- ``absence``: the receipt for the other reason the pulse goes flat — the
-  host was asleep. Same anchor, same batching, so a 39h outage is something
-  Jarvis says rather than something Pascal has to infer from thinner cards.
+The other reason the pulse goes flat is that the host was asleep. This module
+only has to stop blaming the delivery chain for it (``check`` below); saying
+it out loud is ``core.absence``'s receipt, sent on the wake itself.
 
 Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
 has a successful receipt in the unified delivery database or stayed
@@ -168,23 +168,6 @@ def host_asleep_seconds(hours: float = 24,
     return total
 
 
-def absence_line(now: datetime | None = None) -> str:
-    """A receipt for time Jarvis was not there, or "".
-
-    2026-08-19: the laptop was shut for ~39h and nothing ever said so. The
-    system detected it 38 separate times and routed every one of those
-    detections into a decision about whether to RESTART — never into a
-    sentence for Pascal. He found out because the cards thinned out.
-
-    No action is being asked for, so the line says so (style contract).
-    """
-    hours = host_asleep_seconds(24, now=now) / 3600
-    if hours < ABSENCE_HOURS:
-        return ""
-    return (f"🌙 过去24h我有约 {hours:.0f} 小时不在（机器休眠），"
-            f"那段时间的例行任务和卡片都没跑——知道就行。")
-
-
 def check(now: datetime | None = None) -> str:
     """Selfmon sentinel line, or "" when presence is healthy.
 
@@ -231,12 +214,7 @@ def main(argv: list[str]) -> int:
         if line:
             print(line)
         return 0
-    if cmd == "absence":
-        line = absence_line()
-        if line:
-            print(line)
-        return 0
-    print("usage: python3 -m core.presence [check|morning-digest|absence]",
+    print("usage: python3 -m core.presence [check|morning-digest]",
           file=sys.stderr)
     return 2
 

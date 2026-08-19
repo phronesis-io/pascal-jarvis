@@ -328,6 +328,27 @@ the actual out-of-band detector: the daemon withholds its success ping after
 three consecutive real Lark transport failures, as well as when the local
 stack is unhealthy.
 
+The host itself is not a component and cannot be supervised into existence. A
+closed lid on battery sleeps the Mac whatever any `caffeinate` assertion says,
+and while it sleeps the runtime, the Guardian watching it, and the surface it
+would report through are all stopped together, so from the inside silence is
+indistinguishable from health. Three consequences are designed for rather than
+fought:
+
+- `core.hostclock` is the single sleep meter: the drift between the wall and
+  monotonic clocks, so absence is measured wherever in a tick it happened —
+  including inside a model call — and a long model call is never mistaken for
+  it. The daemon is its only writer.
+- Age-derived verdicts in `core.components` count only time the host was
+  actually up. The daemon's bounded post-wake grace remains the fallback where
+  no sleep is recorded, but it cannot overrule recorded evidence: a component
+  wedged through a laptop's hourly naps still turns red.
+- `core.absence` turns a qualifying absence into one ordinary notice card on
+  the next confirmed wake, naming what it cost. Sleep is not a fault and does
+  not page; absence through the owner's active hours is a receipt he is owed,
+  and it has exactly one surface. Only the external dead-man can report an
+  absence while it is still happening.
+
 ## Dependency Direction
 
 Adapters and task hooks may call domain services. Domain services may call

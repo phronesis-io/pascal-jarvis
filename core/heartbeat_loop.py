@@ -33,6 +33,7 @@ from core.attention_policy import in_quiet_hours
 from core.card import extract_card_text, extract_readable_from_output, linkify_bare_urls
 from core.delivery_deadletter import record_overdue
 from core.heartbeat import HeartbeatRunner
+from core import hostclock
 from core.jsonl import write_jsonl
 from core.log import log
 from core.safety import looks_like_error
@@ -1587,7 +1588,8 @@ def _hourly_housekeeping(jd: Path):
             pass
 
 
-SLEEP_GAP_THRESHOLD_S = 120
+# One definition of "this is the host leaving, not jitter".
+SLEEP_GAP_THRESHOLD_S = hostclock.SLEEP_GAP_THRESHOLD_S
 
 
 def _sleep_gap_seconds(wall_elapsed_s: float, mono_elapsed_s: float,
@@ -1613,9 +1615,13 @@ def _sleep_gap_seconds(wall_elapsed_s: float, mono_elapsed_s: float,
     A forward wall-clock correction (NTP) also shows up here. It is rare, it
     is bounded by the same threshold, and an event log entry is the right
     place for it either way.
+
+    The arithmetic itself lives in ``core.hostclock``, which the daemon uses
+    to record the same absences for age accounting; one meter, two call sites.
     """
-    gap = wall_elapsed_s - mono_elapsed_s
-    return gap if gap >= threshold_s else 0.0
+    from core.hostclock import gap_from
+
+    return gap_from(wall_elapsed_s, mono_elapsed_s, threshold_s)
 
 
 # "Beat sent" lines are load-bearing, not narration: daemon.py's

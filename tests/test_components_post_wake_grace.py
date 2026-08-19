@@ -210,3 +210,39 @@ def test_a_genuinely_dead_component_still_reads_as_down(tmp_path, monkeypatch):
 
     text = daemon._component_down_text("EigenFlux 实时消息接收", detail)
     assert "组件失联" in text and "没有在运行" in text
+
+
+# ── the hole the grace window left open ──────────────────────────────
+# A bounded excuse still re-arms on every wake, and this laptop naps hourly
+# (23 wakes in one 24h stretch). A stream that is genuinely wedged — process
+# alive, health file frozen — could sit behind a hold that never lapses. The
+# recorded sleep (core.hostclock) answers the question the timer only
+# approximated: were we UP this long without hearing from it?
+
+
+def test_wedged_stream_goes_red_even_inside_a_fresh_grace_window(
+        tmp_path, live_process):
+    from core import hostclock
+
+    root = _brain(_ef_root(tmp_path, age_s=8.6 * 3600), time.time() + 19 * 60)
+    # Only 20 minutes of that 8.6h was the host asleep: the rest we were up
+    # and heard nothing.
+    hostclock.record(root, 20 * 60, end_epoch=time.time() - 60)
+
+    ok, detail = C._check_ef_stream(EF_COMP, root)
+
+    assert ok is False
+    assert "stale" in detail
+
+
+def test_stream_quiet_only_across_recorded_sleep_stays_green_without_grace(
+        tmp_path, live_process):
+    from core import hostclock
+
+    root = _ef_root(tmp_path, age_s=8.6 * 3600)   # no daemon grace at all
+    hostclock.record(root, 8.5 * 3600, end_epoch=time.time() - 120)
+
+    ok, detail = C._check_ef_stream(EF_COMP, root)
+
+    assert ok is True
+    assert "host sleep not counted" in detail
