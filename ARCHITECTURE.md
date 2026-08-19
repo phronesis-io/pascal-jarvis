@@ -158,6 +158,13 @@ the exact release commit or a healthy resident descendant that contains it.
   only with a provider `message_id`. Owner-identity APIs remain behind the
   separate `lark-cli --as user` OAuth boundary, so calendar/docs degradation
   cannot take bot delivery down with it.
+- `core.ef_stream_loop` + `core.eigenflux_ingress`: one EigenFlux private-
+  message ingestion boundary with two transports. WebSocket is the instant
+  path; a deterministic five-minute `msg fetch` + CLI-cache reconciliation is
+  the no-loss path. Both serialize on the same local lock, deduplicate on the
+  server's canonical `msg_id`, and mark the receipt only after a Memorial or
+  delivery envelope is durable. Terminal retries are automatic only for a
+  typed, definitive no-send failure; closed user decisions never reopen.
 - `docs/capability_inventory.md`: generated evidence map for supported
   components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
   missing contracts and drift; it never authorizes deletion without explicit

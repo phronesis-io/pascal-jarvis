@@ -368,6 +368,43 @@ def test_ef_stream_check_combines_process_and_protocol_health(
     assert components._check_ef_stream(comp, tmp_path)[0] is True
 
 
+def test_ef_stream_connecting_requires_fresh_poll_after_startup_grace(
+        tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (True, "pid 123 owned"),
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ef_stream_health.json").write_text(json.dumps({
+        "status": "connecting",
+        "updated_epoch": now,
+        "started_epoch": now - 700,
+        "quiet_streak": 0,
+    }))
+    comp = {
+        "path": "data/ef_stream_health.json",
+        "reconcile_path": "data/ef_ingress_health.json",
+        "max_age_seconds": 2400,
+        "reconcile_max_age_seconds": 900,
+        "connect_grace_seconds": 600,
+    }
+
+    ok, detail = components._check_ef_stream(comp, tmp_path)
+    assert ok is False
+    assert "polling safety net" in detail
+
+    (data / "ef_ingress_health.json").write_text(json.dumps({
+        "status": "ok",
+        "last_success_epoch": now,
+    }))
+    ok, detail = components._check_ef_stream(comp, tmp_path)
+    assert ok is True
+    assert "poll verified" in detail
+
+
 def test_daemon_critical_probe_ignores_skipped(tmp_path):
     """daemon._probe_manifest_criticals only alerts on ok=False — a skipped
     component must present ok=True through the critical_only path too."""

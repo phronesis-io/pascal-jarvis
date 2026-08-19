@@ -28,6 +28,7 @@ from ..uiutil import (
 
 JARVIS_DIR = Path(__file__).parent.parent.parent
 TASKS = (
+    ("eigenflux-inbox-reconcile", "私信补偿", 5 * 60, 15 * 60),
     ("eigenflux-feed-triage", "信号摄取", 10 * 60, 30 * 60),
     ("eigenflux-publish", "广播起草", 60 * 60, 3 * 3600),
     ("eigenflux-profile", "画像同步", 24 * 3600, 36 * 3600),
@@ -162,16 +163,36 @@ def load_network_overview(
     stream_status = str(stream.get("status") or "unknown")
     stream_updated = _number(stream.get("updated_epoch"))
     stream_fresh = stream_updated > 0 and current_epoch - stream_updated <= 2400
-    # Process startup/reconnect is observable but is not proof that the
-    # protocol has delivered data. Only an active output observation gets the
-    # green product label; connecting/reconnecting remain amber and explicit.
-    stream_healthy = stream_fresh and stream_status == "active"
+    ingress = read_json(
+        root / "data" / "ef_ingress_health.json", ttl=5, default={}
+    ) or {}
+    poll_success = _number(ingress.get("last_success_epoch"))
+    poll_fresh = (
+        poll_success > 0
+        and current_epoch - poll_success <= 900
+        and str(ingress.get("status") or "") == "ok"
+    )
+    stream_active = stream_fresh and stream_status == "active"
+    if stream_active and poll_fresh:
+        ingress_mode = "实时 + 轮询双路"
+    elif poll_fresh:
+        ingress_mode = "轮询兜底"
+    elif stream_active:
+        ingress_mode = "仅实时流，兜底未验真"
+    else:
+        ingress_mode = "未验真"
+    # A quiet WebSocket cannot prove end-to-end ingress. The five-minute poll
+    # is both the no-loss fallback and the deterministic liveness receipt.
+    stream_healthy = poll_fresh
     stream = {
         "status": stream_status,
         "healthy": stream_healthy,
-        "detail": str(stream.get("detail") or "尚无实时流验真记录"),
+        "mode": ingress_mode,
+        "detail": str(ingress.get("detail") or stream.get("detail")
+                      or "尚无私信接入验真记录"),
         "quiet_streak": int(_number(stream.get("quiet_streak"))),
         "updated": _fmt_epoch(stream_updated),
+        "poll_updated": _fmt_epoch(poll_success),
     }
 
     return {
@@ -244,8 +265,11 @@ def eigenflux_page():
                     + ("is-green" if overview["stream"]["healthy"] else "is-amber")
                 )
                 ui.label(
-                    "实时消息流正常" if overview["stream"]["healthy"]
-                    else f"实时消息流未验真：{overview['stream']['status']}"
+                    (
+                        f"私信接入正常：{overview['stream']['mode']}"
+                        if overview["stream"]["healthy"]
+                        else f"私信接入未验真：{overview['stream']['status']}"
+                    )
                 )
 
             with ui.element("div").classes("metric-strip"):

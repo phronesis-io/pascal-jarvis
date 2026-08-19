@@ -5,11 +5,12 @@ All due tasks are batched into a single Claude call (max 4 regular tasks per cyc
 If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 **Priority tasks** bypass the batch cap and run every cycle when due:
-`calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`, `eigenflux-friends`, `intention-check`
+`calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`,
+`eigenflux-friends`, `eigenflux-inbox-reconcile`, `intention-check`, `routine-run`
 
 **Tier 0 tasks** bypass Claude entirely (deterministic local work):
-`calendar-sync`, `delegation-reconcile`, `iteration-observe`, `log-maintenance`,
-`provider-canary`
+`calendar-sync`, `delegation-reconcile`, `eigenflux-inbox-reconcile`,
+`iteration-observe`, `log-maintenance`, `provider-canary`
 
 ## Task Index
 
@@ -22,7 +23,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Intentions | intention-check | yes (when intent fires) |
 | Routines | routine-run | 看例程自己的自主级别：observe 只进审计，propose/act 出卡 |
 | Memory Pipeline | memory-hourly → daily → weekly, memory-consolidate, memory-tidy | silent |
-| EigenFlux | eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | feed+friends yes, others silent |
+| EigenFlux | eigenflux-inbox-reconcile, eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | inbox reconcile silent; feed+friends yes, others silent |
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Content | content-recommend | yes |
 | Thinking Review | thinking-review | silent (log only) |
@@ -109,6 +110,14 @@ OPTIONS 行的**下一行**写：
    模型是什么模型"）。回答的高度要跟着他的提问走，不是跟着你想说的走。
 
 ## EigenFlux
+
+### eigenflux-inbox-reconcile
+- interval: 5m
+- pre: tasks/eigenflux_ingress_pre.sh
+- prompt: |
+    Deterministic Tier-0 task. Poll unread EigenFlux private messages, reconcile
+    the CLI cache with stream receipts, and retry only proven no-send failures.
+    Output is an operational receipt and is never sent as model prose.
 
 ### eigenflux-feed-triage
 - interval: 10m

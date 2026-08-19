@@ -471,7 +471,8 @@ class HeartbeatRunner:
     # intention-check it advances a stateful next_fire_at watermark, so a
     # deferred cycle spends an occurrence that never reaches the user.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
-                       "eigenflux-friends", "intention-check", "routine-run"}
+                       "eigenflux-friends", "eigenflux-inbox-reconcile",
+                       "intention-check", "routine-run"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output
@@ -480,6 +481,7 @@ class HeartbeatRunner:
     TIER0_TASKS = {
         "calendar-sync",
         "delegation-reconcile",
+        "eigenflux-inbox-reconcile",
         "iteration-observe",
         "log-maintenance",
         "memorial-escrow",

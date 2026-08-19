@@ -1551,6 +1551,7 @@ def _find_recent_duplicate(source: str, title: str, body: str,
 def _deliver_existing(
     state: dict,
     urgent: bool = False,
+    recovery_reason: str = "",
 ) -> bool:
     """Hand an already-ledgered memorial to the unified delivery pipeline.
 
@@ -1607,7 +1608,12 @@ def _deliver_existing(
                 # decision above. Avoid a second wall-clock check in the
                 # generic pipeline disagreeing with that decision.
                 "bypass_quiet": not force_queue,
+                # A private EigenFlux message is inbound conversation, not
+                # proactive feed noise. It must not disappear behind a daily
+                # interruption cap; eigenflux-feed-triage remains budgeted.
+                "bypass_throttle": state.get("source") == "eigenflux",
                 "retry_existing": True,
+                "recovery_reason": str(recovery_reason or ""),
             },
         ),
         root=runtime_root(),
@@ -1648,6 +1654,31 @@ def _deliver_existing(
     _record_delivery(mid, "failed")
     _record_delivery(mid, "retry_queued")
     return False
+
+
+def redeliver(memorial_id: str, reason: str) -> bool:
+    """Retry one pending memorial after a proven transport outage.
+
+    Ordinary terminal failures remain terminal. A reconciler must provide an
+    incident reason, and closed user decisions are never resurrected.
+    """
+    state = get_memorial(memorial_id)
+    if not state or state.get("status") != "pending":
+        return False
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("redelivery reason is required")
+    _append_line(_ledger_path(), {
+        "ev": "delivery_recovery",
+        "id": str(memorial_id),
+        "ts": now_local_str(),
+        "reason": reason[:240],
+    })
+    return _deliver_existing(
+        state,
+        urgent=False,
+        recovery_reason=reason,
+    )
 
 
 ROTATE_AFTER_DAYS = 45

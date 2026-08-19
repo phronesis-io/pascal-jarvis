@@ -90,6 +90,9 @@ components:
     pattern: "core.ef_stream_loop"
     path: data/ef_stream_health.json
     max_age_seconds: 2400
+    reconcile_path: data/ef_ingress_health.json
+    reconcile_max_age_seconds: 900
+    connect_grace_seconds: 600
     owned_by_pidfile: .bot.pid
     critical: true
     requires_cmd: eigenflux

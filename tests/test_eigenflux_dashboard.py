@@ -70,6 +70,7 @@ def test_network_overview_reads_real_local_contracts(tmp_path):
         "older",
     ]
     task_by_id = {item["id"]: item for item in overview["tasks"]}
+    assert "eigenflux-inbox-reconcile" in task_by_id
     assert task_by_id["eigenflux-feed-triage"]["healthy"] is True
     assert task_by_id["eigenflux-publish"]["healthy"] is True
     assert task_by_id["eigenflux-profile"]["healthy"] is False
@@ -131,6 +132,19 @@ def test_network_overview_reports_realtime_stream_separately(tmp_path):
     overview = load_network_overview(root, now_epoch=201)
     assert overview["stream"]["healthy"] is False
     assert overview["stream"]["status"] == "connecting"
+
+    _write(
+        root / "data" / "ef_ingress_health.json",
+        {
+            "status": "ok",
+            "last_success_epoch": 200,
+            "detail": "poll verified",
+        },
+    )
+    telemetry.reset_cache()
+    overview = load_network_overview(root, now_epoch=201)
+    assert overview["stream"]["healthy"] is True
+    assert overview["stream"]["mode"] == "轮询兜底"
 
 
 def test_network_overview_uses_content_overrides_but_ignores_infra_drift(
