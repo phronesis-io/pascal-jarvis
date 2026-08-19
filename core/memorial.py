@@ -127,8 +127,8 @@ CHAT_RETAP_THROTTLE_S = 120
 # The ledger keeps the full event; the phone card is the decision surface, not
 # the archive.  This bound prevents an emitter regression from recreating the
 # old wall-of-text experience while「聊聊这个」still receives richer context.
-CARD_BODY_MAX_CHARS = 900
-CARD_BODY_MAX_LINES = 14
+CARD_BODY_MAX_CHARS = 480
+CARD_BODY_MAX_LINES = 6
 
 # When the card had to clip, 「聊聊这个」sends the untruncated source text as a
 # chat message. Bounding it keeps a runaway emitter from pasting a novel into
@@ -151,7 +151,7 @@ CHAT_OPENER_CONTEXT_MAX = 1000
 CHAT_CONTEXT_MAX_CHARS = 6000
 
 # Says what the button DOES, not that context exists somewhere.
-CLIP_NOTICE = "…还有下半段，点「查看全文」一次发完"
+CLIP_NOTICE = "…还有下半段。点第一排「查看全文」，一次发完"
 
 # Identical pending memorial within this window → don't create/send another.
 # Mirrors heartbeat_loop's 6h _is_duplicate_send (born of the 6/10 incident:
@@ -1038,9 +1038,11 @@ def _button_groups(state: dict, include_options: bool = True,
         confused_opt_key=CONFUSED_OPT_KEY,
     )
     if (include_chat
-            and body_was_clipped(str(state.get("body", "")))
-            and groups):
-        groups[-1].insert(0, {
+            and body_was_clipped(str(state.get("body", "")))):
+        # The full-text action is the mobile escape hatch, not a secondary
+        # utility.  Give it a dedicated first row so Lark cannot squeeze or
+        # truncate it beside Chat / confused controls on narrow screens.
+        groups.insert(0, [{
             "text": FULL_TEXT_BUTTON_LABEL,
             "type": "primary",
             "value": {
@@ -1048,7 +1050,7 @@ def _button_groups(state: dict, include_options: bool = True,
                 "id": state["id"],
                 "opt": FULL_TEXT_OPT_KEY,
             },
-        })
+        }])
     return groups
 
 
@@ -2061,6 +2063,9 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     """
     card = json.loads(legacy_card_json)
     source = str(card.pop("__jarvis_source", "") or source).strip()
+    preserved_body = card.pop("__jarvis_full_body", "")
+    if not isinstance(preserved_body, str):
+        preserved_body = ""
     structured_work_receipt = " ".join(
         str(card.pop("__jarvis_work_receipt", "") or "").split()
     )[:MAX_WORK_RECEIPT_CHARS]
@@ -2073,6 +2078,18 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     context = str(card.pop("__jarvis_context", "") or context)
     if _card_memorial_id(card):
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+
+    # core.card keeps a bounded visible fallback for direct Lark callers, but
+    # carries the uncut body inside its internal envelope.  Restore it before
+    # parsing/splitting so the Memorial ledger, reader, and conversation path
+    # retain the source of truth.  The private marker was popped above and can
+    # never reach the rendered Lark card.
+    if preserved_body:
+        for element in card.get("elements", []):
+            text = element.get("text") if isinstance(element, dict) else None
+            if isinstance(text, dict) and text.get("content"):
+                text["content"] = preserved_body
+                break
 
     header = str(card.get("header", {}).get("title", {}).get("content", ""))
     body_parts: list[str] = []

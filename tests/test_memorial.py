@@ -854,6 +854,16 @@ def test_clipped_card_exposes_a_dedicated_full_text_button(env):
         "opt": memorial.FULL_TEXT_OPT_KEY,
     }
     assert "查看全文" in card["elements"][0]["text"]["content"]
+    rows = [element["actions"] for element in card["elements"]
+            if element.get("tag") == "action"]
+    assert [action["text"]["content"] for action in rows[0]] == [
+        memorial.FULL_TEXT_BUTTON_LABEL]
+    visible = card["elements"][0]["text"]["content"]
+    # Six source lines plus the compact card role stay within one ordinary
+    # phone viewport, so the dedicated first action row is visible without a
+    # hunt through a wall of text.
+    assert len(visible.split(memorial.CLIP_NOTICE)[0].splitlines()) <= 10
+    assert len(visible.split(memorial.CLIP_NOTICE)[0]) <= 600
 
 
 def test_view_full_sends_every_chunk_without_more_user_input(env):
@@ -885,6 +895,30 @@ def test_view_full_sends_every_chunk_without_more_user_input(env):
         if event.get("ev") == "chat_continuation"
     }
     assert len(transfers) == 2
+
+
+def test_overlong_task_card_reaches_phone_reader_without_source_loss(env):
+    body = "\n".join(
+        f"跨层段{i:03d}：" + (chr(65 + i % 26) * 90)
+        for i in range(120)
+    )
+    legacy = build_card("跨层长文", body, source="daily-reflect")
+
+    rendered = memorial.adopt_card("daily-reflect", legacy)
+    assert "__jarvis_full_body" not in rendered
+    state = memorial.list_memorials()[0]
+    assert state["body"] == body
+
+    payload = memorial.read_full(state["id"])
+    memorial_reader.current_thread().join(timeout=10)
+
+    assert payload["toast"]["type"] == "success"
+    delivered = "\n".join(text for text, _chat_id in env.texts)
+    assert "跨层段000" in delivered
+    assert "跨层段119" in delivered
+    assert memorial._latest_chat_continuation(
+        ["ou_test"], memorial_id=state["id"]
+    )["done"] is True
 
 
 def test_view_full_resumes_from_last_confirmed_chunk(env, monkeypatch):

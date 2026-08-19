@@ -45,7 +45,10 @@ zero and the phone desk was never successfully paired. Therefore:
   have completed first.
 - A clipped card exposes `查看全文` as a first-class action. One tap sends the
   complete source in receipt-backed chunks; transport failure keeps the last
-  confirmed offset so the same button resumes instead of restarting.
+  confirmed offset so the same button resumes instead of restarting. On a
+  narrow screen the preview is capped at six source lines / 480 characters,
+  and `查看全文` owns the first action row instead of competing with other
+  controls.
 - Do not expose retries, tool calls, scheduler logs, or duplicate cards.
 - A thread about one Memorial retains that Memorial as its context.
 
@@ -101,6 +104,9 @@ zero and the phone desk was never successfully paired. Therefore:
 
 - The dedicated mobile gateway (`:3458`) and all Jarvis-owned Tailscale paths
   are retired; Lark is the only mobile surface.
+- A compact preview must never destroy source text. The full body is preserved
+  through card adoption, stored in the private Memorial ledger, and stripped
+  from the outbound card envelope before delivery.
 
 ## Content and Visual Rules
 

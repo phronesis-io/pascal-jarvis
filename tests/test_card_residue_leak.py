@@ -100,6 +100,23 @@ class TestAdoptedCardPath:
         states = ledger.list_memorials()
         assert states and all("OPTIONS:" not in s["body"] for s in states)
 
+    def test_adopted_overlong_card_keeps_every_word_for_phone_reader(
+            self, ledger):
+        from core.card import build_card
+
+        body = "\n".join(
+            f"第{i:03d}段：" + ("完整内容" * 30) for i in range(100)
+        )
+        legacy = build_card("长文", body, source="daily-reflect")
+        assert "__jarvis_full_body" in json.loads(legacy)
+
+        rendered = ledger.adopt_card("daily-reflect", legacy)
+        state = ledger.list_memorials()[0]
+
+        assert state["body"] == body
+        assert "__jarvis_full_body" not in rendered
+        assert ledger.FULL_TEXT_BUTTON_LABEL in rendered
+
     def test_adopted_card_does_not_ship_title_residue(self, ledger):
         body = "TITLE: 今天的复盘——三条目标是你自己写下的\n\n上午你主动写出三条目标。"
         ledger.adopt_card("daily-reflect", _rich_card("🌙 回顾", body))
