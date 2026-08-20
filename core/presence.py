@@ -121,10 +121,12 @@ def sent_count(hours: float = 24, now: datetime | None = None) -> int:
 
 
 def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
-    """Cards created in the window that are explicitly ledger-only.
+    """Cards created in the window whose only reach is this digest.
 
-    Counts ONLY rows whose delivery event says ``ledger_only`` (ambient
-    exhaust, REQ-119) — the rows whose one reach IS the morning digest.
+    Counts ONLY rows whose delivery event says ``ledger_only``: ambient
+    exhaust that never enters the pipeline (REQ-119), plus — since
+    2026-08-20 — cards the daily attention cap dropped, which are owed a
+    mention rather than obsolete (core.memorial.suppressed_delivery_status).
     Inferring from "created but no ``sent`` event" would also sweep in
     Lark-routed cards still sitting in the quiet-hours queue and cards on
     the retry path, double-exposing them once the queue flushes
@@ -194,11 +196,20 @@ def morning_digest_line(now: datetime | None = None) -> str:
     hand-written line; this rides below it.
     """
     rows = ledger_only(24, now=now)
-    if len(rows) < DIGEST_MIN:
+    # 攒批≥5 is the style contract's threshold for 周知. A card that was going
+    # to ask Pascal for a decision and lost its slot to the daily cap is not
+    # 周知 — holding it back for lacking four companions would be the same
+    # silent drop this line exists to end, so any decision-class row in the
+    # bin publishes the line on its own.
+    decisions = [r for r in rows if str(r.get("attention", "")) == "decision"]
+    if len(rows) < DIGEST_MIN and not decisions:
         return ""
     titles = "／".join(
         str(r.get("title", "")).strip()[:20] or "无题"
-        for r in rows[-DIGEST_TITLES:])
+        for r in (decisions or rows)[-DIGEST_TITLES:])
+    if decisions:
+        return (f"📥 另有 {len(rows)} 条只进了归档，其中 {len(decisions)} 条"
+                f"本来是要你拿主意的：{titles}")
     return f"📥 另有 {len(rows)} 条周知只进了归档，扫一眼标题：{titles}"
 
 

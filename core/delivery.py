@@ -53,11 +53,18 @@ DEFAULT_BURST_WINDOW_SECONDS = 10 * 60
 CAP_RESERVATION_RECHECK_SECONDS = 5
 RECOVERY_REPLAY_LIMIT = 20
 RECOVERY_RECONCILE_SCAN_LIMIT = 500
-RECOVERY_CAP_REASONS = {
+# A cap reason means "no room in today's attention budget", never "this is no
+# longer true". Every other suppression reason (recovery_incident_obsolete,
+# recovery_item_resolved, expired_ttl, ambient_ledger_only) means the content
+# is stale by design. Only the former stays owed to the reader, so this set is
+# what decides whether a suppressed card still earns the batched morning
+# surface — see core.memorial.suppressed_delivery_status.
+BUDGET_CAP_REASONS = frozenset({
     "global_daily_cap",
     "metric_daily_cap",
     "source_daily_cap",
-}
+})
+RECOVERY_CAP_REASONS = set(BUDGET_CAP_REASONS)
 RECOVERY_REPLAY_TTL_SECONDS = {
     "decision": 72 * 3600,
     "notice": 24 * 3600,
@@ -842,8 +849,14 @@ class DeliveryPipeline:
                     db.commit()
                     # Ordinary proactive overflow is terminal for this
                     # delivery. Keeping it queued would turn today's noise
-                    # into tomorrow morning's backlog; the source ledger or
-                    # docket remains the durable place to recover the item.
+                    # into tomorrow morning's backlog; the memorial ledger is
+                    # where the item stays recoverable, and the caller routes
+                    # a cap drop to the ledger-only status so the morning
+                    # anchor's 攒批 line actually names it. That routing is
+                    # load-bearing: until 2026-08-20 the suppressed branches
+                    # in heartbeat_loop recorded nothing at all, so on
+                    # 2026-08-19 thirteen cards created between 14:02 and
+                    # 23:15 reached no surface whatsoever.
                     return "global_daily_cap", None
 
                 burst_window = max(1, int(envelope.metadata.get(

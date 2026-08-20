@@ -355,3 +355,55 @@ def test_a_healthy_day_is_silent_even_after_a_nap(tmp_path):
 
 def test_host_asleep_seconds_survives_a_missing_event_log(tmp_path):
     assert presence.host_asleep_seconds(now=NOW) == 0.0
+
+
+# --- 2026-08-19 incident: cap drops reached no surface at all ---------------
+# Nine budgeted slots were spent between 13:03 and 13:26 by the wake-up
+# backlog; the thirteen cards created from 14:02 to 23:15 were suppressed with
+# `global_daily_cap`, no delivery event was written anywhere, and the next
+# morning's anchor said nothing about them.
+
+def _created_at(i, ts, title="标题", attention="notice"):
+    return {"ev": "create", "id": f"mem_{i}", "ts": ts,
+            "title": f"{title}{i}", "attention": attention}
+
+
+def test_cap_dropped_notices_reach_the_morning_digest(tmp_path):
+    """A card the daily budget dropped is owed a mention, not silence."""
+    events = []
+    for i in range(6):
+        events.append(_created_at(i, "2026-08-07 09:00"))
+        events.append(_ledger_only(i))
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)
+    assert "6 条" in line and "归档" in line
+
+
+def test_one_cap_dropped_decision_publishes_the_line_alone(tmp_path):
+    """攒批≥5 governs 周知. A dropped decision is not 周知: it asked for a
+    judgment and lost its slot to a notice burst, so it does not wait for four
+    companions before Pascal hears about it."""
+    events = [
+        _created_at(0, "2026-08-07 09:00", title="Blog 04 今天到期",
+                    attention="decision"),
+        _ledger_only(0),
+        _created_at(1, "2026-08-07 09:10"),
+        _ledger_only(1),
+    ]
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)
+    assert line, "a dropped decision must not be held back by the 攒批 floor"
+    assert "1 条本来是要你拿主意的" in line
+    assert "Blog 04 今天到期" in line
+
+
+def test_obsolete_suppressions_stay_out_of_the_digest(tmp_path):
+    """Only cap drops are owed a mention. recovery_incident_obsolete and
+    friends are stale by design — resurfacing them is the 7/22 card storm."""
+    events = []
+    for i in range(6):
+        events.append(_created_at(i, "2026-08-07 09:00"))
+        events.append({"ev": "delivery", "id": f"mem_{i}",
+                       "ts": "2026-08-07 09:01", "status": "suppressed"})
+    _write_ledger(tmp_path, events)
+    assert presence.morning_digest_line(now=NOW) == ""

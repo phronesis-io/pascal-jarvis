@@ -363,6 +363,8 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
                     _record_memorial_delivery(jarvis_dir, memorial_id, "delivered")
                     _record_sent_lark_id(memorial_id, _ids_before)
             elif result.state == "suppressed":
+                _record_memorial_suppression(
+                    jarvis_dir, memorial_id, result.reason)
                 results.append(True)
             elif result.reason == "quiet_hours":
                 if memorial_id:
@@ -405,7 +407,10 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
                 _record_sent_lark_id(memorial_id, _ids_before)
             elif result.reason == "quiet_hours" and memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "queued")
-            elif result.state not in {"suppressed"} and memorial_id:
+            elif result.state == "suppressed":
+                _record_memorial_suppression(
+                    jarvis_dir, memorial_id, result.reason)
+            elif memorial_id:
                 _record_memorial_delivery(jarvis_dir, memorial_id, "retry_queued")
             results.append(
                 delivered or result.state == "suppressed"
@@ -953,6 +958,27 @@ def _record_memorial_delivery(jarvis_dir: Path, memorial_id: str,
     except OSError as e:
         log("heartbeat", f"memorial delivery ledger update failed: {e}",
             level="warn")
+
+
+def _record_memorial_suppression(jarvis_dir: Path, memorial_id: str,
+                                 reason: str) -> None:
+    """Record a suppressed send so a budget drop is not a silent drop.
+
+    Both suppressed branches above used to record nothing: the delivery DB
+    kept the row, but the memorial ledger showed only the `create`, and
+    `core.presence.ledger_only()` counts explicit ledger-only rows on purpose
+    (inferring "created but never sent" would double-expose cards still in the
+    quiet-hours queue). So a card the daily cap dropped reached no surface at
+    all — measured 2026-08-19: thirteen of them between 14:02 and 23:15.
+
+    Only a cap drop is re-surfaced; obsolete/expired suppressions keep their
+    own status and stay out of the digest (core.memorial).
+    """
+    if not memorial_id:
+        return
+    from core.memorial import suppressed_delivery_status
+    _record_memorial_delivery(
+        jarvis_dir, memorial_id, suppressed_delivery_status(reason))
 
 
 def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:

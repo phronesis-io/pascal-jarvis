@@ -1976,3 +1976,24 @@ def test_cli_options_flag_builds_reply_buttons(env, capsys):
     opts = memorial.get_memorial(mid)["options"]
     assert [o["label"] for o in opts] == ["加钱", "限流"]
     assert all(o["reply"] for o in opts)
+
+
+def test_suppressed_delivery_status_separates_budget_from_obsolete():
+    """A cap drop still owes Pascal a mention; a stale one does not.
+
+    2026-08-19: the wake-up backlog spent all nine budgeted slots by 13:26 and
+    thirteen later cards were suppressed with `global_daily_cap`. Spelling
+    that the same way as `recovery_incident_obsolete` is what let them vanish.
+    """
+    from core.delivery import BUDGET_CAP_REASONS
+
+    for reason in BUDGET_CAP_REASONS:
+        assert memorial.suppressed_delivery_status(reason) == "ledger_only"
+    for reason in ("recovery_incident_obsolete", "recovery_item_resolved",
+                   "expired_ttl", "ambient_ledger_only", "duplicate", ""):
+        assert memorial.suppressed_delivery_status(reason) == "suppressed"
+
+
+def test_ledger_only_is_an_accepted_delivery_status():
+    """The cap-drop status must not fall outside the ledger's contract."""
+    assert "ledger_only" in memorial.ACCEPTED_DELIVERY_STATUSES

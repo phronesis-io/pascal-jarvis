@@ -413,3 +413,52 @@ def test_bot_api_timeout_retries_safely_and_requires_receipt(monkeypatch):
         retries=False,
     ) is False
     assert len(calls) == 1
+
+
+# --- 2026-08-19: a card the daily cap dropped reached no surface at all -----
+# Both suppressed branches in _route_output recorded nothing, so the memorial
+# ledger held only the `create` row. core.presence.ledger_only() counts
+# explicit ledger-only rows on purpose, so the thirteen cards suppressed with
+# `global_daily_cap` between 14:02 and 23:15 never made the morning digest —
+# they simply stopped existing.
+
+def _suppressed(reason):
+    from core.delivery import DeliveryResult
+    return lambda envelope, **kw: DeliveryResult(
+        envelope.id, True, "suppressed", "lark", "", reason)
+
+
+def test_cap_dropped_card_is_recorded_as_ledger_only(tmp_path):
+    card = _route_memorial_card("mem_capped")
+    with patch("core.delivery.deliver", _suppressed("global_daily_cap")):
+        _route_output("CARD:" + card, "user123", tmp_path)
+
+    events = [json.loads(line) for line in
+              (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    assert [e["status"] for e in events] == ["ledger_only"], (
+        "a budget drop is 'no room today', not 'no longer true' — it must "
+        "keep the status the morning 攒批 line counts")
+
+
+def test_obsolete_suppression_is_not_resurfaced(tmp_path):
+    """Recovery suppressions are stale by design; the digest must not batch
+    them back into Pascal's morning."""
+    card = _route_memorial_card("mem_obsolete")
+    with patch("core.delivery.deliver",
+               _suppressed("recovery_incident_obsolete")):
+        _route_output("CARD:" + card, "user123", tmp_path)
+
+    events = [json.loads(line) for line in
+              (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    assert [e["status"] for e in events] == ["suppressed"]
+
+
+def test_cap_dropped_config_card_is_recorded_too(tmp_path):
+    """The bare-JSON card branch had the same silent hole."""
+    card = _route_memorial_card("mem_capped_cfg")
+    with patch("core.delivery.deliver", _suppressed("source_daily_cap")):
+        _route_output(card, "user123", tmp_path)
+
+    events = [json.loads(line) for line in
+              (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    assert [e["status"] for e in events] == ["ledger_only"]

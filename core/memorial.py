@@ -1273,6 +1273,27 @@ def _record_engagement(row: dict) -> None:
         )
 
 
+def suppressed_delivery_status(reason: str) -> str:
+    """Ledger status for a delivery the pipeline suppressed.
+
+    Budget overflow ("no room in today's nine slots") is not the same event as
+    "this card is obsolete", and the ledger must not spell them the same way.
+    A cap drop still owes Pascal a mention, so it takes the ledger-only status
+    that core.presence batches into the morning anchor's 攒批 line — the same
+    surface ambient exhaust uses. Everything else (recovery_incident_obsolete,
+    recovery_item_resolved, expired_ttl, ambient dedup) is stale by design and
+    must NOT be resurfaced; those keep plain "suppressed".
+
+    Measured on 2026-08-19: the wake-up backlog spent all nine budgeted slots
+    between 13:03 and 13:26, and the thirteen cards created over the next ten
+    waking hours were suppressed with `global_daily_cap` — with no delivery
+    event written anywhere, so `presence.ledger_only()` could not see them and
+    the next morning's anchor said nothing. They simply stopped existing.
+    """
+    from core.delivery import BUDGET_CAP_REASONS
+    return "ledger_only" if str(reason) in BUDGET_CAP_REASONS else "suppressed"
+
+
 def _record_delivery(memorial_id: str, status: str, source: str = "",
                      message_id: str = "") -> None:
     _append_line(_ledger_path(), {
@@ -1721,7 +1742,7 @@ def _deliver_existing(
         return True
 
     if result.state == "suppressed":
-        _record_delivery(mid, "suppressed")
+        _record_delivery(mid, suppressed_delivery_status(result.reason))
         return True
 
     if result.state == "attempting":
