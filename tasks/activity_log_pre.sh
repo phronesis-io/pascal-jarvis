@@ -120,11 +120,46 @@ if msgs:
 " 2>/dev/null)
 fi
 
+# ── 2.5 EigenFlux private messages Jarvis answered by itself ──
+# 2026-08-20, Pascal: "有些你可以自动回复掉吧，不一定要找我". Those replies raise
+# no card, so they would otherwise be invisible in his day. Recording them here
+# keeps the outbound side auditable through the normal silent activity log.
+autoreply_context=""
+autoreply_ledger="$JARVIS_DIR/data/ef_autoreply_ledger.jsonl"
+if [ -f "$autoreply_ledger" ]; then
+  autoreply_context=$(python3 -c "
+import json, sys
+from datetime import datetime, timedelta
+
+cutoff = datetime.now() - timedelta(minutes=45)
+rows = []
+try:
+    with open('$autoreply_ledger', encoding='utf-8') as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+                ts = datetime.strptime(str(row.get('ts', ''))[:19], '%Y-%m-%dT%H:%M:%S')
+            except Exception:
+                continue
+            if ts >= cutoff:
+                rows.append(row)
+except OSError:
+    rows = []
+if rows:
+    print('EIGENFLUX AUTO-REPLIES (Jarvis handled these itself, no card raised):')
+    for row in rows[:6]:
+        who = str(row.get('title', '')).replace(' 来信', '') or 'peer'
+        note = row.get('note') or str(row.get('reply', ''))[:60]
+        print(f'  {who}: {note}')
+" 2>/dev/null)
+fi
+
 # ── 3. Check if user explicitly mentioned activities ──
 # (handled by Claude from the conversation context above)
 
 # ── Output ──
-if [ -z "$calendar_context" ] && [ -z "$conversation_context" ]; then
+if [ -z "$calendar_context" ] && [ -z "$conversation_context" ] \
+   && [ -z "$autoreply_context" ]; then
   exit 0  # No signals at all
 fi
 
@@ -132,6 +167,7 @@ echo "Activity log window: $now_ts (last 45 minutes)"
 echo ""
 [ -n "$calendar_context" ] && echo "$calendar_context" && echo ""
 [ -n "$conversation_context" ] && echo "$conversation_context"
+[ -n "$autoreply_context" ] && echo "" && echo "$autoreply_context"
 
 # A script whose last command is `[ -n "$x" ] && echo …` exits 1 whenever x is
 # empty — so a window with a calendar event but no conversation printed a

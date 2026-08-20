@@ -451,3 +451,94 @@ def test_message_analysis_uses_text_only_shared_provider_chain(
     assert seen["allow_tools"] is False
     assert seen["process_key"] == "analysis"
     assert "hello" in seen["prompt"]
+
+
+# ---- Auto-reply branch (2026-08-20) ---------------------------------------
+# Pascal: "有些你可以自动回复掉吧，不一定要找我". Jarvis answers what it can
+# answer itself; anything needing his judgement still becomes a card. The
+# branch must fail closed — an unparsed verdict or a failed send never
+# silently swallows the message.
+
+def _pm_event(msg_id="msg-auto", conv_id="conv-auto", content="how does floor work?"):
+    return json.dumps({
+        "type": "pm_push",
+        "data": {
+            "messages": [{
+                "msg_id": msg_id,
+                "conv_id": conv_id,
+                "sender_name": "Peer",
+                "content": content,
+            }],
+            "next_cursor": msg_id,
+        },
+    })
+
+
+def test_parse_autoreply_requires_explicit_verdict():
+    assert efsl.parse_autoreply("建议这样回：谢谢") == ("", "")
+    assert efsl.parse_autoreply("HEARTBEAT_OK") == ("", "")
+    assert efsl.parse_autoreply("") == ("", "")
+    reply, note = efsl.parse_autoreply(
+        "AUTOREPLY\nThanks — the floor is a hit count.\nNOTE: 技术追问，已答")
+    assert reply == "Thanks — the floor is a hit count."
+    assert note == "技术追问，已答"
+
+
+def test_autoreply_sends_and_raises_no_card(monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(efsl, "_run_analysis",
+                        lambda *a, **k: "AUTOREPLY\nIt is a hit count.\nNOTE: 技术追问")
+    monkeypatch.setattr(efsl, "_send_auto_reply",
+                        lambda conv, text: sent.append((conv, text)) or True)
+    monkeypatch.setattr(
+        efsl, "_deliver_memorial_and_mark",
+        lambda *a, **k: pytest.fail("auto-replied message must not raise a card"))
+
+    seen_file = tmp_path / ".ef-seen"
+    assert efsl.handle_pm_event(
+        _pm_event(), user_id="u1", seen_file=seen_file, jarvis_dir=tmp_path)
+
+    assert sent == [("conv-auto", "It is a hit count.")]
+    assert "msg-auto" in load_seen(seen_file)
+    ledger = (tmp_path / efsl.AUTOREPLY_LEDGER).read_text().strip()
+    row = json.loads(ledger)
+    assert row["conv_id"] == "conv-auto"
+    assert row["reply"] == "It is a hit count."
+    assert row["note"] == "技术追问"
+
+
+def test_autoreply_send_failure_falls_back_to_card(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(efsl, "_run_analysis",
+                        lambda *a, **k: "AUTOREPLY\nIt is a hit count.")
+    monkeypatch.setattr(efsl, "_send_auto_reply", lambda conv, text: False)
+
+    def deliver(msg, ids, metadata, user_id, seen, seen_file, jd, **kwargs):
+        captured["body"] = msg
+        return seen, True, True
+
+    monkeypatch.setattr(efsl, "_deliver_memorial_and_mark", deliver)
+    assert efsl.handle_pm_event(
+        _pm_event(msg_id="msg-fail"), user_id="u1",
+        seen_file=tmp_path / ".ef-seen", jarvis_dir=tmp_path)
+    assert "It is a hit count." in captured["body"]
+    assert "没发出去" in captured["body"]
+    assert not (tmp_path / efsl.AUTOREPLY_LEDGER).exists()
+
+
+def test_autoreply_without_conv_id_still_raises_card(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(efsl, "_run_analysis", lambda *a, **k: "AUTOREPLY\nhi")
+    monkeypatch.setattr(
+        efsl, "_send_auto_reply",
+        lambda *a: pytest.fail("must not send without a conversation id"))
+
+    def deliver(msg, ids, metadata, user_id, seen, seen_file, jd, **kwargs):
+        captured["body"] = msg
+        return seen, True, True
+
+    monkeypatch.setattr(efsl, "_deliver_memorial_and_mark", deliver)
+    assert efsl.handle_pm_event(
+        _pm_event(msg_id="msg-noconv", conv_id=""), user_id="u1",
+        seen_file=tmp_path / ".ef-seen", jarvis_dir=tmp_path)
+    assert captured["body"]
