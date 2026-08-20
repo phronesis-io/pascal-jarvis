@@ -60,6 +60,13 @@ zero and the phone desk was never successfully paired. Therefore:
   history for archive and diagnosis, not as a second inbox.
 - Pending decisions lead the Lark docket; ambient notices stay ledger-only and
   return as one bounded morning-anchor summary.
+- A card the daily attention budget drops is ledger-only, never gone: the cap
+  means "no room today", not "no longer true", so it joins that morning
+  summary. Suppressions that mean the content is stale (recovery replay of an
+  obsolete incident, an expired TTL) stay out of it. A dropped `decision`
+  publishes the summary line on its own — the 攒批≥5 threshold governs 周知,
+  and holding a lost judgment back for lacking companions is the same silent
+  drop the line exists to end.
 - Details and evidence are available on demand, not forced into the first card.
 
 ### Matter
