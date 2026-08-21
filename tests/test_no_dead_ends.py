@@ -70,21 +70,8 @@ def test_docket_never_renders_a_desk_button(env):
 
 
 # ── 2. a completed action is never reported as a failure ─────────────────
-
-
-def test_chat_notice_reports_success_not_an_unavailable_entrance():
-    from dashboard.uiutil import chat_started_notice
-    payload = {"toast": {"type": "success", "content": "已加载背景——回对话窗回复我即可"},
-               "deep_link": ""}
-    notice = chat_started_notice(payload)
-    assert notice == "已加载背景——回对话窗回复我即可"
-    assert "不可用" not in notice
-
-
-def test_chat_notice_still_says_something_useful_without_a_toast():
-    from dashboard.uiutil import chat_started_notice
-    notice = chat_started_notice({})
-    assert notice and "不可用" not in notice
+# (The web-dashboard chat_started_notice contract lived here until the
+# :3457 dashboard retirement on 2026-08-21 removed that surface entirely.)
 
 
 def test_clipped_memorial_continue_promise_is_wired_for_owner_lark_chat():
@@ -101,12 +88,16 @@ def test_clipped_memorial_continue_promise_is_wired_for_owner_lark_chat():
 
 
 def test_no_surface_reports_the_lark_entrance_as_unavailable():
-    """All three pages used to strand the user with this exact string."""
+    """Three dashboard pages used to strand the user with this exact string.
+    The dashboard is retired (2026-08-21); the honest-notice rule now guards
+    the remaining live surfaces."""
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
-    for name in ("pages/items.py", "pages/home.py"):
-        text = (root / "dashboard" / name).read_text(encoding="utf-8")
-        assert "飞书入口暂不可用" not in text, name
+    paths = [*root.glob("core/**/*.py"), *root.glob("tasks/**/*.py"),
+             root / "admin.py", root / "bot.sh"]
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "飞书入口暂不可用" not in text, path
 
 
 # ── 3. a card never names a destination it cannot reach ──────────────────

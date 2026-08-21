@@ -6,7 +6,7 @@ from __future__ import annotations
 # Engagement is evidence about user-facing content, not infrastructure health.
 # These tasks must keep the cadence declared in HEARTBEAT.md even when their
 # outputs are intentionally silent or rarely clicked. Keep this shared so the
-# scheduler, dashboard, watermarks, and tuning writer cannot disagree.
+# scheduler, watermarks, and tuning writer cannot disagree.
 ENGAGEMENT_TUNING_PROTECTED_TASKS = frozenset({
     "activity-log",
     "calendar-sync",

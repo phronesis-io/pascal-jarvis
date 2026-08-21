@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def _fixture_repo(tmp_path: Path) -> Path:
     (tmp_path / "core").mkdir()
-    (tmp_path / "dashboard" / "pages").mkdir(parents=True)
     (tmp_path / "tasks").mkdir()
     (tmp_path / "tests").mkdir()
     (tmp_path / "components.yaml").write_text(
@@ -53,12 +52,6 @@ def _fixture_repo(tmp_path: Path) -> Path:
         "    main()\n",
         encoding="utf-8",
     )
-    (tmp_path / "dashboard" / "pages" / "home.py").write_text(
-        "@ui.page('/things')\n"
-        "def things_page():\n"
-        "    return None\n",
-        encoding="utf-8",
-    )
     (tmp_path / "core" / "matter_bridge.py").write_text(
         "def handle_lark_command(command):\n"
         "    aliases = {'new': 'new', '当前': 'current'}\n"
@@ -87,7 +80,7 @@ def _fixture_repo(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "tests" / "test_facts.py").write_text(
-        "# sample-task sample_task core.sample /things handle_lark_command /health\n"
+        "# sample-task sample_task core.sample handle_lark_command /health\n"
         "# name: bot /model codex /model auto /model continue-commit pending_publish\n"
         "# content_lower stop cancel\n",
         encoding="utf-8",
@@ -102,7 +95,6 @@ def test_fixture_discovers_every_fact_source(tmp_path):
     assert "component:bot" in by_id
     assert "heartbeat:sample-task" in by_id
     assert "cli:core.sample" in by_id
-    assert "route:page:/things" in by_id
     assert "admin-route:get:/health" in by_id
     assert "admin-route:get:/api/session/{param}" in by_id
     assert "lark:matter:new" in by_id
@@ -117,7 +109,7 @@ def test_every_audited_gap_is_resolved_or_explicitly_explained():
     by_id = {item["id"]: item for item in inventory["capabilities"]}
     audited = inventory["resolved_evidence_audit"]
 
-    assert len(audited) == 18
+    assert len(audited) == 12
     assert set(audited) <= set(by_id)
     unresolved = {
         capability_id: by_id[capability_id]["status_reason"]
@@ -161,7 +153,7 @@ def test_status_rules_are_conservative():
 def test_module_level_string_is_not_executable_test_evidence(tmp_path):
     root = _fixture_repo(tmp_path)
     (root / "tests" / "test_facts.py").write_text(
-        'UNUSED = "core.sample sample-task /things name: bot"\n',
+        'UNUSED = "core.sample sample-task name: bot"\n',
         encoding="utf-8",
     )
 
@@ -177,7 +169,7 @@ def test_function_name_and_docstring_are_not_executable_test_evidence(tmp_path):
     root = _fixture_repo(tmp_path)
     (root / "tests" / "test_facts.py").write_text(
         "def test_core_sample_name_only():\n"
-        '    \"\"\"sample-task /things handle_lark_command name: bot.\"\"\"\n'
+        '    \"\"\"sample-task handle_lark_command name: bot.\"\"\"\n'
         "    pass\n",
         encoding="utf-8",
     )
@@ -187,7 +179,6 @@ def test_function_name_and_docstring_are_not_executable_test_evidence(tmp_path):
 
     assert by_id["cli:core.sample"]["status"] == "fix"
     assert by_id["heartbeat:sample-task"]["status"] == "fix"
-    assert by_id["route:page:/things"]["status"] == "fix"
 
 
 def test_matching_test_filename_without_behavior_is_not_evidence(tmp_path):
@@ -213,13 +204,10 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
     assert len(by_id) >= 100
     for capability_id in (
         "component:bot",
-        "component:dashboard",
         "heartbeat:provider-canary",
         "heartbeat:cross-session-sync",
         "cli:core.codex_fallback",
         "cli:core.memorial",
-        "route:page:/items",
-        "route:get:/api/provider-health",
         "admin-route:get:/health",
         "admin-route:post:/api/bot/restart",
         "lark:model:codex",
@@ -232,6 +220,10 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
     ):
         assert capability_id in by_id
         assert by_id[capability_id]["source_evidence"]
+    # A retired surface leaves an explicit trace, never a silent disappearance.
+    assert any("dashboard :3457" in key for key in inventory["retired_surfaces"])
+    assert any("3458" in key for key in inventory["retired_surfaces"])
+    assert not any(item["kind"].startswith("dashboard") for item in by_id.values())
     assert validate_inventory(inventory) == []
 
 

@@ -35,12 +35,11 @@ def test_quiet_hours_boundaries():
     assert not _in_quiet_hours(23 * 60 + 29)  # 23:29 — still open
 
 
-def test_quiet_hour_runtime_override_is_shared_by_heartbeat_delivery_and_ui(
+def test_quiet_hour_runtime_override_is_shared_by_heartbeat_and_delivery(
         monkeypatch):
     from datetime import datetime
 
     from core.delivery import _next_awake_epoch, _quiet_now
-    from dashboard.pages.settings import _quiet_hours
 
     monkeypatch.setenv("JARVIS_QUIET_START", "12:15")
     monkeypatch.setenv("JARVIS_QUIET_END", "13:45")
@@ -48,7 +47,6 @@ def test_quiet_hour_runtime_override_is_shared_by_heartbeat_delivery_and_ui(
 
     assert _in_quiet_hours(12 * 60 + 30)
     assert _quiet_now(moment)
-    assert _quiet_hours() == ("12:15", "13:45")
     assert datetime.fromtimestamp(_next_awake_epoch(moment)).strftime(
         "%H:%M") == "13:45"
 

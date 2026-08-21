@@ -935,7 +935,7 @@ handle_message() {
   if [ "$chat_type" != "p2p" ]; then
     is_group=1
     # WebSearch ONLY. WebFetch is deliberately excluded: it can reach
-    # localhost (admin console :3456, dashboard :3457) — a group member could
+    # localhost (admin console :3456) — a group member could
     # exfiltrate memory/logs through it. Bash/file tools would be code
     # execution on this machine for anyone in the group.
     claude_tool_flags=(--allowedTools "WebSearch" --disallowedTools "Bash,Edit,Write,NotebookEdit,Read,Glob,Grep,Agent,Skill,WebFetch,TaskCreate,TaskUpdate")

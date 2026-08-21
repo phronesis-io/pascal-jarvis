@@ -542,14 +542,14 @@ def test_manifest_watchdog_healed_transient_never_pages(manifest_env, monkeypatc
 
 
 def test_manifest_skips_components_covered_elsewhere(manifest_env, monkeypatch):
-    """bot/heartbeat-loop/lark-sidecar drive the restart path; admin/dashboard
-    keep the richer degraded-aware probe — none of them may page here."""
+    """bot/heartbeat-loop/lark-sidecar drive the restart path; admin
+    keeps the richer degraded-aware probe — none of them may page here."""
     logs, alerts = manifest_env
     monkeypatch.setattr(
         components_mod, "check_components",
         lambda critical_only=False: [
             _manifest_result(n, False) for n in
-            ("bot", "heartbeat-loop", "lark-sidecar", "admin", "dashboard")])
+            ("bot", "heartbeat-loop", "lark-sidecar", "admin")])
 
     daemon_mod._probe_manifest_criticals()
 

@@ -2,7 +2,7 @@
 
 A Matter is one recognizable piece of work. Existing systems keep their own
 stores; this module links them through stable external IDs and records a small
-append-only event trail in dashboard SQLite.
+append-only event trail in the shared SQLite store (core.db).
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class MatterConflict(ValueError):
 
 
 def _db():
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 

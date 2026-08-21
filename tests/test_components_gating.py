@@ -40,7 +40,7 @@ def test_requires_cmd_missing_skips(tmp_path):
 
 def test_requires_file_missing_skips(tmp_path):
     m = _manifest(tmp_path, """
-  - name: dashboard
+  - name: webview
     check: http
     url: "http://127.0.0.1:1/"
     critical: true

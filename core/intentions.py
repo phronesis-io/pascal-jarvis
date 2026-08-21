@@ -11,7 +11,7 @@ Lifecycle (execution axis, REQ-30/31): create → pending → triggered(+attempt
   deterministic signal via the inflight manifest (data/.intention_inflight.json).
 
 Architecture:
-  - Stored in SQLite `intentions` table (via dashboard.db)
+  - Stored in SQLite `intentions` table (via core.db)
   - Checked every heartbeat cycle by intention-check task
   - Can be created by: agent (ACTION:intent_create), calendar bridge, seed script
   - Supports: one-shot (date), recurring (cron with next_fire_at catch-up),
@@ -288,7 +288,7 @@ def snap_to_golden(dt: datetime) -> datetime:
     return (dt + timedelta(days=1)).replace(hour=11, minute=0, second=0, microsecond=0)
 
 # ---------------------------------------------------------------------------
-# DB helpers — thin wrappers over dashboard.db
+# DB helpers — thin wrappers over core.db
 # ---------------------------------------------------------------------------
 
 _sys_path_added = False
@@ -299,7 +299,7 @@ def _get_db():
         import sys
         sys.path.insert(0, str(CODE_ROOT))
         _sys_path_added = True
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 
@@ -437,7 +437,7 @@ def _migrate():
             "AND next_fire_at IS NULL"
         ).fetchall()
         if rows:
-            from dashboard.scheduler import cron_next
+            from core.cron import cron_next
             for iid, cfg_raw in rows:
                 try:
                     config = json.loads(cfg_raw)
@@ -463,7 +463,7 @@ def _init():
     global _table_ready
     if _table_ready:
         return
-    # dashboard.db exposes one check_same_thread=False connection. Serializing
+    # core.db exposes one check_same_thread=False connection. Serializing
     # the complete schema bootstrap prevents two callers from interleaving
     # executescript/commit/migration operations on that shared transaction.
     with _init_lock:
@@ -539,7 +539,7 @@ def create_intent(
     elif trigger_type == "cron":
         expr = (trigger_config or {}).get("expression", "")
         try:
-            from dashboard.scheduler import cron_next
+            from core.cron import cron_next
             nxt = cron_next(expr) if expr else None
         except Exception:
             nxt = None
@@ -641,7 +641,7 @@ def get_intent(intent_id: str) -> dict | None:
 def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
     """Atomically restore one expired schedule without changing its cadence.
 
-    The status predicate is part of the update so a stale dashboard/admin
+    The status predicate is part of the update so a stale admin/CLI
     callback cannot overwrite a cancellation or another lifecycle transition.
     Returns schedule details on success and ``None`` for a missing, stale, or
     malformed row.
@@ -690,7 +690,7 @@ def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
     elif trigger_type == "cron":
         expression = str(config.get("expression") or "")
         try:
-            from dashboard.scheduler import cron_next
+            from core.cron import cron_next
             next_fire = cron_next(expression, after=now)
         except (TypeError, ValueError):
             next_fire = None
@@ -1294,7 +1294,7 @@ def _skip_stale_cron_occurrence(db, intent: dict, expr: str,
                                 missed_dt: datetime, now: datetime) -> None:
     """Retire a cron occurrence that is too stale to fire (REQ-32 ceiling)."""
     try:
-        from dashboard.scheduler import cron_next
+        from core.cron import cron_next
         nxt = cron_next(expr, after=now.replace(tzinfo=None)) if expr else None
         db.execute(
             "UPDATE intentions SET next_fire_at = ?, last_error = ? WHERE id = ?",
@@ -1396,7 +1396,7 @@ def get_due_intents() -> list[dict]:
             else:
                 # Legacy row without next_fire_at: exact-minute match once,
                 # then mark_executed/backfill stamps next_fire_at.
-                from dashboard.scheduler import cron_matches
+                from core.cron import cron_matches
                 try:
                     triggered = cron_matches(expr, now)
                     if triggered and intent.get("executed_at"):
@@ -1430,7 +1430,7 @@ def get_due_intents() -> list[dict]:
 
         # Check conditions (reuse scheduler's condition engine)
         if triggered and conditions:
-            from dashboard.scheduler import check_conditions
+            from core.cron import check_conditions
             if not check_conditions(conditions, intent):
                 triggered = False
 
@@ -1690,7 +1690,7 @@ def mark_executed(intent_id: str, result: str = "") -> bool:
         # _skip_stale_cron_occurrence in get_due_intents.
         nxt = None
         try:
-            from dashboard.scheduler import cron_next
+            from core.cron import cron_next
             cfg = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
             expr = (cfg or {}).get("expression", "")
             anchor = None
@@ -1922,8 +1922,9 @@ def record_closure(parent_id: str, outcome: str = "done", result: str = "",
     NULL-guards the follow-up before cancelling it (no double-ask). Returns
     False on no-op so callers can tell whether a write happened.
 
-    `via` is telemetry only (button|reply|followup|review|cli|ttl|dashboard) —
-    which path closed the loop, the learning signal REQ-34/35 feed on.
+    `via` is telemetry only (button|reply|followup|review|cli|ttl; historical
+    rows also carry the retired `dashboard` value) — which path closed the
+    loop, the learning signal REQ-34/35 feed on.
     """
     _init()
     parent_id = str(parent_id).strip()
@@ -2119,7 +2120,7 @@ def generate_closure_reask_intents(now: datetime | None = None,
 
 
 def awaiting_closures(categories: tuple = ("hard", "external")) -> list[dict]:
-    """Open closure loops to SURFACE (snapshot wall + dashboard). Excludes
+    """Open closure loops to SURFACE (snapshot wall). Excludes
     healing/autonomous by default so health/learning follow-through is never
     displayed as an undone ledger. Queried directly (not from pending+triggered)
     because a fired one-shot moment is status='executed' yet still awaiting.
@@ -3364,8 +3365,8 @@ def closure_stats() -> dict:
 
     Answers what the system previously could not: which categories actually
     close? are reading-closure intents systematically dying (wrong TYPE, not
-    just broken pipeline)? Consumed by the nightly 每晚intent复盘 and the
-    dashboard funnel. Moments only (follow-up rows excluded).
+    just broken pipeline)? Consumed by the nightly 每晚intent复盘. Moments
+    only (follow-up rows excluded).
     """
     _init()
     db = _get_db()

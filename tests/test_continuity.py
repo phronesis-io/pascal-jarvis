@@ -14,7 +14,7 @@ from contextlib import closing
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core import memorial
 from core.continuity import (
     claim_handoff,
@@ -25,7 +25,6 @@ from core.continuity import (
     list_handoffs,
     reopen_entity_handoffs,
 )
-from dashboard.uiutil import surface_from_headers
 
 
 @pytest.fixture(autouse=True)
@@ -82,12 +81,6 @@ def _delivery_envelope_count() -> int:
         return 0
     return int(db.execute(
         "SELECT COUNT(*) FROM delivery_envelopes").fetchone()[0])
-
-
-def test_surface_identity_defaults_to_desktop_without_device_header():
-    assert surface_from_headers({}) == ("desktop", "local")
-    assert surface_from_headers(
-        {"X-Jarvis-Device": "dev_phone"}) == ("mobile", "dev_phone")
 
 
 def test_handoff_is_idempotent_claimable_and_completable():

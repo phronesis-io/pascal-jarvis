@@ -1,7 +1,9 @@
-"""SQLite database layer with migrations.
+"""Shared SQLite database layer with the ordered base-schema migrations.
 
-Single-file DB with WAL mode for concurrent reads from bot.sh.
-Uses FTS5 for full-text search on bookmarks and logs.
+Single-file DB (data/jarvis.db) with WAL mode for concurrent readers
+(bot.sh, admin, heartbeat tasks). Uses FTS5 for full-text search on
+bookmarks and logs. Lived at dashboard/db.py until the :3457 NiceGUI
+dashboard was retired (2026-08-21); the schema and tables are unchanged.
 """
 
 import json
@@ -16,7 +18,7 @@ from core.timeutil import now_local_str
 
 _DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "jarvis.db"
 # Kept as a module attribute for test monkeypatching compat (tests patch
-# dashboard.db.DB_PATH). Runtime code must go through _db_path().
+# core.db.DB_PATH). Runtime code must go through _db_path().
 DB_PATH = _DEFAULT_DB_PATH
 
 
@@ -696,7 +698,7 @@ def task_register(task_id: str, name: str, trigger_type: str,
     Raises ValueError on a malformed trigger — a poison row would otherwise
     be evaluated (and skipped, loudly) on every due-check forever.
     """
-    from .scheduler import validate_trigger  # deferred: scheduler imports db
+    from core.cron import validate_trigger
     err = validate_trigger(trigger_type, trigger_config)
     if err:
         raise ValueError(err)
@@ -797,7 +799,8 @@ def engagement_stats(days: int = 7) -> dict:
 
     Reads engagement_log.jsonl — the source of truth written by the bot/
     heartbeat. The engagement_events TABLE only ever received writes through
-    a dashboard HTTP endpoint nobody calls (3 rows, all from 2026-05-21), so
+    a since-retired dashboard HTTP endpoint nobody called (3 rows, all from
+    2026-05-21), so
     stats computed from it showed a frozen snapshot while the jsonl kept
     growing. The table and its API stay for compatibility; stats don't use it.
 

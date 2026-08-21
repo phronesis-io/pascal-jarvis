@@ -4,7 +4,9 @@
 # doctor.sh, restart.sh --status, self-diagnostic) each kept their own
 # hardcoded component list and none included :3457. This manifest is consumed
 # by ALL of them via core/components.py — a component not listed here does
-# not exist; a component listed here cannot die silently.
+# not exist; a component listed here cannot die silently. (The :3457
+# dashboard itself is retired as of 2026-08-21; the lesson that created this
+# manifest outlives the component.)
 #
 # check types:
 #   pid       — pidfile alive (first whitespace field, kill -0)
@@ -81,7 +83,7 @@ components:
     note: >-
       Process and HTTP health do not prove that Pascal receives anything. A
       recent streak of failed envelopes, or an overdue retry queue, makes the
-      product unhealthy even while bot/admin/dashboard remain alive. The
+      product unhealthy even while bot/admin remain alive. The
       daemon's independent dead-letter path owns paging; this check is
       observation-only and must not create a credential restart loop.
 
@@ -112,19 +114,6 @@ components:
     critical: true
     requires_config: admin.enabled
     note: ops console + Lark RichView links; bot watchdog restarts it, Guardian verifies recovery before paging
-
-  - name: dashboard
-    check: http
-    url: "http://127.0.0.1:3457/"
-    critical: true
-    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
-    note: launchd KeepAlive com.pascal.jarvis.dashboard; Guardian can kickstart this exact job and verifies recovery before paging
-
-  - name: dashboard-launchd
-    check: launchctl
-    label: com.pascal.jarvis.dashboard
-    critical: false
-    requires_file: ~/Library/LaunchAgents/com.pascal.jarvis.dashboard.plist
 
   - name: daemon-launchd
     check: launchctl

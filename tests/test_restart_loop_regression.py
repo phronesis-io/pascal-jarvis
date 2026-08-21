@@ -68,17 +68,18 @@ def test_restart_sh_settles_before_clearing_deploy_guard():
     assert full.index("start_bot") < full.index("settle_bot")
 
 
-def test_full_restart_refreshes_user_surfaces_and_verifies_all_runtimes():
-    """A full release cannot leave independently supervised UI on old code."""
-    assert "com.pascal.jarvis.dashboard" in RESTART_SH
-    # Mobile gateway retired 2026-08-11 (REQ-120); it must stay gone.
+def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
+    """A full release cannot leave independently supervised residents on old
+    code — and retired surfaces must stay out of the deploy path entirely."""
+    # Mobile gateway retired 2026-08-11 (REQ-120); dashboard retired
+    # 2026-08-21. Both labels must stay gone from live restart logic
+    # (the refresh list keeps a comment recording the retirements).
     assert "com.pascal.jarvis.mobile-gateway" not in RESTART_SH
-    assert "restart_user_surfaces()" in RESTART_SH
+    assert "com.pascal.jarvis.dashboard" not in RESTART_SH
+    assert "restart_user_surfaces" not in RESTART_SH
+    assert "restart_launchd_surface" not in RESTART_SH
     assert "verify_full_runtime()" in RESTART_SH
     assert "refresh_launchd_definitions()" in RESTART_SH
-    assert 'local plist="$HOME/Library/LaunchAgents/$label.plist"' in RESTART_SH
-    assert 'launchctl bootstrap "gui/$UID" "$plist"' in RESTART_SH
-    assert 'FULL_RUNTIME_COMPONENTS+=("$runtime_component")' in RESTART_SH
 
     full = RESTART_SH[
         RESTART_SH.index("governed_deploy()"):
@@ -90,12 +91,7 @@ def test_full_restart_refreshes_user_surfaces_and_verifies_all_runtimes():
     assert full.index("\n  refresh_launchd_definitions") < full.index(
         "\n  kill_bot"
     )
-    assert full.index("start_bot") < full.index("restart_user_surfaces")
-    assert full.index("restart_user_surfaces") < full.index("settle_bot")
-    assert "restart_user_surfaces || surface_failed=1" in full
-    assert full.index("settle_bot") < full.index(
-        'if [ "$surface_failed" -ne 0 ]'
-    )
+    assert full.index("start_bot") < full.index("settle_bot")
     assert full.index("settle_bot") < full.index("verify_full_runtime")
 
     verify = RESTART_SH[
@@ -134,15 +130,9 @@ def test_full_restart_skips_launchd_work_when_launchctl_is_unavailable():
         RESTART_SH.index("refresh_launchd_definitions()"):
         RESTART_SH.index("LAUNCHD_PROBE_DETAIL=")
     ]
-    surface = RESTART_SH[
-        RESTART_SH.index("restart_launchd_surface()"):
-        RESTART_SH.index("restart_user_surfaces()")
-    ]
     guard = "if ! command -v launchctl >/dev/null 2>&1; then"
     assert guard in refresh
-    assert guard in surface
     assert "definition refresh skipped" in refresh
-    assert "launchd unavailable; skipped" in surface
 
 
 def test_launchd_installer_refreshes_only_requested_definition(tmp_path):
@@ -150,7 +140,7 @@ def test_launchd_installer_refreshes_only_requested_definition(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    stale = destination / "com.pascal.jarvis.dashboard.plist"
+    stale = destination / "com.pascal.jarvis.daemon.plist"
     stale.write_text("stale definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -178,7 +168,7 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -191,13 +181,13 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
     assert installed != "stale definition\n"
     assert "__JARVIS_DIR__" not in installed
     assert str(ROOT) in installed
-    assert not (destination / "com.pascal.jarvis.daemon.plist").exists()
+    assert not (destination / "com.pascal.jarvis.caffeinate.plist").exists()
     assert not (
-        destination / "com.pascal.jarvis.caffeinate.plist"
+        destination / "com.jarvis.session-backup.plist"
     ).exists()
     calls = launchctl_log.read_text(encoding="utf-8")
     assert "bootout " in calls
-    assert "com.pascal.jarvis.dashboard" in calls
+    assert "com.pascal.jarvis.daemon" in calls
     assert "bootstrap " in calls
 
 
@@ -206,7 +196,7 @@ def test_launchd_installer_retries_transient_bootstrap_eio(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -260,7 +250,7 @@ esac
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -278,7 +268,7 @@ def test_launchd_installer_does_not_retry_other_error_codes(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -328,7 +318,7 @@ esac
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -404,7 +394,7 @@ def test_launchd_installer_restores_loaded_job_after_bootstrap_failure(
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -458,7 +448,7 @@ esac
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -478,7 +468,7 @@ def test_launchd_installer_retries_transient_eio_during_rollback(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -534,7 +524,7 @@ esac
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -554,7 +544,7 @@ def test_launchd_installer_reports_an_incomplete_file_recovery(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -620,7 +610,7 @@ exec /bin/mv "$@"
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -640,7 +630,7 @@ def test_launchd_installer_fails_closed_on_ambiguous_probe(tmp_path):
     home = tmp_path / "home"
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
-    installed = destination / "com.pascal.jarvis.dashboard.plist"
+    installed = destination / "com.pascal.jarvis.daemon.plist"
     installed.write_text("previous definition\n", encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
@@ -668,7 +658,7 @@ exit 1
         [
             "bash",
             str(ROOT / "scripts" / "launchd" / "install.sh"),
-            "com.pascal.jarvis.dashboard",
+            "com.pascal.jarvis.daemon",
         ],
         cwd=ROOT,
         env=env,
@@ -690,7 +680,7 @@ def test_launchd_installer_rolls_back_the_entire_selected_batch(tmp_path):
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
     labels = (
-        "com.pascal.jarvis.dashboard",
+        "com.pascal.jarvis.caffeinate",
         "com.pascal.jarvis.daemon",
     )
     for label in labels:
@@ -786,7 +776,7 @@ def test_launchd_installer_rolls_back_after_plist_validation_failure(
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
     labels = (
-        "com.pascal.jarvis.dashboard",
+        "com.pascal.jarvis.caffeinate",
         "com.pascal.jarvis.daemon",
     )
     for label in labels:
@@ -971,12 +961,12 @@ esac
 def test_restart_treats_ambiguous_launchd_probe_as_an_error():
     assert "LAUNCHD_PROBE_DETAIL" in RESTART_SH
     assert '*"Could not find service"*' in RESTART_SH
-    surface = RESTART_SH[
-        RESTART_SH.index("restart_launchd_surface()"):
-        RESTART_SH.index("restart_user_surfaces()")
+    refresh = RESTART_SH[
+        RESTART_SH.index("refresh_launchd_definitions()"):
+        RESTART_SH.index("LAUNCHD_PROBE_DETAIL=")
     ]
-    assert 'if [ "$probe_rc" -eq 2 ]' in surface
-    assert "state probe failed" in surface
+    assert 'if [ "$probe_rc" -eq 2 ]' in refresh
+    assert "Cannot inspect" in refresh
 
 
 def test_chinese_stop_words_recognized():

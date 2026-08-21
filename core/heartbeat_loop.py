@@ -1595,17 +1595,17 @@ def _hourly_housekeeping(jd: Path):
                 log("heartbeat", f"views GC: removed {n} expired view(s)")
     except Exception as e:
         log("heartbeat", f"views GC error: {e}", level="warn")
-    # Do not copytruncate /tmp/jarvis-dashboard.log here. launchd keeps an
+    # Never copytruncate a launchd-supervised log here: launchd keeps an
     # O_APPEND descriptor open, so truncation can discard a concurrent write
-    # and rename would strand future writes on the old inode. Its eventual
-    # rotation must restart the supervised dashboard after swapping the file.
+    # and rename would strand future writes on the old inode. Rotating such a
+    # log must restart its supervised process after swapping the file.
     for tmp_log in (Path("/tmp/jarvis_restart.log"),):
         try:
             if tmp_log.exists() and tmp_log.stat().st_size > 500_000:
                 lines = tmp_log.read_text(
                     encoding="utf-8", errors="replace").splitlines()
                 # restart.log has no resident writer, so bounding it in place
-                # does not carry the dashboard log's descriptor race.
+                # does not carry the supervised-log descriptor race above.
                 with open(tmp_log, "r+", encoding="utf-8") as f:
                     f.seek(0)
                     f.truncate()

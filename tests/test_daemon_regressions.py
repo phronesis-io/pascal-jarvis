@@ -137,19 +137,20 @@ def test_component_recovery_only_terminates_owned_exact_child(monkeypatch):
     assert killed == [(200, daemon_mod.signal.SIGTERM)]
 
 
-def test_dashboard_recovery_uses_exact_launchd_job(monkeypatch):
+def test_retired_dashboard_recovery_branch_stays_deleted(monkeypatch):
+    """2026-08-21 retirement: an unknown/foreign component name — including
+    the retired dashboard — must never trigger a recovery request."""
     calls = []
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
-    monkeypatch.setattr(daemon_mod.os, "getuid", lambda: 501)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: None)
     monkeypatch.setattr(
         daemon_mod.subprocess, "run",
         lambda argv, **kwargs: calls.append(argv) or SimpleNamespace(returncode=0),
     )
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
 
-    assert daemon_mod._request_component_recovery("dashboard :3457") is True
-    assert calls == [["launchctl", "kickstart", "-k",
-                      "gui/501/com.pascal.jarvis.dashboard"]]
+    assert daemon_mod._request_component_recovery("dashboard :3457") is False
+    assert calls == []
 
 
 def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
@@ -539,7 +540,7 @@ def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
     daemon_mod.probe_observed_components()
 
     assert alerts == []
-    assert recoveries == ["admin :3456", "dashboard :3457"]
+    assert recoveries == ["admin :3456"]
     for name in recoveries:
         daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
             time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
@@ -845,7 +846,7 @@ def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
 
     assert any("管理面板连续两次连不上" in a for a in alerts)
     saved = json.loads(daemon_mod.PROBE_ALERT_STATE_FILE.read_text())
-    assert "admin :3456" in saved and "dashboard :3457" in saved
+    assert "admin :3456" in saved
 
 
 @pytest.mark.parametrize("content", ["{not json!!", "[1, 2, 3]", ""])

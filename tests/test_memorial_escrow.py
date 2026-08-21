@@ -221,17 +221,14 @@ def test_silent_when_there_is_no_backlog(env):
                        "docket_sent": False, "docket_id": ""}
 
 
-def test_lapsed_rows_are_labelled_and_stay_out_of_the_pending_queue(env):
-    """The 「全部」view keeps archived rows. Without a badge they render like
-    live asks, so hundreds of 留中 rows would read as open work."""
-    from dashboard.uiutil import (memorial_is_notice, memorial_is_pending,
-                                  memorial_lapsed_note)
+def test_lapsed_rows_record_their_reason_and_leave_the_pending_queue(env):
+    """留中 rows must stay archived — a lapsed row that still reads as a live
+    pending ask would resurface hundreds of closed matters as open work."""
     mid = _make(env, "metrics-digest", memorial.ATTENTION_NOTICE, age_h=24 * 8)
     memorial.lapse(mid, "未读满 8 天")
     state = memorial.get_memorial(mid)
-    assert memorial_lapsed_note(state) == "已收起 · 未读满 8 天"
-    assert memorial_is_pending(state) is False
-    assert memorial_is_notice(state) is False
+    assert state.get("status") == "lapsed"
+    assert state.get("lapse_reason") == "未读满 8 天"
 
 
 def test_docket_never_sweeps_itself_into_the_next_docket(env):

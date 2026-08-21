@@ -165,18 +165,19 @@ def test_setup_installs_and_verifies_the_complete_dependency_set():
 
     assert "pip install -r requirements-dev.txt" in script
     assert 'if python3 -c "import yaml"' not in script
-    assert "nicegui" in script
-    # REQ-120: Web Push and pairing QR are retired with the mobile desk —
+    # REQ-120: Web Push and pairing QR are retired with the mobile desk;
+    # 2026-08-21: NiceGUI is retired with the :3457 dashboard —
     # their libraries must not creep back into the dependency set.
+    assert "nicegui" not in script
     assert "pywebpush" not in script
     assert "qrcode" not in script
+    assert "nicegui" not in runtime_requirements
     assert "pywebpush" not in runtime_requirements
     assert "qrcode" not in runtime_requirements
     assert "lark_oapi" in script
     assert "pip check" in script
     assert "sys.version_info >= (3, 10)" in script
     assert "pytest>=8.0" in requirements
-    assert "nicegui==3.15.0" in runtime_requirements
     assert "chmod -x scripts/config_env.sh scripts/runtime_env.sh" in script
     assert "need_cmd python3" not in script
 
@@ -257,9 +258,8 @@ esac
     ("label", "running_probes"),
     [
         ("com.pascal.jarvis.daemon", 0),
-        ("com.pascal.jarvis.dashboard", 0),
         ("com.pascal.jarvis.taskline", 0),
-        ("com.pascal.jarvis.dashboard", 3),
+        ("com.pascal.jarvis.daemon", 3),
     ],
 )
 def test_launchd_installer_rolls_back_tcc_crash_loops(
@@ -432,10 +432,10 @@ def test_launchd_templates_do_not_pin_pascal_homebrew_python():
     assert '"$JARVIS_PYTHON"' in audit_runner
 
 
-def test_dashboard_launchd_command_delegates_to_canonical_installer():
-    script = (ROOT / "dashboard" / "start.sh").read_text(encoding="utf-8")
-    block = script[script.index("--install-launchd)") : script.index("--migrate)")]
-
-    assert "scripts/launchd/install.sh" in block
-    assert "com.pascal.jarvis.dashboard" in block
-    assert "dashboard/launchd" not in block
+def test_retired_dashboard_launchd_template_stays_deleted():
+    """2026-08-21 retirement: the installer's plist glob must never find a
+    dashboard definition again — reintroducing the file would silently
+    resurrect the retired :3457 surface on the next install."""
+    assert not (ROOT / "scripts" / "launchd"
+                / "com.pascal.jarvis.dashboard.plist").exists()
+    assert not (ROOT / "dashboard").exists()

@@ -22,13 +22,16 @@ def test_components_manifest_loads_and_covers_critical_set():
     names = {c["name"] for c in comps}
     # The audit's dead zones must all be present — a component not listed
     # here can die silently again.
-    for required in ("dashboard", "admin", "ef-stream", "lark-sidecar",
+    for required in ("admin", "ef-stream", "lark-sidecar",
                      "bot", "heartbeat-loop", "session-backup",
                      "conversation-audit"):
         assert required in names, f"components.yaml missing {required}"
-    # The 23-day corpse and the silent stream must be critical (daemon probes)
+    # The silent stream must be critical (daemon probes). The dashboard —
+    # the original 23-day corpse — is retired (2026-08-21) and must stay
+    # out of the manifest rather than rot as a permanently-red entry.
     crit = {c["name"] for c in comps if c.get("critical")}
-    assert "dashboard" in crit and "ef-stream" in crit
+    assert "ef-stream" in crit
+    assert "dashboard" not in names
     # REQ-82: the audit had no scheduler mount and sat idle for 13 days —
     # Freshness must come from the latest completed audit, not database mtime:
     # migrations and issue resolution also write the file. One missed daily
@@ -220,13 +223,13 @@ def test_diag_alert_dedup_window(tmp_path, monkeypatch):
     monkeypatch.setattr(dp, "_send", lambda text, uid: (sent.append(text), True)[1])
     monkeypatch.setattr(dp, "_user_id", lambda: "ou_test")
     pre_file = tmp_path / "pre.txt"
-    pre_file.write_text("⚠️ dashboard: unreachable\n")
+    pre_file.write_text("⚠️ admin: unreachable\n")
     monkeypatch.setenv("DIAG_PRE_FILE", str(pre_file))
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("HEARTBEAT_OK"))
 
     dp.main()
     assert len(sent) == 1
-    assert "自诊断" in sent[0] and "dashboard" in sent[0]
+    assert "自诊断" in sent[0] and "admin" in sent[0]
 
     # Second run inside the 4h window: suppressed
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("HEARTBEAT_OK"))

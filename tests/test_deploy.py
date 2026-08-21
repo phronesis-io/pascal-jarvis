@@ -6,6 +6,7 @@ import core.deploy as deploy
 from core.delivery import DeliveryPipeline
 from core.deploy import (
     _dirty_runtime_paths,
+    deregister_runtime,
     register_runtime,
     revision_contains,
     smoke_delivery,
@@ -258,3 +259,29 @@ def test_revision_contains_rejects_unrelated_revision(tmp_path):
         root=tmp_path,
         runner=runner,
     ) is False
+
+
+def test_deregister_removes_only_the_retired_component_row(tmp_path):
+    """2026-08-21 dashboard retirement: a retired surface never re-registers,
+    so without an explicit teardown its dead row fails every unfiltered
+    verify forever. Deregistering it must not touch live components."""
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+    db_path = tmp_path / "jarvis.db"
+    register_runtime("bot", pid=os.getpid(), root=tmp_path, db_path=db_path)
+    register_runtime(
+        "dashboard", pid=999_999_999, root=tmp_path, db_path=db_path)
+
+    stale = verify_runtime(root=tmp_path, db_path=db_path)
+    assert any("dashboard" in issue for issue in stale["issues"])
+
+    assert deregister_runtime(
+        "dashboard", root=tmp_path, db_path=db_path) == {
+        "component": "dashboard", "removed": 1}
+    # Idempotent: a second teardown is a clean no-op.
+    assert deregister_runtime(
+        "dashboard", root=tmp_path, db_path=db_path)["removed"] == 0
+
+    after = verify_runtime(root=tmp_path, db_path=db_path)
+    assert not any("dashboard" in issue for issue in after["issues"])
+    assert [c["component"] for c in after["components"]] == ["bot"]

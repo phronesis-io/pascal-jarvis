@@ -286,7 +286,7 @@ class ActionProcessor:
     def _require_owner_callback(self) -> None:
         if not self.owner_authenticated:
             raise RuntimeError(
-                "owner decision requires an authenticated Item/dashboard callback"
+                "owner decision requires an authenticated Item callback"
             )
 
     # ── Feed / Content ──

@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import dashboard.db as db_module  # noqa: E402
+import core.db as db_module  # noqa: E402
 from core import attention_roi  # noqa: E402
 from core.memorial import (ATTENTION_ALERT, ATTENTION_DECISION,  # noqa: E402
                            ATTENTION_NOTICE)

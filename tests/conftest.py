@@ -136,7 +136,7 @@ def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
 def _isolate_runtime_database(monkeypatch, tmp_path):
     """Route every test's mutable runtime state to a private root.
 
-    Individual modules may still monkeypatch dashboard.db.DB_PATH when they
+    Individual modules may still monkeypatch core.db.DB_PATH when they
     need a named database. The environment overrides cover stores that resolve
     either JARVIS_DIR or JARVIS_DB_PATH and prevent CLI entry points from
     silently falling back to live repository state.
@@ -144,7 +144,7 @@ def _isolate_runtime_database(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setenv("JARVIS_DB_PATH", str(tmp_path / "jarvis.db"))
 
-    import dashboard.db as db_module
+    import core.db as db_module
     import core.intentions as intentions
 
     if db_module._connection is not None:

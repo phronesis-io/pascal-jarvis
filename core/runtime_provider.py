@@ -15,7 +15,7 @@ VALID_PREFERENCES = {"auto", "codex"}
 
 
 def _db():
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 

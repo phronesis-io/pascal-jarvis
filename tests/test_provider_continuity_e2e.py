@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core import codex_fallback, model_fallback, provider_health
 from core.matter_bridge import record_turn
 from core.prompt import build_system_prompt

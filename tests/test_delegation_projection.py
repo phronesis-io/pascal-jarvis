@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import dashboard.db as db_module
+import core.db as db_module
 import pytest
 
 from core import intentions

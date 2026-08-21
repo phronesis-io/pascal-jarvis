@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core import codex_fallback as cf
 
 

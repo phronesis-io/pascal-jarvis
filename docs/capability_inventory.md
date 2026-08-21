@@ -21,71 +21,69 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **233**
-- Status: keep **233**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **60**, dashboard-api **46**, dashboard-page **20**, heartbeat-task **40**, lark-command **21**, runtime-component **17**
+- Total: **165**
+- Status: keep **163**, fix **2**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **60**, heartbeat-task **40**, lark-command **21**, runtime-component **15**
 
 ## Inventory
 
 | ID | Kind | Status | Definition | Implementation | Runtime / entrypoint | Tests | Evidence gap |
 |---|---|---|---|---|---|---|---|
-| `component:admin` | runtime-component | **keep** | `components.yaml:109` | `core/components.py:618` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
-| `component:bot` | runtime-component | **keep** | `components.yaml:45` | `core/components.py:616` | python3 -m core.components --json | `tests/test_components_gating.py:417`, `tests/test_daemon_audit_fixes.py:552`, `tests/test_delegation_verify.py:274` | - |
-| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:141` | `core/components.py:625` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:196` | - |
-| `component:companion-voice` | runtime-component | **keep** | `components.yaml:164` | `core/components.py:619` | python3 -m core.components --json | `tests/test_companion.py:197` | - |
-| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:156` | `core/components.py:622` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
-| `component:daemon` | runtime-component | **keep** | `components.yaml:38` | `core/components.py:616` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
-| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:129` | `core/components.py:625` | python3 -m core.components --json | `tests/test_install_flow.py:231`, `tests/test_restart_loop_regression.py:194` | - |
-| `component:dashboard` | runtime-component | **keep** | `components.yaml:116` | `core/components.py:618` | python3 -m core.components --json | `tests/test_capability_contracts.py:196`, `tests/test_components_gating.py:43`, `tests/test_daemon_audit_fixes.py:552` | - |
-| `component:dashboard-launchd` | runtime-component | **keep** | `components.yaml:123` | `core/components.py:625` | python3 -m core.components --json | `tests/test_daemon_regressions.py:152`, `tests/test_install_flow.py:260`, `tests/test_restart_loop_regression.py:73` | - |
-| `component:ef-stream` | runtime-component | **keep** | `components.yaml:88` | `core/components.py:620` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:500`, `tests/test_reliability_v2.py:25` | - |
-| `component:external-deadman` | runtime-component | **keep** | `components.yaml:135` | `core/components.py:621` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
-| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:51` | `core/components.py:617` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:552`, `tests/test_daemon_regressions.py:136`, `tests/test_deploy.py:35` | - |
-| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:58` | `core/components.py:623` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:171` | - |
-| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:101` | `core/components.py:617` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:552`, `tests/test_reliability_v2.py:25` | - |
-| `component:session-backup` | runtime-component | **keep** | `components.yaml:148` | `core/components.py:619` | python3 -m core.components --json | `tests/test_components_gating.py:501`, `tests/test_reliability_v2.py:26` | - |
-| `component:taskline` | runtime-component | **keep** | `components.yaml:33` | `core/components.py:626` | python3 -m core.components --json | `tests/test_components_gating.py:432`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:223` | - |
-| `component:unified-delivery` | runtime-component | **keep** | `components.yaml:73` | `core/components.py:624` | python3 -m core.components --json | `tests/test_components_gating.py:258` | - |
+| `component:admin` | runtime-component | **keep** | `components.yaml:111` | `core/components.py:618` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
+| `component:bot` | runtime-component | **keep** | `components.yaml:47` | `core/components.py:616` | python3 -m core.components --json | `tests/test_components_gating.py:417`, `tests/test_daemon_audit_fixes.py:552`, `tests/test_delegation_verify.py:274` | - |
+| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:130` | `core/components.py:625` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:184` | - |
+| `component:companion-voice` | runtime-component | **keep** | `components.yaml:153` | `core/components.py:619` | python3 -m core.components --json | `tests/test_companion.py:197` | - |
+| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:145` | `core/components.py:622` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
+| `component:daemon` | runtime-component | **keep** | `components.yaml:40` | `core/components.py:616` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
+| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:118` | `core/components.py:625` | python3 -m core.components --json | `tests/test_install_flow.py:232`, `tests/test_restart_loop_regression.py:143` | - |
+| `component:ef-stream` | runtime-component | **keep** | `components.yaml:90` | `core/components.py:620` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:500`, `tests/test_reliability_v2.py:25` | - |
+| `component:external-deadman` | runtime-component | **keep** | `components.yaml:124` | `core/components.py:621` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
+| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:53` | `core/components.py:617` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:552`, `tests/test_daemon_regressions.py:136`, `tests/test_deploy.py:36` | - |
+| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:60` | `core/components.py:623` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:171` | - |
+| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:103` | `core/components.py:617` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:552`, `tests/test_reliability_v2.py:25` | - |
+| `component:session-backup` | runtime-component | **keep** | `components.yaml:137` | `core/components.py:619` | python3 -m core.components --json | `tests/test_components_gating.py:501`, `tests/test_reliability_v2.py:26`, `tests/test_restart_loop_regression.py:186` | - |
+| `component:taskline` | runtime-component | **keep** | `components.yaml:35` | `core/components.py:626` | python3 -m core.components --json | `tests/test_components_gating.py:432`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:224` | - |
+| `component:unified-delivery` | runtime-component | **keep** | `components.yaml:75` | `core/components.py:624` | python3 -m core.components --json | `tests/test_components_gating.py:258` | - |
 | `heartbeat:activity-log` | heartbeat-task | **keep** | `HEARTBEAT.md:932` | `tasks/activity_log_pre.sh:1`, `tasks/activity_log_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:83`, `tests/test_memory.py:140` | - |
-| `heartbeat:calendar-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:698` | `tasks/calendar_sync_pre.sh:1`, `tasks/calendar_sync_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_attention_roi.py:66`, `tests/test_card_residue_leak.py:161`, `tests/test_delivery_and_quiet_hours.py:69` | - |
+| `heartbeat:calendar-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:698` | `tasks/calendar_sync_pre.sh:1`, `tasks/calendar_sync_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_attention_roi.py:66`, `tests/test_card_residue_leak.py:161`, `tests/test_delivery_and_quiet_hours.py:67` | - |
 | `heartbeat:checkin` | heartbeat-task | **keep** | `HEARTBEAT.md:451` | `tasks/checkin_pre.sh:1`, `tasks/checkin_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:371`, `tests/test_card_delivery_closure.py:60`, `tests/test_checkin_post.py:40` | - |
-| `heartbeat:content-recommend` | heartbeat-task | **keep** | `HEARTBEAT.md:513` | `tasks/content_recommend_pre.sh:1`, `tasks/content_recommend_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_brain_health.py:65`, `tests/test_delivery_and_quiet_hours.py:70`, `tests/test_engagement.py:30` | - |
+| `heartbeat:content-recommend` | heartbeat-task | **keep** | `HEARTBEAT.md:513` | `tasks/content_recommend_pre.sh:1`, `tasks/content_recommend_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_brain_health.py:65`, `tests/test_delivery_and_quiet_hours.py:68`, `tests/test_engagement.py:30` | - |
 | `heartbeat:cross-session-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:848` | `tasks/cross_session_pre.sh:1`, `tasks/cross_session_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:309`, `tests/test_conversation_audit.py:368`, `tests/test_cross_session_memory_e2e.py:53` | - |
-| `heartbeat:daily-plan` | heartbeat-task | **keep** | `HEARTBEAT.md:954` | `tasks/daily_plan_pre.sh:1`, `tasks/daily_plan_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card.py:200`, `tests/test_daily_plan_post.py:42`, `tests/test_delivery_and_quiet_hours.py:419` | - |
-| `heartbeat:daily-reflect` | heartbeat-task | **keep** | `HEARTBEAT.md:994` | `tasks/daily_reflect_pre.sh:1`, `tasks/daily_reflect_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_residue_leak.py:98`, `tests/test_dashboard_routes.py:1074`, `tests/test_heartbeat_loop.py:158` | - |
+| `heartbeat:daily-plan` | heartbeat-task | **keep** | `HEARTBEAT.md:954` | `tasks/daily_plan_pre.sh:1`, `tasks/daily_plan_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card.py:200`, `tests/test_daily_plan_post.py:42`, `tests/test_delivery_and_quiet_hours.py:417` | - |
+| `heartbeat:daily-reflect` | heartbeat-task | **keep** | `HEARTBEAT.md:994` | `tasks/daily_reflect_pre.sh:1`, `tasks/daily_reflect_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_residue_leak.py:98`, `tests/test_heartbeat_loop.py:158`, `tests/test_journal_capture.py:70` | - |
 | `heartbeat:delegation-reconcile` | heartbeat-task | **keep** | `HEARTBEAT.md:1097` | `tasks/delegation_reconcile_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_delegation_projection.py:247`, `tests/test_delegation_reconcile.py:429`, `tests/test_eigenflux_friend_actions.py:221` | - |
-| `heartbeat:eigenflux-feed-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:133` | `tasks/eigenflux_feed_pre.sh:1`, `tasks/eigenflux_feed_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:304`, `tests/test_dashboard_routes.py:989`, `tests/test_delivery_and_quiet_hours.py:69` | - |
-| `heartbeat:eigenflux-friends` | heartbeat-task | **keep** | `HEARTBEAT.md:286` | `tasks/eigenflux_friends_pre.sh:1`, `tasks/eigenflux_friends_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:251`, `tests/test_ef_stream_loop.py:71`, `tests/test_eigenflux_dashboard.py:167` | - |
-| `heartbeat:eigenflux-inbox-reconcile` | heartbeat-task | **keep** | `HEARTBEAT.md:125` | `tasks/eigenflux_ingress_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_dashboard.py:73` | - |
-| `heartbeat:eigenflux-preinstall` | heartbeat-task | **keep** | `HEARTBEAT.md:1181` | `tasks/eigenflux_preinstall_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_dashboard.py:162`, `tests/test_eigenflux_skill_contracts.py:136`, `tests/test_heartbeat.py:1333` | - |
-| `heartbeat:eigenflux-profile` | heartbeat-task | **keep** | `HEARTBEAT.md:275` | `tasks/eigenflux_profile_pre.sh:1`, `tasks/eigenflux_profile_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_dashboard.py:76` | - |
-| `heartbeat:eigenflux-publish` | heartbeat-task | **keep** | `HEARTBEAT.md:213` | `tasks/eigenflux_publish_pre.sh:1`, `tasks/eigenflux_publish_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:179`, `tests/test_card_delivery_closure.py:47`, `tests/test_eigenflux_dashboard.py:52` | - |
+| `heartbeat:eigenflux-feed-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:133` | `tasks/eigenflux_feed_pre.sh:1`, `tasks/eigenflux_feed_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:304`, `tests/test_delivery_and_quiet_hours.py:67`, `tests/test_eigenflux_feed_post.py:177` | - |
+| `heartbeat:eigenflux-friends` | heartbeat-task | **keep** | `HEARTBEAT.md:286` | `tasks/eigenflux_friends_pre.sh:1`, `tasks/eigenflux_friends_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:251`, `tests/test_ef_stream_loop.py:71`, `tests/test_eigenflux_friend_actions.py:15` | - |
+| `heartbeat:eigenflux-inbox-reconcile` | heartbeat-task | **fix** | `HEARTBEAT.md:125` | `tasks/eigenflux_ingress_pre.sh:1` | python3 -m core.heartbeat_loop | - | missing test reference |
+| `heartbeat:eigenflux-preinstall` | heartbeat-task | **keep** | `HEARTBEAT.md:1181` | `tasks/eigenflux_preinstall_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_skill_contracts.py:136`, `tests/test_heartbeat.py:1333`, `tests/test_interaction_quality_p0.py:228` | - |
+| `heartbeat:eigenflux-profile` | heartbeat-task | **fix** | `HEARTBEAT.md:275` | `tasks/eigenflux_profile_pre.sh:1`, `tasks/eigenflux_profile_post.py:1` | python3 -m core.heartbeat_loop | - | missing test reference |
+| `heartbeat:eigenflux-publish` | heartbeat-task | **keep** | `HEARTBEAT.md:213` | `tasks/eigenflux_publish_pre.sh:1`, `tasks/eigenflux_publish_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:179`, `tests/test_card_delivery_closure.py:47`, `tests/test_eigenflux_feed_post.py:285` | - |
 | `heartbeat:engagement-analyze` | heartbeat-task | **keep** | `HEARTBEAT.md:893` | `tasks/engagement_analyze_pre.sh:1`, `tasks/engagement_analyze_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_engagement.py:171`, `tests/test_interaction_quality_p0.py:170` | - |
 | `heartbeat:exercise-week` | heartbeat-task | **keep** | `HEARTBEAT.md:1298` | `tasks/exercise_week_pre.sh:1`, `tasks/exercise_week_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_lifelog.py:209`, `tests/test_memorial.py:1961` | - |
 | `heartbeat:explain-card` | heartbeat-task | **keep** | `HEARTBEAT.md:439` | `tasks/explain_card_pre.sh:1`, `tasks/explain_card_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_confused_button.py:109` | - |
 | `heartbeat:intention-check` | heartbeat-task | **keep** | `HEARTBEAT.md:723` | `tasks/intentions_pre.sh:1`, `tasks/intentions_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:119`, `tests/test_brain_health.py:227`, `tests/test_card_delivery_closure.py:146` | - |
-| `heartbeat:iteration-observe` | heartbeat-task | **keep** | `HEARTBEAT.md:1106` | `tasks/iteration_observe_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:107` | - |
-| `heartbeat:log-maintenance` | heartbeat-task | **keep** | `HEARTBEAT.md:1115` | `tasks/log_maintenance_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:108`, `tests/test_log_maintenance.py:32` | - |
-| `heartbeat:mail-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:337` | `tasks/mail_triage_pre.sh:1`, `tasks/mail_triage_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_and_quiet_hours.py:108`, `tests/test_heartbeat.py:108`, `tests/test_heartbeat_loop.py:134` | - |
+| `heartbeat:iteration-observe` | heartbeat-task | **keep** | `HEARTBEAT.md:1106` | `tasks/iteration_observe_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:104` | - |
+| `heartbeat:log-maintenance` | heartbeat-task | **keep** | `HEARTBEAT.md:1115` | `tasks/log_maintenance_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:105`, `tests/test_log_maintenance.py:32` | - |
+| `heartbeat:mail-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:337` | `tasks/mail_triage_pre.sh:1`, `tasks/mail_triage_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_and_quiet_hours.py:106`, `tests/test_heartbeat.py:108`, `tests/test_heartbeat_loop.py:134` | - |
 | `heartbeat:memorial-escrow` | heartbeat-task | **keep** | `HEARTBEAT.md:1123` | `tasks/memorial_escrow_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:655`, `tests/test_memorial_escrow.py:169`, `tests/test_no_dead_ends.py:66` | - |
 | `heartbeat:memory-consolidate` | heartbeat-task | **keep** | `HEARTBEAT.md:615` | `tasks/memory_consolidate_pre.sh:1`, `tasks/memory_consolidate_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_cross_session_memory_e2e.py:64`, `tests/test_memory_consolidate_post.py:47` | - |
 | `heartbeat:memory-daily` | heartbeat-task | **keep** | `HEARTBEAT.md:667` | `tasks/memory_daily_pre.sh:1`, `tasks/memory_daily_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:632`, `tests/test_memory_audit_fixes.py:236` | - |
 | `heartbeat:memory-hourly` | heartbeat-task | **keep** | `HEARTBEAT.md:657` | `tasks/memory_hourly_pre.sh:1`, `tasks/memory_hourly_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_brain_health.py:50`, `tests/test_heartbeat.py:616`, `tests/test_heartbeat_regressions.py:275` | - |
 | `heartbeat:memory-tidy` | heartbeat-task | **keep** | `HEARTBEAT.md:826` | `tasks/memory_tidy_pre.sh:1`, `tasks/memory_tidy_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:89`, `tests/test_heartbeat.py:129`, `tests/test_memory.py:592` | - |
 | `heartbeat:memory-weekly` | heartbeat-task | **keep** | `HEARTBEAT.md:678` | `tasks/memory_weekly_pre.sh:1`, `tasks/memory_weekly_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_capability_contracts.py:27` | - |
-| `heartbeat:metrics-digest` | heartbeat-task | **keep** | `HEARTBEAT.md:583` | `tasks/metrics_digest_pre.sh:1`, `tasks/metrics_digest_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:70`, `tests/test_companion.py:100`, `tests/test_dashboard_routes.py:1022` | - |
+| `heartbeat:metrics-digest` | heartbeat-task | **keep** | `HEARTBEAT.md:583` | `tasks/metrics_digest_pre.sh:1`, `tasks/metrics_digest_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:70`, `tests/test_companion.py:100`, `tests/test_ledger_accounting.py:87` | - |
 | `heartbeat:morning-anchor` | heartbeat-task | **keep** | `HEARTBEAT.md:488` | `tasks/morning_anchor_pre.sh:1`, `tasks/morning_anchor_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_pipeline.py:181`, `tests/test_lifelog.py:233`, `tests/test_presence.py:213` | - |
 | `heartbeat:perception-collect` | heartbeat-task | **keep** | `HEARTBEAT.md:571` | `tasks/perception_collect_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_brain_health.py:83` | - |
 | `heartbeat:personal-site` | heartbeat-task | **keep** | `HEARTBEAT.md:1236` | `tasks/personal_site_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:1620` | - |
-| `heartbeat:phronesis-monitor` | heartbeat-task | **keep** | `HEARTBEAT.md:1029` | `tasks/phronesis_monitor_pre.sh:1`, `tasks/phronesis_monitor_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:70`, `tests/test_delivery_and_quiet_hours.py:361` | - |
-| `heartbeat:provider-canary` | heartbeat-task | **keep** | `HEARTBEAT.md:1134` | `tasks/provider_canary_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:109`, `tests/test_reliability_v2.py:453` | - |
+| `heartbeat:phronesis-monitor` | heartbeat-task | **keep** | `HEARTBEAT.md:1029` | `tasks/phronesis_monitor_pre.sh:1`, `tasks/phronesis_monitor_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:70`, `tests/test_delivery_and_quiet_hours.py:359` | - |
+| `heartbeat:provider-canary` | heartbeat-task | **keep** | `HEARTBEAT.md:1134` | `tasks/provider_canary_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:106`, `tests/test_reliability_v2.py:456` | - |
 | `heartbeat:reply-followup` | heartbeat-task | **keep** | `HEARTBEAT.md:420` | `tasks/reply_followup_pre.sh:1`, `tasks/reply_followup_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:85`, `tests/test_memorial_boundaries.py:27`, `tests/test_reply_followup.py:52` | - |
-| `heartbeat:repos-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:1143` | `tasks/repos_sync_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:325`, `tests/test_card_delivery_closure.py:70`, `tests/test_dashboard_routes.py:818` | - |
+| `heartbeat:repos-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:1143` | `tasks/repos_sync_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:325`, `tests/test_card_delivery_closure.py:70`, `tests/test_reliability_v2.py:180` | - |
 | `heartbeat:routine-run` | heartbeat-task | **keep** | `HEARTBEAT.md:785` | `tasks/routine_run_pre.sh:1`, `tasks/routine_run_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:137`, `tests/test_heartbeat_regressions.py:227`, `tests/test_routines.py:506` | - |
 | `heartbeat:self-diagnostic` | heartbeat-task | **keep** | `HEARTBEAT.md:1215` | `tasks/self_diagnostic_pre.sh:1`, `tasks/self_diagnostic_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:92`, `tests/test_daemon_audit_fixes.py:197`, `tests/test_heartbeat.py:1008` | - |
 | `heartbeat:self-improve-cycle` | heartbeat-task | **keep** | `HEARTBEAT.md:413` | `tasks/self_improve_cycle_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_self_improve_cycle.py:74` | - |
 | `heartbeat:thinking-review` | heartbeat-task | **keep** | `HEARTBEAT.md:1061` | `tasks/thinking_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:919` | - |
-| `heartbeat:weekly-review` | heartbeat-task | **keep** | `HEARTBEAT.md:1249` | `tasks/weekly_review_pre.sh:1`, `tasks/weekly_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:102`, `tests/test_weekly_review_post.py:48` | - |
+| `heartbeat:weekly-review` | heartbeat-task | **keep** | `HEARTBEAT.md:1249` | `tasks/weekly_review_pre.sh:1`, `tasks/weekly_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:99`, `tests/test_weekly_review_post.py:48` | - |
 | `cli:core.actions` | core-cli | **keep** | `core/actions.py:1017` | `core/actions.py:1017` | python3 -m core.actions | `tests/test_actions.py:288`, `tests/test_bot_trust_boundary.py:43`, `tests/test_card.py:101` | - |
 | `cli:core.attention_roi` | core-cli | **keep** | `core/attention_roi.py:347` | `core/attention_roi.py:347` | python3 -m core.attention_roi | `tests/test_attention_roi.py:51`, `tests/test_import_graph.py:152`, `tests/test_memorial_docket_quality.py:175` | - |
 | `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:591` | `core/aux_model.py:591` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:425` | - |
@@ -96,31 +94,31 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.conversation_context` | core-cli | **keep** | `core/conversation_context.py:339` | `core/conversation_context.py:339` | python3 -m core.conversation_context | `tests/test_bot_trust_boundary.py:34`, `tests/test_memorial.py:630` | - |
 | `cli:core.cross_session` | core-cli | **keep** | `core/cross_session.py:237` | `core/cross_session.py:237` | python3 -m core.cross_session | `tests/test_cross_session_context.py:349`, `tests/test_cross_session_index.py:55`, `tests/test_cross_session_memory_e2e.py:53` | - |
 | `cli:core.cross_session_index` | core-cli | **keep** | `core/cross_session_index.py:584` | `core/cross_session_index.py:584` | python3 -m core.cross_session_index | `tests/test_cross_session_index.py:55` | - |
-| `cli:core.deadman` | core-cli | **keep** | `core/deadman.py:161` | `core/deadman.py:161` | python3 -m core.deadman | `tests/test_daemon_regressions.py:158`, `tests/test_deadman.py:23` | - |
+| `cli:core.deadman` | core-cli | **keep** | `core/deadman.py:161` | `core/deadman.py:161` | python3 -m core.deadman | `tests/test_daemon_regressions.py:159`, `tests/test_deadman.py:23` | - |
 | `cli:core.delegation_cli` | core-cli | **keep** | `core/delegation_cli.py:154` | `core/delegation_cli.py:154` | python3 -m core.delegation_cli | `tests/test_delegation_cli.py:56` | - |
 | `cli:core.delegation_reconcile` | core-cli | **keep** | `core/delegation_reconcile.py:537` | `core/delegation_reconcile.py:537` | python3 -m core.delegation_reconcile | `tests/test_delegation_projection.py:247`, `tests/test_delegation_reconcile.py:429`, `tests/test_eigenflux_friend_actions.py:221` | - |
 | `cli:core.delegation_shadow` | core-cli | **keep** | `core/delegation_shadow.py:318` | `core/delegation_shadow.py:318` | python3 -m core.delegation_shadow | `tests/test_capability_contracts.py:117` | - |
 | `cli:core.delegation_verify` | core-cli | **keep** | `core/delegation_verify.py:584` | `core/delegation_verify.py:584` | python3 -m core.delegation_verify | `tests/test_delegation_cli.py:76`, `tests/test_eigenflux_messages.py:778` | - |
 | `cli:core.delivery` | core-cli | **keep** | `core/delivery.py:1818` | `core/delivery.py:1818` | python3 -m core.delivery | `tests/test_admin_api.py:403`, `tests/test_admin_destructive.py:262`, `tests/test_bot_trust_boundary.py:60` | - |
-| `cli:core.deploy` | core-cli | **keep** | `core/deploy.py:441` | `core/deploy.py:441` | python3 -m core.deploy | `tests/test_daemon_audit_fixes.py:369`, `tests/test_daemon_regressions.py:124`, `tests/test_delegation_reconcile.py:204` | - |
+| `cli:core.deploy` | core-cli | **keep** | `core/deploy.py:478` | `core/deploy.py:478` | python3 -m core.deploy | `tests/test_daemon_audit_fixes.py:369`, `tests/test_daemon_regressions.py:124`, `tests/test_dashboard_retirement.py:104` | - |
 | `cli:core.doc_guard` | core-cli | **keep** | `core/doc_guard.py:159` | `core/doc_guard.py:159` | python3 -m core.doc_guard | `tests/test_doc_guard.py:58` | - |
-| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:941` | `core/ef_stream_loop.py:941` | python3 -m core.ef_stream_loop | `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1044` | - |
+| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:941` | `core/ef_stream_loop.py:941` | python3 -m core.ef_stream_loop | `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1034` | - |
 | `cli:core.eigenflux_ingress` | core-cli | **keep** | `core/eigenflux_ingress.py:410` | `core/eigenflux_ingress.py:410` | python3 -m core.eigenflux_ingress | `tests/test_eigenflux_ingress.py:265` | - |
 | `cli:core.eigenflux_messages` | core-cli | **keep** | `core/eigenflux_messages.py:1396` | `core/eigenflux_messages.py:1396` | python3 -m core.eigenflux_messages | `tests/test_delegation_projection.py:302`, `tests/test_eigenflux_friend_actions.py:117`, `tests/test_eigenflux_friends_post.py:39` | - |
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:128` | - |
-| `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_capability_contracts.py:187`, `tests/test_circuit_breaker.py:109`, `tests/test_cross_session_post.py:228` | - |
-| `cli:core.geo` | core-cli | **keep** | `core/geo.py:487` | `core/geo.py:487` | python3 -m core.geo | `tests/test_dashboard_scheduler.py:163`, `tests/test_geo.py:68`, `tests/test_weather.py:111` | - |
+| `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_circuit_breaker.py:109`, `tests/test_core_db.py:132`, `tests/test_core_db_audit.py:94` | - |
+| `cli:core.geo` | core-cli | **keep** | `core/geo.py:487` | `core/geo.py:487` | python3 -m core.geo | `tests/test_geo.py:68`, `tests/test_weather.py:111` | - |
 | `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:1959` | `core/heartbeat_loop.py:1959` | python3 -m core.heartbeat_loop | `tests/test_daemon_regressions.py:128`, `tests/test_heartbeat_loop.py:99`, `tests/test_import_graph.py:157` | - |
-| `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3603` | `core/intentions.py:3603` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_capability_contracts.py:187` | - |
+| `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3604` | `core/intentions.py:3604` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_card_residue_leak.py:56` | - |
 | `cli:core.iteration_loop` | core-cli | **keep** | `core/iteration_loop.py:1519` | `core/iteration_loop.py:1519` | python3 -m core.iteration_loop | `tests/test_iteration_loop.py:59` | - |
 | `cli:core.jobs` | core-cli | **keep** | `core/jobs.py:455` | `core/jobs.py:455` | python3 -m core.jobs | `tests/test_actions.py:676`, `tests/test_admin_api.py:397`, `tests/test_aux_model.py:253` | - |
 | `cli:core.lark_auth` | core-cli | **keep** | `core/lark_auth.py:190` | `core/lark_auth.py:190` | python3 -m core.lark_auth | `tests/test_lark_auth.py:85`, `tests/test_reply_followup.py:75` | - |
 | `cli:core.lifelog` | core-cli | **keep** | `core/lifelog.py:675` | `core/lifelog.py:675` | python3 -m core.lifelog | `tests/test_lifelog.py:62`, `tests/test_presence.py:212` | - |
-| `cli:core.log_maintenance` | core-cli | **keep** | `core/log_maintenance.py:312` | `core/log_maintenance.py:312` | python3 -m core.log_maintenance | `tests/test_log_maintenance.py:32` | - |
+| `cli:core.log_maintenance` | core-cli | **keep** | `core/log_maintenance.py:308` | `core/log_maintenance.py:308` | python3 -m core.log_maintenance | `tests/test_log_maintenance.py:32` | - |
 | `cli:core.mail_draft` | core-cli | **keep** | `core/mail_draft.py:267` | `core/mail_draft.py:267` | python3 -m core.mail_draft | `tests/test_mail_draft.py:42` | - |
-| `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:780` | `core/matter_bridge.py:780` | python3 -m core.matter_bridge | `tests/test_dashboard_routes.py:1275`, `tests/test_prompt.py:161`, `tests/test_session_lifecycle.py:471` | - |
+| `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:780` | `core/matter_bridge.py:780` | python3 -m core.matter_bridge | `tests/test_prompt.py:161`, `tests/test_session_lifecycle.py:471` | - |
 | `cli:core.matter_executor` | core-cli | **keep** | `core/matter_executor.py:234` | `core/matter_executor.py:234` | python3 -m core.matter_executor | `tests/test_matter_continuity.py:250` | - |
-| `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_continuity.py:307`, `tests/test_dashboard_routes.py:1186`, `tests/test_import_graph.py:154` | - |
+| `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_continuity.py:300`, `tests/test_import_graph.py:154`, `tests/test_matter_continuity.py:281` | - |
 | `cli:core.memorial` | core-cli | **keep** | `core/memorial.py:3693` | `core/memorial.py:3693` | python3 -m core.memorial | `tests/test_absence.py:128`, `tests/test_attention_roi.py:134`, `tests/test_bot_trust_boundary.py:63` | - |
 | `cli:core.memorial_thread` | core-cli | **keep** | `core/memorial_thread.py:135` | `core/memorial_thread.py:135` | python3 -m core.memorial_thread | `tests/test_bot_trust_boundary.py:63`, `tests/test_import_graph.py:161`, `tests/test_matter_continuity.py:309` | - |
 | `cli:core.metrics_digest` | core-cli | **keep** | `core/metrics_digest.py:250` | `core/metrics_digest.py:250` | python3 -m core.metrics_digest | `tests/test_metrics_digest.py:294` | - |
@@ -130,88 +128,22 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.perception` | core-cli | **keep** | `core/perception.py:557` | `core/perception.py:557` | python3 -m core.perception | `tests/test_brain_health.py:83`, `tests/test_metrics_digest.py:333`, `tests/test_perception.py:133` | - |
 | `cli:core.presence` | core-cli | **keep** | `core/presence.py:233` | `core/presence.py:233` | python3 -m core.presence | `tests/test_presence.py:56` | - |
 | `cli:core.prompt` | core-cli | **keep** | `core/prompt.py:393` | `core/prompt.py:393` | python3 -m core.prompt | `tests/test_actions.py:244`, `tests/test_admin.py:68`, `tests/test_admin_destructive.py:347` | - |
-| `cli:core.provider_health` | core-cli | **keep** | `core/provider_health.py:782` | `core/provider_health.py:782` | python3 -m core.provider_health | `tests/test_aux_model.py:82`, `tests/test_dashboard_routes.py:1599`, `tests/test_heartbeat.py:367` | - |
+| `cli:core.provider_health` | core-cli | **keep** | `core/provider_health.py:782` | `core/provider_health.py:782` | python3 -m core.provider_health | `tests/test_aux_model.py:82`, `tests/test_heartbeat.py:367`, `tests/test_provider_continuity_e2e.py:414` | - |
 | `cli:core.reaction_save` | core-cli | **keep** | `core/reaction_save.py:102` | `core/reaction_save.py:102` | python3 -m core.reaction_save | `tests/test_reaction_save.py:27` | - |
 | `cli:core.release_gate` | core-cli | **keep** | `core/release_gate.py:464` | `core/release_gate.py:464` | python3 -m core.release_gate | `tests/test_release_gate.py:642` | - |
 | `cli:core.reply_closure` | core-cli | **keep** | `core/reply_closure.py:88` | `core/reply_closure.py:88` | python3 -m core.reply_closure | `tests/test_model_fallback.py:274` | - |
 | `cli:core.resource_health` | core-cli | **keep** | `core/resource_health.py:140` | `core/resource_health.py:140` | python3 -m core.resource_health | `tests/test_resource_health.py:5` | - |
 | `cli:core.responsiveness` | core-cli | **keep** | `core/responsiveness.py:79` | `core/responsiveness.py:79` | python3 -m core.responsiveness | `tests/test_responsiveness.py:39` | - |
-| `cli:core.routines` | core-cli | **keep** | `core/routines.py:916` | `core/routines.py:916` | python3 -m core.routines | `tests/test_capability_contracts.py:185`, `tests/test_routines.py:70` | - |
+| `cli:core.routines` | core-cli | **keep** | `core/routines.py:916` | `core/routines.py:916` | python3 -m core.routines | `tests/test_routines.py:70` | - |
 | `cli:core.runtime_provider` | core-cli | **keep** | `core/runtime_provider.py:76` | `core/runtime_provider.py:76` | python3 -m core.runtime_provider | `tests/test_capability_contracts.py:57` | - |
-| `cli:core.sched_events` | core-cli | **keep** | `core/sched_events.py:286` | `core/sched_events.py:286` | python3 -m core.sched_events | `tests/test_absence.py:95`, `tests/test_admin_api.py:370`, `tests/test_dashboard_routes.py:313` | - |
+| `cli:core.sched_events` | core-cli | **keep** | `core/sched_events.py:286` | `core/sched_events.py:286` | python3 -m core.sched_events | `tests/test_absence.py:95`, `tests/test_admin_api.py:370`, `tests/test_heartbeat.py:1382` | - |
 | `cli:core.self_improve_cycle` | core-cli | **keep** | `core/self_improve_cycle.py:111` | `core/self_improve_cycle.py:111` | python3 -m core.self_improve_cycle | `tests/test_self_improve_cycle.py:74` | - |
 | `cli:core.selfmon` | core-cli | **keep** | `core/selfmon.py:634` | `core/selfmon.py:634` | python3 -m core.selfmon | `tests/test_delivery_pipeline.py:154`, `tests/test_memorial.py:128`, `tests/test_memorial_docket_quality.py:83` | - |
 | `cli:core.skip_digest` | core-cli | **keep** | `core/skip_digest.py:437` | `core/skip_digest.py:437` | python3 -m core.skip_digest | `tests/test_skip_digest.py:95`, `tests/test_skip_digest_arm.py:99` | - |
 | `cli:core.taskline_bridge` | core-cli | **keep** | `core/taskline_bridge.py:507` | `core/taskline_bridge.py:507` | python3 -m core.taskline_bridge | `tests/test_delegation_reconcile.py:224` | - |
 | `cli:core.usage_stats` | core-cli | **keep** | `core/usage_stats.py:468` | `core/usage_stats.py:468` | python3 -m core.usage_stats | `tests/test_capability_contracts.py:71` | - |
-| `cli:core.watermarks` | core-cli | **keep** | `core/watermarks.py:271` | `core/watermarks.py:271` | python3 -m core.watermarks | `tests/test_reliability_v2.py:393` | - |
+| `cli:core.watermarks` | core-cli | **keep** | `core/watermarks.py:271` | `core/watermarks.py:271` | python3 -m core.watermarks | `tests/test_reliability_v2.py:396` | - |
 | `cli:core.weather` | core-cli | **keep** | `core/weather.py:208` | `core/weather.py:208` | python3 -m core.weather | `tests/test_weather.py:87` | - |
-| `route:page:/` | dashboard-page | **keep** | `dashboard/pages/home.py:275` | `dashboard/pages/home.py:276` | / | `tests/test_dashboard_routes.py:1513`, `tests/test_reliability_v2.py:309`, `tests/test_timeutil.py:31` | - |
-| `route:page:/agent-calendar` | dashboard-page | **keep** | `dashboard/pages/agent_calendar.py:197` | `dashboard/pages/agent_calendar.py:198` | /agent-calendar | `tests/test_capability_contracts.py:185` | - |
-| `route:page:/bookmarks` | dashboard-page | **keep** | `dashboard/pages/bookmarks.py:43` | `dashboard/pages/bookmarks.py:44` | /bookmarks | `tests/test_dashboard_routes.py:1181` | - |
-| `route:page:/delegations` | dashboard-page | **keep** | `dashboard/pages/delegations.py:111` | `dashboard/pages/delegations.py:112` | /delegations | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/delegations/{param}` | dashboard-page | **keep** | `dashboard/pages/delegations.py:186` | `dashboard/pages/delegations.py:187` | /delegations/{delegation_id} | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/eigenflux` | dashboard-page | **keep** | `dashboard/pages/eigenflux.py:240` | `dashboard/pages/eigenflux.py:241` | /eigenflux | `tests/test_capability_contracts.py:185` | - |
-| `route:page:/engagement` | dashboard-page | **keep** | `dashboard/pages/engagement.py:188` | `dashboard/pages/engagement.py:189` | /engagement | `tests/test_capability_contracts.py:187` | - |
-| `route:page:/intentions` | dashboard-page | **keep** | `dashboard/pages/intentions.py:316` | `dashboard/pages/intentions.py:317` | /intentions | `tests/test_capability_contracts.py:187` | - |
-| `route:page:/items` | dashboard-page | **keep** | `dashboard/pages/items.py:268` | `dashboard/pages/items.py:269` | /items | `tests/test_dashboard_routes.py:1510` | - |
-| `route:page:/items/{param}` | dashboard-page | **keep** | `dashboard/pages/items.py:484` | `dashboard/pages/items.py:485` | /items/{memorial_id} | `tests/test_dashboard_routes.py:1510` | - |
-| `route:page:/matters` | dashboard-page | **keep** | `dashboard/pages/matters.py:97` | `dashboard/pages/matters.py:98` | /matters | `tests/test_dashboard_routes.py:1188` | - |
-| `route:page:/matters/{param}` | dashboard-page | **keep** | `dashboard/pages/matters.py:142` | `dashboard/pages/matters.py:143` | /matters/{matter_id} | `tests/test_dashboard_routes.py:1188` | - |
-| `route:page:/memorials` | dashboard-page | **keep** | `dashboard/pages/memorials.py:18` | `dashboard/pages/memorials.py:19` | /memorials | `tests/test_capability_contracts.py:185` | - |
-| `route:page:/ops` | dashboard-page | **keep** | `dashboard/pages/ops.py:265` | `dashboard/pages/ops.py:266` | /ops | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/routines` | dashboard-page | **keep** | `dashboard/pages/routines.py:148` | `dashboard/pages/routines.py:149` | /routines | `tests/test_capability_contracts.py:185` | - |
-| `route:page:/settings` | dashboard-page | **keep** | `dashboard/pages/settings.py:91` | `dashboard/pages/settings.py:92` | /settings | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/signals` | dashboard-page | **keep** | `dashboard/pages/signals.py:97` | `dashboard/pages/signals.py:98` | /signals | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/tasks` | dashboard-page | **keep** | `dashboard/pages/tasks.py:89` | `dashboard/pages/tasks.py:90` | /tasks | `tests/test_capability_contracts.py:187` | - |
-| `route:page:/thinking` | dashboard-page | **keep** | `dashboard/pages/thinking.py:148` | `dashboard/pages/thinking.py:149` | /thinking | `tests/test_capability_contracts.py:186` | - |
-| `route:page:/usage` | dashboard-page | **keep** | `dashboard/pages/usage.py:117` | `dashboard/pages/usage.py:118` | /usage | `tests/test_capability_contracts.py:185` | - |
-| `route:delete:/api/bookmarks/{param}` | dashboard-api | **keep** | `dashboard/api.py:108` | `dashboard/api.py:109` | /api/bookmarks/{bookmark_id} | `tests/test_dashboard_routes.py:1195` | - |
-| `route:delete:/api/matters/{param}/links/{param}` | dashboard-api | **keep** | `dashboard/api.py:327` | `dashboard/api.py:328` | /api/matters/{matter_id}/links/{link_id} | `tests/test_dashboard_routes.py:1236` | - |
-| `route:delete:/api/tasks/{param}` | dashboard-api | **keep** | `dashboard/api.py:168` | `dashboard/api.py:169` | /api/tasks/{task_id} | `tests/test_dashboard_routes.py:1208` | - |
-| `route:get:/api/bookmarks` | dashboard-api | **keep** | `dashboard/api.py:90` | `dashboard/api.py:91` | /api/bookmarks | `tests/test_dashboard_routes.py:1195` | - |
-| `route:get:/api/delegations` | dashboard-api | **keep** | `dashboard/api.py:566` | `dashboard/api.py:567` | /api/delegations | `tests/test_dashboard_routes.py:1379` | - |
-| `route:get:/api/delegations/metrics` | dashboard-api | **keep** | `dashboard/api.py:583` | `dashboard/api.py:584` | /api/delegations/metrics | `tests/test_delegations.py:934` | - |
-| `route:get:/api/delegations/{param}` | dashboard-api | **keep** | `dashboard/api.py:588` | `dashboard/api.py:589` | /api/delegations/{delegation_id} | `tests/test_dashboard_routes.py:1379` | - |
-| `route:get:/api/delegations/{param}/evidence` | dashboard-api | **keep** | `dashboard/api.py:598` | `dashboard/api.py:599` | /api/delegations/{delegation_id}/evidence | `tests/test_dashboard_routes.py:1379` | - |
-| `route:get:/api/deliveries` | dashboard-api | **keep** | `dashboard/api.py:421` | `dashboard/api.py:422` | /api/deliveries | `tests/test_dashboard_routes.py:1361` | - |
-| `route:get:/api/engagement/stats` | dashboard-api | **keep** | `dashboard/api.py:241` | `dashboard/api.py:242` | /api/engagement/stats | `tests/test_dashboard.py:139`, `tests/test_dashboard_scheduler.py:299` | - |
-| `route:get:/api/handoffs` | dashboard-api | **keep** | `dashboard/api.py:451` | `dashboard/api.py:452` | /api/handoffs | `tests/test_dashboard_routes.py:1439` | - |
-| `route:get:/api/health` | dashboard-api | **keep** | `dashboard/api.py:668` | `dashboard/api.py:669` | /api/health | `tests/test_dashboard_routes.py:1590` | - |
-| `route:get:/api/items` | dashboard-api | **keep** | `dashboard/api.py:385` | `dashboard/api.py:386` | /api/items | `tests/test_dashboard_routes.py:1333` | - |
-| `route:get:/api/iteration/proposals` | dashboard-api | **keep** | `dashboard/api.py:640` | `dashboard/api.py:641` | /api/iteration/proposals | `tests/test_dashboard_routes.py:1417` | - |
-| `route:get:/api/iteration/proposals/{param}` | dashboard-api | **keep** | `dashboard/api.py:651` | `dashboard/api.py:652` | /api/iteration/proposals/{proposal_id} | `tests/test_dashboard_routes.py:1417` | - |
-| `route:get:/api/kv/{param}` | dashboard-api | **keep** | `dashboard/api.py:214` | `dashboard/api.py:215` | /api/kv/{key} | `tests/test_dashboard_routes.py:1224` | - |
-| `route:get:/api/log` | dashboard-api | **keep** | `dashboard/api.py:128` | `dashboard/api.py:129` | /api/log | `tests/test_dashboard_routes.py:1203` | - |
-| `route:get:/api/matters` | dashboard-api | **keep** | `dashboard/api.py:248` | `dashboard/api.py:249` | /api/matters | `tests/test_dashboard_routes.py:1236` | - |
-| `route:get:/api/matters/{param}` | dashboard-api | **keep** | `dashboard/api.py:278` | `dashboard/api.py:279` | /api/matters/{matter_id} | `tests/test_dashboard_routes.py:1236` | - |
-| `route:get:/api/matters/{param}/artifacts/{param}` | dashboard-api | **keep** | `dashboard/api.py:335` | `dashboard/api.py:336` | /api/matters/{matter_id}/artifacts/{link_id} | `tests/test_dashboard_routes.py:1236` | - |
-| `route:get:/api/matters/{param}/bindings` | dashboard-api | **keep** | `dashboard/api.py:375` | `dashboard/api.py:376` | /api/matters/{matter_id}/bindings | `tests/test_dashboard_routes.py:1236` | - |
-| `route:get:/api/matters/{param}/context` | dashboard-api | **keep** | `dashboard/api.py:362` | `dashboard/api.py:363` | /api/matters/{matter_id}/context | `tests/test_dashboard_routes.py:1236` | - |
-| `route:get:/api/provider-health` | dashboard-api | **keep** | `dashboard/api.py:663` | `dashboard/api.py:664` | /api/provider-health | `tests/test_dashboard_routes.py:1621` | - |
-| `route:get:/api/tasks` | dashboard-api | **keep** | `dashboard/api.py:136` | `dashboard/api.py:137` | /api/tasks | `tests/test_dashboard_routes.py:1208` | - |
-| `route:get:/api/tasks/due` | dashboard-api | **keep** | `dashboard/api.py:174` | `dashboard/api.py:175` | /api/tasks/due | `tests/test_dashboard.py:219`, `tests/test_dashboard_scheduler.py:94` | - |
-| `route:get:/api/work-sessions` | dashboard-api | **keep** | `dashboard/api.py:351` | `dashboard/api.py:352` | /api/work-sessions | `tests/test_dashboard_routes.py:1503` | - |
-| `route:get:/sw.js` | dashboard-api | **keep** | `dashboard/app.py:26` | `dashboard/app.py:27` | /sw.js | `tests/test_dashboard_routes.py:1511` | - |
-| `route:patch:/api/bookmarks/{param}` | dashboard-api | **keep** | `dashboard/api.py:101` | `dashboard/api.py:102` | /api/bookmarks/{bookmark_id} | `tests/test_dashboard_routes.py:1195` | - |
-| `route:patch:/api/matters/{param}` | dashboard-api | **keep** | `dashboard/api.py:287` | `dashboard/api.py:288` | /api/matters/{matter_id} | `tests/test_dashboard_routes.py:1236` | - |
-| `route:post:/api/bookmarks` | dashboard-api | **keep** | `dashboard/api.py:76` | `dashboard/api.py:77` | /api/bookmarks | `tests/test_dashboard_routes.py:1195` | - |
-| `route:post:/api/delegations` | dashboard-api | **keep** | `dashboard/api.py:548` | `dashboard/api.py:549` | /api/delegations | `tests/test_dashboard_routes.py:1379` | - |
-| `route:post:/api/delegations/{param}/handoff` | dashboard-api | **keep** | `dashboard/api.py:609` | `dashboard/api.py:610` | /api/delegations/{delegation_id}/handoff | `tests/test_dashboard_routes.py:1379` | - |
-| `route:post:/api/deliveries/{param}/confirm` | dashboard-api | **keep** | `dashboard/api.py:426` | `dashboard/api.py:427` | /api/deliveries/{delivery_id}/confirm | `tests/test_dashboard_routes.py:1361` | - |
-| `route:post:/api/engagement` | dashboard-api | **keep** | `dashboard/api.py:228` | `dashboard/api.py:229` | /api/engagement | `tests/test_dashboard_routes.py:1229` | - |
-| `route:post:/api/handoffs` | dashboard-api | **keep** | `dashboard/api.py:463` | `dashboard/api.py:464` | /api/handoffs | `tests/test_dashboard_routes.py:1439` | - |
-| `route:post:/api/handoffs/{param}/claim` | dashboard-api | **keep** | `dashboard/api.py:496` | `dashboard/api.py:497` | /api/handoffs/{handoff_id}/claim | `tests/test_dashboard_routes.py:1439` | - |
-| `route:post:/api/handoffs/{param}/complete` | dashboard-api | **keep** | `dashboard/api.py:514` | `dashboard/api.py:515` | /api/handoffs/{handoff_id}/complete | `tests/test_dashboard_routes.py:1439` | - |
-| `route:post:/api/items/{param}/chat` | dashboard-api | **keep** | `dashboard/api.py:415` | `dashboard/api.py:416` | /api/items/{memorial_id}/chat | `tests/test_dashboard_routes.py:1333` | - |
-| `route:post:/api/kv/{param}` | dashboard-api | **keep** | `dashboard/api.py:219` | `dashboard/api.py:220` | /api/kv/{key} | `tests/test_dashboard_routes.py:1224` | - |
-| `route:post:/api/log` | dashboard-api | **keep** | `dashboard/api.py:116` | `dashboard/api.py:117` | /api/log | `tests/test_dashboard_routes.py:1203` | - |
-| `route:post:/api/matters` | dashboard-api | **keep** | `dashboard/api.py:258` | `dashboard/api.py:259` | /api/matters | `tests/test_dashboard_routes.py:1236` | - |
-| `route:post:/api/matters/{param}/links` | dashboard-api | **keep** | `dashboard/api.py:304` | `dashboard/api.py:305` | /api/matters/{matter_id}/links | `tests/test_dashboard_routes.py:1236` | - |
-| `route:post:/api/tasks` | dashboard-api | **keep** | `dashboard/api.py:142` | `dashboard/api.py:143` | /api/tasks | `tests/test_dashboard_routes.py:1208` | - |
-| `route:post:/api/tasks/alarm` | dashboard-api | **keep** | `dashboard/api.py:182` | `dashboard/api.py:183` | /api/tasks/alarm | `tests/test_dashboard_routes.py:1217` | - |
-| `route:post:/api/tasks/recurring` | dashboard-api | **keep** | `dashboard/api.py:196` | `dashboard/api.py:197` | /api/tasks/recurring | `tests/test_dashboard_routes.py:1220` | - |
-| `route:post:/api/tasks/{param}/execute` | dashboard-api | **keep** | `dashboard/api.py:161` | `dashboard/api.py:162` | /api/tasks/{task_id}/execute | `tests/test_dashboard_routes.py:1208` | - |
 | `admin-route:get:/api/bot_status` | admin-api | **keep** | `admin.py:1373` | `admin.py:1326` | http://127.0.0.1:3456/api/bot_status | `tests/test_admin_api.py:204` | - |
 | `admin-route:get:/api/eigenflux/settings` | admin-api | **keep** | `admin.py:1385` | `admin.py:1326` | http://127.0.0.1:3456/api/eigenflux/settings | `tests/test_admin_destructive.py:261` | - |
 | `admin-route:get:/api/eigenflux/status` | admin-api | **keep** | `admin.py:1383` | `admin.py:1326` | http://127.0.0.1:3456/api/eigenflux/status | `tests/test_admin_api.py:584` | - |
@@ -230,8 +162,8 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `admin-route:get:/api/settings` | admin-api | **keep** | `admin.py:1377` | `admin.py:1326` | http://127.0.0.1:3456/api/settings | `tests/test_admin_api.py:220` | - |
 | `admin-route:get:/api/skills` | admin-api | **keep** | `admin.py:1369` | `admin.py:1326` | http://127.0.0.1:3456/api/skills | `tests/test_admin_api.py:196` | - |
 | `admin-route:get:/api/views` | admin-api | **keep** | `admin.py:1387` | `admin.py:1326` | http://127.0.0.1:3456/api/views | `tests/test_admin_api.py:259` | - |
-| `admin-route:get:/health` | admin-api | **keep** | `admin.py:1331` | `admin.py:1326` | http://127.0.0.1:3456/health | `tests/test_admin_api.py:115`, `tests/test_dashboard_routes.py:1590` | - |
-| `admin-route:get:/healthz` | admin-api | **keep** | `admin.py:1331` | `admin.py:1326` | http://127.0.0.1:3456/healthz | `tests/test_admin_api.py:115`, `tests/test_dashboard_routes.py:1590` | - |
+| `admin-route:get:/health` | admin-api | **keep** | `admin.py:1331` | `admin.py:1326` | http://127.0.0.1:3456/health | `tests/test_admin_api.py:115` | - |
+| `admin-route:get:/healthz` | admin-api | **keep** | `admin.py:1331` | `admin.py:1326` | http://127.0.0.1:3456/healthz | `tests/test_admin_api.py:115` | - |
 | `admin-route:get:/view/{param}` | admin-api | **keep** | `admin.py:1336` | `admin.py:1326` | http://127.0.0.1:3456/view/{suffix} | `tests/test_admin_api.py:652`, `tests/test_card.py:174`, `tests/test_intentions.py:141` | - |
 | `admin-route:post:/api/bot/restart` | admin-api | **keep** | `admin.py:1689` | `admin.py:1585` | http://127.0.0.1:3456/api/bot/restart | `tests/test_admin_api.py:267`, `tests/test_admin_destructive.py:239` | - |
 | `admin-route:post:/api/bot/stop_task` | admin-api | **keep** | `admin.py:1686` | `admin.py:1585` | http://127.0.0.1:3456/api/bot/stop_task | `tests/test_admin_destructive.py:115` | - |
@@ -241,7 +173,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `admin-route:post:/api/intents/cancel` | admin-api | **keep** | `admin.py:1697` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/cancel | `tests/test_admin_api.py:467` | - |
 | `admin-route:post:/api/intents/rearm` | admin-api | **keep** | `admin.py:1716` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/rearm | `tests/test_admin_api.py:489` | - |
 | `admin-route:post:/api/memory` | admin-api | **keep** | `admin.py:1593` | `admin.py:1585` | http://127.0.0.1:3456/api/memory | `tests/test_admin_api.py:130` | - |
-| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:3107` | `bot.sh:3107` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_dashboard.py:27`, `tests/test_eigenflux_publish_post.py:89` | - |
+| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:3107` | `bot.sh:3107` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_publish_post.py:89` | - |
 | `lark:matter:clear` | lark-command | **keep** | `core/matter_bridge.py:602` | `core/matter_bridge.py:602` | /matter clear | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:current` | lark-command | **keep** | `core/matter_bridge.py:601` | `core/matter_bridge.py:601` | /matter current | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:done` | lark-command | **keep** | `core/matter_bridge.py:403` | `core/matter_bridge.py:403` | /matter done | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
@@ -249,7 +181,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `lark:matter:list` | lark-command | **keep** | `core/matter_bridge.py:602` | `core/matter_bridge.py:602` | /matter list | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:new` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /matter new | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:use` | lark-command | **keep** | `core/matter_bridge.py:402` | `core/matter_bridge.py:402` | /matter use | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
-| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:3073` | `bot.sh:3073` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:73`, `tests/test_memorial.py:689`, `tests/test_no_dead_ends.py:98` | - |
+| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:3073` | `bot.sh:3073` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:73`, `tests/test_memorial.py:689`, `tests/test_no_dead_ends.py:85` | - |
 | `lark:model:auto` | lark-command | **keep** | `core/matter_bridge.py:520` | `core/matter_bridge.py:520` | /model auto | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:model:codex` | lark-command | **keep** | `core/matter_bridge.py:507` | `core/matter_bridge.py:507` | /model codex | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:model:status` | lark-command | **keep** | `core/matter_bridge.py:416` | `core/matter_bridge.py:416` | /model | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
@@ -263,19 +195,18 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `lark:session:stop` | lark-command | **keep** | `bot.sh:3144` | `bot.sh:3144` | stop / cancel / 结束 / 停止 | `tests/test_actions.py:237`, `tests/test_admin_api.py:465`, `tests/test_admin_destructive.py:115` | - |
 | `lark:session:switch` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /session switch | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 
+## Retired Surfaces
+
+- **dashboard :3457 (NiceGUI pages + /api routes)** — retired 2026-08-21; archive duty moved to the morning-anchor batch line and the Admin console (:3456). The shared SQLite layer moved to core/db.py; the code archive is git history.
+- **mobile gateway :3458 + Tailscale funnel** — retired 2026-08-11 (REQ-120); Lark is the only mobile surface.
+
 ## Resolved Evidence Audit
 
 - `component:caffeinate-launchd` — **keep**: existing launchd install contract uses com.pascal.jarvis.caffeinate.
 - `component:daemon-launchd` — **keep**: existing launchd batch rollback/install contracts use com.pascal.jarvis.daemon.
-- `component:dashboard-launchd` — **keep**: existing dashboard launchd install contracts use com.pascal.jarvis.dashboard.
 - `heartbeat:memory-weekly` — **keep**: focused contract runs the pre-hook and verifies archive/backup/atomic digest output.
 - `cli:core.runtime_provider` — **keep**: focused CLI contract persists set/get preference and validates bad input.
 - `cli:core.usage_stats` — **keep**: focused CLI contract parses numeric usage while excluding transcript text.
-- `route:page:/routines` — **keep**: focused HTTP page smoke exercises the registered NiceGUI route.
-- `route:page:/usage` — **keep**: focused HTTP page smoke exercises the registered NiceGUI route with isolated usage data.
-- `route:get:/api/delegations/metrics` — **keep**: existing DelegationStore.metrics behavioral tests cover the route dependency.
-- `route:get:/api/engagement/stats` — **keep**: existing engagement_stats behavioral tests cover honesty and cache refresh.
-- `route:get:/api/tasks/due` — **keep**: existing get_due_tasks scheduler tests cover due/not-due behavior.
 - `admin-route:get:/api/lark_chats` — **keep**: existing lark_chats tests cover counters, chat kinds, and missing files.
 - `admin-route:get:/api/live` — **keep**: focused contract selects the newest tracked live conversation.
 - `admin-route:get:/api/session/{param}` — **keep**: focused contract loads a valid session and rejects traversal.
@@ -289,4 +220,5 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 - Keep capabilities remain in regression scope; missing runtime health is handled by their existing probes.
 - Fix capabilities need the named evidence gap closed before their status changes.
 - Retire candidates are review prompts only. Deletion requires replacement/migration evidence and a separate PR.
-- Regenerate this file whenever a component, heartbeat task, CLI, dashboard route, or Lark command changes.
+- Regenerate this file whenever a component, heartbeat task, CLI, admin route, or Lark command changes.
+- A surface retirement must leave an explicit Retired Surfaces entry, never a silent disappearance.

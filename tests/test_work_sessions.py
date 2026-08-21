@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core.matters import create_matter, link_entity
 from core.work_sessions import discover_sessions
 
