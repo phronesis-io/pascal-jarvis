@@ -390,7 +390,7 @@ def test_recent_real_failure_skips_relay_during_cooldown(tmp_path):
     ) == "codex"
     assert ph.preferred_fallback(
         tmp_path, now_epoch=12_000, cooldown_seconds=1800
-    ) == "backup1"
+    ) == "codex"
 
 
 def test_transient_real_failure_uses_short_cooldown(tmp_path, monkeypatch):

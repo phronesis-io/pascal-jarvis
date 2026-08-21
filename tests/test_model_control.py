@@ -97,7 +97,7 @@ def test_route_plan_applies_context_preference_gate_and_tool_policy(tmp_path):
     assert forced_group.skipped["codex"] == "context_forbidden"
 
 
-def test_route_plan_skips_only_fresh_unhealthy_route(tmp_path):
+def test_route_plan_defers_expired_unhealthy_route_behind_healthy_route(tmp_path):
     health = [
         {
             "id": "backup1",
@@ -127,7 +127,7 @@ def test_route_plan_skips_only_fresh_unhealthy_route(tmp_path):
 
     assert [route.id for route in cooling.routes] == ["openai"]
     assert cooling.skipped["backup1"] == "health_cooldown"
-    assert [route.id for route in recovered.routes] == ["backup1", "openai"]
+    assert [route.id for route in recovered.routes] == ["openai", "backup1"]
 
 
 def test_runtime_status_exposes_plan_and_diversity_but_not_credentials(

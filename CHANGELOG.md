@@ -23,6 +23,8 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
   不再重复消耗自动回复速率额度。
 - OpenAI Responses 的首轮文本输入统一使用列表结构，兼容要求严格的中转层；
   Claude 限额且 relay 超时时，只读心跳任务可以继续落到 GPT。
+- 已过冷却期但仍标记不健康的模型通道排在健康通道之后；恢复探测不再拿
+  生产大任务挡住已经可用的 GPT，只在没有健康选择时兜底尝试。
 - Dashboard `:3457` 退役后的产品组合文档和上层 Agent 入口说明完成同步。
 
 ## [1.15.0] — 2026-08-20 — 系统学会说「我不在」+ 长卡片终于能读完
