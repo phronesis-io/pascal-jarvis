@@ -555,6 +555,9 @@ def test_openai_read_only_fallback_never_enters_agentic_tool_loop(
     ) == "{}"
     assert len(payloads) == 1
     assert "tools" not in payloads[0]
+    assert payloads[0]["input"] == [
+        {"role": "user", "content": "prompt"}
+    ]
     assert "No local tools are available for this maintenance call" in (
         payloads[0]["instructions"]
     )

@@ -297,7 +297,7 @@ def _probe_openai(
     payload = {
         "model": spec["model"],
         "instructions": "Return the exact canary marker and do not use tools.",
-        "input": CANARY_MARKER,
+        "input": [{"role": "user", "content": CANARY_MARKER}],
         "max_output_tokens": 32,
     }
     started = time.monotonic()

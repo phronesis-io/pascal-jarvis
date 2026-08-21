@@ -425,7 +425,7 @@ def build_payload(system_prompt: str, user_input: str, model: str,
     return {
         "model": model,
         "instructions": instructions,
-        "input": user_input,
+        "input": [{"role": "user", "content": user_input}],
         "max_output_tokens": max_output_tokens,
     }
 

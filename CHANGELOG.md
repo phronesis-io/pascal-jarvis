@@ -21,6 +21,8 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
   避免内部命令和路径进入用户卡片；原始来信仍会安全送达。
 - EigenFlux 自动回复的活动账按服务端消息回执和入站事件双重去重；崩溃重放
   不再重复消耗自动回复速率额度。
+- OpenAI Responses 的首轮文本输入统一使用列表结构，兼容要求严格的中转层；
+  Claude 限额且 relay 超时时，只读心跳任务可以继续落到 GPT。
 - Dashboard `:3457` 退役后的产品组合文档和上层 Agent 入口说明完成同步。
 
 ## [1.15.0] — 2026-08-20 — 系统学会说「我不在」+ 长卡片终于能读完

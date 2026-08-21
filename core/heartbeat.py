@@ -1012,7 +1012,7 @@ class HeartbeatRunner:
                 payload = {
                     "model": model,
                     "instructions": instructions,
-                    "input": prompt,
+                    "input": [{"role": "user", "content": prompt}],
                     "max_output_tokens": max_output_tokens,
                 }
                 text = extract_text(
