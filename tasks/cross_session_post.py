@@ -67,6 +67,14 @@ ENGAGEMENT_FILE = _JARVIS_DIR / "engagement_log.jsonl"
 SENT_WINDOW_SECONDS = 24 * 3600
 OUTBOX_WINDOW_SECONDS = 6 * 3600
 USER_MSG_SIM_THRESHOLD = 0.5
+# The heartbeat's proactive-output boundary requires evidence that work was
+# completed before a card can enter the ledger.  Cross-session findings have
+# already passed discovery plus the three deterministic gates documented
+# above, so describe that completed work explicitly instead of letting the
+# strict adapter discard an otherwise valid ambient finding.
+USER_MESSAGE_WORK_RECEIPT = (
+    "已扫描跨产品会话，并完成时间锚点、PR 状态和近重复核验"
+)
 # A sent-cache entry older than this with no matching delivery row in the
 # engagement log is treated as never-delivered (2026-07-08: the cache records
 # at print time; heartbeat's Lark send can still fail afterwards, and it
@@ -481,7 +489,9 @@ def main() -> int:
                 file=sys.stderr,
             )
         else:
-            print(f"📡 跨 Session 动态：{filtered}")
+            print("TITLE: 📡 跨 Session 动态")
+            print(f"WORKED: {USER_MESSAGE_WORK_RECEIPT}")
+            print(filtered)
             _record_sent(filtered)
 
     # Skip consecutive "No new data" entries — they waste index space

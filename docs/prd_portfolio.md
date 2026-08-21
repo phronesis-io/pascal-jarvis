@@ -83,7 +83,7 @@ the generic Delegation control plane.
 - one-way Item, Matter, Intent, Delivery, Handoff, Session, Job, and Taskline
   links and projections;
 - bounded reconciliation and lease recovery;
-- dashboard/API/CLI inspection and operator metrics;
+- Admin/API/CLI inspection and operator metrics;
 - precision-first shadow capture with reviewed labels and an explicit,
   metric-enforced graduation gate.
 
@@ -95,10 +95,11 @@ verifier-accuracy thresholds in the PRD.
 ### Completed: Provider fallback observability
 
 Primary Claude, relay backup 1, optional relay backup 2, local Codex CLI, and
-GPT agentic fallback have bounded canaries and a shared health projection. `/model` and the
-Ops dashboard show configured position, requested model, observed model, last
-success, latency, and a sanitized failure category. A primary spend-limit
-canary trips the same fallback gate used by live routing.
+GPT agentic fallback have bounded canaries and a shared health projection.
+`/model` and `python3 -m core.provider_health status` show configured position,
+requested model, observed model, last success, latency, and a sanitized failure
+category. A primary spend-limit canary trips the same fallback gate used by
+live routing.
 
 Owner-private Lark conversations use Claude-first automatic routing by default,
 then Codex CLI, then GPT API. `切到 Codex` and `切回 Claude` change the preferred

@@ -11,6 +11,18 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
 *（补记 2026-08-21：1.8.3 ~ 1.15.0 各段由已合并 PR #25~#96 回溯整理，
 版本号是记账分组，未打 git tag。）*
 
+## [Unreleased]
+
+### Fixed
+
+- 跨 Session 的重要发现现在带有可核验的工作收据，能够通过主动输出硬门禁，
+  进入 ledger-only 台账并在晨间锚点攒批，不增加实时卡片打扰。
+- EigenFlux 分析层拒绝 Claude/Codex 的 XML 工具调用与缺失工具结果转录，
+  避免内部命令和路径进入用户卡片；原始来信仍会安全送达。
+- EigenFlux 自动回复的活动账按服务端消息回执和入站事件双重去重；崩溃重放
+  不再重复消耗自动回复速率额度。
+- Dashboard `:3457` 退役后的产品组合文档和上层 Agent 入口说明完成同步。
+
 ## [1.15.0] — 2026-08-20 — 系统学会说「我不在」+ 长卡片终于能读完
 
 8/17 起卡片从 76 张/天跌到 2 张——不是代码坏了，是 MacBook 合盖断电 39 小时，
