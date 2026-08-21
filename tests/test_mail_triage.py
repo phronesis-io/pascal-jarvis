@@ -153,10 +153,9 @@ def test_post_records_nonurgent_notice_and_all_triaged(tmp_path):
                    {"event_id": "b2", "decision": "silent"}],
         "user_message": "📬 来自 X 的邮件", "urgent": False})
     out = _run_post(reply, tmp_path, pending=PENDING)
-    # Non-urgent pushed mail is transported too (the card rides the CARD
-    # route); only .urgent_send stays urgent-only.
+    # Non-urgent pushed mail is transported too: the card rides the CARD
+    # route as a notice.
     assert "来自 X" in out
-    assert not (tmp_path / ".urgent_send").exists()
     assert "来自 X" in (tmp_path / "memorials.jsonl").read_text()
     rows = [json.loads(x) for x in
             (tmp_path / "mail" / "triaged.jsonl").read_text().splitlines() if x]
@@ -178,16 +177,15 @@ def test_post_silent_when_no_message(tmp_path):
 
 
 def test_post_quiet_hours_still_hands_nonurgent_card_to_loop(tmp_path):
-    # Quiet-hour deferral belongs to heartbeat_loop's intact-card queue, so
-    # the post-hook prints the card even at night — it must NOT touch
-    # .urgent_send (that would break through the queue).
+    # Quiet-hour deferral belongs to the delivery pipeline (the card queues
+    # intact as a notice), so the post-hook prints the card even at night —
+    # never a night-gate of its own that would leave the memorial cardless.
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"}],
         "user_message": "📬 夜间来信", "urgent": False})
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
     assert "夜间来信" in out
-    assert not (tmp_path / ".urgent_send").exists()
     ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
     assert "夜间来信" in ledger and '"attention": "notice"' in ledger
     # still recorded as triaged (won't be re-read)
@@ -242,14 +240,29 @@ def test_post_nonurgent_card_carries_its_memorial_id(tmp_path):
     assert create["id"] in ids
 
 
-def test_post_urgent_breaks_through_quiet_hours(tmp_path):
+def test_post_urgent_mail_is_alert_attention_card(tmp_path):
+    """Urgent mail must break through quiet hours via the LEDGER, not a flag.
+
+    Red-team P2 (2026-08-21): the old `.urgent_send` touch was a dead flag —
+    its only reader (heartbeat_loop._should_queue) has no production caller,
+    so a 2am urgent email was held to 10:00 like any notice. The living
+    signal is attention="alert" on the memorial: _route_output promotes it to
+    an urgent envelope and core.delivery's bypass-quiet semantics take over
+    (delivery-layer proof: test_heartbeat_loop.py::
+    test_route_output_alert_memorial_bypasses_quiet_hours).
+    """
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"}],
         "user_message": "📬 紧急", "urgent": True})
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
     assert "紧急" in out
-    assert (tmp_path / ".urgent_send").exists()
+    rows = [json.loads(line) for line in
+            (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    create = next(row for row in rows if row.get("ev") == "create")
+    assert create["attention"] == "alert"
+    # The dead flag stays dead — nothing may reintroduce it.
+    assert not (tmp_path / ".urgent_send").exists()
 
 
 def test_post_parse_failure_does_not_record(tmp_path):
@@ -258,3 +271,74 @@ def test_post_parse_failure_does_not_record(tmp_path):
     # pending preserved (retry next cycle), nothing triaged
     assert (tmp_path / "mail" / ".pending_batch.json").exists()
     assert not (tmp_path / "mail" / "triaged.jsonl").exists()
+
+
+# --- transport end-to-end: post-hook → run_cycle merge → memorialize --------
+
+
+def test_two_pushed_mails_both_survive_cycle_merge_to_lark_render(
+        tmp_path, monkeypatch):
+    """Red-team P1 (2026-08-21, PR#97): ≥2 pushed emails in one cycle.
+
+    The post-hook prints one card per email (HEARTBEAT.md contract), but the
+    run_cycle merge used to prefix CARD: onto the whole multi-line message —
+    only the first card was framed as an envelope, so memorialize_output
+    blocked every later card as raw internal JSON: created on the ledger,
+    delivered nowhere (the exact create→lapse this PR set out to kill,
+    recurring for multi-mail cycles). Real chain: model reply → REAL
+    mail_triage_post subprocess → _collect_output/_annotate_output_source →
+    run_cycle merge → memorialize_output; both memorial ids must appear in
+    the rendered Lark output.
+    """
+    from core.heartbeat import HeartbeatRunner
+    from core import memorial
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("JARVIS_EF_QUIET_OVERRIDE", "awake")
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+
+    (tmp_path / "mail").mkdir()
+    (tmp_path / "mail" / ".pending_batch.json").write_text(
+        json.dumps(PENDING))
+    (tmp_path / "memory").mkdir()
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text(
+        "### mail-triage\n- interval: 15m\n"
+        f"- post: {POST}\n"
+        "- prompt: triage mail\n"
+    )
+    runner = HeartbeatRunner(
+        jarvis_dir=tmp_path, heartbeat_file=hb,
+        state_file=tmp_path / "state.json",
+        memory_dir=tmp_path / "memory",
+        model="sonnet", idle_judge=False,
+    )
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"},
+                   {"event_id": "b2", "decision": "push"}],
+        "user_messages": [
+            {"event_id": "a1", "title": "银行扣款异常", "body": "同笔重复扣款"},
+            {"event_id": "b2", "title": "导师约时间", "body": "问周四是否有空"},
+        ],
+        "urgent": False,
+    })
+    monkeypatch.setattr(runner, "claude_call", lambda p: reply)
+
+    combined = runner.run_cycle(force=True)
+    card_lines = [l for l in combined.splitlines() if l.strip()]
+    assert len(card_lines) == 2
+    assert all(l.startswith("CARD:") for l in card_lines), card_lines
+    assert not any(l.startswith("CARD:CARD:") for l in card_lines)
+
+    rendered = memorial.memorialize_output(
+        combined, (tmp_path / ".heartbeat_last_source").read_text().strip(),
+        require_work_receipt=True,
+    )
+    creates = [json.loads(line)["id"] for line in
+               (tmp_path / "memorials.jsonl").read_text().splitlines()
+               if json.loads(line).get("ev") == "create"]
+    assert len(creates) == 2
+    for mid in creates:
+        assert mid in rendered, f"{mid} lost between post-hook and Lark render"
+    assert len([l for l in rendered.splitlines() if l.strip()]) == 2
