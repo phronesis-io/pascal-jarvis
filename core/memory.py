@@ -197,7 +197,8 @@ _STRUCTURED_FACTS_TEMPLATE = """# Structured Facts (load-bearing)
 
 def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
                        max_chars: int | None = None,
-                       focus_text: str = "") -> str:
+                       focus_text: str = "",
+                       warm_mode: str = "full") -> str:
     """Load all memory into a single string for system prompt injection.
 
     With 1M context, everything is loaded — but each tier is truncated WITHIN
@@ -219,6 +220,14 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     focus_text: the current owner message. When a provider budget forces
     truncation, matching knowledge and operational sections are loaded first.
     Hot identity and safety ordering is never changed.
+
+    warm_mode: "full" (default — unchanged) or "index". In index mode the
+    warm knowledge files are replaced by a one-line-per-file map and are
+    fetched from disk on demand. The protected guidance band
+    (PROTECTED_WARM_PREFIXES — standing behavioral rules) stays inline
+    because a rule you do not know you need cannot be looked up. Only a
+    caller whose model actually has file-reading tools may pass "index":
+    untrusted-input / no-tools tasks must keep "full".
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -229,7 +238,12 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     budget = int(max_chars) if max_chars is not None else MAX_MEMORY_CHARS
     # Build each tier's sections independently (priority-ordered within tier).
     hot_parts = _collect_hot(memory_dir)
-    warm_parts = _collect_warm(memory_dir)
+    if warm_mode == "index":
+        warm_parts = build_warm_index(memory_dir)
+    elif warm_mode == "full":
+        warm_parts = _collect_warm(memory_dir)
+    else:
+        raise ValueError(f"unknown warm_mode: {warm_mode!r}")
     system_parts = _collect_system(memory_dir, purpose)
     timeline_parts = _collect_timeline(memory_dir)
 
@@ -394,6 +408,96 @@ def _collect_warm(memory_dir: Path) -> list[str]:
     for f in protected + rest:
         _append_file(parts, f, f"Knowledge: {f.stem}",
                      cap=WARM_FILE_CAP, keep="head")
+    return parts
+
+
+def _warm_one_liner(path: Path) -> str:
+    """Best-effort one-line description of a warm file for the index.
+
+    Prefers the YAML frontmatter `description:` the memory writers already
+    maintain; falls back to the first substantive body line. Never guesses:
+    a file with neither returns an empty string rather than an invented gist.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    lines = text.splitlines()
+    in_fm = False
+    body_first = ""
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if i == 0 and line == "---":
+            in_fm = True
+            continue
+        if in_fm:
+            if line in ("---", "..."):
+                in_fm = False
+                continue
+            if line.startswith("description:"):
+                desc = line.split(":", 1)[1].strip().strip('"\'')
+                if desc:
+                    return desc
+            continue
+        if not body_first and line and not line.startswith(("#", "<!--", ">", "|", "---")):
+            body_first = line
+    return body_first
+
+
+def build_warm_index(memory_dir: Path) -> list[str]:
+    """Warm tier in on-demand form: standing rules inline, notes as a map.
+
+    Rationale (2026-08-21): the warm tier is ~60% of the injected payload and
+    most of it is reference material that only a minority of tasks need. The
+    protected guidance band stays inline verbatim — behavioral rules are the
+    one thing a model cannot know to go fetch. Everything else becomes one
+    line per file with its absolute path, so the model reads what the task
+    actually calls for.
+
+    Returns the same list-of-sections shape as _collect_warm so tier
+    budgeting, focus prioritisation, and truncation logic are untouched.
+    """
+    parts: list[str] = []
+    warm_dir = memory_dir / "warm"
+    if not warm_dir.is_dir():
+        return parts
+    files = [f for f in warm_dir.glob("*.md") if f.is_file()]
+    protected = sorted((f for f in files
+                        if f.name.startswith(PROTECTED_WARM_PREFIXES)),
+                       key=lambda f: f.name)
+    rest = [f for f in files if not f.name.startswith(PROTECTED_WARM_PREFIXES)]
+
+    for f in protected:
+        _append_file(parts, f, f"Knowledge: {f.stem}",
+                     cap=WARM_FILE_CAP, keep="head")
+
+    def _mtime(f):
+        try:
+            return f.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    rows = []
+    for f in sorted(rest, key=_mtime, reverse=True):
+        try:
+            size = len(f.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        desc = _warm_one_liner(f)
+        rows.append(f"- {f.name} ({size:,} 字) — {desc}" if desc
+                    else f"- {f.name} ({size:,} 字)")
+    if not rows:
+        return parts
+
+    body = "\n".join(rows)
+    parts.append(
+        "## Knowledge Index（按需读取，不在上下文里）\n"
+        "下面是知识库里**没有**展开进这次上下文的文件。需要哪一条就读它，"
+        "不要凭印象复述，也不要因为它不在上下文里就当成不存在。\n"
+        f"目录：{warm_dir}\n"
+        f"读法：`cat \"{warm_dir}/<文件名>\"`\n\n"
+        f"{body}"
+    )
     return parts
 
 

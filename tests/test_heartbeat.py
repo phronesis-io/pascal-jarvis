@@ -359,6 +359,36 @@ def test_claude_call_read_only_keeps_memory_but_disables_tools(
     assert "deterministic post-script is the sole writer" in system_prompt
 
 
+def test_claude_call_default_mode_keeps_pre_index_memory_signature(
+        tmp_path, monkeypatch):
+    """Regression (red-team on the warm-index PR): with the feature off,
+    warm_mode must not be passed at all — an adapter built against the
+    pre-index signature (max_chars/focus_text, no warm_mode) keeps its
+    budget kwargs instead of being pushed into the legacy one-argument
+    fallback that silently drops them."""
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.delenv("JARVIS_WARM_MEMORY_MODE", raising=False)
+    seen = {}
+
+    def _pre_index_loader(memory_dir, *, max_chars=None, focus_text=""):
+        seen["max_chars"] = max_chars
+        seen["focus_text"] = focus_text
+        return "MEM"
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr("core.heartbeat.subprocess.run",
+                        lambda cmd, **kw: _Result())
+    monkeypatch.setattr("core.heartbeat.load_tiered_memory", _pre_index_loader)
+    runner.claude_call("hello")
+
+    assert seen["focus_text"] == "hello"
+    assert "max_chars" in seen
+
+
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
