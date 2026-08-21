@@ -21,7 +21,8 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
 ### Fixed
 
 - **睡眠仪器一直在说谎**（#89）：睡眠计量改用 wall clock 减 monotonic
-  （旧口径报 0.45h，本机实测真值差 39.69h）；grace 收归一处，只赦免「陈旧」
+  （旧仪器对那段 39.4h 的合盖只记到 0.7h；wall-mono 漂移全程实测 39.69h，
+  与 daemon 38 次 gap 合计对上）；grace 收归一处，只赦免「陈旧」
   不赦免「死活」；告警不再替检查下诊断。
 - **宿主缺席从「探测到」变成「报告出来」**（#88）：wall-mono 漂移
   （hostclock）是唯一的睡眠尺；恢复后按与非静默时段的重叠 ≥3h 出一张缺席
