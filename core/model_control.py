@@ -379,6 +379,7 @@ def route_plan(
     context_routes = set(DEFAULT_ORDERS[context])
     now_epoch = float(time.time() if now_epoch is None else now_epoch)
     selected: list[ModelRoute] = []
+    expired_unhealthy: list[ModelRoute] = []
     skipped: dict[str, str] = {}
     for route_id in order:
         route = by_id.get(route_id)
@@ -396,8 +397,16 @@ def route_plan(
             health[route.id], env=env, now_epoch=now_epoch
         ):
             skipped[route_id] = "health_cooldown"
+        elif health.get(route.id, {}).get("status") == "unhealthy":
+            # An elapsed cooldown permits a bounded recovery attempt; it does
+            # not make the provider healthy again.  Keep that attempt behind
+            # every route that is currently healthy/not_run so a known slow
+            # relay cannot block a working fallback with a production-sized
+            # request merely because its timer expired.
+            expired_unhealthy.append(route)
         else:
             selected.append(route)
+    selected.extend(expired_unhealthy)
     return RoutePlan(
         context=context,
         preference=preference,

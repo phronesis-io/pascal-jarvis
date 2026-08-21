@@ -1599,6 +1599,53 @@ def test_backoff_gate_holds_heavy_and_priority_alike(tmp_path, monkeypatch):
     assert set(skips[0]["skipped"]) == {"intention-check", "deep-research"}
 
 
+def test_real_provider_recovery_after_failure_releases_shared_backoff(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### task-a\n- interval: 1h\n- prompt: a\n")
+    now = int(time.time())
+    runner.save_state({"__shared_call__": {
+        "consecutive_failures": 4,
+        "last_failure": now - 10,
+        "backoff_until": now + 300,
+    }})
+    monkeypatch.setattr(
+        runner, "_provider_recovered_since", lambda _epoch: True,
+        raising=False,
+    )
+    calls = []
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda prompt, timeout=None: calls.append(prompt) or "HEARTBEAT_OK",
+    )
+
+    runner.run_cycle(force=True)
+
+    assert calls
+    assert "__shared_call__" not in runner.load_state()
+
+
+def test_provider_recovery_requires_newer_real_request_not_canary(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### task-a\n- interval: 1h\n- prompt: a\n")
+    row = {
+        "id": "openai",
+        "configured": True,
+        "enabled": True,
+        "status": "healthy",
+        "observation_source": "canary",
+        "last_success_epoch": 200,
+    }
+    monkeypatch.setattr(
+        "core.provider_health.snapshot",
+        lambda _root: {"providers": [row]},
+    )
+
+    assert runner._provider_recovered_since(100) is False
+    row["observation_source"] = "real_request"
+    assert runner._provider_recovered_since(201) is False
+    assert runner._provider_recovered_since(100) is True
+
+
 def test_shared_call_streak_clears_on_any_reply(tmp_path, monkeypatch):
     """Any non-empty reply proves the call path is alive → key removed."""
     hb = "### task-a\n- interval: 1h\n- prompt: a\n"
