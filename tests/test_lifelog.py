@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -345,6 +346,34 @@ def test_morning_anchor_post_clips_to_one_line(tmp_path):
 def test_morning_anchor_post_silent_on_sentinel_and_error(tmp_path):
     assert _run_anchor_post("HEARTBEAT_OK", tmp_path).stdout.strip() == ""
     assert not (tmp_path / "data" / "morning_anchor_state.json").exists()
+
+
+def test_morning_anchor_receipt_states_only_work_done(tmp_path):
+    """Regression (2026-08-20 finding): the receipt claimed 待办 and 留中摘要
+    sweeps that no code in the anchor task performs. It must describe the
+    actual work (anchor items + calendar context + REQ-121 dedup)."""
+    r = _run_anchor_post("早。今天的锚点：拉伸 10 分钟。", tmp_path)
+    out = r.stdout
+    assert "核对今日锚点事项与日历上下文" in out
+    assert "待办" not in out
+    assert "留中摘要" not in out
+    # No ledger-only bin seeded → no digest, so no 攒批 claim either.
+    assert "攒批" not in out
+
+
+def test_morning_anchor_receipt_mentions_digest_only_when_present(tmp_path):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    rows = [
+        {"ev": "create", "id": "mem_r1", "ts": ts, "epoch": int(time.time()),
+         "source": "mail", "title": "占位判断题", "attention": "decision"},
+        {"ev": "delivery", "id": "mem_r1", "status": "ledger_only", "ts": ts},
+    ]
+    (tmp_path / "memorials.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+        encoding="utf-8")
+    out = _run_anchor_post("早。锚点两件。", tmp_path).stdout
+    assert "📥" in out          # the digest footer itself rides the card
+    assert "攒批一行" in out     # and the receipt owns up to attaching it
 
 
 # ── exercise_week_post: one memorial card, one matter, once per week ────
