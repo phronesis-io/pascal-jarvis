@@ -146,6 +146,50 @@ def test_card_present_suppresses_duplicate_top_message(tmp_path, monkeypatch):
     assert "DUPLICATE_PARAGRAPH" not in result
 
 
+def test_multi_card_post_output_frames_every_card(tmp_path, monkeypatch):
+    """2026-08-21 red-team P1: one CARD: envelope PER card, not per message.
+
+    A post-hook printing one card per event (mail-triage, intentions) used to
+    get a single CARD: prefix on the whole multi-line message; every card
+    after the first reached memorialize_output as bare top-level JSON and was
+    blocked there as raw internal JSON — created on the ledger, delivered
+    nowhere.
+    """
+    hb = "### rec\n- interval: 1h\n- prompt: p\n- post: two_cards_post.py\n"
+    runner = _make_runner(tmp_path, hb)
+    second_card = _FAKE_CARD.replace("CARD_BODY_HERE", "SECOND_CARD_BODY")
+    script = Path(runner.jarvis_dir) / "two_cards_post.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"print({_FAKE_CARD!r})\n"
+        f"print({second_card!r})\n"
+    )
+    monkeypatch.setattr(runner, "claude_call", lambda p: "raw rec data")
+    result = runner.run_cycle(force=True)
+
+    lines = [line for line in result.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert all(line.startswith("CARD:") for line in lines), lines
+    assert not any(line.startswith("CARD:CARD:") for line in lines)
+    assert "CARD_BODY_HERE" in lines[0] and "SECOND_CARD_BODY" in lines[1]
+
+
+def test_wrap_card_lines_never_double_prefixes_or_touches_non_cards():
+    from core.heartbeat import _wrap_card_lines
+    msg = "\n".join([
+        f"CARD:{_FAKE_CARD}",   # already an envelope
+        _FAKE_CARD,             # bare top-level card
+        f"    {_FAKE_CARD}",    # indented = quoted example, trust boundary
+        "plain prose line",
+    ])
+    out = _wrap_card_lines(msg).splitlines()
+    assert out[0] == f"CARD:{_FAKE_CARD}"
+    assert out[1] == f"CARD:{_FAKE_CARD}"
+    assert out[2] == f"    {_FAKE_CARD}"
+    assert out[3] == "plain prose line"
+
+
 def test_top_message_kept_when_no_card(tmp_path, monkeypatch):
     """With no card in the cycle, the top-level user_message is the message."""
     hb = (
