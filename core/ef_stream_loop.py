@@ -526,10 +526,19 @@ C. 完全不需要任何动作 → HEARTBEAT_OK
 
 _UNSAFE_ANALYSIS_MARKERS = (
     "**tool:",
+    "<invoke",
+    "</invoke",
+    "<parameter",
+    "</parameter",
     "<tool_call",
+    "<tool_result",
     "<function_calls",
+    "<function_result",
     '"output_mode":',
     '"tool_use_id":',
+    '"tool_calls":',
+    "no result received from ",
+    "it ran without that session",
 )
 
 
@@ -763,8 +772,45 @@ def _record_auto_reply(jd: Path, *, title: str, conv_id: str, sender_id: str,
             "event_ids": list(ids),
             "msg_id": str(msg_id),
         }
-        with path.open("a", encoding="utf-8") as fh:
+        # A crash can remove the ingress seen receipt after the external send.
+        # EigenFluxMessenger then reconciles the replay to the same verified
+        # server receipt.  Keep the activity ledger equally idempotent: its
+        # rows drive the rate gate, so a duplicate row would spend Pascal's
+        # automatic-reply budget twice even though only one message was sent.
+        import fcntl
+
+        event_ids = tuple(sorted({
+            str(item).strip() for item in ids if str(item or "").strip()
+        }))
+        with path.open("a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.seek(0)
+            for line in fh:
+                try:
+                    existing = json.loads(line)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(existing, dict):
+                    continue
+                same_receipt = bool(
+                    msg_id and str(existing.get("msg_id") or "") == msg_id
+                )
+                existing_ids = tuple(sorted({
+                    str(item).strip()
+                    for item in existing.get("event_ids", [])
+                    if str(item or "").strip()
+                }))
+                same_event = bool(
+                    event_ids
+                    and existing_ids == event_ids
+                    and str(existing.get("conv_id") or "") == str(conv_id)
+                )
+                if same_receipt or same_event:
+                    return
+            fh.seek(0, os.SEEK_END)
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
     except Exception as exc:
         log("ef-stream", f"Auto-reply ledger write failed: {exc}", level="warn")
 

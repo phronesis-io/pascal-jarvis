@@ -136,6 +136,14 @@ def test_analysis_tool_transcript_is_discarded():
     assert efsl._safe_analysis_text(
         '**Tool: Grep**\n```json\n{"output_mode":"content"}\n```'
     ) == ""
+    assert efsl._safe_analysis_text(
+        '<invoke name="Bash">\n'
+        '<parameter name="command">cat ~/.config</parameter>\n'
+        '</invoke>'
+    ) == ""
+    assert efsl._safe_analysis_text(
+        "No result received from Bash tool. It ran without that session."
+    ) == ""
 
 
 def test_memorial_quiet_hours_queue_is_durable_acceptance(
@@ -830,6 +838,12 @@ def test_autoreply_replay_after_crash_never_sends_twice(
 
     assert len(cli.api_calls) == 1  # no second external mutation
     assert "msg-auto" in load_seen(seen_file)
+    ledger_rows = [
+        json.loads(line)
+        for line in (tmp_path / efsl.AUTOREPLY_LEDGER).read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(ledger_rows) == 1, "verified replay must not spend budget twice"
 
 
 def test_autoreply_to_stranger_is_rejected_before_any_send(

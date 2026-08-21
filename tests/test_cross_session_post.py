@@ -58,11 +58,38 @@ def test_plain_user_message_printed_and_recorded(tmp_path):
     result = _run_post(tmp_path, "### proj\n- 修好了日历同步",
                        user_message="隔壁 session 把日历同步修好了，链路已恢复")
     assert result.returncode == 0, result.stderr
-    assert "📡 跨 Session 动态" in result.stdout
+    assert "TITLE: 📡 跨 Session 动态" in result.stdout
+    assert "WORKED:" in result.stdout
     assert _digest_file(tmp_path).exists()
     sent = tmp_path / "mem" / "system" / "cross_session_sent.jsonl"
     entries = [json.loads(l) for l in sent.read_text().splitlines()]
     assert len(entries) == 1 and "日历同步" in entries[0]["message"]
+
+
+def test_user_message_survives_strict_work_receipt_gate(
+        tmp_path, monkeypatch):
+    """The ambient finding must reach its ledger, not only the digest file."""
+    result = _run_post(
+        tmp_path,
+        "### proj\n- 修好了日历同步",
+        user_message="隔壁 session 把日历同步修好了，链路已恢复",
+    )
+    assert result.returncode == 0, result.stderr
+
+    import core.memorial as memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    rendered = memorial.memorialize_output(
+        result.stdout,
+        "cross-session-sync",
+        require_work_receipt=True,
+    )
+
+    assert rendered == ""  # ambient notice: ledger-only, never realtime Lark
+    states = memorial.list_memorials()
+    assert len(states) == 1
+    assert states[0]["delivery_status"] == "ledger_only"
+    assert "跨产品会话" in states[0]["work_receipt"]
 
 
 def test_reworded_repeat_suppressed_but_digest_written(tmp_path):
