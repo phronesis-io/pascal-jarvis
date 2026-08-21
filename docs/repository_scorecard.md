@@ -1,100 +1,75 @@
 # Repository Scorecard
 
-Assessment date: 2026-08-16
+Assessment date: 2026-08-21
 
-This scorecard separates source quality from the runtime Pascal is actually
-using. A healthy process tree is not evidence that the product can deliver a
-message, and a strong release candidate is not deployed software.
+This is a reproducible current-state scorecard. Historical incidents remain in
+git history and the changelog; they do not stay here as if they were the live
+verdict. Scores combine source evidence with the revision actually running.
 
 ## Scores
 
-### Release candidate: 84/100 (B+)
-
-The `release/model-memory-runtime-hardening` branch is a credible production
-candidate. It is not yet a releasable production revision because the GitHub
-PR, protected CI, independent trusted review, merge to `main`, and post-merge
-runtime evidence have not happened.
-
-| Dimension | Score | Evidence |
+| Dimension | Score | Current evidence |
 |---|---:|---|
-| Product and architecture | 18/20 | Explicit model control plane, cross-product session index, unified delivery, capability inventory, L1/L2/L3 lifecycle, and documented ownership boundaries. |
-| Correctness and testing | 18/20 | More than 3,000 collected tests, focused provider-continuity scenarios, strict write isolation, import-cycle budget, shell syntax and CI-parity shell checks. Restricted process/socket tests cannot run in the current Codex sandbox. |
-| Security and private data | 14/15 | Bot/user identity separation, private SQLite creation, symlink refusal, secure deletion, WAL truncation, fail-closed receipts, and a public-repository hygiene gate. |
-| Reliability and recovery | 12/15 | Provider fallback, session acquire/run/release receipts, delivery retries, independent Guardian path, bot API delivery, and explicit delivery-ledger health. User OAuth capabilities still require a human reauthorization boundary. |
-| Maintainability | 10/15 | Good documentation and extracted boundaries, but `core.memorial` and `core.intentions` remain large orchestration modules and central-module adjacency is high. Runtime branch coverage is not measured. |
-| Operations and release | 8/10 | Components manifest, deploy receipts, revision verification, smoke tests, and a strong fail-closed release gate. The current workflow still depends on GitHub review evidence and a clean production checkout. |
-| Human value and attention | 4/5 | Lark-first interaction, memorial approval semantics, quiet hours, deduplication, and proactive intent closure are product strengths. Failure-state explanations and cross-session retrieval quality still need ongoing production measurement. |
+| Code and tests | 9.0/10 | 3,100+ tests, strict write isolation, shell checks, import-cycle budget, public-repository hygiene, provider continuity scenarios, and a new non-growing maintainability-debt gate in local and protected CI. |
+| Product effect | 7.5/10 | Lark is the single mobile surface; unified delivery, long-card continuation, cross-product memory, routines, EigenFlux, attention budgets, and model fallback all have executable contracts. Real usefulness, recall precision, and notification value still require ongoing production observation. |
+| Architecture maintainability | 7.8/10 | Cross-session, Memorial storage/rendering/transport, model control, and delivery have explicit boundaries. Four orchestration modules remain large, but their file and longest-function baselines now cannot grow unnoticed. |
+| Release and runtime consistency | 9.2/10 | Merged-PR/CI/review authority, clean-worktree checks, full resident-version verification, component health, delivery smoke, and the exact released SHA are joined into one durable post-release receipt. A failed check cannot persist a success receipt. |
+| **Overall** | **8.4/10** | Rounded mean of the four dimensions. |
 
-### Current production runtime: 58/100 (D+)
+## What Changed
 
-The production processes are alive, but the runtime is not healthy enough to
-consider available:
+The previous scorecard was an incident snapshot: it described an unmerged
+release branch, a dirty production checkout, and runtime drift from 2026-08-16.
+Those facts were useful then and false now. Keeping them as a current verdict
+made the repository look permanently broken after the incident was closed.
 
-- The running bot and heartbeat were started before current runtime-code
-  edits; `core.deploy verify` reports revision drift.
-- The production checkout contains another agent's uncommitted delivery work.
-- The delivery ledger shows a recent consecutive terminal-failure streak.
-- Calendar sync is persistently failing at the user OAuth/Keychain boundary.
-- The old component report exposes calendar failure but does not include
-  delivery-ledger health, so it can look mostly green while Pascal receives
-  nothing.
+This scorecard now rests on repeatable controls:
 
-The low runtime score is not an indictment of the candidate code. It records
-the gap between validated source and what is currently executing.
+- `scripts/maintainability_budget.py` accepts today's large-module debt but
+  rejects any increase in file size or longest-function size. Refactoring can
+  lower the checked-in limits; feature work cannot silently raise them.
+- `core.deploy receipt` verifies the release-gate SHA, every registered
+  runtime, all critical components, and unified-delivery smoke before writing
+  one SQLite receipt.
+- `restart.sh` writes that receipt only after a governed deploy or an authorized
+  same-revision runtime restart has completed all checks.
+- `core.deploy receipt-latest` gives the next human or Agent one durable answer
+  to "what was released, under which authority, and what proved it healthy?"
 
-## Keep
+## Reproduce
 
-- One system-owned model control plane; harnesses execute, models are routed.
-- One cross-session index for Claude Code and Codex history, with private
-  storage and bounded prompt projection.
-- One unified delivery ledger with real provider receipts and idempotency.
-- Bot-identity Lark delivery independent from user OAuth capabilities.
-- Fail-closed release evidence. A restart must never become a deployment
-  bypass.
-- The capability inventory and explicit retirement process. Features are not
-  deleted based on age or file size alone.
+Run these from the repository root:
 
-## Improve
+```bash
+./scripts/localtest.sh
+python3 scripts/maintainability_budget.py
+python3 -m core.components
+python3 -m core.deploy verify
+python3 -m core.deploy receipt-latest
+python3 -m core.provider_health status
+```
 
-### P0: restore one trustworthy production revision
+The first five commands are repository and release evidence. Provider health
+is reported separately because an upstream account limit or relay outage is a
+real operational degradation, but not proof of code/runtime drift.
 
-1. Freeze the dirty production checkout and reconcile its delivery work
-   against the stronger `core.lark_bot_transport` candidate implementation.
-2. Open one protected PR from the release branch, pass CI and independent
-   review, merge to `main`, then update the production checkout cleanly.
-3. Run the governed restart and require revision, component, delivery smoke,
-   provider canary, and desktop/mobile UI evidence.
-4. Confirm a real Lark receipt clears the delivery failure streak. Keep the
-   calendar degraded until owner OAuth is reauthorized; do not weaken Keychain
-   storage to make the alert disappear.
+## Residual Debt
 
-### P1: make product health match human experience
+1. `core.memorial`, `core.intentions`, `core.heartbeat`, and
+   `core.delegations` remain large orchestration modules. The budget stops
+   growth; small behavior-preserving extractions must now ratchet it downward.
+2. Product quality cannot be established from test count. Cross-session recall
+   precision, useful EigenFlux signals, routine completion, ignored cards, and
+   attention cost remain L3 production metrics.
+3. Owner calendar/docs/mail/task operations still have a human OAuth boundary.
+   Bot delivery is deliberately independent and must not impersonate it.
+4. Claude account limits and relay timeouts are external availability facts.
+   The model control plane must keep reporting them honestly while routing to
+   a verified healthy fallback.
 
-1. Track delivery success ratio, oldest due envelope, terminal-failure streak,
-   and last real receipt as first-class health signals.
-2. Distinguish `self_healing`, `recovered`, `needs_owner_action`, and
-   `exhausted` states. Notify Pascal only for the last two states.
-3. Fail fast after the first calendar fetch failure instead of issuing the
-   remaining daily requests in the same 30-day batch.
-4. Add production observations for cross-session recall precision: useful
-   retrievals, ignored retrievals, stale facts, duplicate facts, and missed
-   decisions.
+## Next Threshold
 
-### P2: retire maintainability debt without a rewrite
-
-1. Establish reproducible line and branch coverage for `core.memorial` and
-   `core.intentions`.
-2. Add characterization tests around their longest workflows, then extract
-   lifecycle-owned slices behind compatibility facades.
-3. Turn central-module adjacency growth into a reviewed budget with explicit
-   exceptions for authority modules.
-4. Add a model-control operations view for route, provider, model, fallback
-   reason, health window, cost/usage, and last verified canary.
-
-## Release Decision
-
-`NO-GO` for the currently running production revision.
-
-`CONDITIONAL GO` for the release candidate after GitHub PR, protected CI,
-independent trusted review, merge to `main`, clean deployment, and real runtime
-receipts. The gate must not be bypassed for a local restart.
+Reaching 9/10 overall requires evidence, not another scoring edit: reduce the
+four checked modules below their budgets, publish stable branch-coverage
+baselines for their critical workflows, and show sustained production gains in
+recall usefulness, routine closure, and low-noise delivery.

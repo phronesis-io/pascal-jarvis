@@ -453,6 +453,21 @@ launchd_job_state() {
   esac
 }
 
+record_release_receipt() {
+  local mode="$1"
+  local report="/tmp/jarvis_release_receipt.json"
+  echo "Persisting joined release evidence..."
+  if python3 -m core.deploy receipt \
+      --gate-evidence /tmp/jarvis_release_gate.json \
+      --mode "$mode" >"$report"; then
+    green "  Release receipt persisted."
+    return 0
+  fi
+  red "  Release receipt verification failed."
+  cat "$report"
+  return 1
+}
+
 verify_full_runtime() {
   local verify_args=()
   local component
@@ -560,6 +575,7 @@ governed_deploy() {
     dim "  Retired runtime registrations cleared (dashboard, mobile-gateway)."
   fi
   verify_full_runtime
+  record_release_receipt governed
   echo ""
   status
 }
@@ -581,6 +597,8 @@ case "${1:-}" in
     echo ""
     start_bot
     settle_bot
+    verify_full_runtime
+    record_release_receipt runtime
     echo ""
     status
     ;;

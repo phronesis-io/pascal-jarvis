@@ -97,6 +97,13 @@ deployment remains governed:
 ./restart.sh --full     # alias for the same governed full-runtime deploy
 ```
 
+Every successful restart persists one joined release receipt only after the
+gate SHA, resident versions, critical components, and delivery smoke agree:
+
+```bash
+python3 -m core.deploy receipt-latest
+```
+
 ---
 
 ## What is this?

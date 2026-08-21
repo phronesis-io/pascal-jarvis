@@ -114,6 +114,8 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
     assert "core.deploy deregister dashboard mobile-gateway" in full
     assert full.index("deregister dashboard") < full.index(
         "verify_full_runtime")
+    assert full.index("verify_full_runtime") < full.index(
+        "record_release_receipt governed")
 
     verify = RESTART_SH[
         RESTART_SH.index("verify_full_runtime()"):
@@ -132,6 +134,19 @@ def test_default_release_and_full_alias_share_the_complete_deploy_path():
     unknown = case[case.rindex("  *)"):]
     assert "Unknown option" in unknown
     assert "governed_deploy" not in unknown
+
+
+def test_every_successful_restart_records_joined_release_evidence():
+    recorder = RESTART_SH[
+        RESTART_SH.index("record_release_receipt()"):
+        RESTART_SH.index("verify_full_runtime()")
+    ]
+    assert "core.deploy receipt" in recorder
+    assert "/tmp/jarvis_release_gate.json" in recorder
+    assert "--mode" in recorder
+
+    runtime_case = RESTART_SH[RESTART_SH.index('case "${1:-}"'):]
+    assert "record_release_receipt runtime" in runtime_case
 
 
 def test_admin_restart_handoff_uses_same_revision_runtime_path():

@@ -1,12 +1,16 @@
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import core.deploy as deploy
 from core.delivery import DeliveryPipeline
 from core.deploy import (
     _dirty_runtime_paths,
     deregister_runtime,
+    latest_release_receipt,
+    record_release_receipt,
+    release_receipt_status,
     register_runtime,
     revision_contains,
     smoke_delivery,
@@ -285,3 +289,143 @@ def test_deregister_removes_only_the_retired_component_row(tmp_path):
     after = verify_runtime(root=tmp_path, db_path=db_path)
     assert not any("dashboard" in issue for issue in after["issues"])
     assert [c["component"] for c in after["components"]] == ["bot"]
+
+
+def test_release_receipt_persists_one_joined_success_record(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "jarvis.db"
+    sha = "a" * 40
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: sha)
+    gate_path = tmp_path / "gate.json"
+    gate_path.write_text(
+        '{"ok":true,"sha":"' + sha + '","pr":105,'
+        '"approval_mode":"owner_release_decision",'
+        '"owner_release_decisions":[{"actor":"owner",'
+        '"reason":"private release reason"}]}',
+        encoding="utf-8",
+    )
+
+    result = record_release_receipt(
+        gate_evidence=gate_path,
+        mode="governed",
+        root=tmp_path,
+        db_path=db_path,
+        verify_fn=lambda **_kwargs: {
+            "ok": True,
+            "git_head": sha,
+            "components": [{"component": "bot", "git_head": sha}],
+            "issues": [],
+            "warnings": [],
+        },
+        component_fn=lambda **_kwargs: [
+            {"name": "bot", "ok": True, "critical": True, "detail": "alive"},
+        ],
+        smoke_fn=lambda **_kwargs: {
+            "ok": True, "state": "acted", "delivery_id": "smoke-1",
+        },
+        now_epoch=1234.5,
+    )
+
+    assert result["ok"] is True
+    assert result["receipt"]["git_head"] == sha
+    assert result["receipt"]["gate"]["pr"] == 105
+    assert result["receipt"]["gate"]["owner_actors"] == ["owner"]
+    assert "private release reason" not in str(result["receipt"])
+    assert result["receipt"]["runtime"]["ok"] is True
+    assert result["receipt"]["components"][0]["name"] == "bot"
+    assert result["receipt"]["smoke"]["state"] == "acted"
+    assert latest_release_receipt(
+        root=tmp_path, db_path=db_path,
+    ) == result["receipt"]
+
+
+def test_release_receipt_fails_closed_and_does_not_persist_partial_evidence(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "jarvis.db"
+    sha = "b" * 40
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: sha)
+    gate = {"ok": True, "sha": sha, "pr": 105}
+
+    result = record_release_receipt(
+        gate_evidence=gate,
+        mode="governed",
+        root=tmp_path,
+        db_path=db_path,
+        verify_fn=lambda **_kwargs: {
+            "ok": False, "git_head": sha, "components": [],
+            "issues": ["bot: stale"], "warnings": [],
+        },
+        component_fn=lambda **_kwargs: [],
+        smoke_fn=lambda **_kwargs: {"ok": True, "state": "acted"},
+    )
+
+    assert result["ok"] is False
+    assert "runtime verification failed" in result["issues"]
+    assert latest_release_receipt(root=tmp_path, db_path=db_path) is None
+
+
+def test_release_receipt_rejects_gate_for_another_revision(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: "c" * 40)
+
+    result = record_release_receipt(
+        gate_evidence={"ok": True, "sha": "d" * 40},
+        mode="runtime",
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        verify_fn=lambda **_kwargs: {"ok": True},
+        component_fn=lambda **_kwargs: [],
+        smoke_fn=lambda **_kwargs: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert result["issues"] == ["release gate SHA does not match HEAD"]
+
+
+def test_release_receipt_requires_critical_component_evidence(
+    tmp_path, monkeypatch,
+):
+    sha = "e" * 40
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: sha)
+
+    result = record_release_receipt(
+        gate_evidence={"ok": True, "sha": sha},
+        mode="governed",
+        root=tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        verify_fn=lambda **_kwargs: {"ok": True},
+        component_fn=lambda **_kwargs: [],
+        smoke_fn=lambda **_kwargs: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert result["issues"] == ["no critical component evidence"]
+
+
+def test_release_receipt_status_rejects_evidence_for_old_head(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "jarvis.db"
+    old_sha = "1" * 40
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: old_sha)
+    recorded = record_release_receipt(
+        gate_evidence={"ok": True, "sha": old_sha},
+        mode="governed",
+        root=tmp_path,
+        db_path=db_path,
+        verify_fn=lambda **_kwargs: {"ok": True},
+        component_fn=lambda **_kwargs: [{"name": "bot", "ok": True}],
+        smoke_fn=lambda **_kwargs: {"ok": True},
+    )
+    assert recorded["ok"] is True
+
+    monkeypatch.setattr(deploy, "git_head", lambda _root=None: "2" * 40)
+    status = release_receipt_status(root=tmp_path, db_path=db_path)
+
+    assert status["ok"] is False
+    assert status["issues"] == [
+        "latest release receipt does not match HEAD",
+    ]

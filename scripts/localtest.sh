@@ -40,6 +40,8 @@ else
 fi
 
 if [ "$runtime" -eq 0 ]; then
+  echo "[localtest] maintainability debt budget"
+  python3 scripts/maintainability_budget.py
   echo "[localtest] pytest"
   python3 -m pytest tests/ "$@"
 else
