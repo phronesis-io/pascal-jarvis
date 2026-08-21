@@ -120,11 +120,22 @@ if msgs:
 " 2>/dev/null)
 fi
 
+# ── 2.5 EigenFlux private messages Jarvis answered by itself ──
+# 2026-08-20, Pascal: "有些你可以自动回复掉吧，不一定要找我". Those replies raise
+# no card, so they would otherwise be invisible in his day.
+# core.autoreply_activity keeps a consumed-offset cursor beside the ledger and
+# reports EVERY row since the last report — the hourly gate above therefore
+# only delays a row, never drops it (the old 45-minute wall-clock window
+# silently lost anything sent while the gate was closed).
+autoreply_context=$(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" \
+  python3 -m core.autoreply_activity 2>/dev/null)
+
 # ── 3. Check if user explicitly mentioned activities ──
 # (handled by Claude from the conversation context above)
 
 # ── Output ──
-if [ -z "$calendar_context" ] && [ -z "$conversation_context" ]; then
+if [ -z "$calendar_context" ] && [ -z "$conversation_context" ] \
+   && [ -z "$autoreply_context" ]; then
   exit 0  # No signals at all
 fi
 
@@ -132,6 +143,7 @@ echo "Activity log window: $now_ts (last 45 minutes)"
 echo ""
 [ -n "$calendar_context" ] && echo "$calendar_context" && echo ""
 [ -n "$conversation_context" ] && echo "$conversation_context"
+[ -n "$autoreply_context" ] && echo "" && echo "$autoreply_context"
 
 # A script whose last command is `[ -n "$x" ] && echo …` exits 1 whenever x is
 # empty — so a window with a calendar event but no conversation printed a
