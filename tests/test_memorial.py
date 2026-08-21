@@ -1700,7 +1700,10 @@ def test_send_timeout_retries_and_never_claims_delivery(monkeypatch):
 # ── mail triage integration (post script carrier swap) ──────────────────
 
 
-def test_mail_post_routes_nonurgent_output_to_web(tmp_path, monkeypatch, capsys):
+def test_mail_post_prints_nonurgent_card_for_loop(tmp_path, monkeypatch, capsys):
+    # The web notice stream is retired (Lark is the only delivery surface):
+    # non-urgent pushed mail rides the CARD route, so the post hook must print
+    # the card — carrying its memorial id — for heartbeat_loop to transport.
     import importlib.util
     root = Path(__file__).parent.parent
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -1716,10 +1719,11 @@ def test_mail_post_routes_nonurgent_output_to_web(tmp_path, monkeypatch, capsys)
     spec.loader.exec_module(post)
     assert post.main() == 0
 
-    assert capsys.readouterr().out == ""
+    out = capsys.readouterr().out
     state = memorial.list_memorials()[-1]
     assert state["body"] == "📬 来自 X 的邮件"
     assert state["attention"] == "notice"
+    assert state["id"] in out
 
 
 # ── engagement accounting (v1.2 follow-up: memorial ↔ engagement_log) ────

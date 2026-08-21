@@ -792,3 +792,51 @@ def test_warm_head_keep_floor_on_unbroken_blob(tmp_path):
     # 保留量接近 cap，而不是只剩首行。
     assert len(section) > WARM_FILE_CAP - 500
     assert "full file on disk: pasted_blob.md" in out
+
+
+def test_warm_index_mode_keeps_rules_and_maps_the_rest(tmp_path):
+    """index 模式：标准行为规则照旧全文进上下文，参考笔记降级成一行索引。
+
+    规则不能懒加载——模型不知道自己需要某条规则时不会去 fetch 它。
+    """
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "feedback_never_lazy.md").write_text(
+        "---\ndescription: 标准规则\n---\n\n必须全文注入的行为准则正文。\n",
+        encoding="utf-8")
+    (warm / "project_big_note.md").write_text(
+        "---\ndescription: 一份很长的参考笔记\n---\n\n" + "内容" * 3000,
+        encoding="utf-8")
+
+    full = load_tiered_memory(tmp_path)
+    idx = load_tiered_memory(tmp_path, warm_mode="index")
+
+    # 规则两种模式下都在
+    assert "必须全文注入的行为准则正文。" in full
+    assert "必须全文注入的行为准则正文。" in idx
+
+    # 参考笔记只在 full 里展开；index 里只留一行指路
+    assert "内容内容" in full
+    assert "内容内容" not in idx
+    assert "project_big_note.md" in idx
+    assert "一份很长的参考笔记" in idx
+    assert str(warm) in idx
+    assert len(idx) < len(full)
+
+
+def test_warm_mode_rejects_unknown_value(tmp_path):
+    import pytest
+    (tmp_path / "warm").mkdir()
+    with pytest.raises(ValueError):
+        load_tiered_memory(tmp_path, warm_mode="lazy")
+
+
+def test_warm_index_falls_back_to_body_line_without_frontmatter(tmp_path):
+    """没有 description 就用正文首行，绝不替它编一句摘要。"""
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    (warm / "notes_plain.md").write_text(
+        "# 标题\n\n这是正文第一行。\n" + "尾" * 100, encoding="utf-8")
+    idx = load_tiered_memory(tmp_path, warm_mode="index")
+    assert "这是正文第一行。" in idx
+    assert "# 标题" not in idx

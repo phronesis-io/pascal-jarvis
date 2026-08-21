@@ -98,6 +98,44 @@ def _contains_card_output(message: str) -> bool:
     return False
 
 
+def _wrap_card_lines(message: str) -> str:
+    """Frame EVERY top-level executable card line as its own CARD: envelope.
+
+    The cycle merge used to prefix ``CARD:`` onto the whole (possibly
+    multi-line) message, which framed only the first line. A post-hook that
+    prints one card per event (mail-triage, intentions) had every card after
+    the first reach memorialize_output as bare top-level JSON — blocked there
+    as raw internal JSON, so the memorial was created but delivered nowhere
+    (the 2026-08-21 mail create→lapse recurrence for ≥2 pushed emails in one
+    cycle). A message whose first line already carried its own ``CARD:`` was
+    double-prefixed ("CARD:CARD:{...}") and dropped as malformed downstream.
+
+    Per line: an unindented executable card gets exactly one ``CARD:``; an
+    existing envelope keeps its single prefix; everything else (prose,
+    indented code examples — an indentation trust boundary shared with
+    ``_contains_card_output`` and memorialize_output) passes through
+    byte-for-byte.
+    """
+    wrapped: list[str] = []
+    for raw_line in str(message).splitlines():
+        if raw_line != raw_line.lstrip(" \t"):
+            wrapped.append(raw_line)  # indented = quoted example, not protocol
+            continue
+        candidate = raw_line.strip()
+        if candidate.startswith("CARD:"):
+            wrapped.append(raw_line)  # already an envelope — never double-wrap
+            continue
+        try:
+            card = json.loads(candidate) if candidate else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            card = None
+        if isinstance(card, dict) and "config" in card and "elements" in card:
+            wrapped.append("CARD:" + candidate)
+        else:
+            wrapped.append(raw_line)
+    return "\n".join(wrapped)
+
+
 def _run_isolated(cmd: list[str], *, timeout: float,
                   cwd: str | None = None, env: dict | None = None,
                   input_text: str | None = None) -> subprocess.CompletedProcess:
@@ -1137,15 +1175,36 @@ class HeartbeatRunner:
         mem_budget = None
         if use_backup or direct_gpt:
             mem_budget = int(os.environ.get("BACKUP_MAX_MEMORY_CHARS", "40000"))
+        # Opt-in on-demand warm tier (2026-08-21). The warm knowledge base is
+        # ~60% of every injected payload and most tasks need none of it; in
+        # index mode the standing behavioral rules stay inline verbatim and
+        # the reference notes become a one-line map the model reads from disk.
+        # Fail-closed: a call with no file-reading tools MUST keep "full",
+        # otherwise the notes become unreachable rather than lazy.
+        warm_mode = "full"
+        if (os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip() == "index"
+                and allow_tools and not restrict_tools):
+            warm_mode = "index"
+        # Only pass warm_mode when it deviates from the default: an adapter
+        # built against the pre-index signature (max_chars/focus_text only)
+        # must keep working unchanged while the feature is off, not be pushed
+        # into the legacy fallback that silently drops the budget kwargs.
+        mem_kwargs = {"max_chars": mem_budget, "focus_text": prompt}
+        if warm_mode != "full":
+            mem_kwargs["warm_mode"] = warm_mode
         try:
-            memory = load_tiered_memory(
-                self.memory_dir, max_chars=mem_budget, focus_text=prompt)
+            memory = load_tiered_memory(self.memory_dir, **mem_kwargs)
         except TypeError as exc:
             # Keep HeartbeatRunner compatible with an older memory module and
             # with lightweight test/plugin adapters that still expose the
             # historical one-argument callable.
-            if not any(name in str(exc) for name in ("max_chars", "focus_text")):
+            if not any(name in str(exc)
+                       for name in ("max_chars", "focus_text", "warm_mode")):
                 raise
+            print("[heartbeat] load_tiered_memory signature mismatch; "
+                  f"falling back to the legacy one-argument call "
+                  f"(memory budget and warm_mode dropped): {exc}",
+                  file=sys.stderr)
             memory = load_tiered_memory(self.memory_dir)
         if restrict_tools:
             # External text and private memory must never share one model
@@ -2415,7 +2474,10 @@ You have access to the user's memory below. Use it to personalize your responses
 
         combined_parts = []
         for card in cards:
-            combined_parts.append(f"CARD:{card}")
+            # Per-line framing (2026-08-21 red-team P1): the old
+            # f"CARD:{card}" prefixed only the first line of a multi-card
+            # message, so every later card was dropped downstream as raw JSON.
+            combined_parts.append(_wrap_card_lines(card))
         if texts:
             combined_parts.append("\n\n---\n\n".join(texts))
 
