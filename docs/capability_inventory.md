@@ -21,9 +21,9 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **233**
-- Status: keep **233**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **60**, dashboard-api **46**, dashboard-page **20**, heartbeat-task **40**, lark-command **21**, runtime-component **17**
+- Total: **234**
+- Status: keep **234**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **61**, dashboard-api **46**, dashboard-page **20**, heartbeat-task **40**, lark-command **21**, runtime-component **17**
 
 ## Inventory
 
@@ -88,6 +88,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `heartbeat:weekly-review` | heartbeat-task | **keep** | `HEARTBEAT.md:1249` | `tasks/weekly_review_pre.sh:1`, `tasks/weekly_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:102`, `tests/test_weekly_review_post.py:48` | - |
 | `cli:core.actions` | core-cli | **keep** | `core/actions.py:1017` | `core/actions.py:1017` | python3 -m core.actions | `tests/test_actions.py:288`, `tests/test_bot_trust_boundary.py:43`, `tests/test_card.py:101` | - |
 | `cli:core.attention_roi` | core-cli | **keep** | `core/attention_roi.py:347` | `core/attention_roi.py:347` | python3 -m core.attention_roi | `tests/test_attention_roi.py:51`, `tests/test_import_graph.py:152`, `tests/test_memorial_docket_quality.py:175` | - |
+| `cli:core.autoreply_activity` | core-cli | **keep** | `core/autoreply_activity.py:173` | `core/autoreply_activity.py:173` | python3 -m core.autoreply_activity | `tests/test_autoreply_activity.py:64` | - |
 | `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:591` | `core/aux_model.py:591` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:425` | - |
 | `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:559` | `core/codex_fallback.py:559` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:279`, `tests/test_provider_continuity_e2e.py:227`, `tests/test_session_lifecycle.py:267` | - |
 | `cli:core.companion` | core-cli | **keep** | `core/companion.py:471` | `core/companion.py:471` | python3 -m core.companion | `tests/test_companion.py:63`, `tests/test_heartbeat_regressions.py:158`, `tests/test_import_graph.py:153` | - |
@@ -104,7 +105,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.delivery` | core-cli | **keep** | `core/delivery.py:1818` | `core/delivery.py:1818` | python3 -m core.delivery | `tests/test_admin_api.py:403`, `tests/test_admin_destructive.py:262`, `tests/test_bot_trust_boundary.py:60` | - |
 | `cli:core.deploy` | core-cli | **keep** | `core/deploy.py:441` | `core/deploy.py:441` | python3 -m core.deploy | `tests/test_daemon_audit_fixes.py:369`, `tests/test_daemon_regressions.py:124`, `tests/test_delegation_reconcile.py:204` | - |
 | `cli:core.doc_guard` | core-cli | **keep** | `core/doc_guard.py:159` | `core/doc_guard.py:159` | python3 -m core.doc_guard | `tests/test_doc_guard.py:58` | - |
-| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1061` | `core/ef_stream_loop.py:1061` | python3 -m core.ef_stream_loop | `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1044` | - |
+| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1291` | `core/ef_stream_loop.py:1291` | python3 -m core.ef_stream_loop | `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1044` | - |
 | `cli:core.eigenflux_ingress` | core-cli | **keep** | `core/eigenflux_ingress.py:410` | `core/eigenflux_ingress.py:410` | python3 -m core.eigenflux_ingress | `tests/test_eigenflux_ingress.py:265` | - |
 | `cli:core.eigenflux_messages` | core-cli | **keep** | `core/eigenflux_messages.py:1396` | `core/eigenflux_messages.py:1396` | python3 -m core.eigenflux_messages | `tests/test_delegation_projection.py:302`, `tests/test_eigenflux_friend_actions.py:117`, `tests/test_eigenflux_friends_post.py:39` | - |
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:128` | - |
