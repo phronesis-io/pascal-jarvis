@@ -3,9 +3,13 @@
 Why this module exists — the audit finding "self-monitoring tables frozen at
 2026-05-21":
 
-PRD v2 established that the shared SQLite tables (agent_log,
-engagement_events) are ZOMBIES — nothing writes them any more. The source of
-truth is the LIVE append-only files the running bot actually maintains:
+PRD v2 established that the shared SQLite tables must not be the monitor's
+source of truth. (History: the 2026-05-21 audit found them frozen. Since
+then core/delivery.py writes a 'sent' attribution row to engagement_events
+on every delivered envelope — the table is live again but one-sided, and
+agent_log stays unwritten; every response fact and scheduling fact exists
+only in the files below.) The source of truth is the LIVE append-only files
+the running bot actually maintains:
 
   - sched_events.jsonl       every scheduling decision + intent_* lifecycle
   - engagement_log.jsonl     every proactive 'sent' card + user response

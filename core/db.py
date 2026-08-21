@@ -789,7 +789,7 @@ def engagement_record(event_type: str, source: str = "",
         )
 
 
-# engagement_stats cache: home polls every 15s, the jsonl rarely changes.
+# engagement_stats cache: callers poll frequently, the jsonl rarely changes.
 # Keyed on (path, days) → (mtime_ns, size, result).
 _engagement_stats_cache: dict[tuple[str, int], tuple[int, int, dict]] = {}
 
@@ -798,11 +798,12 @@ def engagement_stats(days: int = 7) -> dict:
     """Get engagement statistics for the last N days.
 
     Reads engagement_log.jsonl — the source of truth written by the bot/
-    heartbeat. The engagement_events TABLE only ever received writes through
-    a since-retired dashboard HTTP endpoint nobody called (3 rows, all from
-    2026-05-21), so
-    stats computed from it showed a frozen snapshot while the jsonl kept
-    growing. The table and its API stay for compatibility; stats don't use it.
+    heartbeat. The engagement_events TABLE is live but one-sided: core/
+    delivery.py inserts a 'sent' attribution row on every delivered envelope
+    (delivery_id/channel/provider metadata), while the response half of the
+    story is recorded only in the jsonl. Stats therefore read the jsonl,
+    which carries both halves; the table and its API stay for delivery
+    attribution.
 
     Per-source engaged counts are capped at the sent count (historical rows
     double-credited replies, showing >100% rates on home) — same cap as

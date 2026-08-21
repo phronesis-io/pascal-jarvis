@@ -1,7 +1,7 @@
 """Tests for core.selfmon (REQ-67) — self-monitoring from LIVE sources.
 
 Per PRD v2 these metrics are computed from the live JSONL/state files and the
-intent DB, NOT from the dead dashboard tables. Every test seeds tmp files and
+intent DB, NOT from the legacy SQLite tables. Every test seeds tmp files and
 a tmp sqlite DB; the real production data is never read (the tmp dir is the
 jarvis_dir, and the DB path is monkeypatched).
 """

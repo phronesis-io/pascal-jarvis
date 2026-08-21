@@ -28,6 +28,21 @@ CONFIG_FILE="${JARVIS_CONFIG_FILE:-$JARVIS_DIR/jarvis.yaml}"
 
 mkdir -p "$DEST"
 
+# Retired surfaces — dashboard :3457 (2026-08-21) and mobile gateway :3458
+# (2026-08-11, REQ-120). A leftover KeepAlive definition for a deleted
+# package crash-loops on ModuleNotFoundError every ~10s with nothing left
+# watching it, so every install removes retired definitions before
+# installing what should exist. Idempotent: a clean machine logs nothing.
+for retired in \
+    "com.pascal.jarvis.dashboard" \
+    "com.pascal.jarvis.mobile-gateway"; do
+  if [ -f "$DEST/$retired.plist" ]; then
+    launchctl bootout "gui/$UID_N/$retired" 2>/dev/null || true
+    rm -f "$DEST/$retired.plist"
+    echo "removed retired launchd service $retired"
+  fi
+done
+
 if [ -z "${WORK_DIR:-}" ]; then
   if [ -f "$CONFIG_FILE" ]; then
     WORK_DIR=$(

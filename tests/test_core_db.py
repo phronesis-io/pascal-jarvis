@@ -114,10 +114,11 @@ class TestDatabase:
         assert tasks[0]["name"] == "Wake up"
 
     def test_engagement_stats(self, tmp_path, monkeypatch):
-        # Stats read engagement_log.jsonl (the source of truth written by the
-        # bot), NOT the engagement_events table — the table only ever received
-        # writes from an uncalled (now retired) dashboard endpoint and froze
-        # on 2026-05-21.
+        # Stats read engagement_log.jsonl (the source of truth written by
+        # the bot), NOT the engagement_events table — that table is written
+        # by core/delivery.py ('sent' attribution row per delivered
+        # envelope) but carries no response half, so only the jsonl can
+        # answer engagement.
         import json as _json
         import time as _time
         monkeypatch.setenv("JARVIS_DIR", str(tmp_path))

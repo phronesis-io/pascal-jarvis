@@ -32,7 +32,12 @@ def _live_python_files():
 
 
 def test_dashboard_package_and_launchd_template_are_deleted():
-    assert not (ROOT / "dashboard").exists()
+    # Not `.exists()`: on the production machine a gitignored
+    # dashboard/__pycache__/ survives the git pull, keeping the directory
+    # alive and turning a plain existence check red on the only machine
+    # that matters. No Python SOURCE may remain; bytecode residue is
+    # removed at deploy (`git clean -fdx dashboard/`).
+    assert not list((ROOT / "dashboard").rglob("*.py"))
     assert not (
         ROOT / "scripts" / "launchd" / "com.pascal.jarvis.dashboard.plist"
     ).exists()
@@ -61,6 +66,15 @@ def test_no_live_code_imports_the_dashboard_package():
 def test_no_live_surface_references_port_3457_or_the_launchd_job():
     for name in LIVE_CODE:
         text = (ROOT / name).read_text(encoding="utf-8")
+        if name == "restart.sh":
+            # The RETIRED_LABELS teardown block (and its deregister call)
+            # are the sanctioned mentions: they exist to REMOVE leftovers.
+            start = text.index("RETIRED_LABELS=(")
+            end = text.index("refresh_launchd_definitions()")
+            text = text[:start] + text[end:]
+            text = text.replace(
+                "python3 -m core.deploy deregister dashboard mobile-gateway",
+                "")
         live = "\n".join(
             line for line in text.splitlines()
             if not line.lstrip().startswith("#")

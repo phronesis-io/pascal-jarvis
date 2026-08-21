@@ -70,16 +70,32 @@ def test_restart_sh_settles_before_clearing_deploy_guard():
 
 def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
     """A full release cannot leave independently supervised residents on old
-    code — and retired surfaces must stay out of the deploy path entirely."""
+    code — and retired surfaces are torn down, never refreshed."""
     # Mobile gateway retired 2026-08-11 (REQ-120); dashboard retired
-    # 2026-08-21. Both labels must stay gone from live restart logic
-    # (the refresh list keeps a comment recording the retirements).
-    assert "com.pascal.jarvis.mobile-gateway" not in RESTART_SH
-    assert "com.pascal.jarvis.dashboard" not in RESTART_SH
+    # 2026-08-21. Their labels may appear ONLY inside the RETIRED_LABELS
+    # teardown block — an installed KeepAlive job whose package is deleted
+    # crash-loops with no supervision surface left to see it, so the
+    # governed deploy removes leftovers in code, not in PR prose.
+    retired_block = RESTART_SH[
+        RESTART_SH.index("RETIRED_LABELS=("):
+        RESTART_SH.index("refresh_launchd_definitions()")
+    ]
+    for label in ("com.pascal.jarvis.dashboard",
+                  "com.pascal.jarvis.mobile-gateway"):
+        assert label in retired_block
+        assert RESTART_SH.count(label) == retired_block.count(label), (
+            f"{label} may only appear in the RETIRED_LABELS teardown block")
+    assert "launchctl bootout" in retired_block
     assert "restart_user_surfaces" not in RESTART_SH
     assert "restart_launchd_surface" not in RESTART_SH
     assert "verify_full_runtime()" in RESTART_SH
     assert "refresh_launchd_definitions()" in RESTART_SH
+
+    refresh = RESTART_SH[
+        RESTART_SH.index("refresh_launchd_definitions()"):
+        RESTART_SH.index("LAUNCHD_PROBE_DETAIL=")
+    ]
+    assert "remove_retired_launchd_jobs" in refresh
 
     full = RESTART_SH[
         RESTART_SH.index("governed_deploy()"):
@@ -93,6 +109,11 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
     )
     assert full.index("start_bot") < full.index("settle_bot")
     assert full.index("settle_bot") < full.index("verify_full_runtime")
+    # Retired components' dead runtime rows would fail every unfiltered
+    # verify (the --runtime gate) forever; the deploy clears them itself.
+    assert "core.deploy deregister dashboard mobile-gateway" in full
+    assert full.index("deregister dashboard") < full.index(
+        "verify_full_runtime")
 
     verify = RESTART_SH[
         RESTART_SH.index("verify_full_runtime()"):
@@ -189,6 +210,68 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
     assert "bootout " in calls
     assert "com.pascal.jarvis.daemon" in calls
     assert "bootstrap " in calls
+
+
+def test_launchd_installer_removes_retired_jobs_and_definitions(tmp_path):
+    """2026-08-21: a leftover dashboard/mobile-gateway KeepAlive definition
+    for a deleted package would crash-loop every ~10s. Any install removes
+    retired definitions (and boots out their jobs) before installing what
+    should exist — collaborator machines included."""
+    home = tmp_path / "home"
+    destination = home / "Library" / "LaunchAgents"
+    destination.mkdir(parents=True)
+    for retired in ("com.pascal.jarvis.dashboard",
+                    "com.pascal.jarvis.mobile-gateway"):
+        (destination / f"{retired}.plist").write_text(
+            "retired leftover\n", encoding="utf-8")
+    # The fake launchctl reports every job as loaded, so the requested
+    # definition must pre-exist or the installer refuses (no rollback copy).
+    daemon_plist = destination / "com.pascal.jarvis.daemon.plist"
+    daemon_plist.write_text("previous daemon definition\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launchctl_log = tmp_path / "launchctl.log"
+    launchctl = bin_dir / "launchctl"
+    launchctl.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
+[ "$1" != "print" ] || echo 'state = running'
+""",
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "LAUNCHCTL_LOG": str(launchctl_log),
+        "WORK_DIR": _existing_work_dir(tmp_path),
+        "JARVIS_LAUNCHD_SETTLE_INTERVAL": "0",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "launchd" / "install.sh"),
+            "com.pascal.jarvis.daemon",
+        ],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    calls = launchctl_log.read_text(encoding="utf-8")
+    for retired in ("com.pascal.jarvis.dashboard",
+                    "com.pascal.jarvis.mobile-gateway"):
+        assert not (destination / f"{retired}.plist").exists()
+        assert f"bootout gui/{os.getuid()}/{retired}" in calls
+        assert f"removed retired launchd service {retired}" in result.stdout
+    # The requested definition still installs normally.
+    assert daemon_plist.read_text(
+        encoding="utf-8") != "previous daemon definition\n"
 
 
 def test_launchd_installer_retries_transient_bootstrap_eio(tmp_path):

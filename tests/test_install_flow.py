@@ -438,4 +438,7 @@ def test_retired_dashboard_launchd_template_stays_deleted():
     resurrect the retired :3457 surface on the next install."""
     assert not (ROOT / "scripts" / "launchd"
                 / "com.pascal.jarvis.dashboard.plist").exists()
-    assert not (ROOT / "dashboard").exists()
+    # Source-level check, not `.exists()`: a gitignored dashboard/__pycache__/
+    # survives git pull on the production machine (bytecode is cleaned at
+    # deploy via `git clean -fdx dashboard/`).
+    assert not list((ROOT / "dashboard").rglob("*.py"))
