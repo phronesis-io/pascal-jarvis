@@ -153,7 +153,10 @@ def test_post_records_nonurgent_notice_and_all_triaged(tmp_path):
                    {"event_id": "b2", "decision": "silent"}],
         "user_message": "📬 来自 X 的邮件", "urgent": False})
     out = _run_post(reply, tmp_path, pending=PENDING)
-    assert out.strip() == ""
+    # Non-urgent pushed mail is transported too (the card rides the CARD
+    # route); only .urgent_send stays urgent-only.
+    assert "来自 X" in out
+    assert not (tmp_path / ".urgent_send").exists()
     assert "来自 X" in (tmp_path / "memorials.jsonl").read_text()
     rows = [json.loads(x) for x in
             (tmp_path / "mail" / "triaged.jsonl").read_text().splitlines() if x]
@@ -174,13 +177,17 @@ def test_post_silent_when_no_message(tmp_path):
     assert {r["event_id"] for r in rows} == {"a1", "b2"}
 
 
-def test_post_quiet_hours_keeps_nonurgent_mail_as_web_notice(tmp_path):
+def test_post_quiet_hours_still_hands_nonurgent_card_to_loop(tmp_path):
+    # Quiet-hour deferral belongs to heartbeat_loop's intact-card queue, so
+    # the post-hook prints the card even at night — it must NOT touch
+    # .urgent_send (that would break through the queue).
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"}],
         "user_message": "📬 夜间来信", "urgent": False})
     out = _run_post(reply, tmp_path, quiet="quiet",
                     pending=[{"event_id": "a1", "subject": "s"}])
-    assert out.strip() == ""
+    assert "夜间来信" in out
+    assert not (tmp_path / ".urgent_send").exists()
     ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
     assert "夜间来信" in ledger and '"attention": "notice"' in ledger
     # still recorded as triaged (won't be re-read)
@@ -189,7 +196,7 @@ def test_post_quiet_hours_keeps_nonurgent_mail_as_web_notice(tmp_path):
     assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
 
 
-def test_post_keeps_one_web_notice_per_nonurgent_pushed_email(tmp_path):
+def test_post_prints_one_card_per_nonurgent_pushed_email(tmp_path):
     reply = json.dumps({
         "triage": [{"event_id": "a1", "decision": "push"},
                    {"event_id": "b2", "decision": "push"}],
@@ -200,13 +207,39 @@ def test_post_keeps_one_web_notice_per_nonurgent_pushed_email(tmp_path):
         "urgent": False,
     })
     out = _run_post(reply, tmp_path, pending=PENDING)
-    assert out.strip() == ""
+    cards = [json.loads(line) for line in out.splitlines() if line.strip()]
+    assert len(cards) == 2
     rows = [json.loads(line) for line in
             (tmp_path / "memorials.jsonl").read_text().splitlines()]
     creates = [row for row in rows if row.get("ev") == "create"]
     assert [row["title"] for row in creates] == ["安全提醒", "合作来信"]
     assert all(row["attention"] == "notice" for row in creates)
     assert not (tmp_path / "mail" / "mail_backlog.jsonl").exists()
+
+
+def test_post_nonurgent_card_carries_its_memorial_id(tmp_path):
+    """Regression (2026-08-21): 12 of 13 mail memorials since 7/31 went
+    create→lapse — non-urgent pushed mail was created with send=False and
+    nobody printed the card, so it fed the retired web notice stream (i.e.
+    nowhere). The printed card must carry the memorial id so heartbeat_loop
+    can route it and record delivery back onto the ledger."""
+    reply = json.dumps({
+        "triage": [{"event_id": "a1", "decision": "push"}],
+        "user_messages": [
+            {"event_id": "a1", "title": "银行扣款异常", "body": "同笔重复扣款"},
+        ],
+        "urgent": False,
+    })
+    out = _run_post(reply, tmp_path, pending=PENDING)
+    rows = [json.loads(line) for line in
+            (tmp_path / "memorials.jsonl").read_text().splitlines()]
+    create = next(row for row in rows if row.get("ev") == "create")
+    card = json.loads(out.strip().splitlines()[0])
+    ids = [action.get("value", {}).get("id")
+           for element in card.get("elements", [])
+           for action in element.get("actions", [])
+           if action.get("value", {}).get("action") == "memorial"]
+    assert create["id"] in ids
 
 
 def test_post_urgent_breaks_through_quiet_hours(tmp_path):

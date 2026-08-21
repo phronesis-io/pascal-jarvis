@@ -108,10 +108,11 @@ def main() -> int:
         surface_items.append({"title": "邮件", "body": msg, "event_id": ""})
     if not surface_items:
         return 0
-    # Non-urgent pushed mail is still worth keeping, but it belongs in the web
-    # notice stream instead of becoming another Lark decision. Urgent mail is a
-    # sparse alert: it uses heartbeat_loop's reliable CARD route and bypasses
-    # quiet hours without inflating the pending-decision count.
+    # Every pushed email rides heartbeat_loop's CARD route (REQ-119: Lark is
+    # the only delivery surface — the web notice stream this hook once fed is
+    # retired, and a card printed nowhere lapses unseen). Urgent mail
+    # additionally bypasses quiet hours without inflating the
+    # pending-decision count.
     try:
         from core import memorial
         if urgent:
@@ -157,18 +158,19 @@ def main() -> int:
                 context=(f"mail event_id={item['event_id']}"
                          if item["event_id"] else ""),
             )
-            if urgent:
-                print(memorial.card_json(mem_id))
+            # send=False + this print is the caller-owned-transport pattern
+            # (same as intentions/exercise-week): heartbeat_loop applies
+            # quiet-hour deferral, the daily budget, and delivery bookkeeping.
+            print(memorial.card_json(mem_id))
     except Exception as e:
         print(f"[mail-triage] memorial failed: {e}",
               file=sys.stderr)
-        if urgent:
-            for item in surface_items:
-                print(build_card(
-                    header=f"📬 {item['title']}", body=item["body"],
-                    source="mail-triage",
-                    work_receipt="读取邮件正文、完成优先级判断和重复项检查",
-                ))
+        for item in surface_items:
+            print(build_card(
+                header=f"📬 {item['title']}", body=item["body"],
+                source="mail-triage",
+                work_receipt="读取邮件正文、完成优先级判断和重复项检查",
+            ))
     return 0
 
 
