@@ -15,7 +15,6 @@ Input (stdin): Claude's reply, e.g.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -108,21 +107,16 @@ def main() -> int:
         surface_items.append({"title": "邮件", "body": msg, "event_id": ""})
     if not surface_items:
         return 0
-    # Non-urgent pushed mail is still worth keeping, but it belongs in the web
-    # notice stream instead of becoming another Lark decision. Urgent mail is a
-    # sparse alert: it uses heartbeat_loop's reliable CARD route and bypasses
-    # quiet hours without inflating the pending-decision count.
+    # Every pushed email rides heartbeat_loop's CARD route (REQ-119: Lark is
+    # the only delivery surface — the web notice stream this hook once fed is
+    # retired, and a card printed nowhere lapses unseen). Urgent mail carries
+    # attention="alert" on its memorial; _route_output promotes that to an
+    # urgent envelope, which is core.delivery's bypass-quiet signal — no
+    # sidecar flag. (The old .urgent_send touch was a dead flag: its only
+    # reader, heartbeat_loop._should_queue, has no production caller, so a
+    # 2am urgent email was held to 10:00 anyway.)
     try:
         from core import memorial
-        if urgent:
-            # Bypass heartbeat_loop's own quiet-hours queue too; this item has
-            # already passed the mail task's explicit urgent gate.
-            try:
-                Path(os.environ.get(
-                    "JARVIS_DIR", Path(__file__).resolve().parent.parent
-                )).joinpath(".urgent_send").touch()
-            except OSError:
-                pass
         from core import mail_draft
         for item in surface_items:
             body, options, preset, draft_id = item["body"], None, "fyi", ""
@@ -157,18 +151,19 @@ def main() -> int:
                 context=(f"mail event_id={item['event_id']}"
                          if item["event_id"] else ""),
             )
-            if urgent:
-                print(memorial.card_json(mem_id))
+            # send=False + this print is the caller-owned-transport pattern
+            # (same as intentions/exercise-week): heartbeat_loop applies
+            # quiet-hour deferral, the daily budget, and delivery bookkeeping.
+            print(memorial.card_json(mem_id))
     except Exception as e:
         print(f"[mail-triage] memorial failed: {e}",
               file=sys.stderr)
-        if urgent:
-            for item in surface_items:
-                print(build_card(
-                    header=f"📬 {item['title']}", body=item["body"],
-                    source="mail-triage",
-                    work_receipt="读取邮件正文、完成优先级判断和重复项检查",
-                ))
+        for item in surface_items:
+            print(build_card(
+                header=f"📬 {item['title']}", body=item["body"],
+                source="mail-triage",
+                work_receipt="读取邮件正文、完成优先级判断和重复项检查",
+            ))
     return 0
 
 

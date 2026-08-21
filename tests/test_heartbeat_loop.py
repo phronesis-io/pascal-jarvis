@@ -178,6 +178,60 @@ def test_route_output_preserves_memorial_attention(tmp_path, monkeypatch):
     assert rows[decision_id]["source"] == "mail"
 
 
+def test_route_output_alert_memorial_bypasses_quiet_hours(tmp_path, monkeypatch):
+    """Red-team P2 (PR#97): an urgent (alert-attention) mail card must be
+    DELIVERED at 3am, not queued to morning.
+
+    The living urgency signal is the memorial's attention="alert" — never the
+    .urgent_send sidecar flag, whose only reader (_should_queue) has no
+    production caller. _route_output promotes alert to envelope.urgent, and
+    core.delivery's existing bypass-quiet semantics send immediately. Clock
+    injected (仓库铁律: a test asserting delivered must not read the wall
+    clock).
+    """
+    from datetime import datetime
+    from core import delivery as delivery_mod
+    from core import memorial
+    from core.timeutil import now_local
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("JARVIS_QUIET_START", "23:30")
+    monkeypatch.setenv("JARVIS_QUIET_END", "10:00")
+    # 03:00 in the pipeline's own local timezone — deep inside quiet hours.
+    three_am = datetime(
+        2026, 8, 21, 3, 0, tzinfo=now_local().tzinfo).timestamp()
+
+    real_pipeline = delivery_mod.DeliveryPipeline
+
+    def deliver_at_3am(envelope, *, root=None, db_path=None, transport=None):
+        return real_pipeline(
+            root, db_path=db_path, transport=transport,
+            clock=lambda: three_am, sleeper=lambda _s: None,
+        ).deliver(envelope)
+
+    monkeypatch.setattr(delivery_mod, "deliver", deliver_at_3am)
+
+    alert_id, _ = memorial.create(
+        "mail", "银行安全告警", "凌晨异常扣款", send=False, attention="alert")
+    notice_id, _ = memorial.create(
+        "mail", "普通来信", "白天再看就好", send=False, attention="notice")
+    (tmp_path / ".heartbeat_last_source").write_text("mail-triage")
+
+    with patch("core.heartbeat_loop._lark_send_card",
+               return_value=True) as mock_card:
+        assert _route_output(
+            "CARD:" + memorial.card_json(alert_id) + "\n"
+            + "CARD:" + memorial.card_json(notice_id),
+            "user123", tmp_path, respect_quiet=True,
+        )
+
+    rows = {row["memorial_id"]: row for row in real_pipeline(tmp_path).list()}
+    assert rows[alert_id]["state"] == "delivered"   # rang through the night
+    assert rows[notice_id]["state"] == "queued"     # notice held to morning
+    assert mock_card.call_count == 1
+    assert alert_id in mock_card.call_args[0][0]
+
+
 def test_route_output_blocks_raw_json():
     """Raw JSON that isn't a card should be blocked."""
     with patch("core.heartbeat_loop._lark_send_text") as mock_send:

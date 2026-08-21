@@ -334,6 +334,13 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
             card_json = line[5:]
             memorial_id = _memorial_id_from_card(card_json)
             card_source, attention, review_surface = memorial_routing(memorial_id)
+            # An alert-class memorial (urgent mail, watchdog alarms) must ring
+            # through quiet hours: envelope.urgent is core.delivery's existing
+            # bypass-quiet signal. Before 2026-08-21 this leaned on the
+            # .urgent_send sidecar flag, whose only consumer (_should_queue)
+            # has no production caller — a 2am urgent email was silently held
+            # to 10:00 like any notice.
+            card_urgent = (not respect_quiet) or attention == "alert"
             _ids_before = len(_LAST_SENT_IDS)
             result = submit(DeliveryEnvelope(
                 source=card_source,
@@ -342,14 +349,14 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
                          "text": extract_card_text(card_json)},
                 attention=attention,
                 requested_channel="lark",
-                urgent=not respect_quiet,
+                urgent=card_urgent,
                 memorial_id=memorial_id,
                 dedup_key=f"memorial:{memorial_id}" if memorial_id else "",
                 provider=provider,
                 model=model,
                 metadata={
                     "review_surface": review_surface,
-                    "bypass_quiet": not respect_quiet,
+                    "bypass_quiet": card_urgent,
                     "bypass_dedup": not respect_quiet,
                     "bypass_throttle": not respect_quiet,
                     "retry_existing": True,
@@ -381,6 +388,8 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
         elif line.startswith('{"config":'):
             memorial_id = _memorial_id_from_card(line)
             card_source, attention, review_surface = memorial_routing(memorial_id)
+            # Same alert⇒urgent promotion as the CARD: branch above.
+            card_urgent = (not respect_quiet) or attention == "alert"
             _ids_before = len(_LAST_SENT_IDS)
             result = submit(DeliveryEnvelope(
                 source=card_source,
@@ -388,13 +397,13 @@ def _route_output(output: str, user_id: str, jarvis_dir: Path, *,
                 payload={"card_json": line, "text": extract_card_text(line)},
                 attention=attention,
                 requested_channel="lark",
-                urgent=not respect_quiet,
+                urgent=card_urgent,
                 memorial_id=memorial_id,
                 dedup_key=f"memorial:{memorial_id}" if memorial_id else "",
                 provider=provider,
                 model=model,
                 metadata={"review_surface": review_surface,
-                          "bypass_quiet": not respect_quiet,
+                          "bypass_quiet": card_urgent,
                           "bypass_dedup": not respect_quiet,
                           "bypass_throttle": not respect_quiet,
                           "retry_existing": True},
