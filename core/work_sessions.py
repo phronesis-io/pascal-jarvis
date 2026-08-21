@@ -228,7 +228,7 @@ def _parse_codex(path: Path) -> dict | None:
 
 def _matter_links() -> dict[tuple[str, str], str]:
     try:
-        from dashboard.db import get_db
+        from core.db import get_db
         rows = get_db().execute(
             "SELECT provider, entity_id, matter_id FROM matter_links "
             "WHERE entity_type = 'session'"

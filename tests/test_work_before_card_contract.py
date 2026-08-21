@@ -11,8 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_every_production_memorial_create_declares_a_work_receipt():
     missing: list[str] = []
-    paths = [*ROOT.glob("core/**/*.py"), *ROOT.glob("tasks/**/*.py"),
-             *ROOT.glob("dashboard/**/*.py")]
+    paths = [*ROOT.glob("core/**/*.py"), *ROOT.glob("tasks/**/*.py")]
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         imported_create_names = {

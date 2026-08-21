@@ -1,10 +1,10 @@
-"""Matter kernel tests against an isolated dashboard SQLite database."""
+"""Matter kernel tests against an isolated shared SQLite database."""
 
 from __future__ import annotations
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core.matters import (
     add_event,
     create_matter,

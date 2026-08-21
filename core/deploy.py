@@ -16,7 +16,6 @@ from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
 
 RUNTIME_PATHS = (
     "core",
-    "dashboard",
     "admin.py",
     "daemon.py",
     "bot.sh",
@@ -249,10 +248,36 @@ def _pid_alive(pid: int) -> bool:
 def _dirty_runtime_paths(root: Path) -> list[str]:
     output = _git(
         root, "status", "--porcelain", "--",
-        "core", "dashboard", "admin.py", "daemon.py", "bot.sh",
+        "core", "admin.py", "daemon.py", "bot.sh",
         "jarvis.yaml", "HEARTBEAT.md",
     )
     return [line[3:] for line in output.splitlines() if len(line) > 3]
+
+
+def deregister_runtime(
+    component: str,
+    *,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict:
+    """Remove a retired component's runtime registration.
+
+    A retired surface (mobile-gateway 2026-08-11, dashboard 2026-08-21) never
+    re-registers, so its last row would sit dead in `runtime_versions` and
+    fail every unfiltered ``core.deploy verify`` with "process is not alive"
+    forever. Deregistration is the explicit teardown step, not a side effect:
+    live components must keep failing loudly when they die.
+    """
+    name = str(component).strip()
+    if not name:
+        raise ValueError("component is required")
+    project = _root(root)
+    with _connect(_db_path(project, db_path)) as db:
+        removed = db.execute(
+            "DELETE FROM runtime_versions WHERE component = ?", (name,)
+        ).rowcount
+        db.commit()
+    return {"component": name, "removed": int(removed or 0)}
 
 
 def verify_runtime(
@@ -414,6 +439,18 @@ def main(argv: list[str] | None = None) -> int:
         **register_runtime(
             args.component, pid=args.pid or None,
             heartbeat_file=args.heartbeat_file or None),
+    }))
+
+    deregister = sub.add_parser(
+        "deregister",
+        help="remove a RETIRED component's runtime registration",
+    )
+    deregister.add_argument("component", nargs="+")
+    deregister.set_defaults(func=lambda args: _print({
+        "ok": True,
+        "removed": [
+            deregister_runtime(name) for name in args.component
+        ],
     }))
 
     verify = sub.add_parser("verify")

@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import dashboard.db as db_module  # noqa: E402
+import core.db as db_module  # noqa: E402
 from core import mail_draft  # noqa: E402
 
 

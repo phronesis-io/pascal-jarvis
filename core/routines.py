@@ -74,7 +74,7 @@ def _get_db():
     if not _sys_path_added:
         sys.path.insert(0, str(ROOT))
         _sys_path_added = True
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 
@@ -137,7 +137,7 @@ def _validate_trigger(trigger_type: str, expr: str) -> str:
     trigger_type = str(trigger_type).strip().lower()
     expr = str(expr).strip()
     if trigger_type == "cron":
-        from dashboard.scheduler import cron_next
+        from core.cron import cron_next
         if len(expr.split()) != 5:
             raise RoutineError(f"cron 表达式要 5 段，收到 {expr!r}")
         if cron_next(expr) is None:
@@ -183,7 +183,7 @@ def _next_fire(trigger_type: str, expr: str,
                after: datetime | None = None) -> datetime | None:
     after = after or now_local()
     if trigger_type == "cron":
-        from dashboard.scheduler import cron_next
+        from core.cron import cron_next
         return cron_next(expr, after=after)
     return after + timedelta(seconds=int(expr))
 

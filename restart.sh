@@ -348,6 +348,36 @@ restart_daemon() {
   start_daemon
 }
 
+# Surfaces retired from this deploy path — labels here are torn down, never
+# refreshed: dashboard :3457 (2026-08-21) and mobile gateway :3458
+# (2026-08-11, REQ-120). An installed KeepAlive job whose package is deleted
+# crash-loops on ModuleNotFoundError every ~10s with no supervision surface
+# left to see it, so a governed deploy removes any leftover job + definition
+# in code, not in deploy prose. Idempotent: a clean machine logs nothing.
+RETIRED_LABELS=(
+  "com.pascal.jarvis.dashboard"
+  "com.pascal.jarvis.mobile-gateway"
+)
+
+remove_retired_launchd_jobs() {
+  local label job plist
+  if ! command -v launchctl >/dev/null 2>&1; then
+    return 0
+  fi
+  for label in "${RETIRED_LABELS[@]}"; do
+    job="gui/$UID/$label"
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    if launchctl print "$job" >/dev/null 2>&1; then
+      launchctl bootout "$job" 2>/dev/null || true
+      echo "Removed retired launchd job: $label"
+    fi
+    if [ -f "$plist" ]; then
+      rm -f "$plist"
+      echo "Removed retired launchd definition: $plist"
+    fi
+  done
+}
+
 refresh_launchd_definitions() {
   local installer="$JARVIS_DIR/scripts/launchd/install.sh"
   local labels=()
@@ -361,13 +391,15 @@ refresh_launchd_definitions() {
     return 0
   fi
 
+  remove_retired_launchd_jobs
+
   # Only refresh services already enabled on this installation. This keeps
   # --full from silently enabling optional UI surfaces on a fresh clone while
   # ensuring tracked ProgramArguments/environment changes reach launchd before
-  # their processes are restarted.
+  # their processes are restarted. Retired labels live in RETIRED_LABELS
+  # above and are removed, never refreshed.
   for label in \
-      "com.pascal.jarvis.daemon" \
-      "com.pascal.jarvis.dashboard"; do
+      "com.pascal.jarvis.daemon"; do
     job="gui/$UID/$label"
     plist="$HOME/Library/LaunchAgents/$label.plist"
     if launchd_job_state "$job"; then
@@ -419,57 +451,6 @@ launchd_job_state() {
       return 2
       ;;
   esac
-}
-
-restart_launchd_surface() {
-  local label="$1"
-  local display_name="$2"
-  local runtime_component="$3"
-  local job="gui/$UID/$label"
-  local plist="$HOME/Library/LaunchAgents/$label.plist"
-  local action="restarted"
-  local probe_rc
-
-  if ! command -v launchctl >/dev/null 2>&1; then
-    dim "  $display_name: launchd unavailable; skipped."
-    return 0
-  fi
-
-  # A missing plist is an optional fresh-install state. An installed but
-  # unloaded job is a recoverable outage and must be bootstrapped.
-  if launchd_job_state "$job"; then
-    echo "Restarting $display_name via launchd..."
-    if ! launchctl kickstart -k "$job" 2>/dev/null; then
-      red "  $display_name restart failed: $label"
-      return 1
-    fi
-  else
-    probe_rc=$?
-    if [ "$probe_rc" -eq 2 ]; then
-      red "  $display_name state probe failed: $LAUNCHD_PROBE_DETAIL"
-      return 1
-    elif [ -f "$plist" ]; then
-      action="bootstrapped"
-      echo "Bootstrapping $display_name via launchd..."
-      if ! launchctl bootstrap "gui/$UID" "$plist" 2>/dev/null; then
-        red "  $display_name bootstrap failed: $plist"
-        return 1
-      fi
-    else
-      dim "  $display_name: launchd plist not installed; skipped."
-      return 0
-    fi
-  fi
-
-  FULL_RUNTIME_COMPONENTS+=("$runtime_component")
-  green "  $display_name $action (launchd)."
-}
-
-restart_user_surfaces() {
-  local failed=0
-  restart_launchd_surface \
-    "com.pascal.jarvis.dashboard" "Dashboard" "dashboard" || failed=1
-  return "$failed"
 }
 
 verify_full_runtime() {
@@ -570,12 +551,13 @@ governed_deploy() {
   # survivable.
   restart_daemon || red "  DAEMON RESTART FAILED — starting bot anyway; check: tail -20 /tmp/jarvis-daemon-stderr.log"
   start_bot
-  surface_failed=0
-  restart_user_surfaces || surface_failed=1
   settle_bot
-  if [ "$surface_failed" -ne 0 ]; then
-    red "  One or more user surfaces failed to restart."
-    return 1
+  # Retired components never re-register, so a dead runtime_versions row
+  # would turn every unfiltered `core.deploy verify` (the --runtime gate)
+  # red forever. Deregistering an already-absent row is a no-op.
+  if python3 -m core.deploy deregister dashboard mobile-gateway \
+      >/dev/null 2>&1; then
+    dim "  Retired runtime registrations cleared (dashboard, mobile-gateway)."
   fi
   verify_full_runtime
   echo ""

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core import intentions, memorial
 from core.jobs import JobManager
 from core.matter_bridge import (

@@ -25,13 +25,13 @@ Then inspect the worktree:
 git status --short --branch
 python3 -m core.components
 python3 scripts/capability_inventory.py --check-doc docs/capability_inventory.md
-python3 scripts/import_graph.py core dashboard tasks --threshold 24 --limit 20
+python3 scripts/import_graph.py core tasks --threshold 24 --limit 20
 python3 scripts/import_graph.py core --max-direct-cycles 11
 ```
 
 The capability inventory is the evidence-backed list of supported runtime
 surfaces. Update it with the generator whenever a component, heartbeat task,
-CLI, dashboard/admin route, or Lark command changes; never delete a capability
+CLI, admin route, or Lark command changes; never delete a capability
 from a broad cleanup without an explicit retirement and migration review.
 
 The import graph is a review signal for broad or self-improve rounds, not a
@@ -118,7 +118,9 @@ git diff --cached
 ## Runtime Surfaces
 
 - `:3456` - local Admin operations console.
-- `:3457` - NiceGUI dashboard.
+- `:3457` - retired (2026-08-21); the NiceGUI dashboard no longer runs.
+  Archive duty moved to the morning-anchor batch line and the Admin
+  console; the code archive is git history.
 - `:3458` - retired (2026-08-11, REQ-120); the mobile gateway and its
   Tailscale funnel no longer run.
 - `components.yaml` - single source of truth for supervised components.

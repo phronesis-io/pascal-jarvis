@@ -29,10 +29,21 @@ KIND_ORDER = {
     "runtime-component": 0,
     "heartbeat-task": 1,
     "core-cli": 2,
-    "dashboard-page": 3,
-    "dashboard-api": 4,
-    "admin-api": 5,
-    "lark-command": 6,
+    "admin-api": 3,
+    "lark-command": 4,
+}
+# Surfaces removed on purpose. A retired surface must leave an explicit trace
+# here (never a silent disappearance from the inventory): what it was, when it
+# was retired, and where its duty moved.
+RETIRED_SURFACES = {
+    "dashboard :3457 (NiceGUI pages + /api routes)": (
+        "retired 2026-08-21; archive duty moved to the morning-anchor batch "
+        "line and the Admin console (:3456). The shared SQLite layer moved to "
+        "core/db.py; the code archive is git history."
+    ),
+    "mobile gateway :3458 + Tailscale funnel": (
+        "retired 2026-08-11 (REQ-120); Lark is the only mobile surface."
+    ),
 }
 STATUS_REQUIREMENTS = {
     "keep": [
@@ -54,11 +65,6 @@ STATUS_REQUIREMENTS = {
         "human review of replacement, migration, and data-retention impact",
     ],
 }
-ROUTE_TEST_ALIASES = {
-    ("GET", "/api/tasks/due"): ("get_due_tasks(",),
-    ("GET", "/api/engagement/stats"): ("engagement_stats(",),
-    ("GET", "/api/delegations/metrics"): ("store.metrics()",),
-}
 ADMIN_ROUTE_TEST_ALIASES = {
     ("GET", "/api/lark_chats"): ("lark_chats()",),
     ("GET", "/api/live"): ("live_chat()",),
@@ -71,15 +77,9 @@ ADMIN_ROUTE_TEST_ALIASES = {
 RESOLVED_EVIDENCE_AUDIT = {
     "component:caffeinate-launchd": "existing launchd install contract uses com.pascal.jarvis.caffeinate",
     "component:daemon-launchd": "existing launchd batch rollback/install contracts use com.pascal.jarvis.daemon",
-    "component:dashboard-launchd": "existing dashboard launchd install contracts use com.pascal.jarvis.dashboard",
     "heartbeat:memory-weekly": "focused contract runs the pre-hook and verifies archive/backup/atomic digest output",
     "cli:core.runtime_provider": "focused CLI contract persists set/get preference and validates bad input",
     "cli:core.usage_stats": "focused CLI contract parses numeric usage while excluding transcript text",
-    "route:page:/routines": "focused HTTP page smoke exercises the registered NiceGUI route",
-    "route:page:/usage": "focused HTTP page smoke exercises the registered NiceGUI route with isolated usage data",
-    "route:get:/api/delegations/metrics": "existing DelegationStore.metrics behavioral tests cover the route dependency",
-    "route:get:/api/engagement/stats": "existing engagement_stats behavioral tests cover honesty and cache refresh",
-    "route:get:/api/tasks/due": "existing get_due_tasks scheduler tests cover due/not-due behavior",
     "admin-route:get:/api/lark_chats": "existing lark_chats tests cover counters, chat kinds, and missing files",
     "admin-route:get:/api/live": "focused contract selects the newest tracked live conversation",
     "admin-route:get:/api/session/{param}": "focused contract loads a valid session and rejects traversal",
@@ -502,63 +502,6 @@ def _core_cli_capabilities(root: Path) -> list[dict[str, Any]]:
     return capabilities
 
 
-def _decorated_routes(root: Path) -> list[dict[str, Any]]:
-    capabilities = []
-    paths = sorted((root / "dashboard").glob("*.py"))
-    paths.extend(sorted((root / "dashboard" / "pages").glob("*.py")))
-    for path in paths:
-        try:
-            tree = ast.parse(_read(path))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call) or not decorator.args:
-                    continue
-                func = decorator.func
-                if not isinstance(func, ast.Attribute):
-                    continue
-                owner = func.value.id if isinstance(func.value, ast.Name) else ""
-                route_node = decorator.args[0]
-                if not isinstance(route_node, ast.Constant) or not isinstance(route_node.value, str):
-                    continue
-                route = route_node.value
-                if owner == "ui" and func.attr == "page":
-                    kind = "dashboard-page"
-                    method = "PAGE"
-                elif owner == "app" and func.attr in {"get", "post", "put", "delete", "patch"}:
-                    kind = "dashboard-api"
-                    method = func.attr.upper()
-                else:
-                    continue
-                normalized = re.sub(r"\{[^}]+\}", "{param}", route)
-                capability_id = f"route:{method.lower()}:{normalized}"
-                route_needles = [f'"{route}"', f"'{route}'", node.name]
-                base = route.split("/{", 1)[0]
-                if len(base) > 2:
-                    route_needles.extend((f'"{base}', f"'{base}"))
-                route_needles.extend(ROUTE_TEST_ALIASES.get((method, route), ()))
-                capabilities.append(_capability(
-                    capability_id=capability_id,
-                    kind=kind,
-                    name=f"{method} {route}",
-                    description=f"Dashboard {method.lower()} route handled by {node.name}",
-                    source_evidence=[_ref(root, path, decorator.lineno, "route decorator")],
-                    implementation_evidence=[_ref(root, path, node.lineno, f"handler {node.name}")],
-                    runtime_evidence=[{
-                        "type": "http-route",
-                        "entrypoint": route,
-                        "method": method,
-                    }],
-                    test_evidence=_test_references(root, route_needles),
-                    retirement_evidence=[],
-                    metadata={"handler": node.name, "method": method, "route": route},
-                ))
-    return capabilities
-
-
 def _admin_routes(root: Path) -> list[dict[str, Any]]:
     """Discover the stdlib HTTP server routes implemented in admin.py."""
     path = root / "admin.py"
@@ -822,7 +765,6 @@ def build_inventory(root: Path) -> dict[str, Any]:
     capabilities.extend(_component_capabilities(root))
     capabilities.extend(_heartbeat_capabilities(root))
     capabilities.extend(_core_cli_capabilities(root))
-    capabilities.extend(_decorated_routes(root))
     capabilities.extend(_admin_routes(root))
     capabilities.extend(_matter_commands(root))
     capabilities.extend(_session_commands(root))
@@ -840,7 +782,6 @@ def build_inventory(root: Path) -> dict[str, Any]:
             "components.yaml",
             "HEARTBEAT.md",
             "core/*.py __main__ guards",
-            "dashboard route decorators",
             "admin.py HTTP route branches",
             "core/matter_bridge.py command tables",
             "bot.sh owner-only inline command gates",
@@ -852,6 +793,7 @@ def build_inventory(root: Path) -> dict[str, Any]:
             "by_status": {status: by_status.get(status, 0) for status in STATUSES},
         },
         "resolved_evidence_audit": RESOLVED_EVIDENCE_AUDIT,
+        "retired_surfaces": RETIRED_SURFACES,
         "capabilities": capabilities,
     }
     errors = validate_inventory(inventory)
@@ -934,6 +876,9 @@ def render_markdown(inventory: dict[str, Any]) -> str:
                 _escape(gaps),
             )) + " |"
         )
+    lines.extend(["", "## Retired Surfaces", ""])
+    for surface, note in inventory.get("retired_surfaces", {}).items():
+        lines.append(f"- **{surface}** — {note}")
     lines.extend(["", "## Resolved Evidence Audit", ""])
     by_id = {item["id"]: item for item in inventory["capabilities"]}
     for capability_id, resolution in inventory["resolved_evidence_audit"].items():
@@ -947,7 +892,8 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "- Keep capabilities remain in regression scope; missing runtime health is handled by their existing probes.",
         "- Fix capabilities need the named evidence gap closed before their status changes.",
         "- Retire candidates are review prompts only. Deletion requires replacement/migration evidence and a separate PR.",
-        "- Regenerate this file whenever a component, heartbeat task, CLI, dashboard route, or Lark command changes.",
+        "- Regenerate this file whenever a component, heartbeat task, CLI, admin route, or Lark command changes.",
+        "- A surface retirement must leave an explicit Retired Surfaces entry, never a silent disappearance.",
         "",
     ])
     return "\n".join(lines)

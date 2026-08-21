@@ -3,9 +3,13 @@
 Why this module exists — the audit finding "self-monitoring tables frozen at
 2026-05-21":
 
-PRD v2 established that the dashboard SQLite tables (agent_log,
-engagement_events) are ZOMBIES — nothing writes them any more. The source of
-truth is the LIVE append-only files the running bot actually maintains:
+PRD v2 established that the shared SQLite tables must not be the monitor's
+source of truth. (History: the 2026-05-21 audit found them frozen. Since
+then core/delivery.py writes a 'sent' attribution row to engagement_events
+on every delivered envelope — the table is live again but one-sided, and
+agent_log stays unwritten; every response fact and scheduling fact exists
+only in the files below.) The source of truth is the LIVE append-only files
+the running bot actually maintains:
 
   - sched_events.jsonl       every scheduling decision + intent_* lifecycle
   - engagement_log.jsonl     every proactive 'sent' card + user response
@@ -21,7 +25,7 @@ the metric you watch must come from the same bytes the system actually writes.
 Everything is read-only. The intent DB is opened sqlite `mode=ro` so a buggy
 monitor can never mutate production state. No function here raises on a missing
 or malformed file — a broken monitor must degrade to zeros/'n/a', never take
-down a caller (the dashboard panel, the CLI, or the REQ-39 self-diagnostic).
+down a caller (the CLI or the REQ-39 self-diagnostic).
 
 Public surface:
   compute_selfmon(jarvis_dir, window_hours=24) -> dict
@@ -80,7 +84,7 @@ LOG_FAILURE_SIGNATURES = (
 )
 
 # Bound the jarvis.log scan — only the tail can be recent; reading a multi-MB
-# rotated log fully on every dashboard refresh would be wasteful.
+# rotated log fully on every refresh would be wasteful.
 LOG_TAIL_BYTES = 512 * 1024
 
 
@@ -144,8 +148,8 @@ def _read_jsonl(path: Path, max_bytes: int | None = None) -> list[dict]:
     return out
 
 
-# Bound the per-refresh parse (red-team fix): the dashboard panel calls
-# compute_selfmon every 10s and sched_events grows to a 10MB rotation cap, so an
+# Bound the per-refresh parse (red-team fix): the retired dashboard panel
+# called compute_selfmon every 10s and sched_events grows to a 10MB rotation cap, so an
 # unbounded full re-parse (twice per call) blocked the asyncio loop ~75ms→~1s.
 # selfmon metrics are 24h-windowed; a 2MB tail covers far more than 24h of
 # events. Memoize on (size, mtime) so the two callers in one compute_selfmon
@@ -433,7 +437,7 @@ def compute_selfmon(jarvis_dir, window_hours: float = 24) -> dict:
     """Compute all self-monitoring metrics over the window from LIVE sources.
 
     Read-only. Never raises — any per-metric read failure degrades that metric
-    to its empty shape (so the dashboard panel and the CLI always render).
+    to its empty shape (so the CLI and self-diagnostic always render).
     """
     jd = Path(jarvis_dir)
     now = time.time()

@@ -56,9 +56,6 @@ def _make_runner(tmp_path, heartbeat_content: str, **kwargs) -> HeartbeatRunner:
         model="sonnet",
         **kwargs,
     )
-    # The dynamic-task bridge imports dashboard code and reads its SQLite —
-    # not this suite's business, and dashboard/ is concurrently in flight.
-    runner._check_dynamic_tasks = lambda: []
     return runner
 
 

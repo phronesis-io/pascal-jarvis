@@ -61,7 +61,7 @@ _SCHEMA_READY: dict[Path, tuple[int, int]] = {}
 
 
 def _database_path() -> Path:
-    from dashboard.db import _db_path
+    from core.db import _db_path
     return Path(_db_path())
 
 

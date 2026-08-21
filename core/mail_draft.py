@@ -45,7 +45,7 @@ def _get_db():
     if not _sys_path_added:
         sys.path.insert(0, str(ROOT))
         _sys_path_added = True
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 

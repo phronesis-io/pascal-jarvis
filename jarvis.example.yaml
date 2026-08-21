@@ -158,7 +158,7 @@ heartbeat:
 
 
 # ── Admin Console ──────────────────────────────────────────────────
-# Local web dashboard for browsing memory/sessions/search.
+# Local web console for browsing memory/sessions/search.
 # Set enabled: true to have bot.sh auto-start it alongside the heartbeat.
 
 admin:

@@ -540,30 +540,11 @@ def _request_component_recovery(name: str) -> bool:
 
     This deliberately does not start a second copy.  For bot-owned children we
     terminate only an exact command that descends from this repo's live bot;
-    bot.sh's 30s watchdog performs the restart.  Dashboard is launchd-owned,
-    so launchd gets the request directly.  Unknown/foreign processes are never
-    touched.  Returns whether a bounded recovery request was made.
+    bot.sh's 30s watchdog performs the restart.  Unknown/foreign processes
+    are never touched.  Returns whether a bounded recovery request was made.
     """
     if _in_deploy_window():
         return False
-    if name == "dashboard :3457":
-        job = f"gui/{os.getuid()}/com.pascal.jarvis.dashboard"
-        try:
-            result = subprocess.run(
-                ["launchctl", "kickstart", "-k", job],
-                capture_output=True, text=True, timeout=15,
-            )
-        except Exception as exc:
-            log("WARN", "Guardian recovery request failed for dashboard: "
-                f"{type(exc).__name__}")
-            return False
-        if result.returncode == 0:
-            log("INFO", "Guardian requested dashboard recovery from launchd")
-            return True
-        log("WARN", "Guardian recovery request failed for dashboard: "
-            f"launchctl exit {result.returncode}")
-        return False
-
     bot_pid = _bot_pid()
     if not bot_pid:
         return False
@@ -797,7 +778,6 @@ _DEGRADED_TAIL = "系统已经在自动重试和切换备用路径；我会继�
 
 _COMPONENT_LABELS = {
     "admin :3456": "管理面板",
-    "dashboard :3457": "监控看板",
     "ef-stream": "EigenFlux 实时消息接收",
     "heartbeat-loop": "心跳调度",
     "lark-sidecar": "飞书事件监听",
@@ -1042,7 +1022,7 @@ def _clear_probe_keys(*keys: str) -> None:
 
 
 def probe_observed_components():
-    """Repair, verify, then alert when :3456/:3457 remain down."""
+    """Repair, verify, then alert when :3456 remains down."""
     # During a restart window the stack is legitimately down — probing here
     # would fire false 'component DOWN' alerts (red-team fix: the probe ran
     # OUTSIDE check_health's deploy guard).
@@ -1050,8 +1030,7 @@ def probe_observed_components():
         return
     import urllib.request
     import urllib.error
-    for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),
-                      ("dashboard :3457", "http://127.0.0.1:3457/")):
+    for name, url in (("admin :3456", "http://127.0.0.1:3456/health"),):
         alive = False
         payload = None
         code = None
@@ -1108,11 +1087,10 @@ def probe_observed_components():
 
 # Manifest criticals that check_health / probe_observed_components already
 # watch through richer paths: bot/heartbeat-loop/lark-sidecar drive the restart
-# path, and admin/dashboard get the degraded-body-aware probe above (which
-# the manifest's plain status<500 check would regress). The manifest probe
+# path, and admin gets the degraded-body-aware probe above (which the
+# manifest's plain status<500 check would regress). The manifest probe
 # only adds what nothing else covers — today that is ef-stream.
-_MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar",
-                     "admin", "dashboard"}
+_MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar", "admin"}
 
 
 def _component_down_text(label: str, detail: str,

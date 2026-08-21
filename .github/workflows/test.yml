@@ -22,8 +22,8 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # requirements.txt (not a hand-picked subset) — otherwise the dashboard
-        # suite silently skips and broken dashboard PRs merge green.
+        # requirements.txt (not a hand-picked subset) — a missing runtime dep
+        # makes its test module silently skip and broken PRs merge green.
         run: pip install -r requirements-dev.txt
 
       - name: Syntax check

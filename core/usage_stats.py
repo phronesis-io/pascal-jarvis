@@ -32,7 +32,7 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CACHE_PATH = Path.home() / ".claude" / "jarvis_usage_cache.json"
 CACHE_VERSION = 1
 
-# In-memory memo so repeated dashboard polls don't re-walk on every refresh.
+# In-memory memo so repeated polls don't re-walk on every refresh.
 _AGG_MEMO: dict = {"sig": None, "agg": None}
 
 
@@ -395,7 +395,7 @@ def _aggregate(cache: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Formatting helpers (shared with the dashboard page)
+# Formatting helpers (shared with the CLI report)
 # --------------------------------------------------------------------------- #
 def fmt_tokens(n: int) -> str:
     n = int(n or 0)

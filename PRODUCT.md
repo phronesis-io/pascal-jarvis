@@ -39,8 +39,8 @@ cards were read 95.7% while web cards were read 1.8%.
   principle 12 — quiet is not invisible.
 - **Jarvis Calendar**: the next concrete fire time and closure state of
   existing Intents; it is not the engineering task-health calendar.
-- **Dashboard (`:3457`)** — frozen: archive + ops reference. No new features
-  land here.
+- **Dashboard (`:3457`)** — retired (frozen 2026-08-07, retired 2026-08-21);
+  archive duty moved to the morning-anchor batch line and the Admin console.
 - **Mobile gateway (`:3458`)** — retired (2026-08-11, completed 2026-08-14);
   Jarvis has no Tailscale runtime, setup, health check, or recovery path.
 - **Routines** — constrained recurring analysis: exercise nags and test

@@ -1,10 +1,14 @@
-"""Tests for the dashboard subsystem."""
+"""Tests for the shared SQLite layer (core.db) and cron helpers (core.cron).
+
+Carried over from the retired dashboard suite (2026-08-21): the base schema,
+bookmark/kv/log/task stores, and the cron primitives stay live under core/
+after the :3457 NiceGUI dashboard was deleted.
+"""
 
 import json
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 # Ensure project root is importable
@@ -12,16 +16,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 # Override DB path for tests
-import dashboard.db as db_module
-
-
-def test_usage_heatmap_has_fixed_inner_canvas_for_scoped_mobile_scroll():
-    from dashboard.pages.usage import _heatmap_html
-
-    markup = _heatmap_html([[1] * 24 for _ in range(7)], 1)
-
-    assert "class='usage-heatmap'" in markup
-    assert markup.count("width:14px") == (7 * 24) + 24
+import core.db as db_module
 
 
 def setup_test_db():
@@ -119,9 +114,11 @@ class TestDatabase:
         assert tasks[0]["name"] == "Wake up"
 
     def test_engagement_stats(self, tmp_path, monkeypatch):
-        # Stats read engagement_log.jsonl (the source of truth written by the
-        # bot), NOT the engagement_events table — the table only ever received
-        # writes from an uncalled dashboard endpoint and froze on 2026-05-21.
+        # Stats read engagement_log.jsonl (the source of truth written by
+        # the bot), NOT the engagement_events table — that table is written
+        # by core/delivery.py ('sent' attribution row per delivered
+        # envelope) but carries no response half, so only the jsonl can
+        # answer engagement.
         import json as _json
         import time as _time
         monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
@@ -144,13 +141,7 @@ class TestDatabase:
             {"source": "checkin", "total": 2, "engaged_count": 1}]
 
 
-class TestScheduler:
-    def setup_method(self):
-        self.db_path = setup_test_db()
-
-    def teardown_method(self):
-        teardown_test_db(self.db_path)
-
+class TestCron:
     def test_cron_matches(self):
         """STANDARD cron dow semantics: 0/7=Sunday, 1=Monday ... 6=Saturday.
 
@@ -158,8 +149,9 @@ class TestScheduler:
         schedule fired one day late (live misfire: int_fb4fcab91d
         '30 14 * * 2' executed on a Wednesday). This test pins the fix.
         """
-        from dashboard.scheduler import cron_matches
         from datetime import datetime
+
+        from core.cron import cron_matches
         # Monday 9:00
         dt = datetime(2026, 5, 25, 9, 0)  # Monday
         assert cron_matches("0 9 * * *", dt)
@@ -179,8 +171,9 @@ class TestScheduler:
 
     def test_cron_next(self):
         """REQ-32 catch-up primitive: next occurrence strictly after `after`."""
-        from dashboard.scheduler import cron_next
         from datetime import datetime
+
+        from core.cron import cron_next
         after = datetime(2026, 6, 9, 20, 30)  # Tuesday evening
         nxt = cron_next("0 21 * * *", after)
         assert nxt == datetime(2026, 6, 9, 21, 0)
@@ -192,84 +185,15 @@ class TestScheduler:
         assert cron_next("0 21 * *", after) is None
 
     def test_cron_wildcards(self):
-        from dashboard.scheduler import cron_matches
         from datetime import datetime
+
+        from core.cron import cron_matches
         dt = datetime(2026, 5, 21, 14, 30)
         assert cron_matches("* * * * *", dt)
         assert cron_matches("*/5 * * * *", dt)  # 30 is divisible by 5
         assert not cron_matches("*/7 * * * *", dt)  # 30 not divisible by 7
 
     def test_check_conditions_time_window(self):
-        from dashboard.scheduler import check_conditions
-        # Mock current time would be needed for thorough testing
+        from core.cron import check_conditions
         conditions = [{"type": "time_window", "start": "00:00", "end": "23:59"}]
         assert check_conditions(conditions, {})
-
-    def test_get_due_tasks_interval(self):
-        from dashboard.scheduler import get_due_tasks
-        # Register a task with interval trigger, never run before
-        db_module.task_register(
-            task_id="test_interval",
-            name="Test Interval",
-            trigger_type="interval",
-            trigger_config={"seconds": 60},
-            action_type="notify",
-            action_config={"message": "hello"},
-        )
-        due = get_due_tasks()
-        assert len(due) == 1
-        assert due[0]["name"] == "Test Interval"
-
-    def test_mark_executed(self):
-        from dashboard.scheduler import mark_executed
-        db_module.task_register(
-            task_id="test_exec",
-            name="Test Exec",
-            trigger_type="interval",
-            trigger_config={"seconds": 60},
-        )
-        mark_executed("test_exec", result="ok")
-        tasks = db_module.task_list()
-        assert tasks[0]["run_count"] == 1
-        assert tasks[0]["last_run_at"] is not None
-
-
-class TestBookmarkPipeline:
-    def setup_method(self):
-        self.db_path = setup_test_db()
-
-    def teardown_method(self):
-        teardown_test_db(self.db_path)
-
-    def test_capture(self):
-        from dashboard.bookmark_pipeline import capture
-        bm_id = capture("Test Article", "https://example.com", source="test")
-        assert bm_id > 0
-        items = db_module.bookmark_list()
-        assert len(items) == 1
-
-    def test_resurface_empty(self):
-        from dashboard.bookmark_pipeline import get_resurface_candidates
-        candidates = get_resurface_candidates(5)
-        assert candidates == []
-
-    def test_resurface_with_items(self):
-        from dashboard.bookmark_pipeline import capture, get_resurface_candidates
-        for i in range(10):
-            capture(f"Article {i}", f"https://example.com/{i}")
-        candidates = get_resurface_candidates(5)
-        assert len(candidates) <= 5
-        assert len(candidates) > 0
-
-    def test_migrate_from_jsonl(self):
-        from dashboard.bookmark_pipeline import migrate_from_jsonl
-        # Create a temp jsonl
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
-        tmp.write(json.dumps({"title": "Old Item", "url": "https://old.com"}) + "\n")
-        tmp.write(json.dumps({"title": "Old Item 2", "url": "https://old2.com"}) + "\n")
-        tmp.close()
-        count = migrate_from_jsonl(tmp.name)
-        assert count == 2
-        items = db_module.bookmark_list()
-        assert len(items) == 2
-        os.unlink(tmp.name)

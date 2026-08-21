@@ -11,12 +11,14 @@ launchd
             -> core.heartbeat_loop
             -> core.ef_stream_loop
             -> admin.py :3456
-  -> dashboard.main :3457
 ```
 
-The mobile gateway (`dashboard.mobile_gateway :3458`) and every Jarvis-owned
-Tailscale path are retired. Jarvis neither installs, configures, probes, nor
-depends on Tailscale; Lark is the only mobile surface.
+The NiceGUI dashboard (`dashboard.main :3457`) is retired (2026-08-21):
+archive duty moved to the morning-anchor batch line and the Admin console,
+and the code archive is git history. The mobile gateway
+(`dashboard.mobile_gateway :3458`) and every Jarvis-owned Tailscale path are
+retired (2026-08-11, REQ-120). Jarvis neither installs, configures, probes,
+nor depends on Tailscale; Lark is the only mobile surface.
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
@@ -257,13 +259,14 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
-  component, so launchd-owned daemon/dashboard processes cannot stay on the
+  component, so the launchd-owned daemon process cannot stay on the
   previous revision. The separate
   `restart.sh --runtime` path is configuration-only: it revalidates release
   authority, requires a clean worktree, and proves the running bot/heartbeat
   already match `HEAD`, so it cannot preserve or deploy unreviewed code.
 - `core.sqlite_migrations`: named, transactional additive migrations for
-  domain stores that must initialize without importing the Dashboard. A
+  domain stores that must initialize without importing the base-schema owner
+  (`core.db`). A
   pending batch owns an `IMMEDIATE` transaction, so concurrent processes
   serialize before reading migration state; a marker and its compatible
   physical column commit together. Type/nullability/default or marker/schema
@@ -276,10 +279,9 @@ the exact release commit or a healthy resident descendant that contains it.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.
-- `dashboard/`: human and operator projections over the same durable state.
 - `views/`: JSON files for RichView interactive card payloads (created by
-  `core.richview`, consumed by the dashboard). Each file is a
-  `{view_id}.json` produced at card creation time.
+  `core.richview`, served through the admin console's RichView routes). Each
+  file is a `{view_id}.json` produced at card creation time.
 
 ## Durable State
 
@@ -354,9 +356,8 @@ stack is unhealthy.
 
 Guardian follows `observe -> bounded repair -> verify -> notify`. It may only
 recycle a process after proving that process descends from this repository's
-live bot and matches the exact component command; the launchd-owned dashboard
-is addressed by its exact job label. A first red probe starts recovery and is
-silent. A user-facing alert means the repair grace expired and a second probe
+live bot and matches the exact component command. A first red probe starts
+recovery and is silent. A user-facing alert means the repair grace expired and a second probe
 was still red. Delivery receipts are three-valued: confirmed/covered closes an
 incident, queued/attempting leaves it durably in flight without a local banner,
 and only a refused or dropped alert invokes the rate-limited macOS fallback.

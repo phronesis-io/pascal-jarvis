@@ -54,12 +54,12 @@
   bounded re-ask intents, and only rendered closure cards consume touch budget
 - Prompt A/B framework — memory-backed prompt experiments inject approved variants into heartbeat task prompts, record exposure metadata in engagement logs, and surface variant performance in engagement-analyze
 - Engagement self-evolution content mix — engagement-analyze now writes advisory `engagement_content_mix.md`; checkin pre-hook consumes it as steering context alongside guarded interval tuning
-- Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files
+- Dashboard Engagement/Ops views REQ-54/55 — `/engagement` source ROI board and `/ops` log/event/queue explorer backed by live JSONL/state files (retired with the dashboard, 2026-08-21)
 - Host sleep modeling REQ-56 — heartbeat emits `sleep_gap` events after long host pauses; daemon grants a short wake grace before treating heartbeat age as stale
 - Repos-sync REQ-52 — slow git fetch/pull work moved to detached single-flight worker; pre-hook now only spawns worker and emits fresh worker product once, with contract tests
 - Content-recommend curation reads safe taste/profile context from memory instead of relying on a stale hardcoded taste block
 - Background jobs — long tasks run in independent Claude sessions with start/finish cards (`jobs` / `job output <id>` / `cancel <id>`)
-- NiceGUI dashboard (port 3457) — home, tasks, bookmarks, intentions, thinking stream, agent calendar, settings; SQLite-backed
+- NiceGUI dashboard (port 3457) — home, tasks, bookmarks, intentions, thinking stream, agent calendar, settings; SQLite-backed (retired 2026-08-21; the SQLite layer lives on as core/db.py)
 - 30-day calendar window (7d detailed + 8-30d compact, NBA schedule API)
 - Philosophical task system (praxis/poiesis capture → commit → decay)
 - Weekly review task
@@ -111,4 +111,4 @@
 | Mobile admin UI | Lark IS the mobile interface; admin is for desktop config |
 | Export/import | Git is the backup mechanism; memory files are plain markdown |
 | Multi-user support | This is a personal agent — one user, one bot, one config |
-| Database backend for memory | Memory stays flat files (JSONL + markdown) — simpler, debuggable, git-friendly. (The dashboard keeps its own SQLite store for bookmarks/cached views; core agent state does not.) |
+| Database backend for memory | Memory stays flat files (JSONL + markdown) — simpler, debuggable, git-friendly. (The shared SQLite store — `core/db.py`, formerly the dashboard's — holds bookmarks/cached views; core agent state does not.) |

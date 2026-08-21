@@ -15,7 +15,7 @@ from core.jsonl import append_jsonl_locked, rewrite_jsonl_locked
 
 
 def _db():
-    from dashboard.db import get_db
+    from core.db import get_db
     return get_db()
 
 

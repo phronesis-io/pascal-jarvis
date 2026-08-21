@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import dashboard.db as db_module  # noqa: E402
+import core.db as db_module  # noqa: E402
 from core import routine_evidence, routines  # noqa: E402
 from core.timeutil import now_local  # noqa: E402
 

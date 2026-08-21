@@ -27,10 +27,11 @@ zero and the phone desk was never successfully paired. Therefore:
   Lark. Web visibility is not delivery.
 - **Lark arrival volume is the product's pulse.** `core.presence` pages
   selfmon when it falls below floor; treat that page as a P0, not a metric.
-- **Web dashboard is frozen**: archive + ops reference only. No new feature
-  investment lands there; content that only reaches the archive gets its one
-  shot via the morning-anchor batch line. The mobile gateway (`:3458`) and
-  all Jarvis-owned Tailscale setup, routing, and recovery paths are retired.
+- **Web dashboard is retired** (frozen 2026-08-07, retired 2026-08-21):
+  archive duty lives in the morning-anchor batch line and the Admin console
+  (`:3456`); content that only reaches the archive gets its one shot via the
+  morning-anchor batch line. The mobile gateway (`:3458`) and all
+  Jarvis-owned Tailscale setup, routing, and recovery paths are retired.
 - Routines is retained only for completed, evidence-backed recurring analysis.
   Exercise nags and integration-test schedules are retired; product expansion
   stays frozen.
@@ -56,8 +57,9 @@ zero and the phone desk was never successfully paired. Therefore:
 
 - One ledger row represents one matter requiring one reading or decision; an
   informational row older than 24 hours becomes 留中, not attention debt.
-- Actionable Items are delivered and resolved in Lark; the dashboard mirrors
-  history for archive and diagnosis, not as a second inbox.
+- Actionable Items are delivered and resolved in Lark; the delivery ledger
+  keeps history for archive and diagnosis (inspected through the Admin
+  console and CLI), not as a second inbox.
 - Pending decisions lead the Lark docket; ambient notices stay ledger-only and
   return as one bounded morning-anchor summary.
 - A card the daily attention budget drops is ledger-only, never gone: the cap

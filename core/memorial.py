@@ -2026,7 +2026,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     if matter_id:
         # The append-only ledger is already durable. Linking is best-effort so
-        # a temporary dashboard lock can never suppress a user-facing card.
+        # a temporary store lock can never suppress a user-facing card.
         try:
             from core.matters import add_event, link_entity
             link_entity(matter_id, "memorial", mid, provider="jarvis", title=title,

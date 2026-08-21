@@ -125,8 +125,7 @@ if "$JARVIS_PYTHON" - <<'PYEOF'
 import importlib
 
 required = (
-    "yaml", "nicegui", "aiohttp", "fastapi",
-    "lark_oapi", "pytest",
+    "yaml", "lark_oapi", "pytest",
 )
 missing = []
 for module in required:
@@ -260,7 +259,7 @@ cat <<'EOF'
      memory consolidation, etc) — you'll see "heartbeat-only mode" in logs.
 
   6. (Optional, macOS) Install supervision so everything survives reboots
-     and crashes — guardian daemon, dashboard, backups:
+     and crashes — guardian daemon, backups:
      ./scripts/launchd/install.sh
      # The plists are templates; the script fills in YOUR paths. Without
      # this step the bot only runs while your terminal session lives.
@@ -269,7 +268,7 @@ cat <<'EOF'
      check and set ops.deadman.enabled + ops.deadman.url in jarvis.yaml. Local
      supervision cannot report while the Mac itself is offline.
 
-  7. Admin dashboard (optional, enable admin.enabled: true in jarvis.yaml):
+  7. Admin console (optional, enable admin.enabled: true in jarvis.yaml):
      ./scripts/python.sh admin.py
      # open http://localhost:3456
 

@@ -1,8 +1,8 @@
 """Named, verified SQLite migrations shared by Jarvis domain stores.
 
-The dashboard owns the ordered base schema. Domain modules can still start
+core.db owns the ordered base schema. Domain modules can still start
 independently, so their additive compatibility migrations live here instead
-of importing the dashboard runtime. Each batch is atomic: schema changes and
+of importing the full base-schema module. Each batch is atomic: schema changes and
 their durable markers commit together or roll back together.
 """
 

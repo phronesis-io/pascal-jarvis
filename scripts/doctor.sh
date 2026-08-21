@@ -42,8 +42,7 @@ _missing_modules=$(python3 - <<'PYEOF' 2>/dev/null || true
 import importlib
 
 required = (
-    "yaml", "nicegui", "aiohttp", "fastapi",
-    "lark_oapi", "pytest",
+    "yaml", "lark_oapi", "pytest",
 )
 missing = []
 for module in required:

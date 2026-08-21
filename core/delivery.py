@@ -221,7 +221,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _ensure_schema(db: sqlite3.Connection) -> None:
-    # Kept here as well as dashboard.db's migration: bot/daemon may be the
+    # Kept here as well as core.db's migration: bot/daemon may be the
     # first process after an upgrade and cannot depend on the UI starting.
     db.executescript("""
         CREATE TABLE IF NOT EXISTS delivery_envelopes (
@@ -1537,7 +1537,7 @@ class DeliveryPipeline:
 
         Unlike the operator-facing ``list`` method this is intentionally not
         capped: reconciliation must repair every row from a prior partial run,
-        not just the newest dashboard page.
+        not just the newest page of results.
         """
         source = str(source or "").strip()
         if not source:

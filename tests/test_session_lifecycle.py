@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-import dashboard.db as db_module
+import core.db as db_module
 from core import codex_fallback
 from core.compact import get_compact_path
 from core.conversation_context import (

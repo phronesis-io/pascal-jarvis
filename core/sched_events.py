@@ -59,7 +59,7 @@ TS_FMT = "%Y-%m-%d %H:%M:%S"  # second precision — replay needs ordering
 def _sqlite_emit(jarvis_dir: Path, entry: dict) -> None:
     """Project one event into the cross-process WAL state store."""
     path = jarvis_dir / "data" / "jarvis.db"
-    # The dashboard/intent store creates the canonical DB.  Do not invent a
+    # The core.db/intent store creates the canonical DB.  Do not invent a
     # partial database in fresh-install/test roots: other consumers interpret
     # "jarvis.db exists" as proof their own schema is available.
     if not path.exists():

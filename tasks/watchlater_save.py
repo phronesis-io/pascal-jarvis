@@ -48,9 +48,9 @@ def save_entries(entries: list[dict]) -> None:
 
 
 def _save_to_sqlite(title: str, url: str, source: str) -> bool:
-    """Also save to the dashboard SQLite store (if available)."""
+    """Also save to the shared SQLite store (if available)."""
     try:
-        from dashboard.db import bookmark_add
+        from core.db import bookmark_add
         bookmark_add(title=title, url=url, source=source)
         return True
     except Exception:
@@ -105,7 +105,7 @@ def main() -> int:
 
     save_entries(entries)
 
-    # Dual-write to SQLite dashboard store
+    # Dual-write to the shared SQLite store
     _save_to_sqlite(title, url, source)
 
     print(f"已收藏: {title or url}")
