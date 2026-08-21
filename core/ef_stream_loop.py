@@ -666,10 +666,15 @@ def autoreply_rate_gate(jd: Path, conv_id: str,
             )
         except ValueError:
             ts = moment  # undated row counts as current
+        if ts > moment:
+            # A future-dated row is clock skew, not permission to send:
+            # clamp it to "just sent" so it spends budget instead of
+            # falling outside the window (fail closed).
+            ts = moment
         if ts.date() == moment.date():
             day_count += 1
         if (str(row.get("conv_id") or "") == str(conv_id)
-                and timedelta(0) <= moment - ts <= timedelta(hours=24)):
+                and moment - ts <= timedelta(hours=24)):
             conv_count += 1
     if day_count >= AUTOREPLY_GLOBAL_DAILY_CAP:
         return f"全局日上限 {AUTOREPLY_GLOBAL_DAILY_CAP} 已用完"

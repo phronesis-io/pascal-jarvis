@@ -639,6 +639,18 @@ def test_autoreply_rate_gate_caps_one_conversation_per_24h(tmp_path):
     assert efsl.autoreply_rate_gate(tmp_path, "conv-other", now=now) == ""
 
 
+def test_autoreply_rate_gate_counts_future_dated_rows_fail_closed(tmp_path):
+    """Clock skew must spend budget, not grant it: rows dated after `now`
+    (the CI-vs-Shanghai skew that produced the fourth date-rot incident)
+    are clamped to "just sent" instead of falling outside the window."""
+    from datetime import datetime
+
+    now = datetime(2026, 8, 21, 8, 0, 0)
+    for hour in ("09", "10", "11"):   # all in the future relative to `now`
+        _ledger_row(tmp_path, f"2026-08-21T{hour}:00:00")
+    assert efsl.autoreply_rate_gate(tmp_path, "conv-auto", now=now) != ""
+
+
 def test_autoreply_rate_gate_expires_old_rows_but_counts_undated_ones(
         tmp_path):
     from datetime import datetime
@@ -663,8 +675,14 @@ def test_autoreply_rate_gate_global_daily_cap(tmp_path):
 
 
 def test_autoreply_over_conv_cap_demotes_to_card(monkeypatch, tmp_path):
-    for hour in ("09", "10", "11"):
-        _ledger_row(tmp_path, f"{efsl.now_local_str('%Y-%m-%d')}T{hour}:00:00")
+    # Seed rows relative to the gate's own clock: fixed morning hours went
+    # future-dated on a UTC CI runner (fourth date-rot incident) and fell
+    # outside the 24h window.
+    from datetime import timedelta as _td
+    base = efsl.now_local().replace(tzinfo=None)
+    for hours_ago in (1, 2, 3):
+        _ledger_row(tmp_path, (base - _td(hours=hours_ago))
+                    .strftime(efsl.AUTOREPLY_TS_FORMAT))
     monkeypatch.setattr(
         efsl, "_run_analysis", _verdict("AUTOREPLY\nAnother answer."))
     _forbid_send(monkeypatch, "over-cap conversation must not send")
