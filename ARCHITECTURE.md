@@ -139,7 +139,7 @@ and never resets the external mutation to pending.
 L3 signal -> deduplicated Proposal -> human accept
   -> L2 Taskline dependency queue + claim/lease/worktree
   -> L1 spec -> dev -> test -> review -> merged PR
-  -> release gate -> runtime verify/smoke
+  -> release gate -> runtime verify/components/smoke -> durable receipt
   -> L3 outcome observation
 ```
 
@@ -264,6 +264,11 @@ the exact release commit or a healthy resident descendant that contains it.
   `restart.sh --runtime` path is configuration-only: it revalidates release
   authority, requires a clean worktree, and proves the running bot/heartbeat
   already match `HEAD`, so it cannot preserve or deploy unreviewed code.
+- `core.deploy`: runtime registrations, delivery smoke, and durable release
+  receipts. A receipt is written only when the release-gate SHA equals `HEAD`,
+  all registered resident versions match, every critical component is healthy,
+  and unified-delivery smoke acts successfully. It is joined evidence, not a
+  log-line claim; `python3 -m core.deploy receipt-latest` reads it back.
 - `core.sqlite_migrations`: named, transactional additive migrations for
   domain stores that must initialize without importing the base-schema owner
   (`core.db`). A
@@ -290,6 +295,7 @@ the exact release commit or a healthy resident descendant that contains it.
 - delivery envelopes, attempts, events, and dead letters;
 - Intent state and breaches;
 - schedule events and runtime versions;
+- joined release receipts (authority, exact revision, components, and smoke);
 - Matters, Handoffs, and cross-device state;
 - Delegations, steps, evidence, events, links, shadow labels, and projection
   retries;
@@ -333,7 +339,7 @@ as legacy ledger values from the pre-REQ-119 era.
 | Lark output was delivered | transport `message_id` / delivery row |
 | Item was decided | Memorial ledger projected into delivery state |
 | Intent completed | Intent lifecycle and closure evidence |
-| deployment is complete | git revision + runtime version + components + smoke |
+| deployment is complete | latest durable release receipt joining release authority + exact git revision + runtime versions + components + smoke |
 | model fallback is usable | real-request outcome plus non-authoritative bounded canary and live routing state |
 | calendar is current | calendar API/sync artifact with freshness |
 

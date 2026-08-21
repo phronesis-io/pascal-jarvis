@@ -13,6 +13,14 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
 
 ## [Unreleased]
 
+### Added
+
+- 发布完成不再散落在终端输出里：受治理发布和同版本重启在 gate SHA、常驻
+  进程版本、关键组件与投递 smoke 全部通过后，写入一条可回读的联合回执；
+  任一证据缺失或不一致都失败关闭且不记成功。
+- 四个大型编排模块建立只降不升的文件/最长函数预算，本地测试与保护 CI
+  同时执行；以后还债会下调基线，新增功能不能静默把神模块继续做大。
+
 ### Fixed
 
 - 跨 Session 的重要发现现在带有可核验的工作收据，能够通过主动输出硬门禁，
@@ -27,6 +35,8 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
   生产大任务挡住已经可用的 GPT，只在没有健康选择时兜底尝试；故障后若
   候选通道已有更新的真实成功回执，共享心跳退避会提前自愈，小探针不能解锁。
 - Dashboard `:3457` 退役后的产品组合文档和上层 Agent 入口说明完成同步。
+- 仓库评分卡从 8/16 的故障快照改成 8/21 可复跑的当前证据，历史故障不再
+  被误报为仍在生产发生。
 
 ## [1.15.0] — 2026-08-20 — 系统学会说「我不在」+ 长卡片终于能读完
 

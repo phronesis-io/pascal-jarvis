@@ -32,10 +32,12 @@ work. The supported product surface remains the generated
   and changed implementation lines are review-volume indicators, not coverage
   percentages, and must not be used to compare this repository with another
   codebase.
-- `core/memorial.py` is 3,477 lines with 115 functions; its longest function is
-  165 lines. `core/intentions.py` is 3,605 lines with 84 functions; its longest
-  function is 324 lines. These are verified maintainability risks even though
-  line count alone is not a defect.
+- `core/memorial.py` is 3,694 lines and its longest function is 181 lines;
+  `core/intentions.py` is 3,606/324; `core/heartbeat.py` is 2,564/886; and
+  `core/delegations.py` is 2,450/218. These are verified maintainability risks
+  even though line count alone is not a defect. Their current file/longest-
+  function values are checked into `docs/maintainability_budget.json` and run
+  by local and protected CI: debt may shrink, but cannot grow silently.
 - A Python-wide scan for commented-out `def`/`class` declarations has no
   production matches. The earlier claim of seven such files is not
   reproducible and therefore is not an active cleanup task.
@@ -58,6 +60,8 @@ work. The supported product surface remains the generated
 | No pytest config means no timeout | False as a release blocker | CI has a 15-minute job timeout and the strict local suite is the canonical command. Parallel pytest is deliberately not default because tests exercise shared process and SQLite contracts. |
 | Old July plans look current | Fixed | `docs/plans/README.md` marks dated plans as historical evidence; current behavior is governed by product/domain/architecture/decision docs and the PRD portfolio. |
 | Import graph is not a CI gate | Fixed | The core-cycle budget runs in pytest, while adjacency remains a review signal rather than a brittle hard limit for central authority modules. |
+| Release success is scattered across terminal output | Fixed | A successful governed or same-revision restart now persists one joined SQLite receipt containing release authority, exact SHA, resident-version proof, critical component results, and delivery smoke. Partial or mismatched evidence fails closed and writes no success row. |
+| Large-module debt can grow between audits | Fixed as a ratchet; debt remains | `scripts/maintainability_budget.py` is in local and protected CI. It accepts the verified 2026-08-21 baselines for four orchestration modules and rejects file or longest-function growth. Each extraction lowers the checked-in budget. |
 
 ## Debt Retirement Sequence
 

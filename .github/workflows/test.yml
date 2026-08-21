@@ -36,5 +36,8 @@ jobs:
           shellcheck -s bash -S error -e SC1090,SC1091 restart.sh
           find tasks/ -name '*.sh' -not -path 'tasks/_quarantine/*' -exec shellcheck -s bash -S error -e SC1090,SC1091 {} +
 
+      - name: Maintainability debt budget
+        run: python scripts/maintainability_budget.py
+
       - name: Run tests
         run: python -m pytest tests/ -v

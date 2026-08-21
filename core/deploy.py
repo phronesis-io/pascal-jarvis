@@ -52,6 +52,18 @@ def _connect(path: Path) -> sqlite3.Connection:
             metadata TEXT NOT NULL DEFAULT '{}'
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS release_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            git_head TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            recorded_epoch REAL NOT NULL,
+            gate_json TEXT NOT NULL,
+            runtime_json TEXT NOT NULL,
+            components_json TEXT NOT NULL,
+            smoke_json TEXT NOT NULL
+        )
+    """)
     db.commit()
     return db
 
@@ -421,6 +433,182 @@ def smoke_delivery(
     }
 
 
+def _release_gate_evidence(value: dict | str | Path) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    path = Path(value)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read release gate evidence: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError("release gate evidence must be a JSON object")
+    return loaded
+
+
+def _receipt_gate(gate: dict) -> dict:
+    """Keep durable release proof useful without copying arbitrary text."""
+    return {
+        key: gate[key]
+        for key in (
+            "ok", "repo", "sha", "pr_head_sha", "pr", "required_checks",
+            "approval_mode", "branch_protection",
+        )
+        if key in gate
+    } | {
+        "review_actors": sorted({
+            str(item.get("actor", "")).strip()
+            for item in gate.get("review_evidence", [])
+            if isinstance(item, dict) and str(item.get("actor", "")).strip()
+        }),
+        "owner_actors": sorted({
+            str(item.get("actor", "")).strip()
+            for item in gate.get("owner_release_decisions", [])
+            if isinstance(item, dict) and str(item.get("actor", "")).strip()
+        }),
+    }
+
+
+def record_release_receipt(
+    *,
+    gate_evidence: dict | str | Path,
+    mode: str,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+    verify_fn=None,
+    component_fn=None,
+    smoke_fn=None,
+    now_epoch: float | None = None,
+) -> dict:
+    """Persist joined proof only after every post-release check succeeds."""
+    project = _root(root)
+    issues: list[str] = []
+    try:
+        gate = _release_gate_evidence(gate_evidence)
+    except ValueError as exc:
+        return {"ok": False, "issues": [str(exc)]}
+    if mode not in {"governed", "runtime"}:
+        return {"ok": False, "issues": ["invalid release mode"]}
+
+    head = git_head(project)
+    if gate.get("ok") is not True:
+        issues.append("release gate did not pass")
+    if str(gate.get("sha") or "") != head:
+        issues.append("release gate SHA does not match HEAD")
+    if issues:
+        return {"ok": False, "issues": issues}
+
+    if verify_fn is None:
+        verify_fn = verify_runtime
+    if component_fn is None:
+        from core.components import check_components
+        component_fn = check_components
+    if smoke_fn is None:
+        smoke_fn = smoke_delivery
+
+    runtime = verify_fn(root=project, db_path=db_path)
+    components = component_fn(critical_only=True, root=project)
+    smoke = smoke_fn(root=project, db_path=db_path, timeout=3)
+    if runtime.get("ok") is not True:
+        issues.append("runtime verification failed")
+    if not components:
+        issues.append("no critical component evidence")
+    elif any(item.get("ok") is not True for item in components):
+        issues.append("critical component verification failed")
+    if smoke.get("ok") is not True:
+        issues.append("delivery smoke failed")
+    if issues:
+        return {
+            "ok": False,
+            "issues": issues,
+            "evidence": {
+                "gate": _receipt_gate(gate),
+                "runtime": runtime,
+                "components": components,
+                "smoke": smoke,
+            },
+        }
+
+    recorded = float(time.time() if now_epoch is None else now_epoch)
+    gate_record = _receipt_gate(gate)
+    with _connect(_db_path(project, db_path)) as db:
+        cursor = db.execute(
+            """
+            INSERT INTO release_receipts (
+                git_head, mode, recorded_epoch, gate_json, runtime_json,
+                components_json, smoke_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                head,
+                mode,
+                recorded,
+                json.dumps(gate_record, ensure_ascii=False, sort_keys=True),
+                json.dumps(runtime, ensure_ascii=False, sort_keys=True),
+                json.dumps(components, ensure_ascii=False, sort_keys=True),
+                json.dumps(smoke, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        receipt_id = int(cursor.lastrowid)
+    receipt = {
+        "id": receipt_id,
+        "git_head": head,
+        "mode": mode,
+        "recorded_epoch": recorded,
+        "gate": gate_record,
+        "runtime": runtime,
+        "components": components,
+        "smoke": smoke,
+    }
+    return {"ok": True, "receipt": receipt}
+
+
+def latest_release_receipt(
+    *,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict | None:
+    project = _root(root)
+    with _connect(_db_path(project, db_path)) as db:
+        row = db.execute(
+            "SELECT * FROM release_receipts ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    value = dict(row)
+    return {
+        "id": int(value["id"]),
+        "git_head": str(value["git_head"]),
+        "mode": str(value["mode"]),
+        "recorded_epoch": float(value["recorded_epoch"]),
+        "gate": json.loads(value["gate_json"]),
+        "runtime": json.loads(value["runtime_json"]),
+        "components": json.loads(value["components_json"]),
+        "smoke": json.loads(value["smoke_json"]),
+    }
+
+
+def release_receipt_status(
+    *,
+    root: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict:
+    project = _root(root)
+    head = git_head(project)
+    receipt = latest_release_receipt(root=project, db_path=db_path)
+    issues = []
+    if receipt is None:
+        issues.append("no release receipt")
+    elif receipt["git_head"] != head:
+        issues.append("latest release receipt does not match HEAD")
+    return {
+        "ok": not issues,
+        "git_head": head,
+        "receipt": receipt,
+        "issues": issues,
+    }
+
+
 def _print(value: dict) -> int:
     print(json.dumps(value, ensure_ascii=False, indent=2))
     return 0 if value.get("ok", True) else 1
@@ -470,6 +658,26 @@ def main(argv: list[str] | None = None) -> int:
     smoke.add_argument("--timeout", type=float, default=3.0)
     smoke.set_defaults(func=lambda args: _print(
         smoke_delivery(timeout=args.timeout)))
+
+    receipt = sub.add_parser(
+        "receipt",
+        help="verify and persist joined post-release evidence",
+    )
+    receipt.add_argument("--gate-evidence", required=True)
+    receipt.add_argument(
+        "--mode", choices=("governed", "runtime"), required=True,
+    )
+    receipt.set_defaults(func=lambda args: _print(
+        record_release_receipt(
+            gate_evidence=args.gate_evidence,
+            mode=args.mode,
+        )))
+
+    latest = sub.add_parser(
+        "receipt-latest",
+        help="show the latest durable release receipt",
+    )
+    latest.set_defaults(func=lambda _args: _print(release_receipt_status()))
 
     args = parser.parse_args(argv)
     return int(args.func(args))
