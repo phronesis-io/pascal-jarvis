@@ -1137,15 +1137,36 @@ class HeartbeatRunner:
         mem_budget = None
         if use_backup or direct_gpt:
             mem_budget = int(os.environ.get("BACKUP_MAX_MEMORY_CHARS", "40000"))
+        # Opt-in on-demand warm tier (2026-08-21). The warm knowledge base is
+        # ~60% of every injected payload and most tasks need none of it; in
+        # index mode the standing behavioral rules stay inline verbatim and
+        # the reference notes become a one-line map the model reads from disk.
+        # Fail-closed: a call with no file-reading tools MUST keep "full",
+        # otherwise the notes become unreachable rather than lazy.
+        warm_mode = "full"
+        if (os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip() == "index"
+                and allow_tools and not restrict_tools):
+            warm_mode = "index"
+        # Only pass warm_mode when it deviates from the default: an adapter
+        # built against the pre-index signature (max_chars/focus_text only)
+        # must keep working unchanged while the feature is off, not be pushed
+        # into the legacy fallback that silently drops the budget kwargs.
+        mem_kwargs = {"max_chars": mem_budget, "focus_text": prompt}
+        if warm_mode != "full":
+            mem_kwargs["warm_mode"] = warm_mode
         try:
-            memory = load_tiered_memory(
-                self.memory_dir, max_chars=mem_budget, focus_text=prompt)
+            memory = load_tiered_memory(self.memory_dir, **mem_kwargs)
         except TypeError as exc:
             # Keep HeartbeatRunner compatible with an older memory module and
             # with lightweight test/plugin adapters that still expose the
             # historical one-argument callable.
-            if not any(name in str(exc) for name in ("max_chars", "focus_text")):
+            if not any(name in str(exc)
+                       for name in ("max_chars", "focus_text", "warm_mode")):
                 raise
+            print("[heartbeat] load_tiered_memory signature mismatch; "
+                  f"falling back to the legacy one-argument call "
+                  f"(memory budget and warm_mode dropped): {exc}",
+                  file=sys.stderr)
             memory = load_tiered_memory(self.memory_dir)
         if restrict_tools:
             # External text and private memory must never share one model
