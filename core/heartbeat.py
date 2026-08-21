@@ -1588,6 +1588,30 @@ You have access to the user's memory below. Use it to personalize your responses
             self._log(f"Idle-noise judge error (failing open): {e}")
             return False
 
+    def _provider_recovered_since(self, failure_epoch: float) -> bool:
+        """Return true only for a real supported-route success after failure."""
+        try:
+            from core.provider_health import snapshot
+
+            rows = snapshot(self.jarvis_dir).get("providers", [])
+        except Exception:
+            return False
+        supported = {"primary", "backup1", "backup2", "openai"}
+        for row in rows:
+            if str(row.get("id") or "") not in supported:
+                continue
+            if not row.get("configured") or not row.get("enabled"):
+                continue
+            if (row.get("status") != "healthy"
+                    or row.get("observation_source") != "real_request"):
+                continue
+            try:
+                if float(row.get("last_success_epoch") or 0) > failure_epoch:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
     # The SQLite `scheduled_tasks` dynamic-task path was retired here. Its only
     # working action type was `notify`, which a cron Intent already does better
     # (closure, breach, catch-up), and it shipped zero rows in production.
@@ -1702,6 +1726,20 @@ You have access to the user's memory below. Use it to personalize your responses
         # naturally due again and MAX_BATCH_SIZE shaves the peak.
         _shared = state.get("__shared_call__", {})
         _backoff_until = float(_shared.get("backoff_until", 0) or 0)
+        _failure_epoch = float(_shared.get("last_failure", 0) or 0)
+        if (_backoff_until > now
+                and self._provider_recovered_since(_failure_epoch)):
+            self._log(
+                "Shared-call backoff released after verified provider recovery"
+            )
+            self._event(
+                "shared_call_recovered", task="*",
+                previous_backoff_until=_backoff_until,
+            )
+            state.pop("__shared_call__", None)
+            self.save_state(state)
+            _shared = {}
+            _backoff_until = 0
         if _backoff_until > now:
             gated = [t["name"] for t in due_tasks
                      if t["name"] not in self.TIER0_TASKS]
