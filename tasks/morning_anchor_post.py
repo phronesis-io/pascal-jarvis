@@ -87,9 +87,15 @@ def main() -> int:
     if footer:
         message = f"{message}\n{footer}"
 
+    # The receipt states what this task actually did (anchor items + calendar
+    # context + REQ-121 dedup vs yesterday); it must not claim work — todo or
+    # 留中 sweeps — that no code here performs.
+    receipt = "核对今日锚点事项与日历上下文，完成与昨日的重复比对"
+    if footer:
+        receipt += "，并附未推送卡片的攒批一行"
     print(build_card(
         "🌅 晨间锚点", message, source="morning-anchor",
-        work_receipt="汇总今日日程、待办和留中摘要并完成重复项压缩",
+        work_receipt=receipt,
     ))
     return 0
 
