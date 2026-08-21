@@ -1147,10 +1147,15 @@ class HeartbeatRunner:
         if (os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip() == "index"
                 and allow_tools and not restrict_tools):
             warm_mode = "index"
+        # Only pass warm_mode when it deviates from the default: an adapter
+        # built against the pre-index signature (max_chars/focus_text only)
+        # must keep working unchanged while the feature is off, not be pushed
+        # into the legacy fallback that silently drops the budget kwargs.
+        mem_kwargs = {"max_chars": mem_budget, "focus_text": prompt}
+        if warm_mode != "full":
+            mem_kwargs["warm_mode"] = warm_mode
         try:
-            memory = load_tiered_memory(
-                self.memory_dir, max_chars=mem_budget, focus_text=prompt,
-                warm_mode=warm_mode)
+            memory = load_tiered_memory(self.memory_dir, **mem_kwargs)
         except TypeError as exc:
             # Keep HeartbeatRunner compatible with an older memory module and
             # with lightweight test/plugin adapters that still expose the
@@ -1158,6 +1163,10 @@ class HeartbeatRunner:
             if not any(name in str(exc)
                        for name in ("max_chars", "focus_text", "warm_mode")):
                 raise
+            print("[heartbeat] load_tiered_memory signature mismatch; "
+                  f"falling back to the legacy one-argument call "
+                  f"(memory budget and warm_mode dropped): {exc}",
+                  file=sys.stderr)
             memory = load_tiered_memory(self.memory_dir)
         if restrict_tools:
             # External text and private memory must never share one model
