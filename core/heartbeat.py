@@ -98,6 +98,44 @@ def _contains_card_output(message: str) -> bool:
     return False
 
 
+def _wrap_card_lines(message: str) -> str:
+    """Frame EVERY top-level executable card line as its own CARD: envelope.
+
+    The cycle merge used to prefix ``CARD:`` onto the whole (possibly
+    multi-line) message, which framed only the first line. A post-hook that
+    prints one card per event (mail-triage, intentions) had every card after
+    the first reach memorialize_output as bare top-level JSON — blocked there
+    as raw internal JSON, so the memorial was created but delivered nowhere
+    (the 2026-08-21 mail create→lapse recurrence for ≥2 pushed emails in one
+    cycle). A message whose first line already carried its own ``CARD:`` was
+    double-prefixed ("CARD:CARD:{...}") and dropped as malformed downstream.
+
+    Per line: an unindented executable card gets exactly one ``CARD:``; an
+    existing envelope keeps its single prefix; everything else (prose,
+    indented code examples — an indentation trust boundary shared with
+    ``_contains_card_output`` and memorialize_output) passes through
+    byte-for-byte.
+    """
+    wrapped: list[str] = []
+    for raw_line in str(message).splitlines():
+        if raw_line != raw_line.lstrip(" \t"):
+            wrapped.append(raw_line)  # indented = quoted example, not protocol
+            continue
+        candidate = raw_line.strip()
+        if candidate.startswith("CARD:"):
+            wrapped.append(raw_line)  # already an envelope — never double-wrap
+            continue
+        try:
+            card = json.loads(candidate) if candidate else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            card = None
+        if isinstance(card, dict) and "config" in card and "elements" in card:
+            wrapped.append("CARD:" + candidate)
+        else:
+            wrapped.append(raw_line)
+    return "\n".join(wrapped)
+
+
 def _run_isolated(cmd: list[str], *, timeout: float,
                   cwd: str | None = None, env: dict | None = None,
                   input_text: str | None = None) -> subprocess.CompletedProcess:
@@ -2436,7 +2474,10 @@ You have access to the user's memory below. Use it to personalize your responses
 
         combined_parts = []
         for card in cards:
-            combined_parts.append(f"CARD:{card}")
+            # Per-line framing (2026-08-21 red-team P1): the old
+            # f"CARD:{card}" prefixed only the first line of a multi-card
+            # message, so every later card was dropped downstream as raw JSON.
+            combined_parts.append(_wrap_card_lines(card))
         if texts:
             combined_parts.append("\n\n---\n\n".join(texts))
 
