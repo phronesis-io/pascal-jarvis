@@ -11,7 +11,7 @@ def test_build_payload_includes_system_prompt():
     payload = of.build_payload("System rules", "hello", "gpt-test", 123)
 
     assert payload["model"] == "gpt-test"
-    assert payload["input"] == "hello"
+    assert payload["input"] == [{"role": "user", "content": "hello"}]
     assert payload["max_output_tokens"] == 123
     assert "fallback" in payload["instructions"]
     assert "System rules" in payload["instructions"]

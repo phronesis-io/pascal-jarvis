@@ -95,6 +95,9 @@ def test_openai_probe_uses_auth_argument_and_records_observed_model(tmp_path):
     assert result["actual_model"] == "gpt-observed"
     assert seen["api_key"] == "sk-super-secret-value"
     assert seen["payload"]["model"] == "gpt-test"
+    assert seen["payload"]["input"] == [
+        {"role": "user", "content": ph.CANARY_MARKER}
+    ]
     assert "sk-super-secret-value" not in json.dumps(result)
 
 
