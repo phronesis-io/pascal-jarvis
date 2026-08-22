@@ -103,7 +103,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.delivery` | core-cli | **keep** | `core/delivery.py:1818` | `core/delivery.py:1818` | python3 -m core.delivery | `tests/test_admin_api.py:403`, `tests/test_admin_destructive.py:262`, `tests/test_bot_trust_boundary.py:60` | - |
 | `cli:core.deploy` | core-cli | **keep** | `core/deploy.py:686` | `core/deploy.py:686` | python3 -m core.deploy | `tests/test_daemon_audit_fixes.py:369`, `tests/test_daemon_regressions.py:124`, `tests/test_dashboard_retirement.py:76` | - |
 | `cli:core.doc_guard` | core-cli | **keep** | `core/doc_guard.py:159` | `core/doc_guard.py:159` | python3 -m core.doc_guard | `tests/test_doc_guard.py:58` | - |
-| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1342` | `core/ef_stream_loop.py:1342` | python3 -m core.ef_stream_loop | `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1132` | - |
+| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1342` | `core/ef_stream_loop.py:1342` | python3 -m core.ef_stream_loop | `tests/test_bot_trust_boundary.py:199`, `tests/test_components_gating.py:31`, `tests/test_restart_loop_regression.py:1132` | - |
 | `cli:core.eigenflux_ingress` | core-cli | **keep** | `core/eigenflux_ingress.py:410` | `core/eigenflux_ingress.py:410` | python3 -m core.eigenflux_ingress | `tests/test_eigenflux_ingress.py:265` | - |
 | `cli:core.eigenflux_messages` | core-cli | **keep** | `core/eigenflux_messages.py:1396` | `core/eigenflux_messages.py:1396` | python3 -m core.eigenflux_messages | `tests/test_delegation_projection.py:302`, `tests/test_eigenflux_friend_actions.py:117`, `tests/test_eigenflux_friends_post.py:39` | - |
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:128` | - |
@@ -174,7 +174,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `admin-route:post:/api/intents/cancel` | admin-api | **keep** | `admin.py:1697` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/cancel | `tests/test_admin_api.py:467` | - |
 | `admin-route:post:/api/intents/rearm` | admin-api | **keep** | `admin.py:1716` | `admin.py:1585` | http://127.0.0.1:3456/api/intents/rearm | `tests/test_admin_api.py:489` | - |
 | `admin-route:post:/api/memory` | admin-api | **keep** | `admin.py:1593` | `admin.py:1585` | http://127.0.0.1:3456/api/memory | `tests/test_admin_api.py:130` | - |
-| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:3107` | `bot.sh:3107` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_publish_post.py:89` | - |
+| `lark:eigenflux:publish-confirm` | lark-command | **keep** | `bot.sh:3121` | `bot.sh:3121` | 发 / 不发 | `tests/test_card_delivery_closure.py:222`, `tests/test_eigenflux_publish_post.py:89` | - |
 | `lark:matter:clear` | lark-command | **keep** | `core/matter_bridge.py:602` | `core/matter_bridge.py:602` | /matter clear | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:current` | lark-command | **keep** | `core/matter_bridge.py:601` | `core/matter_bridge.py:601` | /matter current | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:done` | lark-command | **keep** | `core/matter_bridge.py:403` | `core/matter_bridge.py:403` | /matter done | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
@@ -182,7 +182,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `lark:matter:list` | lark-command | **keep** | `core/matter_bridge.py:602` | `core/matter_bridge.py:602` | /matter list | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:new` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /matter new | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:matter:use` | lark-command | **keep** | `core/matter_bridge.py:402` | `core/matter_bridge.py:402` | /matter use | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
-| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:3073` | `bot.sh:3073` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:73`, `tests/test_memorial.py:689`, `tests/test_no_dead_ends.py:85` | - |
+| `lark:memorial:continue` | lark-command | **keep** | `bot.sh:3087` | `bot.sh:3087` | 继续发 / 继续发送 / 发剩下的 | `tests/test_bot_trust_boundary.py:73`, `tests/test_memorial.py:689`, `tests/test_no_dead_ends.py:85` | - |
 | `lark:model:auto` | lark-command | **keep** | `core/matter_bridge.py:520` | `core/matter_bridge.py:520` | /model auto | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:model:codex` | lark-command | **keep** | `core/matter_bridge.py:507` | `core/matter_bridge.py:507` | /model codex | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:model:status` | lark-command | **keep** | `core/matter_bridge.py:416` | `core/matter_bridge.py:416` | /model | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
@@ -193,7 +193,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `lark:session:list` | lark-command | **keep** | `core/matter_bridge.py:370` | `core/matter_bridge.py:370` | /session list | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:session:new` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /session new | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 | `lark:session:reset` | lark-command | **keep** | `core/matter_bridge.py:371` | `core/matter_bridge.py:371` | /session reset | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
-| `lark:session:stop` | lark-command | **keep** | `bot.sh:3144` | `bot.sh:3144` | stop / cancel / 结束 / 停止 | `tests/test_actions.py:237`, `tests/test_admin_api.py:465`, `tests/test_admin_destructive.py:115` | - |
+| `lark:session:stop` | lark-command | **keep** | `bot.sh:3158` | `bot.sh:3158` | stop / cancel / 结束 / 停止 | `tests/test_actions.py:237`, `tests/test_admin_api.py:465`, `tests/test_admin_destructive.py:115` | - |
 | `lark:session:switch` | lark-command | **keep** | `core/matter_bridge.py:400` | `core/matter_bridge.py:400` | /session switch | `tests/test_matter_continuity.py:76`, `tests/test_session_lifecycle.py:48` | - |
 
 ## Retired Surfaces
