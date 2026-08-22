@@ -175,7 +175,9 @@ OPTIONS 行的**下一行**写：
       domain, honest score>=1, but it is a design essay, not an event: silent.
       Surface AT MOST ONE item per cycle: pick the single most relevant,
       mark the rest silent. The post-hook also enforces a 90-minute non-urgent cooldown
-      and a hard ceiling of 3 non-urgent feed cards per local day;
+      and a hard ceiling of 3 non-urgent feed cards per local day, and mints no
+      non-urgent card during quiet hours (23:30-09:30) so the overnight items
+      do not flush as a 09:30 burst that spends the global daily budget;
       scoring still lands every 10 minutes even when user delivery is suppressed.
     - "silent": scored (for the network) but not delivered this cycle. Use for the surplus
       relevant items beyond the 知会 cap, for score<=0, for abstract/non-event content

@@ -72,6 +72,24 @@ def test_nonurgent_surface_has_90_minute_cooldown(tmp_path):
     assert second.strip() == ""
 
 
+def test_nonurgent_surface_is_not_minted_during_quiet_hours(tmp_path):
+    """An overnight non-urgent item must not become a card at 02:20 that then
+    flushes at 09:30 alongside its siblings; it waits for a daytime cycle."""
+    out = _run(json.dumps({"user_message": "凌晨两点的知会"}), tmp_path,
+               {"JARVIS_EF_QUIET_OVERRIDE": "quiet"})
+    assert out.strip() == ""
+    # Nothing was spent: the first daytime cycle still gets its card.
+    assert not (tmp_path / "eigenflux" / ".feed_last_surface").exists()
+    day = _run(json.dumps({"user_message": "早上的同一条"}), tmp_path)
+    assert "早上的同一条" in day
+
+
+def test_urgent_surface_still_minted_during_quiet_hours(tmp_path):
+    out = _run(json.dumps({"user_message": "凌晨紧急", "urgent": True}),
+               tmp_path, {"JARVIS_EF_QUIET_OVERRIDE": "quiet"})
+    assert "凌晨紧急" in out
+
+
 def test_urgent_surface_bypasses_cooldown(tmp_path):
     _run(json.dumps({"user_message": "普通第一条"}), tmp_path)
     urgent = _run(json.dumps({"user_message": "紧急第二条", "urgent": True}),
@@ -105,7 +123,7 @@ def test_urgent_surface_bypasses_daily_budget(tmp_path):
     assert "真正紧急" in out
 
 
-def _seed_feed_delivery(tmp_path, state: str):
+def _seed_feed_delivery(tmp_path, state: str, last_error: str | None = None):
     import sqlite3
     from core.delivery import (
         DeliveryEnvelope,
@@ -129,9 +147,9 @@ def _seed_feed_delivery(tmp_path, state: str):
     if state != "delivered":
         with sqlite3.connect(tmp_path / "data" / "jarvis.db") as db:
             db.execute(
-                "UPDATE delivery_envelopes SET state=?,delivered_epoch=NULL "
-                "WHERE id=?",
-                (state, result.delivery_id),
+                "UPDATE delivery_envelopes SET state=?,delivered_epoch=NULL,"
+                "last_error=COALESCE(?,last_error) WHERE id=?",
+                (state, last_error, result.delivery_id),
             )
 
 
@@ -149,6 +167,22 @@ def test_terminal_failure_does_not_spend_feed_visibility_budget(tmp_path):
 
     out = _run(json.dumps({"user_message": "故障恢复后的第一条"}), tmp_path)
     assert "故障恢复后的第一条" in out
+
+
+def test_cap_dropped_card_spends_feed_budget(tmp_path):
+    """Once the delivery layer says 'no budget today', minting another feed
+    card every cycle only adds ledger-only archive lines (8/19: 10 in a row)."""
+    _seed_feed_delivery(tmp_path, "suppressed", last_error="global_daily_cap")
+
+    out = _run(json.dumps({"user_message": "额度已满后的又一条"}), tmp_path)
+    assert out.strip() == ""
+
+
+def test_stale_suppression_does_not_spend_feed_budget(tmp_path):
+    _seed_feed_delivery(tmp_path, "suppressed", last_error="expired_ttl")
+
+    out = _run(json.dumps({"user_message": "过期不算花掉额度"}), tmp_path)
+    assert "过期不算花掉额度" in out
 
 
 def test_confirmed_delivery_is_authoritative_for_feed_cooldown(tmp_path):

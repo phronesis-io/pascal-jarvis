@@ -87,11 +87,13 @@ def test_render_caps_lines():
 
 # ---- integration: feed_post quiet-hours gate ------------------------------
 
-def test_feed_post_emits_card_at_night_for_central_queue(tmp_path):
+def test_feed_post_holds_nothing_locally_at_night(tmp_path):
     payload = json.dumps({"user_message": "夜里的一条 [l](https://example.com/a)"})
     out = _run_feed(payload, tmp_path, {"JARVIS_EF_QUIET_OVERRIDE": "quiet"})
-    # Post hook emits the intact card; heartbeat_loop owns the actual hold.
-    assert "夜里的一条" in out
+    # A non-urgent item is not minted at night at all (it would only queue
+    # and flush as a 09:30 burst); and the dead local backlog file must never
+    # come back as a substitute hold.
+    assert out.strip() == ""
     backlog = tmp_path / "eigenflux" / "feed_backlog.jsonl"
     assert not backlog.exists()
 
