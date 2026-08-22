@@ -12,7 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from core.attention_policy import in_quiet_hours
 from core.card import build_card
+from core.delivery import BUDGET_CAP_REASONS
 from core.runtime_paths import database_path
 from core.safety import parse_json_response
 import _ef_delivery as efd
@@ -75,11 +77,16 @@ def _surface_history() -> Path:
 
 
 def _delivery_surface_epochs(now: float) -> list[float] | None:
-    """Confirmed or still-retryable feed cards on the current local day.
+    """Feed cards that already spent today's interruption budget.
+
+    Counts confirmed or still-retryable cards, plus cards the delivery layer
+    dropped for a *budget* cap: once the day's global/source cap has spoken,
+    minting another feed card every cycle only produces more ledger-only
+    archive lines (8/19 prod: 10 feed cards in a row, all global_daily_cap).
+    Transport and staleness failures still do not count.
 
     ``None`` means the unified-delivery database is unavailable and callers
-    should use the legacy stamp. An empty list is authoritative: terminal
-    failures do not spend Pascal's visibility budget.
+    should use the legacy stamp.
     """
     path = database_path(JARVIS_DIR)
     if not path.exists():
@@ -97,12 +104,14 @@ def _delivery_surface_epochs(now: float) -> list[float] | None:
         ).fetchone()
         if not table:
             return None
+        cap_marks = ",".join("?" for _ in BUDGET_CAP_REASONS)
         rows = db.execute(
             "SELECT created_epoch FROM delivery_envelopes "
             "WHERE source='eigenflux-feed-triage' AND created_epoch>=? "
-            "AND state IN ('queued','attempting','delivered','read','acted') "
+            "AND (state IN ('queued','attempting','delivered','read','acted') "
+            f"OR (state='suppressed' AND last_error IN ({cap_marks}))) "
             "ORDER BY created_epoch",
-            (start,),
+            (start, *sorted(BUDGET_CAP_REASONS)),
         ).fetchall()
         return [float(row[0]) for row in rows]
     except (sqlite3.Error, TypeError, ValueError):
@@ -133,10 +142,29 @@ def _daily_surface_count(now: float) -> int:
     return count
 
 
+def _quiet_now(now: float) -> bool:
+    """Canonical quiet window (core.attention_policy), with the test override."""
+    override = os.environ.get("JARVIS_EF_QUIET_OVERRIDE")
+    if override == "quiet":
+        return True
+    if override == "awake":
+        return False
+    local = time.localtime(now)
+    return in_quiet_hours(local.tm_hour * 60 + local.tm_min)
+
+
 def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
     if urgent:
         return True
     now = time.time() if now is None else now
+    # Do not mint a non-urgent card while Pascal is asleep. The poller runs
+    # all night; cards created at 00:20/02:20/04:20 only sit in the quiet-hours
+    # queue and then land as three back-to-back notices at 09:30, spending a
+    # third of the global daily budget before the day starts (8/20-8/22 prod
+    # data). The feed is re-read every cycle, so the best item is still there
+    # for the first daytime run; only the creation moment moves.
+    if _quiet_now(now):
+        return False
     if _daily_surface_count(now) >= FEED_SURFACE_MAX_PER_DAY:
         return False
     delivered = _delivery_surface_epochs(now)
@@ -284,9 +312,11 @@ def main() -> int:
         surface_items.append({"body": legacy_msg,
                               "source_url": data.get("source_url") or data.get("url", "")})
     if surface_items:
-        # heartbeat_loop owns quiet-hour deferral so the exact card (including
-        # links, 批红 and Chat) survives. This hook only marks rare urgent items
-        # that should bypass that central gate.
+        # heartbeat_loop owns quiet-hour deferral of cards that already exist,
+        # so the exact card (including links, 批红 and Chat) survives. This
+        # hook does not mint non-urgent cards during quiet hours at all (see
+        # _surface_allowed) and only marks rare urgent items that should
+        # bypass that central gate.
         urgent = bool(data.get("urgent", False)) or any(
             bool(item.get("urgent", False)) for item in surface_items)
         urgent_items = [item for item in surface_items
@@ -297,8 +327,11 @@ def main() -> int:
         # intact-card delivery windows and building an undeliverable backlog.
         surface_items = (urgent_items or surface_items)[:1]
         if not _surface_allowed(urgent):
-            print("[eigenflux-feed] user surface suppressed by interruption "
-                  "budget (90m gap, max 3/day); feedback still submitted", file=LOG)
+            why = ("quiet hours (surfaces on a daytime cycle)"
+                   if _quiet_now(time.time()) else
+                   "interruption budget (90m gap, max 3/day)")
+            print(f"[eigenflux-feed] user surface suppressed by {why}; "
+                  "feedback still submitted", file=LOG)
             return 0
         if urgent:
             # Tell the downstream heartbeat send layer to bypass ITS batch
