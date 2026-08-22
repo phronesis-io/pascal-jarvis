@@ -188,3 +188,15 @@ def test_deterministic_command_hard_exit_is_not_replayed_through_model():
     assert 'if [ "$status" -ne 0 ] && [ "$deterministic" != "false" ]' in helper
     assert '"handled":true' in helper
     assert "不会交给模型" in helper
+
+
+def test_startup_reaps_orphan_stream_loop_before_its_child():
+    """A bot.sh killed with -9 leaves core.ef_stream_loop alive on init; it
+    respawns `eigenflux stream` faster than the child-only sweep can kill it,
+    and the fresh loop is then bounced with 'Connection replaced' forever
+    (8/22 deploy). The orphan parent must be reaped first, by exact match."""
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    parent = source.index("$5 == \"core.ef_stream_loop\"")
+    child = source.index("$2 == \"eigenflux\" && $4 == \"stream\"")
+    assert parent < child
+    assert "pgrep -f core.ef_stream_loop" not in source

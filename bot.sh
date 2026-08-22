@@ -74,6 +74,20 @@ python3 -m core.deploy register bot --pid "$$" >/dev/null 2>&1 \
   || echo "WARN: failed to register bot runtime version" >&2
 
 # ── Process conflict detection ──────────────────────────────────────
+# Orphan stream loop first: when a previous bot.sh died without its trap
+# (kill -9, crash), its core.ef_stream_loop child survives on init and keeps
+# respawning `eigenflux stream`. Killing only the stream child below is
+# useless then — the orphan parent respawns it within seconds and the two
+# loops trade "Connection replaced by another session" forever (8/22 deploy:
+# ef-stream unhealthy, retry 8, until the orphan was killed by hand).
+# Same ps+awk exact match as the heartbeat orphan check below.
+_orphan_stream=$(ps -eo pid,comm,args | awk '$4 == "-m" && $5 == "core.ef_stream_loop" {print $1}')
+if [ -n "$_orphan_stream" ]; then
+  echo "WARN: Found orphan ef_stream_loop process(es): $_orphan_stream — killing" >&2
+  echo "$_orphan_stream" | xargs kill 2>/dev/null || true
+  sleep 1
+fi
+
 # Detect competing eigenflux stream processes from openclaw-gateway or
 # stale bot instances. Multiple streams cause "Connection replaced" loops.
 # Match only actual eigenflux stream processes (not Claude prompts containing the string)
