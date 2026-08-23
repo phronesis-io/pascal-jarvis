@@ -893,6 +893,75 @@ def test_absence_receipt_does_not_consume_the_budget_either(pipeline):
     assert len(sent) == 2
 
 
+def test_evening_anchor_keeps_one_slot_of_a_spent_budget(pipeline):
+    """daily-reflect must not lose to the cards that merely fired earlier.
+
+    2026-08-14..22 prod: nine budgeted cards were gone by ~13:00 every day and
+    the 20:55 daily-reflect — the two-way check-in Pascal asked for on
+    2026-06-20, acted 4/5 days while it still reached him — was suppressed
+    with global_daily_cap on every one of those nights. Ordinary cards see a
+    budget of cap-1 until the anchor has sent; the anchor sees the full cap.
+    """
+    pipe, sent, _ = pipeline
+    meta = {"global_daily_cap": 3, "source_daily_cap": 9}
+    states = [
+        pipe.deliver(DeliveryEnvelope(
+            source=f"s{index}", payload={"text": f"message {index}"},
+            requested_channel="lark", metadata=dict(meta),
+        )).state
+        for index in range(3)
+    ]
+    assert states == ["delivered", "delivered", "suppressed"]
+    assert len(sent) == 2
+
+    reflect = pipe.deliver(DeliveryEnvelope(
+        source="daily-reflect", attention="notice",
+        payload={"text": "今天怎么样？"},
+        requested_channel="lark", metadata=dict(meta),
+    ))
+    assert reflect.state == "delivered"
+    assert len(sent) == 3
+
+    # The reservation is released once the anchor has sent: the day still
+    # totals exactly the cap, never cap+1.
+    late = pipe.deliver(DeliveryEnvelope(
+        source="s9", payload={"text": "late card"},
+        requested_channel="lark", metadata=dict(meta),
+    ))
+    assert late.state == "suppressed"
+    assert late.reason == "global_daily_cap"
+    assert len(sent) == 3
+
+
+def test_evening_anchor_reservation_is_released_after_it_sends(pipeline):
+    pipe, sent, _ = pipeline
+    meta = {"global_daily_cap": 3, "source_daily_cap": 9}
+    pipe.deliver(DeliveryEnvelope(
+        source="daily-reflect", payload={"text": "今天怎么样？"},
+        requested_channel="lark", metadata=dict(meta),
+    ))
+    states = [
+        pipe.deliver(DeliveryEnvelope(
+            source=f"s{index}", payload={"text": f"message {index}"},
+            requested_channel="lark", metadata=dict(meta),
+        )).state
+        for index in range(3)
+    ]
+    assert states == ["delivered", "delivered", "suppressed"]
+    assert len(sent) == 3
+
+
+def test_evening_anchor_reservation_never_empties_a_tiny_budget(pipeline):
+    pipe, sent, _ = pipeline
+    result = pipe.deliver(DeliveryEnvelope(
+        source="checkin", payload={"text": "only card"},
+        requested_channel="lark",
+        metadata={"global_daily_cap": 1, "source_daily_cap": 9},
+    ))
+    assert result.state == "delivered"
+    assert len(sent) == 1
+
+
 def test_global_daily_budget_does_not_create_a_next_morning_backlog(tmp_path):
     now = [_local_ts(2026, 8, 12, 14, 0)]
     sent = []

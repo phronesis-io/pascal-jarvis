@@ -27,13 +27,16 @@ def _run_feed(payload: str, tmp_path, extra_env=None) -> str:
 
 # ---- in_quiet_hours -------------------------------------------------------
 
-def test_quiet_window_wraps_midnight():
-    assert efd.in_quiet_hours(datetime(2026, 6, 7, 23, 0))   # 23:00 quiet
+def test_quiet_window_is_the_product_wide_one(monkeypatch):
+    """Same 23:30-09:30 window as core.attention_policy, no private copy."""
+    monkeypatch.delenv("JARVIS_QUIET_START", raising=False)
+    monkeypatch.delenv("JARVIS_QUIET_END", raising=False)
+    assert efd.in_quiet_hours(datetime(2026, 6, 7, 23, 30))  # 23:30 quiet
     assert efd.in_quiet_hours(datetime(2026, 6, 7, 2, 0))    # 02:00 quiet
-    assert efd.in_quiet_hours(datetime(2026, 6, 7, 8, 59))   # 08:59 quiet
-    assert not efd.in_quiet_hours(datetime(2026, 6, 7, 9, 0))    # 09:00 awake
+    assert efd.in_quiet_hours(datetime(2026, 6, 7, 9, 29))   # 09:29 quiet
+    assert not efd.in_quiet_hours(datetime(2026, 6, 7, 9, 30))   # 09:30 awake
     assert not efd.in_quiet_hours(datetime(2026, 6, 7, 14, 0))   # 14:00 awake
-    assert not efd.in_quiet_hours(datetime(2026, 6, 7, 21, 59))  # 21:59 awake
+    assert not efd.in_quiet_hours(datetime(2026, 6, 7, 23, 29))  # 23:29 awake
 
 
 def test_override_env(monkeypatch):
