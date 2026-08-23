@@ -80,8 +80,16 @@ flowchart TD
 | metric daily | `metadata.metric_daily_cap`, normally 1 | `suppressed` | one `throttle_key` |
 | source daily | 24 | `suppressed` | one producer source |
 | global daily | 9 | ordinary work `suppressed`; recovery replay deferred | non-exempt proactive deliveries |
+| anchor reservation | 1 of the 9, for `daily-reflect` | ordinary work sees 8 until the anchor has sent today | `ANCHOR_RESERVED_SOURCES` |
 | burst | 4 per 10 minutes | `queued` until capacity is available | non-exempt proactive deliveries |
 | transport retry | delays 0s, 2s, 5s | queue after a batch; fail at 9 cumulative attempts | one delivery envelope |
+
+The global budget is normally spent by early afternoon, so a card that fires
+in the evening by design (`daily-reflect`, 20:55) would otherwise never get a
+slot — from 2026-08-14 to 2026-08-22 it was suppressed every night. One slot
+stays reserved for each anchor source until that source has sent (or holds a
+live reservation) today; the anchor itself sees the full cap, so the day never
+exceeds nine. The reservation never shrinks an ordinary budget below one.
 
 Source, global, burst, and burst-window defaults can be overridden by their
 `JARVIS_DELIVERY_*` environment variables or envelope metadata. Metric, source,

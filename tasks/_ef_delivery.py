@@ -12,15 +12,19 @@ files created by older versions; no active post-hook calls ``hold`` anymore.
 
 Knobs (env, all optional):
   JARVIS_TZ              timezone name           (default Asia/Shanghai)
-  JARVIS_EF_QUIET_START  quiet window start hour (default 22, inclusive)
-  JARVIS_EF_QUIET_END    quiet window end hour   (default 9,  exclusive)
+  JARVIS_QUIET_START / JARVIS_QUIET_END  the one product-wide quiet window
+                         (core.attention_policy, default 23:30-09:30); this
+                         module no longer keeps a window of its own
   JARVIS_EF_FLUSH_HOUR   earliest morning flush  (default 9)
   JARVIS_EF_QUIET_OVERRIDE  "quiet"|"awake"      force state (tests only)
 """
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     from zoneinfo import ZoneInfo
@@ -61,13 +65,12 @@ def in_quiet_hours(now: datetime | None = None) -> bool:
         return True
     if override == "awake":
         return False
-    h = (now or local_now()).hour
-    start = _int_env("JARVIS_EF_QUIET_START", 22)
-    end = _int_env("JARVIS_EF_QUIET_END", 9)
-    if start <= end:
-        return start <= h < end
-    # window wraps midnight (e.g. 22:00 -> 09:00)
-    return h >= start or h < end
+    # One quiet window for every surface: until 2026-08-23 this module kept
+    # a private 22:00-09:00 window that drifted from the 23:30-09:30 the
+    # delivery pipeline and feed-triage actually honour.
+    from core.attention_policy import in_quiet_hours as _canonical
+    moment = now or local_now()
+    return _canonical(moment.hour * 60 + moment.minute)
 
 
 def hold(message: str, source: str, now: datetime | None = None) -> None:

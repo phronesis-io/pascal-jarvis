@@ -565,6 +565,16 @@ def _next_budget_window_epoch(moment: datetime) -> float:
 # budgeted slots between 13:03 and 13:26, and the first thing the full budget
 # dropped was the card that said "I was gone for 39 hours".
 BUDGET_EXEMPT_SOURCES = {"deploy-smoke", "host-absence"}
+# Sources that own one reserved slot of the global daily budget until they
+# have sent today. The budget is spent by early afternoon on an ordinary day
+# (8/20-8/22 prod: nine cards gone by 13:00), so a card that by design fires
+# in the evening never gets a slot. daily-reflect (20:55, the two-way
+# check-in Pascal asked for on 2026-06-20, acted 4/5 days while it was still
+# reaching him) was suppressed with global_daily_cap on every night from
+# 2026-08-14 to 2026-08-22. Reserving does not raise the budget: ordinary
+# cards see `global_cap - outstanding reservations`, the anchor sees the full
+# cap, so the day still totals nine.
+ANCHOR_RESERVED_SOURCES = {"daily-reflect"}
 
 
 def _budget_exempt(envelope: DeliveryEnvelope) -> bool:
@@ -607,6 +617,40 @@ def _row_budget_exempt(row: sqlite3.Row | dict) -> bool:
         or metadata.get("conversation_bound")
         or values.get("source") in BUDGET_EXEMPT_SOURCES
     )
+
+
+def _anchor_slots_outstanding(
+    db: sqlite3.Connection,
+    envelope: DeliveryEnvelope,
+    start: float,
+    global_cap: int,
+) -> int:
+    """Budget slots an ordinary envelope must leave for today's anchors.
+
+    Zero for the anchor itself, and zero once the anchor has sent or holds a
+    live reservation today. Never reserves more than leaves at least one
+    ordinary slot, so tiny test caps keep their meaning.
+    """
+    if envelope.source in ANCHOR_RESERVED_SOURCES:
+        return 0
+    outstanding = 0
+    for source in ANCHOR_RESERVED_SOURCES:
+        sent = db.execute(
+            "SELECT 1 FROM delivery_envelopes "
+            "WHERE source=? AND delivered_epoch>=? LIMIT 1",
+            (source, start),
+        ).fetchone()
+        if sent:
+            continue
+        held = db.execute(
+            "SELECT 1 FROM delivery_cap_reservations "
+            "WHERE source=? AND day_start_epoch=? LIMIT 1",
+            (source, start),
+        ).fetchone()
+        if held:
+            continue
+        outstanding += 1
+    return min(outstanding, max(0, global_cap - 1))
 
 
 def _budgeted_deliveries(
@@ -845,7 +889,9 @@ class DeliveryPipeline:
                 ))
                 total_sent = len(_budgeted_deliveries(db, start))
                 total_held = len(_budgeted_reservations(db, start))
-                if total_sent + total_held >= global_cap:
+                effective_cap = global_cap - _anchor_slots_outstanding(
+                    db, envelope, start, global_cap)
+                if total_sent + total_held >= effective_cap:
                     db.commit()
                     # Ordinary proactive overflow is terminal for this
                     # delivery. Keeping it queued would turn today's noise
