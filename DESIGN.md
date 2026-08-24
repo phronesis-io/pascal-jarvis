@@ -72,7 +72,11 @@ zero and the phone desk was never successfully paired. Therefore:
   obsolete incident, an expired TTL) stay out of it. A dropped `decision`
   publishes the summary line on its own — the 攒批≥5 threshold governs 周知,
   and holding a lost judgment back for lacking companions is the same silent
-  drop the line exists to end.
+  drop the line exists to end. A dropped decision still pending on the
+  morning its 48h deadline expires gets one last call in that summary, with
+  the clock time — its creation-morning mention arrives while the deadline is
+  still over a day away, so without the last call the expiry day itself has
+  no surface (the 2026-08-21 broadcast draft lapsed exactly this way).
 - Details and evidence are available on demand, not forced into the first card.
 
 ### Matter
