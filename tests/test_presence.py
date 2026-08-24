@@ -482,11 +482,11 @@ def test_last_call_rides_below_the_batched_line(tmp_path):
     assert line.count("\n") == 0, "the digest stays ONE line"
 
 
-def test_last_call_past_midnight_says_tomorrow_morning(tmp_path):
+def test_last_call_past_midnight_says_tomorrow(tmp_path):
     events = [
         _created_at(0, "2026-08-06 08:00", attention="decision"),
         _ledger_only(0, ts="2026-08-06 08:00"),
     ]
     _write_ledger(tmp_path, events)
     line = presence.morning_digest_line(now=NOW)  # deadline 8/8 08:00 <24h out
-    assert "明早 08:00" in line and "到期" in line
+    assert "明天 08:00" in line and "到期" in line
