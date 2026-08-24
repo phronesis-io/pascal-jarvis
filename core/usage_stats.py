@@ -17,6 +17,13 @@ CLI (ccusage-style terminal view):
     python3 -m core.usage_stats            # overall summary
     python3 -m core.usage_stats --days 14  # daily table for last 14 days
     python3 -m core.usage_stats --rebuild  # ignore cache, full re-parse
+    python3 -m core.usage_stats --daemon [N]   # heartbeat daemon calls, per
+                                               # day (last N days), from the
+                                               # sched_events llm_usage ledger
+
+The daemon's own claude calls never appear in those transcripts (fresh -p
+subprocesses, no session persistence) — `--daemon` reads the `llm_usage`
+events core.heartbeat emits into sched_events.jsonl instead.
 """
 
 from __future__ import annotations
@@ -409,6 +416,89 @@ def fmt_tokens(n: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Daemon usage (the sched_events llm_usage ledger)
+# --------------------------------------------------------------------------- #
+# Rotation depth mirrors core.sched_events.GENERATIONS (.1 newest … .7 oldest)
+# without importing runtime modules — this stays a dependency-free reader.
+_SCHED_GENERATIONS = 7
+
+
+def _num(value) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
+
+
+def load_daemon_usage(jarvis_dir) -> list[dict]:
+    """Per-day rows from `llm_usage` events in sched_events.jsonl (+rotations).
+
+    Read-only. Numbers only — the events never carry text. Ordered by day.
+    """
+    base = Path(jarvis_dir) / "sched_events.jsonl"
+    days: dict[str, dict] = defaultdict(
+        lambda: {"calls": 0, "in": 0, "out": 0, "cache_read": 0,
+                 "cache_creation": 0, "cost": 0.0, "has_cost": False}
+    )
+    paths = [base.with_name(f"{base.name}.{gen}")
+             for gen in range(_SCHED_GENERATIONS, 0, -1)] + [base]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(e, dict) or e.get("event") != "llm_usage":
+                continue
+            day = str(e.get("ts", ""))[:10]
+            if len(day) != 10:
+                continue
+            d = days[day]
+            d["calls"] += 1
+            d["in"] += int(_num(e.get("input_tokens")))
+            d["out"] += int(_num(e.get("output_tokens")))
+            d["cache_read"] += int(_num(e.get("cache_read_input_tokens")))
+            d["cache_creation"] += int(_num(e.get("cache_creation_input_tokens")))
+            if isinstance(e.get("total_cost_usd"), (int, float)) and \
+                    not isinstance(e.get("total_cost_usd"), bool):
+                d["cost"] += float(e["total_cost_usd"])
+                d["has_cost"] = True
+    return [{"day": day, **days[day]} for day in sorted(days)]
+
+
+def _daemon_cli(days: int) -> int:
+    jarvis_dir = os.environ.get("JARVIS_DIR", ".")
+    rows = load_daemon_usage(jarvis_dir)
+    if days > 0:
+        rows = rows[-days:]
+    print("Jarvis daemon — heartbeat LLM calls (sched_events llm_usage ledger)")
+    print("-" * 72)
+    if not rows:
+        print("  (no llm_usage events found — the daemon records them only "
+              "since the 2026-08-24 accounting change, and only under "
+              f"JARVIS_DIR={jarvis_dir})")
+        return 0
+    show_cost = any(r["has_cost"] for r in rows)
+    header = (f"  {'day':<12}{'calls':>6}{'in':>10}{'out':>10}"
+              f"{'cache-r':>10}{'cache-w':>10}")
+    print(header + (f"{'cost($)':>10}" if show_cost else ""))
+    for r in rows:
+        line = (f"  {r['day']:<12}{r['calls']:>6}{fmt_tokens(r['in']):>10}"
+                f"{fmt_tokens(r['out']):>10}{fmt_tokens(r['cache_read']):>10}"
+                f"{fmt_tokens(r['cache_creation']):>10}")
+        if show_cost:
+            line += f"{r['cost']:>10.2f}" if r["has_cost"] else f"{'-':>10}"
+        print(line)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def _cli(argv: list[str]) -> int:
@@ -419,6 +509,15 @@ def _cli(argv: list[str]) -> int:
             days = int(argv[argv.index("--days") + 1])
         except (ValueError, IndexError):
             days = 14
+    if "--daemon" in argv:
+        idx = argv.index("--daemon")
+        daemon_days = 0
+        if idx + 1 < len(argv):
+            try:
+                daemon_days = int(argv[idx + 1])
+            except ValueError:
+                pass
+        return _daemon_cli(daemon_days)
 
     agg = load_aggregate(rebuild=rebuild)
     t = agg["tokens"]

@@ -299,6 +299,41 @@ def parse_json_response(raw: str):
     return result if isinstance(result, dict) else None
 
 
+def parse_result_envelope(raw: str) -> tuple[str, dict | None]:
+    """(answer_text, usage_fields) from a ``--output-format json`` envelope.
+
+    Mirrors bot.sh's answer extraction: the envelope is one JSON object with
+    a string ``.result`` (``.subtype`` describes success, but bot.sh yields
+    any string result — error text is filtered downstream, same here).
+    Anything else — plain text, malformed JSON, a shape from a different CLI
+    version — falls back to treating raw stdout as the answer exactly as
+    before the flag existed (fail-open, behavior-preserving).
+
+    usage_fields is None on fallback; on a parsed envelope it holds ONLY
+    numeric usage/cost fields for the scheduler event ledger — never text.
+    """
+    import json
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw, None
+    if not isinstance(obj, dict) or not isinstance(obj.get("result"), str):
+        return raw, None
+    fields: dict = {}
+    usage = obj.get("usage")
+    if isinstance(usage, dict):
+        for key in ("input_tokens", "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                fields[key] = value
+    cost = obj.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        fields["total_cost_usd"] = cost
+    return obj["result"], fields
+
+
 def summarize(text: str, max_lines: int = 4) -> str:
     """First `max_lines` lines of `text`, with a trailing "..." if truncated.
 

@@ -67,7 +67,9 @@ echo ""
 echo "Today's date: $(date '+%Y-%m-%d %A')"
 cat <<'EOF'
 请回顾今天的对话、上面的 cross-session digest 和 repo activity，把新学到的东西整合进记忆。
-完整记忆内容已在你的 system prompt 里加载（不只是上面的 head 预览），据此判断什么是「新」、什么和现有记录冲突。
+本任务带 full-memory 标记：完整记忆内容（含 warm/ 原文，不只是上面的 head 预览）
+已在你的 system prompt 里加载——其他任务在 index 模式下只会看到 warm 索引，本任务
+不会，因为 REPLACE 指令必须和文件原文精确匹配。据此判断什么是「新」、什么和现有记录冲突。
 
 整合时遵循三条原则（顺序即优先级）：
 

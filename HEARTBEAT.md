@@ -578,14 +578,15 @@ OPTIONS 行的**下一行**写：
 ### perception-collect
 - interval: 15m
 - pre: tasks/perception_collect_pre.sh
+- post: tasks/perception_collect_post.py
 - prompt: |
-    [PERCEPTION COLLECT]
-    DATA is a deterministic perception-layer collection summary
-    (docs/prd_perception_ingestion.md). Signals already landed in
-    memory/system/inbox_*.md — you do NOT need to relay them.
-    Reply HEARTBEAT_OK unless DATA shows "errors=" greater than 0 with the
-    same source failing repeatedly (notes mention it) — then report one line
-    naming the failing source.
+    Deterministic Tier-0 collection pass. The pre-script runs one perception
+    sweep (docs/prd_perception_ingestion.md); signals land in
+    memory/system/inbox_*.md and are never relayed here. The post-script
+    replays the old model contract in code: silent unless the summary shows
+    errors AND perception_state.json shows the same source failing several
+    passes in a row — then one plain notice card names the source, at most
+    once per source per 24h.
 
 ### metrics-digest
 - interval: 30m
@@ -625,9 +626,13 @@ OPTIONS 行的**下一行**写：
 - post: tasks/memory_consolidate_post.py
 - heavy: true
 - timeout: 900
+- full-memory: true
 - prompt: |
     [DAILY MEMORY CONSOLIDATION]
-    Review the memory files and today's context below. All memory is loaded unconditionally:
+    Review the memory files and today's context below. This task carries the
+    full-memory flag, so ALL memory is loaded verbatim in your system prompt
+    (other tasks may see only a one-line warm index — this one never does,
+    because your REPLACE directives must match warm-file text verbatim):
     - hot/ : identity, behavioral rules, healing frame
     - warm/ : health, cultural, investment, interests, projects
     - system/ : todos, open_threads

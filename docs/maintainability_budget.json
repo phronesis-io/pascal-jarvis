@@ -4,7 +4,7 @@
     "max_function_lines": 218
   },
   "core/heartbeat.py": {
-    "max_lines": 2564,
+    "max_lines": 2598,
     "max_function_lines": 886
   },
   "core/intentions.py": {
