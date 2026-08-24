@@ -451,9 +451,6 @@ def render_card(
     content = render_body(state["body"] if body is None else body)
     if audit_text is not None:
         content = content.replace(IDLE_SENTINEL, r"HEARTBEAT\_OK")
-    work_receipt = " ".join(str(state.get("work_receipt") or "").split())
-    if work_receipt:
-        content = f"**已完成：** {work_receipt}\n\n{content}"
     recommendation = state.get("recommend") or {}
     if (include_options and recommendation.get("label")
             and recommendation.get("why")):

@@ -393,6 +393,29 @@ def test_recent_real_failure_skips_relay_during_cooldown(tmp_path):
     ) == "codex"
 
 
+def test_preferred_route_skips_primary_after_real_overload(tmp_path):
+    _write_config(tmp_path)
+    ph.observe(
+        "primary", "unhealthy", "server_overloaded",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    assert ph.preferred_route(
+        tmp_path,
+        context="owner_chat",
+        gate_state="primary",
+        now_epoch=10_001,
+        provider_ids=("primary", "backup1", "openai"),
+    ) == "backup1"
+    assert ph.preferred_route(
+        tmp_path,
+        context="owner_chat",
+        gate_state="primary",
+        now_epoch=10_300,
+        provider_ids=("primary", "backup1", "openai"),
+    ) == "primary"
+
+
 def test_transient_real_failure_uses_short_cooldown(tmp_path, monkeypatch):
     _write_config(tmp_path)
     monkeypatch.setenv("JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS", "60")
@@ -450,12 +473,28 @@ def test_error_reason_classification_is_bounded():
     ) == "auth_error"
     assert ph.reason_code_for_error("HTTP 503 upstream unavailable") == \
         "server_error"
+    assert ph.reason_code_for_error("API Error: 529 Overloaded") == \
+        "server_overloaded"
     assert ph.reason_code_for_error("max_output_tokens=500") == \
         "request_failed"
     assert ph.reason_code_for_error("502 bad gateway") == "server_error"
     assert ph.reason_code_for_error(
         "name or service not known"
     ) == "request_failed"
+
+
+def test_classify_cli_reads_error_from_stdin():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "core.provider_health", "classify"],
+        input="API Error: 529 Overloaded",
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "server_overloaded"
 
 
 def test_rate_limit_real_failure_uses_medium_cooldown(tmp_path, monkeypatch):

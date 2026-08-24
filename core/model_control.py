@@ -39,6 +39,12 @@ DEFAULT_ORDERS = {
     "auxiliary_untrusted": ("primary", "backup1", "backup2", "openai"),
 }
 TOOL_CONTEXTS = {"owner_chat", "heartbeat", "auxiliary_trusted"}
+_PRIMARY_RECOVERY_REASONS = {
+    "network_error",
+    "rate_limited",
+    "server_error",
+    "server_overloaded",
+}
 
 
 def _bool(value: object, default: bool = False) -> bool:
@@ -353,6 +359,12 @@ def _in_health_cooldown(
     return now_epoch - _checked_epoch(row) < cooldown
 
 
+def _real_failure_reason(row: Mapping[str, Any]) -> str:
+    if row.get("observation_source") != "real_request":
+        return ""
+    return str(row.get("detail") or "").removeprefix("real request: ")
+
+
 def route_plan(
     context: str,
     *,
@@ -393,6 +405,12 @@ def route_plan(
             skipped[route_id] = "unconfigured"
         elif route.id == "primary" and gate_state == "backup":
             skipped[route_id] = "account_gate"
+        elif route.id == "primary" and gate_state == "probe":
+            # The sticky account gate elected exactly one bounded recovery
+            # request. Its own probe lease is the authority here; retaining a
+            # stale provider-health cooldown would make recovery impossible
+            # while any fallback remains healthy.
+            selected.append(route)
         elif route.id in health and _in_health_cooldown(
             health[route.id], env=env, now_epoch=now_epoch
         ):
@@ -403,7 +421,17 @@ def route_plan(
             # every route that is currently healthy/not_run so a known slow
             # relay cannot block a working fallback with a production-sized
             # request merely because its timer expired.
-            expired_unhealthy.append(route)
+            if (route.id == "primary"
+                    and _real_failure_reason(health[route.id])
+                    in _PRIMARY_RECOVERY_REASONS):
+                # A transient primary rejection gets one real production-sized
+                # recovery attempt after its cooldown. A repeated failure is
+                # observed again and expands the next cooldown. Slow/ambiguous
+                # timeout and request_failed routes remain behind known-good
+                # fallbacks instead of blocking the owner repeatedly.
+                selected.append(route)
+            else:
+                expired_unhealthy.append(route)
         else:
             selected.append(route)
     selected.extend(expired_unhealthy)

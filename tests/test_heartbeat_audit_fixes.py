@@ -300,6 +300,14 @@ def test_non_cli_sentinel_errors_pass_through_unfiltered(tmp_path, monkeypatch,
     assert runner._last_call_error == "claude call timed out (300s)"
     assert runner._call_context_overflow is False
 
+    # The timeout is a real-request health observation and deliberately cools
+    # primary for the next call. This test's second half is an independent
+    # sentinel scenario, so reopen the route instead of accidentally testing
+    # the cooldown short-circuit.
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "primary",
+    )
     _fake_cli(monkeypatch, raise_exc=FileNotFoundError("no claude"))
     assert runner.claude_call("hi") == ""
     assert runner._last_call_error == "claude CLI not found"

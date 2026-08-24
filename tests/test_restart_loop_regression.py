@@ -81,7 +81,8 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
         RESTART_SH.index("refresh_launchd_definitions()")
     ]
     for label in ("com.pascal.jarvis.dashboard",
-                  "com.pascal.jarvis.mobile-gateway"):
+                  "com.pascal.jarvis.mobile-gateway",
+                  "com.pascal.jarvis.tailscaled"):
         assert label in retired_block
         assert RESTART_SH.count(label) == retired_block.count(label), (
             f"{label} may only appear in the RETIRED_LABELS teardown block")
@@ -236,7 +237,8 @@ def test_launchd_installer_removes_retired_jobs_and_definitions(tmp_path):
     destination = home / "Library" / "LaunchAgents"
     destination.mkdir(parents=True)
     for retired in ("com.pascal.jarvis.dashboard",
-                    "com.pascal.jarvis.mobile-gateway"):
+                    "com.pascal.jarvis.mobile-gateway",
+                    "com.pascal.jarvis.tailscaled"):
         (destination / f"{retired}.plist").write_text(
             "retired leftover\n", encoding="utf-8")
     # The fake launchctl reports every job as loaded, so the requested
@@ -280,7 +282,8 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 
     calls = launchctl_log.read_text(encoding="utf-8")
     for retired in ("com.pascal.jarvis.dashboard",
-                    "com.pascal.jarvis.mobile-gateway"):
+                    "com.pascal.jarvis.mobile-gateway",
+                    "com.pascal.jarvis.tailscaled"):
         assert not (destination / f"{retired}.plist").exists()
         assert f"bootout gui/{os.getuid()}/{retired}" in calls
         assert f"removed retired launchd service {retired}" in result.stdout

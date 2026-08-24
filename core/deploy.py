@@ -14,15 +14,25 @@ from pathlib import Path
 
 from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
 
-RUNTIME_PATHS = (
+CODE_PATHS = (
     "core",
+    "tasks",
+    "scripts",
+    "plugins",
+    "handlers",
+    "sources",
+    "static",
     "admin.py",
     "daemon.py",
     "bot.sh",
+    "restart.sh",
+)
+CONFIG_PATHS = (
+    "components.yaml",
     "jarvis.yaml",
     "HEARTBEAT.md",
 )
-CODE_PATHS = RUNTIME_PATHS[:-2]
+RUNTIME_PATHS = CODE_PATHS + CONFIG_PATHS
 
 
 def _root(value: str | Path | None = None) -> Path:
@@ -127,7 +137,9 @@ def _runtime_files(root: Path, paths: tuple[str, ...] = RUNTIME_PATHS):
             for candidate in path.rglob("*"):
                 if (candidate.is_file()
                         and "__pycache__" not in candidate.parts
-                        and candidate.suffix in {".py", ".sh", ".yaml", ".json"}):
+                        and candidate.suffix in {
+                            ".py", ".sh", ".yaml", ".json", ".html", ".css", ".js"
+                        }):
                     yield candidate
 
 
@@ -259,9 +271,7 @@ def _pid_alive(pid: int) -> bool:
 
 def _dirty_runtime_paths(root: Path) -> list[str]:
     output = _git(
-        root, "status", "--porcelain", "--",
-        "core", "admin.py", "daemon.py", "bot.sh",
-        "jarvis.yaml", "HEARTBEAT.md",
+        root, "status", "--porcelain", "--", *RUNTIME_PATHS,
     )
     return [line[3:] for line in output.splitlines() if len(line) > 3]
 

@@ -349,14 +349,16 @@ restart_daemon() {
 }
 
 # Surfaces retired from this deploy path — labels here are torn down, never
-# refreshed: dashboard :3457 (2026-08-21) and mobile gateway :3458
-# (2026-08-11, REQ-120). An installed KeepAlive job whose package is deleted
+# refreshed: dashboard :3457 (2026-08-21), mobile gateway :3458 and its
+# Jarvis-owned userspace tailscaled service (2026-08-11, REQ-120). An
+# installed KeepAlive job whose package is deleted
 # crash-loops on ModuleNotFoundError every ~10s with no supervision surface
 # left to see it, so a governed deploy removes any leftover job + definition
 # in code, not in deploy prose. Idempotent: a clean machine logs nothing.
 RETIRED_LABELS=(
   "com.pascal.jarvis.dashboard"
   "com.pascal.jarvis.mobile-gateway"
+  "com.pascal.jarvis.tailscaled"
 )
 
 remove_retired_launchd_jobs() {

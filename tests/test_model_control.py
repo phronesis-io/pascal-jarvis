@@ -130,6 +130,52 @@ def test_route_plan_defers_expired_unhealthy_route_behind_healthy_route(tmp_path
     assert [route.id for route in recovered.routes] == ["openai", "backup1"]
 
 
+def test_primary_transient_failure_gets_one_recovery_turn_after_cooldown(
+        tmp_path):
+    row = {
+        "id": "primary",
+        "status": "unhealthy",
+        "observation_source": "real_request",
+        "detail": "real request: server_overloaded",
+        "checked_epoch": 10_000,
+        "cooldown_until_epoch": 10_300,
+    }
+
+    cooling = model_control.route_plan(
+        "owner_chat", config=_config(tmp_path), env={},
+        health_rows=[row], now_epoch=10_299,
+    )
+    recovered = model_control.route_plan(
+        "owner_chat", config=_config(tmp_path), env={},
+        health_rows=[row], now_epoch=10_300,
+    )
+
+    assert cooling.skipped["primary"] == "health_cooldown"
+    assert recovered.routes[0].id == "primary"
+
+
+def test_account_gate_probe_overrides_stale_primary_health_cooldown(tmp_path):
+    row = {
+        "id": "primary",
+        "status": "unhealthy",
+        "observation_source": "real_request",
+        "detail": "real request: account_limit",
+        "checked_epoch": 10_000,
+        "cooldown_until_epoch": 99_999,
+    }
+
+    plan = model_control.route_plan(
+        "owner_chat",
+        config=_config(tmp_path),
+        env={},
+        gate_state="probe",
+        health_rows=[row],
+        now_epoch=10_100,
+    )
+
+    assert plan.routes[0].id == "primary"
+
+
 def test_runtime_status_exposes_plan_and_diversity_but_not_credentials(
     tmp_path,
 ):

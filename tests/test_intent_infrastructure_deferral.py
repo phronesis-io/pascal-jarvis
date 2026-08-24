@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 
 def _isolate(mod, tmp_path, monkeypatch):
@@ -34,8 +34,17 @@ def test_infrastructure_failure_restores_attempt_and_never_breaches(
     assert row["status"] == "pending"
     assert row["attempt"] == 0
     assert "infrastructure failure" in row["last_error"]
+    assert mod._coerce(datetime.fromisoformat(row["retry_after"])) > now_local()
+    assert mod.get_due_intents() == []
     assert mod.peek_breaches() == []
     assert not mod._inflight_path().exists()
+
+
+def test_malformed_retry_watermark_fails_open_for_due_work():
+    from core.intent_retry import is_deferred
+    from core.timeutil import now_local
+
+    assert not is_deferred("not-a-date", now_local(), lambda value: value)
 
 
 def test_sleep_elapsed_time_does_not_replace_real_content_attempts(

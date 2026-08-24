@@ -33,6 +33,8 @@ from pathlib import Path
 
 from core.log import log
 from core.sqlite_migrations import MigrationError, ensure_additive_columns
+from core.intent_envelope import ENVELOPE_SCHEMA_DOC, validate_envelope
+from core.intent_retry import deferred_until, is_deferred
 from core.timeutil import now_local, now_local_str
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -354,6 +356,7 @@ _NEW_COLS = [
     # ── v2 execution-axis columns (REQ-30/31/32/33) ──
     ("attempt",             "INTEGER NOT NULL DEFAULT 0"),  # execution attempts since last success
     ("next_fire_at",        "TEXT"),                        # recurring catch-up watermark
+    ("retry_after",         "TEXT"),                        # infra backoff without cadence drift
     ("closed_at",           "TEXT"),                        # closure-axis terminal timestamp
     ("cancel_source",       "TEXT NOT NULL DEFAULT ''"),
     ("cancel_sources",      "TEXT NOT NULL DEFAULT '[]'"),
@@ -675,7 +678,8 @@ def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
         next_fire = local_now + timedelta(minutes=10)
         cursor = db.execute(
             "UPDATE intentions SET status='pending',expires_at=NULL,"
-            "attempt=0,last_error=?,trigger_config=?,next_fire_at=NULL "
+            "attempt=0,last_error=?,trigger_config=?,next_fire_at=NULL,"
+            "retry_after=NULL "
             "WHERE id=? AND status='expired'",
             (
                 reason,
@@ -698,7 +702,7 @@ def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
             return None
         cursor = db.execute(
             "UPDATE intentions SET status='pending',expires_at=NULL,"
-            "attempt=0,last_error=?,next_fire_at=? "
+            "attempt=0,last_error=?,next_fire_at=?,retry_after=NULL "
             "WHERE id=? AND status='expired'",
             (reason, next_fire.isoformat(), intent_id),
         )
@@ -713,7 +717,7 @@ def rearm_expired_intent(intent_id: str, *, actor: str = "core") -> dict | None:
         next_fire = local_now + timedelta(seconds=seconds)
         cursor = db.execute(
             "UPDATE intentions SET status='pending',expires_at=NULL,"
-            "attempt=0,last_error=?,next_fire_at=? "
+            "attempt=0,last_error=?,next_fire_at=?,retry_after=NULL "
             "WHERE id=? AND status='expired'",
             (reason, next_fire.isoformat(timespec="seconds"), intent_id),
         )
@@ -1324,6 +1328,8 @@ def get_due_intents() -> list[dict]:
 
     for row in pending:
         intent = dict(row)
+        if is_deferred(intent.get("retry_after"), now, _coerce):
+            continue
         trigger_type = intent["trigger_type"]
         try:
             trigger_config = json.loads(intent["trigger_config"]) if isinstance(intent["trigger_config"], str) else intent["trigger_config"]
@@ -1447,7 +1453,8 @@ def mark_triggered(intent_id: str) -> bool:
     now = now_local_str("%Y-%m-%dT%H:%M:%S")
     cursor = db.execute(
         "UPDATE intentions SET status = 'triggered', triggered_at = ?, "
-        "attempt = attempt + 1 WHERE id = ? AND status = 'pending'",
+        "attempt = attempt + 1, retry_after = NULL "
+        "WHERE id = ? AND status = 'pending'",
         (now, intent_id),
     )
     db.commit()
@@ -2769,44 +2776,6 @@ def _generate_carry_intents(by_date: dict, now: datetime,
 
 
 # ---------------------------------------------------------------------------
-# Envelope contract — SINGLE SOURCE for the shape Claude must return from the
-# intention-check task (REQ-53/leak-10). The same schema text is asserted to
-# appear verbatim in HEARTBEAT.md's intention-check block by a unit test, so
-# prompt and parser cannot drift apart silently (the drift class that shipped
-# 'reply HEARTBEAT_OK' instructions against a state machine requiring an
-# envelope). intentions_post.py imports validate_envelope for its manifest
-# reconciliation.
-# ---------------------------------------------------------------------------
-
-ENVELOPE_SCHEMA_DOC = (
-    '{"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain|failed", '
-    '"closure": {"parent": "<parent_id>", "outcome": "done|recorded|na", "result": "<one line>"}}}}'
-)
-
-
-def validate_envelope(data, expected_ids: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """Check a parsed envelope against the ids the manifest says are inflight.
-
-    Returns (covered_ids, missing_ids, errors). An id is covered when it
-    appears in data['intents'] with a dict value. Never raises.
-    """
-    errors: list[str] = []
-    covered: list[str] = []
-    if not isinstance(data, dict):
-        return [], list(expected_ids), ["envelope is not a dict"]
-    intents = data.get("intents")
-    if not isinstance(intents, dict):
-        return [], list(expected_ids), ["envelope has no 'intents' dict"]
-    for iid, slot in intents.items():
-        if not isinstance(slot, dict):
-            errors.append(f"{iid}: slot is not a dict")
-            continue
-        covered.append(str(iid))
-    missing = [i for i in expected_ids if i not in covered]
-    return covered, missing, errors
-
-
-# ---------------------------------------------------------------------------
 # Inflight manifest — the deterministic execution-ack (REQ-30). Written by
 # intentions_pre.sh after mark_triggered; resolved by intentions_post.py on
 # EVERY outcome (envelope, garbage, or __NO_ENVELOPE__). The absence of a
@@ -2865,6 +2834,7 @@ def defer_inflight_infrastructure(reason: str = "provider call failed") -> dict:
         return out
     db = _get_db()
     events: list[tuple[str, str, dict]] = []
+    retry_after = deferred_until(now_local())
     for iid in inflight:
         row = db.execute(
             "SELECT attempt, trigger_type FROM intentions "
@@ -2875,14 +2845,21 @@ def defer_inflight_infrastructure(reason: str = "provider call failed") -> dict:
         restored = max(0, int(row["attempt"] or 0) - 1)
         db.execute(
             "UPDATE intentions SET status = 'pending', attempt = ?, "
-            "last_error = ? WHERE id = ? AND status = 'triggered'",
-            (restored, f"deferred: infrastructure failure ({reason})", iid),
+            "last_error = ?, retry_after = ? WHERE id = ? "
+            "AND status = 'triggered'",
+            (
+                restored,
+                f"deferred: infrastructure failure ({reason})",
+                retry_after,
+                iid,
+            ),
         )
         out["deferred"].append(iid)
         events.append(("intent_deferred", iid, {
             "attempt": restored,
             "kind": row["trigger_type"],
             "reason": "infrastructure_failure",
+            "retry_after": retry_after,
         }))
     db.commit()
     for event, intent_id, fields in events:

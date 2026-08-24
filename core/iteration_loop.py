@@ -1403,6 +1403,12 @@ class DailyObserver:
         proposals = []
         if create_proposals:
             for signal in signals:
+                # Component health is operational evidence with an automatic
+                # owner (watchdog/Guardian/provider chain). Turning it into a
+                # Pascal-facing product proposal made internal failures look
+                # like decisions he had to put into the R&D queue.
+                if signal.get("category") == "component_health":
+                    continue
                 proposal = self.store.propose_from_signal(signal)
                 if proposal and proposal[1]:
                     proposals.append(proposal[0])

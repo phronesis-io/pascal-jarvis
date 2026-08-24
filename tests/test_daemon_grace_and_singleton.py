@@ -202,15 +202,23 @@ def test_offline_defers_page_and_rearms_grace(brain_env, monkeypatch):
     assert _persisted(tmp_path)["suppressed"]["windows"] == 1
 
 
-def test_out_of_grace_online_repairs_before_page(brain_env):
+def test_out_of_grace_online_waits_without_restarting_heartbeat(
+        brain_env, monkeypatch):
     tmp_path, logs, alerts = brain_env
     _write_hb_state(tmp_path, wedged=True)
+    recoveries = []
+    monkeypatch.setattr(
+        daemon_mod,
+        "_request_component_recovery",
+        lambda name: recoveries.append(name) or True,
+    )
 
     daemon_mod._check_brain_health()
 
     assert alerts == []
+    assert recoveries == []
     assert _persisted(tmp_path)["repair_requested_at"] > 0
-    assert any("recovery requested before alert" in m for _, m in logs)
+    assert any("without process restart" in m for _, m in logs)
 
 
 def test_persistent_failure_after_recovery_grace_pages(brain_env):
