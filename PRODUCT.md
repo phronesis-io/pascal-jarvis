@@ -75,9 +75,10 @@ cards were read 95.7% while web cards were read 1.8%.
 14. Where a source sits in the attention hierarchy is answered by measured
     engagement, not by a hand-edited list nobody revisits — and every
     adjustment is announced.
-15. Work precedes interruption: every new visible card states what Jarvis
-    already completed. Missing work evidence suppresses the card; informational
-    cards leave the live attention queue after 24 hours.
+15. Work precedes interruption: every new visible card has private evidence
+    of what Jarvis completed, while its visible text leads with the useful
+    result in natural language. Missing work evidence suppresses the card;
+    informational cards leave the live attention queue after 24 hours.
 
 ## Non-Goals
 

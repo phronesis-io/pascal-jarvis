@@ -1151,7 +1151,8 @@ def test_strict_native_card_persists_its_producers_work_receipt(env):
     state = memorial.list_memorials()[0]
     assert state["work_receipt"] == "拉取信号、核验来源并完成重复性筛选"
     assert "__jarvis_work_receipt" not in rendered
-    assert "**已完成：** 拉取信号、核验来源并完成重复性筛选" in rendered
+    assert "**已完成：**" not in rendered
+    assert "一件外部动态" in rendered
 
 
 def test_strict_multisection_native_card_keeps_receipt_on_each_split(env):
@@ -1176,7 +1177,7 @@ def test_strict_multisection_native_card_keeps_receipt_on_each_split(env):
     ]
 
 
-def test_proactive_work_receipt_is_required_stored_and_rendered(env):
+def test_proactive_work_receipt_is_required_and_stored_but_not_rendered(env):
     missing = memorial.memorialize_output(
         "TITLE: 需要拍板\n方案已经列好。\nOPTIONS: 同意 | 不做",
         "intention-check",
@@ -1197,7 +1198,8 @@ def test_proactive_work_receipt_is_required_stored_and_rendered(env):
     assert state["work_receipt"] == "对照了三份记录并复算影响范围"
     assert "WORKED" not in state["body"]
     card_body = json.loads(rendered)["elements"][0]["text"]["content"]
-    assert "**已完成：** 对照了三份记录并复算影响范围" in card_body
+    assert "**已完成：**" not in card_body
+    assert "方案已经列好" in card_body
 
 
 def test_quoted_worked_example_does_not_satisfy_receipt_gate(env):

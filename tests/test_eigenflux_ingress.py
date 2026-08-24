@@ -12,6 +12,16 @@ from core.eigenflux_ingress import reconcile_once
 from core.runtime_paths import database_path
 
 
+def test_eigenflux_inbox_reconcile_task_wires_the_ingress_pre_hook():
+    from pathlib import Path
+
+    heartbeat = (Path(__file__).parent.parent / "HEARTBEAT.md").read_text()
+    section = heartbeat.split(
+        "### eigenflux-inbox-reconcile", 1
+    )[1].split("### ", 1)[0]
+    assert "tasks/eigenflux_ingress_pre.sh" in section
+
+
 def _runtime(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 from contextlib import contextmanager
@@ -90,6 +91,19 @@ def reason_code_for_error(value: object) -> str:
         "timed out", "timeout", "deadline exceeded",
     )):
         return "timeout"
+    if (
+        re.search(
+            r"\b(?:http(?:\s+status)?|status(?:\s+code)?|api error)"
+            r"[\s:=/-]*529\b",
+            lowered,
+        )
+        or "overloaded_error" in lowered
+        or re.search(
+            r"\b(?:server|service|provider|api) (?:is )?overloaded\b",
+            lowered,
+        )
+    ):
+        return "server_overloaded"
     if any(marker in lowered for marker in (
         "unexpected_eof_while_reading",
         "eof occurred in violation of protocol",
@@ -174,6 +188,10 @@ def _failure_cooldown_seconds(reason: str, count: int) -> int:
         "network_error": (60, "JARVIS_PROVIDER_TRANSIENT_COOLDOWN_SECONDS"),
         "rate_limited": (300, "JARVIS_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS"),
         "timeout": (1800, "JARVIS_PROVIDER_TIMEOUT_COOLDOWN_SECONDS"),
+        "server_overloaded": (
+            300,
+            "JARVIS_PROVIDER_OVERLOAD_COOLDOWN_SECONDS",
+        ),
     }
     default, setting = defaults.get(
         reason,
@@ -588,6 +606,40 @@ def _merge_probe_rows(
     return merged
 
 
+def preferred_route(
+    root: str | Path | None = None,
+    *,
+    context: str = "owner_chat",
+    gate_state: str = "primary",
+    preference: str = "auto",
+    now_epoch: float | None = None,
+    cooldown_seconds: int | None = None,
+    provider_ids: tuple[str, ...] | None = None,
+) -> str:
+    """Choose the first configured route outside its real-request cooldown."""
+    from .model_control import ROUTE_IDS, route_plan
+
+    for provider_id in provider_ids or ():
+        if provider_id not in ROUTE_IDS:
+            raise ValueError(f"unsupported provider: {provider_id}")
+    env = dict(os.environ)
+    if cooldown_seconds is not None:
+        env["JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS"] = str(
+            max(0, int(cooldown_seconds))
+        )
+    plan = route_plan(
+        context,
+        config=Config(_root(root) / "jarvis.yaml"),
+        env=env,
+        preference=preference,
+        gate_state=gate_state,
+        health_rows=snapshot(root)["providers"],
+        now_epoch=now_epoch,
+        route_ids=provider_ids,
+    )
+    return plan.routes[0].id if plan.routes else "none"
+
+
 def preferred_fallback(
     root: str | Path | None = None,
     *,
@@ -595,27 +647,16 @@ def preferred_fallback(
     cooldown_seconds: int | None = None,
     provider_ids: tuple[str, ...] = ("backup1", "backup2", "codex", "openai"),
 ) -> str:
-    """Choose the first supported route not in a fresh unhealthy cooldown."""
-    from .model_control import ROUTE_IDS, route_plan
-
-    for provider_id in provider_ids:
-        if provider_id not in ROUTE_IDS or provider_id == "primary":
-            raise ValueError(f"unsupported fallback provider: {provider_id}")
-    env = dict(os.environ)
-    if cooldown_seconds is not None:
-        env["JARVIS_PROVIDER_UNHEALTHY_COOLDOWN_SECONDS"] = str(
-            max(0, int(cooldown_seconds))
-        )
-    plan = route_plan(
-        "owner_chat",
-        config=Config(_root(root) / "jarvis.yaml"),
-        env=env,
+    """Compatibility wrapper for callers already inside the backup gate."""
+    if "primary" in provider_ids:
+        raise ValueError("primary is not a fallback provider")
+    return preferred_route(
+        root,
         gate_state="backup",
-        health_rows=snapshot(root)["providers"],
         now_epoch=now_epoch,
-        route_ids=provider_ids,
+        cooldown_seconds=cooldown_seconds,
+        provider_ids=provider_ids,
     )
-    return plan.routes[0].id if plan.routes else "none"
 
 
 def probe_all(
@@ -744,16 +785,35 @@ def summary_text(root: str | Path | None = None) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=("probe", "status", "route", "observe"), nargs="?",
-                        default="status")
+        "command",
+        choices=("probe", "status", "route", "observe", "classify"),
+        nargs="?",
+        default="status",
+    )
     parser.add_argument("provider", nargs="?", default="")
     parser.add_argument("provider_status", nargs="?", default="")
     parser.add_argument("--detail", default="request_failed")
     parser.add_argument("--root", default="")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--context",
+        choices=("owner_chat", "group", "heartbeat", "auxiliary_trusted",
+                 "auxiliary_untrusted"),
+        default="owner_chat",
+    )
+    parser.add_argument(
+        "--gate", choices=("primary", "probe", "backup"), default="primary"
+    )
     args = parser.parse_args(argv)
     if args.command == "route":
-        print(preferred_fallback(args.root or None))
+        print(preferred_route(
+            args.root or None,
+            context=args.context,
+            gate_state=args.gate,
+        ))
+        return 0
+    if args.command == "classify":
+        print(reason_code_for_error(sys.stdin.read()))
         return 0
     if args.command == "observe":
         try:

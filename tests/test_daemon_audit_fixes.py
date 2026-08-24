@@ -235,7 +235,7 @@ def test_diag_fresh_pre_rearms_staleness_dedup(diag_env):
     assert "self-diagnostic|repair-ok" not in daemon_mod._probe_alert_stamps
 
 
-def test_diag_redelivers_undelivered_warnings_and_writes_stamp(diag_env):
+def test_diag_acknowledges_internal_warnings_without_paging_owner(diag_env):
     pre, stamp, alerts = diag_env
     pre.write_text("⚠️ 备份已经 60 小时没跑了\n✓ other stuff\n")
     _age_file(pre, 20 * 60)
@@ -244,21 +244,20 @@ def test_diag_redelivers_undelivered_warnings_and_writes_stamp(diag_env):
 
     daemon_mod._check_diag_staleness()
 
-    assert len(alerts) == 1
-    assert "自诊断发现 1 个问题" in alerts[0]
-    assert "备份已经 60 小时没跑了" in alerts[0]
+    assert alerts == []
     saved = json.loads(stamp.read_text())
-    assert saved["ts"] > 0                        # post-compatible shape
+    assert saved["ts"] > 0
+    assert saved["user_ts"] == 0
     assert saved["lines"] == ["⚠️ 备份已经 60 小时没跑了"]
 
     daemon_mod._check_diag_staleness()            # stamp now fresh → silent
-    assert len(alerts) == 1
+    assert alerts == []
 
 
 def test_diag_genuine_delivery_loss_does_not_consume_shared_stamp(
         diag_env, monkeypatch):
     pre, stamp, alerts = diag_env
-    pre.write_text("⚠️ 备份已经 60 小时没跑了\n")
+    pre.write_text("⚠️ user token 探针失败 — authorization required\n")
     _age_file(pre, 20 * 60)
     _diag_cycle_completed(pre)
     monkeypatch.setattr(daemon_mod, "notify_lark", lambda *a, **k: False)
@@ -342,7 +341,7 @@ def test_diag_no_redelivery_when_post_already_delivered(diag_env):
 
 def test_diag_redelivers_when_stamp_predates_pre_beyond_window(diag_env):
     pre, stamp, alerts = diag_env
-    pre.write_text("⚠️ warning the post failed to send\n")
+    pre.write_text("⚠️ user token 探针失败 — authorization required\n")
     _age_file(pre, 20 * 60)
     _diag_cycle_completed(pre)
     pre_mtime = pre.stat().st_mtime
@@ -351,7 +350,8 @@ def test_diag_redelivers_when_stamp_predates_pre_beyond_window(diag_env):
     daemon_mod._check_diag_staleness()
 
     assert len(alerts) == 1
-    assert "代发" in alerts[0]
+    assert "现在授权" in alerts[0]
+    assert "探针" not in alerts[0]
 
 
 def test_diag_no_redelivery_without_warnings(diag_env):

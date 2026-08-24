@@ -769,6 +769,43 @@ def test_active_signal_is_not_closed_by_same_observation(tmp_path):
     assert result["reconciliation"]["signals_resolved"] == 0
 
 
+def test_component_health_stays_internal_instead_of_messaging_owner(
+        tmp_path, monkeypatch):
+    store = _store(tmp_path)
+
+    class Observer(DailyObserver):
+        def _component_signals(self):
+            self._collector_observed_at["components"] = self.store.now()
+            return [{
+                "source": "components",
+                "category": "component_health",
+                "key": "heartbeat-loop",
+                "severity": "critical",
+                "summary": "heartbeat-loop 未达到运行要求",
+                "evidence": {"component": "heartbeat-loop", "ok": False},
+            }]
+
+        def _delegation_signals(self):
+            self._collector_observed_at["delegations"] = self.store.now()
+            return []
+
+        def _conversation_signals(self):
+            self._collector_observed_at["conversation_audit"] = self.store.now()
+            return []
+
+    projected = []
+    monkeypatch.setattr(
+        "core.iteration_loop.sync_proposal_item",
+        lambda *args, **kwargs: projected.append((args, kwargs)),
+    )
+
+    result = Observer(store).run(create_proposals=True)
+
+    assert result["signals"] == 1
+    assert result["proposals"] == []
+    assert projected == []
+
+
 def test_superseded_signal_can_create_fresh_proposal_after_recurrence(tmp_path):
     clock = [1_000.0]
     store = _store(tmp_path, clock)

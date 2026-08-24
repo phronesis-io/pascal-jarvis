@@ -7,16 +7,16 @@ system's only health alarm was structurally silent (the dashboard died for
 23 days unseen). Detection and delivery are now SPLIT: this post-script scans
 the PRE output (passed through by the runner alongside Claude's reply on
 stdin is the LLM summary — we re-read the pre data from the freshest source)
-for ⚠️ lines and, when any exist, sends ONE aggregated Lark alert directly
-via lark-cli, bypassing both SILENT_TASKS (a post side effect is not a
-user_message) and the proactive error gate (we compose the text ourselves,
-in Chinese, with no raw error strings).
+for ⚠️ lines. Internal, automatically-owned warnings are recorded for
+Guardian reconciliation and stay out of Lark; only a missing user OAuth token
+creates one plain-language action card. This bypasses both SILENT_TASKS (a
+post side effect is not a user_message) and the proactive error gate.
 
 Dedup: at most one alert per 4h window (.diag_last_alert.json stamp) so a
 persistent condition does not nag every cycle. The LLM summary on stdin is
 still swallowed (stays silent) — only the deterministic ⚠️ extraction talks.
 
-No LLM, no heuristics: if the pre printed ⚠️, Pascal hears about it.
+No LLM and no raw diagnostic strings reach Pascal.
 """
 
 import json
@@ -81,7 +81,7 @@ def should_alert(warnings: list[str], stamp: dict, now: float | None = None) -> 
     if not warnings:
         return False
     now = time.time() if now is None else now
-    age = now - float(stamp.get("ts", 0) or 0)
+    age = now - float(stamp.get("user_ts", stamp.get("ts", 0)) or 0)
     if age < DEDUP_WINDOW_S:
         return False
     # Compare exactly what the stamp stores (first 20 lines): with >20
@@ -92,11 +92,21 @@ def should_alert(warnings: list[str], stamp: dict, now: float | None = None) -> 
     return age >= REMIND_INTERVAL_S
 
 
-def _mark_alerted(lines: list[str]) -> None:
+def _mark_alerted(lines: list[str], *, user_alert: bool = False) -> None:
     try:
+        previous = _read_stamp()
+        now = time.time()
         tmp = STAMP.with_suffix(".tmp")
         tmp.write_text(json.dumps(
-            {"ts": time.time(), "lines": lines[:20]}, ensure_ascii=False))
+            {
+                "ts": now,
+                "user_ts": now if user_alert else float(
+                    previous.get("user_ts", 0) or 0
+                ),
+                "lines": lines[:20],
+            },
+            ensure_ascii=False,
+        ))
         os.replace(tmp, STAMP)
     except OSError:
         pass
@@ -108,6 +118,10 @@ def _mark_alerted(lines: list[str]) -> None:
 # terminal (2026-08-07: the reply-only version of this button was a dead
 # end he had to talk his way out of).
 _USER_TOKEN_MARKER = "user token 探针失败"
+_USER_AUTH_TEXT = (
+    "飞书个人授权过期了。普通聊天和机器人消息不受影响；"
+    "需要读取你的文档、日历或任务时会受限。点「现在授权」即可恢复。"
+)
 
 _AUTH_OPTIONS = [
     {"key": "auth", "label": "现在授权",
@@ -116,9 +130,19 @@ _AUTH_OPTIONS = [
 ]
 
 
+def user_actionable_warnings(warnings: list[str]) -> list[str]:
+    """Return only diagnostics that require Pascal's personal action."""
+    return [line for line in warnings if _USER_TOKEN_MARKER in line]
+
+
+def user_alert_text(warnings: list[str]) -> str:
+    """Render the bounded, plain-language owner action for diagnostics."""
+    return _USER_AUTH_TEXT if user_actionable_warnings(warnings) else ""
+
+
 def _options_for(text: str) -> list[dict] | None:
     """Real fix buttons for warnings that have a hands-free fix."""
-    if _USER_TOKEN_MARKER in text:
+    if _USER_TOKEN_MARKER in text or text == _USER_AUTH_TEXT:
         return [dict(o) for o in _AUTH_OPTIONS]
     return None
 
@@ -196,26 +220,33 @@ def main():
 
     warnings = extract_warnings(pre_output)
     stamp = _read_stamp()
+    actionable = user_actionable_warnings(warnings)
+    if warnings and not actionable:
+        _mark_alerted(warnings)
+        print(f"[self_diagnostic_post] recorded {len(warnings)} internal "
+              "warning(s); no user action needed", file=sys.stderr)
+        return
     if not should_alert(warnings, stamp):
         if warnings:
+            _mark_alerted(warnings)
             print(f"[self_diagnostic_post] {len(warnings)} warning(s) "
                   "suppressed (no new content)", file=sys.stderr)
         return
 
+    # Most diagnostic warnings are internal work: provider retries, scheduler
+    # starvation, delivery queues and component probes all have deterministic
+    # recovery owners. Recording them in the shared stamp prevents Guardian
+    # from re-sending the same evidence through its independent channel. Only
+    # a missing user OAuth token genuinely needs Pascal to act.
     uid = _user_id()
     if not uid:
         print("[self_diagnostic_post] no user_open_id — cannot alert",
               file=sys.stderr)
         return
 
-    unchanged = not (set(warnings[:20]) - set(stamp.get("lines") or []))
-    text = ("🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
-            + ("（昨天说过的还没好）" if unchanged else "") + "：\n"
-            + "\n".join(warnings[:12])
-            + ("\n…（其余略）" if len(warnings) > 12 else "")
-            + "\n（同样的问题一天最多提醒一次）")
+    text = user_alert_text(warnings)
     if _send(text, uid):
-        _mark_alerted(warnings)
+        _mark_alerted(warnings, user_alert=True)
         print(f"[self_diagnostic_post] alerted {len(warnings)} warning(s)",
               file=sys.stderr)
     else:

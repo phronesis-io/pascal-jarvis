@@ -216,7 +216,8 @@ def test_diag_stamp_follows_jarvis_dir_without_losing_code_imports(tmp_path):
     assert (tmp_path / ".diag_last_alert.json").exists()
 
 
-def test_diag_alert_dedup_window(tmp_path, monkeypatch):
+def test_diag_internal_warning_is_recorded_without_interrupting_user(
+        tmp_path, monkeypatch):
     dp = _load_diag_post()
     monkeypatch.setattr(dp, "STAMP", tmp_path / "stamp.json")
     sent = []
@@ -228,13 +229,39 @@ def test_diag_alert_dedup_window(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("HEARTBEAT_OK"))
 
     dp.main()
-    assert len(sent) == 1
-    assert "自诊断" in sent[0] and "admin" in sent[0]
+    assert sent == []
+    stamp = json.loads((tmp_path / "stamp.json").read_text())
+    assert stamp["lines"] == ["⚠️ admin: unreachable"]
+    assert stamp["user_ts"] == 0
+    assert dp.should_alert(
+        [f"⚠️ {dp._USER_TOKEN_MARKER}"],
+        stamp,
+        now=stamp["ts"] + 1,
+    )
 
-    # Second run inside the 4h window: suppressed
+    # A second run is deduplicated and remains silent.
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("HEARTBEAT_OK"))
     dp.main()
-    assert len(sent) == 1
+    assert sent == []
+
+
+def test_diag_user_auth_warning_is_plain_and_actionable(tmp_path, monkeypatch):
+    dp = _load_diag_post()
+    monkeypatch.setattr(dp, "STAMP", tmp_path / "stamp.json")
+    sent = []
+    monkeypatch.setattr(dp, "_send", lambda text, uid: (sent.append(text), True)[1])
+    monkeypatch.setattr(dp, "_user_id", lambda: "ou_test")
+    pre_file = tmp_path / "pre.txt"
+    pre_file.write_text("⚠️ user token 探针失败: raw internal detail\n")
+    monkeypatch.setenv("DIAG_PRE_FILE", str(pre_file))
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+
+    dp.main()
+
+    assert sent == [dp._USER_AUTH_TEXT]
+    assert "探针" not in sent[0]
+    assert dp._options_for(sent[0])[0]["label"] == "现在授权"
+    assert json.loads((tmp_path / "stamp.json").read_text())["user_ts"] > 0
 
 
 def test_diag_no_warnings_no_alert(tmp_path, monkeypatch):

@@ -90,6 +90,16 @@ _SESSION_LIMIT = re.compile(
 _RATE_LIMIT = re.compile(
     r"rate limit (reached|exceeded)|rate_limit|too many requests",
     re.IGNORECASE)
+# A provider overload is rejected before execution.  It is safe to replay on
+# another provider, but degrading models on the same overloaded endpoint only
+# adds latency.
+_PROVIDER_OVERLOAD = re.compile(
+    r"(?:api error:\s*)?529\b"
+    r"|http(?:\s+status)?[\s:=/-]*529\b"
+    r"|(?:server|service|provider|api) (?:is )?overloaded"
+    r"|overloaded_error",
+    re.IGNORECASE,
+)
 
 
 def is_model_error(stderr: str) -> bool:
@@ -114,6 +124,20 @@ def limit_reason(stderr: str) -> str | None:
 def is_account_limit(stderr: str) -> bool:
     """True for account-wide limits that require immediate provider failover."""
     return limit_reason(stderr) is not None
+
+
+def is_provider_overload(stderr: str) -> bool:
+    """True when the provider rejected the request before execution."""
+    return bool(stderr and _PROVIDER_OVERLOAD.search(stderr))
+
+
+def is_preexecution_error(stderr: str) -> bool:
+    """True when replaying the request on another provider is safe.
+
+    Transport timeouts are intentionally excluded: a timed-out tool-capable
+    call may already have produced local side effects.
+    """
+    return bool(is_model_error(stderr) or is_provider_overload(stderr))
 
 
 def is_account_limit_line(text: str) -> bool:
@@ -354,6 +378,8 @@ if __name__ == "__main__":
     # Legacy --is-spend-limit remains for callers that need monetary limits.
     if len(sys.argv) > 1 and sys.argv[1] == "--is-model-error":
         sys.exit(0 if is_model_error(sys.stdin.read()) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "--is-preexecution-error":
+        sys.exit(0 if is_preexecution_error(sys.stdin.read()) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--is-spend-limit":
         sys.exit(0 if is_spend_limit(sys.stdin.read()) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "--is-account-limit":

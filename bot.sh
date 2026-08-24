@@ -50,6 +50,36 @@ export PATH="$HOME/.local/bin:$PATH"
 # that impossible regardless of how/where we were launched.
 cd "$JARVIS_DIR" || { echo "FATAL: cannot cd to JARVIS_DIR ($JARVIS_DIR)" >&2; exit 1; }
 
+# Production processes run one reviewed source snapshot for their whole
+# lifetime. A bot started from a feature branch, or a watchdog child respawned
+# after the checkout changed, can otherwise load code that never passed CI or
+# the release gate. Local development can opt out explicitly.
+_BOOT_GIT_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
+_ORIGIN_MAIN_HEAD=$(git rev-parse origin/main 2>/dev/null || true)
+_RUNTIME_GIT_PATHS=(
+  core tasks scripts plugins handlers sources static
+  admin.py daemon.py bot.sh restart.sh components.yaml HEARTBEAT.md
+)
+
+runtime_source_unchanged() {
+  local _current_head _dirty
+  _current_head=$(git rev-parse HEAD 2>/dev/null || true)
+  [ -n "$_BOOT_GIT_HEAD" ] && [ "$_current_head" = "$_BOOT_GIT_HEAD" ] || return 1
+  _dirty=$(git status --porcelain -- "${_RUNTIME_GIT_PATHS[@]}" 2>/dev/null)
+  [ -z "$_dirty" ]
+}
+
+if [ "${JARVIS_ALLOW_UNRELEASED_RUNTIME:-false}" != "true" ]; then
+  if [ -n "$_ORIGIN_MAIN_HEAD" ] && [ "$_BOOT_GIT_HEAD" != "$_ORIGIN_MAIN_HEAD" ]; then
+    echo "FATAL: refusing to start Jarvis from an unreleased revision" >&2
+    exit 1
+  fi
+  if ! runtime_source_unchanged; then
+    echo "FATAL: refusing to start Jarvis with modified runtime source" >&2
+    exit 1
+  fi
+fi
+
 # ── Single-instance lock (prevent duplicate replies) ────────────────
 # PID file format: "PID BOOT_TIMESTAMP" — validates both PID liveness AND
 # that the PID belongs to the same boot cycle (guards against PID reuse).
@@ -1212,9 +1242,14 @@ print(build_system_prompt(
   local _health_routed=0
   local _no_healthy_provider=0
   _provider_gate=$(python3 -m core.model_fallback --gate 2>/dev/null || echo primary)
-  if [ "$_provider_gate" = "backup" ] && [ "$is_group" -ne 1 ]; then
-    _health_route=$(python3 -m core.provider_health route 2>/dev/null || true)
-  fi
+  local _route_context="owner_chat"
+  [ "$is_group" -eq 1 ] && _route_context="group"
+  _health_route=$(python3 -m core.provider_health route \
+    --context "$_route_context" --gate "$_provider_gate" \
+    2>/dev/null || true)
+  case "$_health_route" in
+    none) _health_routed=1; _no_healthy_provider=1 ;;
+  esac
 
   # A private conversation may explicitly prefer Codex. This changes only
   # routing order: if Codex is unavailable, the normal Claude chain still
@@ -1269,9 +1304,11 @@ print(build_system_prompt(
   # it must not fall back to an account-limited primary when every fallback is
   # cooling. An empty route means the health command itself failed, so the
   # historical bounded chain remains the fail-soft path.
-  if [ "$_provider_gate" = "backup" ] && [ -z "$answer" ] \
+  if [ -z "$answer" ] \
     && [ "$_codex_uncertain" -eq 0 ] && [ "$_codex_cancelled" -eq 0 ]; then
-    _health_route=$(python3 -m core.provider_health route 2>/dev/null || true)
+    _health_route=$(python3 -m core.provider_health route \
+      --context "$_route_context" --gate "$_provider_gate" \
+      2>/dev/null || true)
     case "$_health_route" in
       codex|openai) _health_routed=1 ;;
       none) _health_routed=1; _no_healthy_provider=1 ;;
@@ -1301,16 +1338,17 @@ print(build_system_prompt(
     fi
   fi
 
-  # Sticky provider gate: account-wide spend/session limits used to make every
+  # Start from the route selected by the account gate plus real-request health.
+  # Account-wide spend/session limits used to make every
   # message re-probe primary from scratch —
   # ~11s of doomed attempts per reply AND two raw error turns written into
   # the live session transcript each time. When the gate says the flag is
   # fresh, start attempt 1 on backup; _claude_backup_tried=1 keeps the
   # OpenAI rung reachable if backup itself fails. 'probe' elects this
   # message to try primary once — success clears the flag below.
-  if [ "$_provider_gate" = "backup" ] \
+  if { [ "$_health_route" = "backup1" ] \
+      || { [ "$_provider_gate" = "backup" ] && [ -z "$_health_route" ]; }; } \
     && [ "$_health_routed" -eq 0 ] \
-    && { [ -z "$_health_route" ] || [ "$_health_route" = "backup1" ]; } \
     && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
     && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
     && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ]; then
@@ -1318,10 +1356,10 @@ print(build_system_prompt(
     _claude_backup_tried=1
     _active_claude_provider="backup1"
     _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
-    log_info "[$session_id] Provider gate: primary account-limited — starting on backup provider (model=$_cur_model)"
-  elif [ "$_provider_gate" = "backup" ] \
+    log_info "[$session_id] Model route: starting on backup provider (model=$_cur_model, primary_gate=$_provider_gate)"
+  elif { [ "$_health_route" = "backup2" ] \
+      || { [ "$_provider_gate" = "backup" ] && [ -z "$_health_route" ]; }; } \
     && [ "$_health_routed" -eq 0 ] \
-    && { [ -z "$_health_route" ] || [ "$_health_route" = "backup2" ]; } \
     && [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
     && [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] \
     && [ -n "${CLAUDE_BACKUP2_BASE_URL:-}" ]; then
@@ -1331,7 +1369,7 @@ print(build_system_prompt(
     _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
     _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
     _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
-    log_info "[$session_id] Provider gate: primary spend-limited — starting on backup2 provider (model=$_cur_model)"
+    log_info "[$session_id] Model route: starting on backup2 provider (model=$_cur_model, primary_gate=$_provider_gate)"
   fi
 
   # Five bounded calls are enough for the longest route:
@@ -1421,106 +1459,30 @@ print(build_system_prompt(
       answer=""
       continue
     fi
-    # Live activity stream: poll session file every 20s, send new tool calls to user
-    # Also acts as watchdog: kills Claude after 6000s
-    (_session_jsonl="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
-     # Snapshot current tool count so we only report NEW tools from this call
-     _last_tool_count=$(python3 -c "
-import json
-n=0
-try:
-    with open('$CLAUDE_PROJECT_DIR/${session_id}.jsonl') as f:
-        for line in f:
-            for b in (json.loads(line).get('message',{}).get('content',[]) or []):
-                if isinstance(b,dict) and b.get('type')=='tool_use': n+=1
-except: pass
-print(n)
-" 2>/dev/null || echo 0)
-     _elapsed=0
+    # One natural progress line, then release the conversation to a background
+    # job if the call stays slow. Internal tools, retries and IDs stay private.
+    (_elapsed=0
+     _ack_sent=0
      # Responsiveness policy is single-sourced + tested in core/responsiveness
      # (REQ-59). Pull the tuned constants here; fall back to literals if the
      # module call ever fails so the loop never breaks.
      eval "$(python3 -m core.responsiveness env 2>/dev/null)"
-     : "${JV_POLL_FIRST:=6}" "${JV_POLL_STEADY:=20}"
-     # First poll fast (~6s) so the user sees a sign of life quickly, then
-     # settle to 20s to avoid spam. The instant "Typing" reaction already
-     # fired at dispatch; this loop adds the FIRST textual feedback within
-     # ~6s — a tool narration (🔧) when opus is actually running tools. When
-     # opus is just thinking, the instant "Typing" reaction is the ONLY sign of
-     # life: no textual thinking-ack is sent. (Pascal 2026-06-20: that ack was
-     # redundant with the typing indicator and felt annoying — removed.)
+     : "${JV_POLL_FIRST:=10}" "${JV_POLL_STEADY:=10}" \
+       "${JV_ACK_AFTER:=20}" "${JV_PROMOTE_AFTER:=90}" \
+       "${JV_PROGRESS_ACK:=我还在处理，查清楚后马上告诉你。}"
      _poll="$JV_POLL_FIRST"
      while [ "$_elapsed" -lt 6000 ]; do
        sleep "$_poll"
        _elapsed=$((_elapsed + _poll))
        _poll="$JV_POLL_STEADY"
        if ! kill -0 $_claude_pid 2>/dev/null; then break; fi
-       # Extract tool call descriptions, compare with last snapshot
-       _new_tools=$(python3 -c "
-import json, sys
-descs = []
-try:
-    with open('$_session_jsonl') as f:
-        for line in f:
-            obj = json.loads(line)
-            for block in (obj.get('message',{}).get('content',[]) or []):
-                if isinstance(block,dict) and block.get('type')=='tool_use':
-                    inp = block.get('input',{})
-                    d = inp.get('description','')
-                    if not d:
-                        name = block.get('name','')
-                        path = inp.get('file_path','')
-                        cmd = inp.get('command','')[:50]
-                        pattern = inp.get('pattern','')[:30]
-                        if path: d = f'{name}: {path.split(\"/\")[-1]}'
-                        elif cmd: d = f'{name}: {cmd}'
-                        elif pattern: d = f'{name}: {pattern}'
-                        else: d = name
-                    descs.append(d[:60])
-except: pass
-# Output: total_count then new descriptions (after offset)
-offset = int(sys.argv[1]) if len(sys.argv)>1 else 0
-print(len(descs))
-for d in descs[offset:]:
-    print(d)
-" "$_last_tool_count" 2>/dev/null)
-       _new_count=$(echo "$_new_tools" | head -1)
-       _new_descs=$(echo "$_new_tools" | tail -n +2)
-       if [ -n "$_new_descs" ] && [ "$_new_count" -gt "$_last_tool_count" ] 2>/dev/null; then
-         _formatted=$(echo "$_new_descs" | while IFS= read -r _d; do
-           [ -n "$_d" ] && echo "• $_d"
-         done)
-         if [ -n "$_formatted" ]; then
-           # REQ-18 (user-designed 5/29): narrate progress with a fast cheap
-           # model instead of dumping raw tool names — "它搜了什么网站、有没有
-           # 真的去看，还是在幻觉，对用户是非常重要的信息".
-           # REQ-110 (7/20): the ≥60s throttle now gates EVERY send and the
-           # raw English list is never a fallback — 220 🔧 messages reached
-           # Pascal in the week of 7/13 (39 in one hour), most of them raw
-           # fragments that bypassed the throttle on its else-branch, plus
-           # six bare "Execution error" narrator failures. Narration is
-           # haiku-or-nothing; throttled batches accumulate (_last_tool_count
-           # advances only when a narration attempt is dispatched — the fork
-           # cannot write parent vars, so a failed attempt drops its batch
-           # rather than retrying it forever).
-           _now_s=$(date +%s)
-           if [ $((_now_s - ${_last_narrate:-0})) -ge 60 ]; then
-             _last_narrate=$_now_s
-             _last_tool_count="$_new_count"
-             _formatted_capped=$(echo "$_formatted" | head -8)
-             # Narrate in a BACKGROUND fork: an inline call (even with a real
-             # timeout) blocks this poll loop, delaying the 120s promotion
-             # check and the 6000s watchdog by up to 12s per narration.
-             ( _n=$(printf '%s' "下面是 AI 助手正在执行的工具调用列表。用一句中文（≤40字）向用户转述它正在做什么、信息来自哪里。只输出那一句话，不要前缀。
-$_formatted_capped" | python3 -m core.aux_model \
-                 --model haiku --timeout 12 2>/dev/null | head -2 | tr '\n' ' ')
-               if [ -n "$_n" ] && [ "${#_n}" -lt 200 ] && ! looks_like_error "$_n"; then
-                 lark_reply_text "$message_id" "🔧 $_n" >/dev/null 2>&1
-               fi ) >/dev/null 2>&1 &
-           fi
-         fi
+       if [ "$_ack_sent" -eq 0 ] && [ "$_elapsed" -ge "$JV_ACK_AFTER" ]; then
+         lark_reply_text "$message_id" "$JV_PROGRESS_ACK" >/dev/null 2>&1 || true
+         _ack_sent=1
        fi
-       # ── Auto-promotion (REQ-16 MVP-2): a call running >120s becomes a
+       # Tool activity remains observable in the private session log.
+       # ── Auto-promotion (REQ-16 MVP-2): a call still running at the tested
+       # responsiveness threshold becomes a
        # background job. Release the conversation instead of blocking it —
        # "一跑跑3个小时我就用不了这个机器人" was the single harshest complaint
        # in the interaction audit. The conversation rotates to a fresh session
@@ -1531,7 +1493,7 @@ $_formatted_capped" | python3 -m core.aux_model \
        # group conv_key visible to non-owners. The correct fix is making bg
        # jobs inherit tool restrictions, but that needs a run_background_job
        # refactor; for now, group long-running calls stay inline and timeout.
-       if [ "$is_group" -ne 1 ] && [ "$_elapsed" -ge 120 ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
+       if [ "$is_group" -ne 1 ] && [ "$_elapsed" -ge "$JV_PROMOTE_AFTER" ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
          _bg_job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
            JV_DESC="auto-promoted: ${content:0:120}" JV_MSG_ID="$message_id" \
            JV_CONTEXT_KEY="$logical_context_key" JV_MATTER_ID="$matter_id" \
@@ -1565,7 +1527,7 @@ sm.force_rotate(os.environ['JV_KEY'],
              else
                log_warn "[$session_id] Promotion marker rehome failed — retaining conversation marker"
              fi
-             lark_reply_text "$message_id" "⏳ 这个任务跑得比较久，已自动转后台（job \`$_bg_job_id\`）。会话已释放，可以继续找我聊别的；做完我会把结果发回来。发 jobs 可查进度，发 cancel $_bg_job_id 可取消。" >/dev/null 2>&1 || true
+             lark_reply_text "$message_id" "这件事比预期久，我先放到后台继续做。你可以接着聊，做完我会回来告诉你。" >/dev/null 2>&1 || true
              log_info "[$session_id] Promoted to background job $_bg_job_id after ${_elapsed}s — lock released"
            else
              # Rotation failed: keep the lock (conversation stays busy) so a
@@ -1671,8 +1633,15 @@ except Exception:
       # degrading opus→haiku on an exhausted account just burned a second
       # doomed call — the elif below jumps straight to the backup provider.
       _fallback=""
+      _provider_failure_reason=$(printf '%s' "$_model_error_text" \
+        | python3 -m core.provider_health classify 2>/dev/null) || true
+      : "${_provider_failure_reason:=request_failed}"
       if [ "$_use_claude_backup" -eq 0 ]; then
         _fallback=$(printf '%s' "$_model_error_text" | python3 -m core.model_fallback "$_cur_model" 2>/dev/null)
+      fi
+      if [ "$_provider_failure_reason" != "request_failed" ]; then
+        python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
+          --detail "$_provider_failure_reason" >/dev/null 2>&1 || true
       fi
       if [ -n "$_fallback" ]; then
         log_warn "[$session_id] Model error on $_cur_model → degrading to $_fallback (REQ-77)"
@@ -1682,7 +1651,7 @@ except Exception:
         && [ "$_claude_backup_tried" -eq 0 ] \
         && [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] \
         && [ -n "${CLAUDE_BACKUP_BASE_URL:-}" ] \
-        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null; then
+        && printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-preexecution-error 2>/dev/null; then
         _claude_backup_tried=1
         _use_claude_backup=1
         _active_claude_provider="backup1"
@@ -1731,7 +1700,7 @@ print(build_system_prompt(
         _claude_backup2_tried=1
         _use_claude_backup=1
         python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
-          --detail request_failed >/dev/null 2>&1 || true
+          --detail "$_provider_failure_reason" >/dev/null 2>&1 || true
         _active_claude_provider="backup2"
         log_warn "[$session_id] Backup1 exhausted on $_cur_model → trying Claude Code backup2 provider"
         _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
@@ -1743,7 +1712,7 @@ print(build_system_prompt(
              || { [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
                   && [ -n "${OPENAI_API_KEY:-}" ] \
                   && [ "$_openai_tried" -eq 0 ]; }; } \
-        && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-model-error 2>/dev/null \
+        && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-preexecution-error 2>/dev/null \
              || { { [ "$_claude_backup_tried" -eq 1 ] \
                     || [ "$_claude_backup2_tried" -eq 1 ]; } \
                   && [ "$_attempt" -ge 2 ] \
@@ -1762,7 +1731,7 @@ print(build_system_prompt(
           _codex_tried=1
           if [ "$_use_claude_backup" -eq 1 ]; then
             python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
-              --detail request_failed >/dev/null 2>&1 || true
+              --detail "$_provider_failure_reason" >/dev/null 2>&1 || true
           fi
           log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying Codex fallback (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
           answer=$(run_codex_locked "$content" "$conv_key" \
@@ -2247,28 +2216,26 @@ print(j['status'] if j else 'unknown')
   # Notify user via card
   local card_body card_json
   if [ "$status" = "completed" ]; then
-    # Truncate output for notification (full output available via 'job output')
+    # Keep the Lark result readable; the full result remains in the private
+    # job ledger without making Pascal learn job commands.
     local summary
     if [ ${#output} -gt 3000 ]; then
       summary="${output:0:3000}
 
-... (truncated, send 'job output $job_id' for full result)"
+内容较长，我保留了完整结果。需要时直接问我继续展开。"
     else
       summary="$output"
     fi
-    card_body="**Job completed** \`$job_id\`
+    card_body="这件事做完了。
 
 $summary"
   else
-    card_body="**Job failed** \`$job_id\`
-Task: $content
-
-Check logs with: job output $job_id"
+    card_body="这件事这次没跑完。我保留了现场，但没有自动重跑，避免重复执行。直接回复“继续”，我会从这里接上。"
   fi
   card_json=$(JV_BODY="$card_body" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.card import build_card
-print(build_card('⚙️ 后台任务', os.environ['JV_BODY']))
+print(build_card('后台工作结果', os.environ['JV_BODY']))
 " 2>/dev/null) || card_json=""
   if [ -n "$card_json" ]; then
     delivery_card_reliable "$card_json" || send_to_lark "$card_body"
@@ -2370,6 +2337,12 @@ heartbeat_watchdog() {
     # Skip ALL relaunches while .deploying is fresh. (The heartbeat_loop
     # singleton flock is the second line of defense.)
     if [ -f "$JARVIS_DIR/.deploying" ]; then
+      sleep 30
+      continue
+    fi
+    if [ "${JARVIS_ALLOW_UNRELEASED_RUNTIME:-false}" != "true" ] \
+        && ! runtime_source_unchanged; then
+      log_warn "[watchdog] Runtime source changed after startup; child respawns are blocked until governed deploy"
       sleep 30
       continue
     fi

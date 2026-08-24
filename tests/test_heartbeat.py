@@ -394,7 +394,7 @@ def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
-        "core.provider_health.preferred_fallback",
+        "core.provider_health.preferred_route",
         lambda _root, **_kwargs: "openai",
     )
     monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
@@ -421,7 +421,7 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
-        "core.provider_health.preferred_fallback",
+        "core.provider_health.preferred_route",
         lambda _root, **_kwargs: "none",
     )
     monkeypatch.setattr(
@@ -447,7 +447,7 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
-        "core.provider_health.preferred_fallback",
+        "core.provider_health.preferred_route",
         lambda _root, **_kwargs: "backup1",
     )
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
@@ -483,6 +483,35 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     })]
     assert ("backup1", "unhealthy", "timeout") in observed
     assert runner._call_timed_out is False
+
+
+def test_heartbeat_skips_primary_during_real_request_overload_cooldown(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "backup1",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://relay.invalid")
+    seen = []
+
+    class Result:
+        returncode = 0
+        stdout = "BACKUP_OK"
+        stderr = ""
+
+    def isolated(_cmd, **kwargs):
+        seen.append(kwargs.get("env"))
+        return Result()
+
+    monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
+    monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
+
+    assert runner.claude_call("known overload") == "BACKUP_OK"
+    assert seen[0]["ANTHROPIC_AUTH_TOKEN"] == "relay-test"
 
 
 def test_tool_capable_timeout_does_not_replay_on_gpt(tmp_path, monkeypatch):

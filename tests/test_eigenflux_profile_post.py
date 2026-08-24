@@ -15,6 +15,15 @@ import pytest
 from tasks import eigenflux_profile_post as hook
 
 
+def test_eigenflux_profile_task_wires_the_tested_hook():
+    from pathlib import Path
+
+    heartbeat = (Path(__file__).parent.parent / "HEARTBEAT.md").read_text()
+    section = heartbeat.split("### eigenflux-profile", 1)[1].split("### ", 1)[0]
+    assert "tasks/eigenflux_profile_pre.sh" in section
+    assert "tasks/eigenflux_profile_post.py" in section
+
+
 @pytest.fixture
 def run_recorder(monkeypatch):
     calls = []

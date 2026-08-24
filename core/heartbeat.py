@@ -1128,25 +1128,26 @@ class HeartbeatRunner:
         except Exception:
             gate_state = "primary"
         health_route = ""
-        if gate_state == "backup":
-            try:
-                from core.provider_health import preferred_fallback
-                health_route = preferred_fallback(
-                    self.jarvis_dir,
-                    provider_ids=("backup1", "backup2", "openai"),
-                )
-            except Exception:
-                health_route = ""
-        if (gate_state == "backup"
-                and health_route in {"", "backup1"}
+        try:
+            from core.provider_health import preferred_route
+            health_route = preferred_route(
+                self.jarvis_dir,
+                context="heartbeat",
+                gate_state=gate_state,
+                provider_ids=("primary", "backup1", "backup2", "openai"),
+            )
+        except Exception:
+            health_route = ""
+        if ((health_route == "backup1"
+                or (gate_state == "backup" and not health_route))
                 and os.environ.get("CLAUDE_BACKUP_ENABLED", "true") == "true"
                 and os.environ.get("CLAUDE_BACKUP_AUTH_TOKEN")
                 and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
             use_backup = True
             backup_tried = True
             model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
-        elif (gate_state == "backup"
-                and health_route in {"", "backup2"}
+        elif ((health_route == "backup2"
+                or (gate_state == "backup" and not health_route))
                 and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
                 and os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN")
                 and os.environ.get("CLAUDE_BACKUP2_BASE_URL")):
@@ -1154,15 +1155,14 @@ class HeartbeatRunner:
             backup_tried = True
             _backup2_active = True
             model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
-        elif (gate_state == "backup"
-              and health_route == "openai"
+        elif (health_route == "openai"
               and os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
               and os.environ.get("OPENAI_API_KEY")):
             # Heartbeat prompts already contain deterministic pre-script DATA.
             # Use the agentic GPT path rather than retrying a relay in cooldown.
             direct_gpt = True
 
-        if gate_state == "backup" and health_route == "none":
+        if health_route == "none":
             self._last_call_error = "no healthy provider fallback available"
             self._log(
                 "All configured heartbeat fallback routes are cooling or unavailable",
@@ -1350,14 +1350,14 @@ You have access to the user's memory below. Use it to personalize your responses
 
                 try:
                     from core.model_fallback import (fallback_for_stderr,
-                                                     is_model_error,
+                                                     is_preexecution_error,
                                                      limit_reason)
                     nxt = fallback_for_stderr(model or "", err_text)
-                    model_problem = is_model_error(err_text)
+                    preexecution_problem = is_preexecution_error(err_text)
                     account_limit_reason = limit_reason(err_text)
                 except Exception:
                     nxt = None
-                    model_problem = False
+                    preexecution_problem = False
                     account_limit_reason = None
                 try:
                     from core.provider_health import reason_code_for_error
@@ -1365,18 +1365,16 @@ You have access to the user's memory below. Use it to personalize your responses
                 except Exception:
                     failure_reason = "request_failed"
                 retryable_transport = failure_reason in {
-                    "network_error", "rate_limited", "server_error", "timeout",
-                }
+                    "network_error", "rate_limited", "server_error", "server_overloaded", "timeout"}
                 safe_transport_replay = restrict_tools or not allow_tools
                 transport_failover = (
                     failure_reason in {"network_error", "server_error", "timeout"}
                     and safe_transport_replay
                 )
                 pre_execution_failover = (
-                    model_problem
-                    or failure_reason in {
-                        "account_limit", "auth_error", "rate_limited",
-                    }
+                    preexecution_problem
+                    or failure_reason in {"account_limit", "auth_error",
+                                          "rate_limited", "server_overloaded"}
                 )
                 gate_failover = (
                     gate_state != "primary" and safe_transport_replay

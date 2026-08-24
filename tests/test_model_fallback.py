@@ -104,6 +104,14 @@ def test_transient_error_no_fallback():
     assert mf.fallback_for_stderr("opus", "") is None
 
 
+def test_provider_overload_is_safe_cross_provider_but_not_same_provider():
+    error = "API Error: 529 Overloaded: the service is temporarily busy"
+    assert mf.is_provider_overload(error) is True
+    assert mf.is_preexecution_error(error) is True
+    assert mf.is_model_error(error) is False
+    assert mf.fallback_for_stderr("opus", error) is None
+
+
 def test_fable_never_in_chain():
     assert "fable" not in [m.lower() for m in mf.DEGRADE_CHAIN]
 
@@ -125,6 +133,18 @@ def test_cli_is_model_error_predicate():
                        input="connection reset by peer",
                        capture_output=True, text=True)
     assert r.returncode == 1
+
+
+def test_cli_is_preexecution_error_accepts_provider_overload():
+    import subprocess, sys
+    r = subprocess.run(
+        [sys.executable, "-m", "core.model_fallback",
+         "--is-preexecution-error"],
+        input="API Error: 529 Overloaded",
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0
 
 
 def test_cli_is_spend_limit_predicate():
@@ -421,6 +441,9 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert "core.model_fallback --limit-reason" in bot  # trip on hard account limit
     assert "core.model_fallback --trip" in bot
     assert "core.model_fallback --clear" in bot         # probe success reopens
+    assert "core.model_fallback --is-preexecution-error" in bot
+    assert "core.provider_health classify" in bot
+    assert '--context "$_route_context" --gate "$_provider_gate"' in bot
     assert "--gate no-probe" in bot                     # background jobs follow flag
     assert "python3 -m core.aux_model" in bot
     assert "--allow-tools --timeout 6000" in bot
@@ -447,13 +470,11 @@ def test_bot_sh_wires_sticky_provider_gate():
     assert bot.index("\n      fi", fallback_call) > fallback_call
 
 
-def test_bot_progress_narration_never_sends_claude_error_text():
+def test_bot_progress_never_exposes_tool_or_claude_error_narration():
     from pathlib import Path
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
-    leak = 'lark_reply_text "$message_id" "🔧 $_n"'
-    idx = bot.index(leak)
-    guard_window = bot[max(0, idx - 220):idx]
-    assert '! looks_like_error "$_n"' in guard_window
+    assert 'lark_reply_text "$message_id" "🔧' not in bot
+    assert "正在执行的工具调用列表" not in bot
 
 
 def test_heartbeat_claude_call_retries_fallback_and_never_returns_error_stdout(tmp_path, monkeypatch):
@@ -689,6 +710,37 @@ def test_heartbeat_primary_dns_failure_reaches_backup(tmp_path, monkeypatch):
         if row["id"] == "primary"
     )
     assert primary["detail"] == "real request: network_error"
+
+
+def test_heartbeat_primary_529_reaches_backup_even_with_tools(
+        tmp_path, monkeypatch):
+    """529 is an admission failure, so no tool ran and replay is safe."""
+    from subprocess import CompletedProcess
+
+    runner = _gate_runner(tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        token = (kwargs.get("env") or {}).get("ANTHROPIC_AUTH_TOKEN", "")
+        calls.append(token)
+        if token == "backup-token":
+            return CompletedProcess(cmd, 0, stdout="HEARTBEAT_OK", stderr="")
+        return CompletedProcess(
+            cmd, 1, stdout="", stderr="API Error: 529 Overloaded"
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert runner.claude_call("prompt", allow_tools=True) == "HEARTBEAT_OK"
+    assert calls == ["", "backup-token"]
+    primary = next(
+        row for row in ph.snapshot(tmp_path)["providers"]
+        if row["id"] == "primary"
+    )
+    assert primary["detail"] == "real request: server_overloaded"
 
 
 def test_heartbeat_primary_dns_failure_reaches_gpt_without_relay(

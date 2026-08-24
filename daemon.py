@@ -1203,7 +1203,7 @@ def _network_reachable() -> bool:
 
 
 def _check_brain_health():
-    """Recycle, verify, then alert when heartbeat is ALIVE BUT BRAIN-DEAD —
+    """Observe, verify, then alert when heartbeat is ALIVE BUT BRAIN-DEAD —
     ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
     was missing from the launchd PATH for ~1h and EVERY liveness signal stayed
     fresh (beat-marker, /health heartbeat_age, per-task circuit), so nothing
@@ -1212,9 +1212,11 @@ def _check_brain_health():
     detectors (ran-but-failing starvation, priority failure windows, and the
     priority WEDGE rule mirrored from admin /health — the 7/8 intention-check
     wedge class whose only page used to be the deleted degraded-channel
-    alert). It requests one bounded heartbeat recycle, waits a full task-cycle
-    grace, then pages only if verification is still red. 4h dedup,
-    deploy-guarded. Never raises."""
+    alert). Task failures are not process failures: provider overload, timeout
+    and parsing errors must stay with the provider chain and scheduler retry,
+    never kill the whole heartbeat loop. It waits a full task-cycle grace and
+    pages only if verification is still red. 4h dedup, deploy-guarded. Never
+    raises."""
     if _in_deploy_window():
         return
     try:
@@ -1316,11 +1318,16 @@ def _check_brain_health():
                     f"for {BRAIN_WAKE_GRACE // 60}min while the network returns")
             else:
                 if not repair_requested_at:
-                    requested = _request_component_recovery("heartbeat-loop")
+                    # This is a task-level verdict while heartbeat liveness is
+                    # fresh. Restarting the process cannot repair an overloaded
+                    # provider or a bad envelope; it only interrupts unrelated
+                    # tasks and may load mutable, unreleased source. Start a
+                    # verification window and leave recovery to the provider
+                    # chain plus scheduler retry.
                     repair_requested_at = now
-                    repair_request_ok = requested
-                    log("WARN", "BRAIN-DEAD heartbeat: recovery requested "
-                        f"before alert ({'accepted' if requested else 'owner pending'}): "
+                    repair_request_ok = True
+                    log("WARN", "BRAIN-DEAD heartbeat: verification window "
+                        "started without process restart: "
                         + "; ".join(result["alerts"]))
                 elif now - repair_requested_at < BRAIN_RECOVERY_GRACE:
                     log("INFO", "brain-health: recovery in progress; waiting "
@@ -1333,11 +1340,7 @@ def _check_brain_health():
                            else "")
                     log("WARN", "BRAIN-DEAD heartbeat: "
                         + "; ".join(result["alerts"]) + tag)
-                    summary = result["summary"] if repair_request_ok else (
-                        "⚠️ 我有后台任务持续卡住。模型备用链路和任务重试已经"
-                        "跑过，但 Guardian 没能发起心跳自动恢复。我已经保留"
-                        "诊断证据；这次需要人工排查。"
-                    )
+                    summary = result["summary"]
                     notify_lark(summary,
                                 incident_key="heartbeat-brain-dead")
                     suppressed = {}
@@ -1466,11 +1469,38 @@ def _check_diag_staleness():
         if pre_mtime - stamp_ts < DIAG_ALERT_WINDOW:
             return
         try:
-            from tasks.self_diagnostic_post import extract_warnings, should_alert
+            from tasks.self_diagnostic_post import (
+                extract_warnings,
+                should_alert,
+                user_actionable_warnings,
+                user_alert_text,
+            )
         except Exception:
             return  # tasks/ tree unreadable — leg A above still stands
         warnings = extract_warnings(
             DIAG_PRE_FILE.read_text(encoding="utf-8", errors="replace"))
+        actionable = user_actionable_warnings(warnings)
+        if warnings and not actionable:
+            # The post-script normally writes this shared receipt. If its
+            # delivery leg failed, Guardian still acknowledges automatically
+            # owned diagnostics without assigning engineering work to Pascal.
+            try:
+                previous = json.loads(DIAG_ALERT_STAMP.read_text()) or {}
+            except (OSError, ValueError, TypeError):
+                previous = {}
+            try:
+                tmp = DIAG_ALERT_STAMP.with_suffix(".tmp")
+                tmp.write_text(json.dumps({
+                    "ts": now,
+                    "user_ts": float(previous.get("user_ts", 0) or 0),
+                    "lines": warnings[:20],
+                }, ensure_ascii=False))
+                os.replace(tmp, DIAG_ALERT_STAMP)
+            except OSError:
+                pass
+            log("INFO", "self-diagnostic internal warnings acknowledged; "
+                "no owner action required")
+            return
         # Content-aware (REQ-109): re-send only for warnings the stamped set
         # has never carried, or as a 24h reminder. The old window-only check
         # ping-ponged with the post's dedup — the same persisting warning
@@ -1484,11 +1514,7 @@ def _check_diag_staleness():
         log("WARN", f"self-diagnostic warnings unsent by post "
             f"({len(warnings)}) — sending via daemon channel")
         receipt = notify_lark(
-            "🩺 自诊断发现 " + str(len(warnings)) + " 个问题"
-            "（这条由守护进程代发）：\n"
-            + "\n".join(warnings[:12])
-            + ("\n…（其余略）" if len(warnings) > 12 else "")
-            + "\n（同样的问题一天最多提醒一次）",
+            user_alert_text(actionable),
             incident_key="self-diagnostic-delivery",
         )
         if receipt is False:
@@ -1496,7 +1522,8 @@ def _check_diag_staleness():
         try:
             tmp = DIAG_ALERT_STAMP.with_suffix(".tmp")
             tmp.write_text(json.dumps(
-                {"ts": now, "lines": warnings[:20]}, ensure_ascii=False))
+                {"ts": now, "user_ts": now, "lines": warnings[:20]},
+                ensure_ascii=False))
             os.replace(tmp, DIAG_ALERT_STAMP)
         except OSError:
             pass
@@ -1909,11 +1936,9 @@ def main():
         log("INFO", f"  Restart budget restored: {restart_count}/{MAX_RESTART_ATTEMPTS} attempts used")
 
     consecutive_failures = 0
-    # Stale-code hot reload (REQ-42): the long-lived daemon never noticed its
-    # on-disk code changed — on 6/12 a pre-deploy daemon killed a healthy bot
-    # twice by enforcing outdated rules. When disk is newer, exit 0 and let
-    # launchd KeepAlive respawn us on fresh code within seconds.
-    _code_mtime = os.path.getmtime(__file__)
+    # Runtime source is immutable for this process. A changed checkout must go
+    # through the governed deploy path, which restarts the daemon explicitly;
+    # silently hot-loading a branch made unreviewed code enter production.
     probe_tick = 0
     from core.hostclock import Meter
 
@@ -1922,14 +1947,6 @@ def main():
     try:
         while running:
             try:
-                try:
-                    if os.path.getmtime(__file__) > _code_mtime + 1:
-                        log("INFO", "daemon.py changed on disk — exiting for "
-                            "launchd respawn (hot reload)")
-                        break
-                except OSError:
-                    pass
-
                 # Observed-component repair/verify probes every ~4th check
                 probe_tick += 1
                 if probe_tick % 4 == 0:

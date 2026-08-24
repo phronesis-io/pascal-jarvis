@@ -208,6 +208,59 @@ def test_dirty_runtime_paths_preserves_worktree_only_filename(tmp_path):
     assert _dirty_runtime_paths(tmp_path) == ["core/worker.py"]
 
 
+def test_runtime_fingerprint_covers_scheduler_and_launch_surfaces():
+    assert {
+        "core", "tasks", "scripts", "plugins", "handlers", "sources", "static",
+        "admin.py", "daemon.py", "bot.sh", "restart.sh",
+        "components.yaml", "jarvis.yaml", "HEARTBEAT.md",
+    }.issubset(set(deploy.RUNTIME_PATHS))
+
+
+def test_runtime_digest_includes_admin_static_assets(tmp_path):
+    static = tmp_path / "static"
+    static.mkdir()
+    page = static / "admin.html"
+    page.write_text("first", encoding="utf-8")
+    first = deploy.code_digest(tmp_path)
+    page.write_text("second", encoding="utf-8")
+    assert deploy.code_digest(tmp_path) != first
+
+
+def test_bot_watchdog_refuses_mutable_or_unreleased_runtime():
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text(encoding="utf-8")
+    assert "_BOOT_GIT_HEAD=$(git rev-parse HEAD" in bot
+    assert "_ORIGIN_MAIN_HEAD=$(git rev-parse origin/main" in bot
+    assert "refusing to start Jarvis from an unreleased revision" in bot
+    assert "runtime_source_unchanged" in bot
+    assert "child respawns are blocked until governed deploy" in bot
+
+
+def test_dirty_runtime_paths_detects_task_changes(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "jarvis-test@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Jarvis Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    source = tasks / "routine_post.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tasks/routine_post.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True
+    )
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert _dirty_runtime_paths(tmp_path) == ["tasks/routine_post.py"]
+
+
 def test_verify_reads_dirty_runtime_paths_once(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
