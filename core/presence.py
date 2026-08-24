@@ -257,7 +257,10 @@ def morning_digest_line(now: datetime | None = None) -> str:
     last_call = ""
     if dying:
         def _when(deadline: datetime) -> str:
-            day = "今天" if deadline.date() == moment.date() else "明早"
+            # At anchor time (~09:00) a next-24h deadline on tomorrow's date
+            # is always small hours, but the CLI can run any time of day —
+            # 明天 is never wrong, 明早 13:48 would be.
+            day = "今天" if deadline.date() == moment.date() else "明天"
             return f"{day} {deadline.strftime('%H:%M')}"
         parts = "、".join(
             f"「{d['title'][:20] or '无题'}」{_when(d['deadline'])}"
