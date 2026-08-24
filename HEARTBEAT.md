@@ -271,7 +271,12 @@ OPTIONS 行的**下一行**写：
     user can open the source even if you forgot to embed it in content. Use an
     empty string only if the broadcast genuinely has no source.
 
-    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"supply|demand|insight","domains":["<1-3>"],"summary":"<100chars>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
+    SUMMARY_CN: notes.summary_cn is the ONE Chinese sentence the owner sees
+    first on the confirmation card, before the English draft — plain spoken
+    Chinese, says what the broadcast claims (not "一条广播草稿"). It never
+    gets published; only the confirmation card uses it.
+
+    Return JSON: {"should_publish":true/false,"content":"<text>","source_url":"<full url or empty>","notes":{"type":"supply|demand|insight","domains":["<1-3>"],"summary":"<100chars>","summary_cn":"<一句中文，说清这条广播讲什么>","expire_time":"<ISO8601 7 days from now>","source_type":"original"}}
     If you genuinely cannot find anything grounded and decision-relevant (rare), return {"should_publish":false}
 
 ### eigenflux-profile

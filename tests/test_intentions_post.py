@@ -194,7 +194,7 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys, tmp_p
     monkeypatch.setattr(ip, "note_closure_touch", lambda *a, **k: None)
     monkeypatch.setattr(ip, "mark_executed", lambda *a, **k: None)
     monkeypatch.setattr(ip, "get_intent",
-                        lambda iid: {"parent_intent_id": "int_parent", "name": "闭环: 约学妹"})
+                        lambda iid: {"parent_intent_id": "int_parent", "name": "闭环: 回访客户"})
     monkeypatch.setattr("sys.stdin", _Stdin(
         '{"intents": {"int_fu": {"response": "昨天的饭局，有值得跟进的吗？", "action": "notify"}}}'))
     ip.main()
@@ -203,7 +203,10 @@ def test_asking_followup_card_carries_closure_buttons(monkeypatch, capsys, tmp_p
     blob = json.dumps(card, ensure_ascii=False)
     assert '"action": "memorial"' in blob          # buttons route the framework
     assert '"opt": "chat"' in blob                  # 聊聊这个 auto-appended
-    assert "闭环: 约学妹" in blob                    # title = the intent's name
+    # Title = the matter itself: the「闭环: 」mechanism prefix legacy rows
+    # carry never reaches the card header (2026-08-24 card-style audit).
+    assert "回访客户" in blob
+    assert "闭环: 回访客户" not in blob
     ledger = (tmp_path / "memorials.jsonl").read_text(encoding="utf-8")
     assert "intent_close" in ledger and "int_parent" in ledger
     assert '"via": "button"' in ledger

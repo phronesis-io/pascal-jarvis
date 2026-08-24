@@ -368,6 +368,9 @@ def _recent_push_texts() -> list:
         if not _within(entry, OUTBOX_WINDOW_SECONDS):
             continue
         for segment in str(entry.get("text", "")).split("\n---\n"):
+            # Strip BOTH title prefixes: rows written before the 2026-08-24
+            # rename still carry the old「跨 Session 动态」wording.
+            segment = segment.replace("📡 跨会话动态：", "")
             texts.append(segment.replace("📡 跨 Session 动态：", ""))
     return texts
 
@@ -489,7 +492,7 @@ def main() -> int:
                 file=sys.stderr,
             )
         else:
-            print("TITLE: 📡 跨 Session 动态")
+            print("TITLE: 📡 跨会话动态")
             print(f"WORKED: {USER_MESSAGE_WORK_RECEIPT}")
             print(filtered)
             _record_sent(filtered)

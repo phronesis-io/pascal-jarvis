@@ -390,10 +390,14 @@ def _closure_buttons(button_specs: list) -> list[dict]:
     Legacy path — only used for the rare 2-intent combined card (see
     _emit_closure_card): memorial decide() locks the whole card on first
     tap, so two intents' buttons on one memorial would deadlock each other."""
+    from core.textutil import closure_matter
     buttons = []
     for spec in button_specs[:2]:  # at most 2 intents' rows — cards stay small
         pid = spec["parent"]
-        prefix = "" if len(button_specs) == 1 else f"{spec['name'][:8]}·"
+        # Disambiguator prefix carries the matter, not legacy「闭环: 」
+        # mechanism words (2026-08-24 card-style audit).
+        prefix = ("" if len(button_specs) == 1
+                  else f"{closure_matter(spec['name'])[:8]}·")
         buttons += [
             {"text": f"{prefix}✅ 做了",
              # result must be non-empty: REQ-90③ coerces done+empty-result to
@@ -430,6 +434,41 @@ def _memorial_closure_options(pid: str) -> list[dict]:
     ]
 
 
+_TITLE_TAIL_PUNCT = " ，。、；;：:—-·？?！!（("
+
+
+_TITLE_MIN_SURVIVABLE = 8
+
+
+def _card_title(name: str, limit: int = 24) -> str:
+    """Boss-facing card title from an intent name (2026-08-24 audit).
+
+    Strips closure mechanism words (legacy rows are named「闭环: X 后闭环」)
+    so the title carries the matter itself, and over-long titles cut on a
+    word/CJK boundary with「…」— the old hard [:24] shipped titles chopped
+    mid-sentence (「闭环再问: 示例服务 key 无效是否」-shaped). When the
+    word-boundary backoff would leave a near-empty fragment (a long ASCII
+    token near the front), fall back to a plain hard cut instead — a chopped
+    token still names the matter better than nothing.
+    """
+    from core.textutil import closure_matter
+    text = " ".join(str(closure_matter(name)).split())
+    if not text:
+        return "跟进"
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    nxt = text[limit - 1]
+    # Never cut inside an ASCII word (「是否已解…」is fine,「tok…en」is not).
+    if cut[-1].isascii() and cut[-1].isalnum() and nxt.isascii() and nxt.isalnum():
+        cut = cut.rstrip("0123456789abcdefghijklmnopqrstuvwxyz"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    cut = cut.rstrip(_TITLE_TAIL_PUNCT)
+    if len(cut) < _TITLE_MIN_SURVIVABLE:
+        cut = text[:limit - 1].rstrip()
+    return cut + "…"
+
+
 def _emit_closure_card(combined: str, button_specs: list) -> None:
     """Print the closure-ask card. Single intent (the common case) goes out
     as a native memorial — ledgered, idempotent 批红, auto「聊聊这个」. Two
@@ -440,9 +479,9 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
         try:
             from core import memorial
             spec = button_specs[0]
-            # Title = the intent's name (one card says one thing); memorial's
+            # Title = the intent's matter (one card says one thing); memorial's
             # header already prefixes 📜 + the source emoji, no 🎯 here.
-            title = (str(spec.get("name", "")).strip() or "跟进")[:24]
+            title = _card_title(spec.get("name", ""))
             mid, _ = memorial.create(
                 source="intentions", title=title, body=combined,
                 work_receipt="核验触发条件、执行记录和当前完成状态",
@@ -455,7 +494,7 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
                   file=sys.stderr)
     buttons = _closure_buttons(button_specs) if button_specs else None
     print(build_card(
-        "🎯 Intent", combined, source="intentions", buttons=buttons,
+        "🎯 定时提醒", combined, source="intentions", buttons=buttons,
         work_receipt="核验触发条件、执行记录和当前完成状态",
     ))
 
@@ -507,7 +546,7 @@ def main():
         text = re.sub(r'\{.*\}', '', raw, flags=re.DOTALL).strip()
         if text and not _is_contentless(text):
             print(build_card(
-                "🎯 Intent", text, source="intentions",
+                "🎯 定时提醒", text, source="intentions",
                 work_receipt="核验在途意图、完成失败对账和重试状态更新",
             ))
         return

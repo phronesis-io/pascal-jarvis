@@ -1498,7 +1498,9 @@ def test_prose_without_headline_keeps_generic_source_title(env):
               "很长很长很长的正文\n第二行内容")
     rendered = memorial.memorialize_output(output, "intention-check")
     card = json.loads(rendered)
-    assert card["header"]["title"]["content"] == "📜 🎯 Intent"
+    # Fallback titles are Chinese since 2026-08-24 (the「Intent」codename
+    # shipped on 10 cards in 14d).
+    assert card["header"]["title"]["content"] == "📜 🎯 定时提醒"
 
 
 def test_memorialize_output_does_not_double_wrap_memorial(env):

@@ -433,9 +433,11 @@ def test_watermarks_flag_pre_failing_channel(tmp_path):
     }}
     (tmp_path / "heartbeat_state.json").write_text(json.dumps(state))
     report = channel_watermark_report(tmp_path, hb)
-    assert "repos-sync" in report
+    # Boss-facing since 2026-08-24: display name + plain Chinese, no raw id.
+    from core.textutil import task_display_name
+    assert task_display_name("repos-sync") in report
     assert "⚠️" in report
-    assert "DEAD" in report or "STARVED" in report
+    assert "取不到数据" in report or "没跑成" in report
 
 
 def test_watermarks_healthy_channel_quiet(tmp_path):

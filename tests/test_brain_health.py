@@ -14,6 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import brain_health
 from core.brain_health import (FAIL_WINDOWS_THRESHOLD, MIN_STARVED_FOR_SYSTEMIC,
                                STARVATION_FACTOR, WEDGE_CONSEC_THRESHOLD, assess)
+from core.textutil import task_display_name
+
+# Alert copy is boss-facing: since 2026-08-24 it carries the shared
+# plain-Chinese display name, never the raw task id.
+MEMORY_HOURLY = task_display_name("memory-hourly")
+INTENTION_CHECK = task_display_name("intention-check")
 
 NOW = 1_000_000.0
 HOUR = 3600.0
@@ -160,7 +166,7 @@ def test_priority_failing_windows_trip_after_threshold():
     # check 3: another failing window ⇒ crosses FAIL_WINDOWS_THRESHOLD(2)
     r3 = _assess(state_at(20, 30), tasks, prev=samples)
     assert r3["brain_dead"] is True
-    assert any("memory-hourly" in a for a in r3["alerts"])
+    assert any(MEMORY_HOURLY in a for a in r3["alerts"])
     assert FAIL_WINDOWS_THRESHOLD == 2
 
 
@@ -239,12 +245,13 @@ def test_replayed_7_8_wedge_is_detected():
     # The wedge detector pages — on the FIRST sight, and it stays up.
     assert r1["brain_dead"] is True
     assert r2["brain_dead"] is True
-    assert any("intention-check" in a and "卡住" in a for a in r1["alerts"])
+    assert any(INTENTION_CHECK in a and "卡住" in a for a in r1["alerts"])
     # Boss-facing copy: names the stuck task and its duration, no jargon.
     assert any("7.5 小时" in a for a in r1["alerts"])
     for banned in ("consecutive", "circuit", "PRIORITY", "wedge", "status"):
         assert all(banned not in a for a in r1["alerts"])
-    assert "intention-check" in r1["summary"]
+    assert INTENTION_CHECK in r1["summary"]
+    assert "intention-check" not in r1["summary"]
 
 
 def test_wedge_consec_arm_fires_even_with_fresh_success():
@@ -257,7 +264,7 @@ def test_wedge_consec_arm_fires_even_with_fresh_success():
                                     consecutive_failures=3)}
     r = _assess(state, tasks)
     assert r["brain_dead"] is True
-    assert any("intention-check" in a for a in r["alerts"])
+    assert any(INTENTION_CHECK in a for a in r["alerts"])
 
 
 def test_wedge_stale_failing_arm_fires_below_consec_threshold():
@@ -267,7 +274,7 @@ def test_wedge_stale_failing_arm_fires_below_consec_threshold():
     state = _wedge_state(consec=0, last_status="failed")
     r = _assess(state, tasks)
     assert r["brain_dead"] is True
-    assert any("intention-check" in a and "卡住" in a for a in r["alerts"])
+    assert any(INTENTION_CHECK in a and "卡住" in a for a in r["alerts"])
 
 
 def test_wedge_requires_priority_task():
@@ -311,4 +318,4 @@ def test_wedge_and_windows_alert_once_per_task():
                                   consecutive_failures=4)}
     r = _assess(state, tasks, prev=samples)
     assert r["brain_dead"] is True
-    assert sum("memory-hourly" in a for a in r["alerts"]) == 1
+    assert sum(MEMORY_HOURLY in a for a in r["alerts"]) == 1

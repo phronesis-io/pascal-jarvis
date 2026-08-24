@@ -309,7 +309,7 @@ def notify_lark(msg: str, incident_key: str = "") -> bool | None:
             DeliveryEnvelope(
                 source="guardian-daemon",
                 kind="text",
-                payload={"text": f"🛡️ **Guardian Daemon**\n\n{msg}"},
+                payload={"text": f"🛡️ **系统守护**\n\n{msg}"},
                 attention="alert",
                 requested_channel="lark",
                 urgent=True,
@@ -785,6 +785,31 @@ _COMPONENT_LABELS = {
 }
 
 
+def _task_label(task_id: str) -> str:
+    """Plain-Chinese name for an internal task/source id (shared map in
+    core.textutil, same one watermarks/brain_health use). Falls back to the
+    UNTRUNCATED raw id when core/ is unimportable — the daemon must keep
+    alerting on a broken tree, and a cut-off id (「c…」, 8/24 audit) is worse
+    than an ugly one."""
+    try:
+        from core.textutil import task_display_name
+        return task_display_name(task_id)
+    except Exception:
+        return str(task_id or "").strip()
+
+
+def _task_labels(ids) -> dict[str, str]:
+    """Display label per id for ONE rendered list. When two DIFFERENT ids map
+    to the same label, both get the raw id appended in parentheses — two rows
+    of a failure list must never read identically."""
+    uniq = {str(i): _task_label(i) for i in dict.fromkeys(ids)}
+    count: dict[str, int] = {}
+    for label in uniq.values():
+        count[label] = count.get(label, 0) + 1
+    return {i: (f"{label}（{i}）" if count[label] > 1 and label != i else label)
+            for i, label in uniq.items()}
+
+
 def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     """Log + alert (never restart) a component that answered its /health probe
     with a non-ok status. Separate dedup key from the DOWN alert so degraded
@@ -815,7 +840,9 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     reasons = []
     circuits = payload.get("circuits_open") or []
     if circuits:
-        shown = "、".join(str(c) for c in circuits[:5])
+        head = [str(c) for c in circuits[:5]]
+        labels = _task_labels(head)
+        shown = "、".join(f"「{labels[c]}」" for c in head)
         more = " 等" if len(circuits) > 5 else ""
         reasons.append(f"有定时任务连续失败、暂时停跑了（{shown}{more}）")
     if payload.get("bot_alive") is False:
@@ -917,8 +944,10 @@ def consume_delivery_deadletters():
                         str(row.get("kind") or "message"),
                     )
                     grouped[key] = grouped.get(key, 0) + 1
+                labels = _task_labels(
+                    source for (source, _kind) in sorted(grouped))
                 detail_lines = [
-                    f"- {source}：{count} 条"
+                    f"- {labels[source]}：{count} 条"
                     for (source, _kind), count in sorted(grouped.items())
                 ]
                 delivered = notify_lark(

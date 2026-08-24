@@ -58,7 +58,7 @@ def test_plain_user_message_printed_and_recorded(tmp_path):
     result = _run_post(tmp_path, "### proj\n- 修好了日历同步",
                        user_message="隔壁 session 把日历同步修好了，链路已恢复")
     assert result.returncode == 0, result.stderr
-    assert "TITLE: 📡 跨 Session 动态" in result.stdout
+    assert "TITLE: 📡 跨会话动态" in result.stdout
     assert "WORKED:" in result.stdout
     assert _digest_file(tmp_path).exists()
     sent = tmp_path / "mem" / "system" / "cross_session_sent.jsonl"
@@ -288,10 +288,27 @@ def test_same_item_reworded_still_deduped(tmp_path):
     assert "similarity" in r2.stderr
 
 
+def test_outbox_new_title_prefix_also_deduped(tmp_path):
+    # Rows written AFTER the 2026-08-24 rename carry「跨会话动态」— the
+    # outbox dedup must strip that prefix too.
+    from core.timeutil import now_local_str
+    outbox = tmp_path / "heartbeat_outbox.jsonl"
+    sent_text = ("📡 跨会话动态：隔壁把三个修复分支都推上去了，测试全绿，今晚可以收尾")
+    outbox.write_text(json.dumps(
+        {"role": "assistant", "text": sent_text,
+         "ts": now_local_str("%Y-%m-%d %H:%M"), "source": "heartbeat"},
+        ensure_ascii=False) + "\n")
+    r = _run_post(tmp_path, "### proj\n- 进展",
+                  user_message="隔壁把三个修复分支都推上去了，测试全绿，明天可以收尾")
+    assert "📡" not in r.stdout
+    assert "similarity" in r.stderr
+
+
 def test_outbox_rewording_deduped_across_batch_segments(tmp_path):
     # A near-identical line already delivered via the outbox (possibly embedded
     # in a batched multi-task message, '---'-separated) must suppress a fresh
     # rewording even with an empty sent-cache — covers pre-sent-cache history.
+    # The 2026-08-24 pre-rename prefix stays covered: old rows still carry it.
     from core.timeutil import now_local_str
     outbox = tmp_path / "heartbeat_outbox.jsonl"
     sent_text = ("其他任务的内容在前面\n---\n📡 跨 Session 动态："

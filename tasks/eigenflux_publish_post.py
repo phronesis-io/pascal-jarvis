@@ -41,6 +41,13 @@ def main() -> int:
               f"{btype!r} — only supply/demand/insight allowed", file=LOG)
         return 0
 
+    # Owner-facing one-line Chinese summary (SUMMARY_CN, drafted alongside
+    # the English broadcast). Consumed only by the confirmation card below;
+    # popped so the outbound broadcast notes stay byte-identical to before.
+    summary_cn = ""
+    if isinstance(notes, dict):
+        summary_cn = " ".join(str(notes.pop("summary_cn", "") or "").split())
+
     notes_str = json.dumps(notes) if isinstance(notes, dict) else str(notes)
     url = data.get("source_url") or data.get("url", "")
 
@@ -74,16 +81,25 @@ def main() -> int:
     from core.safety import atomic_write
     atomic_write(pending_file, json.dumps(pending_data, ensure_ascii=False))
 
-    # Send to user for confirmation via Lark
-    summary = notes.get("summary", "") if isinstance(notes, dict) else ""
-    btype = notes.get("type", "info") if isinstance(notes, dict) else "info"
-    domains = notes.get("domains", []) if isinstance(notes, dict) else []
-    domain_str = ", ".join(domains) if domains else ""
+    # Send to user for confirmation via Lark. First line = Chinese and says
+    # what this card wants (card-style contract: 第一句结论, no English
+    # metadata labels — the old「**类型**: insight | **领域**: …」opener was
+    # machine self-narration). The draft's summary leads when it is Chinese;
+    # the broadcast body itself is English by design, so it is framed
+    # honestly below the Chinese opener.
+    summary = " ".join(str(
+        notes.get("summary", "") if isinstance(notes, dict) else "").split())
 
-    preview = f"**类型**: {btype}"
-    if domain_str:
-        preview += f" | **领域**: {domain_str}"
-    preview += f"\n\n{content}\n\n"
+    def _cjk(text: str) -> bool:
+        return any("一" <= ch <= "鿿" for ch in text)
+
+    if summary_cn and _cjk(summary_cn):
+        first_line = f"想对外广播这条：{summary_cn}"
+    elif summary and _cjk(summary):
+        first_line = f"想对外广播这条：{summary}"
+    else:
+        first_line = "想对外发这条广播（英文原文如下）："
+    preview = f"{first_line}\n\n{content}\n\n"
     # Render the source as a tappable link. The broadcast body often names a
     # source (e.g. "arXiv 2606.02859") without a clickable URL — surface it so
     # the user can actually open it from the card. (Never a bare URL.)
@@ -104,6 +120,10 @@ def main() -> int:
         work_receipt="完成广播草稿整理、来源绑定和发布参数校验",
         body=preview, options=options, send=False,
         context=f"pending_publish id={pending_id}",
+        # This card carries 发/不发 buttons: it IS a decision. Explicit so the
+        # engagement governor can never demote it to a「知道就行」banner while
+        # the buttons still demand an answer (2026-08-24 audit).
+        attention="decision",
     )
     # Make the draft and its approval card one lifecycle. The pre-hook uses
     # this link to file the card as 留中 when an unanswered draft expires.

@@ -61,6 +61,12 @@ PROTECTED_SOURCES = frozenset({
     "intention-check",
     "mail",
     "checkin",
+    # A broadcast-approval card IS its 发/不发 buttons — demoting it to a
+    # notice while the buttons still demand an answer produced the 8/24
+    # 「知道就行 + 发/不发」contradiction. The emitter also passes an explicit
+    # attention="decision"; protecting the source keeps the governor from
+    # measuring it into a zombie override underneath that.
+    "eigenflux-publish",
 })
 
 _sys_path_added = False

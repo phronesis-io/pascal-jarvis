@@ -1,8 +1,15 @@
-"""Tests for core/watermarks.py (REQ-12 channel watermark monitoring)."""
+"""Tests for core/watermarks.py (REQ-12 channel watermark monitoring).
+
+The ⚠️ lines are boss-facing (they land verbatim on the selfmon card and the
+guardian relay), so since 2026-08-24 the contract is plain Chinese with the
+shared display name — these tests pin the Chinese phrases, not the old
+English SRE wording (STARVED / circuit OPEN / NEVER run).
+"""
 
 import json
 import time
 
+from core.textutil import task_display_name
 from core.watermarks import channel_watermark_report
 
 
@@ -30,7 +37,7 @@ def test_healthy_channels(tmp_path):
     })
     report = channel_watermark_report(tmp_path, now=now)
     assert "✓ All task channels within expected cadence" in report
-    assert "STARVED" not in report
+    assert "⚠️" not in report
 
 
 def test_starved_channel_flagged(tmp_path):
@@ -41,8 +48,11 @@ def test_starved_channel_flagged(tmp_path):
         "checkin": {"last_run": int(now - 3600)},
     })
     report = channel_watermark_report(tmp_path, now=now)
-    assert "feed" in report and "STARVED" in report
-    assert "checkin: " not in report  # healthy channel not listed
+    # "feed" has no display-map entry: the raw id passes through unhidden.
+    assert "「feed」" in report and "没跑成" in report
+    # Healthy channel not listed (neither raw id nor display name).
+    assert "checkin" not in report
+    assert task_display_name("checkin") not in report
 
 
 def test_short_cycle_task_gets_execution_jitter_grace(tmp_path):
@@ -61,7 +71,7 @@ def test_short_cycle_task_gets_execution_jitter_grace(tmp_path):
         },
     })
     report = channel_watermark_report(tmp_path, now=now)
-    assert "STARVED" not in report
+    assert "没跑成" not in report
 
 
 def test_short_cycle_task_is_starved_after_jitter_grace(tmp_path):
@@ -75,7 +85,10 @@ def test_short_cycle_task_is_starved_after_jitter_grace(tmp_path):
         },
     })
     report = channel_watermark_report(tmp_path, now=now)
-    assert "intention-check" in report and "STARVED" in report
+    # Mapped task: the display name replaces the raw id on the ⚠️ line.
+    assert task_display_name("intention-check") in report
+    assert "intention-check" not in report
+    assert "没跑成" in report
 
 
 def _age_install_stamp(tmp_path, age_s):
@@ -93,7 +106,7 @@ def test_never_ran_flagged(tmp_path):
     _age_install_stamp(tmp_path, 3 * 3600)  # feed interval 1h → grace 2h
     _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
     report = channel_watermark_report(tmp_path)
-    assert "feed" in report and "NEVER run" in report
+    assert "「feed」" in report and "从来没跑成过" in report
 
 
 def test_never_ran_suppressed_during_fresh_install_grace(tmp_path):
@@ -104,7 +117,7 @@ def test_never_ran_suppressed_during_fresh_install_grace(tmp_path):
     _age_install_stamp(tmp_path, 600)  # installed 10min ago
     _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
     report = channel_watermark_report(tmp_path)
-    assert "NEVER run" not in report
+    assert "从来没跑成过" not in report
     assert "first run pending" in report and "feed" in report
 
 
@@ -114,7 +127,7 @@ def test_missing_install_stamp_self_heals_as_fresh(tmp_path):
     # because live installs already carry last_success for real tasks.
     _setup(tmp_path, HB, state={"checkin": {"last_run": int(time.time())}})
     report = channel_watermark_report(tmp_path)
-    assert "NEVER run" not in report
+    assert "从来没跑成过" not in report
     assert (tmp_path / "data" / ".install_stamp").exists()
 
 
@@ -127,7 +140,7 @@ def test_override_interval_respected(tmp_path):
                   "checkin": {"last_run": int(now)}},
            overrides={"feed": 4 * 3600})
     report = channel_watermark_report(tmp_path, now=now)
-    assert "STARVED" not in report
+    assert "没跑成" not in report
 
 
 def test_open_circuit_flagged(tmp_path):
@@ -138,7 +151,7 @@ def test_open_circuit_flagged(tmp_path):
         "checkin": {"last_run": int(now)},
     })
     report = channel_watermark_report(tmp_path, now=now)
-    assert "circuit OPEN" in report
+    assert "因为连续失败暂停了" in report and "自动恢复" in report
 
 
 def _epoch_at(hour, minute=0):
@@ -155,8 +168,11 @@ def test_delivery_failures_and_night_queue_surface(tmp_path):
            delivery={"consec_fails": 4},
            night_queue_lines=['{"text":"a"}', '{"text":"b"}'])
     report = channel_watermark_report(tmp_path, now=now)
-    assert "4 consecutive send failures" in report
-    assert "Batch queue: 2" in report
+    assert "飞书消息连续 4 次没发出去" in report
+    # Depending on the wall clock this run lands on, the 2-deep queue reads
+    # as a normal info line or as the stuck ⚠️ line — either must name it.
+    assert ("Batch queue: 2" in report
+            or "有 2 条攒批消息卡住没发出去" in report)
 
 
 def test_unified_delivery_future_window_is_normal(tmp_path):
@@ -215,8 +231,8 @@ def test_unified_delivery_overdue_after_flush_retry_is_warning(tmp_path):
                }],
            })
     report = channel_watermark_report(tmp_path, now=now)
-    assert "⚠️ Unified delivery: 1 of 2" in report
-    assert "overdue after automatic flush/retry" in report
+    assert "排队的 2 条消息里有 1 条早该送到了" in report
+    assert "自动重试也没送出去" in report
 
 
 def test_queue_during_quiet_hours_is_normal(tmp_path):
@@ -226,7 +242,7 @@ def test_queue_during_quiet_hours_is_normal(tmp_path):
            night_queue_lines=['{"text":"a"}'])
     report = channel_watermark_report(tmp_path, now=now)
     assert "held for the morning digest" in report
-    assert "STUCK" not in report and "⚠️ Batch queue" not in report
+    assert "卡住没发出去" not in report and "⚠️" not in report
 
 
 def test_queue_awaiting_next_window_is_normal(tmp_path):
@@ -239,7 +255,7 @@ def test_queue_awaiting_next_window_is_normal(tmp_path):
     (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(12, 33)))
     report = channel_watermark_report(tmp_path, now=now)
     assert "awaiting next batch window (13:30)" in report
-    assert "STUCK" not in report
+    assert "卡住没发出去" not in report
 
 
 def test_queue_stuck_past_window_flagged(tmp_path):
@@ -250,7 +266,7 @@ def test_queue_stuck_past_window_flagged(tmp_path):
            night_queue_lines=['{"text":"a"}'])
     (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(9, 0)))
     report = channel_watermark_report(tmp_path, now=now)
-    assert "STUCK" in report and "13:30 window" in report
+    assert "卡住没发出去" in report and "13:30" in report
 
 
 def test_queue_after_last_window_points_to_tomorrow(tmp_path):
@@ -263,7 +279,7 @@ def test_queue_after_last_window_points_to_tomorrow(tmp_path):
     (tmp_path / ".batch_last_flush").write_text(str(_epoch_at(18, 30)))
     report = channel_watermark_report(tmp_path, now=now)
     assert "tomorrow 10:00" in report
-    assert "STUCK" not in report
+    assert "卡住没发出去" not in report
 
 
 def test_missing_files_no_crash(tmp_path):
