@@ -291,8 +291,9 @@ fi
 # ── 5. Verify ("测通") ────────────────────────────────────────────────
 echo ""
 echo "  verification:"
-# 5a. eigenflux-related pytest suite
-if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
+# 5a. eigenflux-related pytest suite. This suite measured 32.5s on the
+# production Mac; the old 30s budget killed a healthy run before its summary.
+if bounded 120 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
      "$JARVIS_DIR/tests/test_eigenflux_feed_search.py" \
      "$JARVIS_DIR/tests/test_eigenflux_publish_post.py" \
      "$JARVIS_DIR/tests/test_ef_stream.py" \
@@ -301,7 +302,12 @@ if bounded 30 python3 -m pytest -q "$JARVIS_DIR/tests/test_prompt.py" \
      "$JARVIS_DIR/tests/test_eigenflux_messages.py" >/tmp/ef_pi_pytest.out 2>&1; then
   echo "    ✓ pytest (prompt + feed + stream + ingress + messages)"
 else
-  echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"; fail+=("pytest failed")
+  if ! grep -Eq '(passed|failed|error)' /tmp/ef_pi_pytest.out; then
+    echo "    ✗ pytest — timed out before finishing (no summary line); raise the bound, do not read this as a test failure"
+  else
+    echo "    ✗ pytest — $(tail -3 /tmp/ef_pi_pytest.out | tr '\n' ' ' | cut -c1-220)"
+  fi
+  fail+=("pytest failed")
 fi
 # 5b. Live load_ef_skills() against the real synced dir
 if live=$(cd "$JARVIS_DIR" && python3 - <<'PY' 2>&1
