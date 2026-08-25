@@ -72,6 +72,9 @@ perception:
       label: "IMAP mailbox"
       collect:
         secret_file: "~/path/to/imap_secret.json"
+        # Explicit write opt-in: fetched mail is marked read only after the
+        # server confirms the \Seen flag. Dry-runs never change mailbox state.
+        mark_seen: false
         exclude_from: ["mailmaster@163.com", "newsletter"]
       schedule: { interval: 15m }
       sensitivity: private

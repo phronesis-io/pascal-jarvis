@@ -81,5 +81,5 @@ var (set during dry runs) and skip those writes.
 | `git_repo` | new commits across local repos |
 | `lark_chat` | a Lark group chat |
 | `lark_mail` | Lark mailbox new-mail metadata |
-| `imap_mail` | generic IMAP-SSL mailbox metadata |
+| `imap_mail` | generic IMAP-SSL mailbox metadata; optional `mark_seen: true` marks each fetched UID batch read only after an IMAP flag read-back (never during dry-run) |
 | `metrics_probe` | any command printing `{"metrics": {...}}` JSON — daily snapshot + threshold anomaly signals, feeds the `metrics-digest` heartbeat task (see module docstring for the full config shape) |

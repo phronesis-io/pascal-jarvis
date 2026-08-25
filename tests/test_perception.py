@@ -427,6 +427,133 @@ def test_imap_missing_secret_never_raises():
     assert state["error_type"] == "no_secret"
 
 
+def test_imap_mark_seen_is_strictly_opt_in_and_disabled_in_dry_run(
+        tmp_path, monkeypatch):
+    from sources import imap_mail
+    observed = []
+
+    def fetch(secret, folder, since_uid, first_run, *, mark_seen=False):
+        observed.append(mark_seen)
+        return [], since_uid, 555
+
+    monkeypatch.setattr(imap_mail, "_fetch_new", fetch)
+    cfg = {"secret_file": _imap_secret(tmp_path), "mark_seen": True}
+    imap_mail.collect(cfg, {})
+    monkeypatch.setenv("PERCEPTION_DRY_RUN", "1")
+    imap_mail.collect(cfg, {})
+
+    assert observed == [True, False]
+
+
+def test_imap_mark_seen_verifies_server_flags():
+    from sources import imap_mail
+
+    class FakeIMAP:
+        def __init__(self):
+            self.calls = []
+
+        def uid(self, command, *args):
+            self.calls.append((command, args))
+            if command == "store":
+                return "OK", [b""]
+            if command == "search":
+                return "OK", [b""]
+            raise AssertionError(command)
+
+    mailbox = FakeIMAP()
+    imap_mail._mark_uids_seen(mailbox, [11, 12])
+
+    assert mailbox.calls == [
+        ("store", ("11,12", "+FLAGS.SILENT", r"(\Seen)")),
+        ("search", (None, "(UID 11,12 UNSEEN)")),
+    ]
+
+
+def test_imap_mark_seen_fails_closed_when_read_back_still_unseen():
+    from sources import imap_mail
+
+    class FakeIMAP:
+        def uid(self, command, *args):
+            if command == "store":
+                return "OK", [b""]
+            return "OK", [b"12"]
+
+    try:
+        imap_mail._mark_uids_seen(FakeIMAP(), [12])
+    except RuntimeError as exc:
+        assert str(exc) == "mark_seen_verify"
+    else:
+        raise AssertionError("unread read-back must fail the collection")
+
+
+def test_imap_fetch_uses_read_write_mailbox_only_for_mark_seen(monkeypatch):
+    from sources import imap_mail
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            assert timeout == imap_mail._CONNECT_TIMEOUT
+
+    class FakeIMAP:
+        def __init__(self, *args, **kwargs):
+            self.select_readonly = None
+            self.uid_calls = []
+
+        def socket(self):
+            return FakeSocket()
+
+        def login(self, email, auth_code):
+            assert email == "u@163.com" and auth_code == "SECRET"
+            return "OK", [b""]
+
+        def _new_tag(self):
+            return b"A001"
+
+        def send(self, data):
+            assert b" ID " in data
+
+        def readline(self):
+            return b"A001 OK\r\n"
+
+        def select(self, folder, readonly=True):
+            assert folder == "INBOX"
+            self.select_readonly = readonly
+            return "OK", [b"1"]
+
+        def status(self, folder, query):
+            return "OK", [b"INBOX (UIDVALIDITY 555)"]
+
+        def uid(self, command, *args):
+            self.uid_calls.append((command, args))
+            if command == "search" and "SINCE" in args[-1]:
+                return "OK", [b"12"]
+            if command == "fetch":
+                return "OK", [(b"12", (b"From: sender@example.com\r\n"
+                                         b"Subject: hello\r\n"
+                                         b"Date: Tue, 25 Aug 2026 10:00:00 +0800\r\n"))]
+            if command == "store":
+                return "OK", [b""]
+            if command == "search":
+                return "OK", [b""]
+            raise AssertionError((command, args))
+
+        def logout(self):
+            return "BYE", [b""]
+
+    mailbox = FakeIMAP()
+    monkeypatch.setattr(imap_mail.imaplib, "IMAP4_SSL",
+                        lambda *args, **kwargs: mailbox)
+
+    messages, max_uid, uidvalidity = imap_mail._fetch_new(
+        {"email": "u@163.com", "auth_code": "SECRET"},
+        "INBOX", 0, True, mark_seen=True)
+
+    assert mailbox.select_readonly is False
+    assert messages[0]["uid"] == 12
+    assert (max_uid, uidvalidity) == (12, 555)
+    assert ("store", ("12", "+FLAGS.SILENT", r"(\Seen)")) in mailbox.uid_calls
+    assert ("search", (None, "(UID 12 UNSEEN)")) in mailbox.uid_calls
+
+
 def test_imap_first_run_then_incremental(tmp_path, monkeypatch):
     from sources import imap_mail
     cfg = {"secret_file": _imap_secret(tmp_path)}

@@ -11,6 +11,12 @@ Credentials never live in sources.yaml (which is in git). The source block
 points at a 0600 secrets JSON via `secret_file`:
     {"email":..., "imap_host":..., "imap_port":993, "auth_code":...}
 
+`mark_seen: true` is an explicit, mutating opt-in for people who use Jarvis as
+their attention surface instead of an IMAP unread badge. The adapter still
+fetches metadata with BODY.PEEK, then marks the searched UID batch as read and
+verifies the server flags before advancing its cursor. Perception dry-runs
+always suppress this write.
+
 163 quirk: after LOGIN, the client MUST issue an IMAP ID command before
 SELECT, or Coremail rejects with "Unsafe Login". Handled in _fetch_new.
 """
@@ -28,6 +34,7 @@ from email.header import decode_header
 MAX_SIGNALS_PER_RUN = 30
 FIRST_RUN_LOOKBACK_H = 24
 _CONNECT_TIMEOUT = 20
+_MARK_SEEN_BATCH = 500
 
 
 def _decode_hdr(raw: str) -> str:
@@ -72,8 +79,29 @@ def _load_secret(cfg: dict) -> dict | None:
     return None
 
 
+def _mark_uids_seen(mailbox, uids: list[int]) -> None:
+    """Mark UIDs read and verify the authoritative IMAP flags.
+
+    The operation is idempotent. A failed or incomplete read-back aborts the
+    collection so its cursor is not advanced past mail that remains unread.
+    """
+    for offset in range(0, len(uids), _MARK_SEEN_BATCH):
+        batch = uids[offset:offset + _MARK_SEEN_BATCH]
+        uid_set = ",".join(str(uid) for uid in batch)
+        typ, _ = mailbox.uid("store", uid_set, "+FLAGS.SILENT", r"(\Seen)")
+        if typ != "OK":
+            raise RuntimeError("mark_seen")
+        typ, data = mailbox.uid("search", None, f"(UID {uid_set} UNSEEN)")
+        if typ != "OK":
+            raise RuntimeError("mark_seen_verify")
+        remaining = data[0].split() if data and data[0] else []
+        if remaining:
+            raise RuntimeError("mark_seen_verify")
+
+
 def _fetch_new(secret: dict, folder: str, since_uid: int,
-               first_run: bool) -> tuple[list[dict], int, int]:
+               first_run: bool, *,
+               mark_seen: bool = False) -> tuple[list[dict], int, int]:
     """Network step (monkeypatched in tests). Returns (messages, max_uid,
     uidvalidity). Each message: {uid,int from,subject,date_iso,message_id}.
     Raises RuntimeError(error_type) on failure — never leaks raw exceptions."""
@@ -102,7 +130,7 @@ def _fetch_new(secret: dict, folder: str, since_uid: int,
                     break
         except Exception:
             pass  # ID is best-effort; non-163 servers ignore it
-        typ, data = M.select(folder, readonly=True)
+        typ, data = M.select(folder, readonly=not mark_seen)
         if typ != "OK":
             raise RuntimeError("select")
         typ, uvd = M.status(folder, "(UIDVALIDITY)")
@@ -142,6 +170,8 @@ def _fetch_new(secret: dict, folder: str, since_uid: int,
                 "subject": _decode_hdr(msg.get("Subject", "")) or "(无主题)",
                 "date_iso": _iso_from_maildate(msg.get("Date", ""), time.time()),
             })
+        if mark_seen:
+            _mark_uids_seen(M, uids)
         return messages, max_uid, uidvalidity
     except RuntimeError:
         raise
@@ -166,10 +196,16 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
     prev_uv = state.get("uidvalidity") or 0
     last_uid = int(state.get("last_uid") or 0)
     first_run = last_uid == 0
+    mark_seen = (cfg.get("mark_seen") is True
+                 and not os.environ.get("PERCEPTION_DRY_RUN"))
 
     try:
-        messages, max_uid, uidvalidity = _fetch_new(
-            secret, folder, last_uid, first_run)
+        if mark_seen:
+            messages, max_uid, uidvalidity = _fetch_new(
+                secret, folder, last_uid, first_run, mark_seen=True)
+        else:
+            messages, max_uid, uidvalidity = _fetch_new(
+                secret, folder, last_uid, first_run)
     except RuntimeError as e:
         return [], {**state, "error_type": str(e) or "fetch"}
 
