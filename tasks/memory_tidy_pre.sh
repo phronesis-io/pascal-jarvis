@@ -13,6 +13,15 @@ MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 
 [ -d "$MEMORY_DIR" ] || exit 0
 
+# Most six-hour rounds previously sent an identical ~200k memory report to the
+# model.  Re-run only when the memory tree changed, plus one daily staleness
+# pass so an untouched file can still cross an age threshold.
+gate=$(python3 -m core.change_gate tree \
+  --root "$MEMORY_DIR" \
+  --state "$MEMORY_DIR/system/memory_tidy_change_gate.json" \
+  2>/dev/null || echo allow)
+[ "$gate" = "allow" ] || exit 0
+
 # Character count in the loader's units. LC_ALL forces UTF-8 so multibyte
 # sequences collapse to one char each (matches Python len()).
 charcount() { LC_ALL=en_US.UTF-8 wc -m < "$1" | tr -d ' '; }
@@ -20,6 +29,22 @@ charcount() { LC_ALL=en_US.UTF-8 wc -m < "$1" | tr -d ' '; }
 echo "=== MEMORY HEALTH REPORT ==="
 echo "Timestamp: $(date '+%Y-%m-%d %H:%M')"
 echo ""
+
+# Exact assembled payloads, in the same Python len() units as the loader.
+# Production owner/chat/heartbeat calls use index mode; full is retained only
+# as a diagnostic reference for tasks that explicitly opt into it.
+MEMORY_DIR="$MEMORY_DIR" python3 - <<'PYTHON' 2>/dev/null || true
+import os
+from core.memory import MAX_MEMORY_CHARS, load_tiered_memory
+
+root = os.environ["MEMORY_DIR"]
+index_chars = len(load_tiered_memory(root, warm_mode="index"))
+full_chars = len(load_tiered_memory(root, warm_mode="full"))
+print("## Actual assembled payload")
+print(f"  PRODUCTION warm=index: {index_chars} / {MAX_MEMORY_CHARS} chars")
+print(f"  REFERENCE warm=full: {full_chars} / {MAX_MEMORY_CHARS} chars")
+print("")
+PYTHON
 
 # Hot files — size check against the loader's hot reserve.
 echo "## hot/ (reserve: 30000 chars — core/memory.py HOT_BUDGET; a floor, not a cap)"
@@ -35,7 +60,7 @@ echo "  TOTAL: ${hot_total} chars"
 echo ""
 
 # Warm files — list with size and staleness
-echo "## warm/ (remainder of the 200000 global cap after hot+system+timeline; per-file load cap 11000, head-keep)"
+echo "## warm/ (production=index; expanded files use 11000-char head cap)"
 now_epoch=$(date +%s)
 for f in "$MEMORY_DIR"/warm/*.md; do
   [ -f "$f" ] || continue

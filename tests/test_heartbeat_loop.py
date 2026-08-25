@@ -125,8 +125,46 @@ def test_route_output_records_memorial_delivery(tmp_path):
     with patch("core.heartbeat_loop._lark_send_card", return_value=True):
         assert _route_output("CARD:" + card, "user123", tmp_path)
 
-    event = json.loads((tmp_path / "memorials.jsonl").read_text().strip())
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "memorials.jsonl").read_text().splitlines()
+    ]
+    event = rows[0]
     assert event["id"] == "mem_route" and event["status"] == "delivered"
+
+
+def test_sqlite_flush_result_projects_back_to_memorial_ledger(
+        tmp_path, monkeypatch):
+    from datetime import datetime
+    from core import heartbeat_loop as hl
+    from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
+    from core.timeutil import now_local
+
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    afternoon = datetime(
+        2026, 8, 25, 16, 0, tzinfo=now_local().tzinfo).timestamp()
+    pipeline = DeliveryPipeline(
+        tmp_path,
+        transport=lambda *_args: TransportResult(True, "om_projected"),
+        clock=lambda: afternoon,
+    )
+    result = pipeline.deliver(DeliveryEnvelope(
+        source="test", kind="text", payload={"text": "done"},
+        memorial_id="mem_projected", requested_channel="lark",
+    ))
+
+    hl._project_delivery_flush_results(tmp_path, [result])
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "memorials.jsonl").read_text().splitlines()
+    ]
+    event = rows[0]
+    assert event["id"] == "mem_projected"
+    assert event["status"] == "delivered"
+    assert event["message_id"] == "om_projected"
+    assert rows[1]["ev"] == "sent"
+    assert rows[1]["lark_message_id"] == "om_projected"
 
 
 def test_route_output_failed_memorial_keeps_card_not_text_fallback(tmp_path):

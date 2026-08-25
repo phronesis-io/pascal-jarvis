@@ -82,7 +82,6 @@ def _build_group_prompt(
             "⚠️ 以下是这个群此前对话的压缩摘要。\n\n" + compact
         )
     return f"""你是 {owner} 的 AI 助手，现在在一个可能由非主人参与的飞书对话里。
-Current time: {now_ts}
 
 共享对话行为准则（硬约束）：
 1. **隐私边界**：你对主人的了解仅限下方 Group Context。主人的日程、健康、联系人、
@@ -101,7 +100,9 @@ Current time: {now_ts}
 
 {session_compact}
 
-{recent_turns}"""
+{recent_turns}
+
+Current time: {now_ts}"""
 
 
 # ── Action reference (kept in code, not a file, because bot.sh needs to parse it too) ──
@@ -253,6 +254,8 @@ def build_system_prompt(
     context_key: str = "",
     matter_id: str = "",
     focus_text: str = "",
+    warm_mode: str | None = None,
+    resume_existing: bool = False,
 ) -> str:
     """Build the full system prompt for handle_message.
 
@@ -267,10 +270,17 @@ def build_system_prompt(
         return _build_group_prompt(
             jarvis_dir, memory_dir, session_dir, session_id, conv_key,
             now_ts, tracker_path)
+    selected_warm_mode = (
+        str(warm_mode).strip() if warm_mode is not None
+        else os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip()
+    ) or "full"
     memory = load_tiered_memory(
         memory_dir,
         max_chars=max_memory_chars,
-        focus_text=focus_text,
+        # The current message is already the user turn on --resume. Letting it
+        # reorder a 200k system prompt defeats provider prefix caching.
+        focus_text="" if resume_existing else focus_text,
+        warm_mode=selected_warm_mode,
     )
     from core.conversation_context import (
         compact_key_from_context_key,
@@ -290,17 +300,19 @@ def build_system_prompt(
         session_state.get("previous_context_key") in {"", selected_context}
         and session_state.get("rotation_reason") != "reset"
     )
-    recent_turns = build_recent_turns(
+    recent_turns = "" if resume_existing else build_recent_turns(
         session_dir, session_id, counter, conv_key, 20,
         include_outbox=not bool(selected_matter),
         allow_previous_session=allow_previous,
     )
-    compact = read_compact(jarvis_dir, compact_key)
+    compact = "" if resume_existing else read_compact(jarvis_dir, compact_key)
     cross_provider_turns = ""
     try:
         from core.matter_bridge import recent_provider_context
-        cross_provider_turns = recent_provider_context(
-            conv_key, context_key=selected_context)
+        cross_provider_turns = (
+            "" if resume_existing else recent_provider_context(
+                conv_key, context_key=selected_context)
+        )
     except Exception:
         # Prompt construction must survive a fresh/damaged optional DB.
         cross_provider_turns = ""
@@ -308,12 +320,12 @@ def build_system_prompt(
     # discovery remains useful in the unbound inbox, but injecting it into a
     # focused Matter would silently reintroduce unrelated session context.
     external_work_context = (
-        "" if selected_matter
+        "" if selected_matter or resume_existing
         else _external_work_context(jarvis_dir, focus_text=focus_text)
     )
     people_context = owner_people_prompt_context(jarvis_dir)
     matter_context = ""
-    if selected_matter:
+    if selected_matter and not resume_existing:
         try:
             from core.matter_bridge import context_for_matter
             matter_context = context_for_matter(selected_matter)
@@ -358,7 +370,6 @@ IMPORTANT: When presenting EigenFlux feed content:
 """
 
     return f"""You are a personal assistant and life mentor. Reply in the same language the user uses.
-Current time: {now_ts}
 
 IMPORTANT: Never use EnterPlanMode or plan mode. You are running in a non-interactive messaging environment.
 
@@ -387,7 +398,9 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 
 {external_work_context}
 
-{recent_turns}"""
+{recent_turns}
+
+Current time: {now_ts}"""
 
 
 if __name__ == "__main__":

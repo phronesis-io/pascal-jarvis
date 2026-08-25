@@ -9,6 +9,11 @@
 
 set -uo pipefail
 
+# Every runtime artifact is private by default. Individual public assets can
+# opt into broader permissions explicitly; logs, DBs, prompt snapshots and
+# temporary credential files must never inherit a permissive shell umask.
+umask 077
+
 # Ensure UTF-8 encoding for Chinese content processing
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
@@ -1056,11 +1061,13 @@ $content"
     _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
   fi
   local sys_prompt
+  local _resume_existing=0
+  [ -f "$CLAUDE_PROJECT_DIR/${session_id}.jsonl" ] && _resume_existing=1
   sys_prompt=$(printf '%s' "$content" | \
     JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
     JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
     JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
-    JV_MATTER_ID="$matter_id" python3 -c "
+    JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
@@ -1079,6 +1086,7 @@ print(build_system_prompt(
     context_key=os.environ.get('JV_CONTEXT_KEY', ''),
     matter_id=os.environ.get('JV_MATTER_ID', ''),
     focus_text=focus_text,
+    resume_existing=os.environ.get('JV_RESUME_EXISTING') == '1',
 ))
 " 2>>"$LOG_FILE")
 
@@ -1187,11 +1195,13 @@ except Exception:
       session_id="$_cur_sid"
       LOCK_FILE="$JARVIS_DIR/.session_lock_${session_id}"
       # Rebuild system prompt with the new session's recent turns
+      _resume_existing=0
+      [ -f "$CLAUDE_PROJECT_DIR/${session_id}.jsonl" ] && _resume_existing=1
       sys_prompt=$(printf '%s' "$content" | \
         JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
         JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
         JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
-        JV_MATTER_ID="$matter_id" python3 -c "
+        JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
@@ -1210,6 +1220,7 @@ print(build_system_prompt(
     context_key=os.environ.get('JV_CONTEXT_KEY', ''),
     matter_id=os.environ.get('JV_MATTER_ID', ''),
     focus_text=focus_text,
+    resume_existing=os.environ.get('JV_RESUME_EXISTING') == '1',
 ))
 " 2>>"$LOG_FILE") || true
       [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
@@ -1671,11 +1682,13 @@ except Exception:
         _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
         # Rebuild system prompt with backup memory budget to avoid oversized context
         _mem_budget="${BACKUP_MAX_MEMORY_CHARS:-40000}"
+        _resume_existing=0
+        [ -f "$CLAUDE_PROJECT_DIR/${session_id}.jsonl" ] && _resume_existing=1
         sys_prompt=$(printf '%s' "$content" | \
           JV_TRACKER="$SESSION_TRACKER" JV_KEY="$conv_key" \
           JV_SID="$session_id" JV_SDIR="$CLAUDE_PROJECT_DIR" JV_CHAT_TYPE="$prompt_chat_type" \
           JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
-          JV_MATTER_ID="$matter_id" python3 -c "
+          JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.prompt import build_system_prompt
 from core.timeutil import now_local_str
@@ -1694,6 +1707,7 @@ print(build_system_prompt(
     context_key=os.environ.get('JV_CONTEXT_KEY', ''),
     matter_id=os.environ.get('JV_MATTER_ID', ''),
     focus_text=focus_text,
+    resume_existing=os.environ.get('JV_RESUME_EXISTING') == '1',
 ))
 " 2>>"$LOG_FILE") || true
         [ -n "$sys_prompt" ] && printf '%s' "$sys_prompt" > "$SYS_PROMPT_FILE"
@@ -1888,12 +1902,12 @@ print(build_system_prompt(
         # Promoted job hit the 6000s ceiling. 「继续」 would land in the NEW
         # (rotated) session and not resume this work — say so honestly.
         lark_reply_text "$message_id" \
-          "后台任务 \`$_promoted_job\` 运行超过看门狗上限（100 分钟）被中断。它的中间产出已存在原 session 里；要接着做的话告诉我任务内容，我重新起一个。" >/dev/null
+          "这件后台工作运行太久，已经安全停下。进度已保留；回复「继续这件事」，我会先核对已有结果再接着做。" >/dev/null
       elif [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ]; then
         # Genuine 6000s watchdog timeout: the task really ran long. Resuming
         # with 「继续」 is the right recovery.
         lark_reply_text "$message_id" \
-          "任务运行超过看门狗上限被中断（exit 143，不是 API 问题）。进度已存入 session，直接说「继续」即可接着干。" >/dev/null
+          "这件事运行太久，已经安全停下，进度还在。回复「继续」，我会从已有结果接着处理。" >/dev/null
       elif [ "${_exit_code:-0}" -eq 143 ]; then
         # 143 WITHOUT the watchdog marker = a restart / external SIGTERM killed
         # the in-flight Claude. Telling the user to say 「继续」 here is exactly
@@ -1904,7 +1918,7 @@ print(build_system_prompt(
         # 把结果发回来」, so ending in silence is a broken promise, not calm.
         if [ -n "$_promoted_job" ]; then
           lark_reply_text "$message_id" \
-            "后台任务 \`$_promoted_job\` 被外部中断，没有产出结果。要接着做的话把任务再说一遍，我重新起一个。" >/dev/null
+            "这件后台工作被外部中断，没有产出结果。回复「继续这件事」，我会先核对已有进度再接着做。" >/dev/null
           log_warn "[$session_id] exit=143 without watchdog marker — promoted job $_promoted_job, receipt sent"
         else
           log_warn "[$session_id] exit=143 without watchdog marker — restart/external kill, staying silent"
@@ -1921,7 +1935,7 @@ print(build_system_prompt(
         # nothing (j-1786098762 class, 2026-08-07).
         if [ -n "$_promoted_job" ]; then
           lark_reply_text "$message_id" \
-            "后台任务 \`$_promoted_job\` 结束了，但没能产出可交付的结果，已记为失败。要重跑的话把任务再说一遍。" >/dev/null
+            "这件后台工作结束了，但没能产出可交付的结果。回复「继续这件事」，我会先核对已有进度再重试。" >/dev/null
           log_warn "[$session_id] Promoted job $_promoted_job ended empty — receipt sent"
         else
           log_warn "[$session_id] Empty after $_attempt attempts — staying silent (user opted out of the retry nag)"

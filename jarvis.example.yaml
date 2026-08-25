@@ -157,6 +157,18 @@ heartbeat:
   tasks_file: HEARTBEAT.md
 
 
+# ── Isolated Triage Context ──────────────────────────────────────
+# Untrusted feed, friend-request and mail text cannot read personal memory.
+# Put only the minimum non-sensitive facts needed for relevance scoring here.
+# Values containing email addresses, phone numbers, URLs or credential-like
+# words are dropped. Leave empty to judge items only on their own content.
+triage_profile:
+  domains: []             # e.g. ["agent infrastructure", "recommenders"]
+  projects: []            # public or non-sensitive project names only
+  organizations: []       # teams/companies whose outreach may matter
+  portfolio_sectors: []   # broad sectors, never account/position details
+
+
 # ── Admin Console ──────────────────────────────────────────────────
 # Local web console for browsing memory/sessions/search.
 # Set enabled: true to have bot.sh auto-start it alongside the heartbeat.

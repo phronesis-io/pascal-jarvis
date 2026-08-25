@@ -40,6 +40,7 @@ Structured dated facts (REQ-71):
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from core.log import log
@@ -92,6 +93,11 @@ WARM_FILE_CAP = 11000
 
 # Structured-facts file (REQ-71). Lives in hot/ so it rides the hot reserve.
 STRUCTURED_FACTS_NAME = "structured_facts.md"
+
+# Current working state changes many times a day. In index mode it belongs
+# after the stable identity/guidance prefix so provider prompt caches can reuse
+# that prefix. These sections still retain hot-tier budget priority.
+_VOLATILE_HOT_FILES = {"active_intents.md", "calendar_today.md"}
 
 # Files in timeline/ that are archives (never loaded into prompt)
 _TIMELINE_SKIP = {
@@ -206,11 +212,10 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     structured facts) always survives even when warm/ is over budget.
 
     purpose: "inbound" (default — full view, behavior unchanged) or
-    "outbound" — sensitivity gate for tasks whose output leaves Pascal's
-    world (eigenflux-publish, auto-replies): system/inbox_private_*.md /
-    inbox_secret_*.md perception buffers are skipped so ingested private
-    content (mail, DMs) can never ride into an outward-facing context.
-    (Perception PRD §3.4/§6 — sensitivity model steps 1-2.)
+    "outbound" — allowlisted context for tasks whose output leaves Pascal's
+    world. Outbound tasks receive only hot/group_context.md, the same curated
+    public context used in group chat. Todos, sessions, warm notes, timeline,
+    mail, DMs and other private tiers are withheld by construction.
 
     max_chars: override the global memory budget. Used when the backup LLM
     relay has a smaller context window than the primary (1M) channel. Small
@@ -236,11 +241,20 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     if max_chars is not None and int(max_chars) <= 0:
         raise ValueError("max_chars must be positive")
     budget = int(max_chars) if max_chars is not None else MAX_MEMORY_CHARS
+    if purpose == "outbound":
+        # A denylist inevitably misses the next private memory file. Reuse the
+        # existing explicitly-curated public boundary instead, and keep the
+        # caller's provider budget a hard cap.
+        return load_group_context(memory_dir)[:budget]
     # Build each tier's sections independently (priority-ordered within tier).
-    hot_parts = _collect_hot(memory_dir)
+    stable_hot_parts, volatile_hot_parts = _collect_hot_bands(memory_dir)
+    hot_parts = stable_hot_parts + volatile_hot_parts
     if warm_mode == "index":
-        warm_parts = build_warm_index(memory_dir)
+        protected_warm_parts, indexed_warm_parts = _build_warm_index_bands(
+            memory_dir)
+        warm_parts = protected_warm_parts + indexed_warm_parts
     elif warm_mode == "full":
+        protected_warm_parts, indexed_warm_parts = [], []
         warm_parts = _collect_warm(memory_dir)
     else:
         raise ValueError(f"unknown warm_mode: {warm_mode!r}")
@@ -263,7 +277,19 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     # reserves are FLOORS for the over-budget case, never caps that throw away
     # headroom).
     if total <= budget:
-        blocks = [full[t] for t in ("hot", "warm", "system", "timeline") if full[t]]
+        if warm_mode == "index":
+            ordered_parts = (
+                stable_hot_parts,
+                protected_warm_parts,
+                volatile_hot_parts,
+                indexed_warm_parts,
+                system_parts,
+                timeline_parts,
+            )
+            blocks = [sep.join(parts) for parts in ordered_parts if parts]
+        else:
+            blocks = [full[t] for t in ("hot", "warm", "system", "timeline")
+                      if full[t]]
         return sep.join(blocks)
 
     if focus_text:
@@ -348,32 +374,37 @@ def _prioritize_for_focus(parts: list[str], focus_text: str) -> list[str]:
 # (earliest = highest priority = kept first when truncating within budget).
 
 
-def _collect_hot(memory_dir: Path) -> list[str]:
+def _collect_hot_bands(memory_dir: Path) -> tuple[list[str], list[str]]:
     """Hot tier: structured facts FIRST (load-bearing, top priority), then
-    behavioral rules, then the rest of identity. REQ-71: structured_facts is
-    always present at the very front so it rides the hot reserve and is never
-    truncated away."""
-    parts: list[str] = []
+    behavioral rules, then stable identity and volatile working state."""
+    stable: list[str] = []
+    volatile: list[str] = []
     hot_dir = memory_dir / "hot"
     if not hot_dir.is_dir():
-        return parts
+        return stable, volatile
 
     # 1. Structured facts — highest priority, always first (REQ-71).
     facts = hot_dir / STRUCTURED_FACTS_NAME
     if facts.exists():
-        _append_file(parts, facts, "Structured Facts (load-bearing)")
+        _append_file(stable, facts, "Structured Facts (load-bearing)")
 
     # 2. Behavioral rules — attention priority.
     rules = hot_dir / "behavioral_rules.md"
     if rules.exists():
-        _append_file(parts, rules, "Behavioral Rules")
+        _append_file(stable, rules, "Behavioral Rules")
 
     # 3. Remaining identity files.
     for f in sorted(hot_dir.glob("*.md")):
         if f.name in (STRUCTURED_FACTS_NAME, "behavioral_rules.md"):
             continue
-        _append_file(parts, f, f"Identity: {f.stem}")
-    return parts
+        target = volatile if f.name in _VOLATILE_HOT_FILES else stable
+        _append_file(target, f, f"Identity: {f.stem}")
+    return stable, volatile
+
+
+def _collect_hot(memory_dir: Path) -> list[str]:
+    stable, volatile = _collect_hot_bands(memory_dir)
+    return stable + volatile
 
 
 def _collect_warm(memory_dir: Path) -> list[str]:
@@ -444,7 +475,30 @@ def _warm_one_liner(path: Path) -> str:
     return body_first
 
 
-def build_warm_index(memory_dir: Path) -> list[str]:
+def _warm_index_metadata(path: Path) -> str:
+    """Small deterministic metadata tuple for an index-mode warm entry."""
+    try:
+        text = path.read_text(encoding="utf-8")
+        updated = datetime.fromtimestamp(
+            path.stat().st_mtime, tz=now_local().tzinfo).strftime("%Y-%m-%d")
+    except OSError:
+        return ""
+    values = {}
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            for raw in text[4:end].splitlines():
+                if ":" not in raw:
+                    continue
+                key, value = raw.split(":", 1)
+                if key.strip() in {"type", "status"} and value.strip():
+                    values[key.strip()] = value.strip().strip('"\'')
+    fields = [f"{key}={values[key]}" for key in ("type", "status") if key in values]
+    fields.append(f"updated={updated}")
+    return "; ".join(fields)
+
+
+def _build_warm_index_bands(memory_dir: Path) -> tuple[list[str], list[str]]:
     """Warm tier in on-demand form: standing rules inline, notes as a map.
 
     Rationale (2026-08-21): the warm tier is ~60% of the injected payload and
@@ -457,10 +511,10 @@ def build_warm_index(memory_dir: Path) -> list[str]:
     Returns the same list-of-sections shape as _collect_warm so tier
     budgeting, focus prioritisation, and truncation logic are untouched.
     """
-    parts: list[str] = []
+    protected_parts: list[str] = []
     warm_dir = memory_dir / "warm"
     if not warm_dir.is_dir():
-        return parts
+        return protected_parts, []
     files = [f for f in warm_dir.glob("*.md") if f.is_file()]
     protected = sorted((f for f in files
                         if f.name.startswith(PROTECTED_WARM_PREFIXES)),
@@ -468,7 +522,7 @@ def build_warm_index(memory_dir: Path) -> list[str]:
     rest = [f for f in files if not f.name.startswith(PROTECTED_WARM_PREFIXES)]
 
     for f in protected:
-        _append_file(parts, f, f"Knowledge: {f.stem}",
+        _append_file(protected_parts, f, f"Knowledge: {f.stem}",
                      cap=WARM_FILE_CAP, keep="head")
 
     def _mtime(f):
@@ -484,21 +538,29 @@ def build_warm_index(memory_dir: Path) -> list[str]:
         except OSError:
             continue
         desc = _warm_one_liner(f)
-        rows.append(f"- {f.name} ({size:,} 字) — {desc}" if desc
-                    else f"- {f.name} ({size:,} 字)")
+        metadata = _warm_index_metadata(f)
+        suffix = f" [{metadata}]" if metadata else ""
+        rows.append(f"- {f.name} ({size:,} 字){suffix} — {desc}" if desc
+                    else f"- {f.name} ({size:,} 字){suffix}")
     if not rows:
-        return parts
+        return protected_parts, []
 
     body = "\n".join(rows)
-    parts.append(
+    index_parts = [
         "## Knowledge Index（按需读取，不在上下文里）\n"
         "下面是知识库里**没有**展开进这次上下文的文件。需要哪一条就读它，"
         "不要凭印象复述，也不要因为它不在上下文里就当成不存在。\n"
         f"目录：{warm_dir}\n"
         f"读法：`cat \"{warm_dir}/<文件名>\"`\n\n"
         f"{body}"
-    )
-    return parts
+    ]
+    return protected_parts, index_parts
+
+
+def build_warm_index(memory_dir: Path) -> list[str]:
+    """Compatibility wrapper returning inline guidance plus the file map."""
+    protected, index = _build_warm_index_bands(memory_dir)
+    return protected + index
 
 
 def _collect_system(memory_dir: Path, purpose: str) -> list[str]:

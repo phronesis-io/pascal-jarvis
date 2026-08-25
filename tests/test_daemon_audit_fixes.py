@@ -471,6 +471,11 @@ def manifest_env(tmp_path, monkeypatch):
     stubbed per-test via core.components. Returns (logs, alerts)."""
     logs, alerts = [], []
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda: False)
+    monkeypatch.setattr(
+        daemon_mod, "_daemon_started",
+        time.time() - daemon_mod.DAEMON_START_GRACE_SECONDS - 1,
+    )
     monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
     monkeypatch.setattr(daemon_mod, "PROBE_ALERT_STATE_FILE",
                         tmp_path / ".daemon_probe_alert_state.json")
@@ -623,6 +628,26 @@ def test_manifest_probe_never_raises(manifest_env, monkeypatch):
 
     daemon_mod._probe_manifest_criticals()  # must not propagate
 
+    assert alerts == []
+
+
+def test_manifest_probe_skipped_during_post_wake_grace(
+        manifest_env, monkeypatch):
+    logs, alerts = manifest_env
+    recoveries = []
+    monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda: True)
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery",
+        lambda name: recoveries.append(name) or True,
+    )
+    monkeypatch.setattr(
+        "core.components.check_components",
+        lambda **kw: [_manifest_result("ef-stream", False)],
+    )
+
+    daemon_mod._probe_manifest_criticals()
+
+    assert recoveries == []
     assert alerts == []
 
 

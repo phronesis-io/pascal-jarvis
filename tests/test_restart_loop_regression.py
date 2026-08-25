@@ -1086,7 +1086,7 @@ def test_143_message_gated_on_watchdog_marker():
     assert '"${ANSWER_FILE}.watchdog"' in BOT_SH, "watchdog must drop a marker on a real timeout"
     assert "_watchdog_killed" in BOT_SH, "143 branch must distinguish watchdog vs external kill"
     # The「继续」message must be conditioned on the watchdog flag, not on 143 alone.
-    nag = "进度已存入 session"
+    nag = "回复「继续」，我会从已有结果接着处理"
     idx = BOT_SH.index(nag)
     window = BOT_SH[max(0, idx - 400) : idx]
     assert "_watchdog_killed" in window, "the 「继续」 nag must be gated on _watchdog_killed"

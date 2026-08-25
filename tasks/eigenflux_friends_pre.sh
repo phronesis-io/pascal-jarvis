@@ -15,7 +15,7 @@ fi
 [ -z "$result" ] && exit 0
 
 # Extract requests, enrich with entity resolution, output as JSON
-echo "$result" | python3 -c "
+requests=$(echo "$result" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -25,4 +25,8 @@ try:
     print(json.dumps({'requests': requests}))
 except Exception:
     sys.exit(0)
-" 2>/dev/null | JARVIS_DIR="$JARVIS_DIR" python3 "$JARVIS_DIR/scripts/entity_resolve.py" 2>/dev/null || true
+" 2>/dev/null | JARVIS_DIR="$JARVIS_DIR" python3 "$JARVIS_DIR/scripts/entity_resolve.py" 2>/dev/null || true)
+[ -n "$requests" ] || exit 0
+cd "$JARVIS_DIR" || exit 0
+python3 -m core.triage_profile 2>/dev/null || true
+printf '\n%s\n' "$requests"

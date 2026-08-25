@@ -34,6 +34,14 @@ if [ -f "$log_file" ]; then
   fi
 fi
 
+# Do not call calendar/freebusy after deterministic cadence has already spent
+# today's allowance. The model-facing brief is still generated below when a
+# slot exists, but a closed budget now exits before any network request.
+if ! JARVIS_DIR="$JARVIS_DIR" python3 -m core.companion preflight \
+    >/dev/null 2>&1; then
+  exit 0
+fi
+
 # Time-of-day flavor — rough buckets
 if [ "$hour" -lt 12 ]; then
   phase="morning"
@@ -138,12 +146,9 @@ for e in recent:
 " 2>/dev/null || true)
 fi
 
-# Load interests for context-aware nuggets
-interests_file="${MEMORY_DIR:-$HOME/.jarvis/memory}/warm/interests.md"
-interests=""
-if [ -f "$interests_file" ]; then
-  interests=$(cat "$interests_file" 2>/dev/null)
-fi
+# Private config is the active profile source.  Do not resurrect an archived
+# warm/interests.md merely because an old prompt still knows that filename.
+interests=$(python3 -m core.triage_profile 2>/dev/null || true)
 
 # ── Activity evidence (2026-07-13 feedback_idle_detection_signal) ──
 # "No commits + empty calendar" ≠ idle: strategy work, discussions and

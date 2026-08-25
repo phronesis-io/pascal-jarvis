@@ -156,6 +156,31 @@ def test_memorial_flush_only_consumes_ids_from_its_own_send(
     hbl._LAST_SENT_IDS.clear()
 
 
+def test_memorial_flush_selects_at_most_one_card_per_source(
+        tmp_path, monkeypatch):
+    for source, mid in (
+        ("eigenflux-feed-triage", "mem_feed_a"),
+        ("eigenflux-feed-triage", "mem_feed_b"),
+        ("routine-run", "mem_routine"),
+    ):
+        hbl._append_memorial_queue_entry(
+            tmp_path, mid, _memorial_card(mid), source
+        )
+    sent = []
+    monkeypatch.setattr(
+        hbl, "_lark_send_card",
+        lambda card, *_a, **_kw: sent.append(card) or True,
+    )
+
+    assert _flush_night_queue(tmp_path, "ou_test") == hbl.FLUSH_DELIVERED
+    assert len(sent) == 2
+    retained = [
+        json.loads(line)
+        for line in (tmp_path / hbl.MEMORIAL_QUEUE_FILE).read_text().splitlines()
+    ]
+    assert [row["memorial_id"] for row in retained] == ["mem_feed_b"]
+
+
 def test_failed_memorial_flush_retains_exact_card(tmp_path, monkeypatch):
     card = _memorial_card("mem_retry")
     (tmp_path / ".heartbeat_last_source").write_text("mail-triage")

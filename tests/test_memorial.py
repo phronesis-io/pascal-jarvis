@@ -10,8 +10,10 @@ import io
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -46,6 +48,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(memorial, "_send_text", fake_send_text)
     monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
     monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    fixed_now = datetime(2032, 1, 15, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(memorial, "now_local", lambda: fixed_now)
+    monkeypatch.setattr(
+        memorial,
+        "now_local_str",
+        lambda fmt="%Y-%m-%d %H:%M": fixed_now.strftime(fmt),
+    )
     # Most tests care about chat semantics, not thread scheduling. Keep them
     # deterministic; the dedicated async test below covers non-blocking send.
     monkeypatch.setattr(memorial, "_send_opener_async",

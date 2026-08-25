@@ -7,6 +7,7 @@ a single Claude call, and routes responses through post-scripts.
 
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -17,6 +18,25 @@ import uuid
 from pathlib import Path
 
 from .claude_bin import resolve_claude_bin
+from .heartbeat_provider import (
+    drop_benign_notices as _drop_benign_notices,
+    fallback_attempt_timeout as _fallback_attempt_timeout,
+    observe_provider as _observe_provider,
+    openai_usage_fields as _openai_usage_fields,
+    provider_env as _provider_env,
+    provider_id as _provider_id,
+    relay_model as _relay_model,
+    run_provider_attempt as _run_provider_attempt,
+)
+from .heartbeat_task_config import (
+    MEMORY_PURPOSES as _MEMORY_PURPOSES,
+    TASK_MODELS as _TASK_MODELS,
+    highest_task_model as _highest_task_model,
+    parse_heartbeat,
+    parse_interval,
+    policy_isolation_reason,
+    shared_batch_eligible,
+)
 from .interval_config import parse_interval_overrides, resolve_effective_interval
 from .jsonl import append_jsonl
 from .log import log as _structured_log
@@ -235,34 +255,6 @@ def _error_excerpt(text: str, limit: int = 500) -> str:
         return ""
 
 
-# The claude CLI prints benign notice lines BEFORE the real error whenever an
-# auth env var is set (the "connectors are disabled" banner). Left in, the
-# banner became the recorded error for every failure — 40 distinct failures
-# on 7/8 all carried the identical benign string in sched_events while the
-# real causes (context thrash, prompt too long) were invisible — and it ate
-# most of the log-excerpt budget. Filtered at err_text CONSTRUCTION in
-# claude_call, NOT in _error_excerpt: _error_excerpt also receives non-CLI
-# sentinel strings (timeout / CLI-not-found) that must pass through intact.
-# Case-insensitive substring so CLI wording drift on the rest of the line
-# stays harmless.
-_BENIGN_CLI_NOTICES = ("connectors are disabled",)
-
-
-def _drop_benign_notices(text: str) -> str:
-    """Remove known-benign CLI notice lines so the first line is the cause.
-
-    Falls back to the original text when nothing substantive remains — a
-    call whose entire output IS the notice must stay diagnosable rather
-    than record error="".
-    """
-    if not text:
-        return text
-    kept = [ln for ln in text.splitlines()
-            if not any(n in ln.lower() for n in _BENIGN_CLI_NOTICES)]
-    cleaned = "\n".join(kept).strip()
-    return cleaned or text
-
-
 # Deterministic per-call prompt/payload-size failures. Both mean THIS batch's
 # prompt/DATA payload is too large — a retry or a channel backoff can never
 # heal them, so they set _call_context_overflow and are exempted from the
@@ -338,16 +330,6 @@ def _screen_json_residue(residue: str) -> str:
     return residue
 
 
-def parse_interval(s: str) -> int:
-    """Parse '10m', '2h', '1d' to seconds."""
-    s = s.strip()
-    m = re.match(r"(\d+)\s*(s|m|h|d)", s)
-    if not m:
-        return 600
-    val, unit = int(m.group(1)), m.group(2)
-    return val * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
-
-
 def _is_dangling_placeholder(text: str) -> bool:
     """True if a heartbeat teases a hook but never delivers the payload.
 
@@ -386,86 +368,6 @@ def _has_idle_sentinel(text: str) -> bool:
     return any(ln.strip() == "HEARTBEAT_OK" for ln in text.splitlines())
 
 
-def parse_heartbeat(path: str | Path) -> list[dict]:
-    """Parse HEARTBEAT.md into task definitions."""
-    text = Path(path).read_text(encoding="utf-8")
-    tasks = []
-    current = None
-
-    for line in text.splitlines():
-        if line.startswith("### "):
-            if current:
-                if "_in_prompt" in current:
-                    del current["_in_prompt"]
-                tasks.append(current)
-            current = {"name": line[4:].strip(), "interval": 600,
-                        "pre": "", "post": "", "prompt": "",
-                        "heavy": False, "timeout": None,
-                        "untrusted_input": False, "no_tools": False,
-                        "full_memory": False}
-        elif current:
-            if line.startswith("- interval:"):
-                current["interval"] = parse_interval(line.split(":", 1)[1])
-            elif line.startswith("- pre:"):
-                current["pre"] = line.split(":", 1)[1].strip()
-            elif line.startswith("- post:"):
-                current["post"] = line.split(":", 1)[1].strip()
-            elif line.startswith("- heavy:"):
-                current["heavy"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
-            elif line.startswith("- untrusted-input:"):
-                # Marks a task whose DATA block can contain free text from an
-                # outside party (mail sender, EigenFlux peer) rather than
-                # Pascal's own trusted memory/state. Any task in a batch with
-                # this flag forces the WHOLE batched claude_call to run with
-                # Bash/Write/Edit/Agent/Skill disabled (see claude_call's
-                # restrict_tools) — a successful prompt injection in that DATA
-                # can still mislead the model's *text* output, but cannot
-                # reach a shell. Do not remove this flag to "simplify" a task
-                # block without re-auditing where its DATA actually comes from.
-                current["untrusted_input"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
-            elif line.startswith("- no-tools:"):
-                # Trusted maintenance tasks can retain private memory context
-                # while still being denied every local tool. This differs
-                # from untrusted-input, which also withholds private memory.
-                current["no_tools"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
-            elif line.startswith("- full-memory:"):
-                # Opt-out of the warm-index diet for the rare task that must
-                # see warm files VERBATIM (memory-consolidate: its REPLACE
-                # directives match warm text verbatim — index-fed runs would
-                # silently no-op them and rot the tier they maintain).
-                current["full_memory"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
-            elif line.startswith("- timeout:"):
-                try:
-                    current["timeout"] = int(line.split(":", 1)[1].strip())
-                except ValueError:
-                    current["timeout"] = None
-            elif line.startswith("- prompt:"):
-                rest = line.split(":", 1)[1].strip()
-                if rest == "|":
-                    current["_in_prompt"] = True
-                else:
-                    current["prompt"] = rest
-            elif current.get("_in_prompt"):
-                if line.startswith("- ") or line.startswith("### "):
-                    del current["_in_prompt"]
-                else:
-                    current["prompt"] += line.lstrip() + "\n"
-
-    if current:
-        if "_in_prompt" in current:
-            del current["_in_prompt"]
-        tasks.append(current)
-
-    overlay_dir = Path(path).parent / "data" / "heartbeat_overlay"
-    if overlay_dir.is_dir():
-        for t in tasks:
-            overlay = overlay_dir / f"{t['name']}.md"
-            if overlay.is_file():
-                t["prompt"] += "\n" + overlay.read_text(encoding="utf-8")
-
-    return tasks
-
-
 def _completion_epoch(cycle_started_at: float) -> int:
     """Return a success receipt timestamp, never the cycle-acquire time.
 
@@ -488,7 +390,6 @@ class HeartbeatRunner:
         "weekly-review": 1800,    # pre gate = Sunday 10-12 only; the 7d
                                   # re-arm skipped it for 26 days straight
                                   # (every due-point landed on a Saturday)
-        "personal-site": 3600,
         "memory-daily": 3600,
         "memory-weekly": 3600,
         "memory-consolidate": 600,
@@ -536,6 +437,7 @@ class HeartbeatRunner:
         # 98% bare HEARTBEAT_OK); the post-script now replays it in code.
         "perception-collect",
         "provider-canary",
+        "self-diagnostic",
     }  # deterministic pre/post work; no model call
 
     # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /
@@ -733,9 +635,13 @@ class HeartbeatRunner:
         call_kwargs = {"timeout": timeout}
         if task.get("full_memory"):
             call_kwargs["full_memory"] = True  # opt-out of the warm-index diet
+        if task.get("model"):
+            call_kwargs["requested_model"] = task["model"]
+        if task.get("memory_purpose") != "inbound":
+            call_kwargs["memory_purpose"] = task["memory_purpose"]
         if task.get("untrusted_input"):
             raw = self.claude_call(prompt, restrict_tools=True, **call_kwargs)
-        elif task.get("no_tools"):
+        elif task.get("no_tools") or task.get("memory_purpose") == "outbound":
             raw = self.claude_call(prompt, allow_tools=False, **call_kwargs)
         else:
             raw = self.claude_call(prompt, **call_kwargs)
@@ -819,6 +725,23 @@ class HeartbeatRunner:
         state[name] = ts.to_dict()
         self._event("task_finish", task=name, status="ok", duration_s=dur,
                     heavy=is_heavy, isolation=isolation_reason)
+
+    def _run_policy_isolated_tasks(
+        self, tasks: list[dict], task_data: dict, state: dict, now: float,
+        user_messages: list, producing_tasks: list,
+    ) -> list[str]:
+        """Run explicit GPT/outbound tasks after other solo groups peel off."""
+        isolated: list[str] = []
+        for task in tasks:
+            reason = policy_isolation_reason(task)
+            if not reason:
+                continue
+            self._run_solo_task(
+                task, task_data, state, now, user_messages, producing_tasks,
+                isolation_reason=reason,
+            )
+            isolated.append(task["name"])
+        return isolated
 
     def _collect_output(self, task_name: str, message: str,
                         user_messages: list, producing_tasks: list):
@@ -982,8 +905,9 @@ class HeartbeatRunner:
         *,
         restrict_tools: bool = False,
         allow_tools: bool = True,
+        timeout: int | None = None,
     ) -> str:
-        """Last-resort heartbeat responder when Claude-compatible routes are quota-blocked."""
+        """OpenAI-compatible heartbeat route, selected or used as fallback."""
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if os.environ.get("OPENAI_FALLBACK_ENABLED", "true") != "true" or not api_key:
             return ""
@@ -1000,7 +924,13 @@ class HeartbeatRunner:
                 or "gpt-5.5"
             )
             base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-            timeout = int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))
+            configured_timeout = int(
+                os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120")
+            )
+            timeout = (
+                configured_timeout if timeout is None
+                else max(1, min(configured_timeout, int(timeout)))
+            )
             max_output_tokens = int(os.environ.get("OPENAI_FALLBACK_MAX_OUTPUT_TOKENS", "4096"))
             user_agent = os.environ.get("OPENAI_USER_AGENT", "")
             capability = (
@@ -1015,9 +945,8 @@ class HeartbeatRunner:
                 "complete this heartbeat task."
             )
             instructions = (
-                "You are Jarvis running a heartbeat cycle through an OpenAI-compatible "
-                "fallback because every Claude-compatible provider hit an account/model "
-                f"limit. {capability} Return the exact requested "
+                "You are Jarvis running a heartbeat cycle through the selected "
+                f"OpenAI-compatible model route. {capability} Return the exact requested "
                 "heartbeat format, JSON envelope, or HEARTBEAT_OK."
             )
             if system_prompt.strip():
@@ -1030,9 +959,15 @@ class HeartbeatRunner:
                     "input": [{"role": "user", "content": prompt}],
                     "max_output_tokens": max_output_tokens,
                 }
-                text = extract_text(
-                    call_openai(payload, api_key, base_url, timeout, user_agent)
-                )
+                response = call_openai(
+                    payload, api_key, base_url, timeout, user_agent)
+                text = extract_text(response)
+                usage_fields = _openai_usage_fields(response)
+                if usage_fields:
+                    self._event(
+                        "llm_usage", provider="openai", model=model,
+                        **usage_fields,
+                    )
             else:
                 text = run_agentic(
                     instructions,
@@ -1111,7 +1046,9 @@ class HeartbeatRunner:
     def claude_call(self, prompt: str, timeout: int | None = None,
                      restrict_tools: bool = False,
                      allow_tools: bool = True,
-                     full_memory: bool = False) -> str:
+                     full_memory: bool = False,
+                     requested_model: str | None = None,
+                     memory_purpose: str = "inbound") -> str:
         """Call Claude with memory injection, no session persistence.
 
         timeout: override the per-call subprocess budget (seconds). Heavy tasks
@@ -1122,14 +1059,44 @@ class HeartbeatRunner:
             memory remains available, but local tools are fail-closed.
         full_memory: True keeps warm_mode='full' regardless of the
             JARVIS_WARM_MEMORY_MODE env gate (HEARTBEAT.md `full-memory` flag).
+        requested_model: task-level route (opus/sonnet/haiku/gpt). ``gpt`` is
+            an explicit OpenAI route, not merely an outage fallback.
+        memory_purpose: ``outbound`` removes private inbox material before an
+            externally published/profile-writing task sees the prompt.
         """
         call_timeout = timeout or self.claude_timeout
+        # One logical request may cross several providers, but it gets one
+        # bounded wall-clock envelope. Reserve at most the configured OpenAI
+        # budget after the first Claude attempt; retries consume what remains
+        # instead of each receiving another full 5-15 minute allowance.
+        fallback_reserve = min(
+            max(0, int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))),
+            call_timeout,
+        )
+        call_deadline = time.monotonic() + call_timeout + fallback_reserve
+
+        def remaining_budget(*, cap: int | None = None) -> int:
+            remaining = max(0, math.ceil(call_deadline - time.monotonic()))
+            return min(remaining, cap) if cap is not None else remaining
 
         self._call_timed_out = False
         self._last_call_error = ""
         self._call_context_overflow = False
         attempted: set[str] = set()
-        model = self.model
+        requested_model = str(requested_model or "").strip().lower()
+        if requested_model not in _TASK_MODELS:
+            requested_model = ""
+        memory_purpose = (
+            memory_purpose if memory_purpose in _MEMORY_PURPOSES else "inbound"
+        )
+        if memory_purpose == "outbound":
+            # Outbound model stages draft data for deterministic post-hooks.
+            # They never need Bash/file tools and must not be able to bypass an
+            # approval boundary by invoking the external CLI themselves.
+            allow_tools = False
+        model = self.model if requested_model in {"", "gpt"} else requested_model
+        def relay_route(name: str, current: str) -> str:
+            return _relay_model(requested_model, os.environ.get(name, ""), current)
         use_backup = False
         backup_tried = False
         _backup2_active = False
@@ -1142,7 +1109,13 @@ class HeartbeatRunner:
         gate_state = "primary"
         try:
             from core.model_fallback import gate as _provider_gate
-            gate_state = _provider_gate(self.jarvis_dir)
+            try:
+                # Recovery is established by provider-canary's bounded prompt;
+                # never spend a full private production context as a probe.
+                gate_state = _provider_gate(self.jarvis_dir, probe=False)
+            except TypeError:
+                # Compatibility with lightweight adapters in older installs.
+                gate_state = _provider_gate(self.jarvis_dir)
         except Exception:
             gate_state = "primary"
         health_route = ""
@@ -1163,7 +1136,7 @@ class HeartbeatRunner:
                 and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
             use_backup = True
             backup_tried = True
-            model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
+            model = relay_route("CLAUDE_BACKUP_MODEL", model)
         elif ((health_route == "backup2"
                 or (gate_state == "backup" and not health_route))
                 and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
@@ -1172,7 +1145,7 @@ class HeartbeatRunner:
             use_backup = True
             backup_tried = True
             _backup2_active = True
-            model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
+            model = relay_route("CLAUDE_BACKUP2_MODEL", model)
         elif (health_route == "openai"
               and os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
               and os.environ.get("OPENAI_API_KEY")):
@@ -1187,6 +1160,15 @@ class HeartbeatRunner:
                 level="warn",
             )
             return ""
+
+        if requested_model == "gpt":
+            # A task-level GPT choice is a first-class route. Provider health
+            # still retains its global all-cooling veto above, but a healthy
+            # Claude route must not silently override the task policy.
+            use_backup = False
+            backup_tried = False
+            _backup2_active = False
+            direct_gpt = True
 
         # Provider-aware memory budget: backup relay has a smaller context
         # window than the primary 1M channel.
@@ -1209,6 +1191,8 @@ class HeartbeatRunner:
         # must keep working unchanged while the feature is off, not be pushed
         # into the legacy fallback that silently drops the budget kwargs.
         mem_kwargs = {"max_chars": mem_budget, "focus_text": prompt}
+        if memory_purpose != "inbound":
+            mem_kwargs["purpose"] = memory_purpose
         if warm_mode != "full":
             mem_kwargs["warm_mode"] = warm_mode
         try:
@@ -1217,14 +1201,22 @@ class HeartbeatRunner:
             # Keep HeartbeatRunner compatible with an older memory module and
             # with lightweight test/plugin adapters that still expose the
             # historical one-argument callable.
-            if not any(name in str(exc)
-                       for name in ("max_chars", "focus_text", "warm_mode")):
+            if not any(name in str(exc) for name in (
+                    "max_chars", "focus_text", "warm_mode", "purpose")):
                 raise
-            print("[heartbeat] load_tiered_memory signature mismatch; "
-                  f"falling back to the legacy one-argument call "
-                  f"(memory budget and warm_mode dropped): {exc}",
-                  file=sys.stderr)
-            memory = load_tiered_memory(self.memory_dir)
+            if memory_purpose == "outbound":
+                # An older adapter cannot prove it removed private inboxes.
+                # Publishing without memory is safer than silently exporting
+                # the owner's mail through a compatibility fallback.
+                print("[heartbeat] outbound memory filter unavailable; "
+                      "withholding memory for this call", file=sys.stderr)
+                memory = "(personal memory withheld: outbound filter unavailable)"
+            else:
+                print("[heartbeat] load_tiered_memory signature mismatch; "
+                      f"falling back to the legacy one-argument call "
+                      f"(memory budget and warm_mode dropped): {exc}",
+                      file=sys.stderr)
+                memory = load_tiered_memory(self.memory_dir)
         if restrict_tools:
             # External text and private memory must never share one model
             # context. A prompt injection does not need Bash to leak memory:
@@ -1240,8 +1232,11 @@ class HeartbeatRunner:
 ## 主动输出＝先判断注意力（任务指定了 JSON 格式的仍按任务格式）
 - 需要 Pascal 明确选择：才是待批奏折，必须给真实分支的 OPTIONS。
 - 紧急告警：可以不带 OPTIONS，系统会推飞书但不算待批。
-- 纯周知：省略 OPTIONS，系统只存网页「知会」，不打扰飞书。
+- 纯周知：省略 OPTIONS，仍会推一张飞书知会卡并占当天额度；
+  确实值得 Pascal 现在知道才写。
 - 一次只说一件事；确有多件独立事，用单独一行 "---" 分隔。
+- 第一句就是结论；背景能省就省。正文最多三行：什么事、为什么现在说、
+  Pascal 要做什么。不需要他做什么就明确写「知道就行」。
 - 每件事第一行写 `TITLE: 一句话说清这件事`（≤40字）。这是他扫一眼决定
   点不点开的唯一依据，不写就退回「Intent」这类按来源起的泛标题。
 - 最后一行写 `OPTIONS: 回复1 | 回复2`（2-4 个，每个=他会打的那句回复本身，
@@ -1259,9 +1254,10 @@ Current time: {now_ts}"""
             fallback_kwargs = {"restrict_tools": restrict_tools}
             if not allow_tools:
                 fallback_kwargs["allow_tools"] = False
-            return self._openai_fallback_call(
-                system_prompt, prompt, **fallback_kwargs,
-            )
+            fallback_kwargs["timeout"] = remaining_budget(cap=call_timeout)
+            if fallback_kwargs["timeout"] <= 0:
+                raise subprocess.TimeoutExpired("openai", call_timeout)
+            return self._openai_fallback_call(system_prompt, prompt, **fallback_kwargs)
         try:
             while True:
                 cmd = [
@@ -1284,42 +1280,41 @@ Current time: {now_ts}"""
                     cmd.extend(["--model", model])
                 provider = "backup" if use_backup else "primary"
                 attempted.add(f"{provider}:{model or ''}")
-                env = None
-                if use_backup:
-                    env = os.environ.copy()
-                    if _backup2_active:
-                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
-                            "CLAUDE_BACKUP2_AUTH_TOKEN", "")
-                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                            "CLAUDE_BACKUP2_BASE_URL", "")
-                    else:
-                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
-                            "CLAUDE_BACKUP_AUTH_TOKEN", "")
-                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                            "CLAUDE_BACKUP_BASE_URL", "")
+                env = _provider_env(use_backup, _backup2_active)
                 self._log(
                     f"Calling Claude heartbeat provider={provider} model={model or '(default)'}"
                 )
-                result = _run_isolated(
-                    cmd, timeout=call_timeout, cwd=str(self.work_dir), env=env)
+                attempt_timeout = _fallback_attempt_timeout(
+                    remaining_budget, call_timeout, use_backup=use_backup,
+                    backup2_active=_backup2_active,
+                    safe_replay=(restrict_tools or not allow_tools))
+                if attempt_timeout <= 0:
+                    raise subprocess.TimeoutExpired(cmd, call_timeout)
+                timed_out_provider = _provider_id(use_backup, _backup2_active)
+                result, attempt_timed_out = _run_provider_attempt(
+                    _run_isolated, cmd, timeout=attempt_timeout,
+                    cwd=str(self.work_dir), env=env,
+                    safe_replay=(restrict_tools or not allow_tools),
+                    provider=timed_out_provider, root=self.jarvis_dir)
+                if attempt_timed_out:
+                    self._call_timed_out = True
+                    self._last_call_error = (
+                        f"claude call timed out ({attempt_timeout}s)")
+                    self._log(
+                        f"Claude call timed out ({attempt_timeout}s) on "
+                        f"{timed_out_provider}; advancing fallback chain",
+                        level="warn")
                 if result.returncode == 0:
+                    self._call_timed_out = False
+                    self._last_call_error = ""
                     self.last_provider = (
                         "Claude backup2" if _backup2_active
                         else ("Claude backup" if use_backup else "Claude primary")
                     )
                     self.last_model = model or self.model
-                    try:
-                        from core.provider_health import observe
-                        observe(
-                            "backup2" if _backup2_active else (
-                                "backup1" if use_backup else "primary"
-                            ),
-                            "healthy",
-                            "request_succeeded",
-                            root=self.jarvis_dir,
-                        )
-                    except Exception:
-                        pass
+                    _observe_provider(
+                        _provider_id(use_backup, _backup2_active), "healthy",
+                        "request_succeeded", self.jarvis_dir)
                     if gate_state != "primary" and not use_backup:
                         # Primary answered while the outage flag was set (we
                         # were the elected prober, or backup env is missing)
@@ -1459,7 +1454,7 @@ Current time: {now_ts}"""
                              or gate_failover)):
                     backup_tried = True
                     use_backup = True
-                    model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
+                    model = relay_route("CLAUDE_BACKUP_MODEL", model)
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
                 if (not _backup2_active
@@ -1490,7 +1485,7 @@ Current time: {now_ts}"""
                     backup_tried = True
                     use_backup = True
                     _backup2_active = True
-                    model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model
+                    model = relay_route("CLAUDE_BACKUP2_MODEL", model)
                     self._log("Retrying Claude heartbeat with backup2 provider")
                     continue
                 # A backup auth/preflight failure can safely continue to
@@ -1516,10 +1511,17 @@ Current time: {now_ts}"""
                     fallback_kwargs = {"restrict_tools": restrict_tools}
                     if not allow_tools:
                         fallback_kwargs["allow_tools"] = False
+                    fallback_kwargs["timeout"] = remaining_budget(
+                        cap=fallback_reserve
+                    )
+                    if fallback_kwargs["timeout"] <= 0:
+                        return ""
                     fallback = self._openai_fallback_call(
                         system_prompt, prompt, **fallback_kwargs,
                     )
                     if fallback:
+                        self._call_timed_out = False
+                        self._last_call_error = ""
                         return fallback
                 # Nonzero Claude output is an error surface, not user content.
                 return ""
@@ -1555,6 +1557,9 @@ Current time: {now_ts}"""
             fallback_kwargs = {"restrict_tools": restrict_tools}
             if not allow_tools:
                 fallback_kwargs["allow_tools"] = False
+            fallback_kwargs["timeout"] = remaining_budget(cap=fallback_reserve)
+            if fallback_kwargs["timeout"] <= 0:
+                return ""
             fallback = self._openai_fallback_call(
                 system_prompt, prompt, **fallback_kwargs,
             )
@@ -2033,6 +2038,11 @@ Current time: {now_ts}"""
             else:
                 state.pop("__envelope_parse__", None)
 
+        policy_isolated = self._run_policy_isolated_tasks(
+            tier2, task_data, state, now, user_messages, producing_tasks)
+        if policy_isolated:
+            self._log(f"Model/privacy solo: {policy_isolated}")
+
         # A malformed multi-task envelope cannot tell us which slice broke it.
         # Retrying the same roster as another batch simply recreates the same
         # failure. On the next due cycle, fan those tasks out once as direct
@@ -2042,8 +2052,7 @@ Current time: {now_ts}"""
         )
         envelope_retry_due = [
             task for task in tier2
-            if (not task.get("heavy") and not task.get("untrusted_input")
-                and not task.get("no_tools")
+            if (shared_batch_eligible(task)
                 and task["name"] in envelope_retry_names)
         ]
         for task in envelope_retry_due:
@@ -2065,8 +2074,7 @@ Current time: {now_ts}"""
         # ── Tier 2: regular tasks go through Claude ────────────────────
         runnable = [
             t for t in tier2
-            if (not t.get("heavy") and not t.get("untrusted_input")
-                and not t.get("no_tools")
+            if (shared_batch_eligible(t)
                 and t["name"] not in envelope_retry_names)
         ]
         if not runnable:
@@ -2105,17 +2113,6 @@ Current time: {now_ts}"""
         variants = {}
         parts = [f"[HEARTBEAT — {n} task{'s' if n > 1 else ''} due]"]
         parts.append("Process each task below. For each, return the requested format.")
-        # 奏折文风契约 (2026-08-03, owner's words: 「原文应该简洁明了…很多东西
-        # 都说不明白」「我不知道怎么办」). Injected into EVERY batch because
-        # style rules scattered per-task drift and rot; this is the one
-        # assembly point every user-facing sentence passes through.
-        parts.append(
-            "所有会到用户面前的文字，遵守奏折文风：\n"
-            "1. 第一句就是结论。背景放后面，或者不放。\n"
-            "2. 短句，人话，一张卡三行内说清：什么事 / 为什么现在说 / 要他做什么。\n"
-            "3. 不需要他做什么的，明确写出来（例如「知道就行」），不许留悬念。\n"
-            "4. 禁术语禁黑话（SLA/T0/HTTP码这类一律翻成人话）。\n"
-            "5. OPTIONS 按钮必须是明确的动作动词，≤6 字，点了会发生什么要可预期。")
         try:
             from core.memorial import recent_confused
             confused_cards = recent_confused()
@@ -2176,7 +2173,10 @@ Current time: {now_ts}"""
         for task in runnable:
             self._event("task_spawn", task=task["name"], batch=n)
         call_t0 = time.time()
-        raw = self.claude_call(prompt)
+        batch_model = _highest_task_model(runnable)
+        call_kwargs = ({"requested_model": batch_model}
+                       if batch_model else {})
+        raw = self.claude_call(prompt, **call_kwargs)
         call_dur = round(time.time() - call_t0, 2)
 
         if raw == "__KILLED__":

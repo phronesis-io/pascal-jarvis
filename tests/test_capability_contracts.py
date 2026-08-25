@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_memory_weekly_hooks_gate_then_archive_and_replace_digest(
+def test_memory_weekly_hooks_preserve_daily_history_and_replace_digest(
     tmp_path, monkeypatch, capsys,
 ):
     memory = tmp_path / "memory"
@@ -44,8 +44,10 @@ def test_memory_weekly_hooks_gate_then_archive_and_replace_digest(
     monkeypatch.setattr(sys, "stdin", io.StringIO("durable weekly synthesis with enough detail"))
 
     assert memory_weekly_post.main() == 0
-    assert daily.read_text(encoding="utf-8") == ""
-    assert "entry 5" in (timeline / "daily_archive.md").read_text(encoding="utf-8")
+    # Weekly synthesis must not erase or re-archive the rolling 14-day daily
+    # history. memory_daily_post owns the one archive/cutoff policy.
+    assert "entry 5" in daily.read_text(encoding="utf-8")
+    assert not (timeline / "daily_archive.md").exists()
     assert (timeline / "longterm_digest.bak.md").read_text(encoding="utf-8") == "old digest"
     digest = (timeline / "longterm_digest.md").read_text(encoding="utf-8")
     assert "Last updated: 2026-08-12 18:00" in digest

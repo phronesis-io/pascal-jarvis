@@ -379,6 +379,39 @@ def test_cap_dropped_notices_reach_the_morning_digest(tmp_path):
     assert "6 条" in line and "归档" in line
 
 
+def test_morning_digest_groups_repeated_titles_instead_of_repeating_them(
+        tmp_path):
+    events = []
+    for i in range(6):
+        events.append(_created_at(
+            i, "2026-08-07 09:00", title="跨会话动态", attention="notice"))
+        # _created_at adds the numeric id suffix; production duplicates do not.
+        events[-1]["title"] = "跨会话动态"
+        events.append(_ledger_only(i))
+    _write_ledger(tmp_path, events)
+
+    line = presence.morning_digest_line(now=NOW)
+
+    assert "跨会话动态 ×6" in line
+    assert line.count("跨会话动态") == 1
+
+
+def test_morning_digest_marks_long_title_omission_instead_of_hard_cut(
+        tmp_path):
+    events = []
+    long_title = "这是一条非常长但前后信息都很重要的跨会话动态标题"
+    for i in range(5):
+        events.append(_created_at(i, "2026-08-07 09:00", title=long_title))
+        events.append(_ledger_only(i))
+    _write_ledger(tmp_path, events)
+
+    line = presence.morning_digest_line(now=NOW)
+
+    assert "…" in line
+    assert long_title not in line
+    assert "动态标题4" in line
+
+
 def test_one_cap_dropped_decision_publishes_the_line_alone(tmp_path):
     """攒批≥5 governs 周知. A dropped decision is not 周知: it asked for a
     judgment and lost its slot to a notice burst, so it does not wait for four

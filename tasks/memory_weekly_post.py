@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hook: save weekly digest, archive and clear daily log."""
+"""Post-hook: save the weekly digest without destroying rolling daily history."""
 import os
 import sys
 from pathlib import Path
@@ -33,18 +33,17 @@ def main() -> int:
         tmp_bak.write_text(LONGTERM.read_text(encoding="utf-8"), encoding="utf-8")
         os.replace(tmp_bak, LONGTERM_BAK)
 
-    # Archive daily log
-    if DAILY_LOG.exists() and DAILY_LOG.stat().st_size > 0:
-        with DAILY_ARCHIVE.open("a", encoding="utf-8") as f:
-            f.write(f"\n# Archived {ts}\n{DAILY_LOG.read_text(encoding='utf-8')}\n")
-
     # Write new digest (atomic)
     tmp_lt = LONGTERM.with_suffix(".tmp")
     tmp_lt.write_text(f"# Long-term Digest\nLast updated: {ts}\n\n{summary}\n",
                       encoding="utf-8")
     os.replace(tmp_lt, LONGTERM)
-    DAILY_LOG.write_text("")
-    print("[memory] Weekly digest updated, daily archived + cleared.", file=sys.stderr)
+    # memory_daily_post is the single owner of the rolling 14-day cutoff and
+    # daily_archive. Weekly used to copy the entire log into the archive and
+    # clear it, so day-level recall was empty immediately after every digest
+    # and the next weekly run duplicated history in the archive.
+    print("[memory] Weekly digest updated; rolling daily history preserved.",
+          file=sys.stderr)
     return 0
 
 

@@ -542,10 +542,59 @@ class ActionProcessor:
         ]
         if not waiting:
             return "没有等你拍板的事了。"
-        archived = sum(
-            1 for state in waiting
-            if memorial.lapse(state["id"], "先都放着")
-        )
+        archived = 0
+        affected_matters: set[str] = set()
+        for state in waiting:
+            if memorial.lapse(state["id"], "先都放着"):
+                archived += 1
+                matter_id = str(state.get("matter_id") or "").strip()
+                if matter_id:
+                    affected_matters.add(matter_id)
+
+        # "先都放着" is an owner decision, not cosmetic cleanup. Preserve a
+        # machine-readable deferral through the latest known dated intent on
+        # that matter, so tomorrow's reworded occurrence cannot immediately
+        # mint another card. A matter with no dated follow-up gets a bounded
+        # one-day pause rather than an indefinite hidden state.
+        if affected_matters:
+            from datetime import datetime, timedelta
+
+            from core.intent_lifecycle import get_intent
+            from core.matters import add_event, get_matter
+            from core.timeutil import now_local
+
+            now = now_local()
+            for matter_id in affected_matters:
+                deadlines = []
+                matter = get_matter(
+                    matter_id, include_links=True, include_events=False) or {}
+                for link in matter.get("links", []):
+                    if link.get("entity_type") != "intent":
+                        continue
+                    intent = get_intent(str(link.get("entity_id") or "")) or {}
+                    config = intent.get("trigger_config") or {}
+                    if isinstance(config, str):
+                        try:
+                            config = json.loads(config)
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            config = {}
+                    try:
+                        due = datetime.fromisoformat(
+                            str((config or {}).get("datetime") or ""))
+                    except (TypeError, ValueError):
+                        continue
+                    if due.tzinfo is None and now.tzinfo is not None:
+                        due = due.replace(tzinfo=now.tzinfo)
+                    if due > now:
+                        deadlines.append(due)
+                until = max(deadlines) if deadlines else now + timedelta(days=1)
+                add_event(
+                    matter_id,
+                    "matter_deferred",
+                    "先都放着",
+                    actor="user",
+                    payload={"until": until.isoformat(), "reason": "lapse_all"},
+                )
         # Names the filter tab, not a destination: actionable if the reader is
         # already on the items page, and still informative from a Lark card.
         # 「去事项看」 would be a dead end for whoever is standing on it.

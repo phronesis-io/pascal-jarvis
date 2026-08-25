@@ -981,9 +981,9 @@ def test_heartbeat_starts_on_backup2_when_gate_tripped_and_backup1_missing(
     assert runner.last_provider == "Claude backup2"
 
 
-def test_heartbeat_probe_success_reopens_primary(tmp_path, monkeypatch):
-    """The elected prober tries primary once; success clears the flag for
-    every process (recovery is automatic, no human retry button)."""
+def test_heartbeat_does_not_use_full_request_to_probe_primary(
+        tmp_path, monkeypatch):
+    """A tripped gate stays on backup until the bounded canary clears it."""
     import json as _json
     from subprocess import CompletedProcess
 
@@ -1007,8 +1007,8 @@ def test_heartbeat_probe_success_reopens_primary(tmp_path, monkeypatch):
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert len(calls) == 1
-    assert calls[0][1] is None                  # probe ran on PRIMARY env
-    assert mf.gate(tmp_path) == "primary"       # flag cleared
+    assert calls[0][1]["ANTHROPIC_AUTH_TOKEN"] == "backup-token"
+    assert mf.gate(tmp_path, probe=False) == "backup"
 
 
 def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch):
@@ -1047,13 +1047,9 @@ def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch)
     assert openai_calls == ["gpt-test"]
 
 
-def test_heartbeat_probe_nonmodel_failure_falls_back_to_backup(tmp_path, monkeypatch):
-    """7/10 audit: an elected probe that hit a primary-side NON-model error
-    ('403 Request not allowed', ConnectionRefused) matched no signature, so
-    the whole cycle failed and pushed the shared backoff to 3600s — while
-    the backup was demonstrably healthy. Any probe failure = probe not
-    passed → fall back to backup for this call, keeping the outage flag
-    (only a primary SUCCESS may clear it)."""
+def test_heartbeat_tripped_gate_starts_on_backup_without_production_probe(
+        tmp_path, monkeypatch):
+    """A due recovery check must not prepend a full-context primary call."""
     from subprocess import CompletedProcess
 
     runner = _gate_runner(tmp_path)
@@ -1081,8 +1077,7 @@ def test_heartbeat_probe_nonmodel_failure_falls_back_to_backup(tmp_path, monkeyp
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
-    assert len(calls) == 2                          # one probe, one backup
-    assert calls[0] == {}                           # probe ran on PRIMARY env
-    assert calls[1].get("ANTHROPIC_AUTH_TOKEN") == "backup-token"
-    # a failed probe is NOT proof of recovery — the flag must survive
+    assert len(calls) == 1
+    assert calls[0].get("ANTHROPIC_AUTH_TOKEN") == "backup-token"
+    # The canary owns recovery; a backup success changes nothing.
     assert mf.gate(tmp_path, probe=False) == "backup"

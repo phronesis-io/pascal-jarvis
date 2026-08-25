@@ -194,6 +194,13 @@ echo ""
   || echo "--- Channel Watermarks ---
   ⚠️ 后台任务的健康检查这一步自己没跑成"
 
+# The heartbeat entry for self-improve is intentionally empty: it only starts
+# a detached coding session. Check that session's acquire/run/release receipt,
+# not the scheduler's expected empty stdout, and surface only after bounded
+# automatic retries have already failed.
+(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" \
+  python3 -m core.self_improve_cycle health 2>/dev/null) || true
+
 # 7b. Component manifest (REQ-40): the single source of truth for "what
 #     should be running". Failures print as ⚠️ lines → REQ-39 alert path.
 echo ""

@@ -170,14 +170,41 @@ def test_pre_hook_blocks_on_active_pending(tmp_path):
     assert "awaiting user approval" in r.stderr
 
 
-def test_pre_hook_expires_stale_pending_and_proceeds(tmp_path):
+def test_pre_hook_expires_stale_pending_but_skips_without_new_material(tmp_path):
     f = _seed_pending(tmp_path, "1000_1.json", age_seconds=49 * 3600)
     r = _run_pre(tmp_path)
     assert r.returncode == 0
     assert not f.exists()
     expired = tmp_path / "eigenflux" / "pending_publish" / "expired" / "1000_1.json"
     assert expired.exists()
+    assert r.stdout.strip() == ""
+
+
+def test_pre_hook_uses_git_material_without_reading_private_auto_memory(tmp_path):
+    memory = tmp_path / ".claude" / "projects" / "-Users-pascal-Desktop-jarvis" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "new-insight.md").write_text(
+        "# PRIVATE_MEMORY_MUST_NOT_LEAVE\n", encoding="utf-8")
+    repo = tmp_path / "Desktop" / "jarvis" / "repos" / "pascal-jarvis"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"],
+                   cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo,
+                   check=True)
+    (repo / "change.txt").write_text("bounded provider failover")
+    subprocess.run(["git", "add", "change.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "harden bounded provider failover"],
+        cwd=repo, check=True,
+    )
+
+    r = _run_pre(tmp_path)
+
+    assert r.returncode == 0
     assert "Ready to publish" in r.stdout
+    assert "harden bounded provider failover" in r.stdout
+    assert "PRIVATE_MEMORY_MUST_NOT_LEAVE" not in r.stdout
 
 
 def test_expired_draft_lapses_its_approval_card(tmp_path):

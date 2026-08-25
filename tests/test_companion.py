@@ -142,6 +142,13 @@ def test_daily_ceiling_caps_every_kind():
     assert state["owed"] == "", "a spent day must not also owe a card"
 
 
+def test_preflight_skips_gathering_after_daily_budget(monkeypatch):
+    monkeypatch.setattr(companion, "plan", lambda: {"day_remaining": 0})
+    assert companion.main(["preflight"]) == 1
+    monkeypatch.setattr(companion, "plan", lambda: {"day_remaining": 1})
+    assert companion.main(["preflight"]) == 0
+
+
 # ── the floor: silence stops being free ──────────────────────────────────────
 
 

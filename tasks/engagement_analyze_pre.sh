@@ -44,8 +44,11 @@ with open(log_path, encoding='utf-8') as f:
             continue
 
 # Separate sent and response entries
-sent_entries = [e for e in entries if e.get('type') == 'sent']
-response_entries = [e for e in entries if e.get('type') == 'response']
+NON_PRODUCT_SOURCES = {'deploy-smoke', 'release-canary', 'test'}
+sent_entries = [e for e in entries if e.get('type') == 'sent'
+                and e.get('source') not in NON_PRODUCT_SOURCES]
+response_entries = [e for e in entries if e.get('type') == 'response'
+                    and e.get('source') not in NON_PRODUCT_SOURCES]
 # Rate-eligible responses exclude 'conversation' rows (REQ-63): follow-on chat
 # after a card is logged as type=response/reaction=conversation for volume, but
 # it can NEVER be 'engaged', so counting it in a rate DENOMINATOR only deflates

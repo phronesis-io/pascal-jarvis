@@ -9,6 +9,7 @@ from core.safety import (
     salvage_field,
     salvage_task_ids,
     sanitize_for_user,
+    strip_task_framing,
     summarize,
 )
 
@@ -126,6 +127,16 @@ def test_substring_patterns_in_json():
 def test_extract_json_code_fence():
     raw = '```json\n{"key": "value"}\n```'
     assert extract_json(raw) == '{"key": "value"}'
+
+
+def test_strip_task_framing_removes_heartbeat_batch_header():
+    raw = "HEARTBEAT — 1 card.\n\nTITLE: 今天想听听你怎么样\n最近还好吗？"
+    assert strip_task_framing(raw).startswith("TITLE: 今天想听听你怎么样")
+
+
+def test_strip_task_framing_keeps_heartbeat_words_inside_body():
+    raw = "TITLE: 系统说明\n正文里提到 HEARTBEAT — 1 card. 不应被删除"
+    assert strip_task_framing(raw) == raw
 
 
 def test_extract_json_trailing_text():

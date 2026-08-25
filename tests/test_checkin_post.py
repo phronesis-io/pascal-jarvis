@@ -18,6 +18,11 @@ def test_checkin_pre_syntax():
     assert result.returncode == 0, result.stderr
 
 
+def test_checkin_budget_preflight_precedes_calendar_network():
+    script = PRE_SCRIPT.read_text(encoding="utf-8")
+    assert script.index("core.companion preflight") < script.index("lark_freebusy")
+
+
 def _run(stdin: str, memory_dir: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
