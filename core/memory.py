@@ -212,11 +212,10 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     structured facts) always survives even when warm/ is over budget.
 
     purpose: "inbound" (default — full view, behavior unchanged) or
-    "outbound" — sensitivity gate for tasks whose output leaves Pascal's
-    world (eigenflux-publish, auto-replies): system/inbox_private_*.md /
-    inbox_secret_*.md perception buffers are skipped so ingested private
-    content (mail, DMs) can never ride into an outward-facing context.
-    (Perception PRD §3.4/§6 — sensitivity model steps 1-2.)
+    "outbound" — allowlisted context for tasks whose output leaves Pascal's
+    world. Outbound tasks receive only hot/group_context.md, the same curated
+    public context used in group chat. Todos, sessions, warm notes, timeline,
+    mail, DMs and other private tiers are withheld by construction.
 
     max_chars: override the global memory budget. Used when the backup LLM
     relay has a smaller context window than the primary (1M) channel. Small
@@ -242,6 +241,11 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     if max_chars is not None and int(max_chars) <= 0:
         raise ValueError("max_chars must be positive")
     budget = int(max_chars) if max_chars is not None else MAX_MEMORY_CHARS
+    if purpose == "outbound":
+        # A denylist inevitably misses the next private memory file. Reuse the
+        # existing explicitly-curated public boundary instead, and keep the
+        # caller's provider budget a hard cap.
+        return load_group_context(memory_dir)[:budget]
     # Build each tier's sections independently (priority-ordered within tier).
     stable_hot_parts, volatile_hot_parts = _collect_hot_bands(memory_dir)
     hot_parts = stable_hot_parts + volatile_hot_parts

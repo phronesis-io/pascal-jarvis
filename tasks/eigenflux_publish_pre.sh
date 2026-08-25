@@ -67,40 +67,6 @@ except Exception:
 " 2>/dev/null)
 fi
 
-# Material pool: recent memory highlights for content inspiration
-MEMORY_DIR="$HOME/.claude/projects/-Users-pascal-Desktop-jarvis/memory"
-if [ -d "$MEMORY_DIR" ]; then
-  material=$(python3 -c "
-import sys
-from pathlib import Path
-from datetime import datetime, timedelta
-
-mem_dir = Path('$MEMORY_DIR')
-cutoff = datetime.now().timestamp() - 7 * 86400  # last 7 days
-entries = []
-for f in mem_dir.glob('*.md'):
-    if f.name == 'MEMORY.md':
-        continue
-    if f.stat().st_mtime < cutoff:
-        continue
-    first_line = f.read_text(errors='ignore').split('\n')[0].strip()
-    if first_line.startswith('---'):
-        lines = f.read_text(errors='ignore').split('\n')
-        for line in lines:
-            if line.startswith('description:'):
-                first_line = line.split(':', 1)[1].strip()
-                break
-    entries.append((f.stat().st_mtime, first_line[:120]))
-
-if entries:
-    entries.sort(reverse=True)
-    print()
-    print('=== RECENT WORK & INSIGHTS (inspiration for broadcasts) ===')
-    for _, desc in entries[:8]:
-        print(f'  - {desc}')
-" 2>/dev/null)
-fi
-
 # Recent git commits across key repos (last 7 days)
 commits=$(python3 -c "
 import subprocess, os
@@ -129,9 +95,8 @@ if lines:
     for l in lines[:15]:
         print(l)
 " 2>/dev/null)
-[ -n "${material:-}" ] || material=""
 [ -n "${commits:-}" ] || commits=""
-candidate_material=$(printf '%s\n%s\n' "$material" "$commits")
+candidate_material=$(printf '%s\n' "$commits")
 material_gate=$(printf '%s' "$candidate_material" | "$JARVIS_PYTHON" \
   -m core.eigenflux_publish_material \
   --state "$JARVIS_DIR/eigenflux/publish_material_gate.json" 2>/dev/null || echo skip)
@@ -139,6 +104,5 @@ material_gate=$(printf '%s' "$candidate_material" | "$JARVIS_PYTHON" \
 
 echo "Ready to publish. Last published ${elapsed}s ago."
 [ -n "${recent:-}" ] && echo "$recent"
-[ -n "$material" ] && echo "$material"
 [ -n "$commits" ] && echo "$commits"
 exit 0

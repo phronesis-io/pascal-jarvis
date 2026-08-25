@@ -57,6 +57,8 @@ compatible provider, and records the model that actually answered. One
 logical call owns one wall-clock budget. Provider recovery is measured by the
 small `provider-canary`; a full production prompt is never sacrificed as a
 health probe, and a timed-out tool-capable request is never replayed.
+Outbound model stages are no-tools and receive only the curated public group
+context; deterministic post-hooks remain the only effect boundary.
 
 ### Proactive Work
 

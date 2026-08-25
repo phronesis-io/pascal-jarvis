@@ -318,9 +318,11 @@ def test_split_entries_keeps_oversized_newest_entry():
 # ── sensitivity outbound view (PRD §3.4/§6 steps 1-2) ────────────────
 
 
-def test_outbound_memory_skips_private_inbox(tmp_path):
+def test_outbound_memory_uses_only_curated_public_context(tmp_path):
     memory = tmp_path / "memory"
     (memory / "system").mkdir(parents=True)
+    (memory / "hot").mkdir(parents=True)
+    (memory / "hot" / "group_context.md").write_text("可公开团队定位")
     (memory / "system" / "inbox_team.md").write_text("团队动态")
     (memory / "system" / "inbox_private_mail.md").write_text("私密邮件内容")
 
@@ -329,7 +331,8 @@ def test_outbound_memory_skips_private_inbox(tmp_path):
 
     outbound = load_tiered_memory(memory, purpose="outbound")
     assert "私密邮件内容" not in outbound
-    assert "团队动态" in outbound  # internal stays visible
+    assert "团队动态" not in outbound
+    assert "可公开团队定位" in outbound
 
 
 # ── lark_mail adapter ────────────────────────────────────────────────

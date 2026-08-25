@@ -57,6 +57,10 @@ raw output in state, reconciles a dead process without a release receipt,
 retries failures on a bounded clock, and becomes a self-diagnostic warning
 only after repeated failed closures. A final worker admission check rejects a
 stale child before it can invoke a model, and release receipts are write-once.
+The worker lease has a hard deadline; expiry verifies the command identity
+before ending its process group, and PID reuse is reconciled without signalling
+an unrelated process. Identity-probe uncertainty retains the lease, and a
+failed TERM/KILL confirmation blocks any overlapping worker.
 
 ### Optional work now needs material evidence
 

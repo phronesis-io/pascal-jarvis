@@ -62,9 +62,10 @@ that batch. Requested lower tiers remain lower tiers through relays.
 
 `untrusted-input: true` disables tools and withholds personal memory. Those
 tasks receive only an allowlisted `triage_profile` when relevance context is
-needed. `memory-purpose: outbound` removes private inbox buffers and forces an
-isolated call. No task may put untrusted external text and private memory in
-the same prompt.
+needed. `memory-purpose: outbound` forces an isolated no-tools call and loads
+only the explicitly curated `hot/group_context.md`; todos, sessions, warm
+notes, timeline, mail and DMs are withheld by construction. No task may put
+untrusted external text and private memory in the same prompt.
 
 The call chain has one wall-clock budget. Provider health is measured by
 `provider-canary`; a full task prompt is never reused as a probe. A timeout

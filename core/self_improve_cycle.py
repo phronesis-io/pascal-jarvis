@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ FAILURES_BEFORE_WARNING = 2
 PROMPT_FILE = "scripts/self_improve_prompt.md"
 LOG_FILE = "/tmp/jarvis-self-improve.log"
 RUN_TIMEOUT_S = 2 * 3600 + 300
+LEASE_GRACE_S = 5 * 60
 
 
 def _state_path() -> Path:
@@ -108,6 +110,10 @@ def _record_release(receipt: dict) -> None:
             failures += 1
         state.update(receipt)
         state["pid"] = 0
+        state.pop("termination_failures", None)
+        state.pop("last_termination_attempt_epoch", None)
+        state.pop("identity_probe_failures", None)
+        state.pop("last_identity_probe_epoch", None)
         state["consecutive_failures"] = failures
         _write_json(_state_path(), state)
 
@@ -117,7 +123,8 @@ def _admit_worker(run_id: str, now_epoch: float) -> dict | None:
     with _state_lock():
         state = _read_state()
         if (state.get("run_id") == run_id
-                and state.get("status") in {"acquiring", "running"}):
+                and state.get("status") in {"acquiring", "running"}
+                and not _lease_expired(state, now_epoch)):
             return state
         _store_receipt_once({
             "run_id": run_id,
@@ -141,6 +148,79 @@ def _pid_alive(pid: int) -> bool:
     except (OSError, ProcessLookupError):
         return False
     return True
+
+
+def _lease_deadline(state: dict) -> float:
+    explicit = float(state.get("lease_expires_epoch") or 0)
+    if explicit > 0:
+        return explicit
+    acquired = float(state.get("acquire_epoch") or
+                     state.get("spawned_at") or 0)
+    return acquired + RUN_TIMEOUT_S + LEASE_GRACE_S if acquired > 0 else 0
+
+
+def _lease_expired(state: dict, now_epoch: float) -> bool:
+    deadline = _lease_deadline(state)
+    return deadline > 0 and float(now_epoch) >= deadline
+
+
+def _pid_matches_run(pid: int, run_id: str) -> bool | None:
+    """Fence PID reuse; None means process identity could not be inspected."""
+    if pid <= 0 or not run_id:
+        return False
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        # `ps` failure is not evidence of reuse while kill(0) still sees the
+        # process. A concurrent exit is a confirmed end, not an uncertainty.
+        return False if not _pid_alive(pid) else None
+    command = " ".join(str(result.stdout or "").split())
+    return ("core.self_improve_cycle" in command
+            and f"run {run_id}" in command)
+
+
+def _terminate_worker(state: dict) -> bool:
+    pid = int(state.get("pid") or 0)
+    run_id = str(state.get("run_id") or "")
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    for _ in range(10):
+        if not _pid_alive(pid):
+            return True
+        identity = _pid_matches_run(pid, run_id)
+        if identity is False:
+            return True
+        if identity is None:
+            return False
+        time.sleep(0.1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    for _ in range(5):
+        if not _pid_alive(pid):
+            return True
+        identity = _pid_matches_run(pid, run_id)
+        if identity is False:
+            return True
+        if identity is None:
+            return False
+        time.sleep(0.1)
+    if not _pid_alive(pid):
+        return True
+    identity = _pid_matches_run(pid, run_id)
+    return identity is False
 
 
 def _state_due(state: dict, now: float) -> bool:
@@ -185,6 +265,7 @@ def spawn(popen=subprocess.Popen, now_epoch: float | None = None) -> int:
         return 0
 
     now = time.time() if now_epoch is None else float(now_epoch)
+    _reconcile_unreleased(now)
     run_id = f"si-{int(now)}-{uuid.uuid4().hex[:8]}"
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     env = os.environ.copy()
@@ -204,6 +285,7 @@ def spawn(popen=subprocess.Popen, now_epoch: float | None = None) -> int:
             "status": "acquiring",
             "spawned_at": now,
             "acquire_epoch": now,
+            "lease_expires_epoch": now + RUN_TIMEOUT_S + LEASE_GRACE_S,
             "release_epoch": 0,
             "pid": 0,
             "run_digest": digest,
@@ -339,14 +421,43 @@ def _reconcile_unreleased(now_epoch: float) -> None:
     state = _read_state()
     if str(state.get("status") or "") not in {"acquiring", "running"}:
         return
-    if _pid_alive(int(state.get("pid") or 0)):
+    alive = _pid_alive(int(state.get("pid") or 0))
+    lease_expired = _lease_expired(state, now_epoch)
+    if alive and not lease_expired:
         return
     run_id = str(state.get("run_id") or "")
     if not run_id:
         return
+    if alive:
+        identity = _pid_matches_run(int(state.get("pid") or 0), run_id)
+        if identity is None:
+            # `ps` failure is uncertainty, not evidence of PID reuse. Preserve
+            # the fencing token and retry inspection on the next scheduler tick.
+            state["identity_probe_failures"] = int(
+                state.get("identity_probe_failures") or 0) + 1
+            state["last_identity_probe_epoch"] = now_epoch
+            _write_json(_state_path(), state)
+            return
+        if identity is True:
+            terminated = _terminate_worker(state)
+            if not terminated:
+                # Keep ownership visible and block a second worker. The next
+                # tick retries termination; health_line surfaces the impasse.
+                state["termination_failures"] = int(
+                    state.get("termination_failures") or 0) + 1
+                state["last_termination_attempt_epoch"] = now_epoch
+                _write_json(_state_path(), state)
+                return
+            error_type = "worker_lease_expired"
+        else:
+            error_type = "worker_lease_expired_pid_reused"
+        status = "timeout"
+    else:
+        error_type = "missing_release_receipt"
+        status = "interrupted"
     receipt = {
         "run_id": run_id,
-        "status": "interrupted",
+        "status": status,
         "acquire_epoch": float(state.get("acquire_epoch") or
                                state.get("spawned_at") or 0),
         "release_epoch": now_epoch,
@@ -354,7 +465,7 @@ def _reconcile_unreleased(now_epoch: float) -> None:
         "output_digest": "",
         "output_chars": 0,
         "exit_code": -1,
-        "error_type": "missing_release_receipt",
+        "error_type": error_type,
     }
     _record_release(receipt)
 
@@ -367,6 +478,12 @@ def tick(now_epoch: float | None = None) -> int:
 
 def health_line() -> str:
     state = _read_state()
+    if int(state.get("identity_probe_failures") or 0) > 0:
+        return ("⚠️ 自我改进后台任务已经超时，但系统暂时无法确认旧进程身份——"
+                "已保留独占租约并继续复查")
+    if int(state.get("termination_failures") or 0) > 0:
+        return ("⚠️ 自我改进后台任务已经超时，但系统未能结束旧进程——"
+                "已阻止新任务重叠，正在继续回收")
     failures = int(state.get("consecutive_failures") or 0)
     if failures < FAILURES_BEFORE_WARNING:
         return ""

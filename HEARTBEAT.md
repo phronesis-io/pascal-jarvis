@@ -118,8 +118,10 @@ duplicate the common style contract here.
 - post: tasks/eigenflux_profile_post.py
 - prompt: |
     [EIGENFLUX PROFILE REFRESH]
-    Compare the user's current EigenFlux profile with the latest memory.
-    Has anything changed that should be reflected in their network profile?
+    Compare the current EigenFlux profile with the explicitly curated public
+    context supplied below. Never infer from private life, relationships,
+    health, schedule, todos, sessions, or unpublished work. Propose a change
+    only when the public context directly supports every changed phrase.
     Return JSON: {"should_update":true/false,"agent_name":"<optional>","bio":"<full bio>","reason":"<brief>"}
     If no significant changes, return {"should_update":false}
 

@@ -76,6 +76,8 @@ def test_spawn_stamps_and_detaches(tmp_path):
     assert state["pid"] == 777
     assert state["status"] == "running"
     assert state["acquire_epoch"] == 2_000_000
+    assert state["lease_expires_epoch"] == (
+        2_000_000 + sic.RUN_TIMEOUT_S + sic.LEASE_GRACE_S)
     assert state["release_epoch"] == 0
     assert state["run_id"] in argv
     assert len(state["run_digest"]) == 64
@@ -243,6 +245,172 @@ def test_tick_reconciles_dead_unreleased_worker_before_retry(tmp_path,
         (tmp_path / "data" / "self_improve_receipts" /
          "dead-run.json").read_text())
     assert receipt["status"] == "interrupted"
+
+
+def test_tick_expires_a_live_worker_lease_and_retries_later(
+        tmp_path, monkeypatch):
+    acquired = 2_000_000
+    expired = acquired + sic.RUN_TIMEOUT_S + sic.LEASE_GRACE_S + 1
+    _stamp(tmp_path, acquired, pid=os.getpid())
+    state_path = tmp_path / "data" / "self_improve_cycle.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "run_id": "hung-run",
+        "status": "running",
+        "acquire_epoch": acquired,
+        "lease_expires_epoch": expired - 1,
+        "release_epoch": 0,
+        "consecutive_failures": 0,
+    })
+    state_path.write_text(json.dumps(state))
+    terminated = []
+    monkeypatch.setattr(sic, "_pid_matches_run", lambda *_a: True)
+    monkeypatch.setattr(
+        sic, "_terminate_worker",
+        lambda current: terminated.append(current["run_id"]) or True,
+    )
+    spawned = []
+    monkeypatch.setattr(
+        sic, "spawn", lambda now_epoch=None: spawned.append(now_epoch) or 88,
+    )
+
+    assert sic.tick(now_epoch=expired) == 0
+    assert terminated == ["hung-run"]
+    assert spawned == []
+    receipt = json.loads(
+        (tmp_path / "data" / "self_improve_receipts" /
+         "hung-run.json").read_text())
+    assert receipt["status"] == "timeout"
+    assert receipt["error_type"] == "worker_lease_expired"
+
+    assert sic.tick(now_epoch=expired + sic.RETRY_S + 1) == 88
+    assert spawned == [expired + sic.RETRY_S + 1]
+
+
+def test_expired_reused_pid_is_not_killed(tmp_path, monkeypatch):
+    acquired = 2_000_000
+    expired = acquired + sic.RUN_TIMEOUT_S + sic.LEASE_GRACE_S + 1
+    _stamp(tmp_path, acquired, pid=os.getpid())
+    state_path = tmp_path / "data" / "self_improve_cycle.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "run_id": "reused-pid-run",
+        "status": "running",
+        "acquire_epoch": acquired,
+        "lease_expires_epoch": expired - 1,
+        "release_epoch": 0,
+    })
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(sic, "_pid_matches_run", lambda *_a: False)
+    monkeypatch.setattr(
+        sic, "_terminate_worker",
+        lambda *_a: pytest.fail("an unrelated reused PID must not be killed"),
+    )
+    monkeypatch.setattr(sic, "spawn", lambda now_epoch=None: 0)
+
+    sic.tick(now_epoch=expired)
+
+    receipt = json.loads(
+        (tmp_path / "data" / "self_improve_receipts" /
+         "reused-pid-run.json").read_text())
+    assert receipt["status"] == "timeout"
+    assert receipt["error_type"] == "worker_lease_expired_pid_reused"
+
+
+def test_unknown_pid_identity_keeps_the_lease_and_blocks_overlap(
+        tmp_path, monkeypatch):
+    acquired = 2_000_000
+    expired = acquired + sic.RUN_TIMEOUT_S + sic.LEASE_GRACE_S + 1
+    _stamp(tmp_path, acquired, pid=os.getpid())
+    state_path = tmp_path / "data" / "self_improve_cycle.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "run_id": "unknown-pid-run",
+        "status": "running",
+        "acquire_epoch": acquired,
+        "lease_expires_epoch": expired - 1,
+        "release_epoch": 0,
+    })
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(sic, "_pid_matches_run", lambda *_a: None)
+    monkeypatch.setattr(
+        sic, "_terminate_worker",
+        lambda *_a: pytest.fail("unknown identity must never be signalled"),
+    )
+    monkeypatch.setattr(
+        sic, "spawn", lambda now_epoch=None: pytest.fail(
+            "unknown identity must keep exclusive ownership"),
+    )
+
+    assert sic.tick(now_epoch=expired) == 0
+
+    current = json.loads(state_path.read_text())
+    assert current["run_id"] == "unknown-pid-run"
+    assert current["status"] == "running"
+    assert current["pid"] == os.getpid()
+    assert current["identity_probe_failures"] == 1
+    assert not (tmp_path / "data" / "self_improve_receipts" /
+                "unknown-pid-run.json").exists()
+    assert "身份" in sic.health_line()
+
+
+def test_nonzero_ps_is_unknown_while_pid_is_still_alive(monkeypatch):
+    result = SimpleNamespace(returncode=1, stdout="", stderr="ps failed")
+    monkeypatch.setattr(sic.subprocess, "run", lambda *_a, **_kw: result)
+    monkeypatch.setattr(sic, "_pid_alive", lambda _pid: True)
+
+    assert sic._pid_matches_run(777, "live-run") is None
+
+
+def test_failed_worker_termination_keeps_the_lease_and_blocks_overlap(
+        tmp_path, monkeypatch):
+    acquired = 2_000_000
+    expired = acquired + sic.RUN_TIMEOUT_S + sic.LEASE_GRACE_S + 1
+    _stamp(tmp_path, acquired, pid=os.getpid())
+    state_path = tmp_path / "data" / "self_improve_cycle.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "run_id": "unkillable-run",
+        "status": "running",
+        "acquire_epoch": acquired,
+        "lease_expires_epoch": expired - 1,
+        "release_epoch": 0,
+    })
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(sic, "_pid_matches_run", lambda *_a: True)
+    monkeypatch.setattr(sic, "_terminate_worker", lambda *_a: False)
+    spawned = []
+    monkeypatch.setattr(
+        sic, "spawn", lambda now_epoch=None: spawned.append(now_epoch) or 88,
+    )
+
+    assert sic.tick(now_epoch=expired) == 0
+
+    current = json.loads(state_path.read_text())
+    assert current["run_id"] == "unkillable-run"
+    assert current["status"] == "running"
+    assert current["pid"] == os.getpid()
+    assert current["termination_failures"] == 1
+    assert spawned == []
+    assert not (tmp_path / "data" / "self_improve_receipts" /
+                "unkillable-run.json").exists()
+    assert "未能结束" in sic.health_line()
+
+
+def test_worker_termination_escalates_and_confirms_exit(monkeypatch):
+    signals = []
+    alive = iter([True] * 10 + [False])
+    monkeypatch.setattr(
+        sic.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(sic, "_pid_alive", lambda _pid: next(alive, False))
+    monkeypatch.setattr(sic, "_pid_matches_run", lambda *_a: True)
+    monkeypatch.setattr(sic.time, "sleep", lambda _seconds: None)
+
+    assert sic._terminate_worker({"pid": 777, "run_id": "hung-run"}) is True
+    assert signals == [
+        (777, sic.signal.SIGTERM),
+        (777, sic.signal.SIGKILL),
+    ]
 
 
 def test_health_only_warns_after_automatic_retries_are_exhausted(tmp_path):

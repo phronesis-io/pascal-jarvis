@@ -710,6 +710,7 @@ def test_task_model_and_outbound_memory_policy_reach_solo_call(
     assert len(captured) == 1
     assert captured[0][1]["requested_model"] == "sonnet"
     assert captured[0][1]["memory_purpose"] == "outbound"
+    assert captured[0][1]["allow_tools"] is False
     events = [json.loads(line) for line in
               (runner.jarvis_dir / "sched_events.jsonl").read_text().splitlines()]
     spawn = next(event for event in events if event["event"] == "task_spawn")
@@ -749,14 +750,24 @@ def test_batch_prompt_does_not_repeat_global_style_contract(
     assert "≤6 字" not in captured[0]
 
 
-def test_outbound_memory_purpose_filters_private_inbox(
+def test_outbound_memory_purpose_uses_only_curated_public_context(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     private = runner.memory_dir / "system" / "inbox_private_mail.md"
     private.parent.mkdir(parents=True, exist_ok=True)
     private.write_text("PRIVATE_MAIL_SENTINEL")
+    (runner.memory_dir / "system" / "todos.md").write_text("PRIVATE_TODO")
     (runner.memory_dir / "hot").mkdir(parents=True)
-    (runner.memory_dir / "hot" / "behavioral_rules.md").write_text("RULES")
+    (runner.memory_dir / "hot" / "behavioral_rules.md").write_text(
+        "PRIVATE_RULES")
+    (runner.memory_dir / "hot" / "group_context.md").write_text(
+        "PUBLIC_COMPANY_CONTEXT")
+    (runner.memory_dir / "warm").mkdir(parents=True)
+    (runner.memory_dir / "warm" / "user_relationships.md").write_text(
+        "PRIVATE_RELATIONSHIP")
+    (runner.memory_dir / "timeline").mkdir(parents=True)
+    (runner.memory_dir / "timeline" / "daily_log.md").write_text(
+        "PRIVATE_TIMELINE")
     captured = []
 
     class _Result:
@@ -771,8 +782,47 @@ def test_outbound_memory_purpose_filters_private_inbox(
     runner.claude_call("publish", memory_purpose="outbound")
 
     system_prompt = captured[0][captured[0].index("--system-prompt") + 1]
-    assert "RULES" in system_prompt
-    assert "PRIVATE_MAIL_SENTINEL" not in system_prompt
+    assert "PUBLIC_COMPANY_CONTEXT" in system_prompt
+    for private_marker in (
+        "PRIVATE_MAIL_SENTINEL",
+        "PRIVATE_TODO",
+        "PRIVATE_RULES",
+        "PRIVATE_RELATIONSHIP",
+        "PRIVATE_TIMELINE",
+    ):
+        assert private_marker not in system_prompt
+    tools_index = captured[0].index("--tools")
+    assert captured[0][tools_index + 1] == ""
+
+
+def test_backup_preserves_declared_lower_task_model(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "backup1",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://relay.invalid")
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "claude-opus-relay")
+    commands = []
+
+    class _Result:
+        returncode = 0
+        stdout = "LOWER_TIER_OK"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "core.heartbeat._run_isolated",
+        lambda cmd, **_kwargs: commands.append(cmd) or _Result(),
+    )
+    monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
+
+    assert runner.claude_call(
+        "cheap task", requested_model="sonnet", allow_tools=False,
+    ) == "LOWER_TIER_OK"
+    assert commands[0][commands[0].index("--model") + 1] == "sonnet"
 
 
 def test_outbound_memory_signature_mismatch_fails_closed(
@@ -952,6 +1002,123 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     })]
     assert ("backup1", "unhealthy", "timeout") in observed
     assert runner._call_timed_out is False
+
+
+def test_primary_timeout_tries_backup_before_gpt(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "primary",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = "BACKUP1_OK"
+        stderr = ""
+
+    def isolated(cmd, **kwargs):
+        calls.append(kwargs.get("env"))
+        if len(calls) == 1:
+            raise heartbeat_mod.subprocess.TimeoutExpired(
+                cmd, kwargs["timeout"])
+        return _Result()
+
+    monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
+    monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        runner, "_openai_fallback_call",
+        lambda *_a, **_kw: pytest.fail("healthy Backup1 must run before GPT"),
+    )
+
+    assert runner.claude_call("safe", allow_tools=False) == "BACKUP1_OK"
+    assert calls[0] is None
+    assert calls[1]["ANTHROPIC_AUTH_TOKEN"] == "backup1-token"
+
+
+def test_backup1_timeout_tries_backup2_before_gpt(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "backup1",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.invalid")
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = "BACKUP2_OK"
+        stderr = ""
+
+    def isolated(cmd, **kwargs):
+        calls.append(kwargs.get("env"))
+        if len(calls) == 1:
+            raise heartbeat_mod.subprocess.TimeoutExpired(
+                cmd, kwargs["timeout"])
+        return _Result()
+
+    monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
+    monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        runner, "_openai_fallback_call",
+        lambda *_a, **_kw: pytest.fail("healthy Backup2 must run before GPT"),
+    )
+
+    assert runner.claude_call("safe", allow_tools=False) == "BACKUP2_OK"
+    assert calls[0]["ANTHROPIC_AUTH_TOKEN"] == "backup1-token"
+    assert calls[1]["ANTHROPIC_AUTH_TOKEN"] == "backup2-token"
+
+
+def test_elapsed_time_budget_keeps_a_final_gpt_slot(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n",
+                          claude_timeout=600)
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "primary",
+    )
+    monkeypatch.setenv("OPENAI_FALLBACK_TIMEOUT", "120")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.invalid")
+    clock = [10_000.0]
+    monkeypatch.setattr(heartbeat_mod.time, "monotonic", lambda: clock[0])
+    attempt_timeouts = []
+
+    def isolated(cmd, **kwargs):
+        attempt_timeouts.append(kwargs["timeout"])
+        clock[0] += kwargs["timeout"]
+        raise heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
+    monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
+    gpt_timeouts = []
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda _system, _prompt, **kwargs: (
+            gpt_timeouts.append(kwargs["timeout"]) or "GPT_OK"
+        ),
+    )
+
+    assert runner.claude_call("safe", allow_tools=False) == "GPT_OK"
+    assert attempt_timeouts == [600, 40, 40]
+    assert gpt_timeouts == [40]
 
 
 def test_heartbeat_skips_primary_during_real_request_overload_cooldown(

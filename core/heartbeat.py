@@ -20,7 +20,13 @@ from pathlib import Path
 from .claude_bin import resolve_claude_bin
 from .heartbeat_provider import (
     drop_benign_notices as _drop_benign_notices,
+    fallback_attempt_timeout as _fallback_attempt_timeout,
+    observe_provider as _observe_provider,
     openai_usage_fields as _openai_usage_fields,
+    provider_env as _provider_env,
+    provider_id as _provider_id,
+    relay_model as _relay_model,
+    run_provider_attempt as _run_provider_attempt,
 )
 from .heartbeat_task_config import (
     MEMORY_PURPOSES as _MEMORY_PURPOSES,
@@ -635,7 +641,7 @@ class HeartbeatRunner:
             call_kwargs["memory_purpose"] = task["memory_purpose"]
         if task.get("untrusted_input"):
             raw = self.claude_call(prompt, restrict_tools=True, **call_kwargs)
-        elif task.get("no_tools"):
+        elif task.get("no_tools") or task.get("memory_purpose") == "outbound":
             raw = self.claude_call(prompt, allow_tools=False, **call_kwargs)
         else:
             raw = self.claude_call(prompt, **call_kwargs)
@@ -1083,7 +1089,14 @@ class HeartbeatRunner:
         memory_purpose = (
             memory_purpose if memory_purpose in _MEMORY_PURPOSES else "inbound"
         )
+        if memory_purpose == "outbound":
+            # Outbound model stages draft data for deterministic post-hooks.
+            # They never need Bash/file tools and must not be able to bypass an
+            # approval boundary by invoking the external CLI themselves.
+            allow_tools = False
         model = self.model if requested_model in {"", "gpt"} else requested_model
+        def relay_route(name: str, current: str) -> str:
+            return _relay_model(requested_model, os.environ.get(name, ""), current)
         use_backup = False
         backup_tried = False
         _backup2_active = False
@@ -1123,7 +1136,7 @@ class HeartbeatRunner:
                 and os.environ.get("CLAUDE_BACKUP_BASE_URL")):
             use_backup = True
             backup_tried = True
-            model = os.environ.get("CLAUDE_BACKUP_MODEL") or model
+            model = relay_route("CLAUDE_BACKUP_MODEL", model)
         elif ((health_route == "backup2"
                 or (gate_state == "backup" and not health_route))
                 and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
@@ -1132,7 +1145,7 @@ class HeartbeatRunner:
             use_backup = True
             backup_tried = True
             _backup2_active = True
-            model = os.environ.get("CLAUDE_BACKUP2_MODEL") or model
+            model = relay_route("CLAUDE_BACKUP2_MODEL", model)
         elif (health_route == "openai"
               and os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
               and os.environ.get("OPENAI_API_KEY")):
@@ -1267,45 +1280,41 @@ Current time: {now_ts}"""
                     cmd.extend(["--model", model])
                 provider = "backup" if use_backup else "primary"
                 attempted.add(f"{provider}:{model or ''}")
-                env = None
-                if use_backup:
-                    env = os.environ.copy()
-                    if _backup2_active:
-                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
-                            "CLAUDE_BACKUP2_AUTH_TOKEN", "")
-                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                            "CLAUDE_BACKUP2_BASE_URL", "")
-                    else:
-                        env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(
-                            "CLAUDE_BACKUP_AUTH_TOKEN", "")
-                        env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                            "CLAUDE_BACKUP_BASE_URL", "")
+                env = _provider_env(use_backup, _backup2_active)
                 self._log(
                     f"Calling Claude heartbeat provider={provider} model={model or '(default)'}"
                 )
-                attempt_timeout = remaining_budget(cap=call_timeout)
+                attempt_timeout = _fallback_attempt_timeout(
+                    remaining_budget, call_timeout, use_backup=use_backup,
+                    backup2_active=_backup2_active,
+                    safe_replay=(restrict_tools or not allow_tools))
                 if attempt_timeout <= 0:
                     raise subprocess.TimeoutExpired(cmd, call_timeout)
-                result = _run_isolated(
-                    cmd, timeout=attempt_timeout, cwd=str(self.work_dir), env=env)
+                timed_out_provider = _provider_id(use_backup, _backup2_active)
+                result, attempt_timed_out = _run_provider_attempt(
+                    _run_isolated, cmd, timeout=attempt_timeout,
+                    cwd=str(self.work_dir), env=env,
+                    safe_replay=(restrict_tools or not allow_tools),
+                    provider=timed_out_provider, root=self.jarvis_dir)
+                if attempt_timed_out:
+                    self._call_timed_out = True
+                    self._last_call_error = (
+                        f"claude call timed out ({attempt_timeout}s)")
+                    self._log(
+                        f"Claude call timed out ({attempt_timeout}s) on "
+                        f"{timed_out_provider}; advancing fallback chain",
+                        level="warn")
                 if result.returncode == 0:
+                    self._call_timed_out = False
+                    self._last_call_error = ""
                     self.last_provider = (
                         "Claude backup2" if _backup2_active
                         else ("Claude backup" if use_backup else "Claude primary")
                     )
                     self.last_model = model or self.model
-                    try:
-                        from core.provider_health import observe
-                        observe(
-                            "backup2" if _backup2_active else (
-                                "backup1" if use_backup else "primary"
-                            ),
-                            "healthy",
-                            "request_succeeded",
-                            root=self.jarvis_dir,
-                        )
-                    except Exception:
-                        pass
+                    _observe_provider(
+                        _provider_id(use_backup, _backup2_active), "healthy",
+                        "request_succeeded", self.jarvis_dir)
                     if gate_state != "primary" and not use_backup:
                         # Primary answered while the outage flag was set (we
                         # were the elected prober, or backup env is missing)
@@ -1445,7 +1454,7 @@ Current time: {now_ts}"""
                              or gate_failover)):
                     backup_tried = True
                     use_backup = True
-                    model = os.environ.get("CLAUDE_BACKUP_MODEL") or self.model
+                    model = relay_route("CLAUDE_BACKUP_MODEL", model)
                     self._log("Retrying Claude heartbeat with backup provider")
                     continue
                 if (not _backup2_active
@@ -1476,7 +1485,7 @@ Current time: {now_ts}"""
                     backup_tried = True
                     use_backup = True
                     _backup2_active = True
-                    model = os.environ.get("CLAUDE_BACKUP2_MODEL") or self.model
+                    model = relay_route("CLAUDE_BACKUP2_MODEL", model)
                     self._log("Retrying Claude heartbeat with backup2 provider")
                     continue
                 # A backup auth/preflight failure can safely continue to
@@ -1511,6 +1520,8 @@ Current time: {now_ts}"""
                         system_prompt, prompt, **fallback_kwargs,
                     )
                     if fallback:
+                        self._call_timed_out = False
+                        self._last_call_error = ""
                         return fallback
                 # Nonzero Claude output is an error surface, not user content.
                 return ""
