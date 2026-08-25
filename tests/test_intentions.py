@@ -1410,6 +1410,9 @@ def test_generate_closure_reask_intents_after_followup_drained(intent_db):
     assert reask["source"] == "closure"
     assert reask["action_type"] == "notify"
     assert "闭环再问" in reask["prompt"]
+    # Boss-facing name: the matter itself, no stacked mechanism words
+    # (2026-08-24 audit:「闭环再问: …」reached cards verbatim, truncated).
+    assert reask["name"] == "再问：上线 Jarvis 修复"
     assert mod.get_intent(ext)["closure_followup_id"] == created[0]
     assert mod.generate_closure_reask_intents() == []  # pending reask blocks dupes
 

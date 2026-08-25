@@ -290,6 +290,14 @@ SESSION_TRACKER="$JARVIS_DIR/active_sessions.json"
 HEARTBEAT_TRIGGER="/tmp/jarvis-heartbeat-trigger"
 
 export MEMORY_DIR WORK_DIR CLAUDE_PROJECT_DIR USER_ID OWNER_NAME LOG_FILE MAIN_MODEL HEARTBEAT_MODEL HEARTBEAT_TIMEOUT CHECK_INTERVAL
+# Heartbeat memory diet (2026-08-24): the warm knowledge tier rides in every
+# heartbeat call as ~60% of the injected payload while most tasks never read
+# it. "index" (PR#100) keeps the behavioral rules inline verbatim and turns
+# the reference notes into a one-line map the model reads from disk on demand.
+# Overridable: JARVIS_WARM_MEMORY_MODE=full in the environment restores the
+# inline tier without a code change.
+JARVIS_WARM_MEMORY_MODE="${JARVIS_WARM_MEMORY_MODE:-index}"
+export JARVIS_WARM_MEMORY_MODE
 LARK_APP_ID="${LARK_APP_ID:-${APP_ID:-}}"
 export LARK_APP_ID
 

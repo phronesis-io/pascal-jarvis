@@ -155,6 +155,13 @@ def test_preinstall_backlog_dedup_treats_checkbox_as_data():
     assert "removed top-level CLI command(s)" in script
 
 
+def test_preinstall_pytest_budget_covers_the_measured_suite_runtime():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+    assert "bounded 120 python3 -m pytest" in script
+    assert "timed out before finishing (no summary line)" in script
+
+
 def test_preinstall_source_repos_can_be_overridden_for_worktrees():
     script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
         encoding="utf-8")

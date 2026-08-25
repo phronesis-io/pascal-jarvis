@@ -58,6 +58,7 @@ Three complementary detectors (a brain-dead loop trips at least one):
 from __future__ import annotations
 
 from core.interval_config import resolve_effective_interval
+from core.textutil import task_display_name
 
 # Mirrors core.watermarks.STARVATION_FACTOR (kept local so this daemon-critical
 # module stays import-light and dependency-free for unit tests). 2x tolerates
@@ -197,28 +198,33 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
     brain_dead = (bool(priority_dead) or bool(wedged)
                   or len(starved) >= MIN_STARVED_FOR_SYSTEMIC)
 
-    # Alert text is boss-facing (it lands in Pascal's Lark): plain sentences,
-    # no internal jargon (last_success / envelope / PRIORITY / circuit). The
-    # diagnostic detail he'd never act on directly lives in jarvis.log, not here.
+    # Alert text is boss-facing (it lands in the owner's Lark): plain
+    # sentences, no internal jargon (last_success / envelope / PRIORITY /
+    # circuit), and the shared display name instead of the raw task id
+    # (2026-08-24 card-style audit). The diagnostic detail he'd never act on
+    # directly lives in jarvis.log, not here.
     # One line per task — a task tripping two detectors must not read twice.
     alerts: list[str] = []
     named: set = set()
     for name, fw in priority_dead:
-        alerts.append(f"{name} 最近一直在失败，没有一次成功")
+        alerts.append(f"「{task_display_name(name)}」最近一直在失败，没有一次成功")
         named.add(name)
     for name, age in wedged:
         if name in named:
             continue
+        display = task_display_name(name)
         if age > 0:
-            alerts.append(f"心跳任务 {name} 卡住 {_fmt_age(age)} 了，一直没有成功跑完")
+            alerts.append(
+                f"「{display}」这个后台任务卡住 {_fmt_age(age)} 了，"
+                f"一直没有成功跑完")
         else:
-            alerts.append(f"心跳任务 {name} 卡住了，一直没有成功跑完")
+            alerts.append(f"「{display}」这个后台任务卡住了，一直没有成功跑完")
         named.add(name)
     for name, age, interval in starved:
         if name in named:
             continue
         alerts.append(
-            f"{name} 已经 {_fmt_age(age)} 没有跑成过了"
+            f"「{task_display_name(name)}」已经 {_fmt_age(age)} 没有跑成过了"
             f"（正常应该每 {_fmt_age(interval)} 成功一次）")
         named.add(name)
 

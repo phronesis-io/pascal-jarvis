@@ -189,28 +189,99 @@ def check(now: datetime | None = None) -> str:
     return ""
 
 
+def last_call_decisions(now: datetime | None = None) -> list[dict]:
+    """Capped decisions whose deadline expires before the NEXT anchor.
+
+    ``ledger_only(24)`` gives a dropped decision its creation-morning
+    mention — but the decision deadline (48h escrow) is still more than a
+    day away at that moment, so the morning it actually expires has no
+    surface at all: the 2026-08-21 13:41 broadcast draft was named in the
+    8/22 anchor with the deadline 29h out, had rolled past the 24h window
+    by the 8/23 anchor, and lapsed at 13:41 that afternoon with nothing
+    saying so. This is the bounded follow-up: a still-pending, never-
+    delivered decision earns exactly ONE last call, on its final morning.
+    The two mentions are disjoint by construction — a deadline inside the
+    next 24h means the row was created more than 24h ago, outside the
+    ``ledger_only`` window.
+    """
+    from core.memorial import ATTENTION_DECISION, ESCROW_DEADLINE_H
+    moment = now or datetime.now()
+    horizon = moment + timedelta(hours=24)
+    deadline_h = ESCROW_DEADLINE_H[ATTENTION_DECISION]
+    events = _events()
+    # decide/lapse/resolve all end the pending state; a row Pascal already
+    # answered (or that the escrow sweep filed as 留中) owes him nothing.
+    closed = {str(e.get("id")) for e in events
+              if e.get("ev") in ("decide", "lapse", "resolve")}
+    ledger_ids = {str(e.get("id")) for e in events
+                  if e.get("ev") == "delivery"
+                  and str(e.get("status", "")) == "ledger_only"}
+    out: list[dict] = []
+    for e in events:
+        if e.get("ev") != "create":
+            continue
+        if str(e.get("attention", "")) != ATTENTION_DECISION:
+            continue
+        mid = str(e.get("id"))
+        if mid in closed or mid not in ledger_ids:
+            continue
+        try:
+            created = datetime.strptime(
+                str(e.get("ts", "")), "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        deadline = created + timedelta(hours=deadline_h)
+        # Already past → the overdue docket's business, not a fake last call.
+        if moment <= deadline < horizon:
+            out.append({"title": str(e.get("title", "")).strip(),
+                        "deadline": deadline})
+    return out
+
+
 def morning_digest_line(now: datetime | None = None) -> str:
     """One deterministic line for the morning anchor, or "".
 
     Data formatting is code's job — the anchor's LLM contract stays ONE
     hand-written line; this rides below it.
     """
-    rows = ledger_only(24, now=now)
+    moment = now or datetime.now()
+    rows = ledger_only(24, now=moment)
     # 攒批≥5 is the style contract's threshold for 周知. A card that was going
     # to ask Pascal for a decision and lost its slot to the daily cap is not
     # 周知 — holding it back for lacking four companions would be the same
     # silent drop this line exists to end, so any decision-class row in the
     # bin publishes the line on its own.
     decisions = [r for r in rows if str(r.get("attention", "")) == "decision"]
+
+    dying = last_call_decisions(now=moment)
+    last_call = ""
+    if dying:
+        def _when(deadline: datetime) -> str:
+            # At anchor time (~09:00) a next-24h deadline on tomorrow's date
+            # is always small hours, but the CLI can run any time of day —
+            # 明天 is never wrong, 明早 13:48 would be.
+            day = "今天" if deadline.date() == moment.date() else "明天"
+            return f"{day} {deadline.strftime('%H:%M')}"
+        parts = "、".join(
+            f"「{d['title'][:20] or '无题'}」{_when(d['deadline'])}"
+            for d in dying[:DIGEST_TITLES])
+        last_call = f"⏳ {parts} 到期"
+
     if len(rows) < DIGEST_MIN and not decisions:
+        if last_call:
+            # A last call publishes alone for the same reason a dropped
+            # decision does: it asked for a judgment and never arrived.
+            return f"{last_call}——先前被日额度挤掉，一直没送到过你手上"
         return ""
     titles = "／".join(
         str(r.get("title", "")).strip()[:20] or "无题"
         for r in (decisions or rows)[-DIGEST_TITLES:])
     if decisions:
-        return (f"📥 另有 {len(rows)} 条只进了归档，其中 {len(decisions)} 条"
+        line = (f"📥 另有 {len(rows)} 条只进了归档，其中 {len(decisions)} 条"
                 f"本来是要你拿主意的：{titles}")
-    return f"📥 另有 {len(rows)} 条周知只进了归档，扫一眼标题：{titles}"
+    else:
+        line = f"📥 另有 {len(rows)} 条周知只进了归档，扫一眼标题：{titles}"
+    return f"{line}；{last_call}" if last_call else line
 
 
 def main(argv: list[str]) -> int:

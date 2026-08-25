@@ -66,7 +66,7 @@ else
     cal_sync=$(grep -o 'synced [0-9-]* [0-9:]*' "$cal_file" | head -1)
     echo "Last sync: $cal_sync"
   else
-    echo "⚠️ No calendar_today.md found"
+    echo "⚠️ 日历快照文件一直没生成过——「日历同步」可能从没跑成"
   fi
 fi
 
@@ -148,7 +148,7 @@ if [ "$_stream_count" -eq 1 ]; then
   _recent_fails=$(tail -50 "$JARVIS_DIR/jarvis.log" 2>/dev/null | grep -c 'Connect failed' || true)
   _recent_ok=$(tail -50 "$JARVIS_DIR/jarvis.log" 2>/dev/null | grep -c 'Connected\. Streaming' || true)
   if [ "${_recent_fails:-0}" -ge 3 ] && [ "${_recent_ok:-0}" -eq 0 ]; then
-    echo "⚠️ Stream process alive but CONNECTION FAILING (${_recent_fails} recent retries, 0 successes) — EigenFlux messages are NOT flowing (likely server-side outage)"
+    echo "⚠️ EigenFlux 实时连接一直连不上（进程还在，最近 ${_recent_fails} 次重连全失败）——实时消息进不来，多半是对方服务端的问题"
   fi
 elif [ "$_stream_count" -eq 0 ]; then
   # No CLI child ≠ outage: the supervising loop (core.ef_stream_loop) kills
@@ -164,10 +164,10 @@ elif [ "$_stream_count" -eq 0 ]; then
   if [ "${_loop_alive:-0}" -ge 1 ]; then
     echo "✓ Stream between connections (supervisor alive — reconnect/restart window, self-heals)"
   else
-    echo "⚠️ Stream NOT running — real-time messages will not be received"
+    echo "⚠️ EigenFlux 实时接收没在运行——实时消息收不到了"
   fi
 else
-  echo "⚠️ $_stream_count stream processes found — competing connections cause 'Connection replaced' loop"
+  echo "⚠️ 发现 $_stream_count 个 EigenFlux 实时连接在同时抢线——会互相顶掉，得收敛成一个"
 fi
 fi  # _HAS_EF
 
@@ -192,7 +192,7 @@ echo ""
 echo ""
 (cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" python3 -m core.watermarks 2>/dev/null) \
   || echo "--- Channel Watermarks ---
-  ⚠️ watermark check itself failed to run"
+  ⚠️ 后台任务的健康检查这一步自己没跑成"
 
 # 7b. Component manifest (REQ-40): the single source of truth for "what
 #     should be running". Failures print as ⚠️ lines → REQ-39 alert path.
@@ -211,7 +211,7 @@ if [ -n "$_heartbeat_pid" ]; then
     --pid "$_heartbeat_pid" 2>/dev/null) \
     || true
 else
-  echo "⚠️ heartbeat-loop PID unavailable for resource check"
+  echo "⚠️ 找不到心跳调度进程，这次没法检查它占用的资源"
 fi
 
 # 7c. Intent breach daily check (REQ-35): silently-expired commitments in the
@@ -223,7 +223,7 @@ _dropped=$(sqlite3 "file:$JARVIS_DIR/data/jarvis.db?mode=ro" \
    AND (last_error LIKE 'auto-expired%' OR last_error LIKE '%expired after%attempts%') \
    AND triggered_at >= datetime('now','-1 day')" 2>/dev/null || echo "?")
 if [ "$_dropped" != "?" ] && [ "${_dropped:-0}" -gt 0 ]; then
-  echo "⚠️ $_dropped intent(s) dropped in the last 24h (expired after retries/stuck) — check breach cards went out"
+  echo "⚠️ 过去24小时有 $_dropped 个定时提醒重试多次仍失败、被放弃了——请核对补发卡片确实发出"
 else
   echo "✓ No silently dropped intents in the last 24h"
 fi
@@ -234,7 +234,7 @@ fi
 echo ""
 echo "--- Skipped Occurrences (24h) ---"
 (cd "$JARVIS_DIR" && python3 -m core.skip_digest --diag 2>/dev/null) \
-  || echo "⚠️ skip-digest 检查本身失败（python3 -m core.skip_digest --diag 非零退出）"
+  || echo "⚠️ 「被跳过的定时提醒」这项检查自己没跑成"
 
 # 7e. Perception source health: a source can be enabled, scheduled, and
 #     failing EVERY pass without anything noticing — the phronesis lark_chat

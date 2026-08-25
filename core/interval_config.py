@@ -21,6 +21,7 @@ ENGAGEMENT_TUNING_PROTECTED_TASKS = frozenset({
     "log-maintenance",
     "memorial-escrow",
     "memory-hourly",
+    "perception-collect",
     "provider-canary",
     "routine-run",
     "self-diagnostic",

@@ -76,13 +76,19 @@ _LIVE_RUNTIME_FILES = {
 
 
 def _bot_is_running() -> bool:
-    """True if the production heartbeat loop is live (so it may write runtime files)."""
+    """True if the production heartbeat loop is live.
+
+    macOS ``pgrep -f`` truncates long Homebrew-Python command lines before
+    their trailing ``-m core.heartbeat_loop``. Scan complete process args,
+    matching the same token sequence bot.sh uses, so the write guard does not
+    blame tests for files changed by a live production process.
+    """
     try:
         r = _SUBPROCESS_RUN(
-            ["pgrep", "-f", "core.heartbeat_loop"],
-            capture_output=True, timeout=5,
+            ["ps", "-eo", "args"],
+            capture_output=True, text=True, timeout=5,
         )
-        return r.returncode == 0
+        return r.returncode == 0 and "-m core.heartbeat_loop" in (r.stdout or "")
     except Exception:
         return False
 

@@ -389,6 +389,228 @@ def test_claude_call_default_mode_keeps_pre_index_memory_signature(
     assert "max_chars" in seen
 
 
+def test_system_prompt_prefix_is_stable_and_timestamp_comes_last(
+        tmp_path, monkeypatch):
+    """Prompt-cache diet (2026-08-24): the minute-fresh 'Current time' line
+    sat at char offset ~57, before the ~200k-char memory block — every call
+    invalidated the provider prompt cache for the whole prefix. It now closes
+    the system prompt: persona line → attention rules → acting → memory stay
+    byte-stable across calls, timestamp (same format, still in the system
+    prompt) comes after the memory content."""
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    captured_cmds = []
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "core.heartbeat.subprocess.run",
+        lambda cmd, **kw: captured_cmds.append(cmd) or _Result())
+    monkeypatch.setattr(
+        "core.heartbeat.load_tiered_memory",
+        lambda *_args, **_kwargs: "PRIVATE_MEMORY_SENTINEL",
+    )
+    runner.claude_call("hello")
+
+    cmd = captured_cmds[0]
+    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    lines = system_prompt.splitlines()
+    # (a) persona line directly followed by the attention-rules block.
+    assert lines[0].startswith("You are ")
+    assert lines[1].startswith("## 主动输出")
+    # (b) the timestamp appears exactly once, AFTER the memory content,
+    # in the unchanged "%Y-%m-%d %H:%M %A" format.
+    assert system_prompt.count("Current time:") == 1
+    assert (system_prompt.index("Current time:")
+            > system_prompt.index("PRIVATE_MEMORY_SENTINEL"))
+    import re as _re
+    assert _re.search(
+        r"Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z][a-z]+day\s*$",
+        system_prompt)
+
+
+def _usage_envelope(text: str, usage: dict | None = None,
+                    cost: float | None = None) -> str:
+    obj = {"type": "result", "subtype": "success", "result": text}
+    if usage is not None:
+        obj["usage"] = usage
+    if cost is not None:
+        obj["total_cost_usd"] = cost
+    return json.dumps(obj)
+
+
+def _read_llm_usage_events(runner):
+    path = runner.jarvis_dir / "sched_events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()
+            if json.loads(line).get("event") == "llm_usage"]
+
+
+def test_claude_call_json_envelope_returns_result_and_accounts_usage(
+        tmp_path, monkeypatch):
+    """Daemon usage accounting (2026-08-24): claude_call requests the JSON
+    envelope, hands .result to the existing pipeline unchanged, and books
+    the numeric usage/cost fields as an llm_usage scheduler event."""
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    captured_cmds = []
+
+    class _Result:
+        returncode = 0
+        stdout = _usage_envelope(
+            "the answer",
+            usage={"input_tokens": 12, "output_tokens": 34,
+                   "cache_creation_input_tokens": 5,
+                   "cache_read_input_tokens": 190000,
+                   "service_tier": "standard"},
+            cost=0.1234)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "core.heartbeat.subprocess.run",
+        lambda cmd, **kw: captured_cmds.append(cmd) or _Result())
+    assert runner.claude_call("hello") == "the answer"
+
+    cmd = captured_cmds[0]
+    assert cmd[cmd.index("--output-format") + 1] == "json"
+    events = _read_llm_usage_events(runner)
+    assert len(events) == 1
+    event = events[0]
+    assert event["provider"] == "primary"
+    assert event["model"] == "sonnet"
+    assert event["input_tokens"] == 12
+    assert event["output_tokens"] == 34
+    assert event["cache_creation_input_tokens"] == 5
+    assert event["cache_read_input_tokens"] == 190000
+    assert event["total_cost_usd"] == 0.1234
+    # Numbers only — non-numeric envelope fields never reach the ledger.
+    assert "service_tier" not in event
+    assert "result" not in event
+
+
+def test_claude_call_plain_text_stdout_keeps_old_behavior_no_event(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+
+    class _Result:
+        returncode = 0
+        stdout = "  plain old text  "
+        stderr = ""
+
+    monkeypatch.setattr("core.heartbeat.subprocess.run",
+                        lambda cmd, **kw: _Result())
+    assert runner.claude_call("hello") == "plain old text"
+    assert _read_llm_usage_events(runner) == []
+
+
+def test_claude_call_malformed_envelope_falls_back_without_event(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    for weird in ('{"result": ',            # truncated JSON
+                  '{"result": {"a": 1}}',   # non-string result
+                  '[1, 2, 3]'):             # not an object
+        class _Result:
+            returncode = 0
+            stdout = weird
+            stderr = ""
+
+        monkeypatch.setattr("core.heartbeat.subprocess.run",
+                            lambda cmd, **kw: _Result())
+        # Fail-open: raw stdout is the answer, exactly as before the flag.
+        assert runner.claude_call("hello") == weird.strip()
+    assert _read_llm_usage_events(runner) == []
+
+
+def test_bot_sh_defaults_warm_memory_mode_to_index():
+    """PR#100 shipped the index gate but nothing ever set the env var —
+    production silently kept injecting the full ~200k-char memory. bot.sh
+    now defaults it on (overridable from the ambient environment)."""
+    source = (Path(__file__).resolve().parent.parent / "bot.sh").read_text(
+        encoding="utf-8")
+    assert 'JARVIS_WARM_MEMORY_MODE="${JARVIS_WARM_MEMORY_MODE:-index}"' in source
+    assert "export JARVIS_WARM_MEMORY_MODE" in source
+
+
+def test_parse_heartbeat_full_memory_flag(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text("""
+### memory-consolidate
+- interval: 24h
+- heavy: true
+- full-memory: true
+- prompt: consolidate
+
+### checkin
+- interval: 30m
+- prompt: hi
+""")
+    by_name = {t["name"]: t for t in parse_heartbeat(hb)}
+    assert by_name["memory-consolidate"]["full_memory"] is True
+    # Absent flag defaults False — every other task keeps the index diet.
+    assert by_name["checkin"]["full_memory"] is False
+
+
+def test_production_memory_consolidate_is_declared_full_memory():
+    """Adversarial review 2026-08-24: with the warm-index diet on, the warm
+    tier's PRIMARY WRITER would get one-line index entries while its REPLACE
+    directives require verbatim warm text (unmatched REPLACE = silent no-op)
+    — consolidation would silently degrade daily."""
+    hb = Path(__file__).parents[1] / "HEARTBEAT.md"
+    tasks = {t["name"]: t for t in parse_heartbeat(hb)}
+    assert tasks["memory-consolidate"]["full_memory"] is True
+
+
+def test_full_memory_flag_overrides_index_env_others_stay_on_index(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setenv("JARVIS_WARM_MEMORY_MODE", "index")
+    seen = []
+
+    def _loader(memory_dir, *, max_chars=None, focus_text="", warm_mode="full"):
+        seen.append(warm_mode)
+        return "MEM"
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr("core.heartbeat.subprocess.run",
+                        lambda cmd, **kw: _Result())
+    monkeypatch.setattr("core.heartbeat.load_tiered_memory", _loader)
+
+    runner.claude_call("hello", full_memory=True)
+    runner.claude_call("hello")
+    assert seen == ["full", "index"]
+
+
+def test_run_cycle_threads_full_memory_flag_into_the_solo_call(
+        tmp_path, monkeypatch):
+    hb = (
+        "### memory-consolidate\n- interval: 24h\n- heavy: true\n"
+        "- full-memory: true\n- prompt: consolidate\n\n"
+        "### deep-dive\n- interval: 24h\n- heavy: true\n- prompt: dig\n"
+    )
+    runner = _make_runner(tmp_path, hb)
+    captured = []
+
+    def _fake_call(p, timeout=None, full_memory=False, **kwargs):
+        captured.append({"prompt": p, "full_memory": full_memory})
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True, only_task="memory-consolidate")
+    runner.run_cycle(force=True, only_task="deep-dive")
+
+    consolidate = next(c for c in captured
+                       if "memory-consolidate" in c["prompt"])
+    other = next(c for c in captured if "deep-dive" in c["prompt"])
+    assert consolidate["full_memory"] is True
+    assert other["full_memory"] is False
+
+
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")

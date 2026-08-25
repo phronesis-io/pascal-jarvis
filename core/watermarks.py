@@ -22,6 +22,7 @@ from core.interval_config import (
     parse_interval_overrides,
     resolve_effective_interval,
 )
+from core.textutil import task_display_name
 
 # A task is "starved" when it hasn't run for longer than this multiple of its
 # expected interval. 2x tolerates one missed slot before alarming.
@@ -70,6 +71,18 @@ def _fmt_age(seconds: float) -> str:
     return f"{int(seconds / 60)}min"
 
 
+def _fmt_age_cn(seconds: float) -> str:
+    """Chinese age for the ⚠️ lines — those land verbatim on the owner's
+    selfmon card and the guardian relay (card-style contract: 人话中文;
+    2026-08-24 audit found「reply-followup: last real success 5min ago —
+    STARVED」reaching the boss). Non-⚠️ info lines stay machine-flavored."""
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f} 天"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} 小时"
+    return f"{max(1, int(seconds / 60))} 分钟"
+
+
 # A queue entry is only "stuck" once a batch window has been open this long
 # without a flush — one heartbeat cycle plus headroom. Anything younger is the
 # queue working as designed (waiting for a window or a user-activity breakpoint).
@@ -108,9 +121,9 @@ def _queue_status_line(jd: Path, queue_depth: int, now: float) -> str:
         since_window = (mod - max(passed)) * 60
         flush_predates_window = now - last_flush > since_window + 60
         if flush_predates_window and since_window > QUEUE_OVERDUE_GRACE_SECONDS:
-            return (f"  ⚠️ Batch queue: {queue_depth} message(s) STUCK — the "
-                    f"{max(passed) // 60:02d}:{max(passed) % 60:02d} window opened "
-                    f"{_fmt_age(since_window)} ago without a flush")
+            return (f"  ⚠️ 有 {queue_depth} 条攒批消息卡住没发出去 — "
+                    f"{max(passed) // 60:02d}:{max(passed) % 60:02d} 的发送时段"
+                    f"已经过了 {_fmt_age_cn(since_window)}，一直没发出来")
     nxt = next((w for w in BATCH_WINDOWS_MIN if w > mod), None)
     when = (f"{nxt // 60:02d}:{nxt % 60:02d}" if nxt is not None
             else f"tomorrow {BATCH_WINDOWS_MIN[0] // 60:02d}:00")
@@ -148,8 +161,8 @@ def _delivery_queue_status_line(delivery: dict, now: float) -> str:
     overdue_count = (int(projected_overdue or 0)
                      if projected_overdue is not None else len(overdue))
     if overdue_count:
-        return (f"  ⚠️ Unified delivery: {overdue_count} of {depth} queued "
-                f"item(s) overdue after automatic flush/retry")
+        return (f"  ⚠️ 排队的 {depth} 条消息里有 {overdue_count} 条早该送到了，"
+                f"自动重试也没送出去")
     projected_next = delivery.get("next_queued_epoch")
     if projected_next is not None:
         try:
@@ -208,14 +221,20 @@ def channel_watermark_report(jarvis_dir: str | Path,
         last_status = ts.get("last_status", "")
         disabled_until = ts.get("circuit", {}).get("disabled_until", 0)
 
+        # ⚠️ lines are boss-facing (selfmon card + guardian relay): plain
+        # Chinese with the shared display name, never the raw task id
+        # (card-style contract, 2026-08-24 audit).
+        display = task_display_name(name)
         if disabled_until > now:
             circuits.append(
-                f"  ⚠️ {name}: circuit OPEN, re-enables in {_fmt_age(disabled_until - now)}")
+                f"  ⚠️ 「{display}」这个后台任务因为连续失败暂停了，"
+                f"{_fmt_age_cn(disabled_until - now)}后自动恢复")
             continue
         if last_status.startswith("pre_") and                 ts.get("circuit", {}).get("consecutive_failures", 0) >= 3:
             starved.append(
-                f"  ⚠️ {name}: pre-script failing ({last_status} ×"
-                f"{ts['circuit']['consecutive_failures']}) — channel data-gathering DEAD")
+                f"  ⚠️ 「{display}」这个后台任务一直取不到数据"
+                f"（连续 {ts['circuit']['consecutive_failures']} 次失败），"
+                f"这条渠道等于断了")
         if last_success == 0:
             # Within the fresh-install grace (2x the task's own interval since
             # install) a missing first run is the schedule, not an outage —
@@ -224,12 +243,15 @@ def channel_watermark_report(jarvis_dir: str | Path,
                                    + STARVATION_GRACE_SECONDS):
                 pending_first.append(name)
             else:
-                starved.append(f"  ⚠️ {name}: has NEVER run (expected every {_fmt_age(interval)})")
+                starved.append(
+                    f"  ⚠️ 「{display}」这个后台任务从来没跑成过"
+                    f"（正常 {_fmt_age_cn(interval)}一次）")
         elif now - last_success > (STARVATION_FACTOR * interval
                                    + STARVATION_GRACE_SECONDS):
             starved.append(
-                f"  ⚠️ {name}: last real success {_fmt_age(now - last_success)} ago "
-                f"(expected every {_fmt_age(interval)}) — STARVED")
+                f"  ⚠️ 「{display}」这个后台任务已经 "
+                f"{_fmt_age_cn(now - last_success)}没跑成了"
+                f"（正常 {_fmt_age_cn(interval)}一次）")
 
     from core.state_projection import delivery_overview
     delivery = delivery_overview(
@@ -257,7 +279,7 @@ def channel_watermark_report(jarvis_dir: str | Path,
             f"  ○ first run pending (installed {_fmt_age(now - install_ts)} ago"
             f" — normal): {', '.join(pending_first)}")
     if consec_fails > 0:
-        lines.append(f"  ⚠️ Lark delivery: {consec_fails} consecutive send failures")
+        lines.append(f"  ⚠️ 飞书消息连续 {consec_fails} 次没发出去")
     delivery_queue_line = _delivery_queue_status_line(delivery, now)
     if delivery_queue_line:
         lines.append(delivery_queue_line)

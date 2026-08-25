@@ -35,6 +35,7 @@ from core.log import log
 from core.sqlite_migrations import MigrationError, ensure_additive_columns
 from core.intent_envelope import ENVELOPE_SCHEMA_DOC, validate_envelope
 from core.intent_retry import deferred_until, is_deferred
+from core.textutil import closure_matter
 from core.timeutil import now_local, now_local_str
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
@@ -1891,7 +1892,7 @@ def _spawn_closure_followup(parent: dict) -> str | None:
 
     db = _get_db()
     fu_id = create_intent(
-        name=f"闭环: {parent['name']}",
+        name=(fu_name := f"跟进：{closure_matter(parent['name'])}"),
         trigger_type="date",
         trigger_config={"datetime": fu_dt.isoformat()},
         prompt=fu_prompt,
@@ -1914,8 +1915,7 @@ def _spawn_closure_followup(parent: dict) -> str | None:
     # only after that transaction commits.
     matter = _matter_for_intent(pid)
     if matter:
-        _link_new_intent(fu_id, f"闭环: {parent['name']}",
-                         {"matter_id": matter["id"]}, matter["id"])
+        _link_new_intent(fu_id, fu_name, {"matter_id": matter["id"]}, matter["id"])
     return fu_id
 
 
@@ -2102,7 +2102,7 @@ def generate_closure_reask_intents(now: datetime | None = None,
             f"如果还没答，就发这一条 notify 卡片；保持短，带按钮，不道歉、不施压。"
         )
         iid = create_intent(
-            name=f"闭环再问: {parent['name']}",
+            name=f"再问：{closure_matter(parent['name'])}",
             trigger_type="date",
             trigger_config={"datetime": fire_at.isoformat()},
             prompt=prompt,
@@ -2627,7 +2627,7 @@ def generate_calendar_intents(calendar_md: str,
                                 {"datetime": close_dt.isoformat()}, ensure_ascii=False))
                 elif close_dt >= now:
                     cid = create_intent(
-                        name=f"{title} 后闭环",
+                        name=f"{title}（事后跟进）",
                         trigger_type="date",
                         trigger_config={"datetime": close_dt.isoformat()},
                         prompt=(f"{title} 应该结束了。若 Pascal 提到，记录：聊了/做了什么值得跟进的？"

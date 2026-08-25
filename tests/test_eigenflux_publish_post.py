@@ -40,11 +40,59 @@ def test_info_broadcast_dropped(tmp_path):
 def test_supply_broadcast_carded(tmp_path):
     out = _run(_mk("supply"), tmp_path)
     assert "广播待确认" in out
-    assert "supply" in out
     card = json.loads(out)
     labels = [a["text"]["content"] for element in card["elements"]
               if element.get("tag") == "action" for a in element["actions"]]
     assert labels == ["发（确认广播）", "不发（取消）", "💬 聊聊这个", "🤔 看不懂"]
+    body = card["elements"][0]["text"]["content"]
+    # 2026-08-24 card-style audit: no English metadata opener; the card opens
+    # with a Chinese line, and the banner matches the 发/不发 buttons
+    # (decision, not「知道就行」).
+    assert "**类型**" not in body and "**领域**" not in body
+    assert "想对外" in body
+    assert "🎯 等你拍一个" in body
+    assert "知道就行" not in body
+
+
+def test_chinese_summary_leads_the_card(tmp_path):
+    payload = (
+        '{"should_publish":true,"content":"english broadcast body",'
+        '"source_url":"",'
+        '"notes":{"type":"insight","domains":["agents"],'
+        '"summary":"给其他智能体的一个观察","expire_time":"2026-07-01T00:00:00Z",'
+        '"source_type":"original"}}'
+    )
+    out = _run(payload, tmp_path)
+    card = json.loads(out)
+    body = card["elements"][0]["text"]["content"]
+    assert "想对外广播这条：给其他智能体的一个观察" in body
+
+
+def test_summary_cn_leads_the_card_and_never_ships_in_the_broadcast(tmp_path):
+    """notes.summary_cn (the drafting prompt's owner-facing line) wins over
+    the generic summary, and is POPPED from the persisted draft so the
+    outbound broadcast payload stays unchanged."""
+    payload = (
+        '{"should_publish":true,"content":"english broadcast body",'
+        '"source_url":"",'
+        '"notes":{"type":"insight","domains":["agents"],'
+        '"summary":"english summary","summary_cn":"一句给主人看的中文总结",'
+        '"expire_time":"2026-07-01T00:00:00Z","source_type":"original"}}'
+    )
+    out = _run(payload, tmp_path)
+    body = json.loads(out)["elements"][0]["text"]["content"]
+    assert "想对外广播这条：一句给主人看的中文总结" in body
+    draft = next((tmp_path / "eigenflux" / "pending_publish").glob("*.json"))
+    assert "summary_cn" not in json.loads(draft.read_text())["notes"]
+
+
+def test_publish_source_is_protected_from_engagement_demotion():
+    """The 8/24 audit found a 知道就行 banner over 发/不发 buttons: the
+    governor had demoted the source. Belt: explicit attention='decision';
+    suspenders: the source is protected so evaluate() never measures it into
+    a zombie override."""
+    from core.attention_roi import PROTECTED_SOURCES
+    assert "eigenflux-publish" in PROTECTED_SOURCES
 
 
 def test_demand_broadcast_carded(tmp_path):
@@ -60,7 +108,6 @@ def test_source_url_rendered_as_clickable_link(tmp_path):
 def test_insight_broadcast_carded(tmp_path):
     out = _run(_mk("insight"), tmp_path)
     assert "广播待确认" in out
-    assert "insight" in out
 
 
 def test_should_publish_false_no_card(tmp_path):

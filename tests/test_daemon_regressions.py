@@ -904,6 +904,18 @@ def test_deadletter_consume_notifies_and_truncates_in_place(deadletter_env):
     assert f.stat().st_size == 0
 
 
+def test_task_labels_disambiguate_display_collisions():
+    """Two DIFFERENT ids sharing a display name must not render as identical
+    rows in one failure list — each gets its raw id appended. The same id
+    repeated (multiple kinds) is not a collision, and unmapped ids stay raw."""
+    collided = daemon_mod._task_labels(["intentions", "intention-check"])
+    assert collided["intentions"] == "定时提醒（intentions）"
+    assert collided["intention-check"] == "定时提醒（intention-check）"
+    solo = daemon_mod._task_labels(["intention-check", "intention-check", "x-unknown"])
+    assert solo["intention-check"] == "定时提醒"
+    assert solo["x-unknown"] == "x-unknown"
+
+
 def test_deadletter_consume_groups_same_kind(deadletter_env):
     f, sent = deadletter_env
     f.write_text("".join(_dl_line("night_queue_expired", f"e{i}") for i in range(3)))
@@ -954,8 +966,10 @@ def test_sql_deadletter_notice_is_human_and_does_not_claim_failed_is_queued(
     assert len(sent) == 1
     assert "最终未送达" in sent[0]
     assert "只补发仍有效、仍未处理" in sent[0]
-    assert "eigenflux：2 条" in sent[0]
-    assert "mail：1 条" in sent[0]
+    # Source ids ride the shared display map (2026-08-24: bare truncated ids
+    # like「selfmon / c…」violated the card-style contract).
+    assert "EigenFlux：2 条" in sent[0]
+    assert "邮件：1 条" in sent[0]
     assert "已保留在统一投递队列" not in sent[0]
     assert "keychain" not in sent[0].lower()
     assert "API Error" not in sent[0]

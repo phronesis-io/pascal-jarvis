@@ -407,3 +407,86 @@ def test_obsolete_suppressions_stay_out_of_the_digest(tmp_path):
                        "ts": "2026-08-07 09:01", "status": "suppressed"})
     _write_ledger(tmp_path, events)
     assert presence.morning_digest_line(now=NOW) == ""
+
+
+# --- 2026-08-24: the last call on expiry morning -----------------------------
+# The 2026-08-21 13:41 broadcast draft lost its slot to the daily cap, was
+# named once in the 8/22 anchor (deadline still 29h away), and the 8/23
+# anchor — the morning it expired at 13:41 — said nothing: the 24h window had
+# rolled past it. Only an intention-check card improvising a save that morning
+# kept it from dying unseen; 8/14's draft had no such luck and lapsed silent.
+
+def test_capped_decision_gets_a_last_call_on_its_expiry_morning(tmp_path):
+    events = [
+        _created_at(0, "2026-08-05 13:41", title="EigenFlux 广播待确认",
+                    attention="decision"),
+        _ledger_only(0, ts="2026-08-05 13:41"),
+    ]
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)  # 8/7 12:00 — expires 13:41
+    assert "EigenFlux 广播待确认0" in line
+    assert "今天 13:41" in line and "到期" in line
+
+
+def test_no_last_call_while_the_deadline_is_still_a_day_out(tmp_path):
+    """Inside the creation window the row already gets the regular decision
+    mention; the ⏳ clause is reserved for the final morning."""
+    events = [
+        _created_at(0, "2026-08-06 13:41", attention="decision"),
+        _ledger_only(0, ts="2026-08-06 13:41"),
+    ]
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)  # deadline 8/8 13:41, 49h old
+    assert "拿主意" in line
+    assert "到期" not in line
+
+
+def test_no_last_call_after_the_deadline_has_passed(tmp_path):
+    """Past-deadline decisions belong to the overdue docket; a "last call"
+    for something already expired would be a false claim."""
+    events = [
+        _created_at(0, "2026-08-04 09:00", attention="decision"),
+        _ledger_only(0, ts="2026-08-04 09:00"),
+    ]
+    _write_ledger(tmp_path, events)
+    assert presence.morning_digest_line(now=NOW) == ""
+
+
+def test_answered_or_lapsed_rows_get_no_last_call(tmp_path):
+    events = [
+        _created_at(0, "2026-08-05 13:41", attention="decision"),
+        _ledger_only(0, ts="2026-08-05 13:41"),
+        {"ev": "lapse", "id": "mem_0", "ts": "2026-08-06 10:02"},
+        _created_at(1, "2026-08-05 14:00", attention="decision"),
+        _ledger_only(1, ts="2026-08-05 14:00"),
+        {"ev": "decide", "id": "mem_1", "ts": "2026-08-06 10:03",
+         "opt": "read", "label": "已阅"},
+    ]
+    _write_ledger(tmp_path, events)
+    assert presence.morning_digest_line(now=NOW) == ""
+
+
+def test_last_call_rides_below_the_batched_line(tmp_path):
+    events = [
+        _created_at(0, "2026-08-05 13:41", title="EigenFlux 广播待确认",
+                    attention="decision"),
+        _ledger_only(0, ts="2026-08-05 13:41"),
+    ]
+    for i in range(1, 7):
+        events.append(_created_at(i, "2026-08-07 09:00"))
+        events.append(_ledger_only(i))
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)
+    assert "6 条" in line and "归档" in line
+    assert "今天 13:41" in line and "到期" in line
+    assert line.count("\n") == 0, "the digest stays ONE line"
+
+
+def test_last_call_past_midnight_says_tomorrow(tmp_path):
+    events = [
+        _created_at(0, "2026-08-06 08:00", attention="decision"),
+        _ledger_only(0, ts="2026-08-06 08:00"),
+    ]
+    _write_ledger(tmp_path, events)
+    line = presence.morning_digest_line(now=NOW)  # deadline 8/8 08:00 <24h out
+    assert "明天 08:00" in line and "到期" in line

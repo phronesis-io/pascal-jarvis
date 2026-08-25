@@ -22,7 +22,7 @@ from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
 from .prompt_experiments import choose_variant, inject_variant
-from .safety import parse_json_response
+from .safety import parse_json_response, parse_result_envelope
 from .sched_events import emit as sched_emit
 from .task_protocol import (
     TaskState, output_source_marker, parse_output_source_marker,
@@ -401,7 +401,8 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
             current = {"name": line[4:].strip(), "interval": 600,
                         "pre": "", "post": "", "prompt": "",
                         "heavy": False, "timeout": None,
-                        "untrusted_input": False, "no_tools": False}
+                        "untrusted_input": False, "no_tools": False,
+                        "full_memory": False}
         elif current:
             if line.startswith("- interval:"):
                 current["interval"] = parse_interval(line.split(":", 1)[1])
@@ -427,6 +428,12 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
                 # while still being denied every local tool. This differs
                 # from untrusted-input, which also withholds private memory.
                 current["no_tools"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
+            elif line.startswith("- full-memory:"):
+                # Opt-out of the warm-index diet for the rare task that must
+                # see warm files VERBATIM (memory-consolidate: its REPLACE
+                # directives match warm text verbatim — index-fed runs would
+                # silently no-op them and rot the tier they maintain).
+                current["full_memory"] = line.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
             elif line.startswith("- timeout:"):
                 try:
                     current["timeout"] = int(line.split(":", 1)[1].strip())
@@ -523,6 +530,11 @@ class HeartbeatRunner:
         "iteration-observe",
         "log-maintenance",
         "memorial-escrow",
+        # perception-collect (2026-08-24): its "HEARTBEAT_OK unless the same
+        # source keeps failing" prompt was a deterministic check answered by a
+        # solo full-memory call every 15 min (~43% of all heartbeat LLM calls,
+        # 98% bare HEARTBEAT_OK); the post-script now replays it in code.
+        "perception-collect",
         "provider-canary",
     }  # deterministic pre/post work; no model call
 
@@ -718,12 +730,15 @@ class HeartbeatRunner:
         self._event("task_spawn", task=name, heavy=is_heavy,
                     isolation=isolation_reason)
         t0 = time.time()
+        call_kwargs = {"timeout": timeout}
+        if task.get("full_memory"):
+            call_kwargs["full_memory"] = True  # opt-out of the warm-index diet
         if task.get("untrusted_input"):
-            raw = self.claude_call(prompt, timeout=timeout, restrict_tools=True)
+            raw = self.claude_call(prompt, restrict_tools=True, **call_kwargs)
         elif task.get("no_tools"):
-            raw = self.claude_call(prompt, timeout=timeout, allow_tools=False)
+            raw = self.claude_call(prompt, allow_tools=False, **call_kwargs)
         else:
-            raw = self.claude_call(prompt, timeout=timeout)
+            raw = self.claude_call(prompt, **call_kwargs)
         dur = round(time.time() - t0, 2)
 
         ts = TaskState.from_dict(state.get(name, {}))
@@ -1095,7 +1110,8 @@ class HeartbeatRunner:
 
     def claude_call(self, prompt: str, timeout: int | None = None,
                      restrict_tools: bool = False,
-                     allow_tools: bool = True) -> str:
+                     allow_tools: bool = True,
+                     full_memory: bool = False) -> str:
         """Call Claude with memory injection, no session persistence.
 
         timeout: override the per-call subprocess budget (seconds). Heavy tasks
@@ -1104,6 +1120,8 @@ class HeartbeatRunner:
             content (see UNTRUSTED_INPUT_DISALLOWED_TOOLS docstring above).
         allow_tools: False for trusted read-only maintenance calls. Private
             memory remains available, but local tools are fail-closed.
+        full_memory: True keeps warm_mode='full' regardless of the
+            JARVIS_WARM_MEMORY_MODE env gate (HEARTBEAT.md `full-memory` flag).
         """
         call_timeout = timeout or self.claude_timeout
 
@@ -1180,10 +1198,11 @@ class HeartbeatRunner:
         # index mode the standing behavioral rules stay inline verbatim and
         # the reference notes become a one-line map the model reads from disk.
         # Fail-closed: a call with no file-reading tools MUST keep "full",
-        # otherwise the notes become unreachable rather than lazy.
+        # otherwise the notes become unreachable rather than lazy. A task's
+        # `full-memory` flag keeps "full" too (verbatim-warm-text editors).
         warm_mode = "full"
         if (os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip() == "index"
-                and allow_tools and not restrict_tools):
+                and allow_tools and not restrict_tools and not full_memory):
             warm_mode = "index"
         # Only pass warm_mode when it deviates from the default: an adapter
         # built against the pre-index signature (max_chars/focus_text only)
@@ -1213,10 +1232,11 @@ class HeartbeatRunner:
             # a network tool. Untrusted tasks get only their explicit DATA.
             memory = "(personal memory withheld for untrusted-input isolation)"
         now_ts = now_local_str("%Y-%m-%d %H:%M %A")
+        # The timestamp sits at the very END of the system prompt: everything
+        # before it is byte-stable across calls, so provider prompt caching
+        # can reuse the ~200k-char prefix (at the top, the minute-fresh line
+        # invalidated the whole prefix every call).
         system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
-Current time: {now_ts}
-You have access to the user's memory below. Use it to personalize your responses.
-
 ## 主动输出＝先判断注意力（任务指定了 JSON 格式的仍按任务格式）
 - 需要 Pascal 明确选择：才是待批奏折，必须给真实分支的 OPTIONS。
 - 紧急告警：可以不带 OPTIONS，系统会推飞书但不算待批。
@@ -1230,7 +1250,11 @@ You have access to the user's memory below. Use it to personalize your responses
 
 {self._acting_section(restrict_tools, allow_tools)}
 
-{memory}"""
+You have access to the user's memory below. Use it to personalize your responses.
+
+{memory}
+
+Current time: {now_ts}"""
         if direct_gpt:
             fallback_kwargs = {"restrict_tools": restrict_tools}
             if not allow_tools:
@@ -1246,6 +1270,9 @@ You have access to the user's memory below. Use it to personalize your responses
                     "--no-session-persistence",
                     "--system-prompt", system_prompt,
                     "--disable-slash-commands",
+                    # JSON envelope → per-call token/cost accounting; the
+                    # fail-open parse below keeps behavior otherwise identical.
+                    "--output-format", "json",
                     "-p", prompt,
                 ]
                 if restrict_tools or not allow_tools:
@@ -1302,7 +1329,14 @@ You have access to the user's memory below. Use it to personalize your responses
                             _gate_clear(self.jarvis_dir)
                         except Exception:
                             pass
-                    return result.stdout.strip()
+                    text, usage_fields = parse_result_envelope(result.stdout)
+                    if usage_fields is not None:  # numbers only, never text
+                        self._event(
+                            "llm_usage",
+                            provider=("backup2" if _backup2_active else
+                                      "backup1" if use_backup else "primary"),
+                            model=model or self.model, **usage_fields)
+                    return text.strip()
 
                 # warn, not info: the 7/7 spend-limit outage sat at level=info
                 # for 6.5h — 216 lines nobody was ever alerted to. (This also

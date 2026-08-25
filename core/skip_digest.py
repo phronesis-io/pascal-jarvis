@@ -403,9 +403,12 @@ def diag_line(jarvis_dir: Path = ROOT) -> str:
                 continue
             n += 1
         if n > 0:
-            return (f"⚠️ {n} 个定时事项在过去24h被停摆跳过"
-                    "（intent_occurrence_skipped / expires_at_lapsed）"
-                    "— 汇总告知/逐条补发卡应已排队，请核对确实发出")
+            # Boss-facing ⚠️ line (selfmon card + guardian relay): no internal
+            # event names — a card literally showed「intent_occurrence_skipped
+            # / expires_at_lapsed」to Pascal (2026-08-24 audit). The event
+            # classes live in this module's docstring for whoever debugs.
+            return (f"⚠️ 过去24小时有 {n} 个定时提醒因为系统停摆被跳过"
+                    "——汇总/补发卡片应已排队，请核对确实发出")
         return "✓ 过去24h没有定时事项被停摆跳过"
     except Exception as e:  # noqa: BLE001 — fail-open by contract
         return f"⚠️ skip-digest 检查本身失败：{e}"

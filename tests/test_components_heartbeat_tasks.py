@@ -98,7 +98,10 @@ def test_morning_2026_07_27_stall_is_no_longer_green(tmp_path):
     assert result["ok"] is False, "the 07-27 morning stall must not read green"
     assert "停摆" in result["detail"]
     # The operator must be told which task, not just that something is wrong.
-    assert "activity-log" in result["detail"]
+    # Since 2026-08-24 alerts carry the shared plain-Chinese display name
+    # instead of the raw task id (card-style contract).
+    from core.textutil import task_display_name
+    assert task_display_name("activity-log") in result["detail"]
 
 
 def test_healthy_scheduler_stays_green(tmp_path):
