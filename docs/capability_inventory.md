@@ -143,7 +143,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.selfmon` | core-cli | **keep** | `core/selfmon.py:638` | `core/selfmon.py:638` | python3 -m core.selfmon | `tests/test_delivery_pipeline.py:189`, `tests/test_memorial.py:137`, `tests/test_memorial_docket_quality.py:83` | - |
 | `cli:core.skip_digest` | core-cli | **keep** | `core/skip_digest.py:440` | `core/skip_digest.py:440` | python3 -m core.skip_digest | `tests/test_skip_digest.py:95`, `tests/test_skip_digest_arm.py:99` | - |
 | `cli:core.taskline_bridge` | core-cli | **keep** | `core/taskline_bridge.py:507` | `core/taskline_bridge.py:507` | python3 -m core.taskline_bridge | `tests/test_delegation_reconcile.py:224` | - |
-| `cli:core.triage_profile` | core-cli | **keep** | `core/triage_profile.py:76` | `core/triage_profile.py:76` | python3 -m core.triage_profile | `tests/test_triage_profile.py:59` | - |
+| `cli:core.triage_profile` | core-cli | **keep** | `core/triage_profile.py:84` | `core/triage_profile.py:84` | python3 -m core.triage_profile | `tests/test_triage_profile.py:62` | - |
 | `cli:core.usage_stats` | core-cli | **keep** | `core/usage_stats.py:605` | `core/usage_stats.py:605` | python3 -m core.usage_stats | `tests/test_capability_contracts.py:73` | - |
 | `cli:core.watermarks` | core-cli | **keep** | `core/watermarks.py:293` | `core/watermarks.py:293` | python3 -m core.watermarks | `tests/test_reliability_v2.py:423` | - |
 | `cli:core.weather` | core-cli | **keep** | `core/weather.py:208` | `core/weather.py:208` | python3 -m core.weather | `tests/test_weather.py:87` | - |

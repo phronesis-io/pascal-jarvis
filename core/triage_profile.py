@@ -8,7 +8,9 @@ read here.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 from core.config import Config
 
@@ -69,7 +71,13 @@ def render_profile(config: Config | None = None) -> str:
 
 
 def main() -> int:
-    print(render_profile())
+    runtime_root = os.environ.get("JARVIS_DIR", "").strip()
+    config = (
+        Config(Path(runtime_root) / "jarvis.yaml")
+        if runtime_root
+        else Config()
+    )
+    print(render_profile(config))
     return 0
 
 
