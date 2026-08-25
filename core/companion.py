@@ -442,12 +442,16 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="core.companion", description="陪伴式 checkin 的节奏与学习")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("brief", help="给 checkin prompt 用的预算块")
+    sub.add_parser("preflight", help="仍有卡片额度时返回成功，不输出内容")
     sub.add_parser("status", help="人看的状态")
     args = p.parse_args(argv)
 
     if args.cmd == "brief":
         print(brief())
         return 0
+
+    if args.cmd == "preflight":
+        return 0 if plan()["day_remaining"] > 0 else 1
 
     state = plan()
     hours = state["hours_since_spoke"]

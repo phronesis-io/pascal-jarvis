@@ -8,7 +8,7 @@ this reader aggregates them per day from sched_events.jsonl and rotations.
 
 import json
 
-from core.usage_stats import _cli, load_daemon_usage
+from core.usage_stats import _cli, load_daemon_usage, load_daemon_usage_routes
 
 
 def _write_events(path, events):
@@ -61,6 +61,23 @@ def test_load_daemon_usage_empty_dir_is_empty_not_an_error(tmp_path):
     assert load_daemon_usage(tmp_path) == []
 
 
+def test_load_daemon_usage_routes_groups_provider_and_model(tmp_path):
+    _write_events(tmp_path / "sched_events.jsonl", [
+        _usage("2026-08-24 09:00:00", input_tokens=7),
+        {**_usage("2026-08-24 10:00:00", input_tokens=8),
+         "provider": "openai", "model": "gpt-5.5"},
+        {**_usage("2026-08-24 11:00:00", input_tokens=9),
+         "provider": "openai", "model": "gpt-5.5"},
+    ])
+
+    assert load_daemon_usage_routes(tmp_path) == [
+        {"day": "2026-08-24", "provider": "openai",
+         "model": "gpt-5.5", "calls": 2},
+        {"day": "2026-08-24", "provider": "primary",
+         "model": "opus", "calls": 1},
+    ]
+
+
 def test_cli_daemon_mode_prints_table_and_is_read_only(
         tmp_path, monkeypatch, capsys):
     _write_events(tmp_path / "sched_events.jsonl", [
@@ -75,6 +92,8 @@ def test_cli_daemon_mode_prints_table_and_is_read_only(
     out = capsys.readouterr().out
     assert "2026-08-23" in out and "2026-08-24" in out
     assert "cost($)" in out  # at least one row carries cost
+    assert "provider/model" in out
+    assert "primary/opus" in out
     assert sorted(p.name for p in tmp_path.iterdir()) == before
 
     # Optional day cap: `--daemon 1` keeps only the newest day.

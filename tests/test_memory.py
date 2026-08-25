@@ -824,6 +824,32 @@ def test_warm_index_mode_keeps_rules_and_maps_the_rest(tmp_path):
     assert len(idx) < len(full)
 
 
+def test_warm_index_puts_stable_identity_and_guidance_before_volatile_state(
+        tmp_path):
+    """Prompt-cache prefix stays reusable while calendar/intents keep moving."""
+    hot = tmp_path / "hot"
+    warm = tmp_path / "warm"
+    hot.mkdir()
+    warm.mkdir()
+    (hot / "behavioral_rules.md").write_text("STABLE_RULES")
+    (hot / "user_profile.md").write_text("STABLE_PROFILE")
+    (hot / "active_intents.md").write_text("VOLATILE_INTENTS")
+    (hot / "calendar_today.md").write_text("VOLATILE_CALENDAR")
+    (warm / "feedback_never_guess.md").write_text("STABLE_GUIDANCE")
+    (warm / "project_note.md").write_text(
+        "---\ndescription: reference summary\n---\nREFERENCE_BODY")
+
+    output = load_tiered_memory(tmp_path, warm_mode="index")
+
+    stable_end = output.index("STABLE_GUIDANCE")
+    assert output.index("STABLE_RULES") < stable_end
+    assert output.index("STABLE_PROFILE") < stable_end
+    assert stable_end < output.index("VOLATILE_INTENTS")
+    assert stable_end < output.index("VOLATILE_CALENDAR")
+    assert output.index("VOLATILE_CALENDAR") < output.index("Knowledge Index")
+    assert "REFERENCE_BODY" not in output
+
+
 def test_warm_mode_rejects_unknown_value(tmp_path):
     import pytest
     (tmp_path / "warm").mkdir()

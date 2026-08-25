@@ -42,6 +42,22 @@ Lark event
 Group chat is fail-closed: curated group context, restricted tools, and no
 owner-private writes.
 
+Owner conversations and tool-capable heartbeat calls default to indexed warm
+memory. Stable identity and standing guidance remain inline at the start of
+the reusable prompt prefix; frequently changing calendar/intention state,
+the warm-file map, operational state, recent turns, and current time follow.
+Models fetch indexed reference notes from disk only when relevant. Restricted
+or no-tool calls retain full inline memory so index mode can never make
+knowledge unreachable.
+
+Heartbeat model choice is task policy, separate from provider execution.
+`HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`
+validates that declaration, isolates outbound/untrusted contexts, selects a
+compatible provider, and records the model that actually answered. One
+logical call owns one wall-clock budget. Provider recovery is measured by the
+small `provider-canary`; a full production prompt is never sacrificed as a
+health probe, and a timed-out tool-capable request is never replayed.
+
 ### Proactive Work
 
 ```text
@@ -154,6 +170,13 @@ evidence into Delegation so an Agent can recover context without treating its
 own prose as proof. A merged task starts its pending runtime-verification step
 even when its release SHA was bound in an earlier pass. Runtime proof accepts
 the exact release commit or a healthy resident descendant that contains it.
+
+The daily self-improvement coding session is detached from heartbeat model
+work. Its heartbeat pre-hook is expected to return no text; health is derived
+from an `acquire -> run -> release` receipt containing prompt/output digests,
+exit status, and timestamps. A missing release is reconciled as interrupted,
+failed sessions retry on a bounded clock, and self-diagnostic records a
+warning only after the automatic retry budget is exhausted.
 
 ## Module Boundaries
 
@@ -281,6 +304,21 @@ the exact release commit or a healthy resident descendant that contains it.
   background jobs and text-only auxiliary calls. Untrusted or derived text
   enters with all Claude/OpenAI tools disabled. Every configured provider
   selected by the route receives one bounded call before the chain advances.
+- `core.heartbeat_task_config`: parses task cadence/model/privacy declarations
+  and owns shared-batch eligibility; it never invokes a provider.
+- `core.heartbeat_provider`: normalizes provider usage and strips benign CLI
+  banners before failure evidence reaches the scheduler.
+- `core.triage_profile`: bounded, sanitized context for untrusted feed, mail,
+  friend-request, and recommendation inputs. It is configuration, not a copy
+  of private inboxes or full memory.
+- `core.memory_relevance`: exact, bounded warm-memory evidence for a named
+  due intent when indexed memory would otherwise hide the relevant file.
+- `core.change_gate` and `core.eigenflux_publish_material`: digest-only gates
+  that prevent unchanged maintenance or publication work from spending a
+  model call. Candidate private content is never stored in gate state.
+- `core.runtime_hygiene`: allowlisted permission repair and bounded retention
+  for runtime state. It preserves source/user-visible rows and open audit
+  evidence; it does not vacuum databases while active writers may exist.
 - `core.actions`: narrow dispatch for explicit system actions.
 - `core.memory`: tiered context selection, not an authority for mutable
   external facts.
@@ -369,6 +407,13 @@ incident, queued/attempting leaves it durably in flight without a local banner,
 and only a refused or dropped alert invokes the rate-limited macOS fallback.
 All Guardian and external dead-man payloads are `owner_private`; a failed owner
 route fails closed and never falls back to a group or public monitoring route.
+
+Process inspection is tri-state. An unavailable `ps` snapshot is unknown, not
+proof that the Lark listener died. Listener recovery targets only its owned
+sidecar; whole-stack recovery respects live session locks, requests a graceful
+bot shutdown first, and applies startup/wake grace before judging children.
+Recurring incident delivery uses a 24-hour dedup window, so one old recovery
+receipt cannot silence every future incident forever.
 
 The host itself is not a component and cannot be supervised into existence. A
 closed lid on battery sleeps the Mac whatever any `caffeinate` assertion says,

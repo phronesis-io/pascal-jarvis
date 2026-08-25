@@ -307,6 +307,101 @@ def test_root_id_strips_followup_suffix():
     assert ip._root_id("") == ""
 
 
+def test_named_publication_intents_share_one_matter_identity():
+    first = ip._intent_matter_identity(
+        "int_a", {"name": "Blog 05 三件待定（发布前最后一个整天）"})
+    second = ip._intent_matter_identity(
+        "int_b", {"name": "Blog 05 发布日——今天要合进官网仓库"})
+
+    assert first == second
+    assert first[1:] == ("Blog 05", "blog-05")
+
+
+def test_existing_intent_matter_link_wins_over_generated_identity(
+        tmp_path, monkeypatch):
+    import core.db as core_db
+    from core.matters import create_matter, link_entity
+
+    monkeypatch.setattr(core_db, "DB_PATH", tmp_path / "data" / "jarvis.db")
+    create_matter("既有主题", matter_id="mat_existing", source="test")
+    link_entity(
+        "mat_existing", "intent", "int_linked", provider="jarvis",
+        title="已经绑定的意图", actor="test",
+    )
+
+    identity = ip._intent_matter_identity(
+        "int_linked", {"name": "Blog 05 后来改过名字"}
+    )
+
+    assert identity == ("mat_existing", "既有主题", "matter:mat_existing")
+
+
+def test_unrelated_intents_do_not_merge_by_vague_prose():
+    first = ip._intent_matter_identity(
+        "int_a", {"name": "今天有三件事等你定"})
+    second = ip._intent_matter_identity(
+        "int_b", {"name": "今天有三件事等你定"})
+
+    assert first[0] != second[0]
+    assert first[2] != second[2]
+
+
+def test_single_authored_decision_reuses_pending_matter_card(
+        tmp_path, monkeypatch, capsys):
+    import core.memorial as memorial
+
+    monkeypatch.setattr(
+        ip, "_ensure_intent_matter",
+        lambda *_args, **_kwargs: ("mat_blog_05", "blog-05"),
+    )
+    monkeypatch.setattr(ip, "_matter_is_deferred", lambda _matter_id: False)
+    spec = [{
+        "intent_id": "int_blog_a",
+        "name": "Blog 05 发布前确认",
+        "row": {"name": "Blog 05 发布前确认"},
+    }]
+
+    assert ip._emit_closure_card(
+        "TITLE: Blog 05 还差一个判断\n正文\nOPTIONS: 现在做 | 先放着",
+        [], card_specs=spec,
+    ) is True
+    first_card = capsys.readouterr().out.strip()
+    assert ip._emit_closure_card(
+        "TITLE: Blog 05 换了措辞\n另一版正文\nOPTIONS: 去处理 | 先放着",
+        [], card_specs=spec,
+    ) is True
+    second_card = capsys.readouterr().out.strip()
+
+    states = memorial.list_memorials()
+    assert len(states) == 1
+    assert states[0]["matter_id"] == "mat_blog_05"
+    assert states[0]["dedup_key"] == "intent-decision:blog-05"
+    assert first_card == second_card
+
+
+def test_deferred_matter_emits_no_reworded_decision(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ip, "_ensure_intent_matter",
+        lambda *_args, **_kwargs: ("mat_blog_05", "blog-05"),
+    )
+    monkeypatch.setattr(ip, "_matter_is_deferred", lambda _matter_id: True)
+
+    rendered = ip._emit_closure_card(
+        "TITLE: Blog 05 又问一次\n正文\nOPTIONS: 做 | 不做",
+        [],
+        card_specs=[{
+            "intent_id": "int_blog_b",
+            "name": "Blog 05 发布日",
+            "row": {"name": "Blog 05 发布日"},
+        }],
+    )
+
+    captured = capsys.readouterr()
+    assert rendered is False
+    assert captured.out == ""
+    assert "deferred decision suppressed" in captured.err
+
+
 def test_recent_card_roots_reads_ledger(tmp_path, monkeypatch):
     import json, datetime
     ledger = tmp_path / ".intent_card_ledger.jsonl"

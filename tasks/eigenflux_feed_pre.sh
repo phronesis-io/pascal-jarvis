@@ -53,6 +53,8 @@ fi
 
 echo "User delivery preference: $pref"
 echo ""
+python3 -m core.triage_profile 2>/dev/null || true
+echo ""
 
 # Enrich each item with full details (URL, content) via feed get
 echo "Items (enriched with full details):"

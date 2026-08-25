@@ -134,3 +134,40 @@ machine, in `docs/delivery_retry_and_caps.md`.
 Never copy the app secret or tenant token into delivery rows, logs, test
 fixtures, command arguments, or Git. Bot API errors are recorded as bounded
 reason codes; only a real provider receipt can advance delivery to delivered.
+
+## ADR-004: Heartbeat Task Model And Context Policy
+
+**Status:** accepted
+
+- Product/task policy declares `model: opus|sonnet|haiku|gpt` in
+  `HEARTBEAT.md`; the execution harness validates it and records the provider
+  and model that actually answered.
+- GPT is an isolated provider route. Compatible Claude tasks may batch and use
+  the strongest declared Claude tier in that batch. A requested lower tier is
+  preserved through relay failover rather than silently becoming Opus.
+- Untrusted tasks have no tools and no personal memory. They may receive only
+  the sanitized `triage_profile` configuration. Outbound work removes private
+  inbox buffers and runs separately from inbound work.
+- One logical call owns one wall-clock budget. A production prompt is never a
+  health probe; `provider-canary` owns small recovery probes. Tool-capable
+  timeouts are not replayed because side effects may already have occurred.
+- Model assignment is changed by reviewed task policy and live quality/cost
+  evidence, not by an autonomous runtime quality downgrade.
+
+## ADR-005: Maintenance Gates And Runtime Retention
+
+**Status:** accepted
+
+- Expensive periodic work may use a digest-only change gate plus one daily
+  staleness pass. Candidate memory or publication prose is never persisted in
+  gate state.
+- Retention deletes only old operational detail from an allowlist. Source
+  envelopes, user-visible rows, open audit issues, and lifecycle receipts are
+  preserved. Active runtimes use `PRAGMA optimize`; VACUUM is an offline
+  maintenance operation, not a daemon task.
+- Runtime permission repair is allowlisted to private state directories/files
+  and skips symlinks. Temporary cleanup removes only old Jarvis-owned audit or
+  retired-Tailscale artifacts.
+- A removed heartbeat surface is recorded in capability inventory retirement
+  evidence. Default-disabled code with no production consumer is not counted
+  as an active product feature.

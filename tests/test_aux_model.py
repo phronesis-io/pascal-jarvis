@@ -66,6 +66,25 @@ def test_backup1_transport_failure_advances_to_backup2(tmp_path, monkeypatch):
     assert calls == ["backup1-token", "backup2-token"]
 
 
+def test_backup_preserves_requested_auxiliary_model_tier(tmp_path, monkeypatch):
+    model_fallback.trip("spend_limit", tmp_path)
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "claude-opus-5")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return _result(command, 0, stdout="cheap answer")
+
+    result = aux_model.run_auxiliary_model(
+        "small classification", root=tmp_path, model="haiku", runner=runner)
+
+    assert result.model == "haiku"
+    assert calls[0][calls[0].index("--model") + 1] == "haiku"
+
+
 def test_fresh_unhealthy_backup_is_skipped_by_auxiliary_route_plan(
     tmp_path, monkeypatch,
 ):

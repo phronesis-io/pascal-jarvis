@@ -47,6 +47,7 @@ def test_guardian_alert_has_durable_incident_identity(
     assert envelope.metadata["audience"] == "owner_private"
     assert envelope.metadata["recipient_type"] == "open_id"
     assert envelope.metadata["replayable"] is False
+    assert envelope.metadata["dedup_window_seconds"] == 24 * 3600
 
 
 @pytest.mark.parametrize(
@@ -137,6 +138,37 @@ def test_component_recovery_only_terminates_owned_exact_child(monkeypatch):
     assert killed == [(200, daemon_mod.signal.SIGTERM)]
 
 
+def test_component_recovery_skips_when_process_snapshot_is_unknown(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: None)
+    monkeypatch.setattr(
+        daemon_mod.os, "kill",
+        lambda *_args: pytest.fail("unknown ownership must never be killed"),
+    )
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    assert daemon_mod._request_component_recovery("lark-sidecar") is False
+
+
+def test_lark_listener_recovery_recycles_only_owned_sidecar(monkeypatch):
+    killed = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        200: (100, "python3 /repo/scripts/lark_event_sidecar.py"),
+        300: (1, "python3 /other/lark_event_sidecar.py"),
+    })
+    monkeypatch.setattr(
+        daemon_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    assert daemon_mod._request_component_recovery("lark-sidecar") is True
+    assert killed == [(200, daemon_mod.signal.SIGTERM)]
+
+
 def test_retired_dashboard_recovery_branch_stays_deleted(monkeypatch):
     """2026-08-21 retirement: an unknown/foreign component name — including
     the retired dashboard — must never trigger a recovery request."""
@@ -182,6 +214,73 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
     assert daemon_mod._ping_external_deadman() == \
         "withheld_transport_unhealthy"
     assert pinged == []
+
+
+def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
+    tmp_path, monkeypatch,
+):
+    from core import deadman
+
+    pinged = []
+    brain = tmp_path / ".daemon_brain_state.json"
+    brain.write_text(json.dumps({
+        "brain_dead": True,
+        "last_check_ts": time.time(),
+    }))
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "BRAIN_STATE_FILE", brain)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        deadman, "status", lambda _root: deadman.DeadmanResult("ok"))
+    monkeypatch.setattr(
+        deadman, "ping_due",
+        lambda _root: pinged.append(True) or deadman.DeadmanResult("ok"))
+
+    assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
+    assert pinged == []
+
+
+def test_daemon_log_rotation_keeps_multiple_generations(tmp_path, monkeypatch):
+    log_path = tmp_path / "daemon.log"
+    log_path.write_text("current-log-that-is-long\n")
+    (tmp_path / "daemon.log.1").write_text("generation-one\n")
+    (tmp_path / "daemon.log.2").write_text("generation-two\n")
+    (tmp_path / "daemon.log.3").write_text("generation-three\n")
+    monkeypatch.setattr(daemon_mod, "LOG_FILE", log_path)
+    monkeypatch.setattr(daemon_mod, "DAEMON_LOG_MAX_BYTES", 10)
+    monkeypatch.setattr(daemon_mod, "DAEMON_LOG_GENERATIONS", 3)
+
+    daemon_mod.log("INFO", "rotate now")
+
+    assert log_path.exists() and log_path.read_text() == ""
+    assert "current-log" in (tmp_path / "daemon.log.1").read_text()
+    assert (tmp_path / "daemon.log.2").read_text() == "generation-one\n"
+    assert (tmp_path / "daemon.log.3").read_text() == "generation-two\n"
+
+
+def test_repeated_identical_degraded_probe_logs_only_on_change(monkeypatch):
+    daemon_mod._last_degraded_details.clear()
+    daemon_mod._probe_alert_stamps.clear()
+    logged = []
+    alerted = []
+    monkeypatch.setattr(
+        daemon_mod, "log", lambda level, message: logged.append((level, message))
+    )
+    monkeypatch.setattr(
+        daemon_mod, "notify_lark",
+        lambda message, incident_key="": alerted.append((message, incident_key)),
+    )
+    monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)
+
+    payload = {"status": "degraded", "circuits_open": ["intention-check"]}
+    daemon_mod._note_degraded_health("admin :3456", payload)
+    daemon_mod._note_degraded_health("admin :3456", payload)
+
+    assert sum("DEGRADED" in message for _, message in logged) == 1
+    assert len(alerted) == 1
+
+    daemon_mod._note_degraded_health("admin :3456", {"status": "ok"})
+    assert any("recovered" in message for _, message in logged)
 
 
 def test_pid_parse_with_boot_timestamp(tmp_path, monkeypatch):
@@ -285,6 +384,9 @@ def beat_none_env(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda bot_pid=None: True)
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: None)
     monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    monkeypatch.setattr(
+        daemon_mod, "_session_lock_pid_is_ours", lambda pid: pid == 999,
+    )
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     return tmp_path
 
@@ -328,6 +430,9 @@ def test_daemon_stale_beat_with_active_session_carries_note(tmp_path, monkeypatc
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat",
                         lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
     monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    monkeypatch.setattr(
+        daemon_mod, "_session_lock_pid_is_ours", lambda pid: pid == 999,
+    )
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     (tmp_path / ".session_lock_abc").write_text("999 token")
 
@@ -448,6 +553,66 @@ def test_lark_listener_owned_by_bot_is_healthy(monkeypatch):
         200: (150, "python3 /repo/scripts/lark_event_sidecar.py"),
     })
     assert daemon_mod._is_lark_listener_alive() is True
+
+
+def test_lark_listener_ps_failure_is_unknown_not_dead(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: None)
+    assert daemon_mod._is_lark_listener_alive() is None
+
+
+def test_lark_listener_unknown_does_not_trigger_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda _pid: None)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: 10)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result["issues"] == []
+    assert result["note"] == "lark-listener-unknown"
+
+
+def test_lark_listener_startup_grace_does_not_trigger_restart(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda _pid: False)
+    monkeypatch.setattr(daemon_mod, "_find_last_heartbeat", lambda: 10)
+    monkeypatch.setattr(daemon_mod, "_daemon_started", time.time())
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is True
+    assert result["note"] == "daemon-start-grace"
+
+
+def test_stale_session_lock_does_not_hide_a_dead_heartbeat(
+        tmp_path, monkeypatch):
+    stale = tmp_path / ".session_lock_stale"
+    stale.write_text("999999 stale-token")
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_is_lark_listener_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        daemon_mod, "_find_last_heartbeat",
+        lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 1,
+    )
+    monkeypatch.setattr(
+        daemon_mod, "_session_lock_pid_is_ours", lambda _pid: False,
+    )
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+
+    result = daemon_mod.check_health()
+
+    assert result["healthy"] is False
+    assert result["issues"] == [
+        f"Heartbeat stale ({daemon_mod.HEARTBEAT_STALE_THRESHOLD + 1}s "
+        "since last beat)"
+    ]
 
 
 # ── Body-aware /health probing (stability backlog #6b, 2026-07-07) ──
@@ -599,6 +764,44 @@ def restart_env(monkeypatch, tmp_path):
     return state_file
 
 
+def test_restart_defers_while_an_owned_session_is_active(
+        monkeypatch, restart_env):
+    lock = daemon_mod.JARVIS_DIR / ".session_lock_live"
+    lock.write_text("123 token")
+    monkeypatch.setattr(daemon_mod, "_session_lock_pid_is_ours", lambda pid: True)
+    popens = []
+    monkeypatch.setattr(
+        daemon_mod.subprocess, "Popen",
+        lambda *a, **k: popens.append(a) or None,
+    )
+
+    result = daemon_mod.diagnose_and_fix(["Lark event listener is not running"])
+
+    assert "active session" in result
+    assert popens == []
+
+
+def test_graceful_bot_stop_sends_term_and_waits_for_pidfile_release(
+        tmp_path, monkeypatch):
+    pidfile = tmp_path / ".bot.pid"
+    pidfile.write_text("123 456")
+    monkeypatch.setattr(daemon_mod, "BOT_PID_FILE", pidfile)
+    alive = [123, None]
+    monkeypatch.setattr(
+        daemon_mod, "_bot_pid",
+        lambda: alive.pop(0) if alive else None,
+    )
+    signals = []
+    monkeypatch.setattr(
+        daemon_mod.os, "kill",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+    monkeypatch.setattr(daemon_mod.time, "sleep", lambda _seconds: None)
+
+    assert daemon_mod._stop_bot_gracefully() is True
+    assert signals == [(123, daemon_mod.signal.SIGTERM)]
+
+
 def test_restart_budget_persists_across_simulated_reload(monkeypatch, restart_env):
     state_file = restart_env
     monkeypatch.setattr(daemon_mod, "check_health",
@@ -741,6 +944,9 @@ def test_fake_healthy_via_session_lock_does_not_unlatch(monkeypatch, restart_env
     monkeypatch.setattr(daemon_mod, "_find_last_heartbeat",
                         lambda: daemon_mod.HEARTBEAT_STALE_THRESHOLD + 60)
     monkeypatch.setattr(daemon_mod, "_in_wake_grace", lambda now=None: False)
+    monkeypatch.setattr(
+        daemon_mod, "_session_lock_pid_is_ours", lambda pid: pid == 999,
+    )
     (daemon_mod.JARVIS_DIR / ".session_lock_abc").write_text("999 token")
 
     result = daemon_mod.check_health()

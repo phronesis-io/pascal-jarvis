@@ -132,3 +132,39 @@ def test_lapse_all_notice_names_a_filter_not_a_destination(env, monkeypatch):
     # 「去事项看」 is a dead end for whoever is already on the items page.
     assert "「事项」里翻回" not in message
     assert "「全部」" in message
+
+
+def test_lapse_all_defers_linked_matter_until_latest_known_due(env):
+    from datetime import timedelta
+
+    from core.actions import ActionProcessor
+    from core.intent_lifecycle import create_intent
+    from core.matters import create_matter, get_matter
+    from core.timeutil import now_local
+
+    matter_id = "mat_blog_05"
+    create_matter(
+        "Blog 05", kind="decision", source="test", matter_id=matter_id)
+    due = now_local() + timedelta(days=3)
+    create_intent(
+        "Blog 05 发布日", "date", {"datetime": due.isoformat()},
+        prompt="到期核对", source="test", matter_id=matter_id,
+    )
+    memorial.create(
+        source="intentions", title="Blog 05", body="还差一个判断",
+        preset="decision", attention=memorial.ATTENTION_DECISION,
+        matter_id=matter_id, send=False,
+    )
+    ap = ActionProcessor(
+        jarvis_dir=env.dir, memory_dir=str(env.dir), jobs_dir=str(env.dir),
+        log_file="", owner_authenticated=True,
+    )
+
+    ap._do_memorial_lapse_all("")
+
+    matter = get_matter(matter_id)
+    deferred = next(
+        event for event in matter["events"]
+        if event["event_type"] == "matter_deferred")
+    assert deferred["payload"]["reason"] == "lapse_all"
+    assert deferred["payload"]["until"] == due.isoformat()

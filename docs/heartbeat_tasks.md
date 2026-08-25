@@ -1,6 +1,6 @@
 # Jarvis — Heartbeat Tasks & the pre/post Pattern
 
-How the ~30 background behaviours (checkin, daily plan, calendar sync, eigenflux
+How the 38 background behaviours (checkin, calendar sync, EigenFlux,
 feed, memory upkeep …) are structured, and the conventions every task follows so
 they stay consistent instead of each re-inventing the same plumbing.
 
@@ -22,8 +22,10 @@ The heartbeat runs them as a pipeline, with Claude in the middle:
    (gather)                        (decide / write prose)                      (apply + format)        (user)
 ```
 
-- **pre.sh** never mutates state. It only collects context (calendar, feed items,
-  recent logs) and prints it. Silent on error (empty output, no stderr noise).
+- A normal **pre.sh** gathers bounded context and prints it. A small, explicit
+  claimed-work family (`intention-check`, routines, Tier 0 collectors) may
+  mutate an inflight/watermark state before execution; those tasks are marked
+  pipeline tasks and their post/recovery path must always reconcile the claim.
 - **post.py** is where all side effects live: parse Claude's response, write to
   memory/logs, and decide whether to surface a Lark card or stay silent.
 - The two share **no in-process state** — the pipe is the only channel. This makes
@@ -41,13 +43,32 @@ is the I/O loop that calls it every ~10s and routes output to Lark. Per cycle:
 1. Parse `HEARTBEAT.md` (task defs + intervals; cached on mtime).
 2. Pick tasks whose interval is due.
 3. Run their `*_pre.sh`, collect DATA.
-4. One batched Claude call with all due prompts + DATA.
+4. Tier 0 work goes directly to its deterministic post-hook. Remaining work is
+   grouped by compatible trust/privacy/model policy; GPT and outbound work are
+   isolated, while compatible Claude tasks may share one batch.
 5. Split the response per task, pipe each into its `*_post.py`.
 6. Route post-script stdout: `CARD:`/card-JSON → `lark_send_card`, plain text →
    `lark_send`, raw JSON → **blocked**. Update state.
 
 `daemon.py` is a separate guardian that restarts `bot.sh` if the loop dies or goes
 stale. See `docs/concurrency_and_bg_jobs.md` for the three execution lanes.
+
+## Model And Privacy Policy
+
+`HEARTBEAT.md` may declare `model: opus|sonnet|haiku|gpt`. Missing means the
+runner default. GPT is a provider route, not a Claude model alias, and always
+runs solo. A Claude batch selects the strongest explicitly declared tier in
+that batch. Requested lower tiers remain lower tiers through relays.
+
+`untrusted-input: true` disables tools and withholds personal memory. Those
+tasks receive only an allowlisted `triage_profile` when relevance context is
+needed. `memory-purpose: outbound` removes private inbox buffers and forces an
+isolated call. No task may put untrusted external text and private memory in
+the same prompt.
+
+The call chain has one wall-clock budget. Provider health is measured by
+`provider-canary`; a full task prompt is never reused as a probe. A timeout
+after tool access is ambiguous and cannot be replayed.
 
 ---
 
@@ -85,7 +106,11 @@ Supporting rules baked into those helpers:
 | `jsonl.py` | Rolling JSONL store (read/write/append) |
 | `card.py` | Lark interactive card JSON (+ `richview.py` for full-page detail links) |
 | `timeutil.py` | TZ-robust local time |
-| `memory.py` | Load tiered memory (hot/warm/timeline/system) — used by the prompt builder |
+| `memory.py` | Load stable-first tiered memory; indexed warm references are the production default |
+| `triage_profile.py` | Sanitized, bounded relevance config for untrusted inputs |
+| `memory_relevance.py` | Exact bounded warm evidence for named due intents |
+| `change_gate.py` | Digest-only skip gate for unchanged maintenance work |
+| `eigenflux_publish_material.py` | New-material gate without persisting candidate prose |
 | `heartbeat.py` / `heartbeat_loop.py` | Task scheduling/orchestration vs. the I/O loop |
 | `tasks.py` / `intentions.py` | Persistent stores for the task-triage and intent subsystems |
 
@@ -99,11 +124,12 @@ tasks, and are not part of this contract.
 
 | Family | Members | Shares |
 |--------|---------|--------|
-| Memory upkeep | hourly / daily / weekly / monthly / consolidate / tidy | timeline files, archive logic |
-| EigenFlux | feed / research / friends / messages / profile / publish | `eigenflux` CLI calls, the publish-confirm flow |
-| Daily rhythm | daily-plan / daily-reflect / activity-log / free-time-nudge / checkin | rich cards, JSONL logs |
-| Task system | task-triage / weekly-review | `core.tasks` store |
-| Standalone | calendar-sync, intentions, content-recommend, cross-session, engagement-analyze, phronesis-monitor, thinking-review, perception-collect | — |
+| Memory upkeep | hourly / daily / weekly / consolidate / tidy | rolling timeline, digest, change gate |
+| EigenFlux | inbox reconcile / feed / friends / profile / publish / preinstall | EigenFlux CLI, private approval, material gate |
+| Daily rhythm | daily-plan / daily-reflect / activity-log / checkin / morning-anchor / exercise-week | companion budget, cards, rolling logs |
+| Intent and task | intention-check / routine-run / weekly-review / delegation-reconcile | claim/reconcile lifecycle, Matters |
+| Operations | calendar-sync / perception / metrics / provider-canary / log-maintenance / self-diagnostic | deterministic Tier 0 and bounded alerts |
+| Analysis | cross-session / engagement / phronesis / thinking / repos / iteration | private digests and proposal state |
 
 ---
 

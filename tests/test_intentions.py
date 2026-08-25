@@ -7,10 +7,19 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from core.timeutil import now_local
+
+
+def _future_datetime(days: int = 365) -> str:
+    return (now_local() + timedelta(days=days)).replace(
+        tzinfo=None, microsecond=0,
+    ).isoformat()
 
 
 def test_runtime_sidecars_follow_jarvis_dir_on_import(tmp_path):
@@ -172,7 +181,7 @@ def test_create_and_get(intent_db):
     iid = create_intent(
         name="test intent",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
         prompt="remind me",
     )
     assert iid
@@ -225,14 +234,14 @@ def test_projection_cancel_restores_parent_and_closure_followup(intent_db):
     parent = create_intent(
         name="等待委托",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
         closure_question="完成了吗？",
         closure_status="awaiting",
     )
     followup = create_intent(
         name="确认委托结果",
         trigger_type="date",
-        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        trigger_config={"datetime": _future_datetime(366)},
         source="closure",
         parent_intent_id=parent,
     )
@@ -281,7 +290,7 @@ def test_shared_intent_waits_for_every_terminal_projection(intent_db):
     intent_id = create_intent(
         name="共享委托跟进",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
     )
     first = "delegation:dlg-a:completed"
     second = "delegation:dlg-b:completed"
@@ -310,13 +319,13 @@ def test_manual_followup_cancellation_survives_parent_projection_rollback(
     parent = create_intent(
         name="等待共享结果",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
         closure_status="awaiting",
     )
     followup = create_intent(
         name="确认共享结果",
         trigger_type="date",
-        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        trigger_config={"datetime": _future_datetime(366)},
         source="closure",
         parent_intent_id=parent,
     )
@@ -345,13 +354,13 @@ def test_parent_projection_does_not_claim_independently_cancelled_followup(
     parent = create_intent(
         name="等待独立结果",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
         closure_status="awaiting",
     )
     followup = create_intent(
         name="独立取消的跟进",
         trigger_type="date",
-        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        trigger_config={"datetime": _future_datetime(366)},
         source="closure",
         parent_intent_id=parent,
     )
@@ -392,13 +401,13 @@ def test_manual_parent_cancellation_permanently_suppresses_followup(intent_db):
     parent = create_intent(
         name="用户终止的事项",
         trigger_type="date",
-        trigger_config={"datetime": "2026-12-31T09:00:00"},
+        trigger_config={"datetime": _future_datetime()},
         closure_status="awaiting",
     )
     followup = create_intent(
         name="不应再出现的追问",
         trigger_type="date",
-        trigger_config={"datetime": "2027-01-01T09:00:00"},
+        trigger_config={"datetime": _future_datetime(366)},
         source="closure",
         parent_intent_id=parent,
     )

@@ -28,6 +28,7 @@ from core.intent_scheduler import (
 )
 from core.intent_closure import generate_closure_reask_intents
 from pathlib import Path
+from core.memory_relevance import relevant_warm_lines
 
 # 0. Lifecycle sweep: retry stuck intents (bounded), expire exhausted ones
 #    with a breach notification, retire awaiting-closure zombies (TTL).
@@ -146,6 +147,25 @@ if breaches:
         "was_due_at": b.get("trigger_time", ""),
         "attempts": b.get("attempt", 0),
     } for b in breaches]
+
+# Index-mode memory intentionally leaves most warm files out of the model
+# prompt. Retrieve a small exact projection for THIS due batch so a known
+# person/project cannot be mislabeled "not in memory" merely because its file
+# was indexed instead of expanded.
+queries = []
+for intent in due:
+    queries.extend([
+        str(intent.get("name") or ""),
+        str(intent.get("prompt") or ""),
+        str(intent.get("context") or ""),
+    ])
+try:
+    matches = relevant_warm_lines(os.environ["MEMORY_DIR"], queries)
+except Exception as e:
+    print(f"[intentions] warm retrieval error: {e}", file=sys.stderr)
+    matches = []
+if matches:
+    output["memory_matches"] = matches
 
 print(json.dumps(output, ensure_ascii=False))
 PYTHON

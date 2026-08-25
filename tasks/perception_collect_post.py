@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.timeutil import now_local
+from core.textutil import ellipsize, task_display_name
 
 # "Failing repeatedly" = this many consecutive failed passes. Deliberately
 # below core.perception's STUCK_ERROR_STREAK (10, the dead-channel line the
@@ -94,9 +95,11 @@ def _card(sid: str, count: int, since: str) -> str:
     # line is the delivery layer's admission ticket — memorialize_output(...,
     # require_work_receipt=True) drops receipt-less prose before create() —
     # and states only what this script verifiably did.
-    return (f"TITLE: 感知源「{sid[:20]}」连续{count}次没抓到数据\n"
-            f"WORKED: 核对了「{sid}」的连续失败记录，确认 24 小时内没提醒过\n"
-            f"感知源「{sid}」连续 {count} 次没抓到数据{since}，我在自动重试。\n"
+    display = task_display_name(sid)
+    short_display = ellipsize(display, 20)
+    return (f"TITLE: 感知源「{short_display}」连续{count}次没抓到数据\n"
+            f"WORKED: 核对了「{display}」的连续失败记录，确认 24 小时内没提醒过\n"
+            f"感知源「{display}」连续 {count} 次没抓到数据{since}，我在自动重试。\n"
             f"修好之前，这个源盯着的动静会漏。知道就行。")
 
 

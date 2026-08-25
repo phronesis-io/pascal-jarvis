@@ -170,14 +170,26 @@ def test_pre_hook_blocks_on_active_pending(tmp_path):
     assert "awaiting user approval" in r.stderr
 
 
-def test_pre_hook_expires_stale_pending_and_proceeds(tmp_path):
+def test_pre_hook_expires_stale_pending_but_skips_without_new_material(tmp_path):
     f = _seed_pending(tmp_path, "1000_1.json", age_seconds=49 * 3600)
     r = _run_pre(tmp_path)
     assert r.returncode == 0
     assert not f.exists()
     expired = tmp_path / "eigenflux" / "pending_publish" / "expired" / "1000_1.json"
     assert expired.exists()
+    assert r.stdout.strip() == ""
+
+
+def test_pre_hook_proceeds_when_recent_material_exists(tmp_path):
+    memory = tmp_path / ".claude" / "projects" / "-Users-pascal-Desktop-jarvis" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "new-insight.md").write_text("# A new grounded insight\n", encoding="utf-8")
+
+    r = _run_pre(tmp_path)
+
+    assert r.returncode == 0
     assert "Ready to publish" in r.stdout
+    assert "A new grounded insight" in r.stdout
 
 
 def test_expired_draft_lapses_its_approval_card(tmp_path):

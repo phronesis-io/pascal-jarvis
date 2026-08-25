@@ -63,6 +63,21 @@ def test_repeated_failure_yields_one_plain_notice_card(tmp_path):
     assert "python3" not in out
 
 
+def test_known_source_uses_plain_display_name_in_every_visible_line(tmp_path):
+    _write_state(tmp_path, {
+        "pgc_pulse": {"error_count": 4, "error_type": "timeout"},
+    })
+
+    out = pcp.run(
+        "collected=0 deduped=0 errors=1 notes: pgc_pulse: timeout",
+        jarvis_dir=tmp_path,
+        now=NOW,
+    )
+
+    assert "PGC 指标日报" in out
+    assert "pgc_pulse" not in out
+
+
 def test_same_source_is_suppressed_for_24h_then_realerts(tmp_path):
     _write_state(tmp_path, {"src_a": {"error_count": 4,
                                       "error_type": "http_error"}})

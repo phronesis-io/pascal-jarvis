@@ -953,7 +953,7 @@ def _shadow_audit_claims(output: str, jarvis_dir: Path) -> None:
 
 
 def _record_memorial_delivery(jarvis_dir: Path, memorial_id: str,
-                              status: str) -> None:
+                              status: str, message_id: str = "") -> None:
     """Append a delivery event to the memorial ledger in this runtime root."""
     if not memorial_id:
         return
@@ -961,9 +961,17 @@ def _record_memorial_delivery(jarvis_dir: Path, memorial_id: str,
         from core.memorial_ledger import ledger_lock
         ledger = jarvis_dir / "memorials.jsonl"
         with ledger_lock(ledger), open(ledger, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ev": "delivery", "id": memorial_id,
-                                "status": status, "ts": now_local_str()},
+            event = {"ev": "delivery", "id": memorial_id,
+                     "status": status, "ts": now_local_str()}
+            if message_id:
+                event["message_id"] = message_id
+            f.write(json.dumps(event,
                                ensure_ascii=False) + "\n")
+            if isinstance(message_id, str) and message_id.startswith("om_"):
+                f.write(json.dumps({
+                    "ev": "sent", "id": memorial_id,
+                    "lark_message_id": message_id, "ts": now_local_str(),
+                }, ensure_ascii=False) + "\n")
     except OSError as e:
         log("heartbeat", f"memorial delivery ledger update failed: {e}",
             level="warn")
@@ -988,6 +996,40 @@ def _record_memorial_suppression(jarvis_dir: Path, memorial_id: str,
     from core.memorial import suppressed_delivery_status
     _record_memorial_delivery(
         jarvis_dir, memorial_id, suppressed_delivery_status(reason))
+
+
+def _project_delivery_flush_results(jarvis_dir: Path, results: list) -> None:
+    """Mirror authoritative queue outcomes into the memorial event ledger."""
+    if not results:
+        return
+    try:
+        from core.delivery import DeliveryPipeline
+        pipeline = DeliveryPipeline(jarvis_dir)
+    except Exception as exc:
+        log("heartbeat", f"delivery projection unavailable: {exc}", level="warn")
+        return
+    for result in results:
+        try:
+            row = pipeline.get(str(result.delivery_id)) or {}
+            memorial_id = str(row.get("memorial_id") or "")
+            if not memorial_id:
+                continue
+            if result.state == "delivered":
+                _record_memorial_delivery(
+                    jarvis_dir, memorial_id, "delivered",
+                    str(result.message_id or row.get("message_id") or ""),
+                )
+            elif result.state == "suppressed":
+                _record_memorial_suppression(
+                    jarvis_dir, memorial_id,
+                    str(result.reason or row.get("last_error") or "suppressed"),
+                )
+        except Exception as exc:
+            log(
+                "heartbeat",
+                f"delivery result projection failed: {type(exc).__name__}",
+                level="warn",
+            )
 
 
 def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
@@ -1064,8 +1106,19 @@ def _flush_memorial_queue(jarvis_dir: Path, user_id: str) -> str:
                      detail="no user_id; intact cards retained")
         return FLUSH_RETRYABLE
 
-    selected = active[:MEMORIAL_FLUSH_MAX_CARDS]
-    deferred = active[MEMORIAL_FLUSH_MAX_CARDS:]
+    # One source gets at most one slot per flush. A feed burst must not consume
+    # all six morning positions and crowd out routines or owner decisions.
+    selected: list[dict] = []
+    deferred: list[dict] = []
+    selected_sources: set[str] = set()
+    for entry in active:
+        source = str(entry.get("source") or "memorial")
+        if (len(selected) < MEMORIAL_FLUSH_MAX_CARDS
+                and source not in selected_sources):
+            selected.append(entry)
+            selected_sources.add(source)
+        else:
+            deferred.append(entry)
     delivered: list[dict] = []
     retained: list[dict] = []
     attempted_failure: dict | None = None
@@ -1882,7 +1935,7 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
         # alongside it until every pre-unification row has aged out.
         try:
             from core.delivery import flush_due as flush_delivery_due
-            flush_delivery_due(jd)
+            _project_delivery_flush_results(jd, flush_delivery_due(jd))
         except Exception as e:
             log("heartbeat", f"delivery queue flush failed: {e}", level="warn")
 

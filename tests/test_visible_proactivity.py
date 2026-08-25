@@ -6,6 +6,7 @@ import importlib.util
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -46,6 +47,13 @@ def test_memorial_signal_routes_to_lark_and_ambient_to_ledger(
     monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_test")
     monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_test")
     monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    fixed_now = datetime(2032, 1, 15, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(memorial, "now_local", lambda: fixed_now)
+    monkeypatch.setattr(
+        memorial,
+        "now_local_str",
+        lambda fmt="%Y-%m-%d %H:%M": fixed_now.strftime(fmt),
+    )
 
     memorial_id, accepted = memorial.create(
         "eigenflux-feed-triage",
@@ -179,7 +187,7 @@ def test_core_rejects_nonpositive_interval(intent_db):
 
 @pytest.mark.parametrize("legacy_config", [[], "legacy", 1])
 def test_legacy_nonobject_interval_config_recovers_after_success(
-        intent_db, legacy_config):
+        intent_db, legacy_config, monkeypatch):
     from core.intentions import (
         create_intent,
         get_intent,
@@ -198,7 +206,10 @@ def test_legacy_nonobject_interval_config_recovers_after_success(
         (json.dumps(legacy_config), iid),
     )
     db.commit()
-    before = now_local().replace(tzinfo=None)
+    fixed_now = datetime(2032, 1, 15, 10, 30,
+                         tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr("core.intentions.now_local", lambda: fixed_now)
+    before = fixed_now.replace(tzinfo=None)
 
     mark_triggered(iid)
     mark_executed(iid, "handled")
@@ -206,8 +217,7 @@ def test_legacy_nonobject_interval_config_recovers_after_success(
     row = get_intent(iid)
     next_fire = datetime.fromisoformat(row["next_fire_at"])
     assert row["status"] == "pending"
-    assert timedelta(minutes=9, seconds=50) <= next_fire - before
-    assert next_fire - before <= timedelta(minutes=10, seconds=10)
+    assert next_fire - before == timedelta(minutes=10)
 
 
 @pytest.mark.parametrize("legacy_config", [[], "legacy", 1])

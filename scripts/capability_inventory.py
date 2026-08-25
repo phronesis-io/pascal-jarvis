@@ -44,6 +44,10 @@ RETIRED_SURFACES = {
     "mobile gateway :3458 + Tailscale funnel": (
         "retired 2026-08-11 (REQ-120); Lark is the only mobile surface."
     ),
+    "standalone content recommendation heartbeat": (
+        "retired 2026-08-25 after 14 days with no production runs; it was "
+        "disabled by default and duplicated external recommendation products."
+    ),
 }
 STATUS_REQUIREMENTS = {
     "keep": [

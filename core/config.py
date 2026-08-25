@@ -92,6 +92,12 @@ _DEFAULTS = {
             "timeout_seconds": 5,
         },
     },
+    "triage_profile": {
+        "domains": [],
+        "projects": [],
+        "organizations": [],
+        "portfolio_sectors": [],
+    },
     "plugins": {},
 }
 

@@ -10,12 +10,32 @@ the same records instead of silently losing the day's digest.
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.safety import looks_like_error, parse_json_response, sentinel_present
+
+
+_METRIC_DISPLAY_NAMES = {
+    "pgc_pulse": "新闻抓取",
+    "user_growth": "用户增长",
+    "broken_first_party": "一手数据源异常数",
+}
+_INTERNAL_METRIC_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b")
+_TRANSPORT_STATUS_RE = re.compile(
+    r"(?:HTTP\s*|返回\s*)[45]\d{2}\b", re.IGNORECASE)
+
+
+def _plain_metric_copy(text: str) -> str:
+    """Keep probe implementation names and transport codes off user cards."""
+    result = str(text or "")
+    for internal, display in _METRIC_DISPLAY_NAMES.items():
+        result = re.sub(rf"\b{re.escape(internal)}\b", display, result)
+    result = _TRANSPORT_STATUS_RE.sub("服务响应异常", result)
+    return _INTERNAL_METRIC_RE.sub("相关指标", result)
 
 
 def _metrics_dir() -> Path:
@@ -62,7 +82,8 @@ def main() -> int:
         body = str(card.get("body") or "").strip()
         if header and body:
             print(build_card(
-                header, body, source="metrics-digest",
+                _plain_metric_copy(header), _plain_metric_copy(body),
+                source="metrics-digest",
                 work_receipt="聚合运行指标、完成异常归因和重复信号压缩",
             ))
     _promote_watermark()

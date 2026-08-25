@@ -210,6 +210,7 @@ def plain_user_copy(text: str) -> str:
 _FRAMING_LINE_RE = _re.compile(
     r"^\s*(?:"
     r"===\s*TASK[^=\n]*==="            # === TASK: checkin ===
+    r"|HEARTBEAT\s*[—-]\s*\d+\s+cards?\.?"  # HEARTBEAT — 1 card.
     r"|\[[A-Z][A-Z_ -]{1,24}\]"        # [CHECKIN], [DAILY PLAN]
     # [ts] taskname — the tail class is ASCII-only ON PURPOSE: task names are
     # ASCII identifiers, while CJK prose has no spaces, so a \S tail would

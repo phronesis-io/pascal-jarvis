@@ -27,9 +27,12 @@ import json
 import os
 import re
 import ssl
+import sys
 import time
 from email.header import decode_header
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # --- knobs -------------------------------------------------------------------
 MAX_PER_CYCLE = int(os.environ.get("JARVIS_MAIL_MAX_PER_CYCLE", "15"))
@@ -361,7 +364,9 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 def render(records: list[dict]) -> str:
     """Render enriched emails as the DATA block the heartbeat prompt reads."""
-    chunks = []
+    from core.triage_profile import render_profile
+
+    chunks = [render_profile()]
     for e in records:
         chunks.append(
             f"--- EMAIL ---\n"

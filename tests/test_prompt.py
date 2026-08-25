@@ -51,6 +51,118 @@ def test_owner_prompt_uses_current_message_to_focus_memory(tmp_path):
     assert "董责险关键结论" in prompt
 
 
+def test_owner_prompt_uses_runtime_warm_index_mode(tmp_path, monkeypatch):
+    """bot.sh's exported index mode must reach the live owner prompt."""
+    warm = tmp_path / "memory" / "warm"
+    warm.mkdir(parents=True)
+    (warm / "feedback_rules.md").write_text("INLINE_GUIDANCE")
+    (warm / "project_large.md").write_text(
+        "---\ndescription: 大项目资料\n---\n" + "REFERENCE_BODY" * 100)
+    monkeypatch.setenv("JARVIS_WARM_MEMORY_MODE", "index")
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="test-key",
+        now_ts="2026-08-25 13:00 Tuesday",
+        tracker_path=str(tmp_path / "tracker.json"),
+    )
+
+    assert "INLINE_GUIDANCE" in prompt
+    assert "REFERENCE_BODY" not in prompt
+    assert "project_large.md" in prompt
+
+
+def test_owner_prompt_explicit_full_mode_overrides_runtime_index(
+        tmp_path, monkeypatch):
+    warm = tmp_path / "memory" / "warm"
+    warm.mkdir(parents=True)
+    (warm / "project_large.md").write_text("REFERENCE_BODY")
+    monkeypatch.setenv("JARVIS_WARM_MEMORY_MODE", "index")
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="test-key",
+        now_ts="2026-08-25 13:00 Tuesday",
+        tracker_path=str(tmp_path / "tracker.json"),
+        warm_mode="full",
+    )
+
+    assert "REFERENCE_BODY" in prompt
+
+
+def test_owner_prompt_timestamp_is_after_all_dynamic_context(tmp_path):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    (mem / "profile.md").write_text("MEMORY_SENTINEL")
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="test-session",
+        conv_key="test-key",
+        now_ts="2026-08-25 13:00 Tuesday",
+        tracker_path=str(tmp_path / "tracker.json"),
+    )
+
+    assert prompt.count("Current time:") == 1
+    assert prompt.index("Current time:") > prompt.index("MEMORY_SENTINEL")
+    assert prompt.rstrip().endswith("Current time: 2026-08-25 13:00 Tuesday")
+
+
+def test_resumed_prompt_omits_transcript_context_and_focus_reordering(
+        tmp_path, monkeypatch):
+    (tmp_path / "memory").mkdir()
+    seen = []
+    monkeypatch.setattr(
+        "core.prompt.load_tiered_memory",
+        lambda _path, **kwargs: seen.append(kwargs) or "STABLE_MEMORY",
+    )
+    monkeypatch.setattr(
+        "core.prompt.build_recent_turns", lambda *_a, **_kw: "RECENT_TURNS"
+    )
+    monkeypatch.setattr(
+        "core.prompt.read_compact", lambda *_a, **_kw: "SESSION_COMPACT"
+    )
+    monkeypatch.setattr(
+        "core.prompt._external_work_context",
+        lambda *_a, **_kw: "EXTERNAL_CONTEXT",
+    )
+
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="existing-session",
+        conv_key="owner",
+        now_ts="2026-08-25 14:00 Tuesday",
+        tracker_path=str(tmp_path / "tracker.json"),
+        focus_text="CURRENT_MESSAGE",
+        resume_existing=True,
+    )
+
+    assert seen[0]["focus_text"] == ""
+    assert "RECENT_TURNS" not in prompt
+    assert "SESSION_COMPACT" not in prompt
+    assert "EXTERNAL_CONTEXT" not in prompt
+
+
+def test_every_bot_prompt_rebuild_preserves_resume_detection():
+    script = (Path(__file__).parents[1] / "bot.sh").read_text(encoding="utf-8")
+
+    assert script.count('JV_RESUME_EXISTING="$_resume_existing"') == 3
+    assert script.count(
+        "resume_existing=os.environ.get('JV_RESUME_EXISTING') == '1'"
+    ) == 3
+
+
+
 def test_named_matter_does_not_receive_global_external_session_history(
     tmp_path, monkeypatch,
 ):

@@ -15,11 +15,14 @@ heartbeat model budget and cannot starve other tasks.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 JARVIS_DIR = Path(os.environ.get(
@@ -31,8 +34,11 @@ WORK_DIR = Path(os.environ.get(
     "JV_SELF_IMPROVE_CWD", Path.home() / "Desktop" / "jarvis" / "repos"))
 
 CYCLE_S = 86400
+RETRY_S = 6 * 3600
+FAILURES_BEFORE_WARNING = 2
 PROMPT_FILE = "scripts/self_improve_prompt.md"
 LOG_FILE = "/tmp/jarvis-self-improve.log"
+RUN_TIMEOUT_S = 2 * 3600 + 300
 
 
 def _state_path() -> Path:
@@ -46,6 +52,87 @@ def _read_state() -> dict:
         return {}
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+@contextmanager
+def _state_lock():
+    """Serialize acquire/release state without holding a replaceable inode."""
+    import fcntl
+    path = JARVIS_DIR / "data" / ".self_improve_cycle.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _receipt_path(run_id: str) -> Path:
+    safe = "".join(ch for ch in str(run_id) if ch.isalnum() or ch in "-_")
+    return JARVIS_DIR / "data" / "self_improve_receipts" / f"{safe}.json"
+
+
+def _store_receipt_once(receipt: dict) -> dict:
+    """Persist one immutable run receipt; a late duplicate cannot rewrite it."""
+    path = _receipt_path(str(receipt["run_id"]))
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(existing, dict)
+                and existing.get("run_id") == receipt.get("run_id")):
+            return existing
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    _write_json(path, receipt)
+    return receipt
+
+
+def _record_release(receipt: dict) -> None:
+    """Persist immutable evidence, then project it into the current state."""
+    with _state_lock():
+        receipt = _store_receipt_once(receipt)
+        state = _read_state()
+        if state.get("run_id") != receipt.get("run_id"):
+            return
+        failures = int(state.get("consecutive_failures") or 0)
+        if receipt.get("status") == "succeeded":
+            failures = 0
+        else:
+            failures += 1
+        state.update(receipt)
+        state["pid"] = 0
+        state["consecutive_failures"] = failures
+        _write_json(_state_path(), state)
+
+
+def _admit_worker(run_id: str, now_epoch: float) -> dict | None:
+    """Recheck run ownership after spawn and before the coding model can act."""
+    with _state_lock():
+        state = _read_state()
+        if (state.get("run_id") == run_id
+                and state.get("status") in {"acquiring", "running"}):
+            return state
+        _store_receipt_once({
+            "run_id": run_id,
+            "status": "rejected",
+            "acquire_epoch": 0,
+            "release_epoch": now_epoch,
+            "run_digest": "",
+            "output_digest": "",
+            "output_chars": 0,
+            "exit_code": 1,
+            "error_type": "stale_worker_admission",
+        })
+        return None
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -56,13 +143,29 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def due(now_epoch: float | None = None) -> bool:
-    """One live round at a time, at most one spawn per CYCLE_S."""
-    now = time.time() if now_epoch is None else float(now_epoch)
-    state = _read_state()
+def _state_due(state: dict, now: float) -> bool:
     if _pid_alive(int(state.get("pid") or 0)):
         return False
-    return now - float(state.get("spawned_at") or 0) >= CYCLE_S
+    status = str(state.get("status") or "")
+    # A missing release is discovered only on the next scheduler tick. Base
+    # its retry clock on acquisition, otherwise reconciliation would add a
+    # second full retry delay after the worker had already been dead for hours.
+    if status == "interrupted":
+        last = float(state.get("spawned_at") or
+                     state.get("acquire_epoch") or 0)
+    else:
+        last = float(state.get("release_epoch") or
+                     state.get("spawned_at") or 0)
+    delay = (RETRY_S if status in {
+        "empty_success", "failed", "interrupted", "spawn_failed", "timeout"
+    } else CYCLE_S)
+    return now - last >= delay
+
+
+def due(now_epoch: float | None = None) -> bool:
+    """One live round at a time; failed/released rounds retry with a bound."""
+    now = time.time() if now_epoch is None else float(now_epoch)
+    return _state_due(_read_state(), now)
 
 
 def spawn(popen=subprocess.Popen, now_epoch: float | None = None) -> int:
@@ -81,30 +184,211 @@ def spawn(popen=subprocess.Popen, now_epoch: float | None = None) -> int:
     if not prompt:
         return 0
 
-    from core.claude_bin import resolve_claude_bin
     now = time.time() if now_epoch is None else float(now_epoch)
-    log = open(LOG_FILE, "a")
-    log.write(f"\n===== self-improve cycle spawned at {time.ctime(now)} =====\n")
-    proc = popen(
-        [resolve_claude_bin(), "--dangerously-skip-permissions", "-p", prompt],
-        cwd=str(WORK_DIR), stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-        start_new_session=True)
-    _state_path().parent.mkdir(parents=True, exist_ok=True)
-    _state_path().write_text(json.dumps(
-        {"spawned_at": now, "pid": int(getattr(proc, "pid", 0) or 0)},
-        ensure_ascii=False), encoding="utf-8")
-    return int(getattr(proc, "pid", 0) or 0)
+    run_id = f"si-{int(now)}-{uuid.uuid4().hex[:8]}"
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    env = os.environ.copy()
+    env["JARVIS_DIR"] = str(JARVIS_DIR)
+    env["PYTHONPATH"] = str(JARVIS_DIR) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
+    with _state_lock():
+        # Admission and acquire are one critical section. Two heartbeat/manual
+        # ticks may both observe "due" outside this function; only the first is
+        # allowed to replace the current state and start a worker.
+        previous = _read_state()
+        if not _state_due(previous, now):
+            return 0
+        state = {
+            "run_id": run_id,
+            "status": "acquiring",
+            "spawned_at": now,
+            "acquire_epoch": now,
+            "release_epoch": 0,
+            "pid": 0,
+            "run_digest": digest,
+            "consecutive_failures": int(
+                previous.get("consecutive_failures") or 0),
+        }
+        _write_json(_state_path(), state)
+        try:
+            log = open(LOG_FILE, "a", encoding="utf-8")
+            os.chmod(LOG_FILE, 0o600)
+            log.write(
+                f"\n===== self-improve cycle {run_id} acquired at "
+                f"{time.ctime(now)} =====\n")
+            log.flush()
+            proc = popen(
+                [sys.executable, "-m", "core.self_improve_cycle", "run", run_id],
+                cwd=str(WORK_DIR), stdout=log, stderr=log,
+                stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        except (OSError, ValueError) as exc:
+            state.update({
+                "status": "spawn_failed",
+                "release_epoch": now,
+                "error_type": type(exc).__name__,
+                "consecutive_failures": state["consecutive_failures"] + 1,
+            })
+            _write_json(_state_path(), state)
+            _store_receipt_once(state)
+            print(f"self-improve-cycle: spawn failed: {type(exc).__name__}",
+                  file=sys.stderr)
+            return 0
+        finally:
+            if "log" in locals():
+                log.close()
+        state["pid"] = int(getattr(proc, "pid", 0) or 0)
+        state["status"] = "running"
+        _write_json(_state_path(), state)
+    return state["pid"]
+
+
+def run_worker(run_id: str, *, run=subprocess.run,
+               now_epoch: float | None = None) -> int:
+    """Run the coding session and always leave a release receipt."""
+    started = time.time()
+    state = _admit_worker(
+        run_id,
+        time.time() if now_epoch is None else float(now_epoch),
+    )
+    if state is None:
+        return 1
+    prompt_path = JARVIS_DIR / PROMPT_FILE
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        prompt = ""
+    stdout = ""
+    stderr = ""
+    error_type = ""
+    try:
+        if not prompt:
+            raise ValueError("self-improve prompt missing or empty")
+        from core.claude_bin import resolve_claude_bin
+        result = run(
+            [resolve_claude_bin(), "--dangerously-skip-permissions", "-p", prompt],
+            cwd=str(WORK_DIR), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=RUN_TIMEOUT_S)
+        exit_code = int(result.returncode)
+        stdout = str(result.stdout or "")
+        stderr = str(result.stderr or "")
+        status = ("succeeded" if exit_code == 0 and stdout.strip()
+                  else "empty_success" if exit_code == 0 else "failed")
+    except subprocess.TimeoutExpired as exc:
+        exit_code = 124
+        status = "timeout"
+        stdout = str(exc.stdout or "")
+        stderr = str(exc.stderr or "")
+        error_type = type(exc).__name__
+    except Exception as exc:
+        exit_code = 1
+        status = "failed"
+        error_type = type(exc).__name__
+        stderr = str(exc)
+
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            os.chmod(LOG_FILE, 0o600)
+            if stdout:
+                log.write(stdout)
+                if not stdout.endswith("\n"):
+                    log.write("\n")
+            if stderr:
+                log.write(stderr)
+                if not stderr.endswith("\n"):
+                    log.write("\n")
+            log.write(
+                f"===== self-improve cycle {run_id} released: {status} =====\n")
+    except OSError:
+        pass
+
+    released = (time.time() if now_epoch is None else float(now_epoch))
+    receipt = {
+        "run_id": run_id,
+        "status": status,
+        "acquire_epoch": float(state.get("acquire_epoch") or started),
+        "release_epoch": released,
+        "run_digest": str(state.get("run_digest") or hashlib.sha256(
+            prompt.encode("utf-8")).hexdigest()),
+        "output_digest": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        "output_chars": len(stdout),
+        "exit_code": exit_code,
+        "error_type": error_type,
+    }
+    _record_release(receipt)
+    try:
+        from core.sched_events import emit
+        emit(
+            JARVIS_DIR,
+            "llm_usage",
+            task="self-improve-cycle",
+            run_id=run_id,
+            provider="claude",
+            model="opus",
+            duration_s=max(0.0, released - started),
+            output_chars=len(stdout),
+            usage_available=False,
+            status=status,
+        )
+    except Exception:
+        pass
+    return 0 if status == "succeeded" else 1
+
+
+def _reconcile_unreleased(now_epoch: float) -> None:
+    state = _read_state()
+    if str(state.get("status") or "") not in {"acquiring", "running"}:
+        return
+    if _pid_alive(int(state.get("pid") or 0)):
+        return
+    run_id = str(state.get("run_id") or "")
+    if not run_id:
+        return
+    receipt = {
+        "run_id": run_id,
+        "status": "interrupted",
+        "acquire_epoch": float(state.get("acquire_epoch") or
+                               state.get("spawned_at") or 0),
+        "release_epoch": now_epoch,
+        "run_digest": str(state.get("run_digest") or ""),
+        "output_digest": "",
+        "output_chars": 0,
+        "exit_code": -1,
+        "error_type": "missing_release_receipt",
+    }
+    _record_release(receipt)
+
+
+def tick(now_epoch: float | None = None) -> int:
+    now = time.time() if now_epoch is None else float(now_epoch)
+    _reconcile_unreleased(now)
+    return spawn(now_epoch=now) if due(now) else 0
+
+
+def health_line() -> str:
+    state = _read_state()
+    failures = int(state.get("consecutive_failures") or 0)
+    if failures < FAILURES_BEFORE_WARNING:
+        return ""
+    return (f"⚠️ 自我改进后台任务连续 {failures} 次没有正常收尾——"
+            "系统会继续有界重试，先查本地自进化日志")
 
 
 def main(argv: list[str]) -> int:
     if argv[:1] == ["tick"]:
-        if due():
-            pid = spawn()
-            if pid:
-                print(f"self-improve-cycle: spawned pid {pid}",
-                      file=sys.stderr)
+        pid = tick()
+        if pid:
+            print(f"self-improve-cycle: spawned pid {pid}", file=sys.stderr)
         return 0
-    print("usage: python3 -m core.self_improve_cycle tick", file=sys.stderr)
+    if argv[:1] == ["run"] and len(argv) == 2:
+        return run_worker(argv[1])
+    if argv[:1] == ["health"]:
+        line = health_line()
+        if line:
+            print(line)
+        return 0
+    print("usage: python3 -m core.self_improve_cycle [tick|run <id>|health]",
+          file=sys.stderr)
     return 2
 
 

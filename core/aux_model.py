@@ -104,7 +104,15 @@ def _provider_candidates(
     )
     candidates: list[tuple[str, str, dict[str, str] | None]] = []
     for route in plan.routes:
-        provider_model = model if route.id == "primary" else route.model
+        # An auxiliary request's model tier is a cost/capability contract.
+        # A relay's configured default must not silently turn a Haiku request
+        # into Opus. Claude-compatible backups receive the requested model;
+        # an incompatible relay fails and the route plan advances normally.
+        # Cheap auxiliary tiers are an explicit task contract. Preserve those
+        # across relays instead of silently upgrading them to an expensive
+        # provider default. The generic ``opus`` alias remains relay-owned so
+        # deployments can pin the concrete backup model independently.
+        provider_model = model if model in {"haiku", "sonnet"} else route.model
         provider_env = None
         if route.id != "primary":
             provider_env = os.environ.copy()

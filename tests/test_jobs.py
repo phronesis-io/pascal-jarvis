@@ -330,6 +330,8 @@ def test_promoted_job_never_ends_in_silence():
     source = _bot_source()
     assert "被外部中断，没有产出结果" in source
     assert "没能产出可交付的结果" in source
-    # Both receipts reply to the ORIGINAL message the promotion notice
-    # answered, so the user finds them in the thread they were waiting in.
-    assert source.count('lark_reply_text "$message_id" \\\n            "后台任务 \\`$_promoted_job\\`') == 2
+    # Both receipts reply to the original message without leaking an internal
+    # job identifier into the user-facing copy.
+    assert source.count("这件后台工作被外部中断") == 1
+    assert source.count("这件后台工作结束了") == 1
+    assert '后台任务 \\`$_promoted_job\\`' not in source

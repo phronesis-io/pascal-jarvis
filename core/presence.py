@@ -30,6 +30,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.textutil import middle_ellipsize
+
 JARVIS_DIR = Path(os.environ.get(
     "JARVIS_DIR", Path(__file__).resolve().parent.parent))
 
@@ -38,6 +40,7 @@ JARVIS_DIR = Path(os.environ.get(
 SENT_FLOOR_24H = 5
 DIGEST_MIN = 5      # 攒批≥5条晨匣提一行 — the signed style contract's number
 DIGEST_TITLES = 3
+DIGEST_TITLE_CHARS = 24
 
 # Stable text on purpose: selfmon dedups alerts by line content, so a
 # changing count would re-page every 4h for one persisting condition.
@@ -238,6 +241,23 @@ def last_call_decisions(now: datetime | None = None) -> list[dict]:
     return out
 
 
+def _summarize_titles(rows: list[dict]) -> str:
+    """Show newest distinct titles and collapse exact repeats into counts."""
+    counts: dict[str, int] = {}
+    ordered_newest: list[str] = []
+    for row in reversed(rows):
+        title = str(row.get("title", "")).strip() or "无题"
+        counts[title] = counts.get(title, 0) + 1
+        if counts[title] == 1:
+            ordered_newest.append(title)
+    rendered = []
+    for title in ordered_newest[:DIGEST_TITLES]:
+        label = middle_ellipsize(title, DIGEST_TITLE_CHARS)
+        count = counts[title]
+        rendered.append(f"{label} ×{count}" if count > 1 else label)
+    return "／".join(rendered)
+
+
 def morning_digest_line(now: datetime | None = None) -> str:
     """One deterministic line for the morning anchor, or "".
 
@@ -263,7 +283,8 @@ def morning_digest_line(now: datetime | None = None) -> str:
             day = "今天" if deadline.date() == moment.date() else "明天"
             return f"{day} {deadline.strftime('%H:%M')}"
         parts = "、".join(
-            f"「{d['title'][:20] or '无题'}」{_when(d['deadline'])}"
+            f"「{middle_ellipsize(d['title'] or '无题', DIGEST_TITLE_CHARS)}」"
+            f"{_when(d['deadline'])}"
             for d in dying[:DIGEST_TITLES])
         last_call = f"⏳ {parts} 到期"
 
@@ -273,9 +294,7 @@ def morning_digest_line(now: datetime | None = None) -> str:
             # decision does: it asked for a judgment and never arrived.
             return f"{last_call}——先前被日额度挤掉，一直没送到过你手上"
         return ""
-    titles = "／".join(
-        str(r.get("title", "")).strip()[:20] or "无题"
-        for r in (decisions or rows)[-DIGEST_TITLES:])
+    titles = _summarize_titles(decisions or rows)
     if decisions:
         line = (f"📥 另有 {len(rows)} 条只进了归档，其中 {len(decisions)} 条"
                 f"本来是要你拿主意的：{titles}")

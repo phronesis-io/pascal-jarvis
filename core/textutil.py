@@ -91,6 +91,7 @@ TASK_DISPLAY_NAMES: dict[str, str] = {
     "manual": "手动发送",
     "mobile-onboarding": "手机首次使用",
     "pgc-improvement": "PGC 改进",
+    "pgc_pulse": "PGC 指标日报",
     "release-canary": "发布前体检",
     "test": "测试消息",
 }
@@ -112,6 +113,56 @@ def task_display_name(task_id: str) -> str:
         name = key[len(_ROUTINE_PREFIX):].strip()
         return f"例程「{name}」" if name else "例程"
     return TASK_DISPLAY_NAMES.get(key, key)
+
+
+def ellipsize(value: str, max_chars: int) -> str:
+    """Display-width bounded text with an explicit omission marker."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 0:
+        return ""
+    if max_chars == 1:
+        return "…"
+    return _prefix_chars(text, max_chars - 1, word_boundary=True) + "…"
+
+
+def middle_ellipsize(value: str, max_chars: int) -> str:
+    """Keep both the subject and distinguishing suffix of a compact title."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 2:
+        return ellipsize(text, max_chars)
+    available = max_chars - 1
+    head_width = max(1, (available * 2) // 3)
+    tail_width = max(1, available - head_width)
+    head = _prefix_chars(text, head_width, word_boundary=True)
+    tail = _suffix_chars(text, tail_width, word_boundary=True)
+    return head.rstrip() + "…" + tail.lstrip()
+
+
+def _prefix_chars(text: str, limit: int, *, word_boundary: bool) -> str:
+    cut = text[:limit]
+    if (word_boundary and cut and limit < len(text)
+            and cut[-1].isascii() and cut[-1].isalnum()
+            and text[limit].isascii() and text[limit].isalnum()):
+        bounded = cut.rsplit(" ", 1)[0].rstrip(" -_/:")
+        if bounded:
+            cut = bounded
+    return cut.rstrip()
+
+
+def _suffix_chars(text: str, limit: int, *, word_boundary: bool) -> str:
+    start = max(0, len(text) - limit)
+    cut = text[start:]
+    if (word_boundary and start > 0 and cut
+            and text[start - 1].isascii() and text[start - 1].isalnum()
+            and cut[0].isascii() and cut[0].isalnum()):
+        parts = cut.split(" ", 1)
+        if len(parts) == 2 and parts[1].strip():
+            cut = parts[1].lstrip(" -_/:")
+    return cut.lstrip()
 
 
 # Mechanism words the closure machinery historically stacked onto intent

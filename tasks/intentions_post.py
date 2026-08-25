@@ -20,6 +20,7 @@ card carries ✅/❌/🚫 buttons whose value routes through the Lark event
 sidecar straight into record_closure — one tap closes the loop, zero LLM.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -225,6 +226,136 @@ def _root_id(iid: str) -> str:
     return (iid or "").split("__fu")[0]
 
 
+_NAMED_TOPIC_RE = re.compile(
+    r"\b(?P<kind>blog|whitepaper|prd)\s*#?\s*(?P<number>\d{1,3})\b",
+    re.I,
+)
+
+
+def _decoded_mapping(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _decoded_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    try:
+        decoded = json.loads(str(value or "[]"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _intent_matter_identity(intent_id: str, row: dict | None = None) -> tuple[str, str, str]:
+    """Stable matter identity for one intent-authored decision.
+
+    Explicit context/tags win. Named publication series such as ``Blog 05``
+    deliberately converge across separately scheduled rows; everything else
+    stays scoped to the root intent so unrelated reminders cannot merge merely
+    because a model happened to use similar prose.
+    """
+    row = row or {}
+    try:
+        from core.matters import find_by_entity
+        linked = find_by_entity("intent", intent_id, provider="jarvis")
+    except Exception:
+        linked = None
+    if linked and linked.get("id"):
+        linked_id = str(linked["id"])
+        linked_title = " ".join(str(
+            linked.get("title") or row.get("name") or intent_id
+        ).split())
+        return linked_id, linked_title, f"matter:{linked_id}"
+    context = _decoded_mapping(row.get("context"))
+    explicit = str(context.get("matter_id") or "").strip()
+    if not explicit:
+        for tag in _decoded_list(row.get("tags")):
+            tag = str(tag or "").strip()
+            if tag.startswith("matter:") and tag[7:].strip():
+                explicit = tag[7:].strip()
+                break
+    name = " ".join(str(row.get("name") or intent_id).split())
+    if explicit:
+        return explicit, name, f"matter:{explicit}"
+    topic = _NAMED_TOPIC_RE.search(name)
+    if topic:
+        label = f"{topic.group('kind').title()} {int(topic.group('number')):02d}"
+        identity = label.casefold().replace(" ", "-")
+    else:
+        identity = _root_id(intent_id)
+        label = name
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"mat_int_{digest}", label, identity
+
+
+def _ensure_intent_matter(intent_id: str, row: dict | None = None) -> tuple[str, str]:
+    """Create/link the durable decision matter and its known sibling intents."""
+    from core.intent_lifecycle import list_intents
+    from core.matters import create_matter, get_matter, link_entity
+
+    row = row or get_intent(intent_id) or {}
+    matter_id, title, identity = _intent_matter_identity(intent_id, row)
+    if get_matter(matter_id, include_links=False, include_events=False) is None:
+        create_matter(
+            title=title or intent_id,
+            summary="同一主题的意图决策只保留一个待批入口",
+            next_action="等待用户决定或到期后再评估",
+            kind="decision",
+            source="intentions",
+            actor="intentions",
+            matter_id=matter_id,
+        )
+    candidates = list_intents(limit=500)
+    if not any(str(candidate.get("id")) == intent_id for candidate in candidates):
+        candidates.append({**row, "id": intent_id})
+    for candidate in candidates:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id:
+            continue
+        _, _, candidate_identity = _intent_matter_identity(candidate_id, candidate)
+        if candidate_identity != identity:
+            continue
+        link_entity(
+            matter_id,
+            "intent",
+            candidate_id,
+            provider="jarvis",
+            title=str(candidate.get("name") or candidate_id),
+            metadata={"status": str(candidate.get("status") or "")},
+            actor="intentions",
+        )
+    return matter_id, identity
+
+
+def _matter_is_deferred(matter_id: str) -> bool:
+    """Whether an owner ``先都放着`` receipt still covers this matter."""
+    from datetime import datetime
+
+    from core.matters import get_matter
+    from core.timeutil import now_local
+
+    matter = get_matter(matter_id, include_links=False, include_events=True)
+    for event in (matter or {}).get("events", []):
+        if event.get("event_type") != "matter_deferred":
+            continue
+        until = str((event.get("payload") or {}).get("until") or "")
+        try:
+            boundary = datetime.fromisoformat(until)
+        except (TypeError, ValueError):
+            return False
+        now = now_local()
+        if boundary.tzinfo is None and now.tzinfo is not None:
+            boundary = boundary.replace(tzinfo=now.tzinfo)
+        return now < boundary
+    return False
+
+
 # How long the same root intent's card is suppressed after one goes out.
 CARD_DEDUP_MINUTES = 30
 
@@ -292,7 +423,8 @@ def _ledger_append(intent_ids: list[str], card_roots: list[str] | None = None) -
 
 def _apply_action(intent_id: str, response: str, action: str,
                   user_messages: list, closure: dict | None = None,
-                  button_specs: list | None = None) -> bool:
+                  button_specs: list | None = None,
+                  card_specs: list | None = None) -> bool:
     """Mark the intent and optionally surface a user message.
 
     If a `closure` sub-object is present, this row is a FOLLOW-UP recording a
@@ -371,10 +503,21 @@ def _apply_action(intent_id: str, response: str, action: str,
     if action != "silent" and response and not _is_contentless(response) \
             and not quiet_hour and intent_id not in PRODUCT_LOGS:
         user_messages.append(response)
+        row = None
+        try:
+            row = get_intent(intent_id)
+        except Exception as e:
+            print(f"[intentions_post] card spec failed: {e}", file=sys.stderr)
+        if card_specs is not None:
+            card_specs.append({
+                "intent_id": intent_id,
+                "name": str((row or {}).get("name") or intent_id),
+                "row": row or {},
+            })
         # One-tap closure buttons for a follow-up that is ASKING (REQ-34).
         if button_specs is not None:
             try:
-                row = get_intent(intent_id)
+                row = row if row is not None else get_intent(intent_id)
                 parent_id = (row or {}).get("parent_intent_id")
                 if parent_id:
                     button_specs.append(
@@ -469,26 +612,64 @@ def _card_title(name: str, limit: int = 24) -> str:
     return cut + "…"
 
 
-def _emit_closure_card(combined: str, button_specs: list) -> None:
+def _emit_closure_card(combined: str, button_specs: list,
+                       card_specs: list | None = None) -> bool:
     """Print the closure-ask card. Single intent (the common case) goes out
     as a native memorial — ledgered, idempotent 批红, auto「聊聊这个」. Two
     intents keep the legacy combined card (memorial locks a card on first
     decide, which would deadlock the second intent's buttons); the delivery
     layer still adopts it with its native buttons preserved."""
+    card_specs = list(card_specs or [])
+    decision_spec = None
     if len(button_specs) == 1:
+        parent = str(button_specs[0].get("parent") or "")
+        decision_spec = {
+            "intent_id": parent,
+            "name": str(button_specs[0].get("name") or ""),
+            "row": get_intent(parent) or {},
+            "closure": True,
+        }
+    elif len(card_specs) == 1:
         try:
             from core import memorial
-            spec = button_specs[0]
+            authored = memorial.parse_authored_cards(combined)[0]
+            if authored.get("options"):
+                decision_spec = card_specs[0]
+        except Exception as e:
+            print(f"[intentions_post] decision parse failed: {e}", file=sys.stderr)
+
+    if decision_spec is not None:
+        try:
+            from core import memorial
+            intent_id = str(decision_spec.get("intent_id") or "")
+            row = decision_spec.get("row") or get_intent(intent_id) or {}
+            matter_id, identity = _ensure_intent_matter(intent_id, row)
+            if _matter_is_deferred(matter_id):
+                print(
+                    f"[intentions_post] deferred decision suppressed for {matter_id}",
+                    file=sys.stderr,
+                )
+                return False
             # Title = the intent's matter (one card says one thing); memorial's
             # header already prefixes 📜 + the source emoji, no 🎯 here.
-            title = _card_title(spec.get("name", ""))
+            authored = memorial.parse_authored_cards(combined)[0]
+            title = str(authored.get("title") or "").strip()
+            if not title:
+                title = _card_title(decision_spec.get("name", ""))
+            options = (
+                _memorial_closure_options(intent_id)
+                if decision_spec.get("closure")
+                else None
+            )
             mid, _ = memorial.create(
                 source="intentions", title=title, body=combined,
                 work_receipt="核验触发条件、执行记录和当前完成状态",
-                options=_memorial_closure_options(spec["parent"]),
-                authoring_protocol=True, send=False)
+                options=options,
+                authoring_protocol=True, send=False,
+                matter_id=matter_id,
+                dedup_key=f"intent-decision:{identity}")
             print(memorial.card_json(mid))
-            return
+            return True
         except Exception as e:
             print(f"[intentions_post] memorial failed, using plain card: {e}",
                   file=sys.stderr)
@@ -497,6 +678,7 @@ def _emit_closure_card(combined: str, button_specs: list) -> None:
         "🎯 定时提醒", combined, source="intentions", buttons=buttons,
         work_receipt="核验触发条件、执行记录和当前完成状态",
     ))
+    return True
 
 
 def main():
@@ -553,6 +735,7 @@ def main():
 
     user_messages: list = []
     button_specs: list = []
+    card_specs: list = []
     covered: list[str] = []
 
     intents_map = data.get("intents") if isinstance(data, dict) else None
@@ -571,6 +754,7 @@ def main():
                     user_messages=user_messages,
                     closure=result.get("closure"),
                     button_specs=button_specs,
+                    card_specs=card_specs,
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing {intent_id}: {e}",
@@ -596,6 +780,7 @@ def main():
                     user_messages=user_messages,
                     closure=data.get("closure"),
                     button_specs=button_specs,
+                    card_specs=card_specs,
                 )
             except Exception as e:
                 print(f"[intentions_post] Error processing single intent: {e}",
@@ -643,8 +828,11 @@ def main():
                       f"root(s) {sorted(nag_roots)} — already sent within "
                       f"{CARD_DEDUP_MINUTES}min (REQ-59)", file=sys.stderr)
             else:
+                rendered = _emit_closure_card(
+                    combined, button_specs, card_specs=card_specs)
+                if not rendered:
+                    return
                 _ledger_append(covered, card_roots=sorted(nag_roots))
-                _emit_closure_card(combined, button_specs)
                 # Proactive closure budget counts Pascal-visible asks, not row
                 # creation. Duplicate-suppressed cards do not call this path.
                 for spec in button_specs:

@@ -603,6 +603,14 @@ def _recovery_cap_deferral(envelope: DeliveryEnvelope, reason: str) -> bool:
     )
 
 
+def _decision_cap_deferral(envelope: DeliveryEnvelope, reason: str) -> bool:
+    """Keep owner decisions recoverable when a daily send budget is full."""
+    return bool(
+        envelope.attention == "decision"
+        and reason in {"global_daily_cap", "source_daily_cap"}
+    )
+
+
 def _row_budget_exempt(row: sqlite3.Row | dict) -> bool:
     values = dict(row)
     try:
@@ -634,6 +642,25 @@ def _anchor_slots_outstanding(
     if envelope.source in ANCHOR_RESERVED_SOURCES:
         return 0
     outstanding = 0
+    # A real question must not lose every slot to earlier FYI traffic. Keep
+    # one generic decision slot until the first decision has sent or holds a
+    # live reservation today. Additional decisions that arrive after the
+    # budget is exhausted are queued into the next send day below instead of
+    # becoming terminal ledger-only rows.
+    if envelope.attention != "decision":
+        decision_sent = db.execute(
+            "SELECT 1 FROM delivery_envelopes "
+            "WHERE attention='decision' AND delivered_epoch>=? LIMIT 1",
+            (start,),
+        ).fetchone()
+        decision_held = db.execute(
+            "SELECT 1 FROM delivery_cap_reservations r "
+            "JOIN delivery_envelopes e ON e.id=r.delivery_id "
+            "WHERE e.attention='decision' AND r.day_start_epoch=? LIMIT 1",
+            (start,),
+        ).fetchone()
+        if not decision_sent and not decision_held:
+            outstanding += 1
     for source in ANCHOR_RESERVED_SOURCES:
         sent = db.execute(
             "SELECT 1 FROM delivery_envelopes "
@@ -754,12 +781,25 @@ class DeliveryPipeline:
                    envelope: DeliveryEnvelope, content_hash: str,
                    now: float) -> sqlite3.Row | None:
         if envelope.dedup_key:
-            row = db.execute(
-                "SELECT * FROM delivery_envelopes WHERE dedup_key=? "
-                "AND state IN ('queued','attempting','delivered','read','acted') "
-                "ORDER BY created_epoch DESC LIMIT 1",
-                (envelope.dedup_key,),
-            ).fetchone()
+            window = envelope.metadata.get("dedup_window_seconds")
+            if isinstance(window, (int, float)) and not isinstance(window, bool):
+                row = db.execute(
+                    "SELECT * FROM delivery_envelopes WHERE dedup_key=? "
+                    "AND created_epoch>=? "
+                    "AND state IN ('queued','attempting','delivered','read','acted') "
+                    "ORDER BY created_epoch DESC LIMIT 1",
+                    (envelope.dedup_key, now - max(0.0, float(window))),
+                ).fetchone()
+            else:
+                # Stable object identities (friend request ids, one memorial)
+                # remain permanently idempotent. Recurring incidents opt into
+                # a bounded window in metadata instead.
+                row = db.execute(
+                    "SELECT * FROM delivery_envelopes WHERE dedup_key=? "
+                    "AND state IN ('queued','attempting','delivered','read','acted') "
+                    "ORDER BY created_epoch DESC LIMIT 1",
+                    (envelope.dedup_key,),
+                ).fetchone()
             if row:
                 return row
         return db.execute(
@@ -1015,10 +1055,27 @@ class DeliveryPipeline:
                     envelope.id, True, "suppressed", route, reason=blocked)
             throttled = self._throttle_reason(db, envelope, now)
             if throttled:
-                self._set_state(db, envelope.id, "suppressed", throttled,
-                                last_error=throttled)
+                deferred = _decision_cap_deferral(envelope, throttled)
+                retry_epoch = None
+                if deferred:
+                    retry_epoch = _next_budget_window_epoch(
+                        datetime.fromtimestamp(now, tz=now_local().tzinfo)
+                    )
+                self._set_state(
+                    db,
+                    envelope.id,
+                    "queued" if deferred else "suppressed",
+                    throttled,
+                    next_attempt_epoch=retry_epoch,
+                    last_error=throttled,
+                )
                 return DeliveryResult(
-                    envelope.id, True, "suppressed", route, reason=throttled)
+                    envelope.id,
+                    True,
+                    "queued" if deferred else "suppressed",
+                    route,
+                    reason=throttled,
+                )
             moment = datetime.fromtimestamp(now, tz=now_local().tzinfo)
             bypass_quiet = (
                 envelope.urgent or envelope.conversation_bound
@@ -1082,8 +1139,19 @@ class DeliveryPipeline:
                     recovery_deferred = _recovery_cap_deferral(
                         envelope, throttled,
                     )
-                    deferred = throttled == "burst_budget" or recovery_deferred
+                    deferred = (
+                        throttled == "burst_budget"
+                        or recovery_deferred
+                        or _decision_cap_deferral(envelope, throttled)
+                    )
                     if recovery_deferred and retry_epoch is None:
+                        retry_epoch = _next_budget_window_epoch(
+                            datetime.fromtimestamp(
+                                claimed_at, tz=now_local().tzinfo,
+                            )
+                        )
+                    if (deferred and retry_epoch is None
+                            and _decision_cap_deferral(envelope, throttled)):
                         retry_epoch = _next_budget_window_epoch(
                             datetime.fromtimestamp(
                                 claimed_at, tz=now_local().tzinfo,

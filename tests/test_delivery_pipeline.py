@@ -94,6 +94,41 @@ def test_alert_without_explicit_key_gets_stable_incident_identity(pipeline):
     assert len(sent) == 1
 
 
+def test_explicit_dedup_window_allows_a_later_incident_recurrence(tmp_path):
+    now = [_local_ts(2026, 8, 20, 10, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.id) or TransportResult(True, f"om_{len(sent)}")
+        ),
+        clock=lambda: now[0],
+        sleeper=lambda _seconds: None,
+    )
+
+    def envelope():
+        return DeliveryEnvelope(
+            source="guardian-daemon",
+            payload={"text": "系统已经恢复"},
+            attention="alert",
+            dedup_key="guardian:bot-restart-recovered",
+            metadata={"dedup_window_seconds": 24 * 3600},
+        )
+
+    first = pipe.deliver(envelope())
+    now[0] += 23 * 3600
+    duplicate = pipe.deliver(envelope())
+    now[0] += 2 * 3600
+    recurrence = pipe.deliver(envelope())
+
+    assert duplicate.delivery_id == first.delivery_id
+    assert duplicate.reason == "duplicate"
+    assert recurrence.delivery_id != first.delivery_id
+    assert recurrence.state == "delivered"
+    assert len(sent) == 2
+
+
 def test_verified_transport_recovery_replays_valid_terminal_failure(tmp_path):
     now = [_local_ts(2026, 8, 17, 10, 0)]
     healthy = [False]
@@ -911,7 +946,15 @@ def test_evening_anchor_keeps_one_slot_of_a_spent_budget(pipeline):
         )).state
         for index in range(3)
     ]
-    assert states == ["delivered", "delivered", "suppressed"]
+    assert states == ["delivered", "suppressed", "suppressed"]
+    assert len(sent) == 1
+
+    decision = pipe.deliver(DeliveryEnvelope(
+        source="intention-check", attention="decision",
+        payload={"text": "需要你拍板"},
+        requested_channel="lark", metadata=dict(meta),
+    ))
+    assert decision.state == "delivered"
     assert len(sent) == 2
 
     reflect = pipe.deliver(DeliveryEnvelope(
@@ -933,6 +976,69 @@ def test_evening_anchor_keeps_one_slot_of_a_spent_budget(pipeline):
     assert len(sent) == 3
 
 
+def test_second_decision_over_daily_cap_waits_for_next_send_day(tmp_path):
+    now = [_local_ts(2026, 8, 12, 14, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.payload["text"])
+            or TransportResult(True, f"om_{len(sent)}")),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    meta = {"global_daily_cap": 2, "source_daily_cap": 9}
+    first = pipe.deliver(DeliveryEnvelope(
+        source="decision-a", attention="decision",
+        payload={"text": "first decision"}, metadata=dict(meta)))
+    reflect = pipe.deliver(DeliveryEnvelope(
+        source="daily-reflect", attention="notice",
+        payload={"text": "evening anchor"}, metadata=dict(meta)))
+    second = pipe.deliver(DeliveryEnvelope(
+        source="decision-b", attention="decision",
+        payload={"text": "second decision"}, metadata=dict(meta)))
+
+    assert [first.state, reflect.state, second.state] == [
+        "delivered", "delivered", "queued"]
+    assert second.reason == "global_daily_cap"
+    row = pipe.get(second.delivery_id)
+    assert row["next_attempt_epoch"] > now[0]
+
+    now[0] = _local_ts(2026, 8, 13, 10, 1)
+    replay = pipe.flush_due()
+    assert replay[-1].state == "delivered"
+    assert sent[-1] == "second decision"
+
+
+def test_decision_over_source_cap_waits_for_next_send_day(tmp_path):
+    """Same-source decision bursts must not become terminal ledger-only rows."""
+    now = [_local_ts(2026, 8, 12, 14, 0)]
+    sent = []
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=tmp_path / "db.sqlite",
+        transport=lambda envelope, _channel: (
+            sent.append(envelope.payload["text"])
+            or TransportResult(True, f"om_{len(sent)}")),
+        clock=lambda: now[0], sleeper=lambda _: None,
+    )
+    meta = {"global_daily_cap": 9, "source_daily_cap": 1}
+    first = pipe.deliver(DeliveryEnvelope(
+        source="intention-check", attention="decision",
+        payload={"text": "first decision"}, metadata=dict(meta)))
+    second = pipe.deliver(DeliveryEnvelope(
+        source="intention-check", attention="decision",
+        payload={"text": "second decision"}, metadata=dict(meta)))
+
+    assert first.state == "delivered"
+    assert second.state == "queued"
+    assert second.reason == "source_daily_cap"
+    assert pipe.get(second.delivery_id)["next_attempt_epoch"] > now[0]
+
+    now[0] = _local_ts(2026, 8, 13, 10, 1)
+    replay = pipe.flush_due()
+    assert replay[-1].state == "delivered"
+    assert sent == ["first decision", "second decision"]
+
+
 def test_evening_anchor_reservation_is_released_after_it_sends(pipeline):
     pipe, sent, _ = pipeline
     meta = {"global_daily_cap": 3, "source_daily_cap": 9}
@@ -947,8 +1053,8 @@ def test_evening_anchor_reservation_is_released_after_it_sends(pipeline):
         )).state
         for index in range(3)
     ]
-    assert states == ["delivered", "delivered", "suppressed"]
-    assert len(sent) == 3
+    assert states == ["delivered", "suppressed", "suppressed"]
+    assert len(sent) == 2
 
 
 def test_evening_anchor_reservation_never_empties_a_tiny_budget(pipeline):

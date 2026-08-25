@@ -108,12 +108,9 @@ PY
   exit 1
 fi
 
-# Load user interests file (if exists)
-interests_file="$MEMORY_DIR/warm/interests.md"
-interests=""
-if [ -f "$interests_file" ]; then
-  interests=$(cat "$interests_file")
-fi
+# The active profile is private configuration, not a tracked/stale memory
+# filename.  An archived warm/interests.md must not silently regain authority.
+interests=$(python3 -m core.triage_profile 2>/dev/null || true)
 
 # Format via Python (all DAY0_DATA..DAY6_DATA + INTERESTS are already exported)
 export INTERESTS="$interests"
@@ -244,60 +241,6 @@ if all_events_map:
 
 " 2>/dev/null
 
-# ── Fetch real NBA schedule for teams in interests ──
-# Only fetches if interests mention NBA/骑士/Cavaliers
-if echo "$interests" | grep -qi 'cavaliers\|骑士\|NBA'; then
-  nba_schedule=$(curl -s --max-time 10 'https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json' 2>/dev/null | python3 -c "
-import json, sys
-from datetime import datetime, timezone, timedelta
-
-try:
-    data = json.load(sys.stdin)
-except:
-    sys.exit(0)
-
-dates = data.get('leagueSchedule', {}).get('gameDates', [])
-tz_cn = timezone(timedelta(hours=8))
-now = datetime.now(timezone.utc)
-
-# Team codes to track (extend as needed)
-teams = {'CLE'}
-games = []
-for gd in dates:
-    for game in gd.get('games', []):
-        home = game.get('homeTeam', {}).get('teamTricode', '')
-        away = game.get('awayTeam', {}).get('teamTricode', '')
-        if not teams & {home, away}:
-            continue
-        dt_str = game.get('gameDateTimeUTC', '')
-        status = game.get('gameStatusText', '')
-        series = game.get('seriesText', '')
-        try:
-            dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-            if dt < now - timedelta(hours=6):
-                continue
-            cn = dt.astimezone(tz_cn)
-            opponent = away if home == 'CLE' else home
-            ha = 'Home' if home == 'CLE' else 'Away'
-            games.append(f'{cn.strftime(\"%m/%d %H:%M\")} CLE vs {opponent} ({ha}) {series} [{status}]')
-        except:
-            pass
-        if len(games) >= 5:
-            break
-    if len(games) >= 5:
-        break
-
-if games:
-    print()
-    print('=== REAL NBA SCHEDULE (verified from nba.com API) ===')
-    for g in games:
-        print(f'  {g}')
-" 2>/dev/null || true)
-  if [ -n "$nba_schedule" ]; then
-    echo ""
-    echo "$nba_schedule"
-  fi
-fi
 ) | tee "$RAW_CACHE"
 
 # Directly update calendar_today.md from pre-script output.

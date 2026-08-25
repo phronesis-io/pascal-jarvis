@@ -41,6 +41,7 @@ JARVIS_DIR = Path(__file__).parent
 CHECK_INTERVAL = 30           # seconds between health checks
 HEARTBEAT_STALE_THRESHOLD = 1800  # 30 min without heartbeat = stale (Claude calls take 30-90s, cycles ~20min apart)
 WAKE_GRACE_SECONDS = 180      # after host sleep/wake, suppress stale-heartbeat restarts briefly
+DAEMON_START_GRACE_SECONDS = 120  # children may still be attaching after launchd/kickstart
 SLEEP_GAP_THRESHOLD = 120     # daemon loop slept > expected by this much ⇒ host sleep/pause
 # Brain-death alerting needs a much longer post-wake grace than the restart
 # path: after hours of laptop sleep (or a forced-macOS-update reboot) EVERY
@@ -95,6 +96,8 @@ RESTART_STATE_FILE = JARVIS_DIR / ".daemon_restart_state.json"
 # healthy check clears it.
 BREAKER_LATCH_FILE = JARVIS_DIR / "data" / "restart_breaker.latched"
 MAX_LOG_LINES = 1000
+DAEMON_LOG_MAX_BYTES = 200_000
+DAEMON_LOG_GENERATIONS = 30
 # Touched by core/heartbeat_loop._beat() on every call (including throttled
 # ones) — log-format-independent liveness after two log-parsing regressions
 # in a row (10KB tail; beats[-1] concatenation order, audit 7/8). Absent until
@@ -127,7 +130,7 @@ DIAG_CYCLE_START_SKEW = 15 * 60
 # watchdog respawns a dead ef-stream within ≤30s. Page only when a component
 # stays red across TWO consecutive probes at least this far apart — a
 # watchdog-healed transient never pages, a real outage pages within ~4min.
-MANIFEST_CONFIRM_WINDOW = 2 * 60
+MANIFEST_CONFIRM_WINDOW = 5 * 60
 # A repair request is asynchronous: bot.sh's watchdog checks children every
 # 30s and launchd may need a few seconds to recreate a UI process.  Give the
 # repaired component enough time to complete a real heartbeat cycle before a
@@ -193,12 +196,17 @@ def log(level: str, msg: str):
     try:
         with open(LOG_FILE, "a") as f:
             f.write(line)
-        if LOG_FILE.stat().st_size > 200_000:
-            lines = LOG_FILE.read_text().splitlines()
-            trimmed = "\n".join(lines[-500:]) + "\n"
-            tmp = LOG_FILE.with_suffix(".tmp")
-            tmp.write_text(trimmed)
-            os.replace(tmp, LOG_FILE)
+        if LOG_FILE.stat().st_size > DAEMON_LOG_MAX_BYTES:
+            oldest = LOG_FILE.with_name(
+                f"{LOG_FILE.name}.{DAEMON_LOG_GENERATIONS}")
+            oldest.unlink(missing_ok=True)
+            for generation in range(DAEMON_LOG_GENERATIONS - 1, 0, -1):
+                source = LOG_FILE.with_name(f"{LOG_FILE.name}.{generation}")
+                if source.exists():
+                    source.replace(LOG_FILE.with_name(
+                        f"{LOG_FILE.name}.{generation + 1}"))
+            LOG_FILE.replace(LOG_FILE.with_name(f"{LOG_FILE.name}.1"))
+            LOG_FILE.touch(mode=0o600)
     except Exception:
         pass
 
@@ -318,6 +326,9 @@ def notify_lark(msg: str, incident_key: str = "") -> bool | None:
                 metadata={
                     "metric_daily_cap": 1,
                     "incident_key": metric,
+                    # Same incident is quiet for one day, not forever. Stable
+                    # object ids elsewhere keep permanent idempotency.
+                    "dedup_window_seconds": 24 * 3600,
                     "audience": "owner_private",
                     "recipient_type": "open_id",
                     "replayable": False,
@@ -497,13 +508,15 @@ def _bot_pid() -> int | None:
     return None
 
 
-def _ps_processes() -> dict[int, tuple[int, str]]:
-    """Return {pid: (ppid, command)} from ps; never raises."""
+def _ps_processes() -> dict[int, tuple[int, str]] | None:
+    """Return process snapshot, or None when ps itself was unavailable."""
     try:
         r = subprocess.run(["ps", "ax", "-o", "pid=,ppid=,command="],
                            capture_output=True, text=True, timeout=5)
     except Exception:
-        return {}
+        return None
+    if r.returncode != 0:
+        return None
     procs: dict[int, tuple[int, str]] = {}
     for line in r.stdout.splitlines():
         parts = line.strip().split(None, 2)
@@ -532,6 +545,8 @@ def _has_ancestor(pid: int, ancestor: int, procs: dict[int, tuple[int, str]]) ->
 _OWNED_COMPONENT_PATTERNS = {
     "heartbeat-loop": re.compile(r"(?:^|\s)-m\s+core\.heartbeat_loop(?:\s|$)"),
     "ef-stream": re.compile(r"(?:^|\s)-m\s+core\.ef_stream_loop(?:\s|$)"),
+    "lark-sidecar": re.compile(
+        r"(?:lark_event_sidecar\.py|lark-cli\s+event(?:\s|$))"),
 }
 
 
@@ -551,6 +566,10 @@ def _request_component_recovery(name: str) -> bool:
     pattern = _OWNED_COMPONENT_PATTERNS.get(name)
     admin_path = str(JARVIS_DIR / "admin.py")
     procs = _ps_processes()
+    if procs is None:
+        log("WARN", f"Guardian could not inspect process ownership for {name}; "
+            "recovery deferred")
+        return False
     owned: list[int] = []
     for pid, (_, cmd) in procs.items():
         matches = bool(pattern.search(cmd)) if pattern else (
@@ -562,7 +581,9 @@ def _request_component_recovery(name: str) -> bool:
         # spawning the replacement.  That still counts as recovery underway.
         log("INFO", f"Guardian found no live owned {name} process; "
             "owner watchdog will recreate it")
-        return name in {"heartbeat-loop", "ef-stream", "admin :3456"}
+        return name in {
+            "heartbeat-loop", "ef-stream", "admin :3456", "lark-sidecar"
+        }
     requested = False
     for pid in owned:
         try:
@@ -578,7 +599,7 @@ def _request_component_recovery(name: str) -> bool:
     return requested
 
 
-def _is_lark_listener_alive(bot_pid: int | None = None) -> bool:
+def _is_lark_listener_alive(bot_pid: int | None = None) -> bool | None:
     """Check for a Lark listener owned by the current bot process.
 
     A stale/orphaned sidecar is worse than no sidecar: it can make the daemon
@@ -589,6 +610,8 @@ def _is_lark_listener_alive(bot_pid: int | None = None) -> bool:
     if not bot_pid:
         return False
     procs = _ps_processes()
+    if procs is None:
+        return None
     for pid, (_, cmd) in procs.items():
         if ("lark_event_sidecar.py" in cmd or "lark-cli event" in cmd) \
                 and _has_ancestor(pid, bot_pid, procs):
@@ -651,9 +674,27 @@ def check_health() -> dict:
     if not bot_pid:
         issues.append("bot.sh is not running")
 
-    # 2. Is Lark listener connected?
-    if bot_pid and not _is_lark_listener_alive(bot_pid):
-        issues.append("Lark event listener is not running")
+    note = None
+    # 2. Is Lark listener connected? A failed ps snapshot is UNKNOWN, not a
+    # negative observation. The old bool collapse caused five whole-stack
+    # restarts after a 5s ps timeout even though the listener was alive.
+    if bot_pid:
+        listener = _is_lark_listener_alive(bot_pid)
+        if listener is None:
+            note = "lark-listener-unknown"
+            log("WARN", "Lark listener ownership probe unavailable; "
+                "leaving the running stack untouched")
+        elif not listener:
+            if time.time() - _daemon_started < DAEMON_START_GRACE_SECONDS:
+                note = "daemon-start-grace"
+                log("INFO", "Lark listener not attached yet during daemon "
+                    "startup grace — NOT restarting")
+            elif _in_wake_grace():
+                note = "wake-grace"
+                log("INFO", "Lark listener not visible just after wake — "
+                    "NOT restarting")
+            else:
+                issues.append("Lark event listener is not running")
 
     # 3. Is heartbeat alive? (check BOTH log files for recent beat)
     # The beat-age-None case gets the SAME guards as the stale case (red-team
@@ -661,14 +702,12 @@ def check_health() -> dict:
     # the newest beat out of the tail window — "no beat found" during an
     # active session or right after wake is the traffic's fault, not the
     # heartbeat's, and restarting would kill the in-flight user reply.
-    note = None
     beat_age = _find_last_heartbeat()
     if beat_age is None or beat_age > HEARTBEAT_STALE_THRESHOLD:
         # Check if a user message is being processed (session lock exists).
         # Long Claude calls for user conversations (5-10 min) block heartbeat.
         # Restarting during an active conversation KILLS the user's response.
-        import glob as _glob
-        active_locks = _glob.glob(str(JARVIS_DIR / ".session_lock_*"))
+        active_locks = _active_session_locks()
         age_txt = "not found" if beat_age is None else f"stale ({int(beat_age)}s)"
         if active_locks:
             log("INFO", f"Heartbeat {age_txt} but {len(active_locks)} "
@@ -783,6 +822,7 @@ _COMPONENT_LABELS = {
     "lark-sidecar": "飞书事件监听",
     "bot": "机器人主进程",
 }
+_last_degraded_details: dict[str, str] = {}
 
 
 def _task_label(task_id: str) -> str:
@@ -827,6 +867,8 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     Chinese only."""
     key = f"{name}|degraded"
     if payload is None or payload.get("status") == "ok":
+        if _last_degraded_details.pop(key, None) is not None:
+            log("INFO", f"Component recovered from degraded state: {name}")
         if _probe_alert_stamps.pop(key, None) is not None:  # recovered, re-arm
             _save_probe_alert_stamps()
         return
@@ -836,6 +878,9 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
     for field in ("circuits_open", "priority_wedged", "error"):
         if payload.get(field):
             detail += f" {field}={payload[field]}"
+    if _last_degraded_details.get(key) == detail:
+        return
+    _last_degraded_details[key] = detail
     log("WARN", f"Observed component DEGRADED (alive): {name} — {detail}")
     reasons = []
     circuits = payload.get("circuits_open") or []
@@ -1155,7 +1200,8 @@ def _probe_manifest_criticals():
     dedup as the hardcoded probes, debounced across two consecutive red
     probes so a watchdog-healed transient never pages (red-team 7/9).
     Never raises."""
-    if _in_deploy_window():
+    if (_in_deploy_window() or _in_wake_grace()
+            or time.time() - _daemon_started < DAEMON_START_GRACE_SECONDS):
         return
     try:
         # Right after our own diagnose_and_fix restart the children are
@@ -1384,6 +1430,7 @@ def _check_brain_health():
         # drive the sleep-gap detection above; suppressed drives grace penetration.
         new_state = {"samples": result["samples"], "last_alert": new_last_alert,
                      "last_check_ts": now, "grace_until": grace_until,
+                     "brain_dead": bool(result["brain_dead"]),
                      "suppressed": suppressed,
                      "repair_requested_at": repair_requested_at,
                      "repair_request_ok": repair_request_ok}
@@ -1669,8 +1716,48 @@ def _session_lock_pid_is_ours(pid: int) -> bool:
     return bool(re.search(rf"bash.*{re.escape(str(JARVIS_DIR))}/bot\.sh", args))
 
 
+def _active_session_locks() -> list[Path]:
+    """Live owner conversations that a whole-stack restart would interrupt."""
+    active: list[Path] = []
+    now = time.time()
+    for lock in JARVIS_DIR.glob(".session_lock_*"):
+        try:
+            content = lock.read_text().strip()
+            first = content.split()[0] if content else ""
+            if first.isdigit() and _session_lock_pid_is_ours(int(first)):
+                active.append(lock)
+            elif not first.isdigit() and now - lock.stat().st_mtime < 120:
+                # Short acquire window before the provider PID is published.
+                active.append(lock)
+        except OSError:
+            continue
+    return active
+
+
+def _stop_bot_gracefully(wait_seconds: int = 10) -> bool:
+    """Ask bot.sh to release children/state before bounded hard cleanup."""
+    pid = _bot_pid()
+    if not pid:
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError) as exc:
+        log("WARN", f"Could not request graceful bot stop: {type(exc).__name__}")
+        return False
+    for _ in range(max(0, int(wait_seconds))):
+        time.sleep(1)
+        if not _bot_pid():
+            log("INFO", "bot.sh completed graceful shutdown")
+            return True
+    log("WARN", "bot.sh did not finish graceful shutdown within 10s; "
+        "continuing with owned-process cleanup")
+    return False
+
+
 def diagnose_and_fix(issues: list[str]) -> str:
-    """Kill existing processes and restart bot.sh."""
+    """Restart bot.sh after preserving live conversation/session boundaries."""
     global last_restart_time, restart_count
 
     now = time.time()
@@ -1688,6 +1775,11 @@ def diagnose_and_fix(issues: list[str]) -> str:
         remaining = int(RESTART_COOLDOWN - (now - last_restart_time))
         log("INFO", f"Restart cooldown active ({remaining}s remaining)")
         return f"restart cooldown ({remaining}s remaining)"
+
+    active_locks = _active_session_locks()
+    if active_locks:
+        log("INFO", f"Restart deferred: {len(active_locks)} active session(s)")
+        return f"active session ({len(active_locks)}) — restart deferred"
 
     if restart_count >= MAX_RESTART_ATTEMPTS:
         msg = (f"Reached max restart attempts ({MAX_RESTART_ATTEMPTS}) — "
@@ -1731,7 +1823,9 @@ def diagnose_and_fix(issues: list[str]) -> str:
     # another project's admin.py, ...). lark-cli/eigenflux can't be path-
     # anchored (invoked by bare name) — those stay broad but are specific
     # subcommands unlikely to exist outside this bot.
-    log("INFO", "Killing existing processes...")
+    log("INFO", "Requesting graceful bot shutdown before owned cleanup...")
+    _stop_bot_gracefully()
+    log("INFO", "Cleaning remaining owned processes...")
     import re as _re
     _jd = _re.escape(str(JARVIS_DIR))
     for pattern in ["lark-cli event|lark_event_sidecar",
@@ -1918,6 +2012,15 @@ def _ping_external_deadman() -> str:
         configured = status(JARVIS_DIR)
         if configured.status == "disabled":
             return "disabled"
+        try:
+            brain_state = json.loads(BRAIN_STATE_FILE.read_text())
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            brain_state = {}
+        if (brain_state.get("brain_dead")
+                and time.time() - float(brain_state.get("last_check_ts") or 0)
+                < BRAIN_CHECK_GAP_THRESHOLD):
+            log("WARN", "External dead-man ping withheld: heartbeat brain-dead")
+            return "withheld_brain_dead"
         from core.delivery import DeliveryPipeline
 
         transport = DeliveryPipeline(JARVIS_DIR).transport_health()
@@ -1940,6 +2043,8 @@ def _ping_external_deadman() -> str:
 
 def main():
     global running
+
+    os.umask(0o077)
 
     acquire_singleton()
     try:
@@ -2016,7 +2121,21 @@ def main():
                     log("WARN", f"Health check failed ({consecutive_failures}x): {result['issues']}")
 
                     if consecutive_failures >= 2:
-                        fix_result = diagnose_and_fix(result["issues"])
+                        if result["issues"] == [
+                                "Lark event listener is not running"]:
+                            # The listener has its own bot.sh watchdog. Recycle
+                            # only that owned sidecar; a listener probe must not
+                            # kill heartbeat/admin/EigenFlux and every active
+                            # conversation along with it.
+                            requested = _request_component_recovery(
+                                "lark-sidecar")
+                            fix_result = (
+                                "lark sidecar recovery requested"
+                                if requested else
+                                "lark sidecar recovery deferred"
+                            )
+                        else:
+                            fix_result = diagnose_and_fix(result["issues"])
                         log("INFO", f"Fix result: {fix_result}")
                         # Reset consecutive counter after taking action
                         # (give the restart time to take effect)

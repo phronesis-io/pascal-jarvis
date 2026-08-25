@@ -6,7 +6,11 @@ raw id — never to a truncated fragment (「c…」was undecodable on a live ca
 """
 
 from core.heartbeat import parse_heartbeat
-from core.textutil import TASK_DISPLAY_NAMES, task_display_name
+from core.textutil import (
+    TASK_DISPLAY_NAMES,
+    middle_ellipsize,
+    task_display_name,
+)
 
 
 def test_mapped_ids_translate():
@@ -37,9 +41,22 @@ def test_combined_delivery_sources_are_each_humanized():
 def test_every_known_production_non_task_source_has_a_display_name():
     expected = {
         "manual", "mobile-onboarding", "pgc-improvement",
-        "release-canary", "test",
+        "pgc_pulse", "release-canary", "test",
     }
     assert expected <= TASK_DISPLAY_NAMES.keys()
+
+
+def test_pgc_metric_source_never_leaks_its_internal_id():
+    assert task_display_name("pgc_pulse") == "PGC 指标日报"
+
+
+def test_middle_ellipsize_keeps_title_subject_and_distinguishing_suffix():
+    value = "跨会话动态：这是很长的一段说明但结尾是董事责任保险"
+    result = middle_ellipsize(value, 20)
+    assert len(result) == 20
+    assert result.startswith("跨会话动态")
+    assert result.endswith("董事责任保险")
+    assert "…" in result
 
 
 def test_every_heartbeat_task_has_a_display_name():

@@ -46,8 +46,6 @@ fi
 elapsed=$(( now - last_pub ))
 [ "$elapsed" -lt "$cooldown" ] && exit 0
 
-echo "Ready to publish. Last published ${elapsed}s ago."
-
 # Show recent publish history so Claude avoids duplicate topics
 if [ -f "$JARVIS_DIR/eigenflux/publish_state.json" ]; then
   recent=$(python3 -c "
@@ -67,7 +65,6 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
-  [ -n "$recent" ] && echo "$recent"
 fi
 
 # Material pool: recent memory highlights for content inspiration
@@ -102,7 +99,6 @@ if entries:
     for _, desc in entries[:8]:
         print(f'  - {desc}')
 " 2>/dev/null)
-  [ -n "$material" ] && echo "$material"
 fi
 
 # Recent git commits across key repos (last 7 days)
@@ -133,5 +129,16 @@ if lines:
     for l in lines[:15]:
         print(l)
 " 2>/dev/null)
+[ -n "${material:-}" ] || material=""
+[ -n "${commits:-}" ] || commits=""
+candidate_material=$(printf '%s\n%s\n' "$material" "$commits")
+material_gate=$(printf '%s' "$candidate_material" | "$JARVIS_PYTHON" \
+  -m core.eigenflux_publish_material \
+  --state "$JARVIS_DIR/eigenflux/publish_material_gate.json" 2>/dev/null || echo skip)
+[ "$material_gate" = "allow" ] || exit 0
+
+echo "Ready to publish. Last published ${elapsed}s ago."
+[ -n "${recent:-}" ] && echo "$recent"
+[ -n "$material" ] && echo "$material"
 [ -n "$commits" ] && echo "$commits"
 exit 0

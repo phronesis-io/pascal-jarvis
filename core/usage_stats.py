@@ -472,6 +472,36 @@ def load_daemon_usage(jarvis_dir) -> list[dict]:
     return [{"day": day, **days[day]} for day in sorted(days)]
 
 
+def load_daemon_usage_routes(jarvis_dir) -> list[dict]:
+    """Per-day call counts grouped by the actual provider/model route."""
+    base = Path(jarvis_dir) / "sched_events.jsonl"
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    paths = [base.with_name(f"{base.name}.{gen}")
+             for gen in range(_SCHED_GENERATIONS, 0, -1)] + [base]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("event") != "llm_usage":
+                continue
+            day = str(event.get("ts", ""))[:10]
+            if len(day) != 10:
+                continue
+            provider = str(event.get("provider") or "unknown")
+            model = str(event.get("model") or "unknown")
+            counts[(day, provider, model)] += 1
+    return [
+        {"day": day, "provider": provider, "model": model, "calls": calls}
+        for (day, provider, model), calls in sorted(counts.items())
+    ]
+
+
 def _daemon_cli(days: int) -> int:
     jarvis_dir = os.environ.get("JARVIS_DIR", ".")
     rows = load_daemon_usage(jarvis_dir)
@@ -495,6 +525,14 @@ def _daemon_cli(days: int) -> int:
         if show_cost:
             line += f"{r['cost']:>10.2f}" if r["has_cost"] else f"{'-':>10}"
         print(line)
+    selected_days = {row["day"] for row in rows}
+    routes = [row for row in load_daemon_usage_routes(jarvis_dir)
+              if row["day"] in selected_days]
+    if routes:
+        print("\n  provider/model calls")
+        for route in routes:
+            print(f"  {route['day']}  {route['provider']}/{route['model']}: "
+                  f"{route['calls']}")
     return 0
 
 

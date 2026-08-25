@@ -101,6 +101,24 @@ def test_post_renders_cards_and_promotes(tmp_path):
     assert wm["ts"] == "2026-07-15T14:00:00+08:00"
 
 
+def test_post_translates_probe_ids_and_transport_statuses(tmp_path):
+    _stage_pending(tmp_path)
+    payload = json.dumps({"cards": [{
+        "header": "🚨 pgc_pulse 一手源挂了 2 个",
+        "body": "user_growth 返回 520，broken_first_party = 2",
+    }]}, ensure_ascii=False)
+
+    result = _run_post(tmp_path, payload)
+    rendered = result.stdout
+    assert "新闻抓取" in rendered
+    assert "用户增长" in rendered
+    assert "服务响应异常" in rendered
+    assert "pgc_pulse" not in rendered
+    assert "user_growth" not in rendered
+    assert "broken_first_party" not in rendered
+    assert "520" not in rendered
+
+
 def test_post_heartbeat_ok_promotes_without_cards(tmp_path):
     mdir = _stage_pending(tmp_path)
     r = _run_post(tmp_path, "HEARTBEAT_OK")

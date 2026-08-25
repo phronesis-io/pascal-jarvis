@@ -475,7 +475,15 @@ def _warn_tiers_over_budget():
     from core.log import log
     from core.memory import (HOT_BUDGET, MAX_MEMORY_CHARS, SYSTEM_BUDGET,
                              TIMELINE_BUDGET, WARM_BUDGET,
-                             _SYSTEM_FILE_CAPS, _TIMELINE_SKIP)
+                             _SYSTEM_FILE_CAPS, _TIMELINE_SKIP,
+                             load_tiered_memory)
+
+    # Production calls use warm=index. Full-mode corpus size is diagnostic and
+    # must not write a false overflow warning into the index that every later
+    # call reads.
+    index_total = len(load_tiered_memory(MEMORY_DIR, warm_mode="index"))
+    if index_total < MAX_MEMORY_CHARS:
+        return
 
     def _tier_sizes(dirpath, skip=frozenset(), caps=None):
         sizes = {}
@@ -505,9 +513,7 @@ def _warn_tiers_over_budget():
         "timeline": (_tier_sizes(MEMORY_DIR / "timeline", skip=_TIMELINE_SKIP),
                      TIMELINE_BUDGET),
     }
-    total = sum(sum(sizes.values()) for sizes, _ in tiers.values())
-    if total <= MAX_MEMORY_CHARS:
-        return
+    total = index_total
     over = {}
     for tier, (sizes, budget) in tiers.items():
         tier_total = sum(sizes.values())
@@ -579,6 +585,26 @@ def main() -> int:
         _warn_tiers_over_budget()
     except Exception as e:
         print(f"[memory-tidy] tier budget check failed: {e}", file=sys.stderr)
+
+    # First reconcile the exact operational statements invalidated by shipped
+    # runtime changes.  This is a narrow allowlist, not a model-authored memory
+    # rewrite, and runs on both the canonical auto-memory and active replica.
+    try:
+        from core.memory_operational_claims import reconcile_operational_claims
+        repaired = []
+        for root in dict.fromkeys((AUTO_MEMORY, MEMORY_DIR)):
+            repaired.extend(reconcile_operational_claims(root))
+        if repaired:
+            print(
+                "[memory-tidy] reconciled obsolete operational claims: "
+                + ", ".join(sorted(set(repaired))),
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(
+            f"[memory-tidy] operational-claim reconciliation failed: {exc}",
+            file=sys.stderr,
+        )
 
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
