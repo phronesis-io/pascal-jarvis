@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from core.triage_profile import load_profile, render_profile
 
@@ -55,13 +56,30 @@ def test_rendered_profile_contains_only_safe_categories():
 
 
 def test_triage_profile_cli_is_honest_when_unconfigured(tmp_path):
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    (foreign_root / "jarvis.yaml").write_text(
+        "triage_profile:\n  projects: [Wrong checkout]\n",
+        encoding="utf-8",
+    )
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    repo_root = Path(__file__).resolve().parent.parent
     result = subprocess.run(
         [sys.executable, "-m", "core.triage_profile"],
         capture_output=True,
         text=True,
         check=True,
-        env={**os.environ, "JARVIS_DIR": str(tmp_path)},
+        cwd=foreign_root,
+        env={
+            **os.environ,
+            "JARVIS_DIR": str(runtime_root),
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(repo_root), os.environ.get("PYTHONPATH", "")))
+            ),
+        },
     )
 
     assert "RELEVANCE PROFILE" in result.stdout
     assert "未配置" in result.stdout
+    assert "Wrong checkout" not in result.stdout
