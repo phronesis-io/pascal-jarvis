@@ -135,13 +135,18 @@ def test_route_output_records_memorial_delivery(tmp_path):
 
 def test_sqlite_flush_result_projects_back_to_memorial_ledger(
         tmp_path, monkeypatch):
+    from datetime import datetime
     from core import heartbeat_loop as hl
     from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
+    from core.timeutil import now_local
 
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    afternoon = datetime(
+        2026, 8, 25, 16, 0, tzinfo=now_local().tzinfo).timestamp()
     pipeline = DeliveryPipeline(
         tmp_path,
         transport=lambda *_args: TransportResult(True, "om_projected"),
+        clock=lambda: afternoon,
     )
     result = pipeline.deliver(DeliveryEnvelope(
         source="test", kind="text", payload={"text": "done"},
