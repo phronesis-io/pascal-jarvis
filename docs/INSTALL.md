@@ -161,7 +161,9 @@ lark:
 - **通用邮箱 IMAP**（`imap_mail`，163/Gmail/Outlook 等）：凭证放一个 0600 权限的
   JSON 文件（格式见 sources.example.yaml 注释），`secret_file` 指向它——**凭证
   绝不写进 sources.yaml**。🧑 NEEDS HUMAN：去邮箱设置里开 IMAP 并生成
-  **应用专用密码/授权码**（不是登录密码）。
+  **应用专用密码/授权码**（不是登录密码）。如果邮箱只作为 Jarvis 的数据源、不想
+  再维护未读徽标，可显式设置 `mark_seen: true`；适配器会在服务端回读确认已读后
+  才推进游标，dry-run 不会改变邮箱状态。
 - **群聊**（`lark_chat`）：`lark-cli im +chat-search --query 群名` 查 chat_id 填入。
 - **文件/报告变更**（`file_watch`）：globs 指向人类的工作目录。
 - **本地仓库 commit**（`git_repo`）：repos_dir 指向代码目录的父目录。
