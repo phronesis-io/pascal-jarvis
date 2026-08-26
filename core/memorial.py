@@ -64,6 +64,12 @@ from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
 from core import memorial_cards, memorial_ledger, memorial_transport
+from core.card_envelope import (
+    is_card_payload,
+    memorial_action_id,
+    strip_memorial_actions,
+    trusted_ledger_card_id,
+)
 from core.log import log
 from core.memorial_contracts import (
     ATTENTION_ALERT,
@@ -2051,12 +2057,12 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
 
 def _card_memorial_id(card: dict) -> str:
-    for element in card.get("elements", []):
-        for action in element.get("actions", []):
-            value = action.get("value") or {}
-            if value.get("action") == "memorial" and value.get("id"):
-                return str(value["id"])
-    return ""
+    return memorial_action_id(card)
+
+
+def _trusted_ledger_card_memorial_id(card: dict) -> str:
+    expected = lambda mid: json.loads(card_json(mid)) if get_memorial(mid) else None
+    return trusted_ledger_card_id(card, _card_memorial_id, expected)
 
 
 def _clean_adopted_title(header: str, source: str) -> str:
@@ -2097,8 +2103,11 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # per-kind learning possible at all — before this every checkin was logged
     # as an undifferentiated `source=checkin`.
     context = str(card.pop("__jarvis_context", "") or context)
-    if _card_memorial_id(card):
+    if _trusted_ledger_card_memorial_id(card):
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+    if _card_memorial_id(card):
+        _ops_log("untrusted_memorial_card", level="warn", source=source)
+        strip_memorial_actions(card)
 
     # core.card keeps a bounded visible fallback for direct Lark callers, but
     # carries the uncut body inside its internal envelope.  Restore it before
@@ -2438,22 +2447,13 @@ def memorialize_output(
                 continue
             rendered.append(card_json(mid))
 
-    raw_output = str(output)
-    output_lines = raw_output.splitlines()
-    # One standalone legacy card remains backward-compatible. In mixed prose,
-    # executable cards require the explicit CARD: envelope so Markdown examples
-    # and lazy blockquote continuations cannot acquire live callbacks.
-    try:
-        standalone_card = json.loads(raw_output.strip())
-    except (json.JSONDecodeError, TypeError, ValueError):
-        standalone_card = None
-    first_nonempty = next(
-        (line for line in output_lines if line.strip()), "")
-    if (first_nonempty == first_nonempty.lstrip(" \t")
-            and isinstance(standalone_card, dict)
-            and "config" in standalone_card and "elements" in standalone_card):
-        output_lines = ["CARD:" + json.dumps(standalone_card,
-                                              ensure_ascii=False)]
+    # One standalone legacy card, or bare ledger-backed cards one per line
+    # (a post-hook printing several card_json), become CARD: envelopes. In
+    # mixed prose, anything else needs the explicit CARD: envelope so Markdown
+    # examples and lazy blockquote continuations cannot acquire live callbacks.
+    from core.card_envelope import envelope_bare_cards
+    output_lines = envelope_bare_cards(
+        str(output).splitlines(), _trusted_ledger_card_memorial_id)
     protected_output_lines = _markdown_protected_lines(output_lines)
     dropping_bad_card = False
     from core.task_protocol import parse_output_source_marker
@@ -2489,12 +2489,12 @@ def memorialize_output(
                 card = None
         else:
             card = None
-        if isinstance(card, dict) and "config" in card and "elements" in card:
+        if is_card_payload(card):
             flush_prose()
-            existing_id = _card_memorial_id(card)
+            existing_id = _trusted_ledger_card_memorial_id(card)
             if existing_id:
                 state = get_memorial(existing_id) or {}
-                if should_push_to_lark(state):
+                if should_push_to_lark(state) and not delivery_accepted(state):
                     card.pop("__jarvis_source", None)
                     adopted = json.dumps(
                         card, ensure_ascii=False, separators=(",", ":"))

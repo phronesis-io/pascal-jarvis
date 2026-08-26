@@ -318,8 +318,11 @@ def _ensure_intent_matter(intent_id: str, row: dict | None = None) -> tuple[str,
         candidate_id = str(candidate.get("id") or "")
         if not candidate_id:
             continue
-        _, _, candidate_identity = _intent_matter_identity(candidate_id, candidate)
-        if candidate_identity != identity:
+        # Match siblings on the MATTER, not the identity string: once a row
+        # is linked its identity reads ``matter:<id>`` while an unlinked twin
+        # still reads ``blog-05`` — comparing those never converged (8/26).
+        candidate_matter_id, _, _ = _intent_matter_identity(candidate_id, candidate)
+        if candidate_matter_id != matter_id:
             continue
         link_entity(
             matter_id,
@@ -667,7 +670,12 @@ def _emit_closure_card(combined: str, button_specs: list,
                 options=options,
                 authoring_protocol=True, send=False,
                 matter_id=matter_id,
-                dedup_key=f"intent-decision:{identity}")
+                # Keyed on the matter, which is stable across runs. The
+                # identity string is not: the first ask sees ``blog-05``,
+                # links the intent, and the very next ask (3 minutes later,
+                # 2026-08-26 12:27/12:29) saw ``matter:mat_…`` — a fresh key,
+                # a second delivered card on the same question.
+                dedup_key=f"intent-decision:{matter_id}")
             print(memorial.card_json(mid))
             return True
         except Exception as e:

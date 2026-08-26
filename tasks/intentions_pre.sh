@@ -167,5 +167,18 @@ except Exception as e:
 if matches:
     output["memory_matches"] = matches
 
+# 6. What he already answered / what still waits on his desk (2026-08-25):
+#    every due intent is a fresh model call with no view of the memorial
+#    ledger, which is how one blog-deadline matter got asked 7 times in 6 days, 4 of them
+#    after he had said「先都放着」. Fail-open: a ledger hiccup must never
+#    strand the due intents.
+try:
+    from core.memorial_verdicts import recent_verdicts
+    verdicts = recent_verdicts()
+    if verdicts:
+        output["recent_verdicts"] = verdicts
+except Exception as e:
+    print(f"[intentions] recent verdicts error: {e}", file=sys.stderr)
+
 print(json.dumps(output, ensure_ascii=False))
 PYTHON
