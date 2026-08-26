@@ -117,6 +117,19 @@ class TestDefinition:
         assert resumed["next_fire_at"] > now_local().strftime("%Y-%m-%d %H:%M")
         assert routines.claim_due() == []
 
+    def test_default_list_reports_paused_routines_instead_of_data_loss(
+            self, routine_db, capsys):
+        row = _mk(routine_db)
+        routines.set_status(row["id"], routines.STATUS_PAUSED)
+
+        assert routines.main(["list"]) == 0
+
+        output = capsys.readouterr().out
+        assert "当前没有运行中的例程" in output
+        assert "另有 1 条已暂停" in output
+        assert "list --all" in output
+        assert "还没有例程" not in output
+
 
 # ── firing and claim safety ──────────────────────────────────────────────
 

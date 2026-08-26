@@ -354,19 +354,17 @@ def _is_dangling_placeholder(text: str) -> bool:
 def _has_idle_sentinel(text: str) -> bool:
     """True if HEARTBEAT_OK appears as a standalone line in the message.
 
-    The exact-match check (`raw.strip() == "HEARTBEAT_OK"`) only fires when the
-    ENTIRE response is the sentinel. But the model sometimes writes its reasoning
-    ("this is test noise, not worth notifying Pascal") and THEN emits
-    HEARTBEAT_OK on its own line — the reasoning leaks into output and the
-    half-message gets delivered as a card (2026-06-08: a 🎯 Intent card reached
-    Pascal despite ending in HEARTBEAT_OK). When the sentinel is present the
-    model has decided nothing needs attention; the surrounding text is leaked
-    scratch work, so the whole message is dropped.
-
     Standalone-line match (not bare substring) avoids dropping a legitimate
     message that merely mentions the token in prose.
     """
     return any(ln.strip() == "HEARTBEAT_OK" for ln in text.splitlines())
+
+
+def _is_wrapped_idle_ack(text: str) -> bool:
+    """Recognize short model wrappers around the requested idle token."""
+    text = text.strip()
+    return len(text) <= 200 and bool(re.search(
+        r"(?:回复|reply)\s*[：:]?\s*HEARTBEAT_OK\s*$", text, re.IGNORECASE))
 
 
 def _completion_epoch(cycle_started_at: float) -> int:
@@ -2271,10 +2269,11 @@ Current time: {now_ts}"""
         # Every branch past this point ends in save_state, so the pop lands.
         state.pop("__shared_call__", None)
 
-        if raw.strip() == "HEARTBEAT_OK":
-            # Only treat as idle if the ENTIRE response is exactly HEARTBEAT_OK.
-            # A multi-task JSON envelope containing "HEARTBEAT_OK" as a per-task
-            # value must NOT be discarded — other tasks may have real content.
+        if (raw.strip() == "HEARTBEAT_OK"
+                or (not ack_present and _is_wrapped_idle_ack(raw))):
+            # Only the exact token or a short explicit reply-wrapper is idle.
+            # A JSON envelope containing the token still ends in `}` and is
+            # parsed below, so another task's real content cannot be discarded.
             for task in runnable:
                 ts = TaskState.from_dict(state.get(task["name"], {}))
                 ts.last_run = now

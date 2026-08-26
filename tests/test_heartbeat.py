@@ -1626,6 +1626,37 @@ def test_idle_sentinel_detection():
     assert not _has_idle_sentinel("当模型输出 HEARTBEAT_OK 时就不该打扰你")
 
 
+def test_wrapped_idle_ack_detection_is_narrow():
+    from core.heartbeat import _is_wrapped_idle_ack
+
+    assert _is_wrapped_idle_ack("两个任务都不达标准，回复： HEARTBEAT_OK")
+    assert _is_wrapped_idle_ack("No task needs attention; reply: HEARTBEAT_OK")
+    assert not _is_wrapped_idle_ack("当模型输出 HEARTBEAT_OK 时就不该打扰你")
+
+
+def test_multi_task_wrapped_idle_ack_is_success_not_parse_failure(
+        tmp_path, monkeypatch):
+    runner = _make_runner(
+        tmp_path,
+        "### task-a\n- interval: 1h\n- prompt: a\n"
+        "### task-b\n- interval: 1h\n- prompt: b\n",
+    )
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda _prompt: "两个任务都不达标准，回复： HEARTBEAT_OK",
+    )
+
+    assert runner.run_cycle(force=True) == ""
+    state = runner.load_state()
+    assert state["task-a"]["last_status"] == "idle"
+    assert state["task-b"]["last_status"] == "idle"
+    assert "__envelope_parse__" not in state
+    assert not any(
+        event.get("status") == "parse_failed"
+        for event in _sched_events(runner)
+    )
+
+
 def test_single_task_idle_sentinel_suppressed(tmp_path, monkeypatch):
     """Single-task path: reasoning text ending in HEARTBEAT_OK is dropped, not sent."""
     hb = "### intent-check\n- interval: 1h\n- prompt: check\n"
@@ -2056,6 +2087,19 @@ def test_ack_task_prompt_forbids_bare_heartbeat_ok(tmp_path, monkeypatch):
     p = captured["prompt"]
     assert "NEVER reply with a bare HEARTBEAT_OK" in p
     assert "reply with exactly: HEARTBEAT_OK" not in p
+
+
+def test_wrapped_idle_ack_cannot_bypass_required_post(tmp_path, monkeypatch):
+    runner, stdin_log = _ack_runner(tmp_path)
+    monkeypatch.setattr(
+        runner, "claude_call",
+        lambda _prompt: "两个任务都不达标准，回复： HEARTBEAT_OK",
+    )
+
+    runner.run_cycle(force=True)
+
+    assert "__NO_ENVELOPE__" in stdin_log.read_text()
+    assert runner.load_state()["intention-check"]["last_status"] == "parse_failed"
 
 
 def test_degenerate_ack_slice_routes_to_no_envelope(tmp_path, monkeypatch):

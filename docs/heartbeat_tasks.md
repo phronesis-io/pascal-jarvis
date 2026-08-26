@@ -98,6 +98,9 @@ Supporting rules baked into those helpers:
   unparseable input; the caller then either salvages a human field
   (`safety.salvage_field` / `salvage_task_ids`) or suppresses. The heartbeat
   loop also blocks any line that parses as JSON as a backstop.
+- A short wrapper ending in `回复/reply: HEARTBEAT_OK` is an idle receipt, not
+  an envelope failure. This recovery is disabled when an ACK-required task is
+  present because its post-hook must reconcile claimed state.
 - **All file writes are atomic** (`safety.atomic_write`, which `core.jsonl` uses):
   the main session and the heartbeat read these files concurrently, so a
   half-written file must never be observable.

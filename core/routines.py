@@ -850,7 +850,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "list":
             rows = list_routines(status=None if args.all else STATUS_ACTIVE)
             if not rows:
-                print("还没有例程。用 create 建一个。")
+                paused = list_routines(STATUS_PAUSED) if not args.all else []
+                if paused:
+                    print(f"当前没有运行中的例程；另有 {len(paused)} 条已暂停。")
+                    print("用 list --all 查看，确认后再 resume，不会补发暂停期内容。")
+                else:
+                    print("还没有运行中的例程。用 create 建一个。")
             for row in rows:
                 print(_fmt(row))
                 print()
