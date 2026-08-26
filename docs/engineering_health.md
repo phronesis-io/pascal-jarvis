@@ -7,7 +7,7 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 231 active capabilities: 231 `keep`, 0 `fix`,
+- The generated inventory has 168 active capabilities: 168 `keep`, 0 `fix`,
   0 `retire-candidate`. A `keep` row means definition, implementation,
   entrypoint, and executable-test reference exist; it is not a coverage claim.
 - `core.cross_session` is a small facade over discovery, parsing, historical
@@ -33,7 +33,7 @@ work. The supported product surface remains the generated
   percentages, and must not be used to compare this repository with another
   codebase.
 - `core/memorial.py` is 3,694 lines and its longest function is 181 lines;
-  `core/intentions.py` is 3,606/324; `core/heartbeat.py` is 2,564/886; and
+  `core/intentions.py` is 3,583/324; `core/heartbeat.py` is 2,556/882; and
   `core/delegations.py` is 2,450/218. These are verified maintainability risks
   even though line count alone is not a defect. Their current file/longest-
   function values are checked into `docs/maintainability_budget.json` and run
@@ -62,6 +62,7 @@ work. The supported product surface remains the generated
 | Import graph is not a CI gate | Fixed | The core-cycle budget runs in pytest, while adjacency remains a review signal rather than a brittle hard limit for central authority modules. |
 | Release success is scattered across terminal output | Fixed | A successful governed or same-revision restart now persists one joined SQLite receipt containing release authority, exact SHA, resident-version proof, critical component results, and delivery smoke. Partial or mismatched evidence fails closed and writes no success row. |
 | Large-module debt can grow between audits | Fixed as a ratchet; debt remains | `scripts/maintainability_budget.py` is in local and protected CI. It accepts the verified 2026-08-21 baselines for four orchestration modules and rejects file or longest-function growth. Each extraction lowers the checked-in budget. |
+| Local shell validation is stronger than protected CI | Fixed | Protected CI now syntax-checks and ShellChecks the same `bot.sh`, `restart.sh`, `tasks/*.sh`, and `scripts/*.sh` surfaces as `scripts/localtest.sh`; an executable contract prevents either list from silently drifting. |
 
 ## Debt Retirement Sequence
 
