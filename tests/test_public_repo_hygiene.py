@@ -8,6 +8,7 @@ contents.
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 from pathlib import Path
 
@@ -87,6 +88,16 @@ def test_gitignore_keeps_common_secret_shapes_local():
 
     for pattern in REQUIRED_GITIGNORE_PATTERNS:
         assert pattern in ignore_lines
+
+
+def test_ci_uses_node24_capable_official_actions():
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+        encoding="utf-8"
+    )
+    for action in ("actions/checkout", "actions/setup-python"):
+        match = re.search(rf"uses:\s*{re.escape(action)}@v(\d+)", workflow)
+        assert match, f"missing {action} in CI workflow"
+        assert int(match.group(1)) >= 6, f"{action} must use its Node 24 release"
 
 # ── Content guards (added 2026-07-13 pre-internal-release scrub) ──────────
 # The 7/13 audit found real personal data (a private mailbox, full-length
