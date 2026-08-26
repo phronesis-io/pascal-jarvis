@@ -44,4 +44,7 @@ jobs:
         run: python scripts/maintainability_budget.py
 
       - name: Run tests
-        run: python -m pytest tests/ -v
+        run: |
+          python -m coverage run -m pytest tests/ -v
+          python -m coverage json -o /tmp/jarvis-coverage.json
+          python scripts/coverage_budget.py /tmp/jarvis-coverage.json

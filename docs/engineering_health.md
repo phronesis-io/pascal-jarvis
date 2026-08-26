@@ -27,11 +27,12 @@ work. The supported product surface remains the generated
   `core.lark_bot_transport` uses the private app credential, in-memory tenant
   tokens, and verified `message_id` receipts; owner calendar/docs/mail/task
   capabilities remain independently fail-closed behind user OAuth.
-- Runtime line coverage is not currently measured: the repository has no
-  `coverage.py`/`pytest-cov` configuration. Ratios between changed test lines
-  and changed implementation lines are review-volume indicators, not coverage
-  percentages, and must not be used to compare this repository with another
-  codebase.
+- Protected CI measures `core/` statement and branch coverage with
+  `coverage.py`. The reviewed 2026-08-26 baseline is 80.5% statements and
+  72.3% branches. `scripts/coverage_budget.py` ratchets the total and critical
+  runtime modules; it is a regression floor, not a claim that every path is
+  sufficiently tested. Ratios between changed test lines and implementation
+  lines remain review-volume indicators and are not coverage percentages.
 - `core/memorial.py` is 3,694 lines and its longest function is 181 lines;
   `core/intentions.py` is 3,583/324; `core/heartbeat.py` is 2,556/882; and
   `core/delegations.py` is 2,450/218. These are verified maintainability risks
@@ -63,19 +64,21 @@ work. The supported product surface remains the generated
 | Release success is scattered across terminal output | Fixed | A successful governed or same-revision restart now persists one joined SQLite receipt containing release authority, exact SHA, resident-version proof, critical component results, and delivery smoke. Partial or mismatched evidence fails closed and writes no success row. |
 | Large-module debt can grow between audits | Fixed as a ratchet; debt remains | `scripts/maintainability_budget.py` is in local and protected CI. It accepts the verified 2026-08-21 baselines for four orchestration modules and rejects file or longest-function growth. Each extraction lowers the checked-in budget. |
 | Local shell validation is stronger than protected CI | Fixed | Protected CI now syntax-checks and ShellChecks the same `bot.sh`, `restart.sh`, `tasks/*.sh`, and `scripts/*.sh` surfaces as `scripts/localtest.sh`; an executable contract prevents either list from silently drifting. |
+| Runtime coverage is inferred from test-file names | Fixed as a baseline gate | A full branch-coverage run now measures executable `core/` paths. The gate protects the total plus provider, delivery, memory, session, Matter, EigenFlux and scheduler modules from silent regression; low baselines remain named debt rather than being rounded into “covered”. |
 
 ## Debt Retirement Sequence
 
 The two large orchestration modules will be reduced in small, behavior-preserving
 changes. They must not be rewritten or split by line count alone.
 
-1. Establish a reproducible runtime coverage baseline for `core/memorial.py`
-   and `core/intentions.py`, publish branch coverage as information, and keep
-   the strict local suite as the release gate until the baseline is stable.
-2. Add characterization tests around the longest workflows and their failure
+1. Add characterization tests around the longest workflows and their failure
    boundaries before moving code. The first targets are
    `generate_calendar_intents`, `restore_cancelled_intent`,
    `memorialize_output`, and `decide`.
+2. Raise the thin runtime boundaries first: `core.matter_executor` (36.0%
+   statements / 24.1% branches), `core.routine_evidence` (52.9% / 41.4%),
+   `core.ef_stream_loop` (58.1% / 47.7%), and the long-lived loop paths in
+   `core.heartbeat_loop` (69.6% / 65.0%).
 3. Continue the existing Memorial extraction by moving orchestration into
    workflow modules that depend on `memorial_ledger`, `memorial_cards`, and
    `memorial_transport`; keep `core.memorial` as a compatibility facade while
