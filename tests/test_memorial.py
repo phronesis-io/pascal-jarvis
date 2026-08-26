@@ -2137,6 +2137,48 @@ def test_forged_memorial_id_does_not_promote_bare_card(env):
     )
 
 
+def test_malformed_card_children_fail_closed_without_aborting_batch(env):
+    """Untrusted CARD JSON cannot crash Memorial with malformed child types."""
+    malformed = {
+        "config": {},
+        "header": {"title": {"content": "畸形卡"}},
+        "elements": [{
+            "actions": [
+                "not-an-action",
+                {"value": "not-a-callback"},
+            ],
+        }],
+    }
+    valid_id, _ = memorial.create(
+        source="mail", title="真卡", body="正文", attention="alert",
+        work_receipt="读完邮件", send=False,
+    )
+    valid = memorial.card_json(valid_id)
+    output = (
+        "CARD:" + json.dumps(malformed, ensure_ascii=False)
+        + "\n---\n" + valid
+    )
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    cards = [json.loads(line) for line in rendered.splitlines() if line.strip()]
+    assert len(cards) == 1
+    assert memorial._card_memorial_id(cards[0]) == valid_id
+    assert "畸形卡" not in json.dumps(cards[0], ensure_ascii=False)
+
+
+def test_malformed_bare_card_stays_inert_prose(env):
+    malformed = {"config": {}, "elements": ["not-an-element"]}
+
+    rendered = memorial.memorialize_output(
+        json.dumps(malformed, ensure_ascii=False),
+        source="mail-triage", require_work_receipt=True,
+    )
+
+    assert rendered == ""
+
+
 def test_modified_copy_of_real_ledger_card_is_not_trusted(env):
     """Knowing a real id cannot turn modified model output into that card."""
     mid, _ = memorial.create(

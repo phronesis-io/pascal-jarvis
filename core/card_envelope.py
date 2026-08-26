@@ -21,6 +21,74 @@ import json
 from typing import Callable
 
 
+def is_card_payload(card: object) -> bool:
+    """Whether a decoded value is structurally safe for card adoption.
+
+    Model output is untrusted. Merely carrying ``config`` and ``elements``
+    keys is not enough: malformed child values used to reach ``.get`` calls
+    in Memorial and abort the whole post-hook batch.
+    """
+    if not isinstance(card, dict):
+        return False
+    if not isinstance(card.get("config"), dict):
+        return False
+    elements = card.get("elements")
+    if not isinstance(elements, list):
+        return False
+    header = card.get("header")
+    if header is not None:
+        if not isinstance(header, dict):
+            return False
+        title = header.get("title")
+        if title is not None and not isinstance(title, dict):
+            return False
+    for element in elements:
+        if not isinstance(element, dict):
+            return False
+        text = element.get("text")
+        if text is not None and not isinstance(text, dict):
+            return False
+        actions = element.get("actions")
+        if actions is None:
+            continue
+        if not isinstance(actions, list):
+            return False
+        for action in actions:
+            if not isinstance(action, dict):
+                return False
+            action_text = action.get("text")
+            if action_text is not None and not isinstance(action_text, dict):
+                return False
+            value = action.get("value")
+            if value is not None and not isinstance(value, dict):
+                return False
+    return True
+
+
+def memorial_action_id(card: object) -> str:
+    """Extract one Memorial callback id from potentially untrusted JSON."""
+    if not isinstance(card, dict):
+        return ""
+    elements = card.get("elements")
+    if not isinstance(elements, list):
+        return ""
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        actions = element.get("actions")
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            value = action.get("value")
+            if not isinstance(value, dict):
+                continue
+            if value.get("action") == "memorial" and value.get("id"):
+                return str(value["id"])
+    return ""
+
+
 def _as_card(text: str) -> dict | None:
     stripped = text.strip()
     if not stripped.startswith("{"):
@@ -29,7 +97,7 @@ def _as_card(text: str) -> dict | None:
         card = json.loads(stripped)
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
-    if isinstance(card, dict) and "config" in card and "elements" in card:
+    if is_card_payload(card):
         return card
     return None
 
@@ -40,7 +108,10 @@ def trusted_ledger_card_id(
     expected_card_of: Callable[[str], dict | None],
 ) -> str:
     """Return an id only when ``card`` exactly matches its ledger rendering."""
-    memorial_id = memorial_id_of(card)
+    try:
+        memorial_id = memorial_id_of(card)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return ""
     if not memorial_id:
         return ""
     try:
@@ -52,7 +123,12 @@ def trusted_ledger_card_id(
 
 def strip_memorial_actions(card: dict) -> None:
     """Remove ledger callbacks from a card that failed provenance checks."""
-    for element in card.get("elements", []):
+    elements = card.get("elements", [])
+    if not isinstance(elements, list):
+        return
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
         actions = element.get("actions")
         if not isinstance(actions, list):
             continue

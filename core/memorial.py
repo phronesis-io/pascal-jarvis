@@ -64,7 +64,12 @@ from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
 from core import memorial_cards, memorial_ledger, memorial_transport
-from core.card_envelope import strip_memorial_actions, trusted_ledger_card_id
+from core.card_envelope import (
+    is_card_payload,
+    memorial_action_id,
+    strip_memorial_actions,
+    trusted_ledger_card_id,
+)
 from core.log import log
 from core.memorial_contracts import (
     ATTENTION_ALERT,
@@ -2052,12 +2057,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
 
 def _card_memorial_id(card: dict) -> str:
-    for element in card.get("elements", []):
-        for action in element.get("actions", []):
-            value = action.get("value") or {}
-            if value.get("action") == "memorial" and value.get("id"):
-                return str(value["id"])
-    return ""
+    return memorial_action_id(card)
 
 
 def _trusted_ledger_card_memorial_id(card: dict) -> str:
@@ -2489,7 +2489,7 @@ def memorialize_output(
                 card = None
         else:
             card = None
-        if isinstance(card, dict) and "config" in card and "elements" in card:
+        if is_card_payload(card):
             flush_prose()
             existing_id = _trusted_ledger_card_memorial_id(card)
             if existing_id:
