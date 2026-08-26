@@ -1,6 +1,7 @@
 """Tests for core.heartbeat — parsing, scheduling, pipeline protection."""
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -213,6 +214,44 @@ def test_state_persistence(tmp_path):
     runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
     runner.save_state({"t": {"last_run": 12345}})
     assert runner.load_state() == {"t": {"last_run": 12345}}
+
+
+def test_task_scripts_do_not_inherit_model_credentials(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
+    script = runner.jarvis_dir / "env_probe.py"
+    script.write_text(
+        "import os\n"
+        "print('|'.join([os.environ.get('OPENAI_API_KEY', 'unset'), "
+        "os.environ.get('CLAUDE_BACKUP_AUTH_TOKEN', 'unset'), "
+        "os.environ.get('SAFE_MARKER', 'missing')]))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("SAFE_MARKER", "kept")
+
+    assert runner.run_script("env_probe.py") == "unset|unset|kept"
+
+
+def test_provider_process_receives_only_its_active_credential(monkeypatch):
+    from core.heartbeat_provider import provider_env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    primary = provider_env(False, False)
+    assert primary["ANTHROPIC_API_KEY"] == "primary-secret"
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in primary
+    assert "OPENAI_API_KEY" not in primary
+
+    backup2 = provider_env(True, True)
+    assert backup2["ANTHROPIC_AUTH_TOKEN"] == "backup2-secret"
+    assert "ANTHROPIC_API_KEY" not in backup2
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in backup2
+    assert "CLAUDE_BACKUP2_AUTH_TOKEN" not in backup2
+    assert "OPENAI_API_KEY" not in backup2
 
 
 def test_completion_epoch_is_the_release_time(monkeypatch):
@@ -438,20 +477,46 @@ def test_claude_call_default_mode_keeps_pre_index_memory_signature(
     monkeypatch.setattr("core.heartbeat.load_tiered_memory", _pre_index_loader)
     runner.claude_call("hello")
 
-    assert seen["focus_text"] == "hello"
+    assert seen["focus_text"] == ""
     assert "max_chars" in seen
 
 
-def test_system_prompt_prefix_is_stable_and_timestamp_comes_last(
+def test_noncacheable_full_memory_call_keeps_task_focused_ordering(
         tmp_path, monkeypatch):
-    """Prompt-cache diet (2026-08-24): the minute-fresh 'Current time' line
-    sat at char offset ~57, before the ~200k-char memory block — every call
-    invalidated the provider prompt cache for the whole prefix. It now closes
-    the system prompt: persona line → attention rules → acting → memory stay
-    byte-stable across calls, timestamp (same format, still in the system
-    prompt) comes after the memory content."""
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    seen = {}
+
+    def _loader(memory_dir, *, max_chars=None, focus_text=""):
+        seen.update(max_chars=max_chars, focus_text=focus_text)
+        return "MEM"
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "core.heartbeat.subprocess.run", lambda cmd, **kw: _Result())
+    monkeypatch.setattr("core.heartbeat.load_tiered_memory", _loader)
+
+    runner.claude_call("focus on today's recovery", full_memory=True)
+
+    assert seen == {
+        "max_chars": None,
+        "focus_text": "focus on today's recovery",
+    }
+
+
+def test_system_prompt_block_is_exact_and_timestamp_stays_in_user_request(
+        tmp_path, monkeypatch):
+    """A changing suffix in one system text block invalidates the whole block."""
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     captured_cmds = []
+    memory_calls = []
+    timestamps = iter((
+        "2026-08-26 13:00 Tuesday",
+        "2026-08-26 13:03 Tuesday",
+    ))
 
     class _Result:
         returncode = 0
@@ -463,29 +528,32 @@ def test_system_prompt_prefix_is_stable_and_timestamp_comes_last(
         lambda cmd, **kw: captured_cmds.append(cmd) or _Result())
     monkeypatch.setattr(
         "core.heartbeat.load_tiered_memory",
-        lambda *_args, **_kwargs: "PRIVATE_MEMORY_SENTINEL",
+        lambda *_args, **_kwargs: (
+            memory_calls.append(True) or "PRIVATE_MEMORY_SENTINEL"
+        ),
     )
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str", lambda _fmt: next(timestamps))
     runner.claude_call("hello")
+    runner.claude_call("hello again")
 
-    cmd = captured_cmds[0]
-    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    first, second = captured_cmds
+    system_prompt = first[first.index("--system-prompt") + 1]
+    second_system_prompt = second[second.index("--system-prompt") + 1]
     lines = system_prompt.splitlines()
-    # (a) persona line directly followed by the attention-rules block.
     assert lines[0].startswith("You are ")
     assert lines[1].startswith("## 主动输出")
-    # (b) the timestamp appears exactly once, AFTER the memory content,
-    # in the unchanged "%Y-%m-%d %H:%M %A" format.
-    assert system_prompt.count("Current time:") == 1
-    assert (system_prompt.index("Current time:")
-            > system_prompt.index("PRIVATE_MEMORY_SENTINEL"))
+    assert second_system_prompt == system_prompt
+    assert memory_calls == [True]
+    assert "Current time:" not in system_prompt
+    assert first[first.index("-p") + 1].endswith(
+        "Current time: 2026-08-26 13:00 Tuesday")
+    assert second[second.index("-p") + 1].endswith(
+        "Current time: 2026-08-26 13:03 Tuesday")
     assert "仍会推一张飞书知会卡并占当天额度" in system_prompt
     assert "系统只存网页" not in system_prompt
     assert "第一句就是结论" in system_prompt
     assert "正文最多三行" in system_prompt
-    import re as _re
-    assert _re.search(
-        r"Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z][a-z]+day\s*$",
-        system_prompt)
 
 
 def _usage_envelope(text: str, usage: dict | None = None,
@@ -853,6 +921,10 @@ def test_outbound_memory_signature_mismatch_fails_closed(
 def test_explicit_gpt_model_routes_without_spawning_claude(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -874,7 +946,10 @@ def test_explicit_gpt_model_routes_without_spawning_claude(
     assert runner.claude_call(
         "score", requested_model="gpt", restrict_tools=True,
     ) == "GPT_SELECTED"
-    assert calls == [("score", {"restrict_tools": True, "timeout": 300})]
+    assert calls == [(
+        "score\n\nCurrent time: 2026-08-26 13:00 Wednesday",
+        {"restrict_tools": True, "timeout": 300},
+    )]
 
 
 def test_openai_no_tools_call_records_provider_model_and_usage(
@@ -910,6 +985,10 @@ def test_openai_no_tools_call_records_provider_model_and_usage(
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -931,7 +1010,10 @@ def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
     )
 
     assert runner.claude_call("focus on eigenflux") == "GPT_OK"
-    assert calls and calls[0][1:] == ("focus on eigenflux", False)
+    assert calls and calls[0][1:] == (
+        "focus on eigenflux\n\nCurrent time: 2026-08-26 13:00 Wednesday",
+        False,
+    )
 
 
 def test_heartbeat_stops_when_every_fallback_route_is_cooling(
@@ -963,6 +1045,10 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
 def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -995,7 +1081,8 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     )
 
     assert runner.claude_call("routine payload", allow_tools=False) == "GPT_RECOVERED"
-    assert fallback_calls == [("routine payload", {
+    assert fallback_calls == [(
+        "routine payload\n\nCurrent time: 2026-08-26 13:00 Wednesday", {
         "restrict_tools": False,
         "allow_tools": False,
         "timeout": 120,
@@ -1036,7 +1123,8 @@ def test_primary_timeout_tries_backup_before_gpt(tmp_path, monkeypatch):
     )
 
     assert runner.claude_call("safe", allow_tools=False) == "BACKUP1_OK"
-    assert calls[0] is None
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in calls[0]
+    assert "OPENAI_API_KEY" not in calls[0]
     assert calls[1]["ANTHROPIC_AUTH_TOKEN"] == "backup1-token"
 
 
@@ -2151,6 +2239,25 @@ def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
             f"HeartbeatRunner.{set_name} references tasks absent from "
             f"HEARTBEAT.md: {sorted(stale)} — remove them or restore the task block"
         )
+
+
+def test_documented_tier0_roster_matches_runtime():
+    """Keep HEARTBEAT.md's operator-facing Tier-0 roster exact.
+
+    A subset check only proves that runtime names have task blocks. It does not
+    catch the overview silently omitting a deterministic task, which made the
+    T1-T23 closure claim that the rosters were synchronized untrue.
+    """
+    hb = Path(__file__).resolve().parent.parent / "HEARTBEAT.md"
+    text = hb.read_text(encoding="utf-8")
+    match = re.search(
+        r"\*\*Tier 0 tasks\*\*.*?:\n(?P<roster>(?:`[^`]+`[,\s]*)+)\n\n",
+        text,
+        flags=re.DOTALL,
+    )
+    assert match, "HEARTBEAT.md must keep an explicit Tier-0 overview roster"
+    documented = set(re.findall(r"`([^`]+)`", match.group("roster")))
+    assert documented == HeartbeatRunner.TIER0_TASKS
 
 
 def test_engagement_tuning_protects_scheduler_infrastructure_sets():

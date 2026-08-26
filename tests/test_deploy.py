@@ -233,6 +233,8 @@ def test_bot_watchdog_refuses_mutable_or_unreleased_runtime():
     assert "refusing to start Jarvis from an unreleased revision" in bot
     assert "runtime_source_unchanged" in bot
     assert "child respawns are blocked until governed deploy" in bot
+    assert "_source_drift_warn_interval=1800" in bot
+    assert "_now - _source_drift_last_warn" in bot
 
 
 def test_dirty_runtime_paths_detects_task_changes(tmp_path):

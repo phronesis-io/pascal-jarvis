@@ -26,6 +26,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.model_credentials import without_model_credentials
+
 JARVIS_DIR = Path(os.environ.get(
     "JARVIS_DIR", Path(__file__).resolve().parent.parent))
 # The session's cwd decides which auto-memory it loads. The repos directory
@@ -172,6 +174,7 @@ def _pid_matches_run(pid: int, run_id: str) -> bool | None:
         result = subprocess.run(
             ["/bin/ps", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=2,
+            env=without_model_credentials(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -268,7 +271,9 @@ def spawn(popen=subprocess.Popen, now_epoch: float | None = None) -> int:
     _reconcile_unreleased(now)
     run_id = f"si-{int(now)}-{uuid.uuid4().hex[:8]}"
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    env = os.environ.copy()
+    env = without_model_credentials(
+        keep=frozenset({"ANTHROPIC_API_KEY"}),
+    )
     env["JARVIS_DIR"] = str(JARVIS_DIR)
     env["PYTHONPATH"] = str(JARVIS_DIR) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -350,7 +355,10 @@ def run_worker(run_id: str, *, run=subprocess.run,
         result = run(
             [resolve_claude_bin(), "--dangerously-skip-permissions", "-p", prompt],
             cwd=str(WORK_DIR), capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=RUN_TIMEOUT_S)
+            stdin=subprocess.DEVNULL, timeout=RUN_TIMEOUT_S,
+            env=without_model_credentials(
+                keep=frozenset({"ANTHROPIC_API_KEY"}),
+            ))
         exit_code = int(result.returncode)
         stdout = str(result.stdout or "")
         stderr = str(result.stderr or "")

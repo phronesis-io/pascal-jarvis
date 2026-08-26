@@ -104,6 +104,45 @@ def test_fixture_discovers_every_fact_source(tmp_path):
     assert validate_inventory(inventory) == []
 
 
+def test_standalone_task_scripts_require_a_real_caller_and_test(tmp_path):
+    root = _fixture_repo(tmp_path)
+    (root / "tasks" / "active_tool.py").write_text(
+        '"""Active tool."""\n'
+        "def main(): return 0\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    (root / "tasks" / "orphan_tool.py").write_text(
+        "def main(): return 0\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    bot = root / "bot.sh"
+    bot.write_text(
+        bot.read_text(encoding="utf-8")
+        + "python3 tasks/active_tool.py\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "test_task_tools.py").write_text(
+        "def test_active_tool_contract():\n"
+        "    assert 'tasks/active_tool.py'.endswith('active_tool.py')\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(root)
+    by_id = {item["id"]: item for item in inventory["capabilities"]}
+
+    assert by_id["task-script:active_tool"]["status"] == "keep"
+    assert by_id["task-script:active_tool"]["metadata"]["callers"][0]["path"] == "bot.sh"
+    assert by_id["task-script:orphan_tool"]["status"] == "fix"
+    assert "missing runtime/entrypoint evidence" in by_id[
+        "task-script:orphan_tool"
+    ]["evidence_gaps"]
+    assert "task-script:sample_task_post" not in by_id
+
+
 def test_every_audited_gap_is_resolved_or_explicitly_explained():
     inventory = build_inventory(ROOT)
     by_id = {item["id"]: item for item in inventory["capabilities"]}
@@ -206,6 +245,9 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
         "component:bot",
         "heartbeat:provider-canary",
         "heartbeat:cross-session-sync",
+        "task-script:watchlater_save",
+        "task-script:journal_capture",
+        "task-script:write_claim_audit",
         "cli:core.codex_fallback",
         "cli:core.memorial",
         "admin-route:get:/health",
@@ -223,6 +265,7 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
     # A retired surface leaves an explicit trace, never a silent disappearance.
     assert any("dashboard :3457" in key for key in inventory["retired_surfaces"])
     assert any("3458" in key for key in inventory["retired_surfaces"])
+    assert any("harness proposal apply" in key for key in inventory["retired_surfaces"])
     assert not any(item["kind"].startswith("dashboard") for item in by_id.values())
     assert validate_inventory(inventory) == []
 

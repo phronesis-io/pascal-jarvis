@@ -1,11 +1,21 @@
 """Tests for core.prompt — system prompt builder."""
 
 import json
+import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from core.prompt import build_system_prompt, load_ef_skills, ACTIONS_DOC
+from core.prompt import (
+    ACTIONS_DOC,
+    PROMPT_SNAPSHOT_MAX_AGE_SECONDS,
+    _prune_prompt_snapshots,
+    build_cached_system_prompt,
+    build_system_prompt,
+    load_ef_skills,
+)
 
 
 def test_build_system_prompt_basic(tmp_path):
@@ -25,7 +35,8 @@ def test_build_system_prompt_basic(tmp_path):
     )
 
     assert "personal assistant" in prompt
-    assert "2026-05-25 10:00 Monday" in prompt
+    assert "2026-05-25 10:00 Monday" not in prompt
+    assert "Current time:" not in prompt
     assert "User is a developer" in prompt
     assert "ACTION:" in prompt
 
@@ -96,7 +107,7 @@ def test_owner_prompt_explicit_full_mode_overrides_runtime_index(
     assert "REFERENCE_BODY" in prompt
 
 
-def test_owner_prompt_timestamp_is_after_all_dynamic_context(tmp_path):
+def test_owner_system_prompt_is_clock_free(tmp_path):
     mem = tmp_path / "memory" / "hot"
     mem.mkdir(parents=True)
     (mem / "profile.md").write_text("MEMORY_SENTINEL")
@@ -111,9 +122,231 @@ def test_owner_prompt_timestamp_is_after_all_dynamic_context(tmp_path):
         tracker_path=str(tmp_path / "tracker.json"),
     )
 
-    assert prompt.count("Current time:") == 1
-    assert prompt.index("Current time:") > prompt.index("MEMORY_SENTINEL")
-    assert prompt.rstrip().endswith("Current time: 2026-08-25 13:00 Tuesday")
+    assert "Current time:" not in prompt
+    assert "2026-08-25 13:00 Tuesday" not in prompt
+    assert "MEMORY_SENTINEL" in prompt
+
+
+def test_cached_system_prompt_is_exact_per_session_and_private(tmp_path):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST_MEMORY", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "session-one",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    first = build_cached_system_prompt(**common)
+    profile.write_text("SECOND_MEMORY", encoding="utf-8")
+    second = build_cached_system_prompt(
+        **{**common, "now_ts": "2026-08-25 13:10 Tuesday"})
+
+    assert second == first
+    assert "FIRST_MEMORY" in second
+    assert "SECOND_MEMORY" not in second
+    assert "Current time:" not in second
+
+    third = build_cached_system_prompt(
+        **{**common, "session_id": "session-two"})
+    assert "SECOND_MEMORY" in third
+    assert third != first
+    assert cache_dir.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600
+               for path in cache_dir.iterdir())
+
+    snapshot = next(
+        path for path in cache_dir.glob("*.txt")
+        if path.read_text(encoding="utf-8") == first
+    )
+    snapshot.chmod(0o644)
+    assert build_cached_system_prompt(**common) == first
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+
+
+def test_cached_system_prompt_isolated_by_release_and_expires_private_data(
+        tmp_path, monkeypatch):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST_RELEASE", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "session-one",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+
+    monkeypatch.setenv("JARVIS_RUNTIME_GIT_HEAD", "a" * 40)
+    first = build_cached_system_prompt(**common)
+    profile.write_text("SECOND_RELEASE", encoding="utf-8")
+    monkeypatch.setenv("JARVIS_RUNTIME_GIT_HEAD", "b" * 40)
+    second = build_cached_system_prompt(**common)
+
+    assert "FIRST_RELEASE" in first
+    assert "SECOND_RELEASE" in second
+    assert second != first
+
+    snapshot = max(cache_dir.glob("*.txt"), key=lambda path: path.stat().st_mtime)
+    old = time.time() - PROMPT_SNAPSHOT_MAX_AGE_SECONDS - 60
+    os.utime(snapshot, (old, old))
+    profile.write_text("AFTER_RETENTION", encoding="utf-8")
+    third = build_cached_system_prompt(**common)
+    assert "AFTER_RETENTION" in third
+    assert "SECOND_RELEASE" not in third
+    assert {path.name for path in cache_dir.glob("*.lock")} == {".cache.lock"}
+
+
+def test_prompt_snapshot_pruning_enforces_count_for_fresh_files(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    snapshots = []
+    for index in range(4):
+        path = cache_dir / f"{index}.txt"
+        path.write_text(str(index), encoding="utf-8")
+        os.utime(path, (time.time() + index, time.time() + index))
+        snapshots.append(path)
+
+    _prune_prompt_snapshots(cache_dir, keep=2, max_age_seconds=3600)
+
+    assert {path.name for path in cache_dir.glob("*.txt")} == {
+        snapshots[2].name,
+        snapshots[3].name,
+    }
+
+
+def test_unrelated_prompt_cache_misses_build_concurrently(tmp_path, monkeypatch):
+    """A slow cross-session/memory read for one new chat must not hold the
+    directory lock and stall another new chat."""
+    import core.prompt as prompt_module
+
+    cache_dir = tmp_path / "cache"
+    started = {"one": threading.Event(), "two": threading.Event()}
+    release = threading.Event()
+
+    def slow_build(**kwargs):
+        session_id = kwargs["session_id"]
+        started[session_id].set()
+        assert release.wait(timeout=3)
+        return f"prompt:{session_id}"
+
+    monkeypatch.setattr(prompt_module, "build_system_prompt", slow_build)
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "conv_key": "owner",
+        "now_ts": "ignored",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    results = {}
+
+    def worker(session_id):
+        results[session_id] = build_cached_system_prompt(
+            **common, session_id=session_id)
+
+    first = threading.Thread(target=worker, args=("one",))
+    second = threading.Thread(target=worker, args=("two",))
+    first.start()
+    assert started["one"].wait(timeout=1)
+    second.start()
+    assert started["two"].wait(timeout=1), (
+        "second prompt build was serialized behind unrelated session work"
+    )
+    release.set()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {"one": "prompt:one", "two": "prompt:two"}
+
+
+def test_same_prompt_cache_miss_publishes_one_exact_snapshot(
+        tmp_path, monkeypatch):
+    """Concurrent cold calls for one session must converge on one snapshot."""
+    import core.prompt as prompt_module
+
+    cache_dir = tmp_path / "cache"
+    both_started = threading.Barrier(2)
+    build_number = iter((1, 2))
+
+    def concurrent_build(**_kwargs):
+        number = next(build_number)
+        both_started.wait(timeout=3)
+        return f"prompt:{number}"
+
+    monkeypatch.setattr(prompt_module, "build_system_prompt", concurrent_build)
+    kwargs = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "conv_key": "owner",
+        "session_id": "same-session",
+        "now_ts": "ignored",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    results = []
+
+    def worker():
+        results.append(build_cached_system_prompt(**kwargs))
+
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker)
+    first.start()
+    second.start()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert results[0] in {"prompt:1", "prompt:2"}
+    snapshots = list(cache_dir.glob("*.txt"))
+    assert len(snapshots) == 1
+    assert snapshots[0].read_text(encoding="utf-8") == results[0]
+
+
+def test_cached_system_prompt_fails_open_without_sharing_empty_session(
+        tmp_path):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+    kwargs = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+
+    first = build_cached_system_prompt(**kwargs)
+    profile.write_text("SECOND", encoding="utf-8")
+    second = build_cached_system_prompt(**kwargs)
+
+    assert "FIRST" in first
+    assert "SECOND" in second
+    assert not cache_dir.exists()
 
 
 def test_resumed_prompt_omits_transcript_context_and_focus_reordering(

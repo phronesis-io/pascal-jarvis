@@ -57,6 +57,7 @@ from core.autoreply_activity import (
     TS_FORMAT as AUTOREPLY_TS_FORMAT,
 )
 from core.log import log
+from core.model_credentials import without_model_credentials
 from core.timeutil import now_local, now_local_str
 from core import memorial
 
@@ -213,6 +214,7 @@ def _lark_send(text: str, user_id: str) -> bool:
             ["lark-cli", "im", "+messages-send",
              "--user-id", user_id, "--markdown", text, "--as", "bot"],
             capture_output=True, text=True, timeout=15,
+            env=without_model_credentials(),
         )
         return r.returncode == 0
     except Exception:
@@ -411,7 +413,8 @@ def _fetch_history(conv_id: str) -> str:
         h = subprocess.run(
             ["eigenflux", "msg", "history", "--conv-id", str(conv_id),
              "--limit", "10", "-f", "json"],
-            capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL, env=without_model_credentials(),
         )
         if h.returncode != 0 or not h.stdout.strip():
             return ""
@@ -1133,6 +1136,7 @@ def run_loop(jarvis_dir: str, user_id: str = "", log_file: str = ""):
                 cmd, stdout=subprocess.PIPE,
                 stderr=open(log_file, "a") if log_file else subprocess.DEVNULL,
                 text=True,
+                env=without_model_credentials(),
             )
             procs["stream"] = proc
             last_output["ts"] = time.monotonic()

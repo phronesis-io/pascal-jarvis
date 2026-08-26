@@ -264,6 +264,35 @@ def test_diag_user_auth_warning_is_plain_and_actionable(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "stamp.json").read_text())["user_ts"] > 0
 
 
+def test_diag_internal_churn_does_not_reopen_same_user_auth_action(
+        tmp_path, monkeypatch):
+    dp = _load_diag_post()
+    monkeypatch.setattr(dp, "STAMP", tmp_path / "stamp.json")
+    clock = [1_000_000.0]
+    monkeypatch.setattr(dp.time, "time", lambda: clock[0])
+    sent = []
+    monkeypatch.setattr(dp, "_send", lambda text, uid: (sent.append(text), True)[1])
+    monkeypatch.setattr(dp, "_user_id", lambda: "ou_test")
+    pre_file = tmp_path / "pre.txt"
+    monkeypatch.setenv("DIAG_PRE_FILE", str(pre_file))
+
+    pre_file.write_text(
+        "⚠️ user token 探针失败: stable action\n⚠️ network issue A\n"
+    )
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    dp.main()
+    assert sent == [dp._USER_AUTH_TEXT]
+
+    clock[0] += 5 * 3600
+    pre_file.write_text(
+        "⚠️ user token 探针失败: stable action\n⚠️ network issue B\n"
+    )
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    dp.main()
+
+    assert sent == [dp._USER_AUTH_TEXT]
+
+
 def test_diag_no_warnings_no_alert(tmp_path, monkeypatch):
     dp = _load_diag_post()
     monkeypatch.setattr(dp, "STAMP", tmp_path / "stamp.json")

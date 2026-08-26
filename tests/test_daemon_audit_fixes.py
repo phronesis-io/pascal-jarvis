@@ -188,7 +188,7 @@ def _diag_cycle_completed(pre):
     _write_diag_state(pre.parent, pre.stat().st_mtime - 30)
 
 
-def test_diag_missing_pre_pages_once(diag_env):
+def test_diag_missing_pre_records_once_without_owner_page(diag_env):
     pre, stamp, alerts = diag_env
     assert not pre.exists()
 
@@ -197,13 +197,13 @@ def test_diag_missing_pre_pages_once(diag_env):
     daemon_mod._probe_alert_stamps["self-diagnostic|repair"] = (
         time.time() - daemon_mod.DIAG_RECOVERY_GRACE - 1)
     daemon_mod._check_diag_staleness()
-    daemon_mod._check_diag_staleness()  # dedup: still one page
+    daemon_mod._check_diag_staleness()  # dedup: still one internal incident
 
-    assert len(alerts) == 1
-    assert "自诊断" in alerts[0]
+    assert alerts == []
+    assert "self-diagnostic|stale" in daemon_mod._probe_alert_stamps
 
 
-def test_diag_stale_pre_pages_with_hours(diag_env):
+def test_diag_stale_pre_records_without_owner_page(diag_env):
     pre, stamp, alerts = diag_env
     pre.write_text("=== SYSTEM HEALTH CHECK ===\n")
     _age_file(pre, 10 * 3600)
@@ -214,8 +214,7 @@ def test_diag_stale_pre_pages_with_hours(diag_env):
         time.time() - daemon_mod.DIAG_RECOVERY_GRACE - 1)
     daemon_mod._check_diag_staleness()
 
-    assert len(alerts) == 1
-    assert "自诊断" in alerts[0] and "10 小时" in alerts[0]
+    assert alerts == []
     # persisted dedup stamp uses the stable key
     assert "self-diagnostic|stale" in daemon_mod._probe_alert_stamps
 
@@ -352,6 +351,24 @@ def test_diag_redelivers_when_stamp_predates_pre_beyond_window(diag_env):
     assert len(alerts) == 1
     assert "现在授权" in alerts[0]
     assert "探针" not in alerts[0]
+
+
+def test_diag_internal_churn_does_not_redeliver_same_auth_action(diag_env):
+    pre, stamp, alerts = diag_env
+    auth = "⚠️ user token 探针失败 — authorization required"
+    pre.write_text(f"{auth}\n⚠️ new internal network warning\n")
+    _age_file(pre, 20 * 60)
+    _diag_cycle_completed(pre)
+    old = pre.stat().st_mtime - 5 * 3600
+    stamp.write_text(json.dumps({
+        "ts": old,
+        "user_ts": old,
+        "lines": [auth, "⚠️ old internal network warning"],
+    }))
+
+    daemon_mod._check_diag_staleness()
+
+    assert alerts == []
 
 
 def test_diag_no_redelivery_without_warnings(diag_env):
@@ -496,7 +513,7 @@ def _confirm_pending(name="ef-stream"):
         time.time() - daemon_mod.MANIFEST_CONFIRM_WINDOW - 5)
 
 
-def test_manifest_dead_ef_stream_pages_on_second_confirmed_probe(
+def test_manifest_dead_ef_stream_pages_after_recovery_still_failed(
         manifest_env, monkeypatch):
     logs, alerts = manifest_env
     monkeypatch.setattr(
@@ -513,15 +530,36 @@ def test_manifest_dead_ef_stream_pages_on_second_confirmed_probe(
     assert alerts == []
 
     _confirm_pending()
-    daemon_mod._probe_manifest_criticals()   # confirmed: pages
-    daemon_mod._probe_manifest_criticals()   # 4h dedup: still one page
+    daemon_mod._probe_manifest_criticals()   # confirmed: manual action needed
+    daemon_mod._probe_manifest_criticals()   # 4h dedup
 
     assert len(alerts) == 1
-    assert "停了" in alerts[0]
     assert "EigenFlux" in alerts[0]
-    # no raw checker detail leaks into the Lark line
+    assert "人工排查" in alerts[0]
     assert "no process" not in alerts[0]
     assert any("ef-stream" in msg for _, msg in logs)
+
+
+def test_manifest_dead_ef_stream_pages_when_recovery_is_unavailable(
+        manifest_env, monkeypatch):
+    logs, alerts = manifest_env
+    monkeypatch.setattr(
+        components_mod, "check_components",
+        lambda critical_only=False: [
+            _manifest_result("ef-stream", False, detail="no owned process")],
+    )
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery", lambda name: False,
+    )
+
+    daemon_mod._probe_manifest_criticals()
+    _confirm_pending()
+    daemon_mod._probe_manifest_criticals()
+
+    assert len(alerts) == 1
+    assert "EigenFlux" in alerts[0]
+    assert "人工排查" in alerts[0]
+    assert "no owned process" not in alerts[0]
 
 
 def test_manifest_watchdog_healed_transient_never_pages(manifest_env, monkeypatch):
@@ -546,6 +584,42 @@ def test_manifest_watchdog_healed_transient_never_pages(manifest_env, monkeypatc
     assert alerts == []
 
 
+def test_manifest_live_ef_network_degradation_is_internal_only(
+        manifest_env, monkeypatch):
+    """8/26 incident: campus/VPN churn made both EF probes red while the
+    reconnecting parent was alive. Guardian must neither kill it nor tell
+    Pascal that the process disappeared."""
+    logs, alerts = manifest_env
+    recoveries = []
+    monkeypatch.setattr(
+        components_mod,
+        "check_components",
+        lambda critical_only=False: [_manifest_result(
+            "ef-stream",
+            False,
+            detail=("进程在跑但没在报状态；connecting; polling safety net "
+                    "error/stale; pids ['74530'] owned by 9467"),
+        )],
+    )
+    monkeypatch.setattr(
+        daemon_mod, "_owned_component_pids", lambda name: [74530],
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "_request_component_recovery",
+        lambda name: recoveries.append(name) or True,
+    )
+    _confirm_pending()
+
+    daemon_mod._probe_manifest_criticals()
+    daemon_mod._probe_manifest_criticals()
+
+    assert recoveries == []
+    assert alerts == []
+    assert "ef-stream|pending" not in daemon_mod._probe_alert_stamps
+    assert any("transport degraded" in msg for _, msg in logs)
+
+
 def test_manifest_skips_components_covered_elsewhere(manifest_env, monkeypatch):
     """bot/heartbeat-loop/lark-sidecar drive the restart path; admin
     keeps the richer degraded-aware probe — none of them may page here."""
@@ -568,6 +642,9 @@ def test_manifest_recovery_rearms_dedup(manifest_env, monkeypatch):
     results = {"v": down}
     monkeypatch.setattr(components_mod, "check_components",
                         lambda critical_only=False: results["v"])
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery", lambda name: False,
+    )
 
     daemon_mod._probe_manifest_criticals()   # pending
     _confirm_pending()
@@ -708,7 +785,7 @@ def test_wedged_only_degradation_via_full_probe_never_pages(degraded_env, monkey
     assert alerts == []
 
 
-def test_genuine_degradation_pages_in_plain_chinese(degraded_env):
+def test_genuine_degradation_stays_internal(degraded_env):
     logs, alerts = degraded_env
 
     daemon_mod._note_degraded_health(
@@ -717,20 +794,11 @@ def test_genuine_degradation_pages_in_plain_chinese(degraded_env):
          "priority_wedged": ["intention-check"]},
         http_code=200)
 
-    assert len(alerts) == 1
-    msg = alerts[0]
-    assert "管理面板" in msg
-    assert "newsapi" in msg           # which circuits — useful, not jargon
-    # no SRE jargon / raw field dumps (the exact strings Pascal quoted)
-    assert "status=" not in msg
-    assert "HTTP" not in msg
-    assert "priority_wedged" not in msg
-    assert "intention-check" not in msg   # wedge belongs to brain-health page
-    assert "degraded" not in msg
-    assert "降级" not in msg
+    assert alerts == []
+    assert any("circuits_open=['newsapi']" in msg for _, msg in logs)
 
 
-def test_error_degradation_pages_without_raw_error_string(degraded_env):
+def test_error_degradation_stays_internal_with_raw_diagnostic(degraded_env):
     logs, alerts = degraded_env
 
     daemon_mod._note_degraded_health(
@@ -738,23 +806,18 @@ def test_error_degradation_pages_without_raw_error_string(degraded_env):
         {"status": "error", "error": "Traceback: boom at line 3"},
         http_code=503)
 
-    assert len(alerts) == 1
-    msg = alerts[0]
-    assert "管理面板" in msg
-    assert "Traceback" not in msg and "boom" not in msg
-    assert "503" not in msg
-    # the raw detail is still logged for diagnosis
+    assert alerts == []
     assert any("status=error" in m for _, m in logs)
 
 
-def test_unexplained_degradation_still_pages(degraded_env):
+def test_unexplained_degradation_stays_internal(degraded_env):
     logs, alerts = degraded_env
 
     daemon_mod._note_degraded_health(
         "admin :3456", {"status": "degraded"}, http_code=200)
 
-    assert len(alerts) == 1
-    assert "没说具体原因" in alerts[0]
+    assert alerts == []
+    assert any("status=degraded" in msg for _, msg in logs)
 
 
 def test_degraded_recovery_still_rearms(degraded_env):

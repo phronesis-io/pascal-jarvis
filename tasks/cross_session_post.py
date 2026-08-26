@@ -75,6 +75,16 @@ USER_MSG_SIM_THRESHOLD = 0.5
 USER_MESSAGE_WORK_RECEIPT = (
     "已扫描跨产品会话，并完成时间锚点、PR 状态和近重复核验"
 )
+# `user_message` is content inside the deterministic card protocol emitted
+# below. Models occasionally return another TITLE:/WORKED:/OPTIONS: block in
+# that field; the Memorial parser then splits it into a second card whose
+# receipt is missing, leaving a title-only first card. Flatten nested authoring
+# syntax before any gate or sent-cache write. The model's own WORKED claim is
+# discarded: only the deterministic receipt above is trusted.
+_NESTED_AUTHORING_RE = re.compile(
+    r"^\s*(TITLE|WORKED|WORK_RECEIPT|RECEIPT|OPTIONS|RECOMMEND)\s*[:：]\s*(.*)$",
+    re.IGNORECASE,
+)
 # A sent-cache entry older than this with no matching delivery row in the
 # engagement log is treated as never-delivered (2026-07-08: the cache records
 # at print time; heartbeat's Lark send can still fail afterwards, and it
@@ -113,6 +123,22 @@ def _normalize(text: str) -> str:
     text = re.sub(r"\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}", "", text)  # strip timestamps
     text = re.sub(r"[（）()\"'\s]+", " ", text).strip()
     return text
+
+
+def _flatten_nested_authoring(text: str) -> str:
+    """Turn model-authored card directives inside user content into prose."""
+    lines = []
+    for line in str(text or "").splitlines():
+        matched = _NESTED_AUTHORING_RE.match(line)
+        if not matched:
+            lines.append(line)
+            continue
+        key, value = matched.group(1).upper(), matched.group(2).strip()
+        if key in {"WORKED", "WORK_RECEIPT", "RECEIPT"}:
+            continue
+        if value:
+            lines.append(value)
+    return "\n".join(lines).strip()
 
 
 def _char_ngrams(text: str, n: int = 3) -> set:
@@ -454,7 +480,9 @@ def main() -> int:
     user_message = ""
     envelope = parse_json_response(raw)
     if envelope is not None and "digest" in envelope:
-        user_message = envelope.get("user_message", "").strip()
+        user_message = _flatten_nested_authoring(
+            envelope.get("user_message", ""),
+        )
         raw = envelope["digest"].strip()
         if not raw:
             return 0

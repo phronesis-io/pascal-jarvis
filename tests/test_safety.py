@@ -1,8 +1,14 @@
 """Tests for core.safety — error pattern detection."""
 
+import os
+import stat
+
+import pytest
+
 from core.safety import (
     ERROR_PATTERNS,
     ERROR_SUBSTRINGS,
+    atomic_write,
     extract_json,
     looks_like_error,
     parse_json_response,
@@ -331,3 +337,35 @@ def test_strip_task_framing_keeps_cjk_timeline_lines():
     # ASCII task token after ts is still framing
     assert strip_task_framing(
         "[2026-07-19 09:16] checkin\n\n正文。") == "正文。"
+
+
+def test_atomic_write_is_private_from_directory_to_final_inode(tmp_path):
+    parent = tmp_path / "private-state"
+    parent.mkdir(mode=0o755)
+    target = parent / "state.json"
+    target.write_text("old", encoding="utf-8")
+    target.chmod(0o644)
+
+    atomic_write(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_atomic_write_replace_failure_keeps_old_file_and_cleans_temp(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "state.json"
+    target.write_text("old", encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_write(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []

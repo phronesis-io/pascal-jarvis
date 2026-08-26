@@ -42,8 +42,13 @@ def test_snapshot_distinguishes_configured_disabled_and_unverified(tmp_path):
     assert "secret" not in json.dumps(state)
 
 
-def test_claude_probe_keeps_credentials_out_of_argv_and_state(tmp_path):
+def test_claude_probe_keeps_credentials_out_of_argv_and_state(
+    tmp_path, monkeypatch,
+):
     _write_config(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "other-relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[1]
     seen = {}
 
@@ -63,6 +68,9 @@ def test_claude_probe_keeps_credentials_out_of_argv_and_state(tmp_path):
     assert result["actual_model"] == "relay-real"
     assert "backup-secret-token" not in " ".join(seen["cmd"])
     assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "backup-secret-token"
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+    assert "CLAUDE_BACKUP2_AUTH_TOKEN" not in seen["env"]
+    assert "OPENAI_API_KEY" not in seen["env"]
     assert seen["cmd"][seen["cmd"].index("--permission-mode") + 1] == "dontAsk"
     assert seen["cmd"][seen["cmd"].index("--tools") + 1] == ""
     assert (
@@ -71,6 +79,33 @@ def test_claude_probe_keeps_credentials_out_of_argv_and_state(tmp_path):
     )
     assert "--strict-mcp-config" in seen["cmd"]
     assert "token" not in json.dumps(result).lower()
+
+
+def test_primary_claude_probe_receives_only_primary_credential(
+    tmp_path, monkeypatch,
+):
+    _write_config(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    spec = ph.provider_specs(ph.Config(tmp_path / "jarvis.yaml"))[0]
+    seen = {}
+
+    def runner(command, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"result": ph.CANARY_MARKER}),
+            stderr="",
+        )
+
+    assert ph.probe_provider(
+        spec, root=tmp_path, runner=runner,
+    )["status"] == "healthy"
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "primary-secret"
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in seen["env"]
+    assert "OPENAI_API_KEY" not in seen["env"]
 
 
 def test_openai_probe_uses_auth_argument_and_records_observed_model(tmp_path):
@@ -659,6 +694,9 @@ def test_codex_probe_is_ephemeral_read_only_and_exact(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(ph, "resolve_codex_bin", lambda configured="": "/opt/codex")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     spec = next(
         row for row in ph.provider_specs(ph.Config(config_path))
         if row["id"] == "codex"
@@ -688,6 +726,9 @@ def test_codex_probe_is_ephemeral_read_only_and_exact(tmp_path, monkeypatch):
     assert "--ephemeral" in seen["command"]
     assert seen["command"][seen["command"].index("--sandbox") + 1] == "read-only"
     assert "--approve-for-me" not in seen["command"]
+    assert "ANTHROPIC_API_KEY" not in seen["kwargs"]["env"]
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in seen["kwargs"]["env"]
+    assert "OPENAI_API_KEY" not in seen["kwargs"]["env"]
 
 
 def test_codex_probe_rejects_explanatory_marker(tmp_path, monkeypatch):

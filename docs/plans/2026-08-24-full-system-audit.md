@@ -90,6 +90,15 @@ stamp and remain internal. Only expired personal Lark authorization produces
 a plain-language card with a real authorization action. Component-health
 signals remain L3 evidence but cannot create owner-facing proposals.
 
+**Acceptance correction, 2026-08-26.** Runtime evidence found the old tests
+still required Guardian to send live-component degradation and persistent
+task-failure cards ending in “you do not need to act”. Those sends are now
+removed: self-healing states remain internal, while a genuinely dead component
+may notify only after two red probes and its bounded recovery remains
+unsuccessful, so owner action is actually required. A one-attempt automatic
+restart that verifies healthy is likewise log-only; only a breaker incident
+that was already shown to the owner receives the matching recovery receipt.
+
 ### P1: Infrastructure failures caused Intent refire bursts
 
 **Evidence.** The Intent execution lease correctly restored content attempts
