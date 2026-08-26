@@ -28,9 +28,10 @@ STATUSES = ("keep", "fix", "retire-candidate")
 KIND_ORDER = {
     "runtime-component": 0,
     "heartbeat-task": 1,
-    "core-cli": 2,
-    "admin-api": 3,
-    "lark-command": 4,
+    "task-script": 2,
+    "core-cli": 3,
+    "admin-api": 4,
+    "lark-command": 5,
 }
 # Surfaces removed on purpose. A retired surface must leave an explicit trace
 # here (never a silent disappearance from the inventory): what it was, when it
@@ -47,6 +48,11 @@ RETIRED_SURFACES = {
     "standalone content recommendation heartbeat": (
         "retired 2026-08-25 after 14 days with no production runs; it was "
         "disabled by default and duplicated external recommendation products."
+    ),
+    "harness proposal apply CLI (tasks/harness_apply.py)": (
+        "retired 2026-08-26 after its harness-evolve producer had already been "
+        "retired on 2026-07-02; the production checkout had no pending queue or "
+        "changelog, and the implementation remains available in git history."
     ),
 }
 STATUS_REQUIREMENTS = {
@@ -77,6 +83,14 @@ ADMIN_ROUTE_TEST_ALIASES = {
     ("GET", "/healthz"): ('/health"', "/health'"),
     ("GET", "/view/{suffix}"): ("/view/",),
     ("POST", "/api/heartbeat/force/{suffix}"): ("/api/heartbeat/force/",),
+}
+TASK_SCRIPT_TEST_ALIASES = {
+    "checkin_busy_filter": ("f.transition_context(", "f.main("),
+    "journal_capture": ("_run(jd", "_shadow_rows(jd"),
+    "mail_triage_lib": ("m.parse_buffer(", "m.collect_new(", "m.main("),
+    "memorial_escrow": ("memorial_escrow.run(",),
+    "watchlater_save": ("watchlater.main(", "watchlater.load_entries("),
+    "write_claim_audit": ("detect_claims(",),
 }
 RESOLVED_EVIDENCE_AUDIT = {
     "component:caffeinate-launchd": "existing launchd install contract uses com.pascal.jarvis.caffeinate",
@@ -506,6 +520,106 @@ def _core_cli_capabilities(root: Path) -> list[dict[str, Any]]:
     return capabilities
 
 
+def _declared_heartbeat_hooks(root: Path) -> set[str]:
+    hooks: set[str] = set()
+    for line in _read(root / "HEARTBEAT.md").splitlines():
+        match = re.match(r"^- (?:pre|post):\s*(tasks/\S+)\s*$", line.strip())
+        if match:
+            hooks.add(match.group(1))
+    return hooks
+
+
+def _task_script_callers(root: Path, target: Path) -> list[dict[str, Any]]:
+    """Find executable repository code that invokes one standalone task script."""
+    candidates: set[Path] = set()
+    for directory in (root / "core", root / "scripts", root / "tasks"):
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_file() and path.suffix in {".py", ".sh"}:
+                candidates.add(path)
+    for name in ("admin.py", "bot.sh", "daemon.py", "install.sh", "restart.sh"):
+        path = root / name
+        if path.is_file():
+            candidates.add(path)
+
+    relative = target.relative_to(root).as_posix()
+    module = relative.removesuffix(".py").replace("/", ".")
+    needles = (relative, target.name, module)
+    references = []
+    quarantine = root / "tasks" / "_quarantine"
+    for path in sorted(candidates):
+        if path == target or path.is_relative_to(quarantine):
+            continue
+        for line_number, line in enumerate(_read(path).splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            match = next((needle for needle in needles if needle in line), None)
+            if match is None:
+                continue
+            references.append(_ref(
+                root,
+                path,
+                line_number,
+                f"active runtime code references {match!r}",
+            ))
+            break
+        if len(references) >= 6:
+            break
+    return references
+
+
+def _task_script_capabilities(root: Path) -> list[dict[str, Any]]:
+    """Inventory executable task tools that are not heartbeat hooks themselves."""
+    heartbeat_hooks = _declared_heartbeat_hooks(root)
+    capabilities = []
+    for path in sorted((root / "tasks").glob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        if relative in heartbeat_hooks:
+            continue
+        source = _read(path)
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        guards = [node for node in ast.walk(tree) if _is_main_guard(node)]
+        if not guards:
+            continue
+        line = min(node.lineno for node in guards)
+        callers = _task_script_callers(root, path)
+        doc = (ast.get_docstring(tree) or "").strip().splitlines()
+        module = relative.removesuffix(".py").replace("/", ".")
+        runtime = [{
+            "type": "task-script",
+            "entrypoint": f"python3 {relative}",
+            "callers": callers,
+        }] if callers else []
+        capabilities.append(_capability(
+            capability_id=f"task-script:{path.stem}",
+            kind="task-script",
+            name=path.stem,
+            description=doc[0] if doc else f"Standalone task tool {path.stem}",
+            source_evidence=[_ref(root, path, line, "module __main__ guard")],
+            implementation_evidence=[_ref(root, path, line, "executable task module")],
+            runtime_evidence=runtime,
+            test_evidence=_test_references(
+                root,
+                [
+                    relative,
+                    path.name,
+                    module,
+                    f"test_{path.stem}",
+                    *TASK_SCRIPT_TEST_ALIASES.get(path.stem, ()),
+                ],
+            ),
+            retirement_evidence=_retirement_references(
+                root, path, start_line=1, end_line=40
+            ),
+            metadata={"callers": callers},
+        ))
+    return capabilities
+
+
 def _admin_routes(root: Path) -> list[dict[str, Any]]:
     """Discover the stdlib HTTP server routes implemented in admin.py."""
     path = root / "admin.py"
@@ -768,6 +882,7 @@ def build_inventory(root: Path) -> dict[str, Any]:
     capabilities = []
     capabilities.extend(_component_capabilities(root))
     capabilities.extend(_heartbeat_capabilities(root))
+    capabilities.extend(_task_script_capabilities(root))
     capabilities.extend(_core_cli_capabilities(root))
     capabilities.extend(_admin_routes(root))
     capabilities.extend(_matter_commands(root))
@@ -785,6 +900,7 @@ def build_inventory(root: Path) -> dict[str, Any]:
         "fact_sources": [
             "components.yaml",
             "HEARTBEAT.md",
+            "active standalone tasks/*.py __main__ guards and their runtime callers",
             "core/*.py __main__ guards",
             "admin.py HTTP route branches",
             "core/matter_bridge.py command tables",
@@ -896,7 +1012,7 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "- Keep capabilities remain in regression scope; missing runtime health is handled by their existing probes.",
         "- Fix capabilities need the named evidence gap closed before their status changes.",
         "- Retire candidates are review prompts only. Deletion requires replacement/migration evidence and a separate PR.",
-        "- Regenerate this file whenever a component, heartbeat task, CLI, admin route, or Lark command changes.",
+        "- Regenerate this file whenever a component, heartbeat task, standalone task tool, CLI, admin route, or Lark command changes.",
         "- A surface retirement must leave an explicit Retired Surfaces entry, never a silent disappearance.",
         "",
     ])

@@ -21,9 +21,9 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **168**
-- Status: keep **168**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **65**, heartbeat-task **38**, lark-command **21**, runtime-component **15**
+- Total: **175**
+- Status: keep **175**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **65**, heartbeat-task **38**, lark-command **21**, runtime-component **15**, task-script **7**
 
 ## Inventory
 
@@ -49,21 +49,21 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `heartbeat:checkin` | heartbeat-task | **keep** | `HEARTBEAT.md:214` | `tasks/checkin_pre.sh:1`, `tasks/checkin_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:371`, `tests/test_card_delivery_closure.py:60`, `tests/test_checkin_post.py:45` | - |
 | `heartbeat:cross-session-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:506` | `tasks/cross_session_pre.sh:1`, `tasks/cross_session_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:309`, `tests/test_conversation_audit.py:368`, `tests/test_cross_session_memory_e2e.py:53` | - |
 | `heartbeat:daily-plan` | heartbeat-task | **keep** | `HEARTBEAT.md:576` | `tasks/daily_plan_pre.sh:1`, `tasks/daily_plan_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card.py:200`, `tests/test_daily_plan_post.py:42`, `tests/test_delivery_and_quiet_hours.py:442` | - |
-| `heartbeat:daily-reflect` | heartbeat-task | **keep** | `HEARTBEAT.md:616` | `tasks/daily_reflect_pre.sh:1`, `tasks/daily_reflect_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_residue_leak.py:98`, `tests/test_delivery_pipeline.py:961`, `tests/test_heartbeat_loop.py:196` | - |
+| `heartbeat:daily-reflect` | heartbeat-task | **keep** | `HEARTBEAT.md:616` | `tasks/daily_reflect_pre.sh:1`, `tasks/daily_reflect_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_residue_leak.py:98`, `tests/test_daily_reflect_post.py:54`, `tests/test_delivery_pipeline.py:961` | - |
 | `heartbeat:delegation-reconcile` | heartbeat-task | **keep** | `HEARTBEAT.md:720` | `tasks/delegation_reconcile_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_delegation_projection.py:247`, `tests/test_delegation_reconcile.py:429`, `tests/test_eigenflux_friend_actions.py:221` | - |
 | `heartbeat:eigenflux-feed-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:61` | `tasks/eigenflux_feed_pre.sh:1`, `tasks/eigenflux_feed_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:304`, `tests/test_delivery_and_quiet_hours.py:67`, `tests/test_eigenflux_feed_post.py:211` | - |
 | `heartbeat:eigenflux-friends` | heartbeat-task | **keep** | `HEARTBEAT.md:128` | `tasks/eigenflux_friends_pre.sh:1`, `tasks/eigenflux_friends_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_card_delivery_closure.py:251`, `tests/test_ef_stream_loop.py:71`, `tests/test_eigenflux_friend_actions.py:15` | - |
 | `heartbeat:eigenflux-inbox-reconcile` | heartbeat-task | **keep** | `HEARTBEAT.md:53` | `tasks/eigenflux_ingress_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_ingress.py:20`, `tests/test_textutil_display_names.py:20` | - |
 | `heartbeat:eigenflux-preinstall` | heartbeat-task | **keep** | `HEARTBEAT.md:779` | `tasks/eigenflux_preinstall_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_skill_contracts.py:136`, `tests/test_heartbeat.py:2187`, `tests/test_interaction_quality_p0.py:228` | - |
 | `heartbeat:eigenflux-profile` | heartbeat-task | **keep** | `HEARTBEAT.md:114` | `tasks/eigenflux_profile_pre.sh:1`, `tasks/eigenflux_profile_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_eigenflux_profile_post.py:22`, `tests/test_heartbeat.py:181` | - |
-| `heartbeat:eigenflux-publish` | heartbeat-task | **keep** | `HEARTBEAT.md:89` | `tasks/eigenflux_publish_pre.sh:1`, `tasks/eigenflux_publish_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:179`, `tests/test_card_delivery_closure.py:47`, `tests/test_eigenflux_feed_post.py:319` | - |
+| `heartbeat:eigenflux-publish` | heartbeat-task | **keep** | `HEARTBEAT.md:89` | `tasks/eigenflux_publish_pre.sh:1`, `tasks/eigenflux_publish_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:179`, `tests/test_card_delivery_closure.py:47`, `tests/test_ef_stream_loop.py:123` | - |
 | `heartbeat:engagement-analyze` | heartbeat-task | **keep** | `HEARTBEAT.md:528` | `tasks/engagement_analyze_pre.sh:1`, `tasks/engagement_analyze_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_engagement.py:171`, `tests/test_interaction_quality_p0.py:170` | - |
 | `heartbeat:exercise-week` | heartbeat-task | **keep** | `HEARTBEAT.md:854` | `tasks/exercise_week_pre.sh:1`, `tasks/exercise_week_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_lifelog.py:210`, `tests/test_memorial.py:1978` | - |
 | `heartbeat:explain-card` | heartbeat-task | **keep** | `HEARTBEAT.md:202` | `tasks/explain_card_pre.sh:1`, `tasks/explain_card_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_confused_button.py:109` | - |
 | `heartbeat:intention-check` | heartbeat-task | **keep** | `HEARTBEAT.md:413` | `tasks/intentions_pre.sh:1`, `tasks/intentions_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_actions.py:119`, `tests/test_brain_health.py:233`, `tests/test_card_delivery_closure.py:146` | - |
 | `heartbeat:iteration-observe` | heartbeat-task | **keep** | `HEARTBEAT.md:729` | `tasks/iteration_observe_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:104` | - |
 | `heartbeat:log-maintenance` | heartbeat-task | **keep** | `HEARTBEAT.md:738` | `tasks/log_maintenance_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:105`, `tests/test_log_maintenance.py:32` | - |
-| `heartbeat:mail-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:146` | `tasks/mail_triage_pre.sh:1`, `tasks/mail_triage_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_and_quiet_hours.py:106`, `tests/test_heartbeat.py:137`, `tests/test_heartbeat_loop.py:172` | - |
+| `heartbeat:mail-triage` | heartbeat-task | **keep** | `HEARTBEAT.md:146` | `tasks/mail_triage_pre.sh:1`, `tasks/mail_triage_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_delivery_and_quiet_hours.py:106`, `tests/test_heartbeat.py:137`, `tests/test_heartbeat_loop.py:274` | - |
 | `heartbeat:memorial-escrow` | heartbeat-task | **keep** | `HEARTBEAT.md:746` | `tasks/memorial_escrow_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_memorial.py:664`, `tests/test_memorial_escrow.py:169`, `tests/test_no_dead_ends.py:66` | - |
 | `heartbeat:memory-consolidate` | heartbeat-task | **keep** | `HEARTBEAT.md:325` | `tasks/memory_consolidate_pre.sh:1`, `tasks/memory_consolidate_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_cross_session_memory_e2e.py:64`, `tests/test_heartbeat.py:610`, `tests/test_memory_consolidate_post.py:47` | - |
 | `heartbeat:memory-daily` | heartbeat-task | **keep** | `HEARTBEAT.md:357` | `tasks/memory_daily_pre.sh:1`, `tasks/memory_daily_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:1442`, `tests/test_memory_audit_fixes.py:236` | - |
@@ -82,6 +82,13 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `heartbeat:self-improve-cycle` | heartbeat-task | **keep** | `HEARTBEAT.md:176` | `tasks/self_improve_cycle_pre.sh:1` | python3 -m core.heartbeat_loop | `tests/test_self_improve_cycle.py:69` | - |
 | `heartbeat:thinking-review` | heartbeat-task | **keep** | `HEARTBEAT.md:684` | `tasks/thinking_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat.py:1760` | - |
 | `heartbeat:weekly-review` | heartbeat-task | **keep** | `HEARTBEAT.md:805` | `tasks/weekly_review_pre.sh:1`, `tasks/weekly_review_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_heartbeat_audit_fixes.py:99`, `tests/test_weekly_review_post.py:48` | - |
+| `task-script:checkin_busy_filter` | task-script | **keep** | `tasks/checkin_busy_filter.py:82` | `tasks/checkin_busy_filter.py:82` | python3 tasks/checkin_busy_filter.py | `tests/test_checkin_busy_filter.py:32`, `tests/test_codex_fallback.py:274`, `tests/test_openai_fallback.py:44` | - |
+| `task-script:eigenflux_preinstall_retire` | task-script | **keep** | `tasks/eigenflux_preinstall_retire.py:116` | `tasks/eigenflux_preinstall_retire.py:116` | python3 tasks/eigenflux_preinstall_retire.py | `tests/test_eigenflux_skill_contracts.py:153` | - |
+| `task-script:journal_capture` | task-script | **keep** | `tasks/journal_capture.py:182` | `tasks/journal_capture.py:182` | python3 tasks/journal_capture.py | `tests/test_journal_capture.py:63` | - |
+| `task-script:mail_triage_lib` | task-script | **keep** | `tasks/mail_triage_lib.py:400` | `tasks/mail_triage_lib.py:400` | python3 tasks/mail_triage_lib.py | `tests/test_mail_triage.py:35` | - |
+| `task-script:memorial_escrow` | task-script | **keep** | `tasks/memorial_escrow.py:126` | `tasks/memorial_escrow.py:126` | python3 tasks/memorial_escrow.py | `tests/test_memorial_escrow.py:169`, `tests/test_no_dead_ends.py:66` | - |
+| `task-script:watchlater_save` | task-script | **keep** | `tasks/watchlater_save.py:172` | `tasks/watchlater_save.py:172` | python3 tasks/watchlater_save.py | `tests/test_watchlater_save.py:34` | - |
+| `task-script:write_claim_audit` | task-script | **keep** | `tasks/write_claim_audit.py:263` | `tasks/write_claim_audit.py:263` | python3 tasks/write_claim_audit.py | `tests/test_night_queue_audit.py:341`, `tests/test_write_claim_audit.py:34` | - |
 | `cli:core.actions` | core-cli | **keep** | `core/actions.py:1066` | `core/actions.py:1066` | python3 -m core.actions | `tests/test_actions.py:288`, `tests/test_bot_trust_boundary.py:43`, `tests/test_card.py:101` | - |
 | `cli:core.attention_roi` | core-cli | **keep** | `core/attention_roi.py:353` | `core/attention_roi.py:353` | python3 -m core.attention_roi | `tests/test_attention_roi.py:51`, `tests/test_eigenflux_publish_post.py:94`, `tests/test_import_graph.py:152` | - |
 | `cli:core.autoreply_activity` | core-cli | **keep** | `core/autoreply_activity.py:173` | `core/autoreply_activity.py:173` | python3 -m core.autoreply_activity | `tests/test_autoreply_activity.py:64` | - |
@@ -109,7 +116,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:130` | - |
 | `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_circuit_breaker.py:109`, `tests/test_core_db.py:133`, `tests/test_core_db_audit.py:94` | - |
 | `cli:core.geo` | core-cli | **keep** | `core/geo.py:487` | `core/geo.py:487` | python3 -m core.geo | `tests/test_geo.py:68`, `tests/test_weather.py:111` | - |
-| `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:2021` | `core/heartbeat_loop.py:2021` | python3 -m core.heartbeat_loop | `tests/test_daemon_regressions.py:129`, `tests/test_heartbeat_loop.py:99`, `tests/test_import_graph.py:157` | - |
+| `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:2025` | `core/heartbeat_loop.py:2025` | python3 -m core.heartbeat_loop | `tests/test_daemon_regressions.py:129`, `tests/test_heartbeat_loop.py:106`, `tests/test_import_graph.py:157` | - |
 | `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3581` | `core/intentions.py:3581` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_card_residue_leak.py:56` | - |
 | `cli:core.iteration_loop` | core-cli | **keep** | `core/iteration_loop.py:1525` | `core/iteration_loop.py:1525` | python3 -m core.iteration_loop | `tests/test_iteration_loop.py:59` | - |
 | `cli:core.jobs` | core-cli | **keep** | `core/jobs.py:455` | `core/jobs.py:455` | python3 -m core.jobs | `tests/test_actions.py:676`, `tests/test_admin_api.py:397`, `tests/test_aux_model.py:272` | - |
@@ -118,10 +125,10 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.log_maintenance` | core-cli | **keep** | `core/log_maintenance.py:308` | `core/log_maintenance.py:308` | python3 -m core.log_maintenance | `tests/test_log_maintenance.py:32` | - |
 | `cli:core.mail_draft` | core-cli | **keep** | `core/mail_draft.py:267` | `core/mail_draft.py:267` | python3 -m core.mail_draft | `tests/test_mail_draft.py:42` | - |
 | `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:780` | `core/matter_bridge.py:780` | python3 -m core.matter_bridge | `tests/test_prompt.py:382`, `tests/test_session_lifecycle.py:471` | - |
-| `cli:core.matter_executor` | core-cli | **keep** | `core/matter_executor.py:234` | `core/matter_executor.py:234` | python3 -m core.matter_executor | `tests/test_matter_continuity.py:250` | - |
+| `cli:core.matter_executor` | core-cli | **keep** | `core/matter_executor.py:234` | `core/matter_executor.py:234` | python3 -m core.matter_executor | `tests/test_coverage_budget.py:31`, `tests/test_matter_continuity.py:250` | - |
 | `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_continuity.py:300`, `tests/test_import_graph.py:154`, `tests/test_intentions_post.py:323` | - |
 | `cli:core.memorial` | core-cli | **keep** | `core/memorial.py:3693` | `core/memorial.py:3693` | python3 -m core.memorial | `tests/test_absence.py:128`, `tests/test_attention_roi.py:134`, `tests/test_bot_trust_boundary.py:63` | - |
-| `cli:core.memorial_thread` | core-cli | **keep** | `core/memorial_thread.py:135` | `core/memorial_thread.py:135` | python3 -m core.memorial_thread | `tests/test_bot_trust_boundary.py:63`, `tests/test_import_graph.py:161`, `tests/test_matter_continuity.py:309` | - |
+| `cli:core.memorial_thread` | core-cli | **keep** | `core/memorial_thread.py:135` | `core/memorial_thread.py:135` | python3 -m core.memorial_thread | `tests/test_bot_trust_boundary.py:63`, `tests/test_import_graph.py:161`, `tests/test_matter_continuity.py:405` | - |
 | `cli:core.metrics_digest` | core-cli | **keep** | `core/metrics_digest.py:250` | `core/metrics_digest.py:250` | python3 -m core.metrics_digest | `tests/test_metrics_digest.py:312` | - |
 | `cli:core.model_control` | core-cli | **keep** | `core/model_control.py:580` | `core/model_control.py:580` | python3 -m core.model_control | `tests/test_model_control.py:34` | - |
 | `cli:core.model_fallback` | core-cli | **keep** | `core/model_fallback.py:373` | `core/model_fallback.py:373` | python3 -m core.model_fallback | `tests/test_aux_model.py:20`, `tests/test_heartbeat.py:803`, `tests/test_model_fallback.py:84` | - |
@@ -135,7 +142,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.reply_closure` | core-cli | **keep** | `core/reply_closure.py:88` | `core/reply_closure.py:88` | python3 -m core.reply_closure | `tests/test_model_fallback.py:294` | - |
 | `cli:core.resource_health` | core-cli | **keep** | `core/resource_health.py:140` | `core/resource_health.py:140` | python3 -m core.resource_health | `tests/test_resource_health.py:5` | - |
 | `cli:core.responsiveness` | core-cli | **keep** | `core/responsiveness.py:74` | `core/responsiveness.py:74` | python3 -m core.responsiveness | `tests/test_responsiveness.py:33` | - |
-| `cli:core.routines` | core-cli | **keep** | `core/routines.py:921` | `core/routines.py:921` | python3 -m core.routines | `tests/test_routines.py:70` | - |
+| `cli:core.routines` | core-cli | **keep** | `core/routines.py:921` | `core/routines.py:921` | python3 -m core.routines | `tests/test_routines.py:71` | - |
 | `cli:core.runtime_hygiene` | core-cli | **keep** | `core/runtime_hygiene.py:218` | `core/runtime_hygiene.py:218` | python3 -m core.runtime_hygiene | `tests/test_runtime_hygiene.py:115` | - |
 | `cli:core.runtime_provider` | core-cli | **keep** | `core/runtime_provider.py:76` | `core/runtime_provider.py:76` | python3 -m core.runtime_provider | `tests/test_capability_contracts.py:59` | - |
 | `cli:core.sched_events` | core-cli | **keep** | `core/sched_events.py:286` | `core/sched_events.py:286` | python3 -m core.sched_events | `tests/test_absence.py:95`, `tests/test_admin_api.py:370`, `tests/test_heartbeat.py:642` | - |
@@ -203,6 +210,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 - **dashboard :3457 (NiceGUI pages + /api routes)** — retired 2026-08-21; archive duty moved to the morning-anchor batch line and the Admin console (:3456). The shared SQLite layer moved to core/db.py; the code archive is git history.
 - **mobile gateway :3458 + Tailscale funnel** — retired 2026-08-11 (REQ-120); Lark is the only mobile surface.
 - **standalone content recommendation heartbeat** — retired 2026-08-25 after 14 days with no production runs; it was disabled by default and duplicated external recommendation products.
+- **harness proposal apply CLI (tasks/harness_apply.py)** — retired 2026-08-26 after its harness-evolve producer had already been retired on 2026-07-02; the production checkout had no pending queue or changelog, and the implementation remains available in git history.
 
 ## Resolved Evidence Audit
 
@@ -224,5 +232,5 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 - Keep capabilities remain in regression scope; missing runtime health is handled by their existing probes.
 - Fix capabilities need the named evidence gap closed before their status changes.
 - Retire candidates are review prompts only. Deletion requires replacement/migration evidence and a separate PR.
-- Regenerate this file whenever a component, heartbeat task, CLI, admin route, or Lark command changes.
+- Regenerate this file whenever a component, heartbeat task, standalone task tool, CLI, admin route, or Lark command changes.
 - A surface retirement must leave an explicit Retired Surfaces entry, never a silent disappearance.
