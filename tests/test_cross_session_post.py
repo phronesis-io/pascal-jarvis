@@ -92,6 +92,44 @@ def test_user_message_survives_strict_work_receipt_gate(
     assert "跨产品会话" in states[0]["work_receipt"]
 
 
+def test_nested_card_directives_cannot_create_title_only_memorial(
+        tmp_path, monkeypatch):
+    """8/26 regression: a nested TITLE split the body into a receipt-less
+    second card, so the only retained Memorial contained its header twice and
+    none of the actual cross-session finding."""
+    result = _run_post(
+        tmp_path,
+        "### proj\n- 完成跨会话核对",
+        user_message=(
+            "TITLE: 真正的跨会话进展\n"
+            "WORKED: 模型自己声称做过，不可信\n"
+            "正文：修复已验证，等待受保护发布。"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("TITLE:") == 1
+    assert result.stdout.count("WORKED:") == 1
+
+    import core.memorial as memorial
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    rendered = memorial.memorialize_output(
+        result.stdout,
+        "cross-session-sync",
+        require_work_receipt=True,
+    )
+
+    assert rendered == ""
+    states = memorial.list_memorials()
+    assert len(states) == 1
+    assert "真正的跨会话进展" in states[0]["body"]
+    assert "修复已验证" in states[0]["body"]
+    assert "模型自己声称" not in states[0]["body"]
+    assert states[0]["work_receipt"] == (
+        "已扫描跨产品会话，并完成时间锚点、PR 状态和近重复核验"
+    )
+
+
 def test_reworded_repeat_suppressed_but_digest_written(tmp_path):
     msg_a = "隔壁 session 把三个修复分支都推上去了，测试全绿，今晚可以收尾"
     msg_b = "隔壁 session 把三个修复分支都推上去了，测试全绿，明天可以收尾"
