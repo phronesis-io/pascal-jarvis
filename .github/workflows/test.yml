@@ -44,6 +44,11 @@ jobs:
         run: python scripts/maintainability_budget.py
 
       - name: Run tests
+        env:
+          # Parallel subprocess coverage must never write instrumentation
+          # artifacts into the checked-out runtime tree: the strict test guard
+          # correctly treats that as repository-state mutation.
+          COVERAGE_FILE: ${{ runner.temp }}/jarvis-coverage
         run: |
           python -m coverage run -m pytest tests/ -v
           python -m coverage combine
