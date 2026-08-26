@@ -38,6 +38,8 @@ def test_tripped_gate_starts_on_backup2_when_backup1_is_missing(
     assert result.model == "backup2-model"
     assert len(calls) == 1
     assert calls[0][1]["env"]["ANTHROPIC_AUTH_TOKEN"] == "backup2-token"
+    assert "CLAUDE_BACKUP2_AUTH_TOKEN" not in calls[0][1]["env"]
+    assert "OPENAI_API_KEY" not in calls[0][1]["env"]
 
 
 def test_backup1_transport_failure_advances_to_backup2(tmp_path, monkeypatch):

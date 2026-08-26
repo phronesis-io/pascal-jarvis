@@ -28,6 +28,7 @@ from core.model_fallback import (
     limit_reason,
     trip,
 )
+from core.model_credentials import without_model_credentials
 from core.safety import looks_like_error
 
 
@@ -113,9 +114,11 @@ def _provider_candidates(
         # provider default. The generic ``opus`` alias remains relay-owned so
         # deployments can pin the concrete backup model independently.
         provider_model = model if model in {"haiku", "sonnet"} else route.model
-        provider_env = None
+        provider_env = without_model_credentials(
+            keep=frozenset({"ANTHROPIC_API_KEY"}),
+        )
         if route.id != "primary":
-            provider_env = os.environ.copy()
+            provider_env = without_model_credentials()
             provider_env["ANTHROPIC_AUTH_TOKEN"] = route.credential
             provider_env["ANTHROPIC_BASE_URL"] = route.base_url
         candidates.append((route.label, provider_model, provider_env))

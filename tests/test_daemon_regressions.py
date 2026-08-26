@@ -321,12 +321,19 @@ def test_pid_parse_empty_file(tmp_path, monkeypatch):
     assert result is False or result is True
 
 
-def test_stale_threshold_is_1200():
-    """Stale threshold must be 1200s (20 min) to accommodate long Claude calls.
+def test_stale_threshold_is_1800():
+    """Stale threshold must be 1800s (30 min) to accommodate long model calls.
 
     Was 900s (15 min), caused false-positive stale detection → restart spiral.
     """
     assert daemon_mod.HEARTBEAT_STALE_THRESHOLD == 1800
+
+
+def test_daemon_has_no_self_mtime_reload_loop():
+    source = Path(daemon_mod.__file__).read_text(encoding="utf-8")
+
+    assert "__file__).stat().st_mtime" not in source
+    assert "daemon_mtime" not in source
 
 
 def test_daemon_records_wake_gap(monkeypatch):

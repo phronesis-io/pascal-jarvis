@@ -326,15 +326,41 @@ if [ -z "$BOT_OPEN_ID" ] && command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}
     | jq -r '.bot.open_id // empty' 2>/dev/null || true)
 fi
 export BOT_OPEN_ID
-export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
-export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_AUTH_TOKEN CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
+export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
+export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
 export BACKUP_MAX_SESSION_SIZE BACKUP_MAX_MEMORY_CHARS
 export CODEX_FALLBACK_ENABLED CODEX_FALLBACK_MODEL CODEX_FALLBACK_BINARY CODEX_FALLBACK_TIMEOUT
 export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
-  export OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
+  OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
 fi
 unset OPENAI_API_KEY_CONFIG
+# Provider credentials remain shell-private. Only an actual model worker gets
+# them below; admin, Lark/EigenFlux sidecars and ordinary task scripts must not
+# inherit unrelated keys. `export -n` also removes an inherited export flag.
+export -n ANTHROPIC_API_KEY CLAUDE_BACKUP_AUTH_TOKEN \
+  CLAUDE_BACKUP2_AUTH_TOKEN OPENAI_API_KEY 2>/dev/null || true
+with_primary_model_credential() {
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" "$@"
+  else
+    "$@"
+  fi
+}
+with_openai_credential() {
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    OPENAI_API_KEY="$OPENAI_API_KEY" "$@"
+  else
+    "$@"
+  fi
+}
+exec_model_worker() {
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && export ANTHROPIC_API_KEY
+  [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] && export CLAUDE_BACKUP_AUTH_TOKEN
+  [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] && export CLAUDE_BACKUP2_AUTH_TOKEN
+  [ -n "${OPENAI_API_KEY:-}" ] && export OPENAI_API_KEY
+  exec "$@"
+}
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
 
@@ -665,7 +691,7 @@ if [ -f "$_queue_file" ] && [ -s "$_queue_file" ] && [ -n "$USER_ID" ]; then
 fi
 
 sleep 3  # let config load settle
-python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
+exec_model_worker python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
 HEARTBEAT_PID=$!
 
 # ── EigenFlux Real-Time Stream (background, Python) ─────────────────
@@ -1347,8 +1373,8 @@ print(build_cached_system_prompt(
     && [ -n "${OPENAI_API_KEY:-}" ]; then
     _openai_tried=1
     log_warn "[$session_id] Provider health route: trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-    answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
-      python3 -m core.openai_fallback \
+    answer=$(printf '%s' "$content" | with_openai_credential env \
+      JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
       ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
       2>"${ANSWER_FILE}.openai.stderr")
     _openai_exit=$?
@@ -1437,7 +1463,7 @@ print(build_cached_system_prompt(
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
         log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        (cd "$WORK_DIR" && printf '%s' "$content" | with_primary_model_credential claude -p \
           --resume "$session_id" \
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
@@ -1463,7 +1489,7 @@ print(build_cached_system_prompt(
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
         log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        (cd "$WORK_DIR" && printf '%s' "$content" | with_primary_model_credential claude -p \
           --session-id "$session_id" \
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
@@ -1799,8 +1825,8 @@ print(build_cached_system_prompt(
           && [ -n "${OPENAI_API_KEY:-}" ] && [ "$_openai_tried" -eq 0 ]; then
           _openai_tried=1
           log_warn "[$session_id] Codex unavailable → trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-          answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
-            python3 -m core.openai_fallback \
+          answer=$(printf '%s' "$content" | with_openai_credential env \
+            JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
             ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
             2>"${ANSWER_FILE}.openai.stderr")
           _openai_exit=$?
@@ -2416,8 +2442,8 @@ heartbeat_watchdog() {
       log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting (fail #${_fails})"
       # Heartbeat is a Python module now (it used to be a bash function named
       # heartbeat_loop — calling that here was a no-op that never restarted it).
-      # Relaunch exactly like the initial launch above, inheriting exported env.
-      python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
+      # Relaunch exactly like the initial launch above with model-only secrets.
+      exec_model_worker python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
       HEARTBEAT_PID=$!
       log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
       fi

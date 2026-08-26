@@ -10,7 +10,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 **Tier 0 tasks** bypass Claude entirely (deterministic local work):
 `calendar-sync`, `delegation-reconcile`, `eigenflux-inbox-reconcile`,
-`iteration-observe`, `log-maintenance`, `provider-canary`
+`iteration-observe`, `log-maintenance`, `memorial-escrow`,
+`perception-collect`, `provider-canary`, `self-diagnostic`
 
 ## Task Index
 

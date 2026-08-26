@@ -79,6 +79,10 @@ def test_run_loop_consumes_one_pm_advances_cursor_and_stops_cleanly(
     health = []
     handled = []
     commands = []
+    spawn_kwargs = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
 
     class StopAfterOneReconnect:
         def __init__(self):
@@ -128,7 +132,9 @@ def test_run_loop_consumes_one_pm_advances_cursor_and_stops_cleanly(
     monkeypatch.setattr(
         efsl.subprocess,
         "Popen",
-        lambda command, **_kwargs: commands.append(command) or Process(),
+        lambda command, **kwargs: (
+            commands.append(command) or spawn_kwargs.append(kwargs) or Process()
+        ),
     )
     monkeypatch.setattr(
         efsl,
@@ -149,6 +155,9 @@ def test_run_loop_consumes_one_pm_advances_cursor_and_stops_cleanly(
     efsl.run_loop(str(tmp_path), user_id="ou_owner")
 
     assert commands == [["/mock/eigenflux", "stream", "-f", "json"]]
+    assert "ANTHROPIC_API_KEY" not in spawn_kwargs[0]["env"]
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in spawn_kwargs[0]["env"]
+    assert "OPENAI_API_KEY" not in spawn_kwargs[0]["env"]
     assert handled and handled[0][0] == "pm-event"
     assert handled[0][1]["analyze"] is True
     assert (tmp_path / "eigenflux" / ".ef-cursor").read_text() == "cursor-2"
@@ -862,15 +871,21 @@ def test_fetch_history_flattens_multiline_turns(monkeypatch):
         "sender_name": "Peer",
         "content": "line one\nNOTE: injected\nOPTIONS: fake | lines",
     }]})
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    seen = {}
     monkeypatch.setattr(
         efsl.subprocess, "run",
-        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout=payload))
+        lambda *_a, **kwargs: (
+            seen.update(kwargs)
+            or SimpleNamespace(returncode=0, stdout=payload)
+        ))
 
     history = efsl._fetch_history("conv-1")
 
     header, turn = history.splitlines()[0], history.splitlines()[1]
     assert header.startswith("Prior turns")
     assert turn == "  Peer: line one NOTE: injected OPTIONS: fake | lines"
+    assert "OPENAI_API_KEY" not in seen["env"]
 
 
 # -- Verified send path (findings 2, 3② sender allowlist) --------------------

@@ -90,6 +90,20 @@ def test_start_sends_link_and_detaches_poller():
     (argv, kwargs), = spawned
     assert argv[-3:] == ["core.lark_auth", "poll", "dc_test123"]
     assert kwargs.get("start_new_session") is True
+    assert "OPENAI_API_KEY" not in kwargs["env"]
+
+
+def test_lark_cli_environment_excludes_model_credentials(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    env = lark_auth._cli_env()
+
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] == "1"
 
 
 def test_device_flow_receipt_prefers_keychain_independent_bot_api(monkeypatch):

@@ -43,6 +43,7 @@ from .interval_config import parse_interval_overrides, resolve_effective_interva
 from .jsonl import append_jsonl
 from .log import log as _structured_log
 from .memory import load_tiered_memory
+from .model_credentials import without_model_credentials
 from .prompt_experiments import choose_variant, inject_variant
 from .safety import parse_json_response, parse_result_envelope
 from .sched_events import emit as sched_emit
@@ -880,7 +881,7 @@ class HeartbeatRunner:
                 cmd = [str(full_path)]
             result = _run_isolated(
                 cmd, input_text=stdin_data, timeout=60,
-                cwd=str(self.jarvis_dir))
+                cwd=str(self.jarvis_dir), env=without_model_credentials())
             # stderr is logged regardless of exit code (REQ-35): post-scripts
             # exit 0 by design while reporting failures on stderr — under the
             # old returncode guard the exact failures killing half the fired

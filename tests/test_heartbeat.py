@@ -1,6 +1,7 @@
 """Tests for core.heartbeat — parsing, scheduling, pipeline protection."""
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -213,6 +214,44 @@ def test_state_persistence(tmp_path):
     runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
     runner.save_state({"t": {"last_run": 12345}})
     assert runner.load_state() == {"t": {"last_run": 12345}}
+
+
+def test_task_scripts_do_not_inherit_model_credentials(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- interval: 1h\n- prompt: hi\n")
+    script = runner.jarvis_dir / "env_probe.py"
+    script.write_text(
+        "import os\n"
+        "print('|'.join([os.environ.get('OPENAI_API_KEY', 'unset'), "
+        "os.environ.get('CLAUDE_BACKUP_AUTH_TOKEN', 'unset'), "
+        "os.environ.get('SAFE_MARKER', 'missing')]))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("SAFE_MARKER", "kept")
+
+    assert runner.run_script("env_probe.py") == "unset|unset|kept"
+
+
+def test_provider_process_receives_only_its_active_credential(monkeypatch):
+    from core.heartbeat_provider import provider_env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    primary = provider_env(False, False)
+    assert primary["ANTHROPIC_API_KEY"] == "primary-secret"
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in primary
+    assert "OPENAI_API_KEY" not in primary
+
+    backup2 = provider_env(True, True)
+    assert backup2["ANTHROPIC_AUTH_TOKEN"] == "backup2-secret"
+    assert "ANTHROPIC_API_KEY" not in backup2
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in backup2
+    assert "CLAUDE_BACKUP2_AUTH_TOKEN" not in backup2
+    assert "OPENAI_API_KEY" not in backup2
 
 
 def test_completion_epoch_is_the_release_time(monkeypatch):
@@ -1084,7 +1123,8 @@ def test_primary_timeout_tries_backup_before_gpt(tmp_path, monkeypatch):
     )
 
     assert runner.claude_call("safe", allow_tools=False) == "BACKUP1_OK"
-    assert calls[0] is None
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in calls[0]
+    assert "OPENAI_API_KEY" not in calls[0]
     assert calls[1]["ANTHROPIC_AUTH_TOKEN"] == "backup1-token"
 
 
@@ -2199,6 +2239,25 @@ def test_hardcoded_task_name_sets_subset_of_heartbeat_md():
             f"HeartbeatRunner.{set_name} references tasks absent from "
             f"HEARTBEAT.md: {sorted(stale)} — remove them or restore the task block"
         )
+
+
+def test_documented_tier0_roster_matches_runtime():
+    """Keep HEARTBEAT.md's operator-facing Tier-0 roster exact.
+
+    A subset check only proves that runtime names have task blocks. It does not
+    catch the overview silently omitting a deterministic task, which made the
+    T1-T23 closure claim that the rosters were synchronized untrue.
+    """
+    hb = Path(__file__).resolve().parent.parent / "HEARTBEAT.md"
+    text = hb.read_text(encoding="utf-8")
+    match = re.search(
+        r"\*\*Tier 0 tasks\*\*.*?:\n(?P<roster>(?:`[^`]+`[,\s]*)+)\n\n",
+        text,
+        flags=re.DOTALL,
+    )
+    assert match, "HEARTBEAT.md must keep an explicit Tier-0 overview roster"
+    documented = set(re.findall(r"`([^`]+)`", match.group("roster")))
+    assert documented == HeartbeatRunner.TIER0_TASKS
 
 
 def test_engagement_tuning_protects_scheduler_infrastructure_sets():

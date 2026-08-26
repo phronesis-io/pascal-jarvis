@@ -148,6 +148,9 @@ def test_run_loop_drains_distinct_named_and_full_force_requests(
 def test_run_loop_hands_restart_to_governed_script_and_exits(
         monkeypatch, tmp_path):
     _isolate_run_loop(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     (tmp_path / ".restart_trigger").write_text("restart", encoding="utf-8")
     spawned = []
     monkeypatch.setattr(
@@ -163,6 +166,9 @@ def test_run_loop_hands_restart_to_governed_script_and_exits(
         "bash", str(tmp_path / "restart.sh"), "--runtime", "--yes",
     ]
     assert spawned[0][1]["start_new_session"] is True
+    assert "ANTHROPIC_API_KEY" not in spawned[0][1]["env"]
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in spawned[0][1]["env"]
+    assert "OPENAI_API_KEY" not in spawned[0][1]["env"]
     assert not (tmp_path / ".restart_trigger").exists()
 
 

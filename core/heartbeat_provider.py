@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from core.model_credentials import without_model_credentials
+
 
 _BENIGN_CLI_NOTICES = ("connectors are disabled",)
 
@@ -24,10 +26,15 @@ def provider_id(use_backup: bool, backup2_active: bool) -> str:
     return "backup2" if backup2_active else ("backup1" if use_backup else "primary")
 
 
-def provider_env(use_backup: bool, backup2_active: bool) -> dict[str, str] | None:
+def provider_env(use_backup: bool, backup2_active: bool) -> dict[str, str]:
+    # A provider process receives only its active credential. Primary Claude
+    # never sees relay/OpenAI tokens; a relay never sees the primary API key or
+    # the other relay's token.
     if not use_backup:
-        return None
-    env = os.environ.copy()
+        return without_model_credentials(
+            keep=frozenset({"ANTHROPIC_API_KEY"}),
+        )
+    env = without_model_credentials()
     prefix = "CLAUDE_BACKUP2" if backup2_active else "CLAUDE_BACKUP"
     env["ANTHROPIC_AUTH_TOKEN"] = os.environ.get(f"{prefix}_AUTH_TOKEN", "")
     env["ANTHROPIC_BASE_URL"] = os.environ.get(f"{prefix}_BASE_URL", "")

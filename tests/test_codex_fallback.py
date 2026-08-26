@@ -205,6 +205,8 @@ def test_invoke_reads_final_file_and_thread_event(tmp_path, monkeypatch):
         seen["kwargs"] = kwargs
         return FakeProcess()
 
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
     monkeypatch.setattr(subprocess, "Popen", popen)
 
     result = cf.invoke_codex(
@@ -214,6 +216,8 @@ def test_invoke_reads_final_file_and_thread_event(tmp_path, monkeypatch):
 
     assert result == cf.CliResult(text="CODEX ANSWER", thread_id="thread-9")
     assert seen["kwargs"]["start_new_session"] is True
+    assert "OPENAI_API_KEY" not in seen["kwargs"]["env"]
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in seen["kwargs"]["env"]
 
 
 def test_login_preflight_classifies_missing_login_as_safe_unavailability(

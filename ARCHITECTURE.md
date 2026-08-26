@@ -54,6 +54,13 @@ Models fetch indexed reference notes from disk only when relevant. Restricted
 or no-tool calls retain full inline memory so index mode can never make
 knowledge unreachable.
 
+Provider credentials follow the same execution boundary. `bot.sh` keeps the
+primary Anthropic, relay, and OpenAI keys shell-private. The heartbeat routing
+worker receives the configured route set, while a direct provider adapter
+receives only its active credential. Ordinary task scripts and model-started
+Codex/GPT tools receive a scrubbed environment; child-process handling inside
+a third-party provider CLI remains that CLI's responsibility.
+
 Heartbeat model choice is task policy, separate from provider execution.
 `HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`
 validates that declaration, isolates outbound/untrusted contexts, selects a

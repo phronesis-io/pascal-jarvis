@@ -36,6 +36,7 @@ from core.heartbeat import HeartbeatRunner
 from core import hostclock
 from core.jsonl import write_jsonl
 from core.log import log
+from core.model_credentials import without_model_credentials
 from core.safety import looks_like_error
 from core.sched_events import emit as sched_emit
 from core.timeutil import now_local_str
@@ -109,6 +110,7 @@ def _lark_send_card(card_json: str, user_id: str, log_file: str,
                  "--user-id", user_id, "--msg-type", "interactive",
                  "--content", card_json, "--as", "bot"],
                 capture_output=True, text=True, timeout=15,
+                env=without_model_credentials(),
             )
             if r.returncode == 0:
                 if attempt:
@@ -209,6 +211,7 @@ def _lark_send_text(text: str, user_id: str, *,
                 ["lark-cli", "im", "+messages-send",
                  "--user-id", user_id, "--markdown", text, "--as", "bot"],
                 capture_output=True, text=True, timeout=15,
+                env=without_model_credentials(),
             )
             if r.returncode == 0:
                 if attempt:
@@ -1871,7 +1874,8 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
                                   "--runtime", "--yes"],
                                  start_new_session=True,
                                  stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
+                                 stderr=subprocess.DEVNULL,
+                                 env=without_model_credentials())
             except Exception as e:
                 log("heartbeat", f"restart.sh spawn failed: {e} — falling back "
                     "to group SIGTERM", level="error")

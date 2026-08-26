@@ -378,7 +378,7 @@ def test_codex_locked_runner_stops_when_identity_receipt_cannot_publish(
     assert lock.read_text(encoding="utf-8") == "acquiring test-token"
 
 
-def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
+def test_bot_sh_scopes_complete_backup_config_and_reports_chain_failure():
     from pathlib import Path
     import re
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
@@ -386,7 +386,6 @@ def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
     for name in (
         "CLAUDE_BACKUP_MODEL",
         "CLAUDE_BACKUP2_ENABLED",
-        "CLAUDE_BACKUP2_AUTH_TOKEN",
         "CLAUDE_BACKUP2_BASE_URL",
         "CLAUDE_BACKUP2_MODEL",
         "BACKUP_MAX_SESSION_SIZE",
@@ -396,6 +395,19 @@ def test_bot_sh_exports_complete_backup_config_and_reports_chain_failure():
         "CODEX_FALLBACK_TIMEOUT",
     ):
         assert re.search(rf"^export [^\n]*\b{name}\b", bot, re.MULTILINE)
+    for secret in (
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_BACKUP_AUTH_TOKEN",
+        "CLAUDE_BACKUP2_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+    ):
+        assert not re.search(
+            rf"^export (?!-n\b)[^\n]*\b{secret}\b", bot, re.MULTILINE
+        )
+    assert "export -n ANTHROPIC_API_KEY CLAUDE_BACKUP_AUTH_TOKEN" in bot
+    assert bot.count("exec_model_worker python3 -m core.heartbeat_loop") == 2
+    assert bot.count("with_primary_model_credential claude -p") == 2
+    assert bot.count("with_openai_credential env") == 2
     assert "回复被安全过滤器拦截" not in bot
     assert "本次操作没有执行成功" in bot
     assert 'log_warn "Session compact failed' in bot

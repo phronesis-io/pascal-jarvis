@@ -56,8 +56,11 @@ def test_not_due_while_previous_round_is_alive(tmp_path):
     assert sic.due(now_epoch=10 * sic.CYCLE_S) is False
 
 
-def test_spawn_stamps_and_detaches(tmp_path):
+def test_spawn_stamps_and_detaches(tmp_path, monkeypatch):
     calls = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
 
     def popen(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -70,6 +73,9 @@ def test_spawn_stamps_and_detaches(tmp_path):
     assert argv[3] == "run"
     assert kwargs["start_new_session"] is True
     assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["env"]["ANTHROPIC_API_KEY"] == "primary-secret"
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in kwargs["env"]
+    assert "OPENAI_API_KEY" not in kwargs["env"]
     state = json.loads(
         (tmp_path / "data" / "self_improve_cycle.json").read_text())
     assert state["spawned_at"] == 2_000_000
@@ -102,7 +108,7 @@ def test_spawn_admission_rechecks_state_under_the_lock(tmp_path):
     assert json.loads(path.read_text())["run_id"] == "already-running"
 
 
-def test_worker_records_release_receipt_for_success(tmp_path):
+def test_worker_records_release_receipt_for_success(tmp_path, monkeypatch):
     run_id = "run-success"
     _stamp(tmp_path, 2_000_000, pid=os.getpid())
     state_path = tmp_path / "data" / "self_improve_cycle.json"
@@ -112,9 +118,17 @@ def test_worker_records_release_receipt_for_success(tmp_path):
                   "consecutive_failures": 2})
     state_path.write_text(json.dumps(state))
 
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     result = SimpleNamespace(returncode=0, stdout="finished safely\n", stderr="")
-    rc = sic.run_worker(run_id, run=lambda *a, **k: result,
-                        now_epoch=2_000_100)
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return result
+
+    rc = sic.run_worker(run_id, run=run, now_epoch=2_000_100)
 
     assert rc == 0
     saved = json.loads(state_path.read_text())
@@ -122,6 +136,9 @@ def test_worker_records_release_receipt_for_success(tmp_path):
     assert saved["release_epoch"] == 2_000_100
     assert saved["consecutive_failures"] == 0
     assert len(saved["output_digest"]) == 64
+    assert calls[0][1]["env"]["ANTHROPIC_API_KEY"] == "primary-secret"
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in calls[0][1]["env"]
+    assert "OPENAI_API_KEY" not in calls[0][1]["env"]
     receipt = json.loads(
         (tmp_path / "data" / "self_improve_receipts" /
          f"{run_id}.json").read_text())
@@ -356,10 +373,17 @@ def test_unknown_pid_identity_keeps_the_lease_and_blocks_overlap(
 
 def test_nonzero_ps_is_unknown_while_pid_is_still_alive(monkeypatch):
     result = SimpleNamespace(returncode=1, stdout="", stderr="ps failed")
-    monkeypatch.setattr(sic.subprocess, "run", lambda *_a, **_kw: result)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    seen = {}
+    monkeypatch.setattr(
+        sic.subprocess,
+        "run",
+        lambda *_a, **kwargs: seen.update(kwargs) or result,
+    )
     monkeypatch.setattr(sic, "_pid_alive", lambda _pid: True)
 
     assert sic._pid_matches_run(777, "live-run") is None
+    assert "OPENAI_API_KEY" not in seen["env"]
 
 
 def test_failed_worker_termination_keeps_the_lease_and_blocks_overlap(
