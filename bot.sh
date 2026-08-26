@@ -1039,10 +1039,10 @@ $content"
           >/dev/null 2>>"$LOG_FILE" || true
   fi
 
-  # Prepend an authoritative current-time line to the user's message body.
-  # The system prompt already carries 'Current time', but the message body
-  # itself has none — in a long all-day thread Claude can anchor on a stale
-  # in-conversation timestamp. Single line at home (Shanghai), dual when abroad.
+  # Prepend authoritative current time to the user turn. The exact per-session
+  # system snapshot deliberately contains no clock: changing even the end of
+  # one system text block invalidates the whole provider cache block.
+  # Single line at home (Shanghai), dual when abroad.
   local msg_ts
   msg_ts=$(python3 -c "import os,sys; sys.path.insert(0,os.environ['JARVIS_DIR']); from core.timeutil import msg_timestamp_prefix; print(msg_timestamp_prefix())" 2>>"$LOG_FILE")
   if [ -n "$msg_ts" ]; then
@@ -1069,11 +1069,12 @@ $content"
     JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
     JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),
@@ -1203,11 +1204,12 @@ except Exception:
         JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
         JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),
@@ -1690,11 +1692,12 @@ except Exception:
           JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
           JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),

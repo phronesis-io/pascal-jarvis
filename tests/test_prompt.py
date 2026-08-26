@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from core.prompt import build_system_prompt, load_ef_skills, ACTIONS_DOC
+from core.prompt import (
+    ACTIONS_DOC,
+    build_cached_system_prompt,
+    build_system_prompt,
+    load_ef_skills,
+)
 
 
 def test_build_system_prompt_basic(tmp_path):
@@ -25,7 +30,8 @@ def test_build_system_prompt_basic(tmp_path):
     )
 
     assert "personal assistant" in prompt
-    assert "2026-05-25 10:00 Monday" in prompt
+    assert "2026-05-25 10:00 Monday" not in prompt
+    assert "Current time:" not in prompt
     assert "User is a developer" in prompt
     assert "ACTION:" in prompt
 
@@ -96,7 +102,7 @@ def test_owner_prompt_explicit_full_mode_overrides_runtime_index(
     assert "REFERENCE_BODY" in prompt
 
 
-def test_owner_prompt_timestamp_is_after_all_dynamic_context(tmp_path):
+def test_owner_system_prompt_is_clock_free(tmp_path):
     mem = tmp_path / "memory" / "hot"
     mem.mkdir(parents=True)
     (mem / "profile.md").write_text("MEMORY_SENTINEL")
@@ -111,9 +117,72 @@ def test_owner_prompt_timestamp_is_after_all_dynamic_context(tmp_path):
         tracker_path=str(tmp_path / "tracker.json"),
     )
 
-    assert prompt.count("Current time:") == 1
-    assert prompt.index("Current time:") > prompt.index("MEMORY_SENTINEL")
-    assert prompt.rstrip().endswith("Current time: 2026-08-25 13:00 Tuesday")
+    assert "Current time:" not in prompt
+    assert "2026-08-25 13:00 Tuesday" not in prompt
+    assert "MEMORY_SENTINEL" in prompt
+
+
+def test_cached_system_prompt_is_exact_per_session_and_private(tmp_path):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST_MEMORY", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "session-one",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    first = build_cached_system_prompt(**common)
+    profile.write_text("SECOND_MEMORY", encoding="utf-8")
+    second = build_cached_system_prompt(
+        **{**common, "now_ts": "2026-08-25 13:10 Tuesday"})
+
+    assert second == first
+    assert "FIRST_MEMORY" in second
+    assert "SECOND_MEMORY" not in second
+    assert "Current time:" not in second
+
+    third = build_cached_system_prompt(
+        **{**common, "session_id": "session-two"})
+    assert "SECOND_MEMORY" in third
+    assert third != first
+    assert cache_dir.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600
+               for path in cache_dir.iterdir())
+
+
+def test_cached_system_prompt_fails_open_without_sharing_empty_session(
+        tmp_path):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+    kwargs = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+
+    first = build_cached_system_prompt(**kwargs)
+    profile.write_text("SECOND", encoding="utf-8")
+    second = build_cached_system_prompt(**kwargs)
+
+    assert "FIRST" in first
+    assert "SECOND" in second
+    assert not cache_dir.exists()
 
 
 def test_resumed_prompt_omits_transcript_context_and_focus_reordering(

@@ -438,20 +438,20 @@ def test_claude_call_default_mode_keeps_pre_index_memory_signature(
     monkeypatch.setattr("core.heartbeat.load_tiered_memory", _pre_index_loader)
     runner.claude_call("hello")
 
-    assert seen["focus_text"] == "hello"
+    assert seen["focus_text"] == ""
     assert "max_chars" in seen
 
 
-def test_system_prompt_prefix_is_stable_and_timestamp_comes_last(
+def test_system_prompt_block_is_exact_and_timestamp_stays_in_user_request(
         tmp_path, monkeypatch):
-    """Prompt-cache diet (2026-08-24): the minute-fresh 'Current time' line
-    sat at char offset ~57, before the ~200k-char memory block — every call
-    invalidated the provider prompt cache for the whole prefix. It now closes
-    the system prompt: persona line → attention rules → acting → memory stay
-    byte-stable across calls, timestamp (same format, still in the system
-    prompt) comes after the memory content."""
+    """A changing suffix in one system text block invalidates the whole block."""
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     captured_cmds = []
+    memory_calls = []
+    timestamps = iter((
+        "2026-08-26 13:00 Tuesday",
+        "2026-08-26 13:03 Tuesday",
+    ))
 
     class _Result:
         returncode = 0
@@ -463,29 +463,32 @@ def test_system_prompt_prefix_is_stable_and_timestamp_comes_last(
         lambda cmd, **kw: captured_cmds.append(cmd) or _Result())
     monkeypatch.setattr(
         "core.heartbeat.load_tiered_memory",
-        lambda *_args, **_kwargs: "PRIVATE_MEMORY_SENTINEL",
+        lambda *_args, **_kwargs: (
+            memory_calls.append(True) or "PRIVATE_MEMORY_SENTINEL"
+        ),
     )
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str", lambda _fmt: next(timestamps))
     runner.claude_call("hello")
+    runner.claude_call("hello again")
 
-    cmd = captured_cmds[0]
-    system_prompt = cmd[cmd.index("--system-prompt") + 1]
+    first, second = captured_cmds
+    system_prompt = first[first.index("--system-prompt") + 1]
+    second_system_prompt = second[second.index("--system-prompt") + 1]
     lines = system_prompt.splitlines()
-    # (a) persona line directly followed by the attention-rules block.
     assert lines[0].startswith("You are ")
     assert lines[1].startswith("## 主动输出")
-    # (b) the timestamp appears exactly once, AFTER the memory content,
-    # in the unchanged "%Y-%m-%d %H:%M %A" format.
-    assert system_prompt.count("Current time:") == 1
-    assert (system_prompt.index("Current time:")
-            > system_prompt.index("PRIVATE_MEMORY_SENTINEL"))
+    assert second_system_prompt == system_prompt
+    assert memory_calls == [True]
+    assert "Current time:" not in system_prompt
+    assert first[first.index("-p") + 1].endswith(
+        "Current time: 2026-08-26 13:00 Tuesday")
+    assert second[second.index("-p") + 1].endswith(
+        "Current time: 2026-08-26 13:03 Tuesday")
     assert "仍会推一张飞书知会卡并占当天额度" in system_prompt
     assert "系统只存网页" not in system_prompt
     assert "第一句就是结论" in system_prompt
     assert "正文最多三行" in system_prompt
-    import re as _re
-    assert _re.search(
-        r"Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z][a-z]+day\s*$",
-        system_prompt)
 
 
 def _usage_envelope(text: str, usage: dict | None = None,
@@ -853,6 +856,10 @@ def test_outbound_memory_signature_mismatch_fails_closed(
 def test_explicit_gpt_model_routes_without_spawning_claude(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -874,7 +881,10 @@ def test_explicit_gpt_model_routes_without_spawning_claude(
     assert runner.claude_call(
         "score", requested_model="gpt", restrict_tools=True,
     ) == "GPT_SELECTED"
-    assert calls == [("score", {"restrict_tools": True, "timeout": 300})]
+    assert calls == [(
+        "score\n\nCurrent time: 2026-08-26 13:00 Wednesday",
+        {"restrict_tools": True, "timeout": 300},
+    )]
 
 
 def test_openai_no_tools_call_records_provider_model_and_usage(
@@ -910,6 +920,10 @@ def test_openai_no_tools_call_records_provider_model_and_usage(
 def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -931,7 +945,10 @@ def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
     )
 
     assert runner.claude_call("focus on eigenflux") == "GPT_OK"
-    assert calls and calls[0][1:] == ("focus on eigenflux", False)
+    assert calls and calls[0][1:] == (
+        "focus on eigenflux\n\nCurrent time: 2026-08-26 13:00 Wednesday",
+        False,
+    )
 
 
 def test_heartbeat_stops_when_every_fallback_route_is_cooling(
@@ -963,6 +980,10 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
 def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    monkeypatch.setattr(
+        "core.heartbeat.now_local_str",
+        lambda _fmt: "2026-08-26 13:00 Wednesday",
+    )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
         "core.provider_health.preferred_route",
@@ -995,7 +1016,8 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     )
 
     assert runner.claude_call("routine payload", allow_tools=False) == "GPT_RECOVERED"
-    assert fallback_calls == [("routine payload", {
+    assert fallback_calls == [(
+        "routine payload\n\nCurrent time: 2026-08-26 13:00 Wednesday", {
         "restrict_tools": False,
         "allow_tools": False,
         "timeout": 120,

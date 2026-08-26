@@ -29,6 +29,7 @@ from .heartbeat_provider import (
     relay_model as _relay_model,
     run_provider_attempt as _run_provider_attempt,
 )
+from .heartbeat_prompt import build_prompt_pair as _build_prompt_pair
 from .heartbeat_task_config import (
     MEMORY_PURPOSES as _MEMORY_PURPOSES,
     TASK_MODELS as _TASK_MODELS,
@@ -548,6 +549,11 @@ class HeartbeatRunner:
         self._tasks_cache = None   # cached parse result
         self._tasks_mtime = 0.0    # mtime when cache was built
         self._cycle_prompt_variants: dict[str, dict[str, str]] = {}
+        # Claude's cache boundary is the whole system content block, not an
+        # arbitrary stable byte prefix inside that block. Keep one exact
+        # snapshot per trust/tool profile for the high-frequency primary path.
+        # Dynamic task DATA and current time remain in the user request.
+        self._system_prompt_cache: dict[tuple, tuple[float, str]] = {}
         # True iff the LAST claude_call ended in TimeoutExpired — lets the
         # cycle distinguish task_timeout from a generic failed call when
         # writing the scheduler event log (both return "" from claude_call).
@@ -1186,70 +1192,22 @@ class HeartbeatRunner:
         if (os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip() == "index"
                 and allow_tools and not restrict_tools and not full_memory):
             warm_mode = "index"
-        # Only pass warm_mode when it deviates from the default: an adapter
-        # built against the pre-index signature (max_chars/focus_text only)
-        # must keep working unchanged while the feature is off, not be pushed
-        # into the legacy fallback that silently drops the budget kwargs.
-        mem_kwargs = {"max_chars": mem_budget, "focus_text": prompt}
-        if memory_purpose != "inbound":
-            mem_kwargs["purpose"] = memory_purpose
-        if warm_mode != "full":
-            mem_kwargs["warm_mode"] = warm_mode
-        try:
-            memory = load_tiered_memory(self.memory_dir, **mem_kwargs)
-        except TypeError as exc:
-            # Keep HeartbeatRunner compatible with an older memory module and
-            # with lightweight test/plugin adapters that still expose the
-            # historical one-argument callable.
-            if not any(name in str(exc) for name in (
-                    "max_chars", "focus_text", "warm_mode", "purpose")):
-                raise
-            if memory_purpose == "outbound":
-                # An older adapter cannot prove it removed private inboxes.
-                # Publishing without memory is safer than silently exporting
-                # the owner's mail through a compatibility fallback.
-                print("[heartbeat] outbound memory filter unavailable; "
-                      "withholding memory for this call", file=sys.stderr)
-                memory = "(personal memory withheld: outbound filter unavailable)"
-            else:
-                print("[heartbeat] load_tiered_memory signature mismatch; "
-                      f"falling back to the legacy one-argument call "
-                      f"(memory budget and warm_mode dropped): {exc}",
-                      file=sys.stderr)
-                memory = load_tiered_memory(self.memory_dir)
-        if restrict_tools:
-            # External text and private memory must never share one model
-            # context. A prompt injection does not need Bash to leak memory:
-            # it can simply quote the system prompt into an auto-reply or use
-            # a network tool. Untrusted tasks get only their explicit DATA.
-            memory = "(personal memory withheld for untrusted-input isolation)"
-        now_ts = now_local_str("%Y-%m-%d %H:%M %A")
-        # The timestamp sits at the very END of the system prompt: everything
-        # before it is byte-stable across calls, so provider prompt caching
-        # can reuse the ~200k-char prefix (at the top, the minute-fresh line
-        # invalidated the whole prefix every call).
-        system_prompt = f"""You are {self.persona}, a personal AI assistant and life mentor.
-## 主动输出＝先判断注意力（任务指定了 JSON 格式的仍按任务格式）
-- 需要 Pascal 明确选择：才是待批奏折，必须给真实分支的 OPTIONS。
-- 紧急告警：可以不带 OPTIONS，系统会推飞书但不算待批。
-- 纯周知：省略 OPTIONS，仍会推一张飞书知会卡并占当天额度；
-  确实值得 Pascal 现在知道才写。
-- 一次只说一件事；确有多件独立事，用单独一行 "---" 分隔。
-- 第一句就是结论；背景能省就省。正文最多三行：什么事、为什么现在说、
-  Pascal 要做什么。不需要他做什么就明确写「知道就行」。
-- 每件事第一行写 `TITLE: 一句话说清这件事`（≤40字）。这是他扫一眼决定
-  点不点开的唯一依据，不写就退回「Intent」这类按来源起的泛标题。
-- 最后一行写 `OPTIONS: 回复1 | 回复2`（2-4 个，每个=他会打的那句回复本身，
-  第一人称≤14字，覆盖真实分支含「不做」）。不要为了获得推送而虚构选项。
-- 正文说人话：无 SLA/HTTP 码/内部黑话。
-
-{self._acting_section(restrict_tools, allow_tools)}
-
-You have access to the user's memory below. Use it to personalize your responses.
-
-{memory}
-
-Current time: {now_ts}"""
+        system_prompt, request_prompt = _build_prompt_pair(
+            persona=self.persona,
+            memory_dir=self.memory_dir,
+            prompt=prompt,
+            acting_section=self._acting_section(restrict_tools, allow_tools),
+            restrict_tools=restrict_tools,
+            allow_tools=allow_tools,
+            full_memory=full_memory,
+            memory_purpose=memory_purpose,
+            mem_budget=mem_budget,
+            warm_mode=warm_mode,
+            cacheable_provider=not direct_gpt and not use_backup,
+            cache=self._system_prompt_cache,
+            load_memory=load_tiered_memory,
+            now_string=now_local_str,
+        )
         if direct_gpt:
             fallback_kwargs = {"restrict_tools": restrict_tools}
             if not allow_tools:
@@ -1257,7 +1215,8 @@ Current time: {now_ts}"""
             fallback_kwargs["timeout"] = remaining_budget(cap=call_timeout)
             if fallback_kwargs["timeout"] <= 0:
                 raise subprocess.TimeoutExpired("openai", call_timeout)
-            return self._openai_fallback_call(system_prompt, prompt, **fallback_kwargs)
+            return self._openai_fallback_call(
+                system_prompt, request_prompt, **fallback_kwargs)
         try:
             while True:
                 cmd = [
@@ -1269,7 +1228,7 @@ Current time: {now_ts}"""
                     # JSON envelope → per-call token/cost accounting; the
                     # fail-open parse below keeps behavior otherwise identical.
                     "--output-format", "json",
-                    "-p", prompt,
+                    "-p", request_prompt,
                 ]
                 if restrict_tools or not allow_tools:
                     # Claude Code documents --tools "" as the fail-closed way
@@ -1517,7 +1476,7 @@ Current time: {now_ts}"""
                     if fallback_kwargs["timeout"] <= 0:
                         return ""
                     fallback = self._openai_fallback_call(
-                        system_prompt, prompt, **fallback_kwargs,
+                        system_prompt, request_prompt, **fallback_kwargs,
                     )
                     if fallback:
                         self._call_timed_out = False
@@ -1561,7 +1520,7 @@ Current time: {now_ts}"""
             if fallback_kwargs["timeout"] <= 0:
                 return ""
             fallback = self._openai_fallback_call(
-                system_prompt, prompt, **fallback_kwargs,
+                system_prompt, request_prompt, **fallback_kwargs,
             )
             if fallback:
                 self._call_timed_out = False
