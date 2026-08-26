@@ -569,17 +569,36 @@ def _merge_probe_rows(
     *,
     probe_started_epoch: float,
 ) -> list[dict[str, Any]]:
-    """Keep real-request truth when a small canary merely answers.
+    """Keep production truth unless a matching connectivity probe recovers.
 
     A successful tiny probe cannot rehabilitate a provider that timed out on
-    production input. A failed canary may still downgrade a previously healthy
-    route. Canary facts are retained beside the authoritative real observation
-    so operators can see both without conflating them.
+    production input. OpenAI ``network_error`` is narrower: its bounded canary
+    exercises the same HTTP path, so a later success clears that connectivity
+    cooldown. A real failure recorded after the probe began always wins.
     """
     latest_by_id = {str(row.get("id") or ""): row for row in latest}
     merged = []
     for row in probed:
         current = latest_by_id.get(str(row.get("id") or ""))
+        recovered_openai_network = (
+            current
+            and current.get("id") == "openai"
+            and current.get("observation_source") == "real_request"
+            and current.get("status") == "unhealthy"
+            and current.get("detail") == "real request: network_error"
+            and row.get("status") == "healthy"
+            and _checked_epoch(current) < probe_started_epoch
+        )
+        if recovered_openai_network:
+            recovered = dict(row)
+            recovered.update({
+                "consecutive_failures": 0,
+                "cooldown_until_epoch": 0,
+                "last_success_epoch": _checked_epoch(row),
+                "last_failure_epoch": current.get("last_failure_epoch", 0),
+            })
+            merged.append(recovered)
+            continue
         if (current
                 and current.get("observation_source") == "real_request"
                 and (current.get("status") == "unhealthy"

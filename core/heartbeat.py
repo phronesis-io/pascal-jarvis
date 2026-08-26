@@ -21,6 +21,7 @@ from .claude_bin import resolve_claude_bin
 from .heartbeat_provider import (
     drop_benign_notices as _drop_benign_notices,
     fallback_attempt_timeout as _fallback_attempt_timeout,
+    record_isolated_failure as _record_isolated_failure,
     observe_provider as _observe_provider,
     openai_usage_fields as _openai_usage_fields,
     provider_env as _provider_env,
@@ -659,9 +660,8 @@ class HeartbeatRunner:
                         isolation=isolation_reason)
             self._ack_failed_posts([task], infrastructure=True)
             return
-
         if not raw:
-            # Timeout / network / nonzero — record failure with breaker.
+            # Provider outages must not leave ordinary work behind a task circuit.
             # Fast-retry like the batch path (REQ: heavy tasks were pushing
             # last_run to now on every failure, so a single transient network
             # blip on a 24h-interval task like pgc-improvement meant a full
@@ -674,7 +674,9 @@ class HeartbeatRunner:
             retry_delay = min(300, interval)
             ts.last_run = now - interval + retry_delay
             ts.last_status = "timeout" if self._call_timed_out else "failed"
-            tripped = ts.circuit.record_failure()
+            tripped, failure_scope = _record_isolated_failure(
+                ts.circuit, is_heavy, self._call_context_overflow,
+                self._call_timed_out, self._last_call_error)
             if name in self.PRIORITY_TASKS and ts.circuit.is_open:
                 ts.circuit.disabled_until = 0
                 tripped = False
@@ -682,11 +684,11 @@ class HeartbeatRunner:
             if self._call_timed_out:
                 self._event("task_timeout", task=name, duration_s=dur,
                             timeout_s=timeout, heavy=is_heavy,
-                            isolation=isolation_reason)
+                            isolation=isolation_reason, failure_scope=failure_scope)
             else:
                 self._event("task_finish", task=name, status="failed",
                             duration_s=dur, heavy=is_heavy,
-                            isolation=isolation_reason,
+                            isolation=isolation_reason, failure_scope=failure_scope,
                             error=_error_excerpt(self._last_call_error))
             if self._call_context_overflow:
                 self._log(f"Context overflow killed isolated task {name} — its "
@@ -1065,15 +1067,15 @@ class HeartbeatRunner:
             externally published/profile-writing task sees the prompt.
         """
         call_timeout = timeout or self.claude_timeout
-        # One logical request may cross several providers, but it gets one
-        # bounded wall-clock envelope. Reserve at most the configured OpenAI
-        # budget after the first Claude attempt; retries consume what remains
-        # instead of each receiving another full 5-15 minute allowance.
+        # One logical request may cross several providers, but it gets exactly
+        # one bounded wall-clock envelope. Provider attempts reserve their
+        # downstream slots inside this deadline; fallback time is never added
+        # on top of the task's own budget.
         fallback_reserve = min(
             max(0, int(os.environ.get("OPENAI_FALLBACK_TIMEOUT", "120"))),
             call_timeout,
         )
-        call_deadline = time.monotonic() + call_timeout + fallback_reserve
+        call_deadline = time.monotonic() + call_timeout
 
         def remaining_budget(*, cap: int | None = None) -> int:
             remaining = max(0, math.ceil(call_deadline - time.monotonic()))
@@ -1525,9 +1527,9 @@ Current time: {now_ts}"""
                         return fallback
                 # Nonzero Claude output is an error surface, not user content.
                 return ""
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             self._call_timed_out = True
-            self._last_call_error = f"claude call timed out ({call_timeout}s)"
+            self._last_call_error = f"claude call timed out ({exc.timeout}s)"
             self._call_context_overflow = False
             timed_out_provider = (
                 "backup2" if _backup2_active else
@@ -1544,13 +1546,13 @@ Current time: {now_ts}"""
             safe_transport_replay = restrict_tools or not allow_tools
             if not safe_transport_replay:
                 self._log(
-                    f"Claude call timed out ({call_timeout}s) on "
+                    f"Claude call timed out ({exc.timeout}s) on "
                     f"{timed_out_provider}; deferring because tools may have run",
                     level="warn",
                 )
                 return ""
             self._log(
-                f"Claude call timed out ({call_timeout}s) on "
+                f"Claude call timed out ({exc.timeout}s) on "
                 f"{timed_out_provider}; trying GPT fallback",
                 level="warn",
             )

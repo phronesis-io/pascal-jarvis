@@ -87,6 +87,7 @@ eigenflux/.eigenflux/
 
 # Daemon & watchdog logs
 daemon.log
+daemon.log.*
 watchdog.log
 
 # Runtime data
