@@ -421,6 +421,58 @@ def test_bot_sh_scopes_complete_backup_config_and_reports_chain_failure():
     assert "前一条还在处理" in bot
 
 
+def test_bot_shell_credential_boundaries_execute_on_macos_bash(tmp_path):
+    import os
+    import subprocess
+    from pathlib import Path
+
+    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
+    start = bot.index("# Provider credentials remain shell-private")
+    end = bot.index("# Sidecar event backend", start)
+    boundary = bot[start:end]
+    probe = (
+        'printf "%s|%s|%s|%s\\n" '
+        '"${ANTHROPIC_API_KEY-unset}" '
+        '"${CLAUDE_BACKUP_AUTH_TOKEN-unset}" '
+        '"${CLAUDE_BACKUP2_AUTH_TOKEN-unset}" '
+        '"${OPENAI_API_KEY-unset}"'
+    )
+    script = tmp_path / "credential-boundary.sh"
+    script.write_text(
+        "set -u\n"
+        + boundary
+        + f'printf "ambient="; /bin/bash -c \'{probe}\'\n'
+        + f'printf "primary="; with_primary_model_credential /bin/bash -c \'{probe}\'\n'
+        + f'printf "openai="; with_openai_credential /bin/bash -c \'{probe}\'\n'
+        + f'printf "router="; (exec_model_worker /bin/bash -c \'{probe}\')\n',
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "ANTHROPIC_API_KEY": "primary-secret",
+        "CLAUDE_BACKUP_AUTH_TOKEN": "backup1-secret",
+        "CLAUDE_BACKUP2_AUTH_TOKEN": "backup2-secret",
+        "OPENAI_API_KEY": "openai-secret",
+    }
+
+    result = subprocess.run(
+        ["/bin/bash", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "ambient=unset|unset|unset|unset",
+        "primary=primary-secret|unset|unset|unset",
+        "openai=unset|unset|unset|openai-secret",
+        "router=primary-secret|backup1-secret|backup2-secret|openai-secret",
+    ]
+
+
 def test_bot_backup2_credentials_are_scoped_to_one_message():
     from pathlib import Path
 
