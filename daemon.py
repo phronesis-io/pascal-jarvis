@@ -2080,17 +2080,27 @@ def _ping_external_deadman() -> str:
         if (brain_state.get("brain_dead")
                 and time.time() - float(brain_state.get("last_check_ts") or 0)
                 < BRAIN_CHECK_GAP_THRESHOLD):
-            log("WARN", "External dead-man ping withheld: heartbeat brain-dead")
+            key = "deadman|withheld-brain-dead"
+            now = time.time()
+            if now - _probe_alert_stamps.get(key, 0) >= 30 * 60:
+                _probe_alert_stamps[key] = now
+                _save_probe_alert_stamps()
+                log("WARN", "External dead-man ping withheld: heartbeat brain-dead")
             return "withheld_brain_dead"
         from core.delivery import DeliveryPipeline
 
         transport = DeliveryPipeline(JARVIS_DIR).transport_health()
         if not transport["healthy"]:
-            log(
-                "WARN",
-                "External dead-man ping withheld: Lark transport has "
-                f"{transport['consecutive_failures']} consecutive failures",
-            )
+            key = "deadman|withheld-transport"
+            now = time.time()
+            if now - _probe_alert_stamps.get(key, 0) >= 30 * 60:
+                _probe_alert_stamps[key] = now
+                _save_probe_alert_stamps()
+                log(
+                    "WARN",
+                    "External dead-man ping withheld: Lark transport has "
+                    f"{transport['consecutive_failures']} consecutive failures",
+                )
             return "withheld_transport_unhealthy"
         result = ping_due(JARVIS_DIR)
         if result.status == "failed":

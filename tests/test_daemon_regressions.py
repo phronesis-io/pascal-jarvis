@@ -259,7 +259,10 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
             return {"healthy": False, "consecutive_failures": 3}
 
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+    monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: logs.append(a))
     monkeypatch.setattr(
         deadman, "status", lambda _root: deadman.DeadmanResult("ok")
     )
@@ -272,7 +275,10 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
 
     assert daemon_mod._ping_external_deadman() == \
         "withheld_transport_unhealthy"
+    assert daemon_mod._ping_external_deadman() == \
+        "withheld_transport_unhealthy"
     assert pinged == []
+    assert len(logs) == 1
 
 
 def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
@@ -288,7 +294,10 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
     }))
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "BRAIN_STATE_FILE", brain)
-    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+    monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: logs.append(a))
     monkeypatch.setattr(
         deadman, "status", lambda _root: deadman.DeadmanResult("ok"))
     monkeypatch.setattr(
@@ -296,7 +305,9 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
         lambda _root: pinged.append(True) or deadman.DeadmanResult("ok"))
 
     assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
+    assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
     assert pinged == []
+    assert len(logs) == 1
 
 
 def test_daemon_log_rotation_keeps_multiple_generations(tmp_path, monkeypatch):
