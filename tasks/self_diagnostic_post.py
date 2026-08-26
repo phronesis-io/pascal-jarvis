@@ -226,7 +226,10 @@ def main():
         print(f"[self_diagnostic_post] recorded {len(warnings)} internal "
               "warning(s); no user action needed", file=sys.stderr)
         return
-    if not should_alert(warnings, stamp):
+    # Only owner-actionable evidence may create a fresh owner alert. Internal
+    # network/task churn can change on every diagnostic run; including it in
+    # this comparison reopened the same OAuth card after the four-hour floor.
+    if not should_alert(actionable, stamp):
         if warnings:
             _mark_alerted(warnings)
             print(f"[self_diagnostic_post] {len(warnings)} warning(s) "

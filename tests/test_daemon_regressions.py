@@ -138,6 +138,65 @@ def test_component_recovery_only_terminates_owned_exact_child(monkeypatch):
     assert killed == [(200, daemon_mod.signal.SIGTERM)]
 
 
+def test_component_recovery_never_kills_live_ef_stream_loop(monkeypatch):
+    """8/26 incident: Guardian repeatedly SIGTERMed an owned stream loop when
+    only its independent polling safety net was stale. The loop already owns
+    reconnect/backoff; killing the parent converts network churn into downtime.
+    """
+    killed = []
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        200: (100, "python3 -m core.ef_stream_loop"),
+    })
+    monkeypatch.setattr(
+        daemon_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        daemon_mod, "log", lambda level, msg: logs.append((level, msg)),
+    )
+
+    assert daemon_mod._request_component_recovery("ef-stream") is False
+    assert killed == []
+    assert any("left the live ef-stream" in msg for _, msg in logs)
+
+
+def test_missing_child_recovery_does_not_claim_drift_blocked_watchdog(
+        monkeypatch):
+    """A checkout pulled after boot blocks bot.sh child respawns by design.
+    Guardian must not claim that watchdog recovery is underway in that state.
+    """
+    from core import deploy
+
+    killed = []
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+    })
+    monkeypatch.setattr(
+        deploy,
+        "verify_runtime",
+        lambda **_kwargs: {
+            "ok": False,
+            "issues": ["bot: running git commit differs from HEAD"],
+        },
+    )
+    monkeypatch.setattr(
+        daemon_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        daemon_mod, "log", lambda level, msg: logs.append((level, msg)),
+    )
+
+    assert daemon_mod._request_component_recovery("ef-stream") is False
+    assert killed == []
+    assert any("runtime version drift" in msg for _, msg in logs)
+
+
 def test_component_recovery_skips_when_process_snapshot_is_unknown(monkeypatch):
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
     monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
@@ -200,7 +259,10 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
             return {"healthy": False, "consecutive_failures": 3}
 
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
-    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+    monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: logs.append(a))
     monkeypatch.setattr(
         deadman, "status", lambda _root: deadman.DeadmanResult("ok")
     )
@@ -213,7 +275,10 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
 
     assert daemon_mod._ping_external_deadman() == \
         "withheld_transport_unhealthy"
+    assert daemon_mod._ping_external_deadman() == \
+        "withheld_transport_unhealthy"
     assert pinged == []
+    assert len(logs) == 1
 
 
 def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
@@ -229,7 +294,10 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
     }))
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "BRAIN_STATE_FILE", brain)
-    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
+    monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: logs.append(a))
     monkeypatch.setattr(
         deadman, "status", lambda _root: deadman.DeadmanResult("ok"))
     monkeypatch.setattr(
@@ -237,7 +305,9 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
         lambda _root: pinged.append(True) or deadman.DeadmanResult("ok"))
 
     assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
+    assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
     assert pinged == []
+    assert len(logs) == 1
 
 
 def test_daemon_log_rotation_keeps_multiple_generations(tmp_path, monkeypatch):
@@ -277,7 +347,7 @@ def test_repeated_identical_degraded_probe_logs_only_on_change(monkeypatch):
     daemon_mod._note_degraded_health("admin :3456", payload)
 
     assert sum("DEGRADED" in message for _, message in logged) == 1
-    assert len(alerted) == 1
+    assert alerted == []
 
     daemon_mod._note_degraded_health("admin :3456", {"status": "ok"})
     assert any("recovered" in message for _, message in logged)
@@ -321,12 +391,19 @@ def test_pid_parse_empty_file(tmp_path, monkeypatch):
     assert result is False or result is True
 
 
-def test_stale_threshold_is_1200():
-    """Stale threshold must be 1200s (20 min) to accommodate long Claude calls.
+def test_stale_threshold_is_1800():
+    """Stale threshold must be 1800s (30 min) to accommodate long model calls.
 
     Was 900s (15 min), caused false-positive stale detection → restart spiral.
     """
     assert daemon_mod.HEARTBEAT_STALE_THRESHOLD == 1800
+
+
+def test_daemon_has_no_self_mtime_reload_loop():
+    source = Path(daemon_mod.__file__).read_text(encoding="utf-8")
+
+    assert "__file__).stat().st_mtime" not in source
+    assert "daemon_mtime" not in source
 
 
 def test_daemon_records_wake_gap(monkeypatch):
@@ -663,9 +740,9 @@ def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env
     assert degraded, logs
     assert "status=error" in degraded[0]
     assert "newsapi" in degraded[0]  # circuits_open surfaced
-    # alert-only discipline: a degraded (not 失联) Lark line went out — in the
-    # 2026-07-09 plain-Chinese wording (Pascal killed the status=/HTTP jargon)
-    assert any("它自己报告有问题" in a and "newsapi" in a for a in alerts)
+    # A live component owns its retry path. The raw diagnosis stays internal;
+    # there is no owner decision and therefore no Lark card.
+    assert alerts == []
 
 
 def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
@@ -695,7 +772,8 @@ def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
                for _, msg in logs), logs
 
 
-def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
+def test_probe_connection_refused_after_recovery_alerts_for_manual_action(
+        monkeypatch, probe_env):
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
@@ -712,26 +790,28 @@ def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
     daemon_mod.probe_observed_components()
 
     assert any("管理面板连续两次连不上" in a for a in alerts), alerts
-    # The card names the component the way he knows it — never ":3456" or
-    # "launchd" (feedback-no-jargon-dashboards).
+    assert any("人工排查" in a for a in alerts)
     assert not any(":3456" in a or "launchd" in a for a in alerts), alerts
     assert any("DOWN" in msg for _, msg in logs), logs
 
 
-def test_probe_non_json_5xx_still_alerts_down(monkeypatch, probe_env):
-    """A 502 HTML error page is NOT a health report — still a probe failure."""
+def test_probe_non_json_5xx_alerts_when_recovery_is_unavailable(
+        monkeypatch, probe_env):
+    """A 502 HTML error page plus no recovery path requires owner action."""
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
         raise _http_error(502, b"<html>Bad Gateway</html>")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery", lambda name: False,
+    )
     daemon_mod.probe_observed_components()
 
     assert alerts == []
-    for name in recoveries:
-        daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
-            time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
+    daemon_mod._probe_alert_stamps["admin :3456|pending"] = (
+        time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
     daemon_mod.probe_observed_components()
 
     assert any("管理面板连续两次连不上" in a for a in alerts), alerts
@@ -827,11 +907,17 @@ def test_restart_budget_reset_on_success_is_persisted(monkeypatch, restart_env):
     state_file = restart_env
     monkeypatch.setattr(daemon_mod, "check_health",
                         lambda: {"healthy": True, "issues": []})
+    alerts = []
+    monkeypatch.setattr(
+        daemon_mod, "notify_lark",
+        lambda msg, *args, **kwargs: alerts.append(msg),
+    )
 
     daemon_mod.diagnose_and_fix(["bot.sh is not running"])
 
     assert daemon_mod.restart_count == 0
     assert json.loads(state_file.read_text())["restart_count"] == 0
+    assert alerts == [], "a completed self-heal must stay internal"
 
 
 def test_max_attempts_latches_breaker(monkeypatch, restart_env):
@@ -1033,9 +1119,8 @@ def test_corrupt_probe_alert_state_falls_back_to_empty(tmp_path, monkeypatch, co
     assert daemon_mod._probe_alert_stamps == {}
 
 
-def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
-    """The DOWN page's dedup stamp must hit disk so a hot-reload respawn
-    can't re-page within the 4h window."""
+def test_probe_down_actionable_incident_stamp_is_persisted(monkeypatch, probe_env):
+    """The actionable DOWN incident's dedup stamp survives daemon restarts."""
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):

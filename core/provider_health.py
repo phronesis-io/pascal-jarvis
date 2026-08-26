@@ -25,6 +25,7 @@ from typing import Any, Callable
 from .claude_bin import resolve_claude_bin
 from .codex_fallback import parse_terminal_error, resolve_codex_bin
 from .config import Config
+from .model_credentials import without_model_credentials
 
 
 CANARY_MARKER = "JARVIS_CANARY_OK"
@@ -239,8 +240,12 @@ def _probe_claude(
             "and nothing else. Do not use tools."
         ),
     ]
-    env = os.environ.copy()
-    if spec["id"] != "primary":
+    if spec["id"] == "primary":
+        env = without_model_credentials(
+            keep=frozenset({"ANTHROPIC_API_KEY"}),
+        )
+    else:
+        env = without_model_credentials()
         env["ANTHROPIC_AUTH_TOKEN"] = spec["token"]
         env["ANTHROPIC_BASE_URL"] = spec["base_url"]
     started = time.monotonic()
@@ -395,6 +400,7 @@ def _probe_codex(
             text=True,
             timeout=timeout,
             cwd=str(root),
+            env=without_model_credentials(),
         )
     except subprocess.TimeoutExpired:
         return {

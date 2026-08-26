@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from core.model_credentials import without_model_credentials
 from core.timeutil import now_local_str
 
 
@@ -261,6 +262,7 @@ def ensure_codex_authenticated(binary: str, timeout: int = 5) -> None:
             text=True,
             timeout=max(1, int(timeout)),
             check=False,
+            env=without_model_credentials(),
         )
     except OSError as exc:
         raise CodexUnavailableError(
@@ -329,6 +331,7 @@ def invoke_codex(
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(work_dir),
+            env=without_model_credentials(),
             start_new_session=True,
         )
         if process_holder is not None:

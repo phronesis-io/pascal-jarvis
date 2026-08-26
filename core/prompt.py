@@ -12,14 +12,26 @@ The prompt template is a constant; dynamic parts are injected at build time.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
 import os
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from core.memory import load_group_context, load_tiered_memory
 from core.person_registry import owner_people_prompt_context
 from core.session import build_recent_turns, get_session_counter, get_session_state
 from core.compact import read_compact
+
+
+PROMPT_SNAPSHOT_VERSION = 1
+PROMPT_SNAPSHOT_KEEP = 128
+# Exact blocks amortize the 190k-token prompt without freezing newly learned
+# cross-session context for days. This matches Heartbeat's cache horizon.
+PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 3600
 
 
 def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
@@ -57,7 +69,6 @@ def _build_group_prompt(
     session_dir: str,
     session_id: str,
     conv_key: str,
-    now_ts: str,
     tracker_path: str,
     owner_name: str = "",
 ) -> str:
@@ -102,7 +113,7 @@ def _build_group_prompt(
 
 {recent_turns}
 
-Current time: {now_ts}"""
+"""
 
 
 # ── Action reference (kept in code, not a file, because bot.sh needs to parse it too) ──
@@ -266,10 +277,16 @@ def build_system_prompt(
     additionally restricted in bot.sh — this prompt is the knowledge layer of
     that boundary, not the only layer.
     """
+    # ``now_ts`` remains in the signature for callers compiled against the
+    # historical API. The live Lark handler prefixes every user turn with an
+    # authoritative timestamp. A changing timestamp inside one system text
+    # block invalidates that entire provider cache block, even when it appears
+    # at the end, so system prompts deliberately contain no wall-clock value.
+    del now_ts
     if chat_type != "p2p":
         return _build_group_prompt(
             jarvis_dir, memory_dir, session_dir, session_id, conv_key,
-            now_ts, tracker_path)
+            tracker_path)
     selected_warm_mode = (
         str(warm_mode).strip() if warm_mode is not None
         else os.environ.get("JARVIS_WARM_MEMORY_MODE", "full").strip()
@@ -399,8 +416,177 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {external_work_context}
 
 {recent_turns}
+"""
 
-Current time: {now_ts}"""
+
+def _prompt_source_digest() -> str:
+    """Invalidate snapshots when prompt or memory assembly code changes."""
+    from core import memory as memory_module
+
+    digest = hashlib.sha256()
+    for source in (Path(__file__), Path(memory_module.__file__)):
+        try:
+            digest.update(source.read_bytes())
+        except OSError:
+            digest.update(str(source).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def _snapshot_path(cache_dir: Path, *, session_id: str, chat_type: str,
+                   max_memory_chars: int | None, context_key: str,
+                   matter_id: str, warm_mode: str) -> Path:
+    identity = json.dumps({
+        "version": PROMPT_SNAPSHOT_VERSION,
+        "runtime_revision": os.environ.get("JARVIS_RUNTIME_GIT_HEAD", ""),
+        "source": _prompt_source_digest(),
+        "session_id": str(session_id),
+        "chat_type": str(chat_type),
+        "max_memory_chars": max_memory_chars,
+        "context_key": str(context_key),
+        "matter_id": str(matter_id),
+        "warm_mode": str(warm_mode),
+    }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return cache_dir / f"{hashlib.sha256(identity.encode()).hexdigest()}.txt"
+
+
+def _prune_prompt_snapshots(
+    cache_dir: Path,
+    keep: int = PROMPT_SNAPSHOT_KEEP,
+    max_age_seconds: int = PROMPT_SNAPSHOT_MAX_AGE_SECONDS,
+) -> None:
+    try:
+        files = sorted(
+            (path for path in cache_dir.glob("*.txt") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    cutoff = time.time() - max(0, max_age_seconds)
+    retained: list[Path] = []
+    for path in files:
+        try:
+            if max_age_seconds == 0 or path.stat().st_mtime < cutoff:
+                path.unlink()
+            else:
+                retained.append(path)
+        except OSError:
+            pass
+    for path in retained[max(0, keep):]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def _prompt_cache_lock(lock_path: Path):
+    """Serialize only cache metadata and inode replacement, never prompt work."""
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        try:
+            lock_path.chmod(0o600)
+        except OSError:
+            pass
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_prompt_snapshot(path: Path) -> str:
+    try:
+        cached = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if cached:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    return cached
+
+
+def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
+    """Return one exact private system-prompt snapshot per provider session.
+
+    The provider cache hashes content blocks, not arbitrary byte prefixes
+    inside one text block. Rebuilding the same session from live memory made
+    minute-level operational files rewrite the whole block on every message.
+    A session now keeps the exact snapshot it started with; current time and
+    the incoming turn stay in the user message, while tools remain available
+    for facts that changed after the session began.
+    """
+    session_id = str(kwargs.get("session_id") or "")
+    if not session_id:
+        # A missing identity must not collapse unrelated conversations into a
+        # shared private snapshot. Keep serving, but rebuild without caching.
+        return build_system_prompt(**kwargs)
+    root = Path(cache_dir)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+    path = _snapshot_path(
+        root,
+        session_id=session_id,
+        chat_type=str(kwargs.get("chat_type") or "p2p"),
+        max_memory_chars=kwargs.get("max_memory_chars"),
+        context_key=str(kwargs.get("context_key") or ""),
+        matter_id=str(kwargs.get("matter_id") or ""),
+        warm_mode=str(
+            kwargs.get("warm_mode")
+            or os.environ.get("JARVIS_WARM_MEMORY_MODE", "full")
+        ),
+    )
+    # One directory lock bounds lock state while serializing cache reads,
+    # replacement, and pruning. Prompt assembly itself can read 190k of memory
+    # and search provider transcripts, so it must happen outside this global
+    # lock; otherwise two unrelated new sessions make one another wait.
+    lock_path = root / ".cache.lock"
+    with _prompt_cache_lock(lock_path):
+        _prune_prompt_snapshots(root)
+        cached = _read_prompt_snapshot(path)
+        if cached:
+            return cached
+
+    prompt = build_system_prompt(**kwargs)
+
+    # Another worker may have assembled the same session while our lock was
+    # released. Preserve the first complete snapshot so every caller resumes
+    # against exactly one system block.
+    with _prompt_cache_lock(lock_path):
+        _prune_prompt_snapshots(root)
+        cached = _read_prompt_snapshot(path)
+        if cached:
+            return cached
+        tmp_path: Path | None = None
+        try:
+            # NamedTemporaryFile is mode 0600 at creation. Writing private
+            # memory through Path.write_text would briefly expose a 0644
+            # inode under a permissive process umask before chmod.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=root,
+                prefix=f".{path.name}.",
+                delete=False,
+            ) as tmp:
+                tmp.write(prompt)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, path)
+            path.chmod(0o600)
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        _prune_prompt_snapshots(root)
+        return prompt
 
 
 if __name__ == "__main__":

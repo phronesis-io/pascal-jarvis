@@ -28,8 +28,11 @@ healthy, but the product contract was not:
 4. Automatic terminal recovery is fail-closed: only a known definitive
    no-send error is eligible, at most two old cards per cycle, with cooldown
    and retry ceilings. Lapsed, resolved, read, or acted cards never reopen.
-5. Component health requires a recent successful polling receipt after startup
-   grace. Quiet WebSocket process existence alone is not green.
+5. Component health is end-to-end ingress health, not one preferred transport:
+   a fresh active WebSocket receipt or a recent successful poll is green. A
+   `connecting` stream after startup grace still needs the poll; a missing
+   real-time sidecar with a fresh poll is continuity with added latency; both
+   paths unverified is red. Process existence alone is never green.
 6. Feed cooldown and daily count come from unified-delivery states. Terminal
    failures do not consume visibility.
 7. Tool/provider traces are rejected from message analysis; the raw external
@@ -43,6 +46,11 @@ healthy, but the product contract was not:
   recovery; a closed Memorial is not.
 - Poll failure creates degraded health without fabricating success.
 - `connecting` is unhealthy after grace unless the polling path is fresh.
+- A stale poll never makes Guardian terminate a live stream loop; reconnect,
+  backoff, and cursor resume stay owned by that loop.
+- A fresh poll covers a missing real-time sidecar without sending Pascal an
+  actionless outage card; the owner watchdog still recreates the sidecar after
+  a governed deploy.
 - Failed feed envelope does not spend cooldown or daily budget; delivered or
   retryable work does.
 - No model tool trace reaches a Memorial body.

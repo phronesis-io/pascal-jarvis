@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from core.model_credentials import without_model_credentials
+
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5.5"
@@ -179,6 +181,7 @@ def _exec_bash(
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
+            env=without_model_credentials(),
             start_new_session=True,
         )
         if process_holder is not None:

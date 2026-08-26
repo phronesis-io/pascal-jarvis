@@ -61,6 +61,11 @@ cd "$JARVIS_DIR" || { echo "FATAL: cannot cd to JARVIS_DIR ($JARVIS_DIR)" >&2; e
 # the release gate. Local development can opt out explicitly.
 _BOOT_GIT_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
 _ORIGIN_MAIN_HEAD=$(git rev-parse origin/main 2>/dev/null || true)
+# Prompt snapshots survive process restarts, so their identity must include the
+# exact reviewed runtime revision.  Source digests inside core.prompt remain a
+# development fallback, but cannot enumerate every module that contributes to
+# the assembled prompt.
+export JARVIS_RUNTIME_GIT_HEAD="$_BOOT_GIT_HEAD"
 _RUNTIME_GIT_PATHS=(
   core tasks scripts plugins handlers sources static
   admin.py daemon.py bot.sh restart.sh components.yaml HEARTBEAT.md
@@ -321,15 +326,41 @@ if [ -z "$BOT_OPEN_ID" ] && command -v lark-cli &>/dev/null && [ -n "${APP_ID:-}
     | jq -r '.bot.open_id // empty' 2>/dev/null || true)
 fi
 export BOT_OPEN_ID
-export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_AUTH_TOKEN CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
-export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_AUTH_TOKEN CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
+export CLAUDE_BACKUP_ENABLED CLAUDE_BACKUP_BASE_URL CLAUDE_BACKUP_MODEL
+export CLAUDE_BACKUP2_ENABLED CLAUDE_BACKUP2_BASE_URL CLAUDE_BACKUP2_MODEL
 export BACKUP_MAX_SESSION_SIZE BACKUP_MAX_MEMORY_CHARS
 export CODEX_FALLBACK_ENABLED CODEX_FALLBACK_MODEL CODEX_FALLBACK_BINARY CODEX_FALLBACK_TIMEOUT
 export OPENAI_FALLBACK_ENABLED OPENAI_FALLBACK_MODEL OPENAI_BASE_URL OPENAI_USER_AGENT OPENAI_FALLBACK_TIMEOUT OPENAI_FALLBACK_MAX_OUTPUT_TOKENS
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY_CONFIG:-}" ]; then
-  export OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
+  OPENAI_API_KEY="$OPENAI_API_KEY_CONFIG"
 fi
 unset OPENAI_API_KEY_CONFIG
+# Provider credentials remain shell-private. Only an actual model worker gets
+# them below; admin, Lark/EigenFlux sidecars and ordinary task scripts must not
+# inherit unrelated keys. `export -n` also removes an inherited export flag.
+export -n ANTHROPIC_API_KEY CLAUDE_BACKUP_AUTH_TOKEN \
+  CLAUDE_BACKUP2_AUTH_TOKEN OPENAI_API_KEY 2>/dev/null || true
+with_primary_model_credential() {
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" "$@"
+  else
+    "$@"
+  fi
+}
+with_openai_credential() {
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    OPENAI_API_KEY="$OPENAI_API_KEY" "$@"
+  else
+    "$@"
+  fi
+}
+exec_model_worker() {
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && export ANTHROPIC_API_KEY
+  [ -n "${CLAUDE_BACKUP_AUTH_TOKEN:-}" ] && export CLAUDE_BACKUP_AUTH_TOKEN
+  [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] && export CLAUDE_BACKUP2_AUTH_TOKEN
+  [ -n "${OPENAI_API_KEY:-}" ] && export OPENAI_API_KEY
+  exec "$@"
+}
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
 
@@ -660,7 +691,7 @@ if [ -f "$_queue_file" ] && [ -s "$_queue_file" ] && [ -n "$USER_ID" ]; then
 fi
 
 sleep 3  # let config load settle
-python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
+exec_model_worker python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
 HEARTBEAT_PID=$!
 
 # ── EigenFlux Real-Time Stream (background, Python) ─────────────────
@@ -1039,10 +1070,10 @@ $content"
           >/dev/null 2>>"$LOG_FILE" || true
   fi
 
-  # Prepend an authoritative current-time line to the user's message body.
-  # The system prompt already carries 'Current time', but the message body
-  # itself has none — in a long all-day thread Claude can anchor on a stale
-  # in-conversation timestamp. Single line at home (Shanghai), dual when abroad.
+  # Prepend authoritative current time to the user turn. The exact per-session
+  # system snapshot deliberately contains no clock: changing even the end of
+  # one system text block invalidates the whole provider cache block.
+  # Single line at home (Shanghai), dual when abroad.
   local msg_ts
   msg_ts=$(python3 -c "import os,sys; sys.path.insert(0,os.environ['JARVIS_DIR']); from core.timeutil import msg_timestamp_prefix; print(msg_timestamp_prefix())" 2>>"$LOG_FILE")
   if [ -n "$msg_ts" ]; then
@@ -1069,11 +1100,12 @@ $content"
     JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
     JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),
@@ -1203,11 +1235,12 @@ except Exception:
         JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
         JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),
@@ -1340,8 +1373,8 @@ print(build_system_prompt(
     && [ -n "${OPENAI_API_KEY:-}" ]; then
     _openai_tried=1
     log_warn "[$session_id] Provider health route: trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-    answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
-      python3 -m core.openai_fallback \
+    answer=$(printf '%s' "$content" | with_openai_credential env \
+      JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
       ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
       2>"${ANSWER_FILE}.openai.stderr")
     _openai_exit=$?
@@ -1430,7 +1463,7 @@ print(build_system_prompt(
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
         log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        (cd "$WORK_DIR" && printf '%s' "$content" | with_primary_model_credential claude -p \
           --resume "$session_id" \
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
@@ -1456,7 +1489,7 @@ print(build_system_prompt(
           2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
       else
         log_info "[$session_id] Calling primary Claude Code model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | claude -p \
+        (cd "$WORK_DIR" && printf '%s' "$content" | with_primary_model_credential claude -p \
           --session-id "$session_id" \
           --model "$_cur_model" \
           --append-system-prompt "$sys_prompt" \
@@ -1690,11 +1723,12 @@ except Exception:
           JV_MEM_MAX="$_mem_budget" JV_CONTEXT_KEY="$logical_context_key" \
           JV_MATTER_ID="$matter_id" JV_RESUME_EXISTING="$_resume_existing" python3 -c "
 import os, sys; sys.path.insert(0, os.environ['JARVIS_DIR'])
-from core.prompt import build_system_prompt
+from core.prompt import build_cached_system_prompt
 from core.timeutil import now_local_str
 mc = os.environ.get('JV_MEM_MAX', '')
 focus_text = sys.stdin.read()
-print(build_system_prompt(
+print(build_cached_system_prompt(
+    cache_dir=os.path.join(os.environ['JARVIS_DIR'], 'data', 'session_prompt_cache'),
     jarvis_dir=os.environ['JARVIS_DIR'],
     memory_dir=os.environ['MEMORY_DIR'],
     session_dir=os.environ.get('JV_SDIR', ''),
@@ -1791,8 +1825,8 @@ print(build_system_prompt(
           && [ -n "${OPENAI_API_KEY:-}" ] && [ "$_openai_tried" -eq 0 ]; then
           _openai_tried=1
           log_warn "[$session_id] Codex unavailable → trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-          answer=$(printf '%s' "$content" | JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" \
-            python3 -m core.openai_fallback \
+          answer=$(printf '%s' "$content" | with_openai_credential env \
+            JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
             ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
             2>"${ANSWER_FILE}.openai.stderr")
           _openai_exit=$?
@@ -2328,6 +2362,7 @@ heartbeat_watchdog() {
   sleep 30  # initial grace period
   local _fails=0 _last_fail=0 _ticks=0
   local _stream_fails=0 _stream_last_fail=0 _admin_fails=0 _admin_last_fail=0
+  local _source_drift_last_warn=0 _source_drift_warn_interval=1800
   while true; do
     # Hourly housekeeping (120 ticks × 30s). Startup-only rotation isn't
     # enough: a bot that stays up for weeks grows jarvis.log and tmp/ without
@@ -2364,10 +2399,15 @@ heartbeat_watchdog() {
     fi
     if [ "${JARVIS_ALLOW_UNRELEASED_RUNTIME:-false}" != "true" ] \
         && ! runtime_source_unchanged; then
-      log_warn "[watchdog] Runtime source changed after startup; child respawns are blocked until governed deploy"
+      _now=$(date +%s)
+      if [ $((_now - _source_drift_last_warn)) -ge "$_source_drift_warn_interval" ]; then
+        log_warn "[watchdog] Runtime source changed after startup; child respawns are blocked until governed deploy"
+        _source_drift_last_warn=$_now
+      fi
       sleep 30
       continue
     fi
+    _source_drift_last_warn=0
     # Re-assert the pidfile (self-heal): an overlapping old instance's cleanup
     # can delete OUR pidfile during a guardian restart (pre-7/7 code did an
     # unconditional rm). Without it the daemon's health checks go pgrep-blind
@@ -2408,8 +2448,8 @@ heartbeat_watchdog() {
       log_warn "[watchdog] Heartbeat PID $HEARTBEAT_PID died — restarting (fail #${_fails})"
       # Heartbeat is a Python module now (it used to be a bash function named
       # heartbeat_loop — calling that here was a no-op that never restarted it).
-      # Relaunch exactly like the initial launch above, inheriting exported env.
-      python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
+      # Relaunch exactly like the initial launch above with model-only secrets.
+      exec_model_worker python3 -m core.heartbeat_loop 2>>"$LOG_FILE" &
       HEARTBEAT_PID=$!
       log_info "[watchdog] Heartbeat restarted (PID: $HEARTBEAT_PID)"
       fi

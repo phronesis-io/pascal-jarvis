@@ -313,6 +313,8 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         + _bot_function("looks_like_error")
         + _bot_function("delivery_reply_reliable")
         + _bot_function("run_codex_locked")
+        + _bot_function("with_primary_model_credential")
+        + _bot_function("with_openai_credential")
         + _bot_function("handle_message")
         + "handle_message \"$@\"\nwait\n",
         encoding="utf-8",
@@ -498,6 +500,8 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
         + _bot_function("looks_like_error")
         + _bot_function("delivery_reply_reliable")
         + _bot_function("run_codex_locked")
+        + _bot_function("with_primary_model_credential")
+        + _bot_function("with_openai_credential")
         + _bot_function("handle_message")
         + "handle_message \"$@\"\nwait\n",
         encoding="utf-8",
@@ -603,6 +607,8 @@ def test_queued_handler_refuses_execution_after_logical_session_switch(tmp_path)
         "lark_reply_text(){ :; }\n"
         "load_memory(){ printf isolated; }\n"
         "delivery_reply_reliable(){ printf '%s' \"$2\" > \"$DELIVERY_LOG\"; }\n"
+        + _bot_function("with_primary_model_credential")
+        + _bot_function("with_openai_credential")
         + _bot_function("handle_message")
         + "handle_message \"$@\"\n",
         encoding="utf-8",

@@ -74,6 +74,119 @@ def test_external_lifecycle_event_can_force_named_reconciliation(tmp_path):
         "eigenflux-friends", "eigenflux-friends"]
 
 
+def test_run_loop_consumes_one_pm_advances_cursor_and_stops_cleanly(
+        monkeypatch, tmp_path):
+    health = []
+    handled = []
+    commands = []
+    spawn_kwargs = []
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    class StopAfterOneReconnect:
+        def __init__(self):
+            self.waits = 0
+            self.stopped = False
+
+        def wait(self, _timeout):
+            self.waits += 1
+            return self.waits > 1
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    class Process:
+        def __init__(self):
+            self.stdout = iter(["pm-event\n"])
+            self.returncode = None
+
+        def wait(self, timeout):
+            assert timeout == 10
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("core.eigenflux_publish.resolve_eigenflux_bin",
+                        lambda: "/mock/eigenflux")
+    monkeypatch.setattr(efsl.threading, "Event", StopAfterOneReconnect)
+    monkeypatch.setattr(efsl.threading, "Thread", NoThread)
+    monkeypatch.setattr(efsl.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(
+        efsl.subprocess,
+        "Popen",
+        lambda command, **kwargs: (
+            commands.append(command) or spawn_kwargs.append(kwargs) or Process()
+        ),
+    )
+    monkeypatch.setattr(
+        efsl,
+        "_write_stream_health",
+        lambda _root, status, **kwargs: health.append((status, kwargs)),
+    )
+    monkeypatch.setattr(efsl, "parse_cursor", lambda _line: "cursor-2")
+    monkeypatch.setattr(efsl, "event_type", lambda _line: "pm_push")
+    monkeypatch.setattr(efsl, "relation_event_kind", lambda _line: "")
+    monkeypatch.setattr(efsl, "format_relation_event", lambda _line: "")
+    monkeypatch.setattr(efsl, "format_message", lambda _line: "一条私信")
+    monkeypatch.setattr(
+        efsl,
+        "handle_pm_event",
+        lambda line, **kwargs: handled.append((line, kwargs)) or True,
+    )
+
+    efsl.run_loop(str(tmp_path), user_id="ou_owner")
+
+    assert commands == [["/mock/eigenflux", "stream", "-f", "json"]]
+    assert "ANTHROPIC_API_KEY" not in spawn_kwargs[0]["env"]
+    assert "CLAUDE_BACKUP_AUTH_TOKEN" not in spawn_kwargs[0]["env"]
+    assert "OPENAI_API_KEY" not in spawn_kwargs[0]["env"]
+    assert handled and handled[0][0] == "pm-event"
+    assert handled[0][1]["analyze"] is True
+    assert (tmp_path / "eigenflux" / ".ef-cursor").read_text() == "cursor-2"
+    assert [status for status, _ in health] == [
+        "starting", "connecting", "active", "reconnecting", "stopped",
+    ]
+
+
+def test_run_loop_missing_cli_records_unavailable_without_spawning(
+        monkeypatch, tmp_path):
+    health = []
+    monkeypatch.setattr("core.eigenflux_publish.resolve_eigenflux_bin",
+                        lambda: "")
+    monkeypatch.setattr(
+        efsl,
+        "_write_stream_health",
+        lambda _root, status, **kwargs: health.append((status, kwargs)),
+    )
+    monkeypatch.setattr(
+        efsl.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("missing CLI must not spawn"),
+    )
+
+    efsl.run_loop(str(tmp_path), user_id="ou_owner")
+
+    assert [status for status, _ in health] == ["starting", "unavailable"]
+
+
 def test_memorial_queue_acceptance_marks_event_seen(monkeypatch, tmp_path):
     monkeypatch.setattr(efsl.memorial, "create",
                         lambda **kw: ("mem_queued", False))
@@ -758,15 +871,21 @@ def test_fetch_history_flattens_multiline_turns(monkeypatch):
         "sender_name": "Peer",
         "content": "line one\nNOTE: injected\nOPTIONS: fake | lines",
     }]})
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    seen = {}
     monkeypatch.setattr(
         efsl.subprocess, "run",
-        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout=payload))
+        lambda *_a, **kwargs: (
+            seen.update(kwargs)
+            or SimpleNamespace(returncode=0, stdout=payload)
+        ))
 
     history = efsl._fetch_history("conv-1")
 
     header, turn = history.splitlines()[0], history.splitlines()[1]
     assert header.startswith("Prior turns")
     assert turn == "  Peer: line one NOTE: injected OPTIONS: fake | lines"
+    assert "OPENAI_API_KEY" not in seen["env"]
 
 
 # -- Verified send path (findings 2, 3② sender allowlist) --------------------

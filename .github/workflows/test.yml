@@ -26,8 +26,11 @@ jobs:
         # makes its test module silently skip and broken PRs merge green.
         run: pip install -r requirements-dev.txt
 
-      - name: Syntax check
-        run: bash -n bot.sh
+      - name: Shell syntax
+        run: |
+          bash -n bot.sh
+          bash -n restart.sh
+          find tasks scripts -type f -name '*.sh' -exec bash -n {} +
 
       - name: ShellCheck (catches runtime bash bugs)
         run: |
@@ -35,9 +38,19 @@ jobs:
           shellcheck -s bash -S error -e SC1090,SC1091 bot.sh
           shellcheck -s bash -S error -e SC1090,SC1091 restart.sh
           find tasks/ -name '*.sh' -not -path 'tasks/_quarantine/*' -exec shellcheck -s bash -S error -e SC1090,SC1091 {} +
+          find scripts/ -name '*.sh' -exec shellcheck -s bash -S error -e SC1090,SC1091 {} +
 
       - name: Maintainability debt budget
         run: python scripts/maintainability_budget.py
 
       - name: Run tests
-        run: python -m pytest tests/ -v
+        env:
+          # Parallel subprocess coverage must never write instrumentation
+          # artifacts into the checked-out runtime tree: the strict test guard
+          # correctly treats that as repository-state mutation.
+          COVERAGE_FILE: ${{ runner.temp }}/jarvis-coverage
+        run: |
+          python -m coverage run -m pytest tests/ -v
+          python -m coverage combine
+          python -m coverage json -o /tmp/jarvis-coverage.json
+          python scripts/coverage_budget.py /tmp/jarvis-coverage.json

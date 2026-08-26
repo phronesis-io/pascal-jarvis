@@ -171,3 +171,33 @@ reason codes; only a real provider receipt can advance delivery to delivered.
 - A removed heartbeat surface is recorded in capability inventory retirement
   evidence. Default-disabled code with no production consumer is not counted
   as an active product feature.
+
+## ADR-006: Provider Cache Boundaries Use Exact System Snapshots
+
+**Status:** accepted
+
+Provider prompt caching hashes complete content blocks. A changing timestamp,
+calendar row, or memory file at the end of one system text block still changes
+the block; ordering stable text before it is insufficient.
+
+- Lark conversations keep one mode-0600 system snapshot per provider session.
+  A new session, Matter, trust boundary, provider memory budget, reviewed
+  runtime revision, or prompt-code digest receives a different snapshot.
+- Heartbeat keeps an in-process one-hour snapshot per trust/tool profile on the
+  primary Claude path. Full-memory editors, outbound contexts, and fallback
+  providers rebuild instead of receiving a stale incompatible snapshot.
+- Current time and live task DATA belong in the user request. The Lark handler
+  already prefixes every incoming turn with an authoritative local timestamp.
+- Snapshot files contain private memory, remain under ignored runtime `data/`,
+  are created with directory mode 0700/file mode 0600, refresh after one hour
+  so cross-session memory cannot freeze for days, and are bounded to 128. A
+  single mode-0600 directory lock bounds lock state. The lock protects cache
+  reads, pruning, and atomic publication, but never memory/transcript assembly;
+  a second read before publication preserves the first complete snapshot when
+  two workers miss the same key concurrently.
+- Provider secrets are scoped to execution adapters. They are never globally
+  exported to admin, network sidecars, deterministic task scripts, another
+  provider's process, or a Jarvis-controlled Codex/GPT tool subprocess.
+
+This is a latency and cost optimization, never a completion receipt. Current
+facts still come from deterministic task DATA or a synchronous tool check.

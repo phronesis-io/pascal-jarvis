@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.model_credentials import without_model_credentials
+
 JARVIS_DIR = Path(__file__).resolve().parent.parent
 
 # Device codes live 10 minutes; the poll subprocess blocks until authorized
@@ -38,7 +40,7 @@ _RECEIPT_DM = ("✅ 授权成功。日历/邮件/团队群等 user 身份信道�
 
 
 def _cli_env() -> dict:
-    env = os.environ.copy()
+    env = without_model_credentials()
     env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
     env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
     return env
@@ -143,7 +145,7 @@ def start_device_flow(run=subprocess.run, popen=subprocess.Popen) -> str:
     # was promised to him.
     popen([sys.executable, "-m", "core.lark_auth", "poll", code],
           cwd=str(JARVIS_DIR), stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL, start_new_session=True)
+          stderr=subprocess.DEVNULL, start_new_session=True, env=_cli_env())
     sent = _send_dm(_LINK_DM.format(url=url), run=run)
     if sent:
         return ("已把授权链接发到你的飞书私聊（10 分钟内有效），"

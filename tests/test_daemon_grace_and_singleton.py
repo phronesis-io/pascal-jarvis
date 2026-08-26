@@ -110,8 +110,8 @@ def test_first_grace_window_still_suppresses_and_opens_ledger(brain_env,
     assert _no_errors(logs)
 
 
-def test_wedge_crossing_second_wake_window_penetrates_grace(brain_env,
-                                                            monkeypatch):
+def test_wedge_crossing_second_wake_window_records_without_owner_page(
+        brain_env, monkeypatch):
     """7/10 regression: suppressed in an earlier awake window, host slept
     (check-gap), wedge still there on the next wake ⇒ page THROUGH grace."""
     tmp_path, logs, alerts = brain_env
@@ -125,7 +125,7 @@ def test_wedge_crossing_second_wake_window_penetrates_grace(brain_env,
 
     daemon_mod._check_brain_health()
 
-    assert len(alerts) == 1
+    assert alerts == []
     warn = [m for lvl, m in logs if lvl == "WARN"]
     # the conversation-audit classifier needs the literal prefix intact
     assert warn and warn[0].startswith("BRAIN-DEAD heartbeat: ")
@@ -136,8 +136,8 @@ def test_wedge_crossing_second_wake_window_penetrates_grace(brain_env,
     assert _no_errors(logs)
 
 
-def test_cumulative_hour_of_suppression_penetrates_grace(brain_env,
-                                                         monkeypatch):
+def test_cumulative_hour_of_suppression_records_without_owner_page(
+        brain_env, monkeypatch):
     """Short naps (<15min check-gap) never increment windows — the cumulative
     clock is what catches an all-day lid-cycling pattern."""
     tmp_path, logs, alerts = brain_env
@@ -152,7 +152,7 @@ def test_cumulative_hour_of_suppression_penetrates_grace(brain_env,
 
     daemon_mod._check_brain_health()
 
-    assert len(alerts) == 1
+    assert alerts == []
     assert _persisted(tmp_path)["suppressed"] == {}
     assert _no_errors(logs)
 
@@ -221,7 +221,7 @@ def test_out_of_grace_online_waits_without_restarting_heartbeat(
     assert any("without process restart" in m for _, m in logs)
 
 
-def test_persistent_failure_after_recovery_grace_pages(brain_env):
+def test_persistent_failure_after_recovery_grace_stays_internal(brain_env):
     tmp_path, logs, alerts = brain_env
     now = time.time()
     _write_hb_state(tmp_path, wedged=True)
@@ -232,7 +232,7 @@ def test_persistent_failure_after_recovery_grace_pages(brain_env):
 
     daemon_mod._check_brain_health()
 
-    assert len(alerts) == 1
+    assert alerts == []
     warn = [m for lvl, m in logs if lvl == "WARN"]
     assert warn and warn[0].startswith("BRAIN-DEAD heartbeat: ")
     assert "persisted across post-wake grace" not in warn[0]

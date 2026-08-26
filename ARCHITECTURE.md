@@ -44,11 +44,26 @@ owner-private writes.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of
-the reusable prompt prefix; frequently changing calendar/intention state,
-the warm-file map, operational state, recent turns, and current time follow.
+the reusable prompt prefix. An owner conversation stores one exact private
+system-prompt snapshot per provider session and reuses it until the session,
+reviewed runtime revision, prompt implementation, or one-hour freshness window
+changes. Private snapshots are capped at 128. Heartbeat reuses one bounded snapshot per
+trust/tool profile; frequently changing task DATA and current time stay in the
+user request, outside the system cache block.
+The snapshot directory lock covers cache reads, pruning, and atomic publication
+only. Memory and cross-session assembly run outside that lock, followed by a
+second cache read before publication, so unrelated new sessions do not block
+one another while the first complete snapshot still wins each session key.
 Models fetch indexed reference notes from disk only when relevant. Restricted
 or no-tool calls retain full inline memory so index mode can never make
 knowledge unreachable.
+
+Provider credentials follow the same execution boundary. `bot.sh` keeps the
+primary Anthropic, relay, and OpenAI keys shell-private. The heartbeat routing
+worker receives the configured route set, while a direct provider adapter
+receives only its active credential. Ordinary task scripts and model-started
+Codex/GPT tools receive a scrubbed environment; child-process handling inside
+a third-party provider CLI remains that CLI's responsibility.
 
 Heartbeat model choice is task policy, separate from provider execution.
 `HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`

@@ -159,6 +159,24 @@ def test_execute_tool_bash(monkeypatch, tmp_path):
     assert "works" in result
 
 
+def test_execute_tool_bash_does_not_inherit_model_credentials(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-secret")
+    monkeypatch.setenv("SAFE_MARKER", "kept")
+
+    result = of.execute_tool(
+        "bash",
+        {"command": (
+            "printf '%s|%s|%s' \"${OPENAI_API_KEY-unset}\" "
+            "\"${CLAUDE_BACKUP_AUTH_TOKEN-unset}\" \"$SAFE_MARKER\""
+        )},
+    )
+
+    assert result == "unset|unset|kept"
+
+
 def test_execute_tool_bash_exposes_nonzero_exit(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
 
