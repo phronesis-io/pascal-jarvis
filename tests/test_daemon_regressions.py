@@ -138,6 +138,65 @@ def test_component_recovery_only_terminates_owned_exact_child(monkeypatch):
     assert killed == [(200, daemon_mod.signal.SIGTERM)]
 
 
+def test_component_recovery_never_kills_live_ef_stream_loop(monkeypatch):
+    """8/26 incident: Guardian repeatedly SIGTERMed an owned stream loop when
+    only its independent polling safety net was stale. The loop already owns
+    reconnect/backoff; killing the parent converts network churn into downtime.
+    """
+    killed = []
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+        200: (100, "python3 -m core.ef_stream_loop"),
+    })
+    monkeypatch.setattr(
+        daemon_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        daemon_mod, "log", lambda level, msg: logs.append((level, msg)),
+    )
+
+    assert daemon_mod._request_component_recovery("ef-stream") is False
+    assert killed == []
+    assert any("left the live ef-stream" in msg for _, msg in logs)
+
+
+def test_missing_child_recovery_does_not_claim_drift_blocked_watchdog(
+        monkeypatch):
+    """A checkout pulled after boot blocks bot.sh child respawns by design.
+    Guardian must not claim that watchdog recovery is underway in that state.
+    """
+    from core import deploy
+
+    killed = []
+    logs = []
+    monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
+    monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)
+    monkeypatch.setattr(daemon_mod, "_ps_processes", lambda: {
+        100: (1, "bash /repo/bot.sh"),
+    })
+    monkeypatch.setattr(
+        deploy,
+        "verify_runtime",
+        lambda **_kwargs: {
+            "ok": False,
+            "issues": ["bot: running git commit differs from HEAD"],
+        },
+    )
+    monkeypatch.setattr(
+        daemon_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        daemon_mod, "log", lambda level, msg: logs.append((level, msg)),
+    )
+
+    assert daemon_mod._request_component_recovery("ef-stream") is False
+    assert killed == []
+    assert any("runtime version drift" in msg for _, msg in logs)
+
+
 def test_component_recovery_skips_when_process_snapshot_is_unknown(monkeypatch):
     monkeypatch.setattr(daemon_mod, "_in_deploy_window", lambda: False)
     monkeypatch.setattr(daemon_mod, "_bot_pid", lambda: 100)

@@ -550,6 +550,31 @@ _OWNED_COMPONENT_PATTERNS = {
 }
 
 
+def _owned_component_pids(
+    name: str,
+    *,
+    bot_pid: int | None = None,
+    procs: dict[int, tuple[int, str]] | None = None,
+) -> list[int] | None:
+    """Return exact bot-owned component PIDs, or ``None`` if ps failed."""
+    owner = bot_pid or _bot_pid()
+    if not owner:
+        return []
+    snapshot = _ps_processes() if procs is None else procs
+    if snapshot is None:
+        return None
+    pattern = _OWNED_COMPONENT_PATTERNS.get(name)
+    admin_path = str(JARVIS_DIR / "admin.py")
+    owned = []
+    for pid, (_, cmd) in snapshot.items():
+        matches = bool(pattern.search(cmd)) if pattern else (
+            name == "admin :3456" and admin_path in cmd
+        )
+        if matches and _has_ancestor(pid, owner, snapshot):
+            owned.append(pid)
+    return owned
+
+
 def _request_component_recovery(name: str) -> bool:
     """Ask the component's existing supervisor to recreate it.
 
@@ -563,27 +588,44 @@ def _request_component_recovery(name: str) -> bool:
     bot_pid = _bot_pid()
     if not bot_pid:
         return False
-    pattern = _OWNED_COMPONENT_PATTERNS.get(name)
-    admin_path = str(JARVIS_DIR / "admin.py")
     procs = _ps_processes()
     if procs is None:
         log("WARN", f"Guardian could not inspect process ownership for {name}; "
             "recovery deferred")
         return False
-    owned: list[int] = []
-    for pid, (_, cmd) in procs.items():
-        matches = bool(pattern.search(cmd)) if pattern else (
-            name == "admin :3456" and admin_path in cmd)
-        if matches and _has_ancestor(pid, bot_pid, procs):
-            owned.append(pid)
+    owned = _owned_component_pids(name, bot_pid=bot_pid, procs=procs) or []
     if not owned:
         # The bot watchdog may already be between noticing the exit and
         # spawning the replacement.  That still counts as recovery underway.
+        if name in {"heartbeat-loop", "ef-stream", "admin :3456", "lark-sidecar"}:
+            try:
+                from core.deploy import verify_runtime
+                runtime = verify_runtime(root=JARVIS_DIR, required=["bot"])
+                drift = any(
+                    "running git commit differs from HEAD" in issue
+                    or "runtime code changed after process start" in issue
+                    for issue in runtime.get("issues", [])
+                )
+            except Exception:
+                drift = False
+            if drift:
+                log("WARN", f"Guardian cannot request {name} recovery: the "
+                    "owner watchdog is intentionally blocked by runtime version "
+                    "drift until the governed deploy restarts Jarvis")
+                return False
         log("INFO", f"Guardian found no live owned {name} process; "
             "owner watchdog will recreate it")
         return name in {
             "heartbeat-loop", "ef-stream", "admin :3456", "lark-sidecar"
         }
+    if name == "ef-stream":
+        # The loop owns transport reconnect/backoff and cursor recovery. Killing
+        # the healthy parent because its independent polling fallback is stale
+        # turns one network/VPN wobble into a local process outage. Guardian only
+        # asks the owner watchdog to recreate a MISSING loop.
+        log("INFO", "Guardian left the live ef-stream loop in place; transport "
+            "degradation is self-healed inside the loop")
+        return False
     requested = False
     for pid in owned:
         try:
@@ -1222,7 +1264,26 @@ def _probe_manifest_criticals():
             if r.get("ok"):
                 # Recovered: re-arm the 4h dedup AND clear any pending
                 # first-seen mark, so a healed transient never pages later.
+                _clear_probe_keys(
+                    name, pending_key, repair_key,
+                    f"{name}|transport-degraded",
+                )
+                continue
+            # A live ef-stream parent owns its own connection retries, cursor
+            # resume and backoff. Network/VPN instability can make both the
+            # WebSocket and polling probe temporarily red, but terminating the
+            # parent only converts an external dependency wobble into local
+            # downtime. Keep this internal and rate-limit the diagnostic.
+            if name == "ef-stream" and _owned_component_pids(name):
                 _clear_probe_keys(name, pending_key, repair_key)
+                observe_key = f"{name}|transport-degraded"
+                now = time.time()
+                if now - _probe_alert_stamps.get(observe_key, 0) >= 30 * 60:
+                    _probe_alert_stamps[observe_key] = now
+                    _save_probe_alert_stamps()
+                    log("INFO", "EigenFlux transport degraded while the owned "
+                        "stream loop remains alive; leaving reconnect/backoff "
+                        f"to the loop — {r.get('detail')}")
                 continue
             # Debounce (red-team 7/9): bot.sh's watchdog respawns a dead
             # ef-stream within ≤30s, and a single crash landing inside a

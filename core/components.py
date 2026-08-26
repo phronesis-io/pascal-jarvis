@@ -308,18 +308,70 @@ def _check_file_age(comp: dict, root: Path) -> tuple[bool, str]:
             f"age {age_h:.1f}h (max {max_h:.0f}h)")
 
 
+def _ef_reconcile_health(
+    comp: dict,
+    root: Path,
+    *,
+    now: float | None = None,
+) -> tuple[bool, str, float]:
+    """Return whether the polling ingress safety net recently completed.
+
+    Real-time streaming and polling are redundant ingress paths. Keeping this
+    read in one helper prevents the component verdict from accidentally
+    treating the safety net as a prerequisite for an otherwise healthy stream.
+    """
+    moment = time.time() if now is None else float(now)
+    reconcile_path = root / comp.get(
+        "reconcile_path", "data/ef_ingress_health.json"
+    )
+    try:
+        reconcile = json.loads(reconcile_path.read_text(encoding="utf-8"))
+        success = float(reconcile.get("last_success_epoch") or 0)
+        status = str(reconcile.get("status") or "unknown")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        success = 0
+        status = "unavailable"
+    age = max(0.0, moment - success) if success > 0 else float("inf")
+    max_age = float(comp.get("reconcile_max_age_seconds", 900))
+    return success > 0 and age <= max_age and status == "ok", status, age
+
+
 def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
+    """Check end-to-end EigenFlux ingress, not one preferred transport.
+
+    The WebSocket stream is the low-latency path; ``eigenflux-inbox-reconcile``
+    is the durable polling safety net. Either recently verified path preserves
+    delivery. A network/VPN wobble must not make Guardian kill a live stream
+    merely because the independent poll was stale (2026-08-26 incident).
+    """
+    now = time.time()
+    reconcile_ok, reconcile_status, reconcile_age = _ef_reconcile_health(
+        comp, root, now=now
+    )
     process_ok, process_detail = _check_pgrep(comp, root)
     if not process_ok:
-        return False, process_detail
+        if reconcile_ok:
+            return True, (
+                "real-time stream unavailable; polling fallback verified "
+                f"{int(reconcile_age)}s ago; {process_detail}"
+            )
+        return False, (
+            f"{process_detail}; polling safety net "
+            f"{reconcile_status}/stale"
+        )
     path = root / comp.get("path", "data/ef_stream_health.json")
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
         updated = float(state.get("updated_epoch") or 0)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        if reconcile_ok:
+            return True, (
+                "real-time health unavailable; polling fallback verified "
+                f"{int(reconcile_age)}s ago; {process_detail}"
+            )
         return False, (f"{ALIVE_BUT_SILENT}；{process_detail}; "
                        f"protocol health unavailable")
-    age = time.time() - updated
+    age = now - updated
     if updated <= 0 or age > float(comp.get("max_age_seconds", 2400)):
         # The stream writes its health file from inside this host. A host that
         # was asleep produces exactly this reading with nothing wrong.
@@ -334,42 +386,44 @@ def _check_ef_stream(comp: dict, root: Path) -> tuple[bool, str]:
             # wedged stream must still be visible to whoever reads the report.
             return True, (f"{grace}; health {age / 3600:.1f}h old; "
                           f"{process_detail}")
+        if reconcile_ok:
+            return True, (
+                f"real-time health stale; polling fallback verified "
+                f"{int(reconcile_age)}s ago; {process_detail}"
+            )
         return False, f"{ALIVE_BUT_SILENT}；{process_detail}; protocol health stale"
     status = str(state.get("status") or "unknown")
     quiet = int(state.get("quiet_streak") or 0)
     started = float(state.get("started_epoch") or updated)
     grace = float(comp.get("connect_grace_seconds", 600))
-    reconcile_path = root / comp.get(
-        "reconcile_path", "data/ef_ingress_health.json"
-    )
-    try:
-        reconcile = json.loads(reconcile_path.read_text(encoding="utf-8"))
-        reconcile_success = float(reconcile.get("last_success_epoch") or 0)
-        reconcile_status = str(reconcile.get("status") or "unknown")
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        reconcile_success = 0
-        reconcile_status = "unavailable"
-    reconcile_age = time.time() - reconcile_success
-    reconcile_max_age = float(comp.get("reconcile_max_age_seconds", 900))
-    reconcile_ok = (
-        reconcile_success > 0
-        and reconcile_age <= reconcile_max_age
-        and reconcile_status == "ok"
-    )
-    if status in {"active", "connecting", "reconnecting", "degraded"}:
+    if status == "active":
+        poll = (
+            f"poll verified {int(reconcile_age)}s ago"
+            if reconcile_ok else f"poll {reconcile_status}/stale"
+        )
+        return True, (
+            f"active; {poll}; quiet streak {quiet}; {process_detail}"
+        )
+    if status in {"connecting", "reconnecting", "degraded"}:
         if reconcile_ok:
             return True, (
-                f"{status}; poll verified {int(max(0, reconcile_age))}s ago; "
+                f"{status}; poll verified {int(reconcile_age)}s ago; "
                 f"quiet streak {quiet}; {process_detail}"
             )
-        if status != "degraded" and time.time() - started <= grace:
+        if status != "degraded" and now - started <= grace:
             return True, (
                 f"{status}; startup grace, poll {reconcile_status}; "
                 f"{process_detail}"
             )
         return False, (
-            f"{status}; polling safety net {reconcile_status}/stale; "
+            f"{ALIVE_BUT_SILENT}；{status}; polling safety net "
+            f"{reconcile_status}/stale; "
             f"{process_detail}"
+        )
+    if reconcile_ok:
+        return True, (
+            f"real-time {status}; polling fallback verified "
+            f"{int(reconcile_age)}s ago; {process_detail}"
         )
     detail = str(state.get("detail") or status)
     return False, (f"{ALIVE_BUT_SILENT}；{status}: {detail}; "

@@ -2362,6 +2362,7 @@ heartbeat_watchdog() {
   sleep 30  # initial grace period
   local _fails=0 _last_fail=0 _ticks=0
   local _stream_fails=0 _stream_last_fail=0 _admin_fails=0 _admin_last_fail=0
+  local _source_drift_last_warn=0 _source_drift_warn_interval=1800
   while true; do
     # Hourly housekeeping (120 ticks × 30s). Startup-only rotation isn't
     # enough: a bot that stays up for weeks grows jarvis.log and tmp/ without
@@ -2398,10 +2399,15 @@ heartbeat_watchdog() {
     fi
     if [ "${JARVIS_ALLOW_UNRELEASED_RUNTIME:-false}" != "true" ] \
         && ! runtime_source_unchanged; then
-      log_warn "[watchdog] Runtime source changed after startup; child respawns are blocked until governed deploy"
+      _now=$(date +%s)
+      if [ $((_now - _source_drift_last_warn)) -ge "$_source_drift_warn_interval" ]; then
+        log_warn "[watchdog] Runtime source changed after startup; child respawns are blocked until governed deploy"
+        _source_drift_last_warn=$_now
+      fi
       sleep 30
       continue
     fi
+    _source_drift_last_warn=0
     # Re-assert the pidfile (self-heal): an overlapping old instance's cleanup
     # can delete OUR pidfile during a guardian restart (pre-7/7 code did an
     # unconditional rm). Without it the daemon's health checks go pgrep-blind

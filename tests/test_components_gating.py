@@ -405,6 +405,99 @@ def test_ef_stream_connecting_requires_fresh_poll_after_startup_grace(
     assert "poll verified" in detail
 
 
+def test_ef_stream_active_path_does_not_depend_on_polling_fallback(
+        tmp_path, monkeypatch):
+    """8/26 incident: a stale independent poll must not make Guardian kill a
+    live stream whose own protocol health is fresh and active."""
+    now = time.time()
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (True, "pids ['74530'] owned by 9467"),
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ef_stream_health.json").write_text(json.dumps({
+        "status": "active",
+        "updated_epoch": now,
+        "started_epoch": now - 10_000,
+        "quiet_streak": 0,
+    }))
+    (data / "ef_ingress_health.json").write_text(json.dumps({
+        "status": "error",
+        "last_success_epoch": now - 10_000,
+    }))
+    comp = {
+        "path": "data/ef_stream_health.json",
+        "reconcile_path": "data/ef_ingress_health.json",
+        "max_age_seconds": 2400,
+        "reconcile_max_age_seconds": 900,
+        "connect_grace_seconds": 600,
+    }
+
+    ok, detail = components._check_ef_stream(comp, tmp_path)
+
+    assert ok is True
+    assert "active" in detail
+    assert "poll error/stale" in detail
+
+
+def test_ef_stream_missing_process_is_covered_by_fresh_polling_fallback(
+        tmp_path, monkeypatch):
+    """Real-time is latency, polling is durability: losing the sidecar does
+    not become a user-facing outage while reconciliation is current."""
+    now = time.time()
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (
+            False, "not running (bot pid 9467 has no matching child process)"
+        ),
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ef_ingress_health.json").write_text(json.dumps({
+        "status": "ok",
+        "last_success_epoch": now,
+    }))
+    comp = {
+        "reconcile_path": "data/ef_ingress_health.json",
+        "reconcile_max_age_seconds": 900,
+    }
+
+    ok, detail = components._check_ef_stream(comp, tmp_path)
+
+    assert ok is True
+    assert "polling fallback verified" in detail
+    assert "real-time stream unavailable" in detail
+
+
+def test_ef_stream_missing_process_and_stale_poll_is_a_real_outage(
+        tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (False, "not running"),
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ef_ingress_health.json").write_text(json.dumps({
+        "status": "error",
+        "last_success_epoch": now - 10_000,
+    }))
+    comp = {
+        "reconcile_path": "data/ef_ingress_health.json",
+        "reconcile_max_age_seconds": 900,
+    }
+
+    ok, detail = components._check_ef_stream(comp, tmp_path)
+
+    assert ok is False
+    assert "not running" in detail
+    assert "polling safety net error/stale" in detail
+
+
 def test_daemon_critical_probe_ignores_skipped(tmp_path):
     """daemon._probe_manifest_criticals only alerts on ok=False — a skipped
     component must present ok=True through the critical_only path too."""

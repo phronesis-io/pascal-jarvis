@@ -546,6 +546,42 @@ def test_manifest_watchdog_healed_transient_never_pages(manifest_env, monkeypatc
     assert alerts == []
 
 
+def test_manifest_live_ef_network_degradation_is_internal_only(
+        manifest_env, monkeypatch):
+    """8/26 incident: campus/VPN churn made both EF probes red while the
+    reconnecting parent was alive. Guardian must neither kill it nor tell
+    Pascal that the process disappeared."""
+    logs, alerts = manifest_env
+    recoveries = []
+    monkeypatch.setattr(
+        components_mod,
+        "check_components",
+        lambda critical_only=False: [_manifest_result(
+            "ef-stream",
+            False,
+            detail=("进程在跑但没在报状态；connecting; polling safety net "
+                    "error/stale; pids ['74530'] owned by 9467"),
+        )],
+    )
+    monkeypatch.setattr(
+        daemon_mod, "_owned_component_pids", lambda name: [74530],
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "_request_component_recovery",
+        lambda name: recoveries.append(name) or True,
+    )
+    _confirm_pending()
+
+    daemon_mod._probe_manifest_criticals()
+    daemon_mod._probe_manifest_criticals()
+
+    assert recoveries == []
+    assert alerts == []
+    assert "ef-stream|pending" not in daemon_mod._probe_alert_stamps
+    assert any("transport degraded" in msg for _, msg in logs)
+
+
 def test_manifest_skips_components_covered_elsewhere(manifest_env, monkeypatch):
     """bot/heartbeat-loop/lark-sidecar drive the restart path; admin
     keeps the richer degraded-aware probe — none of them may page here."""
