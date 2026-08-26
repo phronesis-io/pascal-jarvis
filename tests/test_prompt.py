@@ -9,6 +9,7 @@ import pytest
 
 from core.prompt import (
     ACTIONS_DOC,
+    _prune_prompt_snapshots,
     build_cached_system_prompt,
     build_system_prompt,
     load_ef_skills,
@@ -204,6 +205,24 @@ def test_cached_system_prompt_isolated_by_release_and_expires_private_data(
     assert "AFTER_RETENTION" in third
     assert "SECOND_RELEASE" not in third
     assert {path.name for path in cache_dir.glob("*.lock")} == {".cache.lock"}
+
+
+def test_prompt_snapshot_pruning_enforces_count_for_fresh_files(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    snapshots = []
+    for index in range(4):
+        path = cache_dir / f"{index}.txt"
+        path.write_text(str(index), encoding="utf-8")
+        os.utime(path, (time.time() + index, time.time() + index))
+        snapshots.append(path)
+
+    _prune_prompt_snapshots(cache_dir, keep=2, max_age_seconds=3600)
+
+    assert {path.name for path in cache_dir.glob("*.txt")} == {
+        snapshots[2].name,
+        snapshots[3].name,
+    }
 
 
 def test_cached_system_prompt_fails_open_without_sharing_empty_session(
