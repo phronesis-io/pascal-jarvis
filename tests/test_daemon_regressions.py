@@ -347,7 +347,7 @@ def test_repeated_identical_degraded_probe_logs_only_on_change(monkeypatch):
     daemon_mod._note_degraded_health("admin :3456", payload)
 
     assert sum("DEGRADED" in message for _, message in logged) == 1
-    assert len(alerted) == 1
+    assert alerted == []
 
     daemon_mod._note_degraded_health("admin :3456", {"status": "ok"})
     assert any("recovered" in message for _, message in logged)
@@ -740,9 +740,9 @@ def test_probe_httperror_with_json_body_is_alive_degraded(monkeypatch, probe_env
     assert degraded, logs
     assert "status=error" in degraded[0]
     assert "newsapi" in degraded[0]  # circuits_open surfaced
-    # alert-only discipline: a degraded (not 失联) Lark line went out — in the
-    # 2026-07-09 plain-Chinese wording (Pascal killed the status=/HTTP jargon)
-    assert any("它自己报告有问题" in a and "newsapi" in a for a in alerts)
+    # A live component owns its retry path. The raw diagnosis stays internal;
+    # there is no owner decision and therefore no Lark card.
+    assert alerts == []
 
 
 def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
@@ -772,7 +772,8 @@ def test_probe_200_with_degraded_body_is_logged(monkeypatch, probe_env):
                for _, msg in logs), logs
 
 
-def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
+def test_probe_connection_refused_after_recovery_alerts_for_manual_action(
+        monkeypatch, probe_env):
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
@@ -789,26 +790,28 @@ def test_probe_connection_refused_still_alerts_down(monkeypatch, probe_env):
     daemon_mod.probe_observed_components()
 
     assert any("管理面板连续两次连不上" in a for a in alerts), alerts
-    # The card names the component the way he knows it — never ":3456" or
-    # "launchd" (feedback-no-jargon-dashboards).
+    assert any("人工排查" in a for a in alerts)
     assert not any(":3456" in a or "launchd" in a for a in alerts), alerts
     assert any("DOWN" in msg for _, msg in logs), logs
 
 
-def test_probe_non_json_5xx_still_alerts_down(monkeypatch, probe_env):
-    """A 502 HTML error page is NOT a health report — still a probe failure."""
+def test_probe_non_json_5xx_alerts_when_recovery_is_unavailable(
+        monkeypatch, probe_env):
+    """A 502 HTML error page plus no recovery path requires owner action."""
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):
         raise _http_error(502, b"<html>Bad Gateway</html>")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        daemon_mod, "_request_component_recovery", lambda name: False,
+    )
     daemon_mod.probe_observed_components()
 
     assert alerts == []
-    for name in recoveries:
-        daemon_mod._probe_alert_stamps[f"{name}|pending"] = (
-            time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
+    daemon_mod._probe_alert_stamps["admin :3456|pending"] = (
+        time.time() - daemon_mod.COMPONENT_RECOVERY_GRACE - 1)
     daemon_mod.probe_observed_components()
 
     assert any("管理面板连续两次连不上" in a for a in alerts), alerts
@@ -1110,9 +1113,8 @@ def test_corrupt_probe_alert_state_falls_back_to_empty(tmp_path, monkeypatch, co
     assert daemon_mod._probe_alert_stamps == {}
 
 
-def test_probe_down_alert_stamp_is_persisted(monkeypatch, probe_env):
-    """The DOWN page's dedup stamp must hit disk so a hot-reload respawn
-    can't re-page within the 4h window."""
+def test_probe_down_actionable_incident_stamp_is_persisted(monkeypatch, probe_env):
+    """The actionable DOWN incident's dedup stamp survives daemon restarts."""
     logs, alerts, recoveries = probe_env
 
     def fake_urlopen(url, timeout=None):

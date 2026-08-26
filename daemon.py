@@ -851,11 +851,11 @@ def _health_payload(body: bytes) -> dict | None:
 # What each component is called when talking to Pascal — alerts carry these,
 # never the internal names/raw /health fields (feedback 7/8: he should not
 # have to decode status=degraded / priority_wedged=[...]).
-# Guardian messages are receipts after bounded self-repair, not requests for
-# Pascal to operate the machine.  Exact diagnostics stay in daemon.log.
-_REPAIR_FAILED_TAIL = "我已经自动重启并复查过，仍未恢复；我会继续处理，你暂时不用操作。"
+# Guardian messages are reserved for incidents that need Pascal to act.
+# Successful/ongoing self-repair stays in daemon.log: a message whose only
+# instruction is "you do not need to do anything" spends attention without
+# giving him a decision.
 _REPAIR_UNAVAILABLE_TAIL = "我已经复查并保留了诊断证据，但自动恢复请求没有成功；这次需要人工排查。"
-_DEGRADED_TAIL = "系统已经在自动重试和切换备用路径；我会继续观察，你暂时不用操作。"
 
 _COMPONENT_LABELS = {
     "admin :3456": "管理面板",
@@ -893,20 +893,16 @@ def _task_labels(ids) -> dict[str, str]:
 
 
 def _note_degraded_health(name: str, payload: dict | None, http_code=None):
-    """Log + alert (never restart) a component that answered its /health probe
-    with a non-ok status. Separate dedup key from the DOWN alert so degraded
-    chatter can't swallow a later genuine 失联 page.
+    """Record a live component's non-ok health without paging Pascal.
 
-    priority_wedged alone never pages HERE: _check_brain_health owns the
-    wedged-PRIORITY-task alert via core/brain_health.py's detector 3, which
-    was ADDED 7/9 to make that ownership real — red-team proved the original
-    claim false against the 7/8 intention-check wedge (16:04→23:37: admin
-    flagged priority_wedged for 7.5h, zero BRAIN-DEAD pages, and this
-    degraded page was the only Lark signal). Detector 3 now mirrors admin's
-    exact wedge rule, so suppressing here is a dedup, not a deletion. A
-    second Lark line for the same condition was a duplicate channel
-    (Pascal, 7/8). Raw fields stay in the log line; the Lark text is plain
-    Chinese only."""
+    A responding component still owns its retry/fallback path.  These are
+    engineering diagnostics, not owner decisions; surfacing them produced
+    repeated cards whose only instruction was "you do not need to act".
+
+    priority_wedged is assessed again by _check_brain_health so the persisted
+    incident evidence survives daemon restarts. Neither path pages: provider
+    fallback and scheduler retry own task-level failures. Raw fields stay in
+    daemon.log for engineering diagnosis."""
     key = f"{name}|degraded"
     if payload is None or payload.get("status") == "ok":
         if _last_degraded_details.pop(key, None) is not None:
@@ -924,32 +920,10 @@ def _note_degraded_health(name: str, payload: dict | None, http_code=None):
         return
     _last_degraded_details[key] = detail
     log("WARN", f"Observed component DEGRADED (alive): {name} — {detail}")
-    reasons = []
-    circuits = payload.get("circuits_open") or []
-    if circuits:
-        head = [str(c) for c in circuits[:5]]
-        labels = _task_labels(head)
-        shown = "、".join(f"「{labels[c]}」" for c in head)
-        more = " 等" if len(circuits) > 5 else ""
-        reasons.append(f"有定时任务连续失败、暂时停跑了（{shown}{more}）")
-    if payload.get("bot_alive") is False:
-        reasons.append("它看不到机器人主进程")
-    if payload.get("error"):
-        reasons.append("自检的时候报了错")
-    if not reasons:
-        if payload.get("priority_wedged"):
-            # Wedge-only: the log line above is enough — brain_health's
-            # detector 3 (same rule as admin's flag) pages it with the task
-            # named in plain Chinese, 4h dedup + wake grace included.
-            return
-        reasons.append("没说具体原因")
-    label = _COMPONENT_LABELS.get(name, name)
-    if time.time() - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
-        _probe_alert_stamps[key] = time.time()
+    # Clear any persisted stamp left by releases that did page this state.
+    # The in-memory detail map already rate-limits repeated log rows.
+    if _probe_alert_stamps.pop(key, None) is not None:
         _save_probe_alert_stamps()
-        notify_lark(f"⚠️ {label}还在跑，但它自己报告有问题："
-                    f"{'；'.join(reasons)}。{_DEGRADED_TAIL}",
-                    incident_key=f"component:{name}:degraded")
 
 
 _DEFAULT_DEADLETTER_FILE = JARVIS_DIR / "data" / ".delivery_deadletter.jsonl"
@@ -1195,10 +1169,10 @@ def probe_observed_components():
             _save_probe_alert_stamps()
             log("WARN", f"Observed component DOWN after recovery: {name}")
             label = _COMPONENT_LABELS.get(name, name)
-            tail = (_REPAIR_FAILED_TAIL if _probe_alert_stamps.get(repair_key)
-                    else _REPAIR_UNAVAILABLE_TAIL)
-            notify_lark(f"⚠️ {label}连续两次连不上。{tail}",
-                        incident_key=f"component:{name}:down")
+            notify_lark(
+                f"⚠️ {label}连续两次连不上。{_REPAIR_UNAVAILABLE_TAIL}",
+                incident_key=f"component:{name}:down",
+            )
 
 
 # Manifest criticals that check_health / probe_observed_components already
@@ -1209,8 +1183,7 @@ def probe_observed_components():
 _MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar", "admin"}
 
 
-def _component_down_text(label: str, detail: str,
-                         recovery_requested: bool = True) -> str:
+def _component_down_text(label: str, detail: str) -> str:
     """What to tell Pascal about a red manifest-critical component.
 
     Every red used to render as 「组件失联：X 没有在运行」. On 2026-08-18 02:16
@@ -1224,14 +1197,13 @@ def _component_down_text(label: str, detail: str,
         from core.components import ALIVE_BUT_SILENT
     except Exception:
         ALIVE_BUT_SILENT = "进程在跑但没在报状态"
-    tail = (_REPAIR_FAILED_TAIL if recovery_requested
-            else _REPAIR_UNAVAILABLE_TAIL)
     if ALIVE_BUT_SILENT in detail:
         return (f"⚠️ {label}不太对劲：进程还活着，但很久没报状态了。"
-                f"{tail}")
+                f"{_REPAIR_UNAVAILABLE_TAIL}")
     # 「组件失联：X没有在运行」said the same thing twice and led with the word
     # 「组件」—— the label already names the thing in his vocabulary.
-    return f"⚠️ {label}停了，进程已经不在了。{tail}"
+    return (f"⚠️ {label}停了，进程已经不在了。"
+            f"{_REPAIR_UNAVAILABLE_TAIL}")
 
 
 def _probe_manifest_criticals():
@@ -1314,8 +1286,6 @@ def _probe_manifest_criticals():
                 notify_lark(
                     _component_down_text(
                         label, str(r.get("detail") or ""),
-                        recovery_requested=bool(
-                            _probe_alert_stamps.get(repair_key)),
                     ),
                     incident_key=f"component:{name}:down",
                 )
@@ -1339,7 +1309,7 @@ def _network_reachable() -> bool:
 
 
 def _check_brain_health():
-    """Observe, verify, then alert when heartbeat is ALIVE BUT BRAIN-DEAD —
+    """Observe and verify when heartbeat is ALIVE BUT BRAIN-DEAD —
     ticking every cycle while every claude_call fails. On 2026-06-15 `claude`
     was missing from the launchd PATH for ~1h and EVERY liveness signal stayed
     fresh (beat-marker, /health heartbeat_age, per-task circuit), so nothing
@@ -1351,8 +1321,9 @@ def _check_brain_health():
     alert). Task failures are not process failures: provider overload, timeout
     and parsing errors must stay with the provider chain and scheduler retry,
     never kill the whole heartbeat loop. It waits a full task-cycle grace and
-    pages only if verification is still red. 4h dedup, deploy-guarded. Never
-    raises."""
+    records a rate-limited internal incident if verification is still red.
+    The provider chain and scheduler own recovery; there is no owner decision
+    to request. Deploy-guarded and never raises."""
     if _in_deploy_window():
         return
     try:
@@ -1476,9 +1447,6 @@ def _check_brain_health():
                            else "")
                     log("WARN", "BRAIN-DEAD heartbeat: "
                         + "; ".join(result["alerts"]) + tag)
-                    summary = result["summary"]
-                    notify_lark(summary,
-                                incident_key="heartbeat-brain-dead")
                     suppressed = {}
         elif result["brain_dead"] and in_grace:
             log("INFO", "brain-health: would alert but in post-wake grace "
@@ -1557,20 +1525,11 @@ def _check_diag_staleness():
             if now - _probe_alert_stamps.get(key, 0) >= PROBE_ALERT_WINDOW:
                 _probe_alert_stamps[key] = now
                 _save_probe_alert_stamps()
-                repair_ok = bool(_probe_alert_stamps.get(repair_ok_key))
-                tail = (_REPAIR_FAILED_TAIL if repair_ok
-                        else _REPAIR_UNAVAILABLE_TAIL)
                 if pre_age is None:
                     log("WARN", "self-diagnostic pre report missing")
-                    notify_lark("⚠️ 自诊断任务好像一直没跑成过（找不到它的"
-                                f"体检报告）。{tail}",
-                                incident_key="self-diagnostic-stale")
                 else:
                     log("WARN", f"self-diagnostic stale "
                         f"({int(pre_age)}s since last pre run)")
-                    notify_lark(f"⚠️ 自诊断任务已经 {int(pre_age // 3600)} 小时"
-                                f"没有运行了（正常每 4 小时一次）。{tail}",
-                                incident_key="self-diagnostic-stale")
             return
         _clear_probe_keys(key, repair_key, repair_ok_key)
 
