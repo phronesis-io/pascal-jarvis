@@ -34,6 +34,38 @@ def _as_card(text: str) -> dict | None:
     return None
 
 
+def trusted_ledger_card_id(
+    card: dict,
+    memorial_id_of: Callable[[dict], str],
+    expected_card_of: Callable[[str], dict | None],
+) -> str:
+    """Return an id only when ``card`` exactly matches its ledger rendering."""
+    memorial_id = memorial_id_of(card)
+    if not memorial_id:
+        return ""
+    try:
+        expected = expected_card_of(memorial_id)
+    except (KeyError, json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    return memorial_id if isinstance(expected, dict) and card == expected else ""
+
+
+def strip_memorial_actions(card: dict) -> None:
+    """Remove ledger callbacks from a card that failed provenance checks."""
+    for element in card.get("elements", []):
+        actions = element.get("actions")
+        if not isinstance(actions, list):
+            continue
+        element["actions"] = [
+            action for action in actions
+            if not (
+                isinstance(action, dict)
+                and isinstance(action.get("value"), dict)
+                and action["value"].get("action") == "memorial"
+            )
+        ]
+
+
 def envelope_bare_cards(output_lines: list[str],
                         trusted_memorial_id_of: Callable[[dict], str]) -> list[str]:
     """Return ``output_lines`` with bare ledger cards wrapped as ``CARD:``."""

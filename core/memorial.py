@@ -64,6 +64,7 @@ from core.card import extract_card_text
 from core.card_split import split_matters
 from core.jsonl import read_jsonl
 from core import memorial_cards, memorial_ledger, memorial_transport
+from core.card_envelope import strip_memorial_actions, trusted_ledger_card_id
 from core.log import log
 from core.memorial_contracts import (
     ATTENTION_ALERT,
@@ -2060,37 +2061,8 @@ def _card_memorial_id(card: dict) -> str:
 
 
 def _trusted_ledger_card_memorial_id(card: dict) -> str:
-    """Return the id only when ``card`` is the ledger's exact rendering.
-
-    A callback-shaped ``mem_*`` value is not provenance: model output can
-    copy or invent one.  Bare cards receive executable treatment only when
-    the id exists and the complete payload matches what the current ledger
-    state renders for that id.
-    """
-    memorial_id = _card_memorial_id(card)
-    if not memorial_id or get_memorial(memorial_id) is None:
-        return ""
-    try:
-        expected = json.loads(card_json(memorial_id))
-    except (KeyError, json.JSONDecodeError, TypeError, ValueError):
-        return ""
-    return memorial_id if card == expected else ""
-
-
-def _strip_untrusted_memorial_actions(card: dict) -> None:
-    """Remove ledger callbacks from a card that failed provenance checks."""
-    for element in card.get("elements", []):
-        actions = element.get("actions")
-        if not isinstance(actions, list):
-            continue
-        element["actions"] = [
-            action for action in actions
-            if not (
-                isinstance(action, dict)
-                and isinstance(action.get("value"), dict)
-                and action["value"].get("action") == "memorial"
-            )
-        ]
+    expected = lambda mid: json.loads(card_json(mid)) if get_memorial(mid) else None
+    return trusted_ledger_card_id(card, _card_memorial_id, expected)
 
 
 def _clean_adopted_title(header: str, source: str) -> str:
@@ -2135,7 +2107,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
     if _card_memorial_id(card):
         _ops_log("untrusted_memorial_card", level="warn", source=source)
-        _strip_untrusted_memorial_actions(card)
+        strip_memorial_actions(card)
 
     # core.card keeps a bounded visible fallback for direct Lark callers, but
     # carries the uncut body inside its internal envelope.  Restore it before
