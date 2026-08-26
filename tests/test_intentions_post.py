@@ -375,7 +375,7 @@ def test_single_authored_decision_reuses_pending_matter_card(
     states = memorial.list_memorials()
     assert len(states) == 1
     assert states[0]["matter_id"] == "mat_blog_05"
-    assert states[0]["dedup_key"] == "intent-decision:blog-05"
+    assert states[0]["dedup_key"] == "intent-decision:mat_blog_05"
     assert first_card == second_card
 
 
@@ -600,3 +600,48 @@ def test_main_no_envelope_reconcile_e2e(tmp_path, monkeypatch, capsys):
     assert "envelope missing" in (it.get("last_error") or "")
     assert not inflight.exists()
     assert capsys.readouterr().out == ""
+
+
+def test_reworded_ask_after_matter_link_folds_into_pending_card(
+        tmp_path, monkeypatch, capsys):
+    """2026-08-26 12:27/12:29: a date intent asked about Blog 05, got linked
+    to its matter, and its auto follow-up asked again 3 minutes later. The
+    identity string had changed from ``blog-05`` to ``matter:mat_…`` in
+    between, so the dedup key changed too and a second card was delivered.
+    No mocks around the matter link here: the real link path must converge."""
+    import core.db as core_db
+    import core.memorial as memorial
+    from core.intentions import create_intent
+    from core.matters import find_by_entity
+
+    monkeypatch.setattr(core_db, "DB_PATH", tmp_path / "data" / "jarvis.db")
+    monkeypatch.setattr(ip, "_matter_is_deferred", lambda _matter_id: False)
+    first_id = create_intent(
+        "Blog 05 发布日——今天要合进官网仓库", "date",
+        {"datetime": "2026-08-26T12:25:00"}, prompt="合仓库",
+        intent_id="int_blog_day")
+    second_id = create_intent(
+        "跟进：Blog 05 发布日——今天要合进官网仓库", "date",
+        {"datetime": "2026-08-26T12:28:00"}, prompt="跟进",
+        intent_id="int_blog_day__fu")
+
+    def _spec(intent_id):
+        row = ip.get_intent(intent_id) or {}
+        return [{"intent_id": intent_id, "name": row.get("name", ""), "row": row}]
+
+    assert ip._emit_closure_card(
+        "TITLE: Blog 05 发布日——今天要合进官网仓库\n正文\nOPTIONS: 合 | 先放着",
+        [], card_specs=_spec(first_id)) is True
+    capsys.readouterr()
+    # The first ask linked BOTH rows to the matter (sibling convergence).
+    linked = find_by_entity("intent", second_id, provider="jarvis") or {}
+    assert linked.get("id")
+    assert ip._emit_closure_card(
+        "TITLE: Blog05发布日到，仓库未合，卡先例选择\n另一版\nOPTIONS: 合 | 先放着",
+        [], card_specs=_spec(second_id)) is True
+    capsys.readouterr()
+
+    states = memorial.list_memorials()
+    assert len(states) == 1, [s["title"] for s in states]
+    assert states[0]["dedup_key"] == f"intent-decision:{linked['id']}"
+    assert states[0]["matter_id"] == linked["id"]

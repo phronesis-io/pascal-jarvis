@@ -2014,3 +2014,100 @@ def test_suppressed_delivery_status_separates_budget_from_obsolete():
 def test_ledger_only_is_an_accepted_delivery_status():
     """The cap-drop status must not fall outside the ledger's contract."""
     assert "ledger_only" in memorial.ACCEPTED_DELIVERY_STATUSES
+
+
+# ── recent_verdicts + recurring-ask identity (2026-08-25 self-improve) ─────
+# 博客稿 was asked 7 times in 6 days, 4 of them after Pascal had answered
+# 「先都放着」, because every recurring intent is a fresh model call with no
+# view of the ledger and no stable identity for its ask.
+
+def test_recent_verdicts_lists_answered_and_pending_decisions(env):
+    from core.memorial_verdicts import recent_verdicts
+    parked, _ = memorial.create(
+        "intention-check", "博客稿 三件待定", "还差三个判断",
+        preset="decision", review_at="lark")
+    assert memorial.lapse(parked, "先都放着")
+    decided, _ = memorial.create(
+        "eigenflux-publish", "广播待确认", "稿子在这",
+        options=[{"key": "go", "label": "发"}, {"key": "no", "label": "不发"}],
+        review_at="lark")
+    assert memorial.decide(decided, "go")
+    pending, _ = memorial.create(
+        "intention-check", "周五饭局后闭环", "跟进了吗",
+        preset="decision", review_at="lark")
+    notice, _ = memorial.create("checkin", "早安", "今天晴")  # notice, not listed
+    assert memorial.decide(notice, "read")
+
+    rows = recent_verdicts()
+    by_title = {r["title"]: r for r in rows}
+    assert by_title["博客稿 三件待定"]["verdict"] == "先都放着"
+    assert by_title["博客稿 三件待定"]["status"] == "lapsed"
+    assert by_title["广播待确认"]["verdict"] == "发"
+    assert by_title["周五饭局后闭环"]["status"] == "pending"
+    assert "早安" not in by_title
+    for r in rows:
+        assert set(r) == {"title", "source", "status", "verdict", "ts"}
+
+
+def test_recent_verdicts_window_and_limit(env):
+    from core.memorial_verdicts import recent_verdicts
+    old, _ = memorial.create(
+        "intention-check", "上个月的事", "早过了",
+        preset="decision", review_at="lark")
+    assert memorial.lapse(old, "先都放着")
+    fresh, _ = memorial.create(
+        "intention-check", "今天的事", "还热着",
+        preset="decision", review_at="lark")
+    # Anchor on the ledger's own (fixture-pinned) clock, never the wall clock:
+    # a test that mixes the two rots the day the fixture date drifts.
+    from datetime import datetime as _dt
+    ledger_now = _dt.strptime(memorial.now_local_str(), "%Y-%m-%d %H:%M").timestamp()
+    # A clock 30 days ahead: the window (7 days) has passed both rows.
+    assert recent_verdicts(now=ledger_now + 30 * 86400) == []
+    # Limit keeps the newest rows.
+    assert [r["title"] for r in recent_verdicts(now=ledger_now, limit=1)] == ["今天的事"]
+
+
+
+# ── several bare ledger cards in one task output (2026-08-26) ──────────────
+
+def test_multiple_bare_ledger_cards_all_render_under_receipt_gate(env):
+    """mail-triage prints one card_json per surfaced email. 2026-08-25 18:24:
+    six alerts in one run → six memorials ledgered ``not_sent``, zero
+    delivered. Only the whole-output-is-one-JSON case was recognised; the
+    rest was prose, and the work-receipt gate dropped the prose."""
+    ids = []
+    for title in ("EigenFlux PGC CI 失败", "Google 新通行密钥提醒"):
+        mid, _ = memorial.create(
+            source="mail", title=title, body="正文", attention="alert",
+            work_receipt="读取并去重邮件，完成重要性判断", send=False)
+        ids.append(mid)
+    output = "\n".join(memorial.card_json(mid) for mid in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    cards = [json.loads(line) for line in rendered.splitlines() if line.strip()]
+    assert [memorial._card_memorial_id(c) for c in cards] == ids
+    creates = [e for e in _ledger_events(env.dir) if e["ev"] == "create"]
+    assert len(creates) == 2  # adopted as-is, nothing re-created
+
+
+def test_single_bare_card_without_memorial_id_still_adopted(env):
+    single = build_card("📬 一封信", "正文\nWORKED: 读了信", source="mail-triage")
+    rendered = memorial.memorialize_output(
+        single, source="mail-triage", require_work_receipt=True)
+    assert rendered.strip()
+    assert memorial._card_memorial_id(json.loads(rendered))
+
+
+def test_bare_json_without_memorial_id_in_prose_stays_prose(env):
+    """A model cannot mint an executable card by echoing raw JSON."""
+    fake = build_card("📬 假卡", "正文", source="mail-triage")
+    output = "第一段说明\n" + fake + "\nWORKED: 读了信"
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+    cards = [json.loads(line) for line in rendered.splitlines() if line.strip()]
+    # One prose card that merely quotes the JSON; the fake never executes.
+    assert len(cards) == 1
+    assert "第一段说明" in json.dumps(cards[0], ensure_ascii=False)

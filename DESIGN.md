@@ -116,6 +116,13 @@ zero and the phone desk was never successfully paired. Therefore:
   Handoff moves attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
   activity signals mean inactivity.
+- One matter keeps at most one open intent-authored decision card: the ask
+  is keyed `intent-decision:<matter_id>` (the matter, never the identity
+  string, which changes once a row is linked), and a reworded twin — from a
+  sibling intent or its auto follow-up — folds into the pending card until he
+  answers. Tasks that draft asks also see what he answered and what still
+  waits in the last 7 days (`core.memorial_verdicts`); a settled matter
+  (「先都放着」) is not reopened before its stated deadline.
 
 ## Mobile Rules
 

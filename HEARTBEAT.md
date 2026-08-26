@@ -432,6 +432,13 @@ duplicate the common style contract here.
     reminder's substance and ask whether it is still needed. One-word notify
     statuses are invalid; use `silent` when there is no real user message.
 
+    If DATA has `recent_verdicts` (decision cards he answered in the last 7 days
+    plus decision cards still pending on his desk): never open another decision
+    card on a matter listed there — a pending one is already in front of him, an
+    answered one (e.g.「先都放着」) is settled until its stated deadline. At most
+    one plain sentence may mention it; a recurring 日报/回访 whose only content
+    would repeat a listed matter says something else or goes `silent`.
+
     Return JSON: {"intents": {"<intent_id>": {"response": "<text>", "action": "notify|silent|chain|failed",
       "closure": {"parent": "<parent_id>", "outcome": "done|recorded|na", "result": "<one line>"}}}}
     Omit closure unless recording it. Use `silent` for no-op ids.
