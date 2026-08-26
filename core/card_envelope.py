@@ -10,9 +10,10 @@ alerts (four CI failures, two Google security notices) were ledgered as
 ``not_sent`` and never reached Lark; since 8/20 only single-card runs
 survived (11 mail memorials, 1 delivered).
 
-A bare line is promoted only when it is a top-level JSON card that already
-carries a memorial id — i.e. it came from our own ledger, not from model
-prose. Anything else keeps the explicit ``CARD:`` requirement.
+A bare line is promoted only when it is a top-level JSON card whose complete
+payload is verified by the caller against the current Memorial ledger. A
+callback-shaped id alone is not provenance. Anything else keeps the explicit
+``CARD:`` requirement.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def _as_card(text: str) -> dict | None:
 
 
 def envelope_bare_cards(output_lines: list[str],
-                        memorial_id_of: Callable[[dict], str]) -> list[str]:
+                        trusted_memorial_id_of: Callable[[dict], str]) -> list[str]:
     """Return ``output_lines`` with bare ledger cards wrapped as ``CARD:``."""
     first_nonempty = next((line for line in output_lines if line.strip()), "")
     top_level = first_nonempty == first_nonempty.lstrip(" \t")
@@ -46,7 +47,7 @@ def envelope_bare_cards(output_lines: list[str],
     out: list[str] = []
     for line in output_lines:
         card = _as_card(line) if line == line.lstrip(" \t") else None
-        if card is not None and memorial_id_of(card):
+        if card is not None and trusted_memorial_id_of(card):
             out.append("CARD:" + json.dumps(card, ensure_ascii=False))
         else:
             out.append(line)

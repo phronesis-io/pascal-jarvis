@@ -2059,6 +2059,40 @@ def _card_memorial_id(card: dict) -> str:
     return ""
 
 
+def _trusted_ledger_card_memorial_id(card: dict) -> str:
+    """Return the id only when ``card`` is the ledger's exact rendering.
+
+    A callback-shaped ``mem_*`` value is not provenance: model output can
+    copy or invent one.  Bare cards receive executable treatment only when
+    the id exists and the complete payload matches what the current ledger
+    state renders for that id.
+    """
+    memorial_id = _card_memorial_id(card)
+    if not memorial_id or get_memorial(memorial_id) is None:
+        return ""
+    try:
+        expected = json.loads(card_json(memorial_id))
+    except (KeyError, json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    return memorial_id if card == expected else ""
+
+
+def _strip_untrusted_memorial_actions(card: dict) -> None:
+    """Remove ledger callbacks from a card that failed provenance checks."""
+    for element in card.get("elements", []):
+        actions = element.get("actions")
+        if not isinstance(actions, list):
+            continue
+        element["actions"] = [
+            action for action in actions
+            if not (
+                isinstance(action, dict)
+                and isinstance(action.get("value"), dict)
+                and action["value"].get("action") == "memorial"
+            )
+        ]
+
+
 def _clean_adopted_title(header: str, source: str) -> str:
     """Remove transport chrome from a legacy card title."""
     import re
@@ -2097,8 +2131,11 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # per-kind learning possible at all — before this every checkin was logged
     # as an undifferentiated `source=checkin`.
     context = str(card.pop("__jarvis_context", "") or context)
-    if _card_memorial_id(card):
+    if _trusted_ledger_card_memorial_id(card):
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+    if _card_memorial_id(card):
+        _ops_log("untrusted_memorial_card", level="warn", source=source)
+        _strip_untrusted_memorial_actions(card)
 
     # core.card keeps a bounded visible fallback for direct Lark callers, but
     # carries the uncut body inside its internal envelope.  Restore it before
@@ -2444,7 +2481,7 @@ def memorialize_output(
     # examples and lazy blockquote continuations cannot acquire live callbacks.
     from core.card_envelope import envelope_bare_cards
     output_lines = envelope_bare_cards(
-        str(output).splitlines(), _card_memorial_id)
+        str(output).splitlines(), _trusted_ledger_card_memorial_id)
     protected_output_lines = _markdown_protected_lines(output_lines)
     dropping_bad_card = False
     from core.task_protocol import parse_output_source_marker
@@ -2482,10 +2519,10 @@ def memorialize_output(
             card = None
         if isinstance(card, dict) and "config" in card and "elements" in card:
             flush_prose()
-            existing_id = _card_memorial_id(card)
+            existing_id = _trusted_ledger_card_memorial_id(card)
             if existing_id:
                 state = get_memorial(existing_id) or {}
-                if should_push_to_lark(state):
+                if should_push_to_lark(state) and not delivery_accepted(state):
                     card.pop("__jarvis_source", None)
                     adopted = json.dumps(
                         card, ensure_ascii=False, separators=(",", ":"))
