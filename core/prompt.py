@@ -28,7 +28,9 @@ from core.compact import read_compact
 
 PROMPT_SNAPSHOT_VERSION = 1
 PROMPT_SNAPSHOT_KEEP = 128
-PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 30 * 24 * 3600
+# Exact blocks amortize the 190k-token prompt without freezing newly learned
+# cross-session context for days. This matches Heartbeat's cache horizon.
+PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 3600
 
 
 def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:

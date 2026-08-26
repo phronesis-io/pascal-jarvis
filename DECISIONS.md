@@ -189,8 +189,9 @@ the block; ordering stable text before it is insufficient.
 - Current time and live task DATA belong in the user request. The Lark handler
   already prefixes every incoming turn with an authoritative local timestamp.
 - Snapshot files contain private memory, remain under ignored runtime `data/`,
-  are created with directory mode 0700/file mode 0600, expire after 30 days,
-  and are bounded to 128. A single mode-0600 directory lock bounds lock state.
+  are created with directory mode 0700/file mode 0600, refresh after one hour
+  so cross-session memory cannot freeze for days, and are bounded to 128. A
+  single mode-0600 directory lock bounds lock state.
 - Provider secrets are scoped to execution adapters. They are never globally
   exported to admin, network sidecars, deterministic task scripts, another
   provider's process, or a Jarvis-controlled Codex/GPT tool subprocess.

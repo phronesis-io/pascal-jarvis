@@ -46,8 +46,8 @@ Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of
 the reusable prompt prefix. An owner conversation stores one exact private
 system-prompt snapshot per provider session and reuses it until the session,
-reviewed runtime revision, or prompt implementation changes. Private snapshots
-expire after 30 days and are capped at 128. Heartbeat reuses one bounded snapshot per
+reviewed runtime revision, prompt implementation, or one-hour freshness window
+changes. Private snapshots are capped at 128. Heartbeat reuses one bounded snapshot per
 trust/tool profile; frequently changing task DATA and current time stay in the
 user request, outside the system cache block.
 Models fetch indexed reference notes from disk only when relevant. Restricted

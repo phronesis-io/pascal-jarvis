@@ -9,6 +9,7 @@ import pytest
 
 from core.prompt import (
     ACTIONS_DOC,
+    PROMPT_SNAPSHOT_MAX_AGE_SECONDS,
     _prune_prompt_snapshots,
     build_cached_system_prompt,
     build_system_prompt,
@@ -198,7 +199,7 @@ def test_cached_system_prompt_isolated_by_release_and_expires_private_data(
     assert second != first
 
     snapshot = max(cache_dir.glob("*.txt"), key=lambda path: path.stat().st_mtime)
-    old = time.time() - 31 * 24 * 3600
+    old = time.time() - PROMPT_SNAPSHOT_MAX_AGE_SECONDS - 60
     os.utime(snapshot, (old, old))
     profile.write_text("AFTER_RETENTION", encoding="utf-8")
     third = build_cached_system_prompt(**common)
