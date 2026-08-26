@@ -2438,22 +2438,13 @@ def memorialize_output(
                 continue
             rendered.append(card_json(mid))
 
-    raw_output = str(output)
-    output_lines = raw_output.splitlines()
-    # One standalone legacy card remains backward-compatible. In mixed prose,
-    # executable cards require the explicit CARD: envelope so Markdown examples
-    # and lazy blockquote continuations cannot acquire live callbacks.
-    try:
-        standalone_card = json.loads(raw_output.strip())
-    except (json.JSONDecodeError, TypeError, ValueError):
-        standalone_card = None
-    first_nonempty = next(
-        (line for line in output_lines if line.strip()), "")
-    if (first_nonempty == first_nonempty.lstrip(" \t")
-            and isinstance(standalone_card, dict)
-            and "config" in standalone_card and "elements" in standalone_card):
-        output_lines = ["CARD:" + json.dumps(standalone_card,
-                                              ensure_ascii=False)]
+    # One standalone legacy card, or bare ledger-backed cards one per line
+    # (a post-hook printing several card_json), become CARD: envelopes. In
+    # mixed prose, anything else needs the explicit CARD: envelope so Markdown
+    # examples and lazy blockquote continuations cannot acquire live callbacks.
+    from core.card_envelope import envelope_bare_cards
+    output_lines = envelope_bare_cards(
+        str(output).splitlines(), _card_memorial_id)
     protected_output_lines = _markdown_protected_lines(output_lines)
     dropping_bad_card = False
     from core.task_protocol import parse_output_source_marker
