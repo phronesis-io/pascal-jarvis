@@ -29,6 +29,10 @@ same system block, so the earlier cache entry does not match.
    focus text. Constrained fallback routes retain relevance ordering.
 5. Private snapshots are ignored runtime data, directory mode 0700, files and
    locks mode 0600, and capped at 128 entries.
+6. The directory lock covers cache metadata and atomic publication only.
+   Memory and cross-session assembly happen outside it; a second read before
+   publication keeps one exact first-writer snapshot without serializing
+   unrelated new sessions.
 
 ## Acceptance
 
@@ -36,6 +40,8 @@ same system block, so the earlier cache entry does not match.
   prompts after memory/time changes, while a new session receives fresh memory.
 - Unit tests prove two compatible Heartbeat calls load memory once, reuse the
   exact system block, and carry different timestamps in their user requests.
+- A concurrency regression proves two unrelated cold session keys assemble in
+  parallel; existing same-session tests retain one byte-identical snapshot.
 - After release, two compatible calls within five minutes must show the second
   call shifting the custom system block from cache creation to cache read.
 - A live resumed Lark pair must show the same behavior without losing current

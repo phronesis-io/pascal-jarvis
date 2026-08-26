@@ -50,6 +50,10 @@ reviewed runtime revision, prompt implementation, or one-hour freshness window
 changes. Private snapshots are capped at 128. Heartbeat reuses one bounded snapshot per
 trust/tool profile; frequently changing task DATA and current time stay in the
 user request, outside the system cache block.
+The snapshot directory lock covers cache reads, pruning, and atomic publication
+only. Memory and cross-session assembly run outside that lock, followed by a
+second cache read before publication, so unrelated new sessions do not block
+one another while the first complete snapshot still wins each session key.
 Models fetch indexed reference notes from disk only when relevant. Restricted
 or no-tool calls retain full inline memory so index mode can never make
 knowledge unreachable.

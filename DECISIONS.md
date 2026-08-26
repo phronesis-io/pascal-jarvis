@@ -191,7 +191,10 @@ the block; ordering stable text before it is insufficient.
 - Snapshot files contain private memory, remain under ignored runtime `data/`,
   are created with directory mode 0700/file mode 0600, refresh after one hour
   so cross-session memory cannot freeze for days, and are bounded to 128. A
-  single mode-0600 directory lock bounds lock state.
+  single mode-0600 directory lock bounds lock state. The lock protects cache
+  reads, pruning, and atomic publication, but never memory/transcript assembly;
+  a second read before publication preserves the first complete snapshot when
+  two workers miss the same key concurrently.
 - Provider secrets are scoped to execution adapters. They are never globally
   exported to admin, network sidecars, deterministic task scripts, another
   provider's process, or a Jarvis-controlled Codex/GPT tool subprocess.

@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from core.memory import load_group_context, load_tiered_memory
@@ -478,6 +479,34 @@ def _prune_prompt_snapshots(
             pass
 
 
+@contextmanager
+def _prompt_cache_lock(lock_path: Path):
+    """Serialize only cache metadata and inode replacement, never prompt work."""
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        try:
+            lock_path.chmod(0o600)
+        except OSError:
+            pass
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _read_prompt_snapshot(path: Path) -> str:
+    try:
+        cached = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if cached:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    return cached
+
+
 def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
     """Return one exact private system-prompt snapshot per provider session.
 
@@ -511,57 +540,53 @@ def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
             or os.environ.get("JARVIS_WARM_MEMORY_MODE", "full")
         ),
     )
-    # One directory lock bounds lock state while still serializing every read,
-    # replacement, and prune.  Per-snapshot locks leaked one empty inode for
-    # every historical session and could not be removed safely while live.
+    # One directory lock bounds lock state while serializing cache reads,
+    # replacement, and pruning. Prompt assembly itself can read 190k of memory
+    # and search provider transcripts, so it must happen outside this global
+    # lock; otherwise two unrelated new sessions make one another wait.
     lock_path = root / ".cache.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock:
+    with _prompt_cache_lock(lock_path):
+        _prune_prompt_snapshots(root)
+        cached = _read_prompt_snapshot(path)
+        if cached:
+            return cached
+
+    prompt = build_system_prompt(**kwargs)
+
+    # Another worker may have assembled the same session while our lock was
+    # released. Preserve the first complete snapshot so every caller resumes
+    # against exactly one system block.
+    with _prompt_cache_lock(lock_path):
+        _prune_prompt_snapshots(root)
+        cached = _read_prompt_snapshot(path)
+        if cached:
+            return cached
+        tmp_path: Path | None = None
         try:
-            lock_path.chmod(0o600)
-        except OSError:
-            pass
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            _prune_prompt_snapshots(root)
-            try:
-                cached = path.read_text(encoding="utf-8")
-            except OSError:
-                cached = ""
-            if cached:
+            # NamedTemporaryFile is mode 0600 at creation. Writing private
+            # memory through Path.write_text would briefly expose a 0644
+            # inode under a permissive process umask before chmod.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=root,
+                prefix=f".{path.name}.",
+                delete=False,
+            ) as tmp:
+                tmp.write(prompt)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, path)
+            path.chmod(0o600)
+        finally:
+            if tmp_path is not None:
                 try:
-                    path.chmod(0o600)
+                    tmp_path.unlink()
                 except OSError:
                     pass
-                return cached
-            prompt = build_system_prompt(**kwargs)
-            tmp_path: Path | None = None
-            try:
-                # NamedTemporaryFile is mode 0600 at creation. Writing private
-                # memory through Path.write_text would briefly expose a 0644
-                # inode under a permissive process umask before chmod.
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    encoding="utf-8",
-                    dir=root,
-                    prefix=f".{path.name}.",
-                    delete=False,
-                ) as tmp:
-                    tmp.write(prompt)
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                    tmp_path = Path(tmp.name)
-                os.replace(tmp_path, path)
-                path.chmod(0o600)
-            finally:
-                if tmp_path is not None:
-                    try:
-                        tmp_path.unlink()
-                    except OSError:
-                        pass
-            _prune_prompt_snapshots(root)
-            return prompt
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        _prune_prompt_snapshots(root)
+        return prompt
 
 
 if __name__ == "__main__":

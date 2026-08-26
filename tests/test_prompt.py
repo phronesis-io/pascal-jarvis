@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -224,6 +225,101 @@ def test_prompt_snapshot_pruning_enforces_count_for_fresh_files(tmp_path):
         snapshots[2].name,
         snapshots[3].name,
     }
+
+
+def test_unrelated_prompt_cache_misses_build_concurrently(tmp_path, monkeypatch):
+    """A slow cross-session/memory read for one new chat must not hold the
+    directory lock and stall another new chat."""
+    import core.prompt as prompt_module
+
+    cache_dir = tmp_path / "cache"
+    started = {"one": threading.Event(), "two": threading.Event()}
+    release = threading.Event()
+
+    def slow_build(**kwargs):
+        session_id = kwargs["session_id"]
+        started[session_id].set()
+        assert release.wait(timeout=3)
+        return f"prompt:{session_id}"
+
+    monkeypatch.setattr(prompt_module, "build_system_prompt", slow_build)
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "conv_key": "owner",
+        "now_ts": "ignored",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    results = {}
+
+    def worker(session_id):
+        results[session_id] = build_cached_system_prompt(
+            **common, session_id=session_id)
+
+    first = threading.Thread(target=worker, args=("one",))
+    second = threading.Thread(target=worker, args=("two",))
+    first.start()
+    assert started["one"].wait(timeout=1)
+    second.start()
+    assert started["two"].wait(timeout=1), (
+        "second prompt build was serialized behind unrelated session work"
+    )
+    release.set()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results == {"one": "prompt:one", "two": "prompt:two"}
+
+
+def test_same_prompt_cache_miss_publishes_one_exact_snapshot(
+        tmp_path, monkeypatch):
+    """Concurrent cold calls for one session must converge on one snapshot."""
+    import core.prompt as prompt_module
+
+    cache_dir = tmp_path / "cache"
+    both_started = threading.Barrier(2)
+    build_number = iter((1, 2))
+
+    def concurrent_build(**_kwargs):
+        number = next(build_number)
+        both_started.wait(timeout=3)
+        return f"prompt:{number}"
+
+    monkeypatch.setattr(prompt_module, "build_system_prompt", concurrent_build)
+    kwargs = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "conv_key": "owner",
+        "session_id": "same-session",
+        "now_ts": "ignored",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+    results = []
+
+    def worker():
+        results.append(build_cached_system_prompt(**kwargs))
+
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker)
+    first.start()
+    second.start()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert results[0] in {"prompt:1", "prompt:2"}
+    snapshots = list(cache_dir.glob("*.txt"))
+    assert len(snapshots) == 1
+    assert snapshots[0].read_text(encoding="utf-8") == results[0]
 
 
 def test_cached_system_prompt_fails_open_without_sharing_empty_session(
