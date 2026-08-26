@@ -442,6 +442,32 @@ def test_claude_call_default_mode_keeps_pre_index_memory_signature(
     assert "max_chars" in seen
 
 
+def test_noncacheable_full_memory_call_keeps_task_focused_ordering(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    seen = {}
+
+    def _loader(memory_dir, *, max_chars=None, focus_text=""):
+        seen.update(max_chars=max_chars, focus_text=focus_text)
+        return "MEM"
+
+    class _Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "core.heartbeat.subprocess.run", lambda cmd, **kw: _Result())
+    monkeypatch.setattr("core.heartbeat.load_tiered_memory", _loader)
+
+    runner.claude_call("focus on today's recovery", full_memory=True)
+
+    assert seen == {
+        "max_chars": None,
+        "focus_text": "focus on today's recovery",
+    }
+
+
 def test_system_prompt_block_is_exact_and_timestamp_stays_in_user_request(
         tmp_path, monkeypatch):
     """A changing suffix in one system text block invalidates the whole block."""

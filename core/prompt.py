@@ -526,6 +526,10 @@ def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
             except OSError:
                 cached = ""
             if cached:
+                try:
+                    path.chmod(0o600)
+                except OSError:
+                    pass
                 return cached
             prompt = build_system_prompt(**kwargs)
             tmp_path: Path | None = None

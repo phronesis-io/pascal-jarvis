@@ -159,6 +159,14 @@ def test_cached_system_prompt_is_exact_per_session_and_private(tmp_path):
     assert all(path.stat().st_mode & 0o777 == 0o600
                for path in cache_dir.iterdir())
 
+    snapshot = next(
+        path for path in cache_dir.glob("*.txt")
+        if path.read_text(encoding="utf-8") == first
+    )
+    snapshot.chmod(0o644)
+    assert build_cached_system_prompt(**common) == first
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+
 
 def test_cached_system_prompt_isolated_by_release_and_expires_private_data(
         tmp_path, monkeypatch):

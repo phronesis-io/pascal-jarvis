@@ -42,7 +42,13 @@ def build_prompt_pair(
         and memory_purpose == "inbound"
     )
     cache_key = (
-        bool(restrict_tools), bool(allow_tools), warm_mode, persona,
+        bool(restrict_tools),
+        bool(allow_tools),
+        warm_mode,
+        persona,
+        str(Path(memory_dir).resolve()),
+        mem_budget,
+        acting_section,
     )
     try:
         cache_ttl = max(
@@ -59,7 +65,10 @@ def build_prompt_pair(
         # On the primary path it only makes the system block task-dependent.
         mem_kwargs = {
             "max_chars": mem_budget,
-            "focus_text": prompt if mem_budget is not None else "",
+            # A cacheable system block must not inherit whichever task happened
+            # to run first. Non-cacheable fallback/full-memory calls retain the
+            # historical task-focused ordering.
+            "focus_text": "" if cacheable else prompt,
         }
         if memory_purpose != "inbound":
             mem_kwargs["purpose"] = memory_purpose

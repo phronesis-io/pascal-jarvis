@@ -379,14 +379,40 @@ def salvage_task_ids(raw: str):
 def atomic_write(path, content: str, encoding: str = "utf-8"):
     """Write content to path atomically via tmp + rename.
 
-    Prevents data corruption if the process is killed mid-write.
+    Prevents data corruption if the process is killed mid-write. Jarvis state
+    carries private calendar, memory, and network material, so both the temp
+    inode and final inode are private from creation; a chmod after a normal
+    ``Path.write_text`` would leave a real exposure window under umask 022.
     Use for any file that is read by another process (heartbeat state,
     memory files, engagement logs, etc.).
     """
     import os
+    import tempfile
     from pathlib import Path
+
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(content, encoding=encoding)
-    os.replace(tmp, p)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        p.parent.chmod(0o700)
+    except OSError:
+        pass
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{p.name}.", suffix=".tmp", dir=p.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, p)
+        os.chmod(p, 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        tmp.unlink(missing_ok=True)
