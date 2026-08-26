@@ -353,6 +353,24 @@ def test_diag_redelivers_when_stamp_predates_pre_beyond_window(diag_env):
     assert "探针" not in alerts[0]
 
 
+def test_diag_internal_churn_does_not_redeliver_same_auth_action(diag_env):
+    pre, stamp, alerts = diag_env
+    auth = "⚠️ user token 探针失败 — authorization required"
+    pre.write_text(f"{auth}\n⚠️ new internal network warning\n")
+    _age_file(pre, 20 * 60)
+    _diag_cycle_completed(pre)
+    old = pre.stat().st_mtime - 5 * 3600
+    stamp.write_text(json.dumps({
+        "ts": old,
+        "user_ts": old,
+        "lines": [auth, "⚠️ old internal network warning"],
+    }))
+
+    daemon_mod._check_diag_staleness()
+
+    assert alerts == []
+
+
 def test_diag_no_redelivery_without_warnings(diag_env):
     pre, stamp, alerts = diag_env
     pre.write_text("✓ everything healthy\n")

@@ -1605,7 +1605,10 @@ def _check_diag_staleness():
             stamp = json.loads(DIAG_ALERT_STAMP.read_text()) or {}
         except (OSError, ValueError, TypeError):
             stamp = {}
-        if not should_alert(warnings, stamp):
+        # The owner action is stable even while unrelated internal warnings
+        # churn. Dedup on that action only, otherwise a new network/task line
+        # can re-page the same OAuth request after the four-hour floor.
+        if not should_alert(actionable, stamp):
             return
         log("WARN", f"self-diagnostic warnings unsent by post "
             f"({len(warnings)}) — sending via daemon channel")
