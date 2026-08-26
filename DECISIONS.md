@@ -5,28 +5,6 @@ work in the same area. It is current-state knowledge, not a history of every
 implementation discussion. Product history remains in `docs/prd_portfolio.md`;
 runtime topology and domain boundaries remain in `ARCHITECTURE.md`.
 
-## ADR-004: Provider Cache Boundaries Use Exact System Snapshots
-
-**Status:** accepted
-
-Provider prompt caching hashes complete content blocks. A changing timestamp,
-calendar row, or memory file at the end of one system text block still changes
-the block; ordering stable text before it is insufficient.
-
-- Lark conversations keep one mode-0600 system snapshot per provider session.
-  A new session, Matter, trust boundary, provider memory budget, or prompt-code
-  digest receives a different snapshot.
-- Heartbeat keeps an in-process one-hour snapshot per trust/tool profile on the
-  primary Claude path. Full-memory editors, outbound contexts, and fallback
-  providers rebuild instead of receiving a stale incompatible snapshot.
-- Current time and live task DATA belong in the user request. The Lark handler
-  already prefixes every incoming turn with an authoritative local timestamp.
-- Snapshot files contain private memory, remain under ignored runtime `data/`,
-  are created with directory mode 0700/file mode 0600, and are bounded to 128.
-
-This is a latency and cost optimization, never a completion receipt. Current
-facts still come from deterministic task DATA or a synchronous tool check.
-
 ## ADR-001: Runtime Choice, Codex Execution, and Cross-Session Context
 
 **Status:** accepted
@@ -193,3 +171,26 @@ reason codes; only a real provider receipt can advance delivery to delivered.
 - A removed heartbeat surface is recorded in capability inventory retirement
   evidence. Default-disabled code with no production consumer is not counted
   as an active product feature.
+
+## ADR-006: Provider Cache Boundaries Use Exact System Snapshots
+
+**Status:** accepted
+
+Provider prompt caching hashes complete content blocks. A changing timestamp,
+calendar row, or memory file at the end of one system text block still changes
+the block; ordering stable text before it is insufficient.
+
+- Lark conversations keep one mode-0600 system snapshot per provider session.
+  A new session, Matter, trust boundary, provider memory budget, reviewed
+  runtime revision, or prompt-code digest receives a different snapshot.
+- Heartbeat keeps an in-process one-hour snapshot per trust/tool profile on the
+  primary Claude path. Full-memory editors, outbound contexts, and fallback
+  providers rebuild instead of receiving a stale incompatible snapshot.
+- Current time and live task DATA belong in the user request. The Lark handler
+  already prefixes every incoming turn with an authoritative local timestamp.
+- Snapshot files contain private memory, remain under ignored runtime `data/`,
+  are created with directory mode 0700/file mode 0600, expire after 30 days,
+  and are bounded to 128. A single mode-0600 directory lock bounds lock state.
+
+This is a latency and cost optimization, never a completion receipt. Current
+facts still come from deterministic task DATA or a synchronous tool check.

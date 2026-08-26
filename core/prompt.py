@@ -27,6 +27,8 @@ from core.compact import read_compact
 
 
 PROMPT_SNAPSHOT_VERSION = 1
+PROMPT_SNAPSHOT_KEEP = 128
+PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 30 * 24 * 3600
 
 
 def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
@@ -432,6 +434,7 @@ def _snapshot_path(cache_dir: Path, *, session_id: str, chat_type: str,
                    matter_id: str, warm_mode: str) -> Path:
     identity = json.dumps({
         "version": PROMPT_SNAPSHOT_VERSION,
+        "runtime_revision": os.environ.get("JARVIS_RUNTIME_GIT_HEAD", ""),
         "source": _prompt_source_digest(),
         "session_id": str(session_id),
         "chat_type": str(chat_type),
@@ -443,7 +446,11 @@ def _snapshot_path(cache_dir: Path, *, session_id: str, chat_type: str,
     return cache_dir / f"{hashlib.sha256(identity.encode()).hexdigest()}.txt"
 
 
-def _prune_prompt_snapshots(cache_dir: Path, keep: int = 128) -> None:
+def _prune_prompt_snapshots(
+    cache_dir: Path,
+    keep: int = PROMPT_SNAPSHOT_KEEP,
+    max_age_seconds: int = PROMPT_SNAPSHOT_MAX_AGE_SECONDS,
+) -> None:
     try:
         files = sorted(
             (path for path in cache_dir.glob("*.txt") if path.is_file()),
@@ -452,7 +459,17 @@ def _prune_prompt_snapshots(cache_dir: Path, keep: int = 128) -> None:
         )
     except OSError:
         return
-    for path in files[keep:]:
+    cutoff = time.time() - max(0, max_age_seconds)
+    retained: list[Path] = []
+    for path in files:
+        try:
+            if max_age_seconds == 0 or path.stat().st_mtime < cutoff:
+                path.unlink()
+            else:
+                retained.append(path)
+        except OSError:
+            pass
+    for path in retained[max(0, keep):]:
         try:
             path.unlink()
         except OSError:
@@ -492,7 +509,10 @@ def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
             or os.environ.get("JARVIS_WARM_MEMORY_MODE", "full")
         ),
     )
-    lock_path = path.with_suffix(".lock")
+    # One directory lock bounds lock state while still serializing every read,
+    # replacement, and prune.  Per-snapshot locks leaked one empty inode for
+    # every historical session and could not be removed safely while live.
+    lock_path = root / ".cache.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
         try:
             lock_path.chmod(0o600)
@@ -500,6 +520,7 @@ def build_cached_system_prompt(*, cache_dir: str | Path, **kwargs) -> str:
             pass
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            _prune_prompt_snapshots(root)
             try:
                 cached = path.read_text(encoding="utf-8")
             except OSError:

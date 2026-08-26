@@ -1,6 +1,8 @@
 """Tests for core.prompt — system prompt builder."""
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,44 @@ def test_cached_system_prompt_is_exact_per_session_and_private(tmp_path):
     assert cache_dir.stat().st_mode & 0o777 == 0o700
     assert all(path.stat().st_mode & 0o777 == 0o600
                for path in cache_dir.iterdir())
+
+
+def test_cached_system_prompt_isolated_by_release_and_expires_private_data(
+        tmp_path, monkeypatch):
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    profile = mem / "profile.md"
+    profile.write_text("FIRST_RELEASE", encoding="utf-8")
+    cache_dir = tmp_path / "data" / "session_prompt_cache"
+    common = {
+        "cache_dir": cache_dir,
+        "jarvis_dir": str(tmp_path),
+        "memory_dir": str(tmp_path / "memory"),
+        "session_dir": str(tmp_path),
+        "session_id": "session-one",
+        "conv_key": "owner",
+        "now_ts": "2026-08-25 13:00 Tuesday",
+        "tracker_path": str(tmp_path / "tracker.json"),
+    }
+
+    monkeypatch.setenv("JARVIS_RUNTIME_GIT_HEAD", "a" * 40)
+    first = build_cached_system_prompt(**common)
+    profile.write_text("SECOND_RELEASE", encoding="utf-8")
+    monkeypatch.setenv("JARVIS_RUNTIME_GIT_HEAD", "b" * 40)
+    second = build_cached_system_prompt(**common)
+
+    assert "FIRST_RELEASE" in first
+    assert "SECOND_RELEASE" in second
+    assert second != first
+
+    snapshot = max(cache_dir.glob("*.txt"), key=lambda path: path.stat().st_mtime)
+    old = time.time() - 31 * 24 * 3600
+    os.utime(snapshot, (old, old))
+    profile.write_text("AFTER_RETENTION", encoding="utf-8")
+    third = build_cached_system_prompt(**common)
+    assert "AFTER_RETENTION" in third
+    assert "SECOND_RELEASE" not in third
+    assert {path.name for path in cache_dir.glob("*.lock")} == {".cache.lock"}
 
 
 def test_cached_system_prompt_fails_open_without_sharing_empty_session(

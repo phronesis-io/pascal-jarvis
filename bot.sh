@@ -61,6 +61,11 @@ cd "$JARVIS_DIR" || { echo "FATAL: cannot cd to JARVIS_DIR ($JARVIS_DIR)" >&2; e
 # the release gate. Local development can opt out explicitly.
 _BOOT_GIT_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
 _ORIGIN_MAIN_HEAD=$(git rev-parse origin/main 2>/dev/null || true)
+# Prompt snapshots survive process restarts, so their identity must include the
+# exact reviewed runtime revision.  Source digests inside core.prompt remain a
+# development fallback, but cannot enumerate every module that contributes to
+# the assembled prompt.
+export JARVIS_RUNTIME_GIT_HEAD="$_BOOT_GIT_HEAD"
 _RUNTIME_GIT_PATHS=(
   core tasks scripts plugins handlers sources static
   admin.py daemon.py bot.sh restart.sh components.yaml HEARTBEAT.md
