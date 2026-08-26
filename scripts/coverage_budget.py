@@ -11,17 +11,17 @@ from pathlib import Path
 # Budgets are a ratchet, not a quality target. Raise a row after adding tests;
 # do not lower it to make a regression green.
 MINIMUMS = {
-    "__total__": (80.0, 72.0),
+    "__total__": (81.0, 73.0),
     "core/memorial.py": (89.0, 82.0),
     "core/intentions.py": (78.0, 72.0),
     "core/heartbeat.py": (88.0, 88.0),
     "core/delegations.py": (89.0, 75.0),
     "core/delivery.py": (81.0, 77.0),
-    "core/heartbeat_loop.py": (69.0, 65.0),
-    "core/ef_stream_loop.py": (58.0, 47.0),
+    "core/heartbeat_loop.py": (75.0, 71.0),
+    "core/ef_stream_loop.py": (72.0, 61.0),
     "core/lark_bot_transport.py": (83.0, 65.0),
-    "core/matter_executor.py": (36.0, 24.0),
-    "core/routine_evidence.py": (52.0, 41.0),
+    "core/matter_executor.py": (60.0, 46.0),
+    "core/routine_evidence.py": (87.0, 75.0),
     "core/cross_session.py": (80.0, 41.0),
     "core/cross_session_index.py": (83.0, 70.0),
     "core/prompt.py": (81.0, 73.0),

@@ -1780,7 +1780,11 @@ def run_loop(jarvis_dir: str, memory_dir: str, model: str = "opus",
              claude_timeout: int = 600):
     """Main heartbeat loop. Runs forever until killed."""
     jd = Path(jarvis_dir)
-    heartbeat_trigger = Path("/tmp/jarvis-heartbeat-trigger")
+    # The production path stays compatible with bot.sh/admin writers. Tests
+    # and isolated harnesses must be able to move it away from the live host's
+    # trigger file, otherwise a verification run can consume a real force.
+    heartbeat_trigger = Path(os.environ.get(
+        "JARVIS_HEARTBEAT_TRIGGER", "/tmp/jarvis-heartbeat-trigger"))
     _init_beat_stamp(jd)
 
     # Trim logs on startup

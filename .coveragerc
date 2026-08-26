@@ -1,6 +1,14 @@
 [run]
 branch = True
-source = core
+parallel = True
+patch = subprocess
+source =
+    admin
+    core
+    daemon
+    handlers
+    sources
+    tasks
 
 [report]
 precision = 1

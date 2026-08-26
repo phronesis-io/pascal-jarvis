@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import timedelta
@@ -451,6 +452,112 @@ class TestEvidence:
     def test_git_provider_rejects_path_traversal(self, routine_db):
         text, gathered = routine_evidence.collect(["git:../../etc"])
         assert "unavailable" in text and gathered == []
+
+    def test_intent_card_task_and_mail_providers_return_bounded_facts(
+            self, routine_db, monkeypatch):
+        monkeypatch.setattr(
+            "core.intentions.list_intents",
+            lambda status="pending": [{
+                "name": "确认白皮书",
+                "trigger_type": "date",
+                "trigger_config": {"datetime": "2099-01-02T10:00:00+08:00"},
+            }] if status == "pending" else [],
+        )
+        monkeypatch.setattr(
+            "core.memorial.list_memorials",
+            lambda: [{
+                "ts": "2099-01-01 12:00",
+                "status": "acted",
+                "source": "test",
+                "title": "已批方案",
+            }, {
+                "ts": "2099-01-01 13:00",
+                "status": "pending",
+                "source": "test",
+                "title": "待批方案",
+            }],
+        )
+        monkeypatch.setattr(
+            "core.timeutil.now_local",
+            lambda: now_local().replace(year=2099, month=1, day=2),
+        )
+
+        class Tasks:
+            def __init__(self, _memory_dir):
+                pass
+
+            def active(self):
+                return [{"content": "收尾发布", "status": "active"}]
+
+        monkeypatch.setattr("core.tasks.TaskManager", Tasks)
+        mail_dir = routine_db / "mail"
+        mail_dir.mkdir()
+        (mail_dir / "triaged.jsonl").write_text(
+            json.dumps({
+                "ts": "2099-01-02T08:00:00+08:00",
+                "decision": "reply",
+                "subject": "需要回复的邮件",
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        text, gathered = routine_evidence.collect([
+            "intents", "cards:7", "tasks", "mail:3",
+        ])
+
+        assert gathered == ["intents", "cards:7", "tasks", "mail:3"]
+        assert "确认白皮书" in text
+        assert "2 张卡，其中 1 张被批过" in text
+        assert "收尾发布" in text
+        assert "需要回复的邮件" in text
+
+    def test_git_provider_records_success_and_transport_failure(
+            self, routine_db, monkeypatch):
+        repo = routine_db.parent / "eigenflux-pgc"
+        (repo / ".git").mkdir(parents=True)
+
+        class Result:
+            returncode = 0
+            stdout = "abc1234 2099-01-01 fix: bounded coordination"
+            stderr = ""
+
+        monkeypatch.setattr(
+            routine_evidence.subprocess,
+            "run",
+            lambda *args, **kwargs: Result(),
+        )
+        text, gathered = routine_evidence.collect(["git:eigenflux-pgc"])
+        assert gathered == ["git:eigenflux-pgc"]
+        assert "bounded coordination" in text
+
+        def fail(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired("git", 20)
+
+        monkeypatch.setattr(routine_evidence.subprocess, "run", fail)
+        text, gathered = routine_evidence.collect(["git:eigenflux-pgc"])
+        assert gathered == []
+        assert "unavailable" in text and "执行失败" in text
+
+    def test_evidence_validation_and_total_limit_are_explicit(
+            self, routine_db, monkeypatch):
+        assert routine_evidence.validate_spec(" Cards:7 ") == "cards:7"
+        with pytest.raises(routine_evidence.EvidenceError, match="空的证据项"):
+            routine_evidence.validate_spec(" ")
+        with pytest.raises(routine_evidence.EvidenceError, match="需要参数"):
+            routine_evidence.validate_spec("memory")
+        with pytest.raises(routine_evidence.EvidenceError, match="超出范围"):
+            routine_evidence._int_arg("91", default=7, lo=1, hi=90,
+                                      label="cards")
+        with pytest.raises(routine_evidence.EvidenceError, match="不是整数"):
+            routine_evidence._int_arg("many", default=7, lo=1, hi=90,
+                                      label="cards")
+
+        monkeypatch.setattr(routine_evidence, "TOTAL_MAX_CHARS", 80)
+        monkeypatch.setitem(routine_evidence.PROVIDERS, "large",
+                            lambda _arg: "x" * 1000)
+        text, gathered = routine_evidence.collect(["large", "unknown"])
+        assert gathered == ["large"]
+        assert "证据总量超限" in text
 
 
 # ── pre-hook contract ────────────────────────────────────────────────────

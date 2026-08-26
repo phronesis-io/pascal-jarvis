@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+import core.heartbeat_loop as heartbeat_loop
 from core.card import build_card
 from core import lark_bot_transport
 from core.heartbeat_loop import (
@@ -62,6 +65,105 @@ def test_sleep_that_began_inside_a_model_call_is_seen():
     gap = _sleep_gap_seconds(wall_elapsed_s=3880.0, mono_elapsed_s=12.0,
                              threshold_s=120)
     assert round(gap) == 3868
+
+
+class _StopLoop(Exception):
+    pass
+
+
+class _LoopRunner:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls = []
+        self.last_provider = "primary"
+        self.last_model = "sonnet"
+        self.__class__.instances.append(self)
+
+    def run_cycle(self, *, force=False, only_task=None):
+        self.calls.append((force, only_task))
+        return ""
+
+
+def _isolate_run_loop(monkeypatch, tmp_path):
+    _LoopRunner.instances = []
+    monkeypatch.setenv(
+        "JARVIS_HEARTBEAT_TRIGGER", str(tmp_path / "force-trigger"))
+    monkeypatch.setattr(heartbeat_loop, "HeartbeatRunner", _LoopRunner)
+    monkeypatch.setattr("core.deploy.register_runtime", lambda *_a, **_kw: None)
+    monkeypatch.setattr("core.delivery.flush_due", lambda _root: [])
+    monkeypatch.setattr(heartbeat_loop, "_project_delivery_flush_results",
+                        lambda *_a, **_kw: None)
+    monkeypatch.setattr(heartbeat_loop, "_should_flush", lambda _root: False)
+    monkeypatch.setattr(heartbeat_loop, "_trim_file", lambda *_a, **_kw: None)
+
+
+def test_run_loop_executes_one_normal_tick_in_an_isolated_harness(
+        monkeypatch, tmp_path):
+    _isolate_run_loop(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        heartbeat_loop.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(_StopLoop()),
+    )
+
+    with pytest.raises(_StopLoop):
+        heartbeat_loop.run_loop(
+            str(tmp_path), str(tmp_path / "memory"), check_interval=10,
+            user_id="ou_owner", claude_timeout=123,
+        )
+
+    runner = _LoopRunner.instances[0]
+    assert runner.calls == [(False, None)]
+    assert runner.kwargs["jarvis_dir"] == str(tmp_path)
+    assert runner.kwargs["claude_timeout"] == 123
+    assert (tmp_path / "data" / ".heartbeat_beat").exists()
+
+
+def test_run_loop_drains_distinct_named_and_full_force_requests(
+        monkeypatch, tmp_path):
+    _isolate_run_loop(monkeypatch, tmp_path)
+    trigger = tmp_path / "force-trigger"
+    trigger.write_text("intention-check\nintention-check\nall\n",
+                       encoding="utf-8")
+    monkeypatch.setattr(heartbeat_loop.run_loop, "_last_full_force", 0.0,
+                        raising=False)
+    monkeypatch.setattr(
+        heartbeat_loop.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(_StopLoop()),
+    )
+
+    with pytest.raises(_StopLoop):
+        heartbeat_loop.run_loop(
+            str(tmp_path), str(tmp_path / "memory"), check_interval=10)
+
+    assert _LoopRunner.instances[0].calls == [
+        (True, "intention-check"), (True, None),
+    ]
+    assert not trigger.exists()
+
+
+def test_run_loop_hands_restart_to_governed_script_and_exits(
+        monkeypatch, tmp_path):
+    _isolate_run_loop(monkeypatch, tmp_path)
+    (tmp_path / ".restart_trigger").write_text("restart", encoding="utf-8")
+    spawned = []
+    monkeypatch.setattr(
+        heartbeat_loop.subprocess,
+        "Popen",
+        lambda command, **kwargs: spawned.append((command, kwargs)),
+    )
+
+    heartbeat_loop.run_loop(
+        str(tmp_path), str(tmp_path / "memory"), check_interval=10)
+
+    assert spawned[0][0] == [
+        "bash", str(tmp_path / "restart.sh"), "--runtime", "--yes",
+    ]
+    assert spawned[0][1]["start_new_session"] is True
+    assert not (tmp_path / ".restart_trigger").exists()
 
 
 def test_write_outbox(tmp_path):

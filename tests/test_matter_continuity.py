@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import core.db as db_module
-from core import intentions, memorial
+from core import intentions, matter_executor, memorial
 from core.jobs import JobManager
 from core.matter_bridge import (
     bind_conversation,
@@ -259,6 +259,102 @@ def test_prepare_handoff_uses_the_same_launcher_for_both_entry_points(
     event = next(item for item in events
                  if item["event_type"] == "handoff_prepared")
     assert event["payload"]["provider"] == "codex"
+
+
+@pytest.mark.parametrize("provider", ("claude", "codex"))
+def test_executor_launch_records_session_and_only_new_artifacts(
+        tmp_path, monkeypatch, provider):
+    matter = create_matter("跨执行器交接", next_action="完成实现")
+    context_path = tmp_path / "matter-context.md"
+    context_path.write_text("bounded Matter context", encoding="utf-8")
+    transcript = tmp_path / f"{provider}.jsonl"
+    if provider == "claude":
+        transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Claude 完成"}]},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        expected_summary = "Claude 完成"
+    else:
+        transcript.write_text(json.dumps({
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Codex 完成"},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        expected_summary = "Codex 完成"
+    session = {
+        "provider": provider,
+        "session_id": f"{provider}-session",
+        "workspace": str(tmp_path),
+        "path": str(transcript),
+        "title": "交接会话",
+        "model": "test-model",
+    }
+    discoveries = iter(([], [session]))
+    file_snapshots = iter(({"already-dirty.txt"}, {
+        "already-dirty.txt", "new-result.txt",
+    }))
+    calls = []
+
+    monkeypatch.setattr(matter_executor, "write_context_bundle",
+                        lambda _matter_id: context_path)
+    monkeypatch.setattr(matter_executor.shutil, "which",
+                        lambda name: f"/mock/{name}")
+    monkeypatch.setattr(matter_executor, "discover_sessions",
+                        lambda **_kwargs: next(discoveries))
+    monkeypatch.setattr(matter_executor, "_git_files",
+                        lambda _workspace: next(file_snapshots))
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(
+        matter_executor.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)) or Result(),
+    )
+
+    assert matter_executor.launch(
+        matter["id"], provider, workspace=tmp_path, prompt="完成剩余工作") == 0
+
+    command, kwargs = calls[0]
+    assert command[0] == f"/mock/{provider}"
+    assert kwargs["cwd"] == tmp_path.resolve()
+    assert "bounded Matter context" in command[-1]
+    assert "完成剩余工作" in command[-1]
+    if provider == "codex":
+        assert command[1:4] == ["--cd", str(tmp_path.resolve()), "--no-alt-screen"]
+    else:
+        assert command[1:3] == ["--name", f"Matter {matter['id']}"]
+
+    loaded = get_matter(matter["id"])
+    assert any(link["entity_type"] == "session"
+               and link["entity_id"] == session["session_id"]
+               for link in loaded["links"])
+    artifacts = [link["title"] for link in loaded["links"]
+                 if link["entity_type"] == "artifact"]
+    assert artifacts == ["new-result.txt"]
+    completed = next(event for event in loaded["events"]
+                     if event["event_type"] == "work_session_completed")
+    assert completed["summary"] == expected_summary
+    assert completed["payload"]["artifacts"] == ["new-result.txt"]
+
+
+def test_executor_launch_fails_before_writing_handoff_without_provider_cli(
+        tmp_path, monkeypatch):
+    matter = create_matter("缺执行器")
+    wrote_context = []
+    monkeypatch.setattr(matter_executor.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        matter_executor,
+        "write_context_bundle",
+        lambda _matter_id: wrote_context.append(True),
+    )
+
+    with pytest.raises(FileNotFoundError, match="codex CLI not found"):
+        matter_executor.launch(matter["id"], "codex", workspace=tmp_path)
+
+    assert wrote_context == []
+    assert not any(event["event_type"] == "work_session_started"
+                   for event in get_matter(matter["id"])["events"])
 
 
 def test_router_classifies_and_attaches_only_to_existing_matter():

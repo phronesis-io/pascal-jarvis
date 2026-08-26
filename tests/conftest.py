@@ -20,6 +20,42 @@ sys.path.insert(0, str(ROOT))
 _SUBPROCESS_RUN = subprocess.run
 
 
+@pytest.fixture(autouse=True)
+def _propagate_coverage_to_python_subprocesses(monkeypatch):
+    """Keep coverage active when a test intentionally supplies a tiny env.
+
+    Task-hook tests run the production scripts in child interpreters and often
+    replace the whole environment to prevent credential or runtime leakage.
+    Coverage's subprocess patch works for inherited environments; this fixture
+    copies only its instrumentation variables into explicit test envs. It is a
+    no-op during ordinary pytest runs.
+    """
+    if not os.environ.get("COVERAGE_PROCESS_CONFIG"):
+        yield
+        return
+
+    original_popen = subprocess.Popen
+    keys = (
+        "COVERAGE_FILE",
+        "COVERAGE_PROCESS_CONFIG",
+        "COVERAGE_PROCESS_START",
+        "PYTHONPATH",
+    )
+
+    def covered_popen(*args, **kwargs):
+        if kwargs.get("env") is not None:
+            child_env = dict(kwargs["env"])
+            for key in keys:
+                value = os.environ.get(key)
+                if value:
+                    child_env[key] = value
+            kwargs["env"] = child_env
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", covered_popen)
+    yield
+
+
 # (The old autouse `_desk_reachable_pinned` fixture is gone with REQ-119:
 # routing no longer consults the phone/web desk's live pairing state — Lark
 # is the only delivery surface — so there is nothing to pin for hermeticity.)
