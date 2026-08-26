@@ -491,6 +491,9 @@ def harness_environment(config: Config) -> dict[str, str]:
         "BACKUP_MAX_MEMORY_CHARS": str(
             claude.get("backup_max_memory_chars", 40000)
         ),
+        "CLAUDE_RELAY_ATTEMPT_TIMEOUT": str(
+            claude.get("relay_attempt_timeout", 120)
+        ),
         "CODEX_FALLBACK_ENABLED": str(routes["codex"].enabled).lower(),
         "CODEX_FALLBACK_MODEL": routes["codex"].model,
         "CODEX_FALLBACK_BINARY": routes["codex"].binary,

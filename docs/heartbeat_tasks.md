@@ -70,6 +70,11 @@ untrusted external text and private memory in the same prompt.
 The call chain has one wall-clock budget. Provider health is measured by
 `provider-canary`; a full task prompt is never reused as a probe. A timeout
 after tool access is ambiguous and cannot be replayed.
+Relay attempts are additionally capped by `claude.relay_attempt_timeout`
+(default 120s) inside the same budget. Replay-safe work reserves bounded time
+for every configured downstream route; the cap never extends the task budget.
+Provider failures on non-heavy isolated work stay provider-scoped, so route
+recovery cannot leave mail, memory, or triage tasks stuck behind task circuits.
 
 ---
 

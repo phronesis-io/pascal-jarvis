@@ -34,6 +34,23 @@ def provider_env(use_backup: bool, backup2_active: bool) -> dict[str, str] | Non
     return env
 
 
+def isolated_failure_scope(is_heavy: bool, context_overflow: bool,
+                           timed_out: bool, error: str) -> str:
+    """Classify an isolated model failure without poisoning task circuits."""
+    if is_heavy or context_overflow or not (timed_out or error):
+        return "task"
+    return "provider"
+
+
+def record_isolated_failure(circuit, is_heavy: bool, context_overflow: bool,
+                            timed_out: bool, error: str) -> tuple[bool, str]:
+    """Charge only task-owned failures to a task's circuit breaker."""
+    scope = isolated_failure_scope(
+        is_heavy, context_overflow, timed_out, error,
+    )
+    return (circuit.record_failure() if scope == "task" else False), scope
+
+
 def fallback_attempt_timeout(
     remaining_budget: Callable[..., int],
     call_timeout: int,
@@ -42,23 +59,55 @@ def fallback_attempt_timeout(
     backup2_active: bool,
     safe_replay: bool,
 ) -> int:
-    """Reserve one equal wall-clock slot for every configured later route."""
-    cap = call_timeout
-    if use_backup and safe_replay:
-        backup2 = (
-            not backup2_active
-            and os.environ.get("CLAUDE_BACKUP2_ENABLED", "false") == "true"
-            and bool(os.environ.get("CLAUDE_BACKUP2_AUTH_TOKEN"))
-            and bool(os.environ.get("CLAUDE_BACKUP2_BASE_URL"))
+    """Bound one attempt while preserving later routes inside one deadline."""
+
+    def configured(prefix: str, *, default_enabled: str) -> bool:
+        return (
+            os.environ.get(f"{prefix}_ENABLED", default_enabled) == "true"
+            and bool(os.environ.get(f"{prefix}_AUTH_TOKEN"))
+            and bool(os.environ.get(f"{prefix}_BASE_URL"))
         )
-        openai = (
-            os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
-            and bool(os.environ.get("OPENAI_API_KEY"))
+
+    def bounded_env(name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        return min(call_timeout, max(1, value))
+
+    remaining = remaining_budget()
+    if remaining <= 0:
+        return 0
+
+    relay_cap = bounded_env("CLAUDE_RELAY_ATTEMPT_TIMEOUT", 120)
+    current_cap = min(remaining, relay_cap if use_backup else call_timeout)
+    if not safe_replay:
+        # An ambiguous tool-capable timeout still fails closed. Relays are
+        # capped so a degraded intermediary cannot hold the scheduler for the
+        # full task envelope before that safe failure is recorded.
+        return remaining_budget(cap=current_cap)
+
+    downstream_caps: list[int] = []
+    if (not use_backup
+            and configured("CLAUDE_BACKUP", default_enabled="true")):
+        downstream_caps.append(relay_cap)
+    if (not backup2_active
+            and configured("CLAUDE_BACKUP2", default_enabled="false")):
+        downstream_caps.append(relay_cap)
+    if (os.environ.get("OPENAI_FALLBACK_ENABLED", "true") == "true"
+            and bool(os.environ.get("OPENAI_API_KEY"))):
+        downstream_caps.append(
+            bounded_env("OPENAI_FALLBACK_TIMEOUT", 120)
         )
-        downstream = int(backup2) + int(openai)
-        if downstream:
-            cap = max(1, remaining_budget() // (1 + downstream))
-    return remaining_budget(cap=cap)
+
+    if downstream_caps:
+        # Fixed downstream caps are ideal for the normal 600s envelope. For a
+        # smaller caller budget, shrink every slot fairly instead of reserving
+        # more time than the logical call owns.
+        fair_cap = max(1, remaining // (1 + len(downstream_caps)))
+        reserved = sum(min(cap, fair_cap) for cap in downstream_caps)
+        current_cap = min(current_cap, max(1, remaining - reserved))
+    return remaining_budget(cap=current_cap)
 
 
 def run_provider_attempt(

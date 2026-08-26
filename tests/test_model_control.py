@@ -201,5 +201,6 @@ def test_harness_environment_is_generated_from_the_same_catalog(tmp_path):
 
     assert private["CLAUDE_BACKUP_MODEL"] == "gpt-through-claude"
     assert private["CLAUDE_BACKUP_AUTH_TOKEN"] == "relay-secret"
+    assert private["CLAUDE_RELAY_ATTEMPT_TIMEOUT"] == "120"
     assert private["OPENAI_FALLBACK_MODEL"] == "gpt-api"
     assert private["OPENAI_API_KEY_CONFIG"] == "api-secret"

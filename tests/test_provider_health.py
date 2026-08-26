@@ -277,6 +277,73 @@ def test_successful_canary_cannot_erase_older_real_timeout(tmp_path):
     assert row["canary_checked_epoch"] > 0
 
 
+def test_successful_openai_canary_clears_older_network_cooldown(tmp_path):
+    _write_config(tmp_path)
+    ph.observe(
+        "openai", "unhealthy", "network_error",
+        root=tmp_path, now_epoch=10_000,
+    )
+
+    state = ph.probe_all(
+        tmp_path,
+        runner=lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}),
+            stderr="",
+        ),
+        openai_caller=lambda *a, **k: {
+            "output_text": ph.CANARY_MARKER,
+            "model": "gpt-observed",
+        },
+    )
+
+    row = next(item for item in state["providers"]
+               if item["id"] == "openai")
+    assert row["status"] == "healthy"
+    assert row["observation_source"] == "canary"
+    assert row["consecutive_failures"] == 0
+    assert row["cooldown_until_epoch"] == 0
+    assert row["last_failure_epoch"] == 10_000
+    assert ph.preferred_fallback(
+        tmp_path, provider_ids=("openai",)
+    ) == "openai"
+
+
+def test_concurrent_openai_network_failure_wins_over_canary(tmp_path):
+    _write_config(tmp_path)
+    probe_started = threading.Event()
+    finish_probe = threading.Event()
+    result = {}
+
+    def caller(*_args, **_kwargs):
+        probe_started.set()
+        assert finish_probe.wait(timeout=2)
+        return {"output_text": ph.CANARY_MARKER}
+
+    def run_probe():
+        result["state"] = ph.probe_all(
+            tmp_path,
+            runner=lambda cmd, **kwargs: subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"result": ph.CANARY_MARKER}),
+                stderr="",
+            ),
+            openai_caller=caller,
+        )
+
+    thread = threading.Thread(target=run_probe)
+    thread.start()
+    assert probe_started.wait(timeout=2)
+    ph.observe("openai", "unhealthy", "network_error", root=tmp_path)
+    finish_probe.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    row = next(item for item in result["state"]["providers"]
+               if item["id"] == "openai")
+    assert row["status"] == "unhealthy"
+    assert row["observation_source"] == "real_request"
+    assert row["detail"] == "real request: network_error"
+
+
 def test_failed_canary_preserves_real_failure_streak_and_refreshes_cooldown(
     tmp_path,
 ):

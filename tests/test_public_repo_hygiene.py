@@ -52,6 +52,7 @@ REQUIRED_GITIGNORE_PATTERNS = (
     "sources.yaml",
     "/todos.md",
     "/warm/",
+    "daemon.log.*",
 )
 
 

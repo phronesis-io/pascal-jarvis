@@ -57,6 +57,9 @@ compatible provider, and records the model that actually answered. One
 logical call owns one wall-clock budget. Provider recovery is measured by the
 small `provider-canary`; a full production prompt is never sacrificed as a
 health probe, and a timed-out tool-capable request is never replayed.
+Claude-compatible relays also have an independent
+`claude.relay_attempt_timeout` cap inside that budget, so a green tiny canary
+cannot let a stalled production-size relay monopolize the scheduler.
 Outbound model stages are no-tools and receive only the curated public group
 context; deterministic post-hooks remain the only effect boundary.
 

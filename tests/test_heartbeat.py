@@ -1117,8 +1117,79 @@ def test_elapsed_time_budget_keeps_a_final_gpt_slot(tmp_path, monkeypatch):
     )
 
     assert runner.claude_call("safe", allow_tools=False) == "GPT_OK"
-    assert attempt_timeouts == [600, 40, 40]
-    assert gpt_timeouts == [40]
+    # One 600s logical envelope: primary keeps the remainder after three
+    # bounded downstream slots, then every relay/GPT route gets at most 120s.
+    assert attempt_timeouts == [240, 120, 120]
+    assert gpt_timeouts == [120]
+
+
+def test_small_fallback_budget_shrinks_every_remaining_slot_fairly(
+        monkeypatch):
+    from core.heartbeat_provider import fallback_attempt_timeout
+
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
+    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
+    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.invalid")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    remaining = [60]
+
+    def budget(*, cap=None):
+        return remaining[0] if cap is None else min(remaining[0], cap)
+
+    slots = []
+    for use_backup, backup2_active in (
+        (False, False), (True, False), (True, True),
+    ):
+        slot = fallback_attempt_timeout(
+            budget,
+            60,
+            use_backup=use_backup,
+            backup2_active=backup2_active,
+            safe_replay=True,
+        )
+        slots.append(slot)
+        remaining[0] -= slot
+
+    assert slots == [15, 15, 15]
+    assert remaining == [15]
+
+
+def test_tool_capable_backup_timeout_is_bounded_without_replay(
+        tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n",
+                          claude_timeout=600)
+    monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setattr(
+        "core.provider_health.preferred_route",
+        lambda _root, **_kwargs: "backup1",
+    )
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
+    monkeypatch.setenv("CLAUDE_RELAY_ATTEMPT_TIMEOUT", "120")
+    attempt_timeouts = []
+
+    def isolated(cmd, **kwargs):
+        attempt_timeouts.append(kwargs["timeout"])
+        raise heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
+    monkeypatch.setattr(
+        runner,
+        "_openai_fallback_call",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a tool-capable timed-out request must never be replayed"
+        ),
+    )
+
+    assert runner.claude_call("tool-capable backup", allow_tools=True) == ""
+    assert attempt_timeouts == [120]
+    assert runner._last_call_error == "claude call timed out (120s)"
+    assert runner._call_timed_out is True
 
 
 def test_heartbeat_skips_primary_during_real_request_overload_cooldown(
@@ -2374,6 +2445,75 @@ def test_heavy_solo_failure_does_not_feed_shared_counter(tmp_path, monkeypatch):
     # per-task breaker accounting is retained for heavy solo failures
     assert state["deep-research"]["circuit"]["consecutive_failures"] == 1
     assert state["deep-research"]["last_status"] == "failed"
+
+
+@pytest.mark.parametrize("directives", [
+    "- model: gpt",
+    "- no-tools: true",
+    "- untrusted-input: true\n- model: gpt",
+])
+def test_provider_failure_does_not_trip_nonheavy_isolated_task_circuit(
+        tmp_path, monkeypatch, directives):
+    runner = _make_runner(
+        tmp_path,
+        f"### mail-triage\n- interval: 15m\n{directives}\n- prompt: triage\n",
+    )
+    from core.task_protocol import TaskState
+    state = runner.load_state()
+    task = TaskState()
+    task.circuit.consecutive_failures = task.circuit.FAILURE_THRESHOLD - 1
+    task.circuit.total_runs = task.circuit.FAILURE_THRESHOLD - 1
+    task.circuit.total_failures = task.circuit.FAILURE_THRESHOLD - 1
+    state["mail-triage"] = task.to_dict()
+    runner.save_state(state)
+
+    def provider_failure(*_args, **_kwargs):
+        runner._last_call_error = "no healthy provider fallback available"
+        return ""
+
+    monkeypatch.setattr(runner, "claude_call", provider_failure)
+    runner.run_cycle(force=True)
+
+    final = runner.load_state()["mail-triage"]
+    assert final["last_status"] == "failed"
+    assert final["circuit"]["consecutive_failures"] == 4
+    assert final["circuit"]["disabled_until"] == 0
+    events = _sched_events(runner)
+    assert not any(event["event"] == "circuit_tripped" for event in events)
+    failed = next(event for event in events
+                  if event["event"] == "task_finish")
+    assert failed["failure_scope"] == "provider"
+
+
+def test_empty_isolated_response_remains_task_owned(tmp_path, monkeypatch):
+    runner = _make_runner(
+        tmp_path,
+        "### mail-triage\n- interval: 15m\n- no-tools: true\n- prompt: triage\n",
+    )
+    from core.task_protocol import TaskState
+    state = runner.load_state()
+    task = TaskState()
+    task.circuit.consecutive_failures = task.circuit.FAILURE_THRESHOLD - 1
+    task.circuit.total_runs = task.circuit.FAILURE_THRESHOLD - 1
+    task.circuit.total_failures = task.circuit.FAILURE_THRESHOLD - 1
+    state["mail-triage"] = task.to_dict()
+    runner.save_state(state)
+
+    def empty_success(*_args, **_kwargs):
+        runner._last_call_error = ""
+        runner._call_timed_out = False
+        return ""
+
+    monkeypatch.setattr(runner, "claude_call", empty_success)
+    runner.run_cycle(force=True)
+
+    final = runner.load_state()["mail-triage"]
+    assert final["circuit"]["disabled_until"] > time.time()
+    events = _sched_events(runner)
+    assert any(event["event"] == "circuit_tripped" for event in events)
+    failed = next(event for event in events
+                  if event["event"] == "task_finish")
+    assert failed["failure_scope"] == "task"
 
 
 def test_replay_2026_07_02_outage_zero_circuit_trips(tmp_path, monkeypatch):

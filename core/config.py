@@ -31,6 +31,10 @@ _DEFAULTS = {
         # this is smaller than the primary memory budget.
         "backup_max_session_size": 100000,
         "backup_max_memory_chars": 40000,
+        # A relay is less trustworthy than the official provider and must not
+        # monopolize an entire heartbeat cycle when its small canary is green
+        # but a production-size request stalls.
+        "relay_attempt_timeout": 120,
         # Max seconds a single heartbeat Claude call may run. Raised from the
         # old hard-coded 300s so heartbeat tasks have room to fan out subagents
         # (Task/Agent) and wait for them. Bumping this lengthens the worst-case
