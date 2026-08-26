@@ -1930,12 +1930,11 @@ def diagnose_and_fix(issues: list[str]) -> str:
     if post_check["healthy"] and "note" not in post_check:
         msg = f"Auto-restart successful (attempt {restart_count})"
         log("INFO", msg)
-        # The log line above keeps its English wording (conversation_audit
-        # classifies on "Auto-restart successful"); the card does not.
-        notify_lark("✅ 刚才我这边停了，已经自动重启好，现在恢复正常了。\n\n"
-                    "停的原因：\n" + _issues_block(issues) + "\n\n知道就行，"
-                    "不用你做什么。",
-                    incident_key="bot-restart-recovered")
+        # A self-heal that completed without owner involvement is internal
+        # operational evidence, not a reason to interrupt Pascal. If a
+        # breaker alert was already raised, _clear_breaker_latch below still
+        # sends the matching recovery receipt so a real human-facing incident
+        # cannot remain open.
         restart_count = 0
         _save_restart_state()
         # Defensive: a latch created out-of-band must not outlive a verified

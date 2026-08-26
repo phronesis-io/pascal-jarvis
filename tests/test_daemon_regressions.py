@@ -907,11 +907,17 @@ def test_restart_budget_reset_on_success_is_persisted(monkeypatch, restart_env):
     state_file = restart_env
     monkeypatch.setattr(daemon_mod, "check_health",
                         lambda: {"healthy": True, "issues": []})
+    alerts = []
+    monkeypatch.setattr(
+        daemon_mod, "notify_lark",
+        lambda msg, *args, **kwargs: alerts.append(msg),
+    )
 
     daemon_mod.diagnose_and_fix(["bot.sh is not running"])
 
     assert daemon_mod.restart_count == 0
     assert json.loads(state_file.read_text())["restart_count"] == 0
+    assert alerts == [], "a completed self-heal must stay internal"
 
 
 def test_max_attempts_latches_breaker(monkeypatch, restart_env):
