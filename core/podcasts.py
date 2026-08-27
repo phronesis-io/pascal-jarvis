@@ -376,6 +376,106 @@ def pick() -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------- broadcast
+
+# Pascal 2026-08-27:「你可以做一个 supply，把高质量的去走发布，我们争取成为这个
+# 网站里面的一个比较高质量的贡献者。」So: not every episode goes out. What leaves
+# this machine is a stranger-facing artefact built from a PUBLIC transcript —
+# never his name, his tools, or a link into his private drive.
+_PRIVATE_RE = re.compile(
+    r"(?i)\b(pascal|yongyi|jarvis|phronesis)\b|飞书|白皮书|pcnlty|feishu\.cn"
+)
+_TIMESTAMP_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
+MIN_BROADCAST_CHARS = 400
+MIN_BROADCAST_TIMESTAMPS = 2
+MAX_SUMMARY_CHARS = 100
+BROADCAST_TTL_DAYS = 30
+DEFAULT_BROADCAST_DOMAINS = ["tech", "ai-agents", "research"]
+
+
+def broadcast_reject_reason(video_id: str, content: str, summary: str,
+                            state: dict | None = None) -> str:
+    """Why this digest must NOT go on the network. Empty string == publishable.
+
+    Fail closed: every bar here is a bar the network would otherwise have to
+    trust us on. A thin post costs other agents' attention, and attention is
+    the only currency the network has.
+    """
+    state = state if state is not None else load_state()
+    if not video_id:
+        return "no video_id"
+    if video_id in (state.get("broadcast") or {}):
+        return "already broadcast"
+    content = (content or "").strip()
+    summary = (summary or "").strip()
+    if len(content) < MIN_BROADCAST_CHARS:
+        return f"content too thin ({len(content)} < {MIN_BROADCAST_CHARS})"
+    if len(_TIMESTAMP_RE.findall(content)) < MIN_BROADCAST_TIMESTAMPS:
+        return "fewer than two timestamped claims — not grounded enough"
+    if not summary or len(summary) > MAX_SUMMARY_CHARS:
+        return "summary missing or over 100 chars"
+    leak = _PRIVATE_RE.search(content) or _PRIVATE_RE.search(summary)
+    if leak:
+        return f"private marker in public text: {leak.group(0)!r}"
+    return ""
+
+
+def _eigenflux() -> str | None:
+    return shutil.which("eigenflux")
+
+
+def _item_id(stdout: str) -> str:
+    m = re.search(r'"item_id"\s*:\s*"?(\d+)"?', stdout or "")
+    return m.group(1) if m else ""
+
+
+def broadcast(video_id: str, title: str, content: str, summary: str,
+              url: str = "", keywords: list[str] | None = None,
+              domains: list[str] | None = None) -> dict:
+    """Publish one digest as a `supply` broadcast. Never raises: a failed
+    broadcast must not cost him the card the digest was actually for."""
+    state = load_state()
+    reason = broadcast_reject_reason(video_id, content, summary, state)
+    if reason:
+        return {"skipped": reason}
+    ef = _eigenflux()
+    if not ef:
+        return {"skipped": "eigenflux CLI not installed"}
+
+    notes = {
+        "type": "supply",
+        "domains": (domains or DEFAULT_BROADCAST_DOMAINS)[:3],
+        "summary": summary.strip(),
+        "expire_time": (datetime.now() + timedelta(days=BROADCAST_TTL_DAYS))
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_type": "curated",
+        "expected_response": (
+            "What: the podcast episode URL you want digested, plus the one "
+            "question you want answered from it. Constraints: an official "
+            "transcript must exist; one episode per request. Deadline: 24h."
+        ),
+        "keywords": (keywords or ["podcast-digest", "transcript",
+                                  "ai-agents", "timestamps"])[:8],
+    }
+    cmd = [ef, "publish", "--content", content,
+           "--notes", json.dumps(notes, ensure_ascii=False), "--accept-reply"]
+    if url:
+        cmd += ["--url", url]
+    code, out, err = _run(cmd, timeout=180)
+    if code != 0:
+        return {"error": (err or out).strip()[:200]}
+    item_id = _item_id(out)
+    if not item_id:
+        return {"error": f"publish returned no item_id: {out.strip()[:200]}"}
+
+    state.setdefault("broadcast", {})[video_id] = {
+        "item_id": item_id, "title": title[:120],
+        "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    save_state(state)
+    return {"item_id": item_id}
+
+
 # ------------------------------------------------------------------------- cli
 
 
@@ -393,6 +493,12 @@ def main(argv=None) -> int:
     p_scan.add_argument("--lookback-days", type=int, default=None)
     p_prep = sub.add_parser("prepare")
     p_prep.add_argument("video_id")
+    p_bc = sub.add_parser("broadcast")
+    p_bc.add_argument("video_id")
+    p_bc.add_argument("--content-file", required=True)
+    p_bc.add_argument("--summary", required=True)
+    p_bc.add_argument("--title", default="")
+    p_bc.add_argument("--url", default="")
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("video_id")
     p_mark.add_argument("--doc", default="")
@@ -428,6 +534,13 @@ def main(argv=None) -> int:
             ]
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 1 if info.get("error") else 0
+
+    if args.cmd == "broadcast":
+        body = Path(args.content_file).read_text(encoding="utf-8")
+        result = broadcast(args.video_id, args.title, body, args.summary,
+                           url=args.url or f"https://www.youtube.com/watch?v={args.video_id}")
+        print(json.dumps(result, ensure_ascii=False))
+        return 1 if result.get("error") else 0
 
     if args.cmd == "mark":
         mark(args.video_id, args.doc)

@@ -7,7 +7,10 @@ short teaser. This hook does three things and nothing else:
 
   1. Marks the episode seen, so tomorrow moves on to the next one.
   2. Stamps the day, so the 07:00-10:00 window fires at most one card.
-  3. Emits ONE 知会级 card: a pointer + why it is worth his 5 minutes.
+  3. Publishes the English extract as a `supply` broadcast when the task
+     supplied one and it clears core.podcasts' bars (Pascal 2026-08-27:
+     「把高质量的去走发布，争取成为比较高质量的贡献者」). Never every episode.
+  4. Emits ONE 知会级 card: a pointer + why it is worth his 5 minutes.
 
 It is a notice, not a decision — he does not have to approve anything, so it
 must not carry 批红 options (REQ: 信封与正文角色对账).
@@ -64,6 +67,21 @@ def main() -> int:
         podcasts.mark(video_id, doc_url)
     _stamp_today()
 
+    receipt = f"已下载并通读该期官方字幕全文，摘要写入飞书文档 {doc_url}"
+    bc = parsed.get("broadcast")
+    if isinstance(bc, dict) and str(bc.get("content") or "").strip():
+        result = podcasts.broadcast(
+            video_id=video_id, title=title,
+            content=str(bc.get("content") or ""),
+            summary=str(bc.get("summary") or ""),
+            url=f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+            keywords=bc.get("keywords") if isinstance(bc.get("keywords"), list) else None,
+            domains=bc.get("domains") if isinstance(bc.get("domains"), list) else None,
+        )
+        print(f"[podcast-digest] broadcast: {result}", file=sys.stderr)
+        if result.get("item_id"):
+            receipt += f"；并以 supply 形态广播到 EigenFlux（item {result['item_id']}）"
+
     if doc_url not in body:
         body = f"{body}\n\n[全文摘要]({doc_url})"
 
@@ -71,7 +89,7 @@ def main() -> int:
         from core import memorial
         mem_id, _ = memorial.create(
             source="podcast-digest", title=title, body=body,
-            work_receipt=(f"已下载并通读该期官方字幕全文，摘要写入飞书文档 {doc_url}"),
+            work_receipt=receipt,
             options=OPTIONS, authoring_protocol=True, send=False,
             attention="notice",
             context="每日播客摘要：他 2026-08-27 亲口要的「每天搞一点，我简单看看，别让我错过」。知会级，不需要他拍板。",
@@ -83,7 +101,7 @@ def main() -> int:
         from core.card import build_card
         print(build_card(
             f"🎧 {title}", body, source="podcast-digest",
-            work_receipt="已下载并通读该期官方字幕全文并写成飞书摘要",
+            work_receipt=receipt,
         ))
     return 0
 
