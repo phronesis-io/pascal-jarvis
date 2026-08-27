@@ -297,6 +297,15 @@ def review_memory_claim(
     )
 
 
+def model_usage_status(*, refresh: bool = True) -> dict[str, Any]:
+    """Read the unified model package, health, and fallback status."""
+    from core.model_usage import build_report, load_latest
+
+    if refresh:
+        return build_report()
+    return load_latest()
+
+
 def frontstage_health() -> dict[str, Any]:
     """Return protocol health and recoverable residue for operator review."""
     audit = audit_matter_runs(now=time.time())

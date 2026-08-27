@@ -419,7 +419,7 @@ class HeartbeatRunner:
     # deferred cycle spends an occurrence that never reaches the user.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
                        "eigenflux-friends", "eigenflux-inbox-reconcile",
-                       "intention-check", "routine-run"}
+                       "intention-check", "model-usage", "routine-run"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output
@@ -432,6 +432,7 @@ class HeartbeatRunner:
         "iteration-observe",
         "log-maintenance",
         "memorial-escrow",
+        "model-usage",
         # perception-collect (2026-08-24): its "HEARTBEAT_OK unless the same
         # source keeps failing" prompt was a deterministic check answered by a
         # solo full-memory call every 15 min (~43% of all heartbeat LLM calls,

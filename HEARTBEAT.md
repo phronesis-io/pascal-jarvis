@@ -6,12 +6,13 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 **Priority tasks** bypass the batch cap and run every cycle when due:
 `calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`,
-`eigenflux-friends`, `eigenflux-inbox-reconcile`, `intention-check`, `routine-run`
+`eigenflux-friends`, `eigenflux-inbox-reconcile`, `intention-check`,
+`model-usage`, `routine-run`
 
 **Tier 0 tasks** bypass Claude entirely (deterministic local work):
 `calendar-sync`, `delegation-reconcile`, `eigenflux-inbox-reconcile`,
 `iteration-observe`, `log-maintenance`, `memorial-escrow`,
-`perception-collect`, `provider-canary`, `self-diagnostic`
+`model-usage`, `perception-collect`, `provider-canary`, `self-diagnostic`
 
 ## Task Index
 
@@ -29,7 +30,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Thinking Review | thinking-review | silent (log only) |
 | Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync compiles source-grounded memory and surfaces only a newly detected contradiction as an ambient ledger item; metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
 | Team | phronesis-monitor | only when the user is named or his action is needed (REQ-121); team chatter never cards |
-| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic | silent (beat only on change/fail; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent) |
+| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, model-usage, provider-canary, self-diagnostic | model-usage is silent except the first exact quota-risk transition; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent |
 
 **Permanently silent tasks** (behavioral_rules.md — autonomous 内务，长期零响应):
 `daily-plan`, `self-diagnostic`, `thinking-review`, `iteration-observe`
@@ -774,6 +775,16 @@ duplicate the common style contract here.
     one tiny bounded request. Credentials stay in environment variables or HTTP
     headers; only status, latency, requested/observed model and a redacted error
     are persisted. Disabled or unconfigured routes are reported honestly.
+
+### model-usage
+- interval: 1h
+- pre: tasks/model_usage_pre.py
+- post: tasks/model_usage_post.py
+- prompt: |
+    Deterministic Tier-0 package check with no model call. Read exact supported
+    quota windows, keep unsupported provider allowance unknown, update the
+    private forecast history, and emit at most one card for each new
+    exhausted/critical/account-limited episode.
 
 ### repos-sync
 - interval: 24h

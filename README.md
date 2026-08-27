@@ -652,6 +652,12 @@ code archive is git history.
   paths by design. Auxiliary paths retain their own Claude/relay/API order
   through `core.aux_model`; only the owner's live Lark conversation uses the
   local Codex CLI rung.
+- Ask `/usage` (or naturally ask about package allowance) in the owner Lark
+  chat, or use the Codex `jarvis_model_status` tool. Codex reports available
+  account windows and reset times exactly. Claude-compatible relays and API
+  routes without a quota endpoint are labeled unknown; login and green canary
+  results are never converted into made-up remaining percentages. A scheduled
+  refresh stays silent unless a new critical/exhausted episode appears.
 
 **Heartbeat not running tasks**
 - Check `heartbeat_state.json` for last-run timestamps

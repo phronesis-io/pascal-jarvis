@@ -775,6 +775,7 @@ def _model_commands(root: Path) -> list[dict[str, Any]]:
         ("lark:model:status", "/model", "Show the last successful provider/model and route health"),
         ("lark:model:codex", "/model codex", "Prefer Codex for the current private conversation"),
         ("lark:model:auto", "/model auto", "Restore Claude-first routing with automatic fallback"),
+        ("lark:model:usage", "/usage", "Show exact known package usage, reset time, and fallback order"),
     ]
     capabilities = []
     for capability_id, trigger, description in definitions:

@@ -47,6 +47,15 @@ task that can finish and be verified entirely in the current Codex task.
   the named claim in the current conversation. Never infer consent, self-review
   a claim, or invent a reviewer identity.
 
+## Model Status
+
+- Use `jarvis_model_status` when Pascal asks which model is active, how much
+  package usage remains, when it resets, or whether fallback is usable.
+- Treat only `quota_evidence=exact` windows as numeric allowance. Account
+  login, a configured token, and a green canary do not prove remaining quota.
+- Report unknown providers plainly. Never convert token counts into a made-up
+  subscription percentage.
+
 ## Authority
 
 - A Result Receipt closes the execution window, not the Matter.

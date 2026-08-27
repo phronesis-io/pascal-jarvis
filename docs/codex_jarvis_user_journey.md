@@ -112,6 +112,23 @@ remains. Unknown provider data must be labeled unknown; a small canary, a
 configured token, or a successful login is not proof of usable production
 quota.
 
+The repository now implements this contract through `core.model_usage`:
+
+- Codex desktop/mobile can call `jarvis_model_status`; owner Lark can use
+  `/usage` or a direct natural-language quota question.
+- The signed-in Codex app-server supplies exact used percentage and reset time.
+- Claude CLI supplies account type only. MICU/relay/API routes remain unknown
+  until they expose a supported, credential-free balance endpoint.
+- Numeric observations are retained privately for 45 days. A forecast is
+  shown only after two observations in the same reset window, at least five
+  minutes apart, demonstrate positive consumption.
+- An hourly model-free Tier-0 task refreshes the view. It interrupts only
+  on a new `>=90%`, exhausted, predicted-before-reset, or real-request account
+  limit episode; repetition is silent and recovery rearms the warning.
+
+The runtime does not redeem reset credits, buy capacity, or open billing pages.
+Those actions are consequential and remain explicit owner decisions.
+
 ## Replacement And Retirement Rules
 
 - Use Codex native tasks, Remote, `/goal`, scheduling, approvals, tools, and

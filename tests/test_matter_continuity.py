@@ -14,6 +14,7 @@ from core import intentions, matter_executor, memorial
 from core.jobs import JobManager
 from core.matter_bridge import (
     bind_conversation,
+    command_would_handle,
     context_for_conversation,
     get_binding,
     handle_lark_command,
@@ -92,6 +93,44 @@ def test_model_command_reports_last_actual_provider_and_model():
                 model="gpt-test", session_id="sid-1")
     reply = handle_lark_command("当前模型", "ou_owner")["reply"]
     assert "GPT fallback / gpt-test" in reply
+
+
+def test_usage_question_uses_deterministic_runtime_report(monkeypatch):
+    from core import model_usage
+
+    observed = {
+        "active_route": "codex",
+        "fallback_order": ["codex", "primary"],
+        "claude_account": {"subscription_type": "max"},
+        "codex": {
+            "windows": [{
+                "limit_name": "Codex",
+                "window_minutes": 10080,
+                "window_label": "7 天",
+                "used_percent": 47,
+                "resets_at": "2026-09-01T23:29+08:00",
+                "predicted_exhaustion_at": "",
+            }],
+            "reset_credits": {"available_count": 0},
+        },
+        "routes": [],
+    }
+    calls = []
+    monkeypatch.setattr(
+        model_usage, "build_report", lambda: calls.append(1) or observed,
+    )
+
+    result = handle_lark_command("这个套餐的用量是不是不够了？", "ou_owner")
+
+    assert result["handled"] is True
+    assert "已用 47%" in result["reply"]
+    assert "7 天额度已用 47%" in result["reply"]
+    assert "当前尝试顺序：codex -> primary" in result["reply"]
+    assert calls == [1]
+
+
+def test_phone_plan_question_is_not_claimed_as_model_usage():
+    assert command_would_handle("我的手机套餐流量还剩多少？") is False
 
 
 def test_owner_can_switch_runtime_preference_between_codex_and_claude():

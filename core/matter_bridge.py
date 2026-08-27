@@ -417,6 +417,8 @@ def command_would_handle(content: str) -> bool:
     if text.lower() in {
             "/model", "当前模型", "现在是什么模型", "你是什么模型"}:
         return True
+    if _is_model_usage_command(text):
+        return True
     return _match_command(text) is not None
 
 
@@ -528,6 +530,23 @@ def _model_preference_command(content: str) -> str | None:
     return None
 
 
+def _is_model_usage_command(content: str) -> bool:
+    """Recognize direct quota questions without handing them to a model."""
+    text = re.sub(r"\s+", "", str(content or "").strip().lower())
+    if text in {"/usage", "套餐用量", "模型额度", "额度还剩多少"}:
+        return True
+    if any(word in text for word in ("手机", "流量", "话费", "运营商")):
+        return False
+    return bool(
+        ("套餐" in text and any(word in text for word in (
+            "用量", "额度", "还剩", "剩余", "够不够", "不够",
+        )))
+        or ("额度" in text and any(word in text for word in (
+            "用量", "还剩", "剩余", "多少", "够不够", "不够", "用完",
+        )))
+    )
+
+
 def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                         chat_type: str = "p2p", actor: str = "user") -> dict:
     preference_command = _model_preference_command(content)
@@ -549,7 +568,17 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                 "不会因为额度耗尽而中断。"
             )
         return {"handled": True, "reply": reply}
-    if str(content or "").strip().lower() in {
+    normalized_content = str(content or "").strip().lower()
+    if _is_model_usage_command(content):
+        try:
+            from core.model_usage import build_report, status_text
+            return {"handled": True, "reply": status_text(build_report())}
+        except Exception:
+            return {"handled": True, "reply": (
+                "这次没有读到套餐用量；已知模型健康状态仍会继续记录，"
+                "不会把未知误报成有额度。"
+            )}
+    if normalized_content in {
             "/model", "当前模型", "现在是什么模型", "你是什么模型"}:
         from core.runtime_provider import get_preference, preference_label
         route = preference_label(get_preference(conv_key))
@@ -570,10 +599,18 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                 )
             except Exception:
                 chain = ""
+            usage = ""
+            try:
+                from core.model_usage import load_latest, status_text
+                latest = load_latest()
+                if latest:
+                    usage = "\n\n套餐用量：\n" + status_text(latest)
+            except Exception:
+                pass
             return {"handled": True, "reply": (
                 f"上一条实际由 {provider} / {state.get('model') or 'unknown'} 回答。\n"
                 f"记录时间：{state.get('updated_at', '')}\n"
-                f"路由模式：{route}{chain}"
+                f"路由模式：{route}{chain}{usage}"
             )}
         from core.config import Config
         try:

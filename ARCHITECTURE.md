@@ -388,6 +388,14 @@ warning only after the automatic retry budget is exhausted.
   explicit Pascal review can confirm, choose, or reject a disputed claim.
   Applied compile batches erase transcript payloads while retaining source
   digests, references, claim lifecycle, and audit evidence.
+- `core.model_usage`: the joined product view over package allowance,
+  reset windows, account metadata, real-request health, and the current
+  fallback plan. Codex allowance comes from the signed-in local app-server;
+  providers without a provider-defined quota surface remain `unknown`. Numeric
+  observations support exhaustion forecasts but never store credentials,
+  opaque credit identifiers, or provider billing prose. The hourly Tier-0
+  usage task refreshes this view and emits only the first warning in a new
+  critical/exhausted episode; recovery rearms it.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
@@ -451,6 +459,9 @@ warning only after the automatic retry budget is exhausted.
 - Memory Compiler batches, source digests, traceable claims, source links, and
   unresolved/resolved conflicts. These records are remembered assertions, not
   independent evidence that an external action or release succeeded.
+- Numeric model-usage observations by route, limit, window, and reset epoch.
+  They are private telemetry for trend/forecast calculations, not billing
+  authority and not proof that a production-sized request will succeed.
 
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable

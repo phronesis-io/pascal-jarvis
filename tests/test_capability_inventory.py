@@ -60,7 +60,9 @@ def _fixture_repo(tmp_path: Path) -> Path:
         "    if command in {'/model auto'}:\n"
         "        return 'auto'\n"
         "    if command in {'/model'}:\n"
-        "        return 'status'\n",
+        "        return 'status'\n"
+        "    if command in {'/usage'}:\n"
+        "        return 'usage'\n",
         encoding="utf-8",
     )
     (tmp_path / "bot.sh").write_text(
@@ -99,6 +101,7 @@ def test_fixture_discovers_every_fact_source(tmp_path):
     assert "admin-route:get:/api/session/{param}" in by_id
     assert "lark:matter:new" in by_id
     assert "lark:model:codex" in by_id
+    assert "lark:model:usage" in by_id
     assert "lark:session:stop" in by_id
     assert by_id["cli:core.sample"]["metadata"]["subcommands"] == ["show"]
     assert validate_inventory(inventory) == []

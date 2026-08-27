@@ -302,3 +302,26 @@ already proven.
 
 No memory claim, including a human-authored one, is proof of an external side
 effect. Delegation and domain-specific read-back remain authoritative.
+
+## ADR-009: Model Usage Is Evidence-Graded Product State
+
+**Status:** accepted; repository implementation complete, release pending
+
+- `core.model_usage` owns one joined read view across exact provider quota,
+  non-secret account metadata, real-request health, and `model_control` route
+  order. It does not choose or invoke a model.
+- Numeric allowance is valid only when a provider-defined read surface returns a
+  named window and reset. A successful login, configured credential, token
+  counter, or bounded canary never proves remaining subscription capacity.
+- Codex is currently `exact` through the signed-in local app-server. Claude is
+  `account_only`; MICU/relay/API routes are `unknown` until a defined balance
+  surface exists. Unknown is displayed, never estimated.
+- Private numeric observations are retained for 45 days. Exhaustion prediction
+  requires positive consumption across observations in the same reset window,
+  at least five minutes apart.
+- An hourly model-free Tier-0 task refreshes the view. It emits one
+  warning for a new critical/exhausted/account-limited episode, stays silent on
+  repetition, and rearms only after recovery.
+- Reading usage may cache sanitized telemetry but causes no provider spend and
+  no external effect. Buying capacity or consuming a reset credit always
+  requires explicit owner action.

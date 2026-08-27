@@ -9,6 +9,7 @@ from core.codex_frontstage import (
     create_frontstage_matter,
     frontstage_health,
     matter_status,
+    model_usage_status,
     review_memory_claim,
     release_matter_run,
     renew_matter_run,
@@ -26,6 +27,9 @@ digest, and release every run. A Result Receipt never completes the Matter.
 External effects require trusted Delegation evidence; model prose is not proof.
 Compiled memory is read-only unless Pascal has explicitly reviewed a named
 claim in the current conversation. Never infer approval or invent a reviewer.
+For package usage, report numeric allowance only from exact quota evidence.
+A login, configured credential, or successful canary is not remaining quota;
+show unknown when a provider exposes no supported read surface.
 """.strip()
 
 
@@ -173,6 +177,15 @@ def create_server():
     def abort(run_id: str, error: str) -> dict[str, Any]:
         """Release a failed execution lease with a system-observed receipt."""
         return abort_matter_run(run_id, error=error)
+
+    @server.tool(
+        name="jarvis_model_status",
+        annotations=readonly,
+        structured_output=True,
+    )
+    def model_status(refresh: bool = True) -> dict[str, Any]:
+        """Read exact known package usage, reset times, health and fallbacks."""
+        return model_usage_status(refresh=refresh)
 
     @server.tool(
         name="jarvis_memory_search",

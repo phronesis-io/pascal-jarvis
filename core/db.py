@@ -609,6 +609,26 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_memory_conflicts_open
         ON memory_conflicts(status, created_epoch DESC);
     """,
+    # v15: Numeric, credential-free model usage observations. Exact provider
+    # snapshots and inferred forecasts stay separate from health canaries.
+    """
+    CREATE TABLE IF NOT EXISTS model_usage_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        route_id TEXT NOT NULL,
+        limit_id TEXT NOT NULL,
+        window_name TEXT NOT NULL,
+        used_percent REAL NOT NULL,
+        resets_at_epoch REAL,
+        observed_epoch REAL NOT NULL,
+        source TEXT NOT NULL,
+        UNIQUE(route_id, limit_id, window_name, observed_epoch)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_model_usage_window
+        ON model_usage_observations(
+            route_id, limit_id, window_name, resets_at_epoch, observed_epoch DESC
+        );
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

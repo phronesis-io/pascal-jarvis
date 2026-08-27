@@ -164,6 +164,7 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract():
             names = {tool.name for tool in tools.tools}
             assert names == {
                 "jarvis_frontstage_health",
+                "jarvis_model_status",
                 "jarvis_matter_abort",
                 "jarvis_matter_create",
                 "jarvis_matter_release",

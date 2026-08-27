@@ -60,6 +60,7 @@ TASK_DISPLAY_NAMES: dict[str, str] = {
     "delegation-reconcile": "委托任务核对",
     "iteration-observe": "迭代观察",
     "log-maintenance": "日志维护",
+    "model-usage": "模型额度观察",
     "provider-canary": "模型通道体检",
     "repos-sync": "代码仓同步",
     "personal-site": "个人网站更新",
