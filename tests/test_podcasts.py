@@ -119,3 +119,20 @@ def test_marking_records_the_doc(isolated_state):
     state = podcasts.load_state()
     assert state["seen"] == ["vid1"]
     assert state["delivered"]["vid1"]["doc"] == "https://example.invalid/doc"
+
+
+def test_podcast_digest_task_stays_wired_to_its_scripts():
+    """The heartbeat entry must keep pointing at the pre/post pair: a renamed
+    script would turn the daily digest into a silent no-op instead of failing.
+    """
+    import pathlib
+
+    from core.heartbeat import parse_heartbeat
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    tasks = {t["name"]: t for t in parse_heartbeat(root / "HEARTBEAT.md")}
+    task = tasks["podcast-digest"]
+    assert task["pre"] == "tasks/podcast_digest_pre.sh"
+    assert task["post"] == "tasks/podcast_digest_post.py"
+    assert (root / task["pre"]).exists()
+    assert (root / task["post"]).exists()

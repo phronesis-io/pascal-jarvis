@@ -259,6 +259,12 @@ def test_external_deadman_withholds_ping_when_delivery_is_unhealthy(
             return {"healthy": False, "consecutive_failures": 3}
 
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    # BRAIN_STATE_FILE is module-level, so without this the test reads THIS
+    # machine's live brain state and returns "withheld_brain_dead" whenever
+    # the running heartbeat happens to be wedged — a red that says nothing
+    # about the transport branch under test (seen 2026-08-27).
+    monkeypatch.setattr(
+        daemon_mod, "BRAIN_STATE_FILE", tmp_path / ".daemon_brain_state.json")
     logs = []
     monkeypatch.setattr(daemon_mod, "_probe_alert_stamps", {})
     monkeypatch.setattr(daemon_mod, "_save_probe_alert_stamps", lambda: None)

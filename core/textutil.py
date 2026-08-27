@@ -33,6 +33,7 @@ TASK_DISPLAY_NAMES: dict[str, str] = {
     # 信息与内容
     "mail-triage": "邮件整理",
     "content-recommend": "内容推荐",
+    "podcast-digest": "播客摘要",
     "calendar-sync": "日历同步",
     "perception-collect": "信息采集",
     "metrics-digest": "指标摘要",
