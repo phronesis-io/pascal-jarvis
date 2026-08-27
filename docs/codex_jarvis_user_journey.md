@@ -176,7 +176,13 @@ Phase-1 acceptance requires 20 real desktop and 20 real mobile continuations.
 For each sample, record Matter discovery, packet correctness, task completion,
 receipt validity, duplicate side effects, and whether Pascal had to re-explain
 settled context. Only then may the corresponding Lark interaction be reduced.
-The reviewer records these observations with
-`python3 -m core.frontstage_acceptance record`; the read-only report is
-included in `jarvis_frontstage_health`. The MCP surface intentionally exposes
-no tool that can self-approve a sample.
+After an eligible released run, Codex may show one optional, one-line question:
+`顺` records success; `找错事项 / 背景不对 / 没做完 / 有重复动作 / 需要重讲`
+record exact failure dimensions. The prompt claim is durable, so ignoring it
+never causes a second ask. The MCP accepts only Pascal's exact published label,
+stores his original words, and cannot submit arbitrary scores or a reviewer
+identity. Agent praise, silence, tests, and Result Receipts never count as
+acceptance. The prompt records its connector version, so a delayed reply can
+never qualify a later implementation. Operators retain the equivalent CLI for
+audit and recovery; the read-only aggregate remains in
+`jarvis_frontstage_health`.

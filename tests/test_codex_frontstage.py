@@ -14,6 +14,7 @@ import pytest
 import core.db as db_module
 from core.codex_frontstage import (
     abort_matter_run,
+    claim_frontstage_feedback_prompt,
     close_frontstage_matter,
     continue_matter_run,
     create_frontstage_matter,
@@ -23,7 +24,13 @@ from core.codex_frontstage import (
     search_matters,
     start_matter_run,
 )
-from core.frontstage_acceptance import acceptance_report, record_acceptance
+from core.frontstage_acceptance import (
+    acceptance_report,
+    claim_acceptance_prompt,
+    parse_owner_feedback,
+    record_acceptance,
+    record_owner_feedback,
+)
 from core.matter_runs import MatterRunConflict, get_run
 from core.matters import create_matter, get_matter
 
@@ -204,10 +211,23 @@ def test_health_reports_unreleased_residue_without_mutating_it(tmp_path):
 
 
 def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
-        monkeypatch):
+        monkeypatch, tmp_path):
     from core import codex_mcp
 
     create_matter("MCP 协议测试", summary="不能暴露原始会话")
+    review_matter = create_matter("手机验收")
+    started = start_matter_run(
+        matter_id=review_matter["id"],
+        task="mobile acceptance",
+        workspace=str(tmp_path),
+        surface="mobile",
+    )
+    packet = started["context_packet"]
+    release_matter_run(
+        run_id=started["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
     monkeypatch.setattr(codex_mcp, "model_usage_status", lambda refresh=True: {
         "schema": "jarvis.model-status.v1",
         "refreshed": refresh,
@@ -224,6 +244,8 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             tools = await client.list_tools()
             names = {tool.name for tool in tools.tools}
             assert names == {
+                "jarvis_acceptance_prompt",
+                "jarvis_acceptance_record",
                 "jarvis_frontstage_health",
                 "jarvis_model_status",
                 "jarvis_matter_abort",
@@ -244,6 +266,10 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             assert by_name["jarvis_matter_abort"].annotations.destructive_hint
             assert by_name["jarvis_matter_release"].annotations.idempotent_hint
             assert by_name["jarvis_matter_review"].annotations.read_only_hint
+            assert by_name["jarvis_acceptance_prompt"].annotations.idempotent_hint
+            assert by_name[
+                "jarvis_acceptance_record"
+            ].annotations.destructive_hint
             assert by_name["jarvis_memory_search"].annotations.read_only_hint
             assert by_name["jarvis_memory_review"].annotations.destructive_hint
             result = await client.call_tool(
@@ -263,6 +289,22 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             review = await client.call_tool("jarvis_matter_review", {})
             assert review.is_error is False
             assert review.structured_content["schema"] == "jarvis.matter-review.v1"
+            prompt = await client.call_tool(
+                "jarvis_acceptance_prompt", {"run_id": started["run"]["id"]}
+            )
+            assert prompt.is_error is False
+            assert prompt.structured_content["should_ask"] is True
+            feedback = await client.call_tool(
+                "jarvis_acceptance_record",
+                {"run_id": started["run"]["id"], "feedback": "顺"},
+            )
+            assert feedback.is_error is False
+            assert feedback.structured_content["review"][
+                "owner_confirmation"
+            ] == "顺"
+            assert feedback.structured_content["acceptance"]["surfaces"][
+                "mobile"
+            ]["reviewed"] == 1
 
     asyncio.run(scenario())
 
@@ -291,6 +333,7 @@ def test_acceptance_is_human_reviewed_and_blocks_lark_retirement(tmp_path):
         duplicate_effect=False,
         reexplanation_required=False,
         reviewer="owner",
+        owner_confirmation="顺",
         now=100.0,
     )
     report = acceptance_report()
@@ -329,6 +372,31 @@ def test_acceptance_rejects_surface_conflicts_and_non_boolean_claims(tmp_path):
             duplicate_effect=False,
             reexplanation_required=False,
             reviewer="owner",
+            owner_confirmation="顺",
+        )
+    with pytest.raises(ValueError, match="reviewer must be owner"):
+        record_acceptance(
+            run_id=started["run"]["id"],
+            surface="desktop",
+            matter_discovered_correct=True,
+            context_packet_correct=True,
+            task_completed=True,
+            duplicate_effect=False,
+            reexplanation_required=False,
+            reviewer="agent",
+            owner_confirmation="顺",
+        )
+    with pytest.raises(ValueError, match="confirmation conflicts"):
+        record_acceptance(
+            run_id=started["run"]["id"],
+            surface="desktop",
+            matter_discovered_correct=True,
+            context_packet_correct=True,
+            task_completed=False,
+            duplicate_effect=False,
+            reexplanation_required=False,
+            reviewer="owner",
+            owner_confirmation="顺",
         )
     with pytest.raises(ValueError, match="must be boolean"):
         record_acceptance(
@@ -340,6 +408,7 @@ def test_acceptance_rejects_surface_conflicts_and_non_boolean_claims(tmp_path):
             duplicate_effect=False,
             reexplanation_required=False,
             reviewer="owner",
+            owner_confirmation="顺",
         )
 
 
@@ -369,7 +438,170 @@ def test_failed_run_cannot_be_reviewed_as_a_completed_task(tmp_path):
             duplicate_effect=False,
             reexplanation_required=False,
             reviewer="owner",
+            owner_confirmation="顺",
         )
+
+
+def test_owner_feedback_labels_are_exact_and_deterministic():
+    good = parse_owner_feedback("顺")
+    issues = parse_owner_feedback("背景不对 / 没做完、需要重讲")
+
+    assert good["task_completed"] is True
+    assert good["labels"] == ["顺"]
+    assert issues["matter_discovered_correct"] is True
+    assert issues["context_packet_correct"] is False
+    assert issues["task_completed"] is False
+    assert issues["duplicate_effect"] is False
+    assert issues["reexplanation_required"] is True
+    assert issues["owner_confirmation"] == "背景不对 / 没做完、需要重讲"
+    with pytest.raises(ValueError, match="cannot be combined"):
+        parse_owner_feedback("顺、没做完")
+    with pytest.raises(ValueError, match="unsupported feedback"):
+        parse_owner_feedback("挺好的")
+
+
+def test_feedback_prompt_is_claimed_once_and_records_exact_owner_words(tmp_path):
+    matter = create_matter("手机自然验收")
+    started = start_matter_run(
+        matter_id=matter["id"],
+        task="continue on mobile",
+        workspace=str(tmp_path),
+        surface="mobile",
+    )
+    packet = started["context_packet"]
+    release_matter_run(
+        run_id=started["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+
+    first = claim_acceptance_prompt(started["run"]["id"], now=101.0)
+    second = claim_acceptance_prompt(started["run"]["id"], now=102.0)
+    review = record_owner_feedback(
+        started["run"]["id"], "背景不对 / 需要重讲", now=103.0
+    )
+    repeated = record_owner_feedback(
+        started["run"]["id"], "背景不对 / 需要重讲", now=104.0
+    )
+
+    assert first["should_ask"] is True
+    assert first["prompt"].startswith("这次接续顺吗")
+    assert second["should_ask"] is False
+    assert second["reason"] == "prompt_already_claimed"
+    assert review["owner_confirmation"] == "背景不对 / 需要重讲"
+    assert review["context_packet_correct"] == 0
+    assert review["reexplanation_required"] == 1
+    assert repeated == review
+    assert acceptance_report()["surfaces"]["mobile"]["reviewed"] == 1
+    with pytest.raises(ValueError, match="immutable"):
+        record_owner_feedback(started["run"]["id"], "顺")
+
+
+def test_feedback_prompt_requires_a_successful_receipted_frontstage_run(tmp_path):
+    failed_matter = create_matter("失败不索要好评")
+    failed = start_matter_run(
+        matter_id=failed_matter["id"],
+        task="fail",
+        workspace=str(tmp_path),
+        surface="desktop",
+    )
+    packet = failed["context_packet"]
+    release_matter_run(
+        run_id=failed["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+        exit_code=1,
+    )
+    no_surface_matter = create_matter("未记录端不索要好评")
+    no_surface = start_matter_run(
+        matter_id=no_surface_matter["id"],
+        task="unknown surface",
+        workspace=str(tmp_path),
+    )
+    packet = no_surface["context_packet"]
+    release_matter_run(
+        run_id=no_surface["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+
+    failed_prompt = claim_frontstage_feedback_prompt(failed["run"]["id"])
+    unknown_prompt = claim_frontstage_feedback_prompt(no_surface["run"]["id"])
+
+    assert failed_prompt["should_ask"] is False
+    assert failed_prompt["reason"] == "run_not_successfully_released"
+    assert unknown_prompt["should_ask"] is False
+    assert unknown_prompt["reason"] == "surface_not_recorded"
+    with pytest.raises(ValueError, match="not claimed"):
+        record_owner_feedback(failed["run"]["id"], "没做完")
+
+
+def test_feedback_prompt_stops_after_the_versioned_surface_target(
+        tmp_path, monkeypatch):
+    from core import frontstage_acceptance
+
+    monkeypatch.setattr(frontstage_acceptance, "TARGET_PER_SURFACE", 1)
+    first_matter = create_matter("第一条桌面样本")
+    first = start_matter_run(
+        matter_id=first_matter["id"],
+        task="first",
+        workspace=str(tmp_path),
+        surface="desktop",
+    )
+    packet = first["context_packet"]
+    release_matter_run(
+        run_id=first["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+    assert claim_acceptance_prompt(first["run"]["id"])["should_ask"]
+    record_owner_feedback(first["run"]["id"], "顺")
+
+    second_matter = create_matter("第二条桌面样本")
+    second = start_matter_run(
+        matter_id=second_matter["id"],
+        task="second",
+        workspace=str(tmp_path),
+        surface="desktop",
+    )
+    packet = second["context_packet"]
+    release_matter_run(
+        run_id=second["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+
+    prompt = claim_acceptance_prompt(second["run"]["id"])
+
+    assert prompt["should_ask"] is False
+    assert prompt["reason"] == "surface_target_reached"
+
+
+def test_delayed_feedback_stays_bound_to_the_prompt_connector_version(
+        tmp_path, monkeypatch):
+    from core import frontstage_acceptance
+
+    matter = create_matter("迟到回复不污染新版本")
+    started = start_matter_run(
+        matter_id=matter["id"],
+        task="versioned feedback",
+        workspace=str(tmp_path),
+        surface="mobile",
+    )
+    packet = started["context_packet"]
+    release_matter_run(
+        run_id=started["run"]["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+    prompt = claim_acceptance_prompt(started["run"]["id"], now=200.0)
+    monkeypatch.setattr(frontstage_acceptance, "CONNECTOR_VERSION", "0.3.2")
+
+    review = record_owner_feedback(started["run"]["id"], "顺", now=201.0)
+
+    assert prompt["connector_version"] == "0.3.1"
+    assert review["connector_version"] == "0.3.1"
+    assert acceptance_report()["surfaces"]["mobile"]["reviewed"] == 0
 
 
 def test_frontstage_acceptance_cli_reports_an_empty_fail_closed_gate(tmp_path):
@@ -390,6 +622,26 @@ def test_frontstage_acceptance_cli_reports_an_empty_fail_closed_gate(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["schema"] == "jarvis.frontstage-acceptance.v1"
     assert payload["ready"] is False
+
+
+def test_plugin_requires_once_only_explicit_owner_feedback():
+    skill = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "jarvis-matters"
+        / "skills"
+        / "jarvis-matter"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "jarvis_acceptance_prompt" in skill
+    assert "jarvis_acceptance_record" in skill
+    assert "ignores it, never ask again" in skill
+    assert "Do not accept prose" in skill
+    assert all(
+        label in skill
+        for label in ("顺", "找错事项", "背景不对", "没做完", "有重复动作", "需要重讲")
+    )
 
 
 def test_plugin_launcher_starts_from_a_codex_cache_directory(tmp_path):

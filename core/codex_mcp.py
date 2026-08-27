@@ -6,6 +6,7 @@ from typing import Any
 
 from core.codex_frontstage import (
     abort_matter_run,
+    claim_frontstage_feedback_prompt,
     close_frontstage_matter,
     continue_matter_run,
     create_frontstage_matter,
@@ -15,6 +16,7 @@ from core.codex_frontstage import (
     review_matters,
     review_memory_claim,
     release_matter_run,
+    record_frontstage_feedback,
     renew_matter_run,
     search_matters,
     search_memory,
@@ -37,6 +39,11 @@ Use the one-step continuation tool when Pascal naturally asks to resume durable
 work. Close only when Pascal explicitly says that named Matter is complete;
 pass his exact words as owner_confirmation and never infer them from executor
 prose, tests, exit codes, or artifacts.
+After a successfully released desktop/mobile continuation, call the feedback
+prompt tool once. Show its prompt only when should_ask is true. Record feedback
+only when Pascal's current message is exactly one or more published labels;
+never infer acceptance from silence, praise, completion evidence, or your own
+assessment, and never rephrase his owner confirmation.
 """.strip()
 
 
@@ -62,7 +69,7 @@ def create_server():
         title="Jarvis Matters",
         description="Durable Matter continuity for Codex and other frontstages.",
         instructions=SERVER_INSTRUCTIONS,
-        version="0.3.0",
+        version="0.3.1",
     )
 
     @server.tool(
@@ -249,6 +256,34 @@ def create_server():
     def matter_review(days: int = 7, limit: int = 8) -> dict[str, Any]:
         """Review confirmed Matter outcomes and the most useful next actions."""
         return review_matters(days=days, limit=limit)
+
+    @server.tool(
+        name="jarvis_acceptance_prompt",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    def acceptance_prompt(run_id: str) -> dict[str, Any]:
+        """Claim the one optional feedback prompt for a released Matter run."""
+        return claim_frontstage_feedback_prompt(run_id)
+
+    @server.tool(
+        name="jarvis_acceptance_record",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    def acceptance_record(run_id: str, feedback: str) -> dict[str, Any]:
+        """Record Pascal's exact published feedback label for one prompted run."""
+        return record_frontstage_feedback(run_id, feedback)
 
     @server.tool(
         name="jarvis_memory_search",

@@ -93,8 +93,13 @@ not create a second preference or route-policy store.
   needs programmatic task creation/resumption and streamed approvals.
 - Jarvis cannot grant an executor Matter-completion authority or accept model
   prose as external-effect evidence. Release closes the run only.
-- Desktop/mobile migration evidence is written through the operator CLI, not
-  an MCP write tool. A model may expose the report but cannot review itself.
+- Desktop/mobile migration evidence comes only from Pascal's exact response to
+  a once-per-run prompt. MCP may claim that prompt and map the finite published
+  labels to evidence, but it cannot supply arbitrary scores, change reviewer
+  identity, infer approval, or overwrite a recorded sample. Prompt version and
+  run surface are immutable evidence, so delayed replies cannot bless a newer
+  connector or manufacture mobile coverage. The operator CLI
+  remains an audit/recovery path, not a source of Agent self-approval.
 - A repo-owned Codex plugin supplies concise routing guidance and starts the
   local MCP process. Its installation records only the local repository path;
   secrets and private Matter data stay in the existing private Jarvis store.

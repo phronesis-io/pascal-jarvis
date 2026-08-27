@@ -101,7 +101,10 @@ The implementation boundary is explicit:
   local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
   it does not read Codex's private task store or create a second conversation;
 - `core.frontstage_acceptance` stores explicit owner reviews for real desktop
-  and mobile journeys. The MCP exposes its report but no self-approval tool;
+  and mobile journeys. It atomically claims at most one optional prompt per
+  successful run and maps only Pascal's exact published labels to immutable
+  version-bound evidence. MCP cannot submit free-form scores, a surface, or a
+  reviewer identity;
 - `scripts/jarvis-matter` exposes the same contract through `context`,
   `launch`, `run-status`, `finish`, and `audit`.
 

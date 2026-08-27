@@ -398,6 +398,25 @@ def review_matters(*, days: int = 7, limit: int = 8) -> dict[str, Any]:
     return build_matter_review(days=days, limit=limit)
 
 
+def claim_frontstage_feedback_prompt(run_id: str) -> dict[str, Any]:
+    """Return the optional owner-feedback prompt at most once for one run."""
+    from core.frontstage_acceptance import claim_acceptance_prompt
+
+    return claim_acceptance_prompt(run_id)
+
+
+def record_frontstage_feedback(run_id: str, feedback: str) -> dict[str, Any]:
+    """Persist one exact owner label and return the updated migration gate."""
+    from core.frontstage_acceptance import acceptance_report, record_owner_feedback
+
+    review = record_owner_feedback(run_id, feedback)
+    return {
+        "schema": "jarvis.frontstage-feedback.v1",
+        "review": review,
+        "acceptance": acceptance_report(),
+    }
+
+
 def frontstage_health() -> dict[str, Any]:
     """Return protocol health and recoverable residue for operator review."""
     audit = audit_matter_runs(now=time.time())

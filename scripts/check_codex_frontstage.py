@@ -25,6 +25,8 @@ async def _check(root: Path) -> dict:
         listed = await client.list_tools()
         names = {tool.name for tool in listed.tools}
         required = {
+            "jarvis_acceptance_prompt",
+            "jarvis_acceptance_record",
             "jarvis_frontstage_health",
             "jarvis_matter_review",
             "jarvis_matter_search",

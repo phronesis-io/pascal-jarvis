@@ -47,6 +47,10 @@ verified Context Packet/Result Receipt contract. This is not yet a claim that
 the production migration is complete. Until 20 desktop and 20 mobile journeys
 pass acceptance, Lark remains the current reliable proactive transport. No
 feature may drop its existing reachable path merely because code exists.
+Each eligible continuation may ask for feedback once, after the work result:
+Pascal can reply with one short published label or ignore it forever. Jarvis
+stores the exact owner words and deterministic dimensions; it never translates
+silence, praise, or its own confidence into migration evidence.
 
 - **Codex desktop and mobile**: the primary place to begin, split, continue,
   inspect, and finish substantive work. Each task is a bounded executor
@@ -127,6 +131,9 @@ The concrete decision table and desktop/mobile journeys are authoritative in
 23. Review measures useful outcomes, not visible busyness: only owner-confirmed
     Matter closure counts as completed; executor receipts remain “awaiting
     closure,” and the review itself never mutates work state.
+24. Acceptance must be easy for the human and hard to forge: ask at most once
+    after a verified result, accept only explicit owner labels, preserve the
+    exact words, and never turn ignored feedback into another interruption.
 
 ## Non-Goals
 

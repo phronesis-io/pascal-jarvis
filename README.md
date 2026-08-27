@@ -174,8 +174,11 @@ one recoverable closure retires linked reminders, Items, and Handoffs. Codex
 and the weekly Lark card read the same
 result-oriented Matter review, where only an owner closure receipt counts as
 completed and a Result Receipt remains “awaiting closure.” All Lark output
-still crosses the unified
-delivery state machine with sanitization, deduplication, attention caps, retry,
+still crosses the unified delivery state machine. After an eligible Codex
+continuation, one optional short prompt can record Pascal's exact `顺` or issue
+label as immutable desktop/mobile migration evidence; ignored prompts do not
+repeat and Agent inference never counts.
+Delivery uses sanitization, deduplication, attention caps, retry,
 dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
 Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
 

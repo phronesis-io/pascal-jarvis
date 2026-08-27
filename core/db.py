@@ -699,6 +699,25 @@ def _run_migrations(db: sqlite3.Connection):
             ("memory_eligible", "INTEGER NOT NULL DEFAULT 0"),
         ),
     )
+    # Frontstage acceptance v2 records whether a feedback prompt has already
+    # been shown and preserves Pascal's exact confirmation words.  Named
+    # additive migrations keep an interrupted upgrade re-entrant on the live
+    # SQLite database.
+    ensure_additive_columns(
+        db,
+        namespace="frontstage_acceptance_v2",
+        table="matter_runs",
+        columns=(
+            ("acceptance_prompted_epoch", "REAL"),
+            ("acceptance_prompt_version", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    )
+    ensure_additive_columns(
+        db,
+        namespace="frontstage_acceptance_v2",
+        table="frontstage_acceptance",
+        columns=(("owner_confirmation", "TEXT NOT NULL DEFAULT ''"),),
+    )
     try:
         db.execute("BEGIN IMMEDIATE")
         # These data repairs intentionally run on every startup.  They are

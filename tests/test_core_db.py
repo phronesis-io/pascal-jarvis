@@ -57,6 +57,16 @@ class TestDatabase:
         assert "agent_log" in table_names
         assert "kv_store" in table_names
         assert "surface_handoffs" in table_names
+        matter_run_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(matter_runs)")
+        }
+        acceptance_columns = {
+            row[1]
+            for row in db.execute("PRAGMA table_info(frontstage_acceptance)")
+        }
+        assert "acceptance_prompted_epoch" in matter_run_columns
+        assert "acceptance_prompt_version" in matter_run_columns
+        assert "owner_confirmation" in acceptance_columns
 
     def test_bookmark_add_and_list(self):
         bm_id = db_module.bookmark_add("Test Article", "https://example.com", "test")

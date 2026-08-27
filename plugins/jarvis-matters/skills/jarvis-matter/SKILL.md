@@ -42,6 +42,15 @@ task that can finish and be verified entirely in the current Codex task.
    run first, then call `jarvis_matter_close` with the useful outcome and his
    exact confirmation words. This one transition retires linked reminders,
    Items, and Handoffs. A live run, Job, or Delegation remains a blocker.
+8. After a substantive desktop/mobile run releases successfully, call
+   `jarvis_acceptance_prompt` once. Only when it returns `should_ask=true`, add
+   its single short question after the result. The claim is durable: if Pascal
+   ignores it, never ask again for that run. Do not ask for failed runs,
+   ordinary one-turn work, or after that surface reaches its sample target.
+9. If Pascal's next reply is exactly `顺`, or one or more of `找错事项`,
+   `背景不对`, `没做完`, `有重复动作`, `需要重讲`, call
+   `jarvis_acceptance_record` with his exact text. Do not accept prose, infer a
+   label, turn praise into approval, or self-review the run.
 
 ## Remember
 
