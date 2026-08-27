@@ -44,7 +44,7 @@ Lark event
 Group chat is fail-closed: curated group context, restricted tools, and no
 owner-private writes.
 
-### Target Codex-First Session Lifecycle
+### Codex-First Session Lifecycle
 
 ```text
 Codex task on desktop or mobile
@@ -57,8 +57,9 @@ Codex task on desktop or mobile
   -> release the lease; keep the raw transcript as audit evidence only
 ```
 
-This is the accepted target contract, not a claim about the current deployed
-entry path. A Codex task is a replaceable execution window; the Matter is the
+The Phase-1 protocol is implemented in the repository; production migration
+still requires review, merge, release-gate and desktop/mobile acceptance
+evidence. A Codex task is a replaceable execution window; the Matter is the
 long-lived product object. Jarvis owns context compilation, authority,
 continuity, asynchronous work, and reconciliation. Codex owns the interactive
 work surface. Lark remains a bounded wake-up and native-integration channel
@@ -69,6 +70,34 @@ Context Packet inputs are authoritative object state and selected memory, not a
 raw transcript dump. Result Receipts contain artifacts, decisions, verified
 effects, unresolved blockers, and the exact next action. Provider prose alone
 cannot satisfy a receipt.
+
+The implementation boundary is explicit:
+
+- `core.matter_runs` owns the single active lease, run sequence, expiry and
+  immutable Result Receipt;
+- `core.matter_run_evidence` verifies present/deleted workspace artifacts and
+  resolves external effects against current Delegation evidence;
+- `core.matter_run_projection` projects timeline/session/artifact views after
+  the authoritative state commits, logging failures without falsifying the
+  acquire or release outcome;
+- `core.matter_run_audit` reports stale leases, legacy prose-only completion
+  events, missing outcomes and terminal runs without receipts;
+- `core.matter_context` compiles `jarvis.context-packet.v2`, removes raw event
+  payloads, adds source references, and writes owner-only packet files;
+- `core.matter_executor` is the shared Claude/Codex adapter. Process exit and
+  the last assistant message are observations only; they never close a Matter;
+- `scripts/jarvis-matter` exposes the same contract through `context`,
+  `launch`, `run-status`, `finish`, and `audit`.
+
+One partial unique index enforces a single active run per Matter across
+processes. A context reset invalidates late release attempts by generation.
+An external-effect claim is accepted only when it references current,
+qualifying evidence from the Delegation verifier. Release persists the receipt
+before projecting session/artifact links, so projection failure is observable
+without losing the authoritative receipt.
+Foreground launcher sessions renew a bounded six-hour lease while alive;
+abandoned prepared handoffs still expire. Replayed handoff requests reuse the
+same unstarted run only when executor, task, workspace and packet all match.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of

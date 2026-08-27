@@ -23,6 +23,7 @@ from core.matter_bridge import (
 )
 from core.matter_context import build_context_bundle, render_context_markdown
 from core.matter_executor import prepare_handoff, record_completion
+from core.matter_runs import MatterRunConflict
 from core.matter_router import classify_signal, ingest_signal
 from core.matters import (
     MatterConflict,
@@ -236,6 +237,8 @@ def test_executor_records_real_model_summary_and_artifact(tmp_path):
         tmp_path, {"result.md"},
     )
     assert result["summary"] == "实现完成，测试通过"
+    assert result["narrative_trust"] == "unverified_model_report"
+    assert result["receipt"]["matter_completed"] is False
     loaded = get_matter(matter["id"])
     session = next(link for link in loaded["links"] if link["entity_type"] == "session")
     assert session["metadata"]["model"] == "gpt-test"
@@ -244,29 +247,36 @@ def test_executor_records_real_model_summary_and_artifact(tmp_path):
 
 def test_prepare_handoff_uses_the_same_launcher_for_both_entry_points(
         tmp_path, monkeypatch):
-    context_path = tmp_path / "context.md"
-    context_path.write_text("bounded context", encoding="utf-8")
-    monkeypatch.setattr(
-        "core.matter_executor.write_context_bundle",
-        lambda _matter_id: context_path,
-    )
     matter = create_matter("统一执行入口")
-    handoff = prepare_handoff(matter["id"], "codex", actor="test")
+    handoff = prepare_handoff(
+        matter["id"], "codex", actor="test", workspace=tmp_path
+    )
     assert handoff["command"] == (
-        f"./scripts/jarvis-matter launch {matter['id']} codex")
+        f"./scripts/jarvis-matter launch {matter['id']} codex "
+        f"--run-id {handoff['run_id']}")
     assert Path(handoff["context_path"]).exists()
+    assert Path(handoff["context_path"]).with_suffix(".json").exists()
     events = get_matter(matter["id"])["events"]
     event = next(item for item in events
                  if item["event_type"] == "handoff_prepared")
     assert event["payload"]["provider"] == "codex"
+    assert event["payload"]["run_id"] == handoff["run_id"]
+
+
+def test_replayed_handoff_reuses_the_same_unstarted_run(tmp_path):
+    matter = create_matter("重复点击同一交接")
+
+    first = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+    replay = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+
+    assert replay["run_id"] == first["run_id"]
+    assert replay["context_path"] == first["context_path"]
 
 
 @pytest.mark.parametrize("provider", ("claude", "codex"))
 def test_executor_launch_records_session_and_only_new_artifacts(
         tmp_path, monkeypatch, provider):
     matter = create_matter("跨执行器交接", next_action="完成实现")
-    context_path = tmp_path / "matter-context.md"
-    context_path.write_text("bounded Matter context", encoding="utf-8")
     transcript = tmp_path / f"{provider}.jsonl"
     if provider == "claude":
         transcript.write_text(json.dumps({
@@ -288,14 +298,13 @@ def test_executor_launch_records_session_and_only_new_artifacts(
         "title": "交接会话",
         "model": "test-model",
     }
+    (tmp_path / "new-result.txt").write_text("new", encoding="utf-8")
     discoveries = iter(([], [session]))
     file_snapshots = iter(({"already-dirty.txt"}, {
         "already-dirty.txt", "new-result.txt",
     }))
     calls = []
 
-    monkeypatch.setattr(matter_executor, "write_context_bundle",
-                        lambda _matter_id: context_path)
     monkeypatch.setattr(matter_executor.shutil, "which",
                         lambda name: f"/mock/{name}")
     monkeypatch.setattr(matter_executor, "discover_sessions",
@@ -318,7 +327,7 @@ def test_executor_launch_records_session_and_only_new_artifacts(
     command, kwargs = calls[0]
     assert command[0] == f"/mock/{provider}"
     assert kwargs["cwd"] == tmp_path.resolve()
-    assert "bounded Matter context" in command[-1]
+    assert "# Matter: 跨执行器交接" in command[-1]
     assert "完成剩余工作" in command[-1]
     if provider == "codex":
         assert command[1:4] == ["--cd", str(tmp_path.resolve()), "--no-alt-screen"]
@@ -334,8 +343,12 @@ def test_executor_launch_records_session_and_only_new_artifacts(
     assert artifacts == ["new-result.txt"]
     completed = next(event for event in loaded["events"]
                      if event["event_type"] == "work_session_completed")
-    assert completed["summary"] == expected_summary
+    assert completed["summary"] == "执行会话已结束并生成 Result Receipt"
     assert completed["payload"]["artifacts"] == ["new-result.txt"]
+    assert completed["payload"]["matter_completed"] is False
+    receipt = next(event for event in loaded["events"]
+                   if event["event_type"] == "matter_run_released")
+    assert receipt["payload"]["receipt_id"].startswith("rr_")
 
 
 def test_executor_launch_fails_before_writing_handoff_without_provider_cli(
@@ -355,6 +368,73 @@ def test_executor_launch_fails_before_writing_handoff_without_provider_cli(
     assert wrote_context == []
     assert not any(event["event_type"] == "work_session_started"
                    for event in get_matter(matter["id"])["events"])
+
+
+def test_executor_can_launch_a_prepared_run_without_reacquiring(
+        tmp_path, monkeypatch):
+    matter = create_matter("预备后启动", next_action="继续")
+    handoff = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+    snapshots = iter((set(), set()))
+    monkeypatch.setattr(matter_executor.shutil, "which", lambda _name: "/mock/codex")
+    monkeypatch.setattr(matter_executor, "discover_sessions", lambda **_kwargs: [])
+    monkeypatch.setattr(matter_executor, "_git_files", lambda _path: next(snapshots))
+    monkeypatch.setattr(
+        matter_executor.subprocess, "run",
+        lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(MatterRunConflict, match="task does not match"):
+        matter_executor.launch(
+            matter["id"], "codex", workspace=tmp_path,
+            prompt="偷偷换任务", run_id=handoff["run_id"],
+        )
+    assert matter_executor.launch(
+        matter["id"], "codex", workspace=tmp_path,
+        run_id=handoff["run_id"],
+    ) == 0
+    assert matter_executor.get_run(handoff["run_id"])["status"] == "released"
+
+
+def test_matter_executor_cli_reports_context_status_and_audit(
+        tmp_path, capsys):
+    matter = create_matter("CLI 合同", next_action="检查")
+    handoff = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+
+    assert matter_executor.main(["context", matter["id"], "--output",
+                                 str(tmp_path / "manual.md")]) == 0
+    assert (tmp_path / "manual.json").exists()
+    capsys.readouterr()
+
+    assert matter_executor.main(["run-status", handoff["run_id"]]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["id"] == handoff["run_id"]
+
+    assert matter_executor.main(["audit"]) == 0
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["counts"]["acquired"] == 1
+
+
+def test_prepare_handoff_rejects_unknown_provider_and_matter(tmp_path):
+    matter = create_matter("入口校验")
+    with pytest.raises(ValueError, match="provider"):
+        prepare_handoff(matter["id"], "unknown", workspace=tmp_path)
+    with pytest.raises(KeyError, match="matter not found"):
+        prepare_handoff("mat_missing", "codex", workspace=tmp_path)
+
+
+def test_real_git_file_snapshot_handles_dirty_and_renamed_paths(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    old = tmp_path / "old.txt"
+    old.write_text("old", encoding="utf-8")
+    subprocess.run(["git", "add", "old.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=t@example.com",
+         "commit", "-qm", "seed"], cwd=tmp_path, check=True,
+    )
+    subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=tmp_path, check=True)
+
+    assert matter_executor._git_files(tmp_path) == {"new.txt"}
+    assert matter_executor._git_files(tmp_path / "missing") == set()
 
 
 def test_router_classifies_and_attaches_only_to_existing_matter():

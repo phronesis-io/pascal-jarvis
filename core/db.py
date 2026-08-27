@@ -458,6 +458,46 @@ MIGRATIONS = [
         reset_at TEXT NOT NULL DEFAULT ''
     );
     """,
+    # v12: Provider-neutral Matter execution receipts.  A provider session is
+    # an expendable execution window; this table is the durable acquire/run/
+    # release boundary that prevents two windows from silently owning the same
+    # Matter and prevents model prose from becoming completion evidence.
+    """
+    CREATE TABLE IF NOT EXISTS matter_runs (
+        id TEXT PRIMARY KEY,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        executor TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+            status IN ('acquired', 'running', 'released', 'failed', 'expired')
+        ),
+        run_sequence INTEGER NOT NULL,
+        task TEXT NOT NULL DEFAULT '',
+        workspace TEXT NOT NULL,
+        context_generation INTEGER NOT NULL DEFAULT 0,
+        context_packet_id TEXT NOT NULL DEFAULT '',
+        context_digest TEXT NOT NULL DEFAULT '',
+        context_path TEXT NOT NULL DEFAULT '',
+        authority_json TEXT NOT NULL DEFAULT '{}',
+        acquired_epoch REAL NOT NULL,
+        lease_expires_epoch REAL NOT NULL,
+        started_epoch REAL,
+        released_epoch REAL,
+        session_id TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        exit_code INTEGER,
+        result_digest TEXT NOT NULL DEFAULT '',
+        receipt_json TEXT NOT NULL DEFAULT '{}',
+        last_error TEXT NOT NULL DEFAULT '',
+        UNIQUE(matter_id, run_sequence)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_matter_runs_one_active
+        ON matter_runs(matter_id)
+        WHERE status IN ('acquired', 'running');
+    CREATE INDEX IF NOT EXISTS idx_matter_runs_status_lease
+        ON matter_runs(status, lease_expires_epoch);
+    CREATE INDEX IF NOT EXISTS idx_matter_runs_matter
+        ON matter_runs(matter_id, run_sequence DESC);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

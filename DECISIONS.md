@@ -204,7 +204,8 @@ facts still come from deterministic task DATA or a synchronous tool check.
 
 ## ADR-007: Codex Is Frontstage; Jarvis Is the Continuity and Control Plane
 
-**Status:** accepted target; migration gated by real desktop/mobile evidence
+**Status:** accepted; Phase-1 protocol implemented in repository, production
+migration gated by review/release and real desktop/mobile evidence
 
 The primary interactive product will be Codex on desktop and mobile. Jarvis is
 the backstage continuity and control plane. Lark remains a bounded wake-up,
@@ -242,3 +243,11 @@ closure. Otherwise it belongs in Codex, should be reduced to an adapter, or
 should be retired. Codex integration must use supported public interfaces and
 provider-neutral contracts; undocumented task internals are never an
 authoritative dependency.
+
+The first implementation slice is intentionally narrower than the full
+frontstage migration. `core.matter_runs`, `core.matter_context`, and
+`core.matter_executor` now implement acquire/run/release, Context Packet v2,
+artifact/effect verification, Result Receipt v1, expiry recovery, and a
+read-only Phase-0 residue audit. It does not auto-close Matters, move proactive
+delivery out of Lark, or claim that Codex mobile notification/resume APIs are
+already proven.

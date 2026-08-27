@@ -1,6 +1,9 @@
 # Pascal Jarvis
 
-Turn [Claude Code](https://claude.com/claude-code) into a persistent personal AI agent with continuous heartbeat, self-evolving memory, closed-loop proactive intents, and bidirectional IM integration.
+Jarvis is the continuity and control plane behind Codex, Claude Code, Lark and
+other replaceable execution surfaces. It preserves durable Matters, compiles
+bounded context, runs asynchronous routines, governs effects, and verifies
+closure across sessions and models.
 
 **Release: `v1.15.0` (2026-08-20)** — see [CHANGELOG.md](CHANGELOG.md). 3000+ tests passing.
 
@@ -149,7 +152,37 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 10. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced through the self-diagnostic and CLI, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, owner Lark conversations route through the configured Claude chain, local Codex CLI, then the OpenAI-compatible Responses fallback. `core.model_control` keeps upstream account, model, harness, tools, health, and route order as separate facts, so GPT can run through Codex, Responses, or a Claude-compatible relay without confusing the product layer. Send `切到 Codex` or `切回 Claude` in the private chat to change the preferred executor; `/model` reports the actual responder, current plan, and real upstream diversity. Heartbeat and untrusted conversations do not receive the local Codex tool route.
 
-11. **Items, Topics & Continuity** — A Memorial is the only user-facing Item, Matter is an optional topic and handoff context, and Intent appears only as a timed-reminder attribute. Lark is the sole delivery and decision surface; the delivery ledger is the archive, batched into the morning anchor. A durable Matter connects Lark, Claude/Codex sessions, jobs, and artifacts under the surface, so `电脑继续` can move work into an executor without forking the object or its completion state. All Memorial, heartbeat, bot-reply, and Guardian output crosses one SQLite-backed delivery state machine with global sanitization, 6-hour deduplication, throttling, quiet hours, retry, dead-letter, and delivered/read/acted confirmation. Bot replies and cards use the app's direct OpenAPI identity and do not depend on the owner's Keychain-backed OAuth; calendar/docs/mail/task user APIs degrade separately and honestly. After a verified transport recovery, only unresolved and unexpired terminal failures are retried; regenerated routine/Guardian/calendar output and stale alerts are audited and closed instead of flooding chat. Recovery does not bypass attention budgets: a full daily cap defers a valid replay to the next window and checks its TTL again. The authenticated mobile gateway on `:3458` and its Tailscale Funnel are retired (2026-08-11, REQ-120); Lark is the mobile surface. See [the cross-device continuity PRD](docs/prd_cross_device_continuity.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+11. **Items, Matters & Continuity** — A Memorial is one user-visible Item,
+Matter is the durable topic and execution context, and Intent is a timed
+promise. Codex desktop/mobile is the accepted interactive frontstage target;
+Lark remains the currently deployed proactive transport and bounded wake-up,
+approval, and native-integration channel until Codex acceptance evidence is
+complete. A provider-neutral Matter Run gives Claude or Codex one atomic lease,
+an owner-private Context Packet, and an immutable Result Receipt. Model prose
+cannot close the Matter; artifacts are hashed and external effects must point
+to authoritative Delegation evidence. All Lark output still crosses the unified
+delivery state machine with sanitization, deduplication, attention caps, retry,
+dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
+Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+
+### Provider-neutral Matter execution
+
+```bash
+# Create or select a durable Matter, then run it in either executor.
+python3 -m core.matters create "Matter title" --next-action "Concrete next move"
+./scripts/jarvis-matter launch mat_xxx codex
+./scripts/jarvis-matter launch mat_xxx claude
+
+# Inspect the run contract and Phase-0 execution residue.
+./scripts/jarvis-matter run-status mrun_xxx
+./scripts/jarvis-matter audit
+```
+
+`launch` acquires the Matter, writes `jarvis.context-packet.v2`, runs the
+selected provider, verifies changed workspace files, writes
+`jarvis.result-receipt.v1`, and releases the lease. A successful process exit
+is not a successful Matter outcome; the Matter remains open until a separate
+verified domain transition closes it.
 
 ## Architecture
 

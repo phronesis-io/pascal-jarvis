@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +15,12 @@ DEFAULT_EVENT_LIMIT = 12
 DEFAULT_CHAR_LIMIT = 12000
 
 _SAFE_METADATA = {
-    "session": {"model", "started_at", "updated_at", "workspace", "conv_key"},
-    "artifact": {"workspace", "exists", "source", "job_id", "status"},
+    "session": {
+        "model", "started_at", "updated_at", "workspace", "conv_key", "status",
+    },
+    "artifact": {
+        "workspace", "exists", "source", "job_id", "status", "sha256", "size",
+    },
     "intent": {"status", "closure_status"},
     "memorial": {"source", "status", "decision"},
     "job": {"status", "output_file"},
@@ -39,23 +46,25 @@ def _decision_events(events: list[dict]) -> list[dict]:
     decisions = []
     for event in reversed(events):
         kind = str(event.get("event_type", "")).lower()
-        payload = event.get("payload") or {}
         if ("decision" in kind or "closure" in kind
                 or kind in {"memorial_decided", "matter_closed_with_followups"}):
             decisions.append({
                 "at": event.get("created_at", ""),
                 "summary": _clip(event.get("summary", ""), 600),
-                "details": payload,
+                "source_ref": f"matter_event:{event.get('id', '')}",
             })
     return decisions[-8:]
 
 
 def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
-                         char_limit: int = DEFAULT_CHAR_LIMIT) -> dict:
+                         char_limit: int = DEFAULT_CHAR_LIMIT,
+                         run: dict | None = None) -> dict:
     """Build a safe handoff bundle without copying transcripts or memory bodies."""
     matter = get_matter(matter_id)
     if matter is None:
         raise KeyError(f"matter not found: {matter_id}")
+    if run and str(run.get("matter_id") or "") != str(matter_id):
+        raise ValueError("run belongs to another Matter")
     links = matter.get("links", [])
     sessions, artifacts, memory_pointers, related = [], [], [], []
     for link in links:
@@ -65,6 +74,7 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
             "id": _clip(link.get("entity_id", ""), 500),
             "title": _clip(link.get("title", ""), 300),
             "metadata": _safe_metadata(entity_type, link.get("metadata")),
+            "source_ref": f"matter_link:{link.get('id', '')}",
         }
         if entity_type == "session":
             sessions.append(item)
@@ -82,6 +92,8 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
     # active reset generation.  Legacy events are generation 0.
     from core.conversation_context import current_context_generation
     generation = current_context_generation(f"matter:{matter_id}")
+    if run and int(run.get("context_generation", -1)) != generation:
+        raise ValueError("run was acquired under a stale context generation")
     visible_events = []
     for event in matter.get("events", []):
         if str(event.get("event_type") or "").startswith("conversation_"):
@@ -91,8 +103,29 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
                 continue
         visible_events.append(event)
     events = list(reversed(visible_events[:max(1, event_limit)]))
+    authority = dict((run or {}).get("authority") or {
+        "may_complete_matter": False,
+        "may_self_attest_external_effects": False,
+    })
     bundle = {
-        "schema": "jarvis.matter-context.v1",
+        "schema": "jarvis.context-packet.v2",
+        "context_generation": generation,
+        "run": {
+            "id": str((run or {}).get("id") or ""),
+            "executor": str((run or {}).get("executor") or ""),
+            "run_sequence": int((run or {}).get("run_sequence") or 0),
+            "task": _clip((run or {}).get("task", ""), 4000),
+            "workspace": str((run or {}).get("workspace") or ""),
+            "lease_expires_epoch": (run or {}).get("lease_expires_epoch"),
+        },
+        "authority": authority,
+        "receipt_contract": {
+            "schema": "jarvis.result-receipt.v1",
+            "artifact_verification": "workspace_file_hash_required",
+            "external_effects": "authoritative_evidence_reference_required",
+            "model_narrative": "unverified",
+            "matter_completion": "separate_verified_transition_required",
+        },
         "matter": {
             "id": matter["id"],
             "title": matter["title"],
@@ -110,6 +143,7 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
             "type": event.get("event_type", ""),
             "actor": event.get("actor", ""),
             "summary": _clip(event.get("summary", ""), 800),
+            "source_ref": f"matter_event:{event.get('id', '')}",
         } for event in events],
         "sessions": sessions[-8:],
         "artifacts": artifacts[-20:],
@@ -133,6 +167,13 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
                 break
         if not changed:
             break
+    identity = hashlib.sha256(
+        json.dumps(
+            bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    bundle["packet_id"] = f"ctx_{identity[:20]}"
+    bundle["digest"] = f"sha256:{identity}"
     return bundle
 
 
@@ -141,6 +182,8 @@ def render_context_markdown(bundle: dict) -> str:
     lines = [
         f"# Matter: {matter['title']}",
         "",
+        f"- Context Packet: `{bundle.get('packet_id', '')}`",
+        f"- Context generation: `{bundle.get('context_generation', 0)}`",
         f"- Matter ID: `{matter['id']}`",
         f"- Status: `{matter['status']}`",
         f"- Priority: `{matter['priority']}`",
@@ -152,6 +195,17 @@ def render_context_markdown(bundle: dict) -> str:
         "## Next action",
         matter.get("next_action") or "No next action recorded yet.",
     ]
+    run = bundle.get("run") or {}
+    if run.get("id"):
+        lines.extend([
+            "",
+            "## Execution boundary",
+            f"- Run ID: `{run.get('id', '')}`",
+            f"- Executor: `{run.get('executor', '')}`",
+            f"- Run sequence: `{run.get('run_sequence', 0)}`",
+            "- Releasing this run does not complete the Matter.",
+            "- Model prose is not evidence of artifacts or external effects.",
+        ])
     if matter.get("outcome"):
         lines.extend(["", "## Outcome", matter["outcome"]])
     if bundle.get("confirmed_decisions"):
@@ -177,14 +231,41 @@ def render_context_markdown(bundle: dict) -> str:
     return "\n".join(lines)
 
 
-def write_context_bundle(matter_id: str, output: str | Path | None = None) -> Path:
-    bundle = build_context_bundle(matter_id)
+def _write_private(path: Path, content: str) -> None:
+    """Atomically write one handoff file with owner-only permissions."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_context_bundle(matter_id: str, output: str | Path | None = None,
+                         run: dict | None = None) -> Path:
+    bundle = build_context_bundle(matter_id, run=run)
     if output is None:
-        from core.config import Config
-        output = Config().jarvis_dir / "data" / "matter_context" / f"{matter_id}.md"
+        # Follow the active runtime DB override. This keeps tests and alternate
+        # installations from writing private packets into the repository root.
+        from core.db import _db_path
+        root = _db_path().parent / "matter_context"
+        if run and run.get("id"):
+            output = root / matter_id / f"{run['id']}.md"
+        else:
+            output = root / f"{matter_id}.md"
     path = Path(output).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_context_markdown(bundle), encoding="utf-8")
+    os.chmod(path.parent, 0o700)
+    _write_private(path, render_context_markdown(bundle))
     json_path = path.with_suffix(".json")
-    json_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_private(
+        json_path, json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
+    )
     return path

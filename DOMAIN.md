@@ -51,6 +51,23 @@ Invariant: model prose or a process exit code is not a Result Receipt. Claimed
 effects must link to authoritative verification, and a missing or stale receipt
 cannot advance the Matter to done.
 
+The current `jarvis.result-receipt.v1` proves the execution boundary: matching
+Context Packet generation/digest, executor exit, hashed workspace artifacts,
+qualifying Delegation evidence for external effects, and Matter state at
+release. Its model-authored narrative is explicitly marked unverified. The
+receipt always says `matter_completed: false`; completion remains a separate
+domain transition with its own closure guards.
+
+### Matter Run
+
+One leased execution attempt against one Matter and Context Packet. It has a
+monotonic run sequence and exactly one terminal state: released, failed, or
+expired.
+
+Invariant: at most one acquired/running Matter Run exists per Matter. Expired
+leases are recoverable; a second release is idempotent only when it describes
+the exact same evidence. A conflicting receipt is rejected, never overwritten.
+
 ### Intent
 
 A time-bound internal promise to trigger, retry, and optionally ask a closure
