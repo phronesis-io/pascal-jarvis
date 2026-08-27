@@ -644,6 +644,17 @@ def test_plugin_requires_once_only_explicit_owner_feedback():
     )
 
 
+def test_product_journey_keeps_git_as_evidence_not_a_second_state_machine():
+    journey = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "codex_jarvis_user_journey.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Git/GitHub | source history" in journey
+    assert "it is not a second Matter, inbox, or memory store" in journey
+
+
 def test_plugin_launcher_starts_from_a_codex_cache_directory(tmp_path):
     async def scenario():
         from mcp import Client, StdioServerParameters

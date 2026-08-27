@@ -107,6 +107,20 @@ not create a second preference or route-policy store.
 The full product journey and replacement rules are in
 `docs/codex_jarvis_user_journey.md`.
 
+## ADR-007: Git Is The Code-Evidence Plane, Not Product Memory
+
+**Status:** accepted
+
+- Codex uses native Git/GitHub workflows for branches, commits, diffs, PRs,
+  review, CI, and merge.
+- Jarvis may retain a bounded `git`/`github` artifact link or verified file
+  digest when a Matter needs continuity or closure evidence.
+- Jarvis does not mirror repository history, issue state, or PR lifecycle into
+  a competing task system. Git facts do not become personal decisions merely
+  because they are committed.
+- CI and merge evidence can prove code delivery; only explicit owner closure
+  can prove that the intended Matter outcome is complete.
+
 ## Architecture Adjacency Check
 
 Use the stdlib-only graph check before and after a broad self-improve round:

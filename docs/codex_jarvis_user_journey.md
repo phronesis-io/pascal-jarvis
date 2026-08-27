@@ -34,6 +34,7 @@ Jarvis time/signal trigger
 | Work will cross a day, task, device, repo, or executor | Codex task | Search/create one Matter, acquire a run, release with a receipt | The outcome needs identity beyond one task. |
 | Continue something discussed in Lark or Claude Code | New clean Codex task | Open the existing Matter and load its compiled Context Packet | Old transcripts are evidence, not the prompt. |
 | Perform a consequential external action | Codex task | Matter + Delegation evidence | The UI can request approval; Jarvis verifies the effect and prevents false completion. |
+| Change code, inspect a diff, review a PR, or watch CI | Codex plus native Git/GitHub | Link the commit, PR, or verified artifact only when the outcome must survive this task | Git owns version and review evidence; it is not a second Matter, inbox, or memory store. |
 | Use a Feishu document, calendar, contact, group, or approval | Usually Codex with the native Lark tool | Add a Matter only if continuity or follow-up is needed | Native tools should remain native; Jarvis must not proxy everything. |
 | Receive a deadline, outage, safety issue, or decision that cannot wait | Lark wake-up | Jarvis owns trigger, dedupe, attention budget, and Item state | This is interruption, not a long work surface. |
 | Run recurring observation or organization while Pascal is absent | Jarvis Routine/Intent | Record evidence and remain quiet unless the threshold says to wake | This is the backstage's unique asynchronous value. |
@@ -55,9 +56,13 @@ Jarvis time/signal trigger
    next action. Raw chat histories are not dumped into the prompt.
 5. Codex does the interactive work with its native tools and approvals. Jarvis
    stays out of the conversation unless asked for durable state or an effect.
-6. Codex releases the run with file hashes and authoritative effect evidence.
+6. Code work uses the repository's ordinary branch, commit, PR, review, and CI
+   flow. Git/GitHub remains the authority for source history and collaborative
+   review. Jarvis may retain a bounded `git`/`github` artifact link or verified
+   file digest, but it never mirrors the repository into Matter state.
+7. Codex releases the run with file hashes and authoritative effect evidence.
    Its narrative is stored as an unverified report, not completion truth.
-7. Jarvis reconciles the receipt. Matter closure remains a separate owner-
+8. Jarvis reconciles the receipt. Matter closure remains a separate owner-
    confirmed transition; a process exit or confident sentence cannot close
    it. Once Pascal explicitly confirms completion, one idempotent closure
    retires linked Intents, Items, and Handoffs before the Matter reaches done.
@@ -108,6 +113,7 @@ clean Codex task continue it. It should not grow one permanent chat context.
 |---|---|---|
 | Codex | task/session UX, mobile Remote, tools, diffs, approvals, long results | durable Matter truth, provider policy, unverified completion |
 | Jarvis | Matter/Item/Intent, memory compilation, time, attention, authority, evidence, reconciliation | cloned chat/editor/mobile UI, raw model transcript as truth |
+| Git/GitHub | source history, branches, diffs, commits, PR review, CI and merge evidence | personal memory, Matter lifecycle, reminders, model policy |
 | Lark | bounded wake-up and native communication/calendar/document workflows | long analysis, second task inbox, duplicate Matter state |
 | Model Runtime | capability/trust/cost/health-based route and observed model | product state, permission, closure semantics |
 | Claude Code | optional execution session for tasks where it is useful | product continuity or exclusive model ownership |

@@ -58,6 +58,9 @@ silence, praise, or its own confidence into migration evidence.
 - **Jarvis backstage**: Matter identity, memory compilation, time triggers,
   attention policy, authority, model routing, verified effects, and terminal
   reconciliation. It should become less visible as it improves.
+- **Git/GitHub**: source history, diffs, commits, pull requests, CI, review, and
+  merge evidence for code work. Jarvis may link bounded evidence to a Matter;
+  it must not duplicate the repository, issue tracker, or PR state machine.
 - **Lark**: urgent/time-bound wake-ups, concise decision prompts during the
   transition, and native calendar/contact/group/document communication. It is
   not the default home for long analysis or a second task workspace.
@@ -83,7 +86,8 @@ silence, praise, or its own confidence into migration evidence.
   daily user workflow.
 
 The concrete decision table and desktop/mobile journeys are authoritative in
-`docs/codex_jarvis_user_journey.md`.
+`docs/codex_jarvis_user_journey.md`; implementation versus release versus
+real-use evidence is tracked in `docs/codex_frontstage_completion_audit.md`.
 
 ## Product Principles
 
@@ -134,6 +138,9 @@ The concrete decision table and desktop/mobile journeys are authoritative in
 24. Acceptance must be easy for the human and hard to forge: ask at most once
     after a verified result, accept only explicit owner labels, preserve the
     exact words, and never turn ignored feedback into another interruption.
+25. Native work systems remain authoritative: Git/GitHub owns code history and
+    review; Lark owns its native communication objects; Jarvis links only the
+    minimum evidence needed for continuity and closure.
 
 ## Non-Goals
 

@@ -4,7 +4,9 @@ Codex desktop/mobile is the interactive frontstage. Jarvis is the quiet
 continuity and control plane behind Codex, Claude Code, Lark, and replaceable
 models. It preserves durable Matters, compiles bounded context, runs
 asynchronous routines, governs effects, and verifies closure across sessions
-without rebuilding another chat product.
+without rebuilding another chat product. Git/GitHub remains the source, diff,
+PR, CI, and merge evidence plane; Jarvis links only the bounded evidence a
+durable Matter needs.
 
 **Release: `v1.15.0` (2026-08-20)** — see [CHANGELOG.md](CHANGELOG.md). 3000+ tests passing.
 

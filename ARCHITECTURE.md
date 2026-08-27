@@ -125,6 +125,13 @@ host-driven workflow may use Codex app-server to create or resume tasks, but
 app-server event state must still project into the same Matter Run contract;
 it may not become a competing lifecycle store.
 
+Git and GitHub remain outside the Jarvis state machine. They own source
+history, commits, pull requests, review, CI, and merge evidence. Matter links
+may reference `git` or `github` artifacts, and Result Receipts may hash files
+inside the acquired workspace, but repository state is never copied into a
+second Jarvis branch/PR model. A green CI check is delivery evidence, not owner
+confirmation that the product Matter is complete.
+
 The weekly review is a deterministic Tier-0 heartbeat task. Its pre-hook reads
 the same `core.matter_review` contract exposed as `jarvis_matter_review`; its
 post-hook renders at most one bounded card. It makes no model call and cannot
