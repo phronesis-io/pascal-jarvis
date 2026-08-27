@@ -30,6 +30,27 @@ Matter ledger. Each reset advances the context generation; receipts and
 background results captured under an older generation are historical evidence,
 not input to the current model window.
 
+### Context Packet
+
+A minimal, provider-neutral projection of one Matter for a bounded executor
+session. It contains the current goal, accepted decisions, relevant artifacts,
+constraints, unresolved questions, permissions, and next action, with a source
+reference for every mutable fact.
+
+Invariant: a Context Packet is compiled from authoritative state and selected
+memory. It is not a transcript dump, does not own domain state, and cannot make
+an old decision current merely because it appeared in conversation history.
+
+### Result Receipt
+
+The release contract of one bounded executor session. It records artifacts,
+decisions requested or made, verified effects, unresolved blockers, and the
+exact next action against the same Matter and context generation.
+
+Invariant: model prose or a process exit code is not a Result Receipt. Claimed
+effects must link to authoritative verification, and a missing or stale receipt
+cannot advance the Matter to done.
+
 ### Intent
 
 A time-bound internal promise to trigger, retry, and optionally ask a closure
@@ -117,8 +138,8 @@ content or interrupt the user.
 
 A lease indicating where the next interaction should continue.
 
-Invariant: a Handoff moves attention between devices or executors; it never
-duplicates the Item, Matter, or Intent.
+Invariant: a Handoff moves attention between surfaces, devices, or executors;
+it never duplicates the Item, Matter, or Intent.
 
 ### Job
 
@@ -135,6 +156,8 @@ completion is not automatically product-outcome completion.
 - A verified external action may add evidence to a Delegation and Matter.
 - Delivery transports an Item or reply; it does not own their business state.
 - A Handoff closes when its exact Item or Matter continuation is consumed.
+- A Logical Session acquires one Matter through a Context Packet and releases it
+  through a Result Receipt; neither object becomes a second source of truth.
 - Memory summarizes objects but never replaces their authoritative stores.
 - L3 proposes, L2 schedules engineering work, and L1 proves delivery; none of
   these may infer a product outcome from an Agent's completion sentence.

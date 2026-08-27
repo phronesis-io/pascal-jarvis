@@ -18,14 +18,16 @@ archive duty moved to the morning-anchor batch line and the Admin console,
 and the code archive is git history. The mobile gateway
 (`dashboard.mobile_gateway :3458`) and every Jarvis-owned Tailscale path are
 retired (2026-08-11, REQ-120). Jarvis neither installs, configures, probes,
-nor depends on Tailscale; Lark is the only mobile surface.
+nor depends on Tailscale. Lark remains the only production proactive-delivery
+surface while the Codex desktop/mobile frontstage contract is implemented and
+verified. That target does not revive a Jarvis-owned mobile web application.
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
 
 ## Main Flows
 
-### Conversation
+### Current Lark Conversation
 
 ```text
 Lark event
@@ -41,6 +43,32 @@ Lark event
 
 Group chat is fail-closed: curated group context, restricted tools, and no
 owner-private writes.
+
+### Target Codex-First Session Lifecycle
+
+```text
+Codex task on desktop or mobile
+  -> acquire one Matter lease
+  -> compile a provider-neutral Context Packet
+  -> run a bounded executor session
+  -> verify artifacts and external effects
+  -> write one Result Receipt
+  -> reconcile Matter / Item / Intent / Handoff state
+  -> release the lease; keep the raw transcript as audit evidence only
+```
+
+This is the accepted target contract, not a claim about the current deployed
+entry path. A Codex task is a replaceable execution window; the Matter is the
+long-lived product object. Jarvis owns context compilation, authority,
+continuity, asynchronous work, and reconciliation. Codex owns the interactive
+work surface. Lark remains a bounded wake-up and native-integration channel
+until desktop and mobile acceptance tests prove that a class of interaction can
+move without losing delivery or closure evidence.
+
+Context Packet inputs are authoritative object state and selected memory, not a
+raw transcript dump. Result Receipts contain artifacts, decisions, verified
+effects, unresolved blockers, and the exact next action. Provider prose alone
+cannot satisfy a receipt.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of
@@ -144,10 +172,14 @@ or delivery stack.
 ```text
 Item / Matter
   -> Handoff lease
-  -> Lark conversation or desktop executor
+  -> Codex desktop/mobile task, Lark conversation, or another executor
   -> action on the same underlying object
   -> all stale handoffs close
 ```
+
+Sessions remain bounded and replaceable. Matter identity, decisions, artifacts,
+receipts, and next action outlive every individual Codex, Claude Code, Lark, or
+provider session.
 
 ### Verified Delegation
 
@@ -274,6 +306,13 @@ warning only after the automatic retry budget is exhausted.
   health cooldown, and real provider diversity. It emits the private
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
+- **Target Model Runtime boundary:** route execution is still spread across the
+  current conversation, heartbeat, auxiliary, and Codex adapters. The migration
+  converges those callers on one provider-neutral orchestrator that consumes
+  `model_control` policy, enforces one wall-clock/effect budget, and records
+  task, Matter, provider, observed model, latency, cost, and terminal reason.
+  Product state, permissions, and completion receipts stay outside that runtime.
+  Tiny canaries and real-workload health remain distinct signals.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog. Canary and real-request
   evidence remain separate: a green tiny canary cannot erase a production
@@ -371,9 +410,13 @@ SQLite table is a read-through projection rebuilt on demand.
 
 ## Reach Policy
 
-Lark is the only delivery surface (REQ-119, 2026-08-11). A card either goes
-to Lark or stays ledger-only; no envelope may route to the retired web
-channel, whose transport used to fake success unconditionally.
+Today Lark is the only production proactive-delivery surface (REQ-119,
+2026-08-11). A card either goes to Lark or stays ledger-only; no envelope may
+route to the retired web channel, whose transport used to fake success
+unconditionally. The accepted target adds Codex desktop/mobile as the primary
+interactive frontstage, not as a second broadcast inbox. A delivery class moves
+only after its Codex notification, resume, and closure receipts pass real
+desktop/mobile acceptance tests.
 
 | Attention | Durable surface | Interrupting reach |
 |---|---|---|

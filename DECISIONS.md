@@ -15,10 +15,10 @@ continuity are three different responsibilities.
 |---|---|---|
 | `core.runtime_provider` | The owner's durable per-conversation preferred executor (`auto` or `codex`). | Defining route capabilities/order, recording which provider answered, starting a model process, or reading provider transcripts. |
 | `core.model_control` | The sanitized model catalog, private harness environment, route order, trust/tool policy, health cooldown application, and upstream-diversity truth. | Starting a model process, parsing provider output, storing conversation preference, or treating model prose as a receipt. |
-| `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per Lark conversation. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
+| `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per logical Matter context. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
 | `core.cross_session` | Bounded discovery, parsing, redaction, recent projection, and incremental digest of owner-operated Claude Code/Codex sessions. | Selecting or invoking a provider, claiming that an external session completed work, or replacing provider transcripts as source of truth. |
 | `core.cross_session_index` | A private, rebuildable SQLite index of redacted owner-operated session turns and query-focused historical projection. | Copying tool payloads, entering groups/Matters, or becoming authority for mutable facts. |
-| `core.matter_bridge` | The provider-neutral Lark conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
+| `core.matter_bridge` | The provider-neutral conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
 
 The short version is:
 
@@ -58,7 +58,7 @@ flowchart LR
   application, upstream diversity, or `/model` route truth in
   `core.model_control`.
 - Change Codex CLI arguments, timeout/process behavior, sandboxing, or durable
-  Lark-to-Codex thread reuse in `core.codex_fallback`.
+  Matter-to-Codex thread reuse in `core.codex_fallback`.
 - Change which external sessions are found, excluded, redacted, parsed, or
   projected in `core.cross_session`.
 - Change historical indexing, retention, or query ranking in
@@ -201,3 +201,44 @@ the block; ordering stable text before it is insufficient.
 
 This is a latency and cost optimization, never a completion receipt. Current
 facts still come from deterministic task DATA or a synchronous tool check.
+
+## ADR-007: Codex Is Frontstage; Jarvis Is the Continuity and Control Plane
+
+**Status:** accepted target; migration gated by real desktop/mobile evidence
+
+The primary interactive product will be Codex on desktop and mobile. Jarvis is
+the backstage continuity and control plane. Lark remains a bounded wake-up,
+approval, and native-integration channel; it is not the preferred home for long
+analysis, artifacts, or multi-step work. Claude Code, Codex CLI, GPT, and future
+harnesses are replaceable executors behind the same Matter contract.
+
+This supersedes the earlier product statement that "Lark is the product" while
+preserving an important runtime fact: Lark is still the only deployed proactive
+delivery transport today. No current path is removed until its replacement has
+passed desktop and mobile notification, resume, action, and closure tests.
+
+The interaction contract is **short Session, long Matter**:
+
+1. A new objective starts or resumes one Matter.
+2. Jarvis acquires the Matter and compiles a minimal, provider-neutral Context
+   Packet from authoritative state and selected memory.
+3. A bounded executor session performs the work under explicit permission and
+   effect budgets.
+4. Jarvis accepts only a Result Receipt backed by artifacts and authoritative
+   effect evidence, reconciles every linked Item/Intent/Handoff, then releases
+   the Matter.
+5. Raw transcripts remain searchable audit evidence but never become the
+   mutable source of truth.
+
+The model runtime is independent from both product surface and harness. It owns
+route execution, bounded failover, workload-class health, and full attribution
+of task, Matter, provider, observed model, latency, cost, and terminal reason.
+It does not own product state, permissions, or completion truth.
+
+Every Jarvis-owned feature must add at least one capability Codex alone cannot
+reliably provide: durable continuity, useful work while the owner is absent,
+authority and safety governance, cross-system coordination, or verified
+closure. Otherwise it belongs in Codex, should be reduced to an adapter, or
+should be retired. Codex integration must use supported public interfaces and
+provider-neutral contracts; undocumented task internals are never an
+authoritative dependency.
