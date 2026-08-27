@@ -88,6 +88,13 @@ def _validate_claim(
         )
     source_level_authority = source_authority(source["role"], source["text"])
     quote_level_authority = source_authority(source["role"], quote)
+    authority = (
+        "owner_asserted"
+        if source_level_authority == quote_level_authority == "owner_asserted"
+        else "assistant_candidate"
+    )
+    if authority == "owner_asserted":
+        content = quote
     return {
         "source_ref": source_ref,
         "kind": kind,
@@ -97,11 +104,7 @@ def _validate_claim(
         "quote": quote,
         "matter_id": source_matter,
         "role": source["role"],
-        "authority": (
-            "owner_asserted"
-            if source_level_authority == quote_level_authority == "owner_asserted"
-            else "assistant_candidate"
-        ),
+        "authority": authority,
         "occurred_epoch": _occurred_epoch(source.get("occurred_at")),
     }
 
@@ -238,23 +241,24 @@ def _insert_claim(
 
 
 def repair_context_dependent_claims(*, now: float | None = None) -> dict[str, Any]:
-    """Demote legacy active claims whose owner quote needs prior context.
+    """Ground legacy auto-active claims in self-contained owner words.
 
     Early Memory Compiler releases treated any exact owner quote as enough to
-    activate the model's expanded claim. This repair is replay-safe: it only
-    touches auto-active ``owner_asserted`` rows for which every retained quote
-    is a context-dependent acknowledgement. Human-confirmed claims are never
-    changed.
+    activate the model's expanded claim. This replay-safe repair demotes rows
+    whose quotes all need context, rewrites a claim backed by one independent
+    quote to that exact quote, and demotes ambiguous multi-quote paraphrases.
+    Human-confirmed claims are never changed.
     """
     connection = _db()
     epoch = _now(now)
-    affected: list[str] = []
+    affected: dict[str, str] = {}
+    grounded: dict[str, str] = {}
     restored: set[str] = set()
     resolved = 0
     try:
         connection.execute("BEGIN IMMEDIATE")
         candidates = connection.execute(
-            """SELECT id FROM memory_claims
+            """SELECT id,content FROM memory_claims
                 WHERE authority='owner_asserted'
                   AND status IN ('active','conflicted')"""
         ).fetchall()
@@ -263,15 +267,37 @@ def repair_context_dependent_claims(*, now: float | None = None) -> dict[str, An
             quotes = [
                 str(item[0] or "") for item in connection.execute(
                     """SELECT source_quote FROM memory_claim_sources
-                        WHERE claim_id=?""",
+                        WHERE claim_id=? ORDER BY source_ref""",
                     (claim_id,),
                 ).fetchall()
             ]
-            if quotes and all(
-                context_dependent_owner_text(item) for item in quotes
-            ):
-                affected.append(claim_id)
-        for claim_id in affected:
+            if not quotes:
+                continue
+            independent = [
+                item for item in quotes
+                if not context_dependent_owner_text(item)
+            ]
+            if not independent:
+                affected[claim_id] = "context_dependent_owner_quote"
+                continue
+            by_normalized: dict[str, str] = {}
+            for quote in independent:
+                by_normalized.setdefault(_normalized(quote), quote)
+            current = _normalized(row["content"])
+            if current in by_normalized:
+                continue
+            if len(by_normalized) == 1:
+                grounded[claim_id] = next(iter(by_normalized.values()))
+            else:
+                affected[claim_id] = "ambiguous_owner_quotes"
+        for claim_id, quote in grounded.items():
+            connection.execute(
+                """UPDATE memory_claims
+                      SET content=?,normalized_content=?,updated_epoch=?
+                    WHERE id=?""",
+                (quote, _normalized(quote), epoch, claim_id),
+            )
+        for claim_id, resolution in affected.items():
             connection.execute(
                 """UPDATE memory_claims
                       SET status='candidate',authority='assistant_candidate',
@@ -309,10 +335,10 @@ def repair_context_dependent_claims(*, now: float | None = None) -> dict[str, An
                 connection.execute(
                     """UPDATE memory_conflicts
                           SET status='resolved',
-                              resolution='context_dependent_owner_quote',
+                              resolution=?,
                               resolved_by='memory_compiler',resolved_epoch=?
                         WHERE id=?""",
-                    (epoch, conflict["id"]),
+                    (resolution, epoch, conflict["id"]),
                 )
                 resolved += 1
             for counterpart_id in counterparts:
@@ -346,6 +372,15 @@ def repair_context_dependent_claims(*, now: float | None = None) -> dict[str, An
         raise
     return {
         "demoted": len(affected),
+        "demoted_contextual": sum(
+            reason == "context_dependent_owner_quote"
+            for reason in affected.values()
+        ),
+        "demoted_ambiguous": sum(
+            reason == "ambiguous_owner_quotes"
+            for reason in affected.values()
+        ),
+        "grounded": len(grounded),
         "restored": len(restored),
         "resolved_conflicts": resolved,
     }

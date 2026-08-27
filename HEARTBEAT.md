@@ -529,7 +529,8 @@ duplicate the common style contract here.
     activation_policy=owner_context_candidate. Do not use neighboring turns to
     expand those words into owner-authorized facts. Core also re-checks the
     complete source and exact quote you choose; questions and contextual text
-    remain candidate-only.
+    remain candidate-only. For an auto-active owner claim, Core stores the
+    exact selected quote as content; your paraphrase cannot become authority.
 
     Return exactly:
     {"schema":"jarvis.memory-candidates.v1","batch_id":"<DATA batch_id>",
