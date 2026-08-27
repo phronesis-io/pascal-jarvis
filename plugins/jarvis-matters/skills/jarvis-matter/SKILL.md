@@ -23,10 +23,14 @@ task that can finish and be verified entirely in the current Codex task.
 
 ## Work
 
-1. Search before creating. Reuse the same recognizable outcome.
-2. Start a Matter run before substantive work. Pass the real workspace and a
-   concise task outcome. Pass `desktop` or `mobile` as the surface when it is
-   known. Keep its `run_id`, `context_generation`, and `context_digest`.
+1. The user speaks naturally; do not teach or expose the Matter protocol. When
+   the request clearly continues durable work, call `jarvis_matter_continue`
+   with a concise identifying phrase. If it returns one match, proceed. If it
+   is ambiguous, ask one short human question using the returned titles. If no
+   match exists and the work deserves continuity, create it once and continue.
+2. The one-step continuation acquires the Matter run before substantive work.
+   Pass the real workspace and concise task outcome. Pass `desktop` or `mobile`
+   when known. Keep its `run_id`, `context_generation`, and `context_digest`.
 3. Treat the returned Context Packet as the current bounded contract. Follow
    pointers only when needed; never load unrelated private memory or raw
    transcripts.
@@ -34,6 +38,10 @@ task that can finish and be verified entirely in the current Codex task.
 5. Release exactly once. List only files inside the workspace that now exist
    or are verifiably deleted. External effects need Delegation evidence IDs.
 6. If execution cannot finish, abort the run so the next task is not blocked.
+7. When Pascal explicitly says the named Matter is complete, release any live
+   run first, then call `jarvis_matter_close` with the useful outcome and his
+   exact confirmation words. This one transition retires linked reminders,
+   Items, and Handoffs. A live run, Job, or Delegation remains a blocker.
 
 ## Remember
 
@@ -61,7 +69,7 @@ task that can finish and be verified entirely in the current Codex task.
 - A Result Receipt closes the execution window, not the Matter.
 - Do not claim an external action from prose, tool intent, or an unverified
   response.
-- Do not mark a Matter done. Jarvis reconciles evidence and Pascal owns
-  consequential closure decisions.
+- Do not infer Matter completion. Pascal may explicitly close it; Jarvis then
+  reconciles linked state and records an authoritative closure receipt.
 - A new Codex task is the normal boundary for a distinct outcome. Multiple
   tasks may contribute to one Matter, one run at a time.

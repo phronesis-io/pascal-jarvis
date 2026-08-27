@@ -14,6 +14,8 @@ import pytest
 import core.db as db_module
 from core.codex_frontstage import (
     abort_matter_run,
+    close_frontstage_matter,
+    continue_matter_run,
     create_frontstage_matter,
     frontstage_health,
     matter_status,
@@ -52,6 +54,56 @@ def test_create_reuses_an_exact_open_matter_title():
     assert search_matters(query="连接层")["matters"][0]["id"] == (
         first["matter"]["id"]
     )
+
+
+def test_continue_resolves_one_natural_query_and_starts_the_run(tmp_path):
+    matter = create_matter(
+        "EigenFlux 白皮书",
+        summary="两周三个 Vlog",
+        next_action="整理路线图",
+    )
+
+    result = continue_matter_run(
+        query="白皮书",
+        task="继续整理时间节点",
+        workspace=str(tmp_path),
+        surface="mobile",
+    )
+
+    assert result["status"] == "started"
+    assert result["matter"]["id"] == matter["id"]
+    assert result["run"]["matter_id"] == matter["id"]
+    assert result["context_packet"]["matter"]["next_action"] == "整理路线图"
+
+
+def test_continue_fails_closed_on_ambiguous_or_missing_query(tmp_path):
+    create_matter("白皮书论证")
+    create_matter("白皮书发布")
+
+    ambiguous = continue_matter_run(
+        query="白皮书", task="继续", workspace=str(tmp_path)
+    )
+    missing = continue_matter_run(
+        query="董事责任险", task="继续", workspace=str(tmp_path)
+    )
+
+    assert ambiguous["status"] == "ambiguous"
+    assert len(ambiguous["candidates"]) == 2
+    assert missing["status"] == "not_found"
+    assert missing["candidates"] == []
+
+
+def test_frontstage_close_needs_owner_confirmation_and_reconciles(tmp_path):
+    matter = create_matter("自然关闭")
+
+    result = close_frontstage_matter(
+        matter_id=matter["id"],
+        outcome="已完成测试",
+        owner_confirmation="确认已经完成",
+    )
+
+    assert result["status"] == "closed"
+    assert get_matter(matter["id"])["status"] == "done"
 
 
 def test_start_returns_bounded_packet_and_records_the_codex_task(tmp_path):
@@ -151,10 +203,19 @@ def test_health_reports_unreleased_residue_without_mutating_it(tmp_path):
     assert get_run(started["run"]["id"])["status"] == "running"
 
 
-def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract():
+def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
+        monkeypatch):
     from core import codex_mcp
 
     create_matter("MCP 协议测试", summary="不能暴露原始会话")
+    monkeypatch.setattr(codex_mcp, "model_usage_status", lambda refresh=True: {
+        "schema": "jarvis.model-status.v1",
+        "refreshed": refresh,
+        "text": "Codex 7 天额度还剩约 50%",
+        "report": {
+            "codex": {"windows": [{"remaining_percent": 50}]},
+        },
+    })
 
     async def scenario():
         from mcp import Client
@@ -166,6 +227,8 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract():
                 "jarvis_frontstage_health",
                 "jarvis_model_status",
                 "jarvis_matter_abort",
+                "jarvis_matter_close",
+                "jarvis_matter_continue",
                 "jarvis_matter_create",
                 "jarvis_matter_release",
                 "jarvis_matter_renew",
@@ -187,6 +250,14 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract():
             assert result.is_error is False
             assert result.structured_content["count"] == 1
             assert "events" not in result.structured_content["matters"][0]
+            usage = await client.call_tool(
+                "jarvis_model_status", {"refresh": True}
+            )
+            assert usage.is_error is False
+            assert usage.structured_content["refreshed"] is True
+            assert usage.structured_content["report"]["codex"]["windows"][0][
+                "remaining_percent"
+            ] == 50
 
     asyncio.run(scenario())
 

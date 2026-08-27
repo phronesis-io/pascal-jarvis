@@ -132,6 +132,91 @@ def create_frontstage_matter(
     }
 
 
+def continuation_prompt(matter: dict[str, Any]) -> str:
+    """Stable user-facing resume phrase; never depends on Codex internals."""
+    return f"继续 Jarvis 事项「{matter['title']}」（{matter['id']}）"
+
+
+def continue_matter_run(
+    *,
+    task: str,
+    workspace: str,
+    matter_id: str = "",
+    query: str = "",
+    task_ref: str = "",
+    model: str = "",
+    surface: str = "",
+    lease_seconds: int = 21600,
+) -> dict[str, Any]:
+    """Resolve and acquire one Matter without exposing a multi-step protocol."""
+    selected: dict[str, Any] | None = None
+    candidates: list[dict[str, Any]] = []
+    direct_id = str(matter_id or "").strip()
+    if direct_id:
+        candidate = get_matter(
+            direct_id, include_links=False, include_events=False,
+        )
+        if candidate and candidate.get("status") not in {"done", "archived"}:
+            selected = candidate
+        elif candidate:
+            return {
+                "schema": "jarvis.matter-continuation.v1",
+                "status": "closed",
+                "matter": _compact_matter(candidate),
+                "candidates": [],
+            }
+    else:
+        search = search_matters(query=query)
+        candidates = search["matters"]
+        if len(candidates) == 1:
+            selected = get_matter(
+                candidates[0]["id"], include_links=False, include_events=False,
+            )
+
+    if selected is None:
+        return {
+            "schema": "jarvis.matter-continuation.v1",
+            "status": "ambiguous" if len(candidates) > 1 else "not_found",
+            "query": str(query or ""),
+            "candidates": [
+                {**item, "continuation_prompt": continuation_prompt(item)}
+                for item in candidates
+            ],
+        }
+
+    started = start_matter_run(
+        matter_id=selected["id"],
+        task=task,
+        workspace=workspace,
+        executor="codex",
+        task_ref=task_ref,
+        model=model,
+        surface=surface,
+        lease_seconds=lease_seconds,
+    )
+    return {
+        "schema": "jarvis.matter-continuation.v1",
+        "status": "started",
+        "matter": _compact_matter(selected),
+        "continuation_prompt": continuation_prompt(selected),
+        **started,
+    }
+
+
+def close_frontstage_matter(
+    *, matter_id: str, outcome: str, owner_confirmation: str,
+) -> dict[str, Any]:
+    """Close linked backstage state only from explicit owner words."""
+    from core.matter_closure import close_matter
+
+    return close_matter(
+        matter_id,
+        outcome=outcome,
+        confirmation_text=owner_confirmation,
+        source="codex",
+    )
+
+
 def matter_status(matter_id: str, *, event_limit: int = 12) -> dict[str, Any]:
     """Return current Matter truth and run residue without raw transcripts."""
     matter = get_matter(matter_id)

@@ -87,8 +87,12 @@ The implementation boundary is explicit:
 - `core.matter_executor` is the shared Claude/Codex adapter. Process exit and
   the last assistant message are observations only; they never close a Matter;
 - `core.codex_frontstage` exposes the provider-independent application
-  contract used by interactive harnesses: search/create, acquire, renew,
-  release, abort, and audit. It contains no MCP protocol code;
+  contract used by interactive harnesses: one-step continuation, search/create,
+  acquire, renew, release, owner-confirmed closure, abort, and audit. It
+  contains no MCP protocol code;
+- `core.matter_closure` owns the separate owner-authorized terminal saga. It
+  reconciles linked Intent/Item/Handoff state before Matter completion and
+  fails closed on live runs, Jobs, or Delegations;
 - `core.codex_mcp` adapts that contract to the official MCP Python SDK over
   local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
   it does not read Codex's private task store or create a second conversation;

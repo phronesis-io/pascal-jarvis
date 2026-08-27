@@ -1,9 +1,10 @@
 # Pascal Jarvis
 
-Jarvis is the continuity and control plane behind Codex, Claude Code, Lark and
-other replaceable execution surfaces. It preserves durable Matters, compiles
-bounded context, runs asynchronous routines, governs effects, and verifies
-closure across sessions and models.
+Codex desktop/mobile is the interactive frontstage. Jarvis is the quiet
+continuity and control plane behind Codex, Claude Code, Lark, and replaceable
+models. It preserves durable Matters, compiles bounded context, runs
+asynchronous routines, governs effects, and verifies closure across sessions
+without rebuilding another chat product.
 
 **Release: `v1.15.0` (2026-08-20)** — see [CHANGELOG.md](CHANGELOG.md). 3000+ tests passing.
 
@@ -111,7 +112,8 @@ python3 -m core.deploy receipt-latest
 
 ## What is this?
 
-Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
+Pascal Jarvis supplies the durable backstage that a single Codex or Claude Code
+task does not own:
 
 1. **Heartbeat Loop + Guardian Daemon** — A background scheduler runs tasks on configurable intervals (defined in `HEARTBEAT.md`, executed via pre/post shell scripts + a batched Claude call). A guardian daemon (`daemon.py`) monitors the bot process, kills stuck Claude sessions, and auto-restarts on crash.
 
@@ -165,7 +167,10 @@ approval, and native-integration channel until Codex acceptance evidence is
 complete. A provider-neutral Matter Run gives Claude or Codex one atomic lease,
 an owner-private Context Packet, and an immutable Result Receipt. Model prose
 cannot close the Matter; artifacts are hashed and external effects must point
-to authoritative Delegation evidence. All Lark output still crosses the unified
+to authoritative Delegation evidence. Codex can continue one unambiguous Matter
+through a single connector call; after Pascal explicitly confirms completion,
+one recoverable closure retires linked reminders, Items, and Handoffs. All Lark
+output still crosses the unified
 delivery state machine with sanitization, deduplication, attention caps, retry,
 dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
 Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).

@@ -10,7 +10,7 @@ from typing import Any
 from core.matter_runs import get_run
 
 
-CONNECTOR_VERSION = "0.1.0"
+CONNECTOR_VERSION = "0.2.0"
 SURFACES = {"desktop", "mobile"}
 TARGET_PER_SURFACE = 20
 

@@ -119,6 +119,9 @@ The concrete decision table and desktop/mobile journeys are authoritative in
 21. Usage is a product fact, not an operator chore: expose known quota, spend,
     reset, throttling, and predicted exhaustion in one model-runtime view;
     label unknowns honestly and interrupt only when the route is at risk.
+22. The protocol stays backstage: the user says “continue” or “done” in normal
+    language; deterministic code resolves identity, acquires the run, and
+    converges linked state. Ambiguity or missing authority stops the action.
 
 ## Non-Goals
 

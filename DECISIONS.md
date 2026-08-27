@@ -270,13 +270,17 @@ should be retired. Codex integration must use supported public interfaces and
 provider-neutral contracts; undocumented task internals are never an
 authoritative dependency.
 
-The first implementation slice is intentionally narrower than the full
+The repository implementation is intentionally narrower than the full
 frontstage migration. `core.matter_runs`, `core.matter_context`, and
-`core.matter_executor` now implement acquire/run/release, Context Packet v2,
+`core.matter_executor` implement acquire/run/release, Context Packet v2,
 artifact/effect verification, Result Receipt v1, expiry recovery, and a
-read-only Phase-0 residue audit. It does not auto-close Matters, move proactive
-delivery out of Lark, or claim that Codex mobile notification/resume APIs are
-already proven.
+read-only Phase-0 residue audit. `core.codex_frontstage` combines Matter
+resolution and acquire into one natural continuation call. A Result Receipt
+still cannot auto-close a Matter. `core.matter_closure` acts only on Pascal's
+explicit completion words, converges linked Intent/Item/Handoff state, and
+fails closed while a Run, Job, or Delegation is live. This does not move
+proactive delivery out of Lark or claim that Codex mobile notification/resume
+APIs are already proven.
 
 ## ADR-008: Memory Is Compiled Claims, Not Replayed Conversation
 

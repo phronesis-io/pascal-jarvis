@@ -207,6 +207,42 @@ def test_intent_link_blocks_close_until_cancelled():
     assert update_matter(matter["id"], status="done")["status"] == "done"
 
 
+def test_lark_owner_done_reconciles_linked_intent_without_extra_commands():
+    matter = create_matter("自然收口")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    intent_id = intentions.create_intent(
+        name="旧提醒",
+        trigger_type="date",
+        trigger_config={"datetime": "2099-08-30T09:00:00+08:00"},
+        matter_id=matter["id"],
+    )
+
+    result = handle_lark_command(
+        "/matter done 已经完成并验证", "ou_owner", "ou_owner")
+
+    assert "已完成并归档" in result["reply"]
+    assert intentions.get_intent(intent_id)["status"] == "cancelled"
+    assert get_matter(matter["id"])["status"] == "done"
+    assert get_binding("ou_owner") is None
+
+
+def test_lark_handoff_gives_a_human_codex_continuation_phrase(monkeypatch):
+    matter = create_matter("手机继续白皮书")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    monkeypatch.setattr(
+        matter_executor,
+        "prepare_handoff",
+        lambda *_a, **_k: {"context_path": "/private/context.md"},
+    )
+
+    result = handle_lark_command(
+        "/matter handoff codex", "ou_owner", "ou_owner")
+
+    assert "请在 Codex 新任务里说" in result["reply"]
+    assert matter["id"] in result["reply"]
+    assert "在仓库运行" not in result["reply"]
+
+
 def test_force_close_keeps_an_audited_warning():
     matter = create_matter("明确强制完成")
     intentions.create_intent(

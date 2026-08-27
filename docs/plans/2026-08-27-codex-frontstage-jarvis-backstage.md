@@ -262,8 +262,14 @@ acquire/run/release 路径。产物必须在 workspace 内存在并按内容哈�
 自动完成。`core.codex_frontstage` 和 `core.codex_mcp` 通过官方 MCP v2 SDK 暴露
 search/create/start/renew/release/abort/health；`plugins/jarvis-matters` 让 Codex
 发现这条能力而不读取其内部 task 文件。当前还欠桌面/手机各 20 次真实接受测试、
-Codex 主动唤醒/恢复适配、Item 与 Intent 的自动 reconcile，以及完整的 Model
-Runtime 收口。
+完整的 Model Runtime 收口，以及可由 Codex 宿主直接打开任务的已验证唤醒适配。
+
+**2026-08-27 后续工程检查点：** `jarvis_matter_continue` 已把查找、消歧、认领和
+Context Packet 合成一个自然继续入口；歧义时不绑定。Lark 交接只给稳定 Matter
+短语，不伪造 Codex 深链。`core.matter_closure` 在明确 owner 完成确认后，先统一收掉
+关联 Intent、Item 和 Handoff，再把 Matter 标记完成；活跃 Run、Job、Delegation
+继续阻断，Result Receipt 仍不能自动完成 Matter。以上仍是待审查、待发布代码，且
+Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
 
 ### Phase 2：Memory Compiler
 

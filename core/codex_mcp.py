@@ -6,6 +6,8 @@ from typing import Any
 
 from core.codex_frontstage import (
     abort_matter_run,
+    close_frontstage_matter,
+    continue_matter_run,
     create_frontstage_matter,
     frontstage_health,
     matter_status,
@@ -30,6 +32,10 @@ claim in the current conversation. Never infer approval or invent a reviewer.
 For package usage, report numeric allowance only from exact quota evidence.
 A login, configured credential, or successful canary is not remaining quota;
 show unknown when a provider exposes no supported read surface.
+Use the one-step continuation tool when Pascal naturally asks to resume durable
+work. Close only when Pascal explicitly says that named Matter is complete;
+pass his exact words as owner_confirmation and never infer them from executor
+prose, tests, exit codes, or artifacts.
 """.strip()
 
 
@@ -55,7 +61,7 @@ def create_server():
         title="Jarvis Matters",
         description="Durable Matter continuity for Codex and other frontstages.",
         instructions=SERVER_INSTRUCTIONS,
-        version="0.1.0",
+        version="0.2.0",
     )
 
     @server.tool(
@@ -68,6 +74,33 @@ def create_server():
     ) -> dict[str, Any]:
         """Find an existing durable Matter before creating another one."""
         return search_matters(query=query, status=status, limit=limit)
+
+    @server.tool(
+        name="jarvis_matter_continue",
+        annotations=bounded_write,
+        structured_output=True,
+    )
+    def matter_continue(
+        task: str,
+        workspace: str,
+        matter_id: str = "",
+        query: str = "",
+        task_ref: str = "",
+        model: str = "",
+        surface: str = "",
+        lease_seconds: int = 21600,
+    ) -> dict[str, Any]:
+        """Find and acquire one Matter in a single natural continuation step."""
+        return continue_matter_run(
+            task=task,
+            workspace=workspace,
+            matter_id=matter_id,
+            query=query,
+            task_ref=task_ref,
+            model=model,
+            surface=surface,
+            lease_seconds=lease_seconds,
+        )
 
     @server.tool(
         name="jarvis_matter_create",
@@ -177,6 +210,26 @@ def create_server():
     def abort(run_id: str, error: str) -> dict[str, Any]:
         """Release a failed execution lease with a system-observed receipt."""
         return abort_matter_run(run_id, error=error)
+
+    @server.tool(
+        name="jarvis_matter_close",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    def matter_close(
+        matter_id: str, outcome: str, owner_confirmation: str,
+    ) -> dict[str, Any]:
+        """Close a Matter only after Pascal explicitly confirms completion."""
+        return close_frontstage_matter(
+            matter_id=matter_id,
+            outcome=outcome,
+            owner_confirmation=owner_confirmation,
+        )
 
     @server.tool(
         name="jarvis_model_status",

@@ -45,18 +45,22 @@ Jarvis time/signal trigger
    outcome. A distinct outcome gets a new task.
 2. Codex answers or works normally. It does not create durable state merely
    because a conversation exists.
-3. When the work needs continuity, Codex searches Jarvis Matters. It reuses an
-   existing recognizable outcome or creates one only after the durable need is
-   clear.
-4. Codex acquires the Matter. Jarvis returns a bounded, traceable Context
+3. When the work needs continuity, Codex uses one natural continuation call.
+   One match proceeds; zero matches stays unbound; several matches produce one
+   short clarification. The user never operates the underlying search/acquire
+   protocol. Codex creates a Matter only after the durable need is clear.
+4. The continuation call acquires the Matter. Jarvis returns a bounded, traceable Context
    Packet containing current consensus, decisions, pointers, authority, and
    next action. Raw chat histories are not dumped into the prompt.
 5. Codex does the interactive work with its native tools and approvals. Jarvis
    stays out of the conversation unless asked for durable state or an effect.
 6. Codex releases the run with file hashes and authoritative effect evidence.
    Its narrative is stored as an unverified report, not completion truth.
-7. Jarvis reconciles the receipt. Matter closure remains a separate verified
-   transition; a process exit or confident sentence cannot close it.
+7. Jarvis reconciles the receipt. Matter closure remains a separate owner-
+   confirmed transition; a process exit or confident sentence cannot close
+   it. Once Pascal explicitly confirms completion, one idempotent closure
+   retires linked Intents, Items, and Handoffs before the Matter reaches done.
+   Live runs, Jobs, and Delegations continue to block closure.
 
 When Pascal refers to a decision from another product, Codex first searches
 compiled memory. An active claim includes its exact source reference and may be
@@ -76,7 +80,8 @@ chooses one; claim review is never inferred from silence or model prose.
    Codex. Lark does not receive a clipped duplicate.
 4. A Lark wake-up remains independently understandable until an exact Codex
    continuation link has been proven in production. It names the result or
-   decision and the Matter; it never promises a broken deep link.
+   decision and the Matter, then gives one stable phrase to use in a clean
+   Codex task; it never promises a broken deep link.
 
 ## When Pascal Talks Directly To Jarvis
 
