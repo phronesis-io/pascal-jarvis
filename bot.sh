@@ -2088,6 +2088,10 @@ ${_model_footer}"
       python3 "$JARVIS_DIR/tasks/write_claim_audit.py" >>"$LOG_FILE" 2>&1 & )
     # Keep the Matter timeline on the same successful-delivery boundary as
     # the user-visible reply. A failed Lark send is not recorded as delivered.
+    _memory_eligible_arg=()
+    if [ "$is_owner_p2p" = "1" ]; then
+      _memory_eligible_arg=(--memory-eligible)
+    fi
     ( JV_CONV_KEY="$conv_key" JV_REPLY="$reply" JV_MSG_ID="$message_id" \
       JV_MODEL="${_answer_model:-$MAIN_MODEL}" JARVIS_DIR="$JARVIS_DIR" \
       JV_CONTEXT_KEY="$logical_context_key" JV_MATTER_ID="$matter_id" \
@@ -2096,7 +2100,8 @@ ${_model_footer}"
         --model "${_answer_model:-$MAIN_MODEL}" \
         --provider "${_answer_provider:-Claude primary}" \
         --session-id "$session_id" --context-key "$logical_context_key" \
-        --matter-id "$matter_id" >>"$LOG_FILE" 2>&1 & )
+        --matter-id "$matter_id" "${_memory_eligible_arg[@]}" \
+        >>"$LOG_FILE" 2>&1 & )
     resolve_memorial_thread_after_reply "$conv_key" "$reply"
   fi
   _finish_message_handler
@@ -3300,7 +3305,8 @@ except Exception:
       # the same Matter. Also record the incoming turn after dedup succeeds.
       ( JV_CONV_KEY="$conv_key" JV_SESSION_ID="$session_id" JV_CONTENT="$content" \
         JV_MSG_ID="$message_id" JV_CONTEXT_KEY="$logical_context_key" \
-        JV_MATTER_ID="$matter_id" JARVIS_DIR="$JARVIS_DIR" python3 -c "
+        JV_MATTER_ID="$matter_id" JV_MEMORY_ELIGIBLE="$_owner_p2p" \
+        JARVIS_DIR="$JARVIS_DIR" python3 -c "
 import os, sys
 sys.path.insert(0, os.environ['JARVIS_DIR'])
 from core.matter_bridge import record_turn
@@ -3308,7 +3314,8 @@ from core.matters import link_entity
 record_turn(os.environ['JV_CONV_KEY'], 'user', os.environ['JV_CONTENT'],
             os.environ.get('JV_MSG_ID', ''),
             context_key=os.environ['JV_CONTEXT_KEY'],
-            matter_id=os.environ.get('JV_MATTER_ID', ''))
+            matter_id=os.environ.get('JV_MATTER_ID', ''),
+            memory_eligible=os.environ.get('JV_MEMORY_ELIGIBLE') == '1')
 if os.environ.get('JV_MATTER_ID'):
     link_entity(os.environ['JV_MATTER_ID'], 'session', os.environ['JV_SESSION_ID'],
                 provider='claude', title='Jarvis 飞书会话',

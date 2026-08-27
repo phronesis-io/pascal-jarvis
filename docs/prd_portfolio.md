@@ -1,6 +1,6 @@
 # Jarvis PRD Portfolio
 
-- Date: 2026-07-24
+- Last updated: 2026-08-27
 - Status: Authoritative portfolio index
 - Purpose: distinguish current product contracts from historical records,
   superseded designs, observation-only experiments, and rejected scope.
@@ -33,17 +33,18 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `prd_perception_ingestion.md` | Core accepted and shipped; expansion demand-gated | Registry, Signal, dedup, sensitivity, buffers, dry-run, and several adapters exist. Adding every possible Lark/API source would increase noise and permissions without a current outcome. New adapters require a named blind spot and privacy test. |
 | `prd_delivery_connectors.md` | Rejected as current scope; partially superseded | `core.delivery` already unifies product delivery across Lark reply, Lark, web, and push. Telegram/Slack/email portability has no current user and would force neutral-card and callback abstractions before evidence. Reopen only with a committed second backend/user. |
 | `design_task_system.md` | Consolidated and partly stale | Praxis/poiesis, capture, decay, and weekly review exist. Free-time nudge was later retired by engagement evidence. User-facing work now belongs to Item/Matter/Intent boundaries; do not resurrect a parallel task inbox from this design. |
-| `prd_matter_workspace_mobile.md` | Superseded; fully retired 2026-08-14 | The Matter topic contract (cross-entry continuity, Matter detail) lives on in code. The mobile workspace, pairing, Web Push, `:3458`, and every Jarvis-owned Tailscale path are gone; Lark is the only mobile and delivery surface. Do not build against this document's phone/web sections. |
+| `prd_matter_workspace_mobile.md` | Superseded; fully retired 2026-08-14 | The Matter topic contract (cross-entry continuity, Matter detail) lives on in code. The Jarvis-owned mobile workspace, pairing, Web Push, `:3458`, and every Jarvis-owned Tailscale path are gone. The 2026-08-27 Codex-frontstage target does not revive them. |
 | `prd_unified_delivery_items.md` | Current, shipped | Canonical Item, attention routing, and delivery contract. |
 | `prd_cross_device_continuity.md` | Partially superseded | Handoff state machine still current; pairing and the 发到手机 direction are retired (REQ-120, 2026-08-11) — new handoffs may only target the desktop 接力区. |
 | `prd_companion_checkin.md` | Current, shipped 2026-08-03 | Checkin as a self-improving companion: tap gradient (「这类不必」), per-kind budget with floor/ceiling, silence as a recorded+alarmable state, conversation feedback into the prompt. |
-| `prd_card_delivery_closure.md` | Partially superseded 2026-08-11 (REQ-119) | Honest tap outcomes (no-op ≠ ✓) and durable broadcast approvals remain current. The C1 reachable-surface routing (desk gate) is superseded: measured 14d read rates (Lark 95.7% vs web 1.8%) retired the web/phone desk as a delivery surface — Lark is the only surface, ambient exhaust is ledger-only with a morning-anchor digest line. |
+| `prd_card_delivery_closure.md` | Partially superseded 2026-08-11 and 2026-08-27 | Honest tap outcomes (no-op ≠ ✓) and durable broadcast approvals remain current. The old Jarvis web/phone desk remains retired. Lark stays the deployed proactive transport during migration, but the long-term interactive surface is Codex desktop/mobile; long content must not be forced into Lark cards. |
 | `prd_verified_delegation.md` | Current, implementation complete; production graduation gated | The generic control plane, deterministic verifiers, projections, reconciler, shadow evaluation, and connector receipts are implemented. Automatic promotion remains fail-closed until the production shadow sample meets the PRD thresholds. |
-| `prd_2026_08_11_signal_over_noise.md` | Active, current round (REQ-119 to REQ-123) | Lark as the only delivery surface (ledger-only ambient exhaust with a morning digest line), mobile gateway/funnel retirement, per-source noise reduction, one ledger accounting (待批/已办/留中 summing to created), and this constitution alignment. Evidence-based: 14d read rates, ghost-rate by hour, per-source批红 conversion. |
+| `prd_2026_08_11_signal_over_noise.md` | Shipped baseline; surface ruling superseded 2026-08-27 | Per-source noise reduction, one ledger accounting (待批/已办/留中 summing to created), and mobile-gateway retirement remain current. Its "Lark only" ruling remains today's transport fact, not the product end state; the Codex-frontstage PRD now owns that direction. |
 | `plans/2026-08-12-evidence-driven-attention-loop.md` | Shipped; daily-cap rule superseded 2026-08-14 | Authoritative Lark-arrival accounting, a hard 9/day ordinary proactive budget with terminal ledger-only overflow, a 4/10-minute burst queue, explicit-only decisions, memorial-thread closure, plain user copy, and worktree-safe EigenFlux/memory harnesses. Alerts, replies, urgent and active-conversation messages remain exempt. |
 | `plans/2026-08-14-audited-product-closure.md` | Current, implementation in release verification | Complete Tailscale retirement, query-focused cross-session memory, whole-turn context projection, provider cooldown routing, hard attention budget, truthful EigenFlux stream health, content-based deploy drift, memory-specific conversation findings, and two-observation L3 verification. |
 | `plans/2026-08-14-model-control-and-cross-product-memory.md` | Current, implementation in release verification | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
 | `plans/2026-08-15-lark-identity-transport.md` | Current, implementation in release verification | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
+| `plans/2026-08-27-codex-frontstage-jarvis-backstage.md` | Active; Phase 0/1 implemented, production acceptance pending | Codex desktop/mobile is the primary interactive frontstage; Jarvis is the continuity and control plane; Git/GitHub is the native code-evidence plane; Lark is bounded wake-up/native integration. The repository has the provider-neutral run protocol and local Codex MCP/plugin connector. `codex_frontstage_completion_audit.md` separates implementation, release, and real-use proof. Migration remains fail-closed until 20 desktop and 20 mobile journeys pass. |
 
 ## 3. Active Work
 
@@ -101,10 +102,12 @@ requested model, observed model, last success, latency, and a sanitized failure
 category. A primary spend-limit canary trips the same fallback gate used by
 live routing.
 
-Owner-private Lark conversations use Claude-first automatic routing by default,
-then Codex CLI, then GPT API. `切到 Codex` and `切回 Claude` change the preferred
-executor without weakening fallback; Codex threads are durable per conversation.
-Group and non-owner traffic never enters the local Codex tool route.
+Owner-private Lark conversations currently use Claude-first automatic routing
+by default, then Codex CLI, then GPT API. `切到 Codex` and `切回 Claude` change
+the preferred executor without weakening fallback; Codex threads are durable
+per logical Matter context. This is deployed runtime behavior, not the target
+surface contract. Group and non-owner traffic never enters the local Codex tool
+route.
 
 The live order also covers background jobs, session compaction, progress
 narration, EigenFlux message analysis, and heartbeat noise classification.
@@ -156,6 +159,10 @@ The following are not hidden backlog:
 - REQ-79.2 batch parse clamping after safe retry proved sufficient.
 - A second personal task system beside Item/Matter/Intent.
 - A home-grown clone of taskline inside Jarvis; the external service owns L2.
+- A Jarvis-owned clone of the Codex desktop/mobile work surface.
+- Depending on undocumented Codex task storage or transcript formats as product
+  state; integrations must use supported interfaces and provider-neutral
+  Context Packet/Result Receipt contracts.
 
 Current external constraints and accepted residuals:
 
@@ -220,3 +227,7 @@ A portfolio item is done only when:
 - runtime revision, component health, and smoke checks pass;
 - real external mutation is tested only with owner authorization;
 - the portfolio status is updated without rewriting historical evidence.
+
+For a product-surface migration, "done" additionally requires real desktop and
+mobile evidence for notification, Matter resume, action, and closure before the
+corresponding Lark path is reduced or retired.

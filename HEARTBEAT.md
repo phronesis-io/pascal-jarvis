@@ -6,12 +6,14 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 
 **Priority tasks** bypass the batch cap and run every cycle when due:
 `calendar-sync`, `memory-hourly`, `activity-log`, `cross-session-sync`,
-`eigenflux-friends`, `eigenflux-inbox-reconcile`, `intention-check`, `routine-run`
+`eigenflux-friends`, `eigenflux-inbox-reconcile`, `intention-check`,
+`model-usage`, `routine-run`
 
 **Tier 0 tasks** bypass Claude entirely (deterministic local work):
 `calendar-sync`, `delegation-reconcile`, `eigenflux-inbox-reconcile`,
 `iteration-observe`, `log-maintenance`, `memorial-escrow`,
-`perception-collect`, `provider-canary`, `self-diagnostic`
+`model-usage`, `perception-collect`, `provider-canary`, `self-diagnostic`,
+`weekly-review`
 
 ## Task Index
 
@@ -27,9 +29,9 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | EigenFlux | eigenflux-inbox-reconcile, eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | inbox reconcile silent; feed+friends yes, others silent |
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent; a gated user_message (anchor check + live gh PR verify + sent dedup) is AMBIENT — it lands in the ledger and the morning-anchor 攒批 line, not as a realtime Lark card (REQ-119 ledger-only); metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
+| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync compiles source-grounded memory and surfaces only a newly detected contradiction as an ambient ledger item; metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
 | Team | phronesis-monitor | only when the user is named or his action is needed (REQ-121); team chatter never cards |
-| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic | silent (beat only on change/fail; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent) |
+| Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, model-usage, provider-canary, self-diagnostic | model-usage is silent except the first exact quota-risk transition; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent |
 
 **Permanently silent tasks** (behavioral_rules.md — autonomous 内务，长期零响应):
 `daily-plan`, `self-diagnostic`, `thinking-review`, `iteration-observe`
@@ -517,19 +519,23 @@ duplicate the common style contract here.
 - pre: tasks/cross_session_pre.sh
 - post: tasks/cross_session_post.py
 - prompt: |
-    [CROSS-SESSION DIGEST]
-    Summarize each project in 2-3 bullets: decisions, solved problems, blockers,
-    and next steps. `[context]` lines are prior digest, never new evidence. A
-    state claim older than two hours is historical, not a current request; use
-    coarse time words/date, never a bare HH:MM. The post-hook independently
-    verifies pending-PR claims.
+    [MEMORY COMPILER]
+    DATA is one private batch of redacted owner-operated Codex, Claude Code,
+    and eligible owner-Lark turns. Extract only durable facts, decisions,
+    artifacts, todos, constraints, and preferences. Do not summarize sessions.
+    Do not infer completion, Matter identity, dates, or facts absent from an
+    exact quote. Assistant statements are candidates, never proof.
 
-    Add `user_message` (<=80 Chinese words) only for a new blocker, decision,
-    cross-reference, or incident the main assistant/user must know. Routine
-    progress remains digest-only.
-
-    Return JSON: {"digest": "...", "user_message": "..."} or just {"digest": "..."}
-    Always produce digest when DATA exists; only empty DATA may HEARTBEAT_OK.
+    Return exactly:
+    {"schema":"jarvis.memory-candidates.v1","batch_id":"<DATA batch_id>",
+    "claims":[{"source_ref":"<DATA source_ref>","quote":"<exact non-empty substring>",
+    "kind":"fact|decision|artifact|todo|constraint|preference",
+    "claim_key":"<stable subject/property key>","content":"<one durable claim>",
+    "matter_id":"<copy DATA source matter_id or empty>"}],
+    "ignored_source_refs":["<every DATA source with no durable claim>"]}
+    Every source_ref must appear in claims or ignored_source_refs. At most three
+    claims per source. Never author user_message, cards, advice, or prose outside
+    the JSON object.
 
 ## Analytics
 
@@ -771,6 +777,16 @@ duplicate the common style contract here.
     headers; only status, latency, requested/observed model and a redacted error
     are persisted. Disabled or unconfigured routes are reported honestly.
 
+### model-usage
+- interval: 1h
+- pre: tasks/model_usage_pre.py
+- post: tasks/model_usage_post.py
+- prompt: |
+    Deterministic Tier-0 package check with no model call. Read exact supported
+    quota windows, keep unsupported provider allowance unknown, update the
+    private forecast history, and emit at most one card for each new
+    exhausted/critical/account-limited episode.
+
 ### repos-sync
 - interval: 24h
 - model: sonnet
@@ -815,49 +831,9 @@ duplicate the common style contract here.
 - pre: tasks/weekly_review_pre.sh
 - post: tasks/weekly_review_post.py
 - prompt: |
-    [WEEKLY REVIEW — 周省]
-    This is the only moment where the full landscape is visible.
-    NOT a performance review. A landscape survey. A walk with a wise friend.
-
-    STEPS:
-    1. PRAXIS CHECK: Show streaks. No judgment. Pattern only.
-       "拉伸做了5/7天，冥想2/7。" No "should do better".
-
-    2. STALE SCAN: Any committed items touched 2+ times without completion?
-       Present each with: "还想做吗？要么这周真的排进去，要么放手。"
-       (王阳明: 知而不行非真知 — if you keep not doing it, maybe you don't actually want it)
-
-    3. PROJECT PULSE: For each in-progress project,
-       one sentence on momentum: moving / stuck / dormant.
-       Dormant > 2 weeks: "这个项目沉默了两周。暂停是有意的吗？"
-
-    4. INBOX ZERO: Force-triage any remaining inbox items.
-       48h+ items get surfaced. Decision required.
-
-    5. ENGAGEMENT REVIEW: If engagement insights exist in DATA, surface the top 1-2
-       adaptation suggestions briefly: "数据显示 X 互动率低，建议 Y". Skip if no insights.
-
-    6. NEXT WEEK LANDSCAPE: Show calendar density.
-       If >80% filled: "下周很满，想提前砍掉什么吗？" (道家: 留白)
-       If <40% filled: "下周比较松，有没有什么想主动安排的？"
-
-    7. ONE QUESTION: End with one question that reflects their trajectory.
-       Not "what are your goals" but something specific based on the data.
-       (Existentialist authenticity check — "上周花最多时间的事，是你真正想做的吗？")
-
-    Tone: wise friend on a walk, not a coach with a clipboard.
-    Under 200 words Chinese. No emojis except minimal structure markers.
-
-    Return JSON: {
-      "user_message": "<markdown>",
-      "auto_actions": [
-        {"action": "decay", "task_id": "...", "reason": "..."},
-        {"action": "defer", "task_id": "...", "to_date": "..."}
-      ]
-    }
-    JSON MUST be valid: inside string values never use bare ASCII double
-    quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
-    Or HEARTBEAT_OK if truly nothing to review.
+    Deterministic Tier-0 Matter result review. The pre-script reads only
+    authoritative Matter/Run state and the post-script renders it directly.
+    It never invokes a model, edits task state, or creates a parallel inbox.
 
 ### exercise-week
 - interval: 1h

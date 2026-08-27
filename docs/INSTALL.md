@@ -20,8 +20,8 @@
 
 | 组件 | 必需？ | 作用 | 人类要做的事 |
 |---|---|---|---|
-| Claude Code CLI | ✅ 必需 | Jarvis 的大脑（每次心跳/对话都是一次 claude 调用） | 登录一次（订阅或 API 计费） |
-| Codex CLI | 可选但推荐 | Claude 限额时接管私聊；也可手动切为首选 | `codex login` 登录 ChatGPT |
+| Claude Code CLI | 推荐 | 当前常驻任务的一个执行器；不再是产品身份 | 登录一次（订阅或 API 计费） |
+| Codex CLI/应用 | 推荐作为主入口 | 电脑和手机上的交互前台；通过 Matter 接续长期工作 | `codex login` 登录 ChatGPT |
 | python3.10+ / jq / requirements-dev.txt | ✅ 必需 | 运行时与安装验收 | 无 |
 | GitHub CLI (`gh`) | 仅生产发布 | PR/CI/review 发布门禁 | 首次 `gh auth login` |
 | Lark/飞书插件 | 可选 | 手机上和 bot 双向聊天 | 浏览器创建应用 + 授权（约 5 分钟） |
@@ -32,7 +32,9 @@
 **不配任何可选项也能跑**：headless 模式（心跳 + 记忆 + 感知照常工作，没有 IM）。
 
 Jarvis 不需要也不支持 Tailscale、设备配对码、Web Push 或手机网页入口。
-手机端只需安装飞书并与机器人对话；`:3457` Dashboard 已退役（2026-08-21），归档由晨间锚点攒批行 + Admin 控制台（`:3456`）承接。
+手机上的深度工作使用 Codex Remote；飞书只承担限量提醒和原生飞书动作。
+`:3457` Dashboard 已退役（2026-08-21），归档由晨间锚点攒批行 + Admin
+控制台（`:3456`）承接。
 
 ---
 
@@ -77,6 +79,29 @@ cd pascal-jarvis
 
 **验证**：`./scripts/doctor.sh` 的 1/6 和 2/6 段**无 FAIL**（WARN 可以有——比如 macOS 默认没有 coreutils timeout，属可选项）。
 此时已可启动 headless 模式：`./bot.sh`（Ctrl-C 退出；正式运行见 Phase 6）。
+
+### Phase 1.5 — Codex 主入口（推荐）
+
+```bash
+./scripts/install_codex_integration.sh
+codex plugin list        # jarvis-matters 应显示 installed, enabled
+codex mcp list           # jarvis 应显示 enabled
+```
+
+安装器只记录当前仓库的绝对路径到权限为 `0600` 的
+`~/.jarvis/repo-path`，再通过仓库内 marketplace 安装 `jarvis-matters`
+插件。MCP 使用本地 stdio，不开放端口，不复制密钥或私人 Matter 数据。
+安装或升级后新开一个 Codex task 才会加载新插件。
+
+Governed release (`./restart.sh --yes`) repeats this registration and verifies
+the enabled plugin plus a real stdio MCP handshake and representative read-only
+request before stopping the running bot. If MCP 2.x is absent from the selected
+Jarvis runtime venv, the release installs it first; a failure leaves the
+existing runtime untouched.
+
+验证提示词：`Show my active Jarvis Matters and their next actions.`。普通
+一次性问答不会创建 Matter；跨 session、设备、产品或日期的工作才绑定 Matter。
+完整旅程见 `docs/codex_jarvis_user_journey.md`。
 
 > **headless 模式有什么用？** 没有 IM 时它是一台后台「记忆+感知引擎」：持续整理
 > 记忆、采集 sources.yaml 信源、跑各类周期任务。和它交互的方式：① 在 `work_dir`

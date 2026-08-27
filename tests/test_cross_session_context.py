@@ -448,7 +448,7 @@ def test_prompt_and_first_digest_keep_latest_user_after_many_agent_updates(tmp_p
         state_file=tmp_path / "seen.json", **kwargs)
 
 
-def test_live_root_gate_injects_owner_prompt_but_not_group(tmp_path, monkeypatch):
+def test_live_root_gate_does_not_inject_uncompiled_transcripts(tmp_path, monkeypatch):
     jarvis_dir = tmp_path / "jarvis"
     memory = tmp_path / "memory"
     claude_root = tmp_path / "claude"
@@ -479,8 +479,8 @@ def test_live_root_gate_injects_owner_prompt_but_not_group(tmp_path, monkeypatch
         tracker_path=str(jarvis_dir / "active_sessions.json"),
         chat_type="group",
     )
-    assert "Recent External Work Sessions" in owner
-    assert "把 Codex 结论同步给主 Agent" in owner
+    assert "Recent External Work Sessions" not in owner
+    assert "把 Codex 结论同步给主 Agent" not in owner
     assert "Recent External Work Sessions" not in group
     assert "把 Codex 结论同步给主 Agent" not in group
 

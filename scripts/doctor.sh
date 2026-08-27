@@ -38,11 +38,11 @@ command -v jq >/dev/null 2>&1 \
   && ok "jq $(jq --version 2>/dev/null)" \
   || bad "jq not found" "brew install jq / apt install jq"
 
-_missing_modules=$(python3 - <<'PYEOF' 2>/dev/null || true
+_missing_modules=$("$JARVIS_PYTHON" - <<'PYEOF' 2>/dev/null || true
 import importlib
 
 required = (
-    "yaml", "lark_oapi", "pytest",
+    "yaml", "lark_oapi", "mcp", "pytest",
 )
 missing = []
 for module in required:
@@ -59,7 +59,7 @@ else
   bad "missing or broken Python modules: $_missing_modules" \
       "./scripts/python.sh -m pip install -r requirements-dev.txt"
 fi
-if python3 -m pip check >/dev/null 2>&1; then
+if "$JARVIS_PYTHON" -m pip check >/dev/null 2>&1; then
   ok "Python dependency graph is consistent"
 else
   bad "Python dependency conflicts detected" "./scripts/python.sh -m pip check"
@@ -92,6 +92,13 @@ if [ -n "$_codex_bin" ]; then
     warn "Codex CLI found but not authenticated — Claude outage cannot switch to Codex" \
          "run: codex login   (or use the ChatGPT-bundled Codex login)"
   fi
+  if $_codex_bin plugin list 2>/dev/null \
+       | grep -q 'jarvis-matters@pascal-jarvis.*installed, enabled'; then
+    ok "Codex Jarvis Matters plugin is installed"
+  else
+    warn "Codex frontstage is not connected to Jarvis Matters" \
+         "run: ./scripts/install_codex_integration.sh, then start a new Codex task"
+  fi
 else
   warn "Codex CLI not found — Claude still works, but local Codex fallback is unavailable" \
        "install Codex or ChatGPT for macOS, run 'codex login', or set codex.binary in jarvis.yaml"
@@ -118,7 +125,8 @@ fi
 # sections 2-3 would mislead (empty command substitutions read as PASS,
 # import errors read as 'broken YAML').
 PYCHECK_OK=1
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import yaml" 2>/dev/null; then
+if ! command -v python3 >/dev/null 2>&1 \
+    || ! "$JARVIS_PYTHON" -c "import yaml" 2>/dev/null; then
   PYCHECK_OK=0
 fi
 
@@ -129,7 +137,7 @@ if [ "$PYCHECK_OK" -ne 1 ]; then
   warn "skipping config-file parsing checks" "fix the Python dependency FAILs in section 1 first, then re-run"
 elif [ -f jarvis.yaml ]; then
   ok "jarvis.yaml exists"
-  _missing=$(python3 - <<'PYEOF'
+_missing=$("$JARVIS_PYTHON" - <<'PYEOF'
 import sys
 sys.path.insert(0, ".")
 try:

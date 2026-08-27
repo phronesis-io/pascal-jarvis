@@ -15,10 +15,10 @@ continuity are three different responsibilities.
 |---|---|---|
 | `core.runtime_provider` | The owner's durable per-conversation preferred executor (`auto` or `codex`). | Defining route capabilities/order, recording which provider answered, starting a model process, or reading provider transcripts. |
 | `core.model_control` | The sanitized model catalog, private harness environment, route order, trust/tool policy, health cooldown application, and upstream-diversity truth. | Starting a model process, parsing provider output, storing conversation preference, or treating model prose as a receipt. |
-| `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per Lark conversation. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
+| `core.codex_fallback` | One bounded, owner-private Codex CLI execution; process control; and one durable Codex thread per logical Matter context. | Provider preference, group/untrusted traffic, or cross-session discovery and projection. |
 | `core.cross_session` | Bounded discovery, parsing, redaction, recent projection, and incremental digest of owner-operated Claude Code/Codex sessions. | Selecting or invoking a provider, claiming that an external session completed work, or replacing provider transcripts as source of truth. |
 | `core.cross_session_index` | A private, rebuildable SQLite index of redacted owner-operated session turns and query-focused historical projection. | Copying tool payloads, entering groups/Matters, or becoming authority for mutable facts. |
-| `core.matter_bridge` | The provider-neutral Lark conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
+| `core.matter_bridge` | The provider-neutral conversation-turn ledger and the actual provider/model/session record after a successful answer. | Choosing a provider, invoking a model, or scraping external coding sessions. |
 
 The short version is:
 
@@ -58,7 +58,7 @@ flowchart LR
   application, upstream diversity, or `/model` route truth in
   `core.model_control`.
 - Change Codex CLI arguments, timeout/process behavior, sandboxing, or durable
-  Lark-to-Codex thread reuse in `core.codex_fallback`.
+  Matter-to-Codex thread reuse in `core.codex_fallback`.
 - Change which external sessions are found, excluded, redacted, parsed, or
   projected in `core.cross_session`.
 - Change historical indexing, retention, or query ranking in
@@ -75,6 +75,51 @@ not consult cross-session projections to decide whether to run. A harness may
 apply the route plan, call an adapter, and record the actual result through
 `matter_bridge`, but execution, continuity, and the conversation ledger must
 not create a second preference or route-policy store.
+
+## ADR-006: Codex Owns The Frontstage; Jarvis Integrates Through MCP
+
+**Status:** accepted
+
+- Codex owns interactive tasks, desktop/mobile Remote, tools, approvals,
+  diffs, long output, and ordinary task-local memory.
+- Jarvis exposes only application-owned capabilities through a local stdio MCP
+  server: durable Matter discovery, bounded Context Packets, run leases,
+  verified Result Receipts, and protocol health.
+- The MCP adapter calls `core.codex_frontstage`; it does not implement a second
+  Matter state machine. Claude Code or another harness may reuse that Python
+  contract without MCP.
+- The connector does not scrape or mutate undocumented Codex task storage.
+  Codex app-server is reserved for a future host-driven journey that truly
+  needs programmatic task creation/resumption and streamed approvals.
+- Jarvis cannot grant an executor Matter-completion authority or accept model
+  prose as external-effect evidence. Release closes the run only.
+- Desktop/mobile migration evidence comes only from Pascal's exact response to
+  a once-per-run prompt. MCP may claim that prompt and map the finite published
+  labels to evidence, but it cannot supply arbitrary scores, change reviewer
+  identity, infer approval, or overwrite a recorded sample. Prompt version and
+  run surface are immutable evidence, so delayed replies cannot bless a newer
+  connector or manufacture mobile coverage. The operator CLI
+  remains an audit/recovery path, not a source of Agent self-approval.
+- A repo-owned Codex plugin supplies concise routing guidance and starts the
+  local MCP process. Its installation records only the local repository path;
+  secrets and private Matter data stay in the existing private Jarvis store.
+
+The full product journey and replacement rules are in
+`docs/codex_jarvis_user_journey.md`.
+
+## ADR-007: Git Is The Code-Evidence Plane, Not Product Memory
+
+**Status:** accepted
+
+- Codex uses native Git/GitHub workflows for branches, commits, diffs, PRs,
+  review, CI, and merge.
+- Jarvis may retain a bounded `git`/`github` artifact link or verified file
+  digest when a Matter needs continuity or closure evidence.
+- Jarvis does not mirror repository history, issue state, or PR lifecycle into
+  a competing task system. Git facts do not become personal decisions merely
+  because they are committed.
+- CI and merge evidence can prove code delivery; only explicit owner closure
+  can prove that the intended Matter outcome is complete.
 
 ## Architecture Adjacency Check
 
@@ -201,3 +246,123 @@ the block; ordering stable text before it is insufficient.
 
 This is a latency and cost optimization, never a completion receipt. Current
 facts still come from deterministic task DATA or a synchronous tool check.
+
+## ADR-007: Codex Is Frontstage; Jarvis Is the Continuity and Control Plane
+
+**Status:** accepted; Phase-1 protocol implemented in repository, production
+migration gated by review/release and real desktop/mobile evidence
+
+The primary interactive product will be Codex on desktop and mobile. Jarvis is
+the backstage continuity and control plane. Lark remains a bounded wake-up,
+approval, and native-integration channel; it is not the preferred home for long
+analysis, artifacts, or multi-step work. Claude Code, Codex CLI, GPT, and future
+harnesses are replaceable executors behind the same Matter contract.
+
+This supersedes the earlier product statement that "Lark is the product" while
+preserving an important runtime fact: Lark is still the only deployed proactive
+delivery transport today. No current path is removed until its replacement has
+passed desktop and mobile notification, resume, action, and closure tests.
+
+The interaction contract is **short Session, long Matter**:
+
+1. A new objective starts or resumes one Matter.
+2. Jarvis acquires the Matter and compiles a minimal, provider-neutral Context
+   Packet from authoritative state and selected memory.
+3. A bounded executor session performs the work under explicit permission and
+   effect budgets.
+4. Jarvis accepts only a Result Receipt backed by artifacts and authoritative
+   effect evidence, reconciles every linked Item/Intent/Handoff, then releases
+   the Matter.
+5. Raw transcripts remain searchable audit evidence but never become the
+   mutable source of truth.
+
+The model runtime is independent from both product surface and harness. It owns
+route execution, bounded failover, workload-class health, and full attribution
+of task, Matter, provider, observed model, latency, cost, and terminal reason.
+It does not own product state, permissions, or completion truth.
+
+Every Jarvis-owned feature must add at least one capability Codex alone cannot
+reliably provide: durable continuity, useful work while the owner is absent,
+authority and safety governance, cross-system coordination, or verified
+closure. Otherwise it belongs in Codex, should be reduced to an adapter, or
+should be retired. Codex integration must use supported public interfaces and
+provider-neutral contracts; undocumented task internals are never an
+authoritative dependency.
+
+The repository implementation is intentionally narrower than the full
+frontstage migration. `core.matter_runs`, `core.matter_context`, and
+`core.matter_executor` implement acquire/run/release, Context Packet v2,
+artifact/effect verification, Result Receipt v1, expiry recovery, and a
+read-only Phase-0 residue audit. `core.codex_frontstage` combines Matter
+resolution and acquire into one natural continuation call. A Result Receipt
+still cannot auto-close a Matter. `core.matter_closure` acts only on Pascal's
+explicit completion words, converges linked Intent/Item/Handoff state, and
+fails closed while a Run, Job, or Delegation is live. This does not move
+proactive delivery out of Lark or claim that Codex mobile notification/resume
+APIs are already proven.
+
+## ADR-008: Memory Is Compiled Claims, Not Replayed Conversation
+
+**Status:** accepted; repository implementation complete, release pending
+
+- Provider transcripts and Lark conversation turns are audit sources. They do
+  not enter default prompts and cannot become mutable product truth directly.
+- `core.cross_session_index` continues to own private redacted raw-history
+  search. `core.memory_compiler` owns batches, exact-quote validation, claim
+  authority, supersession, conflict lifecycle, Matter scope, and recall.
+- Only owner-authored turns from owner-operated Codex/Claude sessions or Lark
+  turns explicitly marked owner-private may activate a claim automatically.
+  Assistant claims remain candidates even when they say work is complete.
+- A newer decision, preference, or todo with the same semantic key supersedes
+  the old value. Conflicting facts, constraints, or artifacts suspend both
+  values until a named human reviewer chooses or rejects one.
+- Context Packet recall is exact-Matter and active-only. Unbound owner recall is
+  query-focused. Groups receive neither. Every rendered claim carries a claim
+  ID and source reference.
+- Applied batches erase temporary transcript payloads. The legacy rolling
+  cross-session digest stays on disk for audit but is excluded from all memory
+  loaders and consolidation prompts.
+
+No memory claim, including a human-authored one, is proof of an external side
+effect. Delegation and domain-specific read-back remain authoritative.
+
+## ADR-009: Model Usage Is Evidence-Graded Product State
+
+**Status:** accepted; repository implementation complete, release pending
+
+- `core.model_usage` owns one joined read view across exact provider quota,
+  non-secret account metadata, real-request health, and `model_control` route
+  order. It does not choose or invoke a model.
+- Numeric allowance is valid only when a provider-defined read surface returns a
+  named window and reset. A successful login, configured credential, token
+  counter, or bounded canary never proves remaining subscription capacity.
+- Codex is currently `exact` through the signed-in local app-server. Claude is
+  `account_only`; MICU/relay/API routes are `unknown` until a defined balance
+  surface exists. Unknown is displayed, never estimated.
+- Private numeric observations are retained for 45 days. Exhaustion prediction
+  requires positive consumption across observations in the same reset window,
+  at least five minutes apart.
+- An hourly model-free Tier-0 task refreshes the view. It emits one
+  warning for a new critical/exhausted/account-limited episode, stays silent on
+  repetition, and rearms only after recovery.
+- Reading usage may cache sanitized telemetry but causes no provider spend and
+  no external effect. Buying capacity or consuming a reset credit always
+  requires explicit owner action.
+
+## ADR-010: Review Is A Read Model Over Matter Outcomes
+
+**Status:** accepted; repository implementation complete, release pending
+
+- `core.matter_review` is the single read contract for “what was accomplished,
+  what awaits owner closure, and what should continue next.” Codex exposes it
+  through `jarvis_matter_review`; the weekly Lark card renders the same data.
+- A Matter appears under outcomes only when it has a
+  `matter_closure_completed` receipt. A released executor Run appears under
+  “awaiting closure” and must never be promoted by model prose or exit status.
+- The review is bounded, transcript-free, and read-only. It must not decay,
+  defer, archive, create, close, or reprioritize work.
+- `weekly-review` is Tier 0 and makes no provider call. Empty reviews are
+  silent but advance the weekly success watermark; malformed evidence fails
+  visibly and does not spend the occurrence.
+- Routine retention and L3 value choices remain human decisions informed by
+  real use. A result review is not authority to create more recurring work.

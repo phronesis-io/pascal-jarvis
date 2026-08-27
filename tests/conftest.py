@@ -42,17 +42,26 @@ def _propagate_coverage_to_python_subprocesses(monkeypatch):
         "PYTHONPATH",
     )
 
-    def covered_popen(*args, **kwargs):
-        if kwargs.get("env") is not None:
-            child_env = dict(kwargs["env"])
-            for key in keys:
-                value = os.environ.get(key)
-                if value:
-                    child_env[key] = value
-            kwargs["env"] = child_env
-        return original_popen(*args, **kwargs)
+    class CoveredPopen(original_popen):
+        """Popen-compatible coverage injector, including its type contract.
 
-    monkeypatch.setattr(subprocess, "Popen", covered_popen)
+        A function wrapper breaks dependencies that evaluate annotations such
+        as ``subprocess.Popen[bytes]`` while the fixture is active on Python
+        3.12. Subclassing keeps Popen callable, usable in isinstance checks,
+        and subscriptable while still extending only explicit child envs.
+        """
+
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("env") is not None:
+                child_env = dict(kwargs["env"])
+                for key in keys:
+                    value = os.environ.get(key)
+                    if value:
+                        child_env[key] = value
+                kwargs["env"] = child_env
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", CoveredPopen)
     yield
 
 

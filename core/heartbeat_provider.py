@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -158,6 +159,40 @@ def drop_benign_notices(text: str) -> str:
     ]
     cleaned = "\n".join(kept).strip()
     return cleaned or text
+
+
+def error_summary(text: str, limit: int = 900) -> str:
+    """The part of a failed CLI call that says WHY it failed.
+
+    The Claude CLI answers `--output-format json` even on failure, and puts
+    the human-readable cause in the trailing `result` field — after a ~500
+    char preamble of usage counters. Head-truncating that envelope therefore
+    logs exactly the half that carries no information: on 2026-08-27 six
+    consecutive shared-call failures were logged as `is_error: true` plus
+    zeroed token counts, and the cause was unrecoverable from the log.
+
+    Falls back to head+tail for anything that is not that envelope, so a
+    plain stderr traceback keeps both its first and last line.
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
+    start = text.find("{")
+    if start != -1:
+        try:
+            payload = json.loads(text[start:])
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            cause = payload.get("result") or payload.get("error")
+            if cause:
+                subtype = payload.get("subtype") or payload.get("stop_reason") or ""
+                head = f"[{subtype}] " if subtype else ""
+                return f"{head}{str(cause)[:limit]}"
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n…[{len(text) - limit} chars omitted]…\n{text[-half:]}"
 
 
 def openai_usage_fields(response: object) -> dict[str, int]:

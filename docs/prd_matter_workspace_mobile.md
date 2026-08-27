@@ -25,6 +25,20 @@ Implemented on 2026-07-22:
   revocable device credentials, TLS with an installable local CA, access
   audit, and Web Push.
 
+2026-08-27 Codex-frontstage correction:
+
+- Phase 2's completion-summary contract is superseded by the provider-neutral
+  Matter Run protocol. A single atomic lease now guards each Matter execution.
+- `jarvis.context-packet.v2` carries a digest, context generation, source
+  references, authority boundary and receipt contract; raw decision payloads
+  are not forwarded.
+- `jarvis.result-receipt.v1` hashes real artifacts and accepts external-effect
+  claims only through qualifying Delegation evidence. Model prose and exit code
+  are observations and cannot mark a Matter done.
+- The code is implemented in `core.matter_runs`, `core.matter_context`, and
+  `core.matter_executor`. Deployment remains gated by review, release evidence,
+  and real Codex desktop/mobile acceptance.
+
 2026-07-22 evening hardening round:
 
 - The PWA manifest fetch defaults to credentials-omit and 401'd at the
@@ -536,10 +550,10 @@ python3 -m core.matters create "Matter title" --next-action "Concrete next move"
 ./scripts/jarvis-matter launch mat_xxx codex
 ./scripts/jarvis-matter launch mat_xxx claude
 
-# Pair or revoke a phone from the CLI (also available under /settings)
-python3 -m core.mobile_access pair --label "My phone"
-python3 -m core.mobile_access devices
-python3 -m core.mobile_access revoke dev_xxx
+# Inspect one immutable run or audit stale/legacy execution state
+./scripts/jarvis-matter run-status mrun_xxx
+./scripts/jarvis-matter audit
+./scripts/jarvis-matter audit --recover-expired
 ```
 
 Lark commands:

@@ -1,5 +1,11 @@
 # Jarvis Task System — Complete Design
 
+> **Historical design (May 2026).** The praxis/poiesis vocabulary remains
+> useful, but the model-authored `weekly-review` and its automatic
+> decay/defer/archive actions are retired. Current work continuity lives in
+> Matters, and the production weekly review is the deterministic, read-only
+> contract documented in `ARCHITECTURE.md` and `HEARTBEAT.md`.
+
 ## Philosophy (50 words)
 
 Tasks are commitments to finite time, not obligations to productivity. The system practices 知行合一: a task uncommitted-to is noise; a task stale is a signal about desire. Praxis (becoming) is protected before poiesis (producing). Whitespace is sacred. Explicit rejection is freedom. Decay is mercy.

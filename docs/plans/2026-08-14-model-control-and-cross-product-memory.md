@@ -1,6 +1,8 @@
 # Model Control Plane and Cross-Product Memory
 
-**Status:** implementation complete; release verification pending
+**Status:** model-control portion retained; cross-product-memory design
+superseded on 2026-08-27 by
+`docs/plans/2026-08-27-cross-product-memory-compiler.md`
 **Owner outcome:** Jarvis can change model providers without changing its
 product or execution semantics, and the main assistant can recover relevant
 history from Pascal's interactive Claude Code and Codex conversations.
@@ -19,7 +21,7 @@ That makes a GPT model exposed through a Claude-compatible relay look like a
 Claude provider, hides when two fallbacks share one upstream account, and makes
 route behavior expensive to inspect.
 
-Cross-session continuity has the opposite shape: recent Claude Code and Codex
+The original cross-session diagnosis was: recent Claude Code and Codex
 turns are projected correctly, but the 24-hour window is not a historical
 memory.  Older decisions are reduced to one small rolling digest, so the main
 assistant cannot retrieve a relevant old conversation on demand.
@@ -41,7 +43,11 @@ assistant cannot retrieve a relevant old conversation on demand.
 - Configuration and diagnostics never serialize credentials.  Existing
   `claude`, `codex`, and `openai` configuration remains backward compatible.
 
-### Cross-product memory
+### Historical cross-product memory contract
+
+This section describes the first searchable-index implementation. It remains
+valid for explicit raw-history audit, but it is no longer the default prompt or
+durable-memory contract.
 
 - Recent interactive Claude Code/Codex turns keep their direct, bounded prompt
   projection.

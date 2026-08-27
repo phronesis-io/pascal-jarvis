@@ -11,12 +11,12 @@ Directory layout:
   │   ├── daily_log.md
   │   ├── daily_archive.md   (not loaded — old entries)
   │   └── hourly_archive.md  (not loaded — old entries)
-  └── system/            — todos, open_threads, cross_session_digest
+  └── system/            — todos, open_threads, perception buffers
 
 Loading strategy (1M context — load everything, but with per-tier budgets):
   - hot/*          → full content (rules first for attention priority)
   - warm/*         → full content (all knowledge base files)
-  - system/*.md    → full content (todos, open_threads, digest, insights)
+  - system/*.md    → bounded content except explicitly retired projections
   - timeline/hourly_log.md  → full
   - timeline/daily_log.md   → full (auto-archived after 14 days)
   - Archives       → NOT loaded (hourly_archive, daily_archive, warm/archive/*)
@@ -105,6 +105,10 @@ _TIMELINE_SKIP = {
     "longterm_digest.bak.md", "monthly_archive.bak.md",
 }
 
+# Legacy model-authored projections remain on disk for audit but cannot become
+# current truth merely because the general system-memory loader sees them.
+_SYSTEM_SKIP = {"cross_session_digest.md"}
+
 # Append-only system files (new entries at the TAIL): when a hard cut lands
 # mid-section, keep the tail, not the head. todos.md grows via dated
 # auto-update appends since April — the head-keep cut had the model reading
@@ -130,8 +134,8 @@ _SYSTEM_TAIL_KEEP_FILES = {
 
 # Load-time caps (chars, tail-keep) for the bulky perception inbox buffers.
 # INBOX_MAX_LINES=500 lets each buffer reach ~40KB — the two of them alone
-# exceed SYSTEM_BUDGET, so they were evicting cross_session_digest /
-# pending_updates on every call (2026-07-07 memory audit). Capping at load
+# exceed SYSTEM_BUDGET, so they were evicting pending_updates and other system
+# guidance on every call (2026-07-07 memory audit). Capping at load
 # keeps the newest signals visible without letting raw buffers starve the
 # load-bearing system files; the full files stay on disk for on-demand Read.
 # REQ-92 (2026-07-14): this is also the single source of truth for the ON-DISK
@@ -169,7 +173,6 @@ _SYSTEM_FILE_CAPS = {
     "engineering_roadmap.md": 5000,
     "inbox_team.md": 3500,
     "engagement_insights.md": 3000,
-    "cross_session_digest.md": 3000,
     "heartbeat_tasks_hourly_selflog.md": 2000,
     "pending_updates.md": 1500,
     "engagement_content_mix.md": 1500,
@@ -564,12 +567,12 @@ def build_warm_index(memory_dir: Path) -> list[str]:
 
 
 def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
-    """System tier: todos, open_threads, digest, insights, perception buffers.
+    """System tier: todos, open_threads, insights, and perception buffers.
     Honors the outbound sensitivity gate.
 
     Priority-ordered (red-team fix): the load-bearing operational files
     (open_threads — drives heartbeat proactive follow-up per CLAUDE.md, todos,
-    pending_updates, the digest) come FIRST so that if the tier is ever
+    and pending_updates) come FIRST so that if the tier is ever
     truncated the casualties are the bulky perception buffers (inbox_ops /
     inbox_private_mail), never Pascal's todos/threads. Previously plain
     alphabetical, so inbox_ops (21KB) ate the budget and dropped open_threads."""
@@ -581,11 +584,13 @@ def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
         "open_threads.md": 0,
         "todos.md": 1,
         "pending_updates.md": 2,
-        "cross_session_digest.md": 3,
-        "engagement_insights.md": 4,
-        "engineering_roadmap.md": 5,
+        "engagement_insights.md": 3,
+        "engineering_roadmap.md": 4,
     }
-    files = [f for f in sys_dir.glob("*.md") if f.is_file()]
+    files = [
+        f for f in sys_dir.glob("*.md")
+        if f.is_file() and f.name not in _SYSTEM_SKIP
+    ]
     files.sort(key=lambda f: (priority.get(f.name, 50), f.name))
     for f in files:
         if purpose == "outbound" and (f.name.startswith("inbox_private")

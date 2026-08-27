@@ -375,8 +375,8 @@ def test_curated_system_files_still_keep_head(tmp_path):
 
 
 def test_inbox_buffers_capped_at_load(tmp_path):
-    """Per-file caps: the perception inbox buffers (2×~40KB > the whole 40k
-    system reserve) can never again evict cross_session_digest & co — they
+    """Per-file caps: perception buffers cannot evict current system memory;
+    the retired cross-session digest remains an audit file and is not loaded.
     are tail-capped at load time, newest signals kept, file on disk intact
     (2026-07-07 memory audit)."""
     _make_full_tree(tmp_path)
@@ -388,7 +388,7 @@ def test_inbox_buffers_capped_at_load(tmp_path):
     assert "NEW_SIGNAL_MARKER" in output
     assert "OLD_SIGNAL_MARKER" not in output
     assert "[capped" in output
-    assert "DIGEST_MARKER" in output
+    assert "DIGEST_MARKER" not in output
     # Cap is load-time only — the file on disk is untouched.
     assert "OLD_SIGNAL_MARKER" in (sysd / "inbox_ops.md").read_text()
 

@@ -458,6 +458,177 @@ MIGRATIONS = [
         reset_at TEXT NOT NULL DEFAULT ''
     );
     """,
+    # v12: Provider-neutral Matter execution receipts.  A provider session is
+    # an expendable execution window; this table is the durable acquire/run/
+    # release boundary that prevents two windows from silently owning the same
+    # Matter and prevents model prose from becoming completion evidence.
+    """
+    CREATE TABLE IF NOT EXISTS matter_runs (
+        id TEXT PRIMARY KEY,
+        matter_id TEXT NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+        executor TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+            status IN ('acquired', 'running', 'released', 'failed', 'expired')
+        ),
+        run_sequence INTEGER NOT NULL,
+        task TEXT NOT NULL DEFAULT '',
+        workspace TEXT NOT NULL,
+        context_generation INTEGER NOT NULL DEFAULT 0,
+        context_packet_id TEXT NOT NULL DEFAULT '',
+        context_digest TEXT NOT NULL DEFAULT '',
+        context_path TEXT NOT NULL DEFAULT '',
+        authority_json TEXT NOT NULL DEFAULT '{}',
+        acquired_epoch REAL NOT NULL,
+        lease_expires_epoch REAL NOT NULL,
+        started_epoch REAL,
+        released_epoch REAL,
+        session_id TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        exit_code INTEGER,
+        result_digest TEXT NOT NULL DEFAULT '',
+        receipt_json TEXT NOT NULL DEFAULT '{}',
+        last_error TEXT NOT NULL DEFAULT '',
+        UNIQUE(matter_id, run_sequence)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_matter_runs_one_active
+        ON matter_runs(matter_id)
+        WHERE status IN ('acquired', 'running');
+    CREATE INDEX IF NOT EXISTS idx_matter_runs_status_lease
+        ON matter_runs(status, lease_expires_epoch);
+    CREATE INDEX IF NOT EXISTS idx_matter_runs_matter
+        ON matter_runs(matter_id, run_sequence DESC);
+    """,
+    # v13: Human-reviewed desktop/mobile acceptance evidence for the Codex
+    # frontstage. Runtime receipts remain authoritative; this table records
+    # whether the user journey was actually useful before a Lark path retires.
+    """
+    ALTER TABLE matter_runs ADD COLUMN surface TEXT NOT NULL DEFAULT ''
+        CHECK(surface IN ('', 'desktop', 'mobile', 'lark', 'api'));
+    CREATE TABLE IF NOT EXISTS frontstage_acceptance (
+        run_id TEXT PRIMARY KEY REFERENCES matter_runs(id) ON DELETE CASCADE,
+        connector_version TEXT NOT NULL,
+        surface TEXT NOT NULL CHECK(surface IN ('desktop', 'mobile')),
+        matter_discovered_correct INTEGER NOT NULL CHECK(
+            matter_discovered_correct IN (0, 1)
+        ),
+        context_packet_correct INTEGER NOT NULL CHECK(
+            context_packet_correct IN (0, 1)
+        ),
+        task_completed INTEGER NOT NULL CHECK(task_completed IN (0, 1)),
+        receipt_valid INTEGER NOT NULL CHECK(receipt_valid IN (0, 1)),
+        duplicate_effect INTEGER NOT NULL CHECK(duplicate_effect IN (0, 1)),
+        reexplanation_required INTEGER NOT NULL CHECK(
+            reexplanation_required IN (0, 1)
+        ),
+        reviewer TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        reviewed_epoch REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_frontstage_acceptance_version_surface
+        ON frontstage_acceptance(connector_version, surface, reviewed_epoch);
+    """,
+    # v14: Cross-product Memory Compiler. Raw provider transcripts remain the
+    # audit source; these tables hold only bounded source receipts, validated
+    # claim quotes, lifecycle state, and explicit conflicts.
+    """
+    CREATE TABLE IF NOT EXISTS memory_compile_batches (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK(status IN ('pending','applied','failed')),
+        source_refs TEXT NOT NULL DEFAULT '[]',
+        payload TEXT NOT NULL DEFAULT '{}',
+        created_epoch REAL NOT NULL,
+        completed_epoch REAL,
+        last_error TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_compile_sources (
+        source_ref TEXT PRIMARY KEY,
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('session_turn','lark_turn')),
+        provider TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+        occurred_at TEXT NOT NULL DEFAULT '',
+        source_digest TEXT NOT NULL,
+        matter_id TEXT REFERENCES matters(id) ON DELETE SET NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','compiled','ignored','failed')),
+        batch_id TEXT NOT NULL REFERENCES memory_compile_batches(id),
+        metadata TEXT NOT NULL DEFAULT '{}',
+        processed_epoch REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_claims (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(
+            kind IN ('fact','decision','artifact','todo','constraint','preference')
+        ),
+        claim_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_content TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+            status IN ('candidate','active','conflicted','superseded','rejected')
+        ),
+        authority TEXT NOT NULL CHECK(
+            authority IN ('assistant_candidate','owner_asserted','human_confirmed')
+        ),
+        matter_id TEXT REFERENCES matters(id) ON DELETE SET NULL,
+        valid_from_epoch REAL,
+        valid_until_epoch REAL,
+        superseded_by TEXT REFERENCES memory_claims(id),
+        confirmed_by TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        updated_epoch REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_claim_sources (
+        claim_id TEXT NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+        source_ref TEXT NOT NULL REFERENCES memory_compile_sources(source_ref)
+            ON DELETE RESTRICT,
+        source_quote TEXT NOT NULL,
+        PRIMARY KEY(claim_id, source_ref)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_conflicts (
+        id TEXT PRIMARY KEY,
+        matter_scope TEXT NOT NULL DEFAULT '',
+        claim_key TEXT NOT NULL,
+        prior_claim_id TEXT NOT NULL REFERENCES memory_claims(id),
+        incoming_claim_id TEXT NOT NULL REFERENCES memory_claims(id),
+        status TEXT NOT NULL CHECK(status IN ('open','resolved')),
+        resolution TEXT NOT NULL DEFAULT '',
+        resolved_by TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        resolved_epoch REAL,
+        UNIQUE(prior_claim_id, incoming_claim_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_sources_status
+        ON memory_compile_sources(status, occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_claims_scope
+        ON memory_claims(matter_id, status, kind, claim_key);
+    CREATE INDEX IF NOT EXISTS idx_memory_claims_updated
+        ON memory_claims(status, updated_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_conflicts_open
+        ON memory_conflicts(status, created_epoch DESC);
+    """,
+    # v15: Numeric, credential-free model usage observations. Exact provider
+    # snapshots and inferred forecasts stay separate from health canaries.
+    """
+    CREATE TABLE IF NOT EXISTS model_usage_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        route_id TEXT NOT NULL,
+        limit_id TEXT NOT NULL,
+        window_name TEXT NOT NULL,
+        used_percent REAL NOT NULL,
+        resets_at_epoch REAL,
+        observed_epoch REAL NOT NULL,
+        source TEXT NOT NULL,
+        UNIQUE(route_id, limit_id, window_name, observed_epoch)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_model_usage_window
+        ON model_usage_observations(
+            route_id, limit_id, window_name, resets_at_epoch, observed_epoch DESC
+        );
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None
@@ -525,7 +696,27 @@ def _run_migrations(db: sqlite3.Connection):
         columns=(
             ("context_key", "TEXT NOT NULL DEFAULT ''"),
             ("matter_id", "TEXT NOT NULL DEFAULT ''"),
+            ("memory_eligible", "INTEGER NOT NULL DEFAULT 0"),
         ),
+    )
+    # Frontstage acceptance v2 records whether a feedback prompt has already
+    # been shown and preserves Pascal's exact confirmation words.  Named
+    # additive migrations keep an interrupted upgrade re-entrant on the live
+    # SQLite database.
+    ensure_additive_columns(
+        db,
+        namespace="frontstage_acceptance_v2",
+        table="matter_runs",
+        columns=(
+            ("acceptance_prompted_epoch", "REAL"),
+            ("acceptance_prompt_version", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    )
+    ensure_additive_columns(
+        db,
+        namespace="frontstage_acceptance_v2",
+        table="frontstage_acceptance",
+        columns=(("owner_confirmation", "TEXT NOT NULL DEFAULT ''"),),
     )
     try:
         db.execute("BEGIN IMMEDIATE")

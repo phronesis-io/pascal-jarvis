@@ -20,6 +20,7 @@ from pathlib import Path
 from .claude_bin import resolve_claude_bin
 from .heartbeat_provider import (
     drop_benign_notices as _drop_benign_notices,
+    error_summary as _error_summary,
     fallback_attempt_timeout as _fallback_attempt_timeout,
     record_isolated_failure as _record_isolated_failure,
     observe_provider as _observe_provider,
@@ -419,7 +420,7 @@ class HeartbeatRunner:
     # deferred cycle spends an occurrence that never reaches the user.
     PRIORITY_TASKS = {"calendar-sync", "memory-hourly", "activity-log", "cross-session-sync",
                        "eigenflux-friends", "eigenflux-inbox-reconcile",
-                       "intention-check", "routine-run"}
+                       "intention-check", "model-usage", "routine-run"}
 
     # Tier 0: tasks that bypass Claude entirely (pre→post direct pipe).
     # ONLY for tasks where the pre-script already produces the final output
@@ -432,6 +433,7 @@ class HeartbeatRunner:
         "iteration-observe",
         "log-maintenance",
         "memorial-escrow",
+        "model-usage",
         # perception-collect (2026-08-24): its "HEARTBEAT_OK unless the same
         # source keeps failing" prompt was a deterministic check answered by a
         # solo full-memory call every 15 min (~43% of all heartbeat LLM calls,
@@ -439,6 +441,7 @@ class HeartbeatRunner:
         "perception-collect",
         "provider-canary",
         "self-diagnostic",
+        "weekly-review",
     }  # deterministic pre/post work; no model call
 
     # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /
@@ -1328,7 +1331,7 @@ class HeartbeatRunner:
                 self._call_context_overflow = any(
                     s in err_text.lower() for s in _OVERFLOW_SIGNATURES)
                 if err_text:
-                    self._log(f"Claude error output: {err_text[:500]}",
+                    self._log(f"Claude error output: {_error_summary(err_text)}",
                               level="warn")
                 # Exit 143 = killed by SIGTERM (128+15). This is an infrastructure
                 # event (restart/shutdown), not a task failure. Return a sentinel

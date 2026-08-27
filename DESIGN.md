@@ -4,29 +4,39 @@
 
 Every user-facing output declares one attention class:
 
-- `reply`: stay in the active Lark conversation;
-- `decision`: a Lark card awaiting 批红 (REQ-119: the phone/web review desk
-  is retired — Lark is the only surface a decision can wait on);
+- `reply`: stay in the active Codex task or Lark conversation;
+- `decision`: one authoritative Item awaiting judgment. During the Codex-first
+  migration it may wake the owner in Lark, but it must resolve the same Item
+  and Matter reviewed from Codex;
 - `alert`: interrupt only when time or safety materially requires it;
-- `notice`: a Lark card that demands nothing and leaves the live queue after
-  24 hours — except ambient monitoring
+- `notice`: a non-interrupting result that leaves the live queue after 24
+  hours — except ambient monitoring
   exhaust (`AMBIENT_SOURCES`), which stays ledger-only and reaches the user
-  as one batched morning-anchor line.
+  as one bounded review batch.
 
 The system must not route content based on what a transport happens to support.
 It routes based on the human attention cost.
 
 ## Surface Responsibilities
 
-Surface reality check (owner verdict, 2026-08-07): every real interaction —
-taps, replies, reads — happens in Lark; recorded web-dashboard traffic is
-zero and the phone desk was never successfully paired. Therefore:
+Surface ruling (owner verdict, 2026-08-27): Codex is available on both desktop
+and mobile and is the better place for separate tasks, long material,
+artifacts, and execution. The 2026-08-07 evidence still proves that the old
+Jarvis-owned web inbox failed; it no longer proves that Lark should own every
+interaction. Therefore:
 
-- **Lark is the product.** A user-facing feature counts as delivered only
-  when its full loop (see it, decide it, see the outcome) works inside
-  Lark. Web visibility is not delivery.
-- **Lark arrival volume is the product's pulse.** `core.presence` pages
-  selfmon when it falls below floor; treat that page as a P0, not a metric.
+- **Codex is the interactive frontstage.** Substantive work starts or
+  continues in a bounded task attached to one Matter.
+- **Jarvis is the backstage.** It compiles context, coordinates executors,
+  protects authority, and reconciles outcomes without competing for chat
+  attention.
+- **Lark is a wake-up and native-integration channel.** It retains current
+  proactive delivery until the Codex adapter is production-proven, then
+  carries only time-sensitive interrupts, small decisions, and native
+  calendar/contact/group/document actions.
+- **No migration by documentation.** The reachable production path remains
+  until desktop and mobile Codex continuation plus result receipts pass their
+  acceptance sample.
 - **Web dashboard is retired** (frozen 2026-08-07, retired 2026-08-21):
   archive duty lives in the morning-anchor batch line and the Admin console
   (`:3456`); content that only reaches the archive gets its one shot via the
@@ -36,9 +46,31 @@ zero and the phone desk was never successfully paired. Therefore:
   Exercise nags and integration-test schedules are retired; product expansion
   stays frozen.
 
+### Codex
+
+- The default surface for a new body of substantive work on desktop or mobile.
+- One objective gets one bounded task; a new objective starts a new task rather
+  than inheriting an indefinitely growing conversation.
+- On acquire, show the Matter objective, settled decisions, relevant evidence,
+  constraints, unresolved conflicts, and required result receipt. Do not dump
+  raw transcripts or tool narration.
+- On release, persist artifacts, decisions, verified effects, blockers, and
+  next action back to the Matter before calling the task complete.
+- Long results and reviewable artifacts stay here. Lark may wake the owner with
+  a concise pointer but must not carry a lossy duplicate of the work.
+- A Codex task is replaceable execution context, not the source of product
+  truth. Failure to read or write a task never corrupts the Matter ledger.
+- Ordinary one-turn work remains Codex-only. The Jarvis connector appears only
+  when continuity, time, authority, or verified effects justify a Matter.
+- Search before creating a Matter. One recognizable outcome keeps one Matter;
+  separate Codex tasks may contribute one verified run at a time.
+
 ### Lark
 
-- Short, immediate, conversational.
+- Short, immediate, and native to communication/time-sensitive workflows.
+- Do not send a long analysis merely because it can fit in a card. Prefer one
+  useful sentence and continue the Matter in Codex once that handoff is
+  production-proven.
 - For replies still running after 20 seconds, send one natural progress line;
   after 90 seconds release the conversation to background work. Never expose
   provider names, tool narration, job IDs, retry commands, or log directions.
@@ -61,11 +93,11 @@ zero and the phone desk was never successfully paired. Therefore:
 
 - One ledger row represents one matter requiring one reading or decision; an
   informational row older than 24 hours becomes 留中, not attention debt.
-- Actionable Items are delivered and resolved in Lark; the delivery ledger
-  keeps history for archive and diagnosis (inspected through the Admin
-  console and CLI), not as a second inbox.
-- Pending decisions lead the Lark docket; ambient notices stay ledger-only and
-  return as one bounded morning-anchor summary.
+- Actionable Items resolve one authoritative state regardless of whether the
+  owner reaches it from Codex or a transitional Lark card. The delivery ledger
+  keeps transport history, not a second business state.
+- Pending decisions lead one bounded review batch; ambient notices stay
+  ledger-only and do not create a competing inbox.
 - A card the daily attention budget drops is ledger-only, never gone: the cap
   means "no room today", not "no longer true", so it joins that morning
   summary. Suppressions that mean the content is stale (recovery replay of an
@@ -82,7 +114,9 @@ zero and the phone desk was never successfully paired. Therefore:
 ### Matter
 
 - Shows current objective, next action, sessions, artifacts, and outcomes.
-- Supports continuation into an executor.
+- Compiles a minimal, traceable Context Packet for a new executor session.
+- Accepts one Result Receipt on release and reconciles related Items, Intents,
+  Handoffs, and stale sessions.
 - Does not compete with Items as a second top-level inbox.
 
 ### Ops
@@ -112,8 +146,8 @@ zero and the phone desk was never successfully paired. Therefore:
 - Missing evidence means unknown, not failure and not success.
 - Missing work receipt means no card. It is recorded as withheld at the
   producing boundary and cannot fall through as raw proactive prose.
-- Lark and executor sessions operate the same Item and Delegation IDs. A
-  Handoff moves attention; it does not copy state.
+- Codex, Lark, and other executor sessions operate the same Item, Matter, and
+  Delegation IDs. A Handoff moves attention; it does not copy state.
 - Do not infer that calendar presence means physical presence, or that missing
   activity signals mean inactivity.
 - One matter keeps at most one open intent-authored decision card: the ask
@@ -127,10 +161,15 @@ zero and the phone desk was never successfully paired. Therefore:
 ## Mobile Rules
 
 - The dedicated mobile gateway (`:3458`) and all Jarvis-owned Tailscale paths
-  are retired; Lark is the only mobile surface.
+  remain retired. Codex is the primary mobile work surface; Lark is the mobile
+  wake-up and native-integration channel.
 - A compact preview must never destroy source text. The full body is preserved
   through card adoption, stored in the private Memorial ledger, and stripped
   from the outbound card envelope before delivery.
+- A mobile handoff must open or identify the exact Matter/task without making
+  the user search through an unrelated chat history. Until that path is
+  verified, the Lark message must remain independently understandable and may
+  not promise a broken deep link.
 
 ## Content and Visual Rules
 

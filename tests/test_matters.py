@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import core.db as db_module
+from core.matter_context import build_context_bundle
 from core.matters import (
     add_event,
     create_matter,
@@ -90,6 +91,27 @@ def test_link_is_idempotent_and_preserves_metadata():
     assert second["metadata"] == {"workspace": "/tmp/project"}
     assert len(get_matter(matter["id"])["links"]) == 1
     assert find_by_entity("session", "session-1", "codex")["id"] == matter["id"]
+
+
+def test_context_bundle_carries_bounded_git_and_github_evidence():
+    matter = create_matter("发布代码改动")
+    link_entity(
+        matter["id"], "artifact", "commit:abc123", provider="git",
+        title="实现提交", metadata={"sha256": "a" * 64, "private_note": "drop"},
+    )
+    link_entity(
+        matter["id"], "artifact", "pull:129", provider="github",
+        title="发布 PR", metadata={"status": "merged", "review_body": "drop"},
+    )
+
+    artifacts = build_context_bundle(matter["id"])["artifacts"]
+    by_provider = {item["provider"]: item for item in artifacts}
+
+    assert set(by_provider) == {"git", "github"}
+    assert by_provider["git"]["id"] == "commit:abc123"
+    assert by_provider["github"]["id"] == "pull:129"
+    assert by_provider["git"]["metadata"] == {"sha256": "a" * 64}
+    assert by_provider["github"]["metadata"] == {"status": "merged"}
 
 
 def test_link_requires_explicit_move_between_matters():

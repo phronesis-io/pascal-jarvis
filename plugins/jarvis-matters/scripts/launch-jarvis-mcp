@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="${JARVIS_DIR:-}"
+path_file="${JARVIS_REPO_FILE:-$HOME/.jarvis/repo-path}"
+
+if [[ -z "$repo" && -f "$path_file" ]]; then
+  IFS= read -r repo < "$path_file"
+fi
+if [[ -z "$repo" || ! -x "$repo/scripts/python.sh" ]]; then
+  echo "Jarvis repository is not registered; run scripts/install_codex_integration.sh" >&2
+  exit 2
+fi
+
+export JARVIS_DIR="$repo"
+cd "$repo"
+exec "$repo/scripts/python.sh" -m core.codex_mcp

@@ -18,14 +18,16 @@ archive duty moved to the morning-anchor batch line and the Admin console,
 and the code archive is git history. The mobile gateway
 (`dashboard.mobile_gateway :3458`) and every Jarvis-owned Tailscale path are
 retired (2026-08-11, REQ-120). Jarvis neither installs, configures, probes,
-nor depends on Tailscale; Lark is the only mobile surface.
+nor depends on Tailscale. Lark remains the only production proactive-delivery
+surface while the Codex desktop/mobile frontstage contract is implemented and
+verified. That target does not revive a Jarvis-owned mobile web application.
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
 
 ## Main Flows
 
-### Conversation
+### Current Lark Conversation
 
 ```text
 Lark event
@@ -41,6 +43,99 @@ Lark event
 
 Group chat is fail-closed: curated group context, restricted tools, and no
 owner-private writes.
+
+### Codex-First Session Lifecycle
+
+```text
+Codex task on desktop or mobile
+  -> acquire one Matter lease
+  -> compile a provider-neutral Context Packet
+  -> run a bounded executor session
+  -> verify artifacts and external effects
+  -> write one Result Receipt
+  -> reconcile Matter / Item / Intent / Handoff state
+  -> release the lease; keep the raw transcript as audit evidence only
+```
+
+The Phase-1 protocol is implemented in the repository; production migration
+still requires review, merge, release-gate and desktop/mobile acceptance
+evidence. A Codex task is a replaceable execution window; the Matter is the
+long-lived product object. Jarvis owns context compilation, authority,
+continuity, asynchronous work, and reconciliation. Codex owns the interactive
+work surface. Lark remains a bounded wake-up and native-integration channel
+until desktop and mobile acceptance tests prove that a class of interaction can
+move without losing delivery or closure evidence.
+
+Context Packet inputs are authoritative object state and selected memory, not a
+raw transcript dump. Result Receipts contain artifacts, decisions, verified
+effects, unresolved blockers, and the exact next action. Provider prose alone
+cannot satisfy a receipt.
+
+The implementation boundary is explicit:
+
+- `core.matter_runs` owns the single active lease, run sequence, expiry and
+  immutable Result Receipt;
+- `core.matter_run_evidence` verifies present/deleted workspace artifacts and
+  resolves external effects against current Delegation evidence;
+- `core.matter_run_projection` projects timeline/session/artifact views after
+  the authoritative state commits, logging failures without falsifying the
+  acquire or release outcome;
+- `core.matter_run_audit` reports stale leases, legacy prose-only completion
+  events, missing outcomes and terminal runs without receipts;
+- `core.matter_context` compiles `jarvis.context-packet.v2`, removes raw event
+  payloads, adds source references, and writes owner-only packet files;
+- `core.matter_executor` is the shared Claude/Codex adapter. Process exit and
+  the last assistant message are observations only; they never close a Matter;
+- `core.codex_frontstage` exposes the provider-independent application
+  contract used by interactive harnesses: one-step continuation, search/create,
+  acquire, renew, release, owner-confirmed closure, abort, result review, and
+  audit. It contains no MCP protocol code;
+- `core.matter_review` is the bounded read model shared by Codex and the
+  weekly Lark surface. It counts only `matter_closure_completed` as an outcome,
+  separates released runs awaiting owner closure, and never reads transcripts
+  or mutates Matter/Task state;
+- `core.matter_closure` owns the separate owner-authorized terminal saga. It
+  reconciles linked Intent/Item/Handoff state before Matter completion and
+  fails closed on live runs, Jobs, or Delegations;
+- `core.codex_mcp` adapts that contract to the official MCP Python SDK over
+  local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
+  it does not read Codex's private task store or create a second conversation;
+- `core.frontstage_acceptance` stores explicit owner reviews for real desktop
+  and mobile journeys. It atomically claims at most one optional prompt per
+  successful run and maps only Pascal's exact published labels to immutable
+  version-bound evidence. MCP cannot submit free-form scores, a surface, or a
+  reviewer identity;
+- `scripts/jarvis-matter` exposes the same contract through `context`,
+  `launch`, `run-status`, `finish`, and `audit`.
+
+One partial unique index enforces a single active run per Matter across
+processes. A context reset invalidates late release attempts by generation.
+An external-effect claim is accepted only when it references current,
+qualifying evidence from the Delegation verifier. Release persists the receipt
+before projecting session/artifact links, so projection failure is observable
+without losing the authoritative receipt.
+Foreground launcher sessions renew a bounded six-hour lease while alive;
+abandoned prepared handoffs still expire. Replayed handoff requests reuse the
+same unstarted run only when executor, task, workspace and packet all match.
+
+Codex itself owns task creation, resumption, streaming, approvals, diffs,
+mobile Remote, and ordinary task memory. Jarvis integrates through the
+supported MCP/plugin boundary for application-owned capabilities. A future
+host-driven workflow may use Codex app-server to create or resume tasks, but
+app-server event state must still project into the same Matter Run contract;
+it may not become a competing lifecycle store.
+
+Git and GitHub remain outside the Jarvis state machine. They own source
+history, commits, pull requests, review, CI, and merge evidence. Matter links
+may reference `git` or `github` artifacts, and Result Receipts may hash files
+inside the acquired workspace, but repository state is never copied into a
+second Jarvis branch/PR model. A green CI check is delivery evidence, not owner
+confirmation that the product Matter is complete.
+
+The weekly review is a deterministic Tier-0 heartbeat task. Its pre-hook reads
+the same `core.matter_review` contract exposed as `jarvis_matter_review`; its
+post-hook renders at most one bounded card. It makes no model call and cannot
+decay, defer, archive, or otherwise edit a parallel task system.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of
@@ -144,10 +239,14 @@ or delivery stack.
 ```text
 Item / Matter
   -> Handoff lease
-  -> Lark conversation or desktop executor
+  -> Codex desktop/mobile task, Lark conversation, or another executor
   -> action on the same underlying object
   -> all stale handoffs close
 ```
+
+Sessions remain bounded and replaceable. Matter identity, decisions, artifacts,
+receipts, and next action outlive every individual Codex, Claude Code, Lark, or
+provider session.
 
 ### Verified Delegation
 
@@ -274,6 +373,13 @@ warning only after the automatic retry budget is exhausted.
   health cooldown, and real provider diversity. It emits the private
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
+- **Target Model Runtime boundary:** route execution is still spread across the
+  current conversation, heartbeat, auxiliary, and Codex adapters. The migration
+  converges those callers on one provider-neutral orchestrator that consumes
+  `model_control` policy, enforces one wall-clock/effect budget, and records
+  task, Matter, provider, observed model, latency, cost, and terminal reason.
+  Product state, permissions, and completion receipts stay outside that runtime.
+  Tiny canaries and real-workload health remain distinct signals.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog. Canary and real-request
   evidence remain separate: a green tiny canary cannot erase a production
@@ -289,16 +395,30 @@ warning only after the automatic retry budget is exhausted.
   unknown, or post-tool failures stop fail-closed.
 - `core.runtime_provider`: per-conversation executor preference. Preference
   changes route order only; `conversation_runtime` records what actually ran.
-- `core.cross_session`: bounded, redacted owner-only continuity across
-  interactive Claude Code and Codex sessions. It excludes Jarvis-managed
-  provider calls and supplies both immediate prompt context and the durable
-  heartbeat digest; provider transcripts remain the source of truth. The
-  choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
+- `core.cross_session`: bounded, redacted discovery and explicit audit search
+  across owner-operated Claude Code and Codex sessions. It excludes
+  Jarvis-managed provider calls. Raw turns remain evidence and are never a
+  default prompt or durable truth surface.
 - `core.cross_session_index`: private, WAL-backed, rebuildable indexing of
   redacted visible turns from owner-operated Claude Code and Codex sessions.
-  Small heartbeat batches converge through old transcripts; the current owner
-  request retrieves only relevant older turns. It is never injected into a
-  group or named Matter and never turns remembered prose into current truth.
+  Small batches converge through old transcripts and explicit searches can
+  retrieve relevant turns. It never turns remembered prose into current truth.
+- `core.memory_compiler`: deterministic reconciliation between source turns
+  and prompt-safe claims. A model may extract bounded candidates only when it
+  supplies an exact quote and covers every source. Owner-authored claims may
+  become active; assistant-authored claims remain candidates. New decisions
+  supersede old ones, contradictory facts suspend both values, and only an
+  explicit Pascal review can confirm, choose, or reject a disputed claim.
+  Applied compile batches erase transcript payloads while retaining source
+  digests, references, claim lifecycle, and audit evidence.
+- `core.model_usage`: the joined product view over package allowance,
+  reset windows, account metadata, real-request health, and the current
+  fallback plan. Codex allowance comes from the signed-in local app-server;
+  providers without a provider-defined quota surface remain `unknown`. Numeric
+  observations support exhaustion forecasts but never store credentials,
+  opaque credit identifiers, or provider billing prose. The hourly Tier-0
+  usage task refreshes this view and emits only the first warning in a new
+  critical/exhausted episode; recovery rearms it.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
@@ -359,6 +479,12 @@ warning only after the automatic retry budget is exhausted.
   retries;
 - L3 signals, proposals, and post-release observations;
 - verified external-action receipts.
+- Memory Compiler batches, source digests, traceable claims, source links, and
+  unresolved/resolved conflicts. These records are remembered assertions, not
+  independent evidence that an external action or release succeeded.
+- Numeric model-usage observations by route, limit, window, and reset epoch.
+  They are private telemetry for trend/forecast calculations, not billing
+  authority and not proof that a production-sized request will succeed.
 
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
@@ -371,9 +497,13 @@ SQLite table is a read-through projection rebuilt on demand.
 
 ## Reach Policy
 
-Lark is the only delivery surface (REQ-119, 2026-08-11). A card either goes
-to Lark or stays ledger-only; no envelope may route to the retired web
-channel, whose transport used to fake success unconditionally.
+Today Lark is the only production proactive-delivery surface (REQ-119,
+2026-08-11). A card either goes to Lark or stays ledger-only; no envelope may
+route to the retired web channel, whose transport used to fake success
+unconditionally. The accepted target adds Codex desktop/mobile as the primary
+interactive frontstage, not as a second broadcast inbox. A delivery class moves
+only after its Codex notification, resume, and closure receipts pass real
+desktop/mobile acceptance tests.
 
 | Attention | Durable surface | Interrupting reach |
 |---|---|---|

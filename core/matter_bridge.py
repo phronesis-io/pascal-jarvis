@@ -14,8 +14,6 @@ from core.matters import (
     create_matter,
     get_matter,
     list_matters,
-    open_followups,
-    update_matter,
 )
 from core.timeutil import now_local_str
 
@@ -233,7 +231,8 @@ def recent_provider_context(conv_key: str, limit: int = 12,
 def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
                 provider: str = "lark", model: str = "",
                 session_id: str = "", context_key: str = "",
-                matter_id: str | None = None) -> bool:
+                matter_id: str | None = None,
+                memory_eligible: bool = False) -> bool:
     from core.conversation_context import (
         context_generation_from_key,
         context_snapshot,
@@ -261,10 +260,11 @@ def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
         db.execute(
             """INSERT OR IGNORE INTO conversation_turns
                (conv_key, role, text, message_id, provider, model,
-                session_id, created_at, context_key, matter_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                session_id, created_at, context_key, matter_id, memory_eligible)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (conv_key, role, clean_turn, message_id, provider, model,
-             session_id, _now(), selected_context, selected_matter),
+             session_id, _now(), selected_context, selected_matter,
+             int(memory_eligible)),
         )
         stored = db.total_changes > before
         # Keep this continuity projection bounded. Native provider sessions and
@@ -415,54 +415,55 @@ def command_would_handle(content: str) -> bool:
     if text.lower() in {
             "/model", "当前模型", "现在是什么模型", "你是什么模型"}:
         return True
+    if _is_model_usage_command(text):
+        return True
     return _match_command(text) is not None
 
 
 def _close_bound_matter(conv_key: str, matter_id: str, outcome: str,
-                        actor: str) -> dict:
-    """Complete a Matter and unbind its conversation in one transaction."""
+                        actor: str, confirmation_text: str) -> dict:
+    """Authoritatively close linked state, then unbind the conversation.
+
+    Item and Intent stores cannot share the binding transaction. The closure
+    coordinator is idempotent: if unbinding fails, repeating the same owner
+    command safely finishes only the remaining step.
+    """
     now = _now()
     outcome = str(outcome or "")
     db = _db()
+    binding = db.execute(
+        "SELECT matter_id FROM matter_bindings WHERE conv_key = ?", (conv_key,)
+    ).fetchone()
+    if not binding or binding["matter_id"] != matter_id:
+        raise RuntimeError("conversation binding changed during close")
+
+    # Fail before touching the cross-store closure saga when this exact
+    # conversation cannot be unbound (constraint, trigger, or lock failure).
+    # The rolled-back delete exercises the same database boundary as the final
+    # write while preserving the existing atomic-close user contract.
     try:
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute("SELECT * FROM matters WHERE id = ?", (matter_id,)).fetchone()
-        if row is None:
-            raise KeyError(f"matter not found: {matter_id}")
-        current = dict(row)
-        if current.get("status") not in {"done", "archived"}:
-            outstanding = open_followups(matter_id)
-            if outstanding:
-                raise MatterConflict(
-                    f"还有 {len(outstanding)} 项未闭环，确认后才能结束事项",
-                    outstanding,
-                )
+        db.execute("DELETE FROM matter_bindings WHERE conv_key = ?", (conv_key,))
+        db.rollback()
+    except Exception:
+        db.rollback()
+        raise
+
+    from core.matter_closure import close_matter
+    closed = close_matter(
+        matter_id,
+        outcome=outcome or "已由 Pascal 确认完成",
+        confirmation_text=confirmation_text,
+        source="lark",
+    )
+    try:
+        db.execute("BEGIN IMMEDIATE")
         binding = db.execute(
             "SELECT matter_id FROM matter_bindings WHERE conv_key = ?",
             (conv_key,),
         ).fetchone()
         if not binding or binding["matter_id"] != matter_id:
             raise RuntimeError("conversation binding changed during close")
-        changes = {}
-        for field, value in {
-            "status": "done", "outcome": outcome, "closed_at": now,
-        }.items():
-            if current.get(field) != value:
-                changes[field] = {"from": current.get(field), "to": value}
-        if changes:
-            db.execute(
-                """UPDATE matters SET status='done', outcome=?, closed_at=?,
-                          updated_at=? WHERE id=?""",
-                (outcome, now, now, matter_id),
-            )
-            db.execute(
-                """INSERT INTO matter_events
-                   (matter_id,event_type,actor,summary,payload,created_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (matter_id, "matter_updated", actor,
-                 "更新了状态、完成结果、完成时间",
-                 json.dumps(changes, ensure_ascii=False), now),
-            )
         db.execute("DELETE FROM matter_bindings WHERE conv_key = ?", (conv_key,))
         db.execute(
             """INSERT INTO matter_events
@@ -476,7 +477,7 @@ def _close_bound_matter(conv_key: str, matter_id: str, outcome: str,
         db.rollback()
         raise
     complete_surface_handoffs(matter_id)
-    return get_matter(matter_id) or {}
+    return {**(get_matter(matter_id) or {}), "closure_receipt": closed}
 
 
 def _resolve_session_target(value: str) -> tuple[dict | None, str]:
@@ -526,6 +527,23 @@ def _model_preference_command(content: str) -> str | None:
     return None
 
 
+def _is_model_usage_command(content: str) -> bool:
+    """Recognize direct quota questions without handing them to a model."""
+    text = re.sub(r"\s+", "", str(content or "").strip().lower())
+    if text in {"/usage", "套餐用量", "模型额度", "额度还剩多少"}:
+        return True
+    if any(word in text for word in ("手机", "流量", "话费", "运营商")):
+        return False
+    return bool(
+        ("套餐" in text and any(word in text for word in (
+            "用量", "额度", "还剩", "剩余", "够不够", "不够",
+        )))
+        or ("额度" in text and any(word in text for word in (
+            "用量", "还剩", "剩余", "多少", "够不够", "不够", "用完",
+        )))
+    )
+
+
 def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                         chat_type: str = "p2p", actor: str = "user") -> dict:
     preference_command = _model_preference_command(content)
@@ -547,7 +565,17 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                 "不会因为额度耗尽而中断。"
             )
         return {"handled": True, "reply": reply}
-    if str(content or "").strip().lower() in {
+    normalized_content = str(content or "").strip().lower()
+    if _is_model_usage_command(content):
+        try:
+            from core.model_usage import build_report, status_text
+            return {"handled": True, "reply": status_text(build_report())}
+        except Exception:
+            return {"handled": True, "reply": (
+                "这次没有读到套餐用量；已知模型健康状态仍会继续记录，"
+                "不会把未知误报成有额度。"
+            )}
+    if normalized_content in {
             "/model", "当前模型", "现在是什么模型", "你是什么模型"}:
         from core.runtime_provider import get_preference, preference_label
         route = preference_label(get_preference(conv_key))
@@ -568,10 +596,18 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                 )
             except Exception:
                 chain = ""
+            usage = ""
+            try:
+                from core.model_usage import load_latest, status_text
+                latest = load_latest()
+                if latest:
+                    usage = "\n\n套餐用量：\n" + status_text(latest)
+            except Exception:
+                pass
             return {"handled": True, "reply": (
                 f"上一条实际由 {provider} / {state.get('model') or 'unknown'} 回答。\n"
                 f"记录时间：{state.get('updated_at', '')}\n"
-                f"路由模式：{route}{chain}"
+                f"路由模式：{route}{chain}{usage}"
             )}
         from core.config import Config
         try:
@@ -687,30 +723,47 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
         ), "transition": {"context_key": logical_context_key(conv_key, matter["id"]),
                            "reset": True}}
     if command == "close":
+        from core.matter_closure import MatterClosureBlocked
         try:
-            _close_bound_matter(conv_key, matter["id"], arg, actor)
+            _close_bound_matter(
+                conv_key, matter["id"], arg, actor, str(content or "").strip())
         except MatterConflict as exc:
             titles = "、".join(item["title"] for item in exc.open_items[:4])
             return {"handled": True, "reply": f"还不能结束：{titles}。请先闭环这些内容。"}
+        except MatterClosureBlocked as exc:
+            titles = "、".join(
+                str(item.get("title") or item.get("entity_id") or "未完成工作")
+                for item in exc.blockers[:4]
+            )
+            return {"handled": True, "reply": f"还不能结束：{titles} 仍在执行或等待验证。"}
         from core.conversation_context import logical_context_key
         return {"handled": True, "reply": f"会话「{matter['title']}」已结束，结果已归档。",
                 "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "done":
+        from core.matter_closure import MatterClosureBlocked
         try:
-            _close_bound_matter(conv_key, matter["id"], arg, actor)
+            _close_bound_matter(
+                conv_key, matter["id"], arg, actor, str(content or "").strip())
         except MatterConflict as exc:
             titles = "、".join(item["title"] for item in exc.open_items[:4])
-            return {"handled": True, "reply": f"还不能直接完成：{titles}。请先闭环，或在网页确认保留这些条目。"}
+            return {"handled": True, "reply": f"还不能直接完成：{titles}。"}
+        except MatterClosureBlocked as exc:
+            titles = "、".join(
+                str(item.get("title") or item.get("entity_id") or "未完成工作")
+                for item in exc.blockers[:4]
+            )
+            return {"handled": True, "reply": f"还不能直接完成：{titles} 仍在执行或等待验证。"}
         from core.conversation_context import logical_context_key
         return {"handled": True, "reply": f"事项「{matter['title']}」已完成并归档。",
                 "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "handoff":
         provider = arg.lower() if arg.lower() in {"claude", "codex"} else "codex"
         from core.matter_executor import prepare_handoff
-        handoff = prepare_handoff(matter["id"], provider, actor="lark")
+        prepare_handoff(matter["id"], provider, actor="lark")
+        from core.codex_frontstage import continuation_prompt
         return {"handled": True, "reply": (
-            f"交接包已准备：{handoff['context_path']}\n"
-            f"在仓库运行：{handoff['command']}"
+            "上下文已经整理好。请在 Codex 新任务里说：\n"
+            f"{continuation_prompt(matter)}"
         )}
     return {"handled": True, "reply": "支持：new / use / current / list / done / handoff / clear"}
 
@@ -731,13 +784,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jarvis-dir", default="")
     parser.add_argument("--context-key", default="")
     parser.add_argument("--matter-id", default=None)
+    parser.add_argument("--memory-eligible", action="store_true")
     args = parser.parse_args(argv)
     if args.record_role:
         result = {"recorded": record_turn(
             args.conv_key, args.record_role, args.content,
             args.message_id, provider=args.provider, model=args.model,
             session_id=args.session_id, context_key=args.context_key,
-            matter_id=args.matter_id)}
+            matter_id=args.matter_id,
+            memory_eligible=args.memory_eligible)}
     else:
         try:
             result = handle_lark_command(

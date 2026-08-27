@@ -493,6 +493,43 @@ verify_full_runtime() {
   return 1
 }
 
+prepare_codex_frontstage() {
+  if ! command -v codex >/dev/null 2>&1; then
+    dim "  Codex CLI unavailable; frontstage plugin install skipped."
+    return 0
+  fi
+
+  echo "Preparing Codex frontstage integration..."
+  if ! "$JARVIS_PYTHON" - <<'PY' >/dev/null 2>&1
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    major = int(version("mcp").split(".", 1)[0])
+except (PackageNotFoundError, TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if major == 2 else 1)
+PY
+  then
+    echo "  Installing the supported MCP runtime..."
+    "$JARVIS_PYTHON" -m pip install --disable-pip-version-check \
+      "mcp>=2,<3"
+  fi
+
+  "$JARVIS_DIR/scripts/install_codex_integration.sh" >/dev/null
+  if codex plugin list 2>/dev/null \
+       | grep -q 'jarvis-matters@pascal-jarvis.*installed, enabled'; then
+    if "$JARVIS_PYTHON" "$JARVIS_DIR/scripts/check_codex_frontstage.py" \
+         >/dev/null; then
+      green "  Codex Jarvis Matters plugin and MCP handshake are healthy."
+      return 0
+    fi
+    red "  Codex MCP handshake failed; runtime was not stopped."
+    return 1
+  fi
+  red "  Codex plugin verification failed; runtime was not stopped."
+  return 1
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 # --yes anywhere in argv skips the in-flight-conversation confirmation
@@ -556,8 +593,9 @@ governed_deploy() {
   _verify_release_gate
   _set_deploy_guard
   # Confirmation must precede definition refresh because installing a changed
-  # plist restarts that launchd job.
+  # plugin mutates Codex config and a changed plist restarts its launchd job.
   confirm_restart
+  prepare_codex_frontstage
   refresh_launchd_definitions
   kill_bot
   echo ""

@@ -136,7 +136,7 @@ tasks, and are not part of this contract.
 | Memory upkeep | hourly / daily / weekly / consolidate / tidy | rolling timeline, digest, change gate |
 | EigenFlux | inbox reconcile / feed / friends / profile / publish / preinstall | EigenFlux CLI, private approval, material gate |
 | Daily rhythm | daily-plan / daily-reflect / activity-log / checkin / morning-anchor / exercise-week | companion budget, cards, rolling logs |
-| Intent and task | intention-check / routine-run / weekly-review / delegation-reconcile | claim/reconcile lifecycle, Matters |
+| Intent and task | intention-check / routine-run / weekly-review / delegation-reconcile | claim/reconcile lifecycle; weekly-review is a model-free Matter outcome read |
 | Operations | calendar-sync / perception / metrics / provider-canary / log-maintenance / self-diagnostic | deterministic Tier 0 and bounded alerts |
 | Analysis | cross-session / engagement / phronesis / thinking / repos / iteration | private digests and proposal state |
 

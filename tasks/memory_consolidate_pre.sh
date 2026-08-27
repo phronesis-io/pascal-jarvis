@@ -30,18 +30,9 @@ for f in "${files[@]}"; do
   echo "---"
 done
 
-# --- Cross-session work (other Claude Code sessions) ---
-# Pascal works across many sessions/repos simultaneously. That work never appears
-# in *this* session's conversation history, so without feeding the digest in full
-# here, durable facts (project advanced, new work line, team activity) never reach
-# consolidation and the project files go stale. Feed the FULL digest, not head -5.
-DIGEST="$MEMORY_DIR/system/cross_session_digest.md"
-if [ -f "$DIGEST" ]; then
-  echo ""
-  echo "=== CROSS-SESSION DIGEST (other sessions — Pascal's primary daytime work) ==="
-  cat "$DIGEST"
-  echo "=== END CROSS-SESSION DIGEST ==="
-fi
+# Cross-product claims are compiled into SQLite with source, validity, conflict,
+# and Matter scope. The legacy rolling digest is intentionally not injected:
+# replaying model summaries would re-author stale prose as current truth.
 
 # --- Repo activity, last 24h, ALL authors (incl. teammates) ---
 # Team work is context too: completeness of situational awareness is priority 1.
