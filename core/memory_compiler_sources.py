@@ -19,6 +19,7 @@ from core.memory_compiler_common import (
     flat,
     json_text,
     now as current_epoch,
+    source_activation_policy,
 )
 
 
@@ -88,11 +89,13 @@ def _session_sources(
                     continue
                 provider = str(row["provider"] or "")
                 session_id = str(row["session_id"] or "")
+                role = str(row["role"] or "")
                 sources.append({
                     "source_ref": source_ref,
                     "source_kind": "session_turn",
                     "provider": provider,
-                    "role": str(row["role"] or ""),
+                    "role": role,
+                    "activation_policy": source_activation_policy(role, text),
                     "occurred_at": str(row["occurred_at"] or ""),
                     "matter_id": _linked_session_matter(provider, session_id),
                     "text": text,
@@ -143,11 +146,13 @@ def _lark_sources(*, known: set[str], limit: int) -> list[dict[str, Any]]:
             text = flat(row["text"])
             if not text:
                 continue
+            role = str(row["role"] or "")
             sources.append({
                 "source_ref": source_ref,
                 "source_kind": "lark_turn",
                 "provider": str(row["provider"] or "lark"),
-                "role": str(row["role"] or ""),
+                "role": role,
+                "activation_policy": source_activation_policy(role, text),
                 "occurred_at": str(row["created_at"] or ""),
                 "matter_id": str(row["matter_id"] or ""),
                 "text": text,
@@ -219,6 +224,12 @@ def prepare_batch(
             "max_claims_per_source": MAX_CLAIMS_PER_SOURCE,
             "matter_binding": "copy the source matter_id only; otherwise empty",
             "completion": "assistant completion prose is never evidence",
+            "context_dependent_owner_turns": (
+                "owner_context_candidate sources can never auto-activate"
+            ),
+            "claim_activation": (
+                "core re-evaluates the exact quote; a contextual quote is candidate-only"
+            ),
             "coverage": "every source_ref must be claimed or ignored",
         },
         "sources": sources,

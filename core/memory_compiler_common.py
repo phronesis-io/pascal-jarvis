@@ -28,6 +28,28 @@ MAX_CONTEXT_CLAIMS = 16
 MAX_CONTEXT_CHARS = 6000
 
 
+_CONTEXT_DEPENDENT_OWNER_EXACT = {
+    "好", "好的", "可以", "可以的", "行", "嗯", "嗯嗯", "对", "同意",
+    "通过", "确认", "确认发布", "继续", "开始", "开始吧", "搞吧", "做吧",
+    "改吧", "发吧", "上吧", "来吧", "开干", "就这样", "按这个", "就按这个",
+    "照这个来", "全部做", "全部做完", "都做", "全部同意", "都同意",
+    "没问题",
+    "ok", "okay", "yes", "go ahead", "do it", "ship it", "approved",
+    "继续修", "继续优化", "继续检查", "sounds good", "continue", "proceed",
+}
+_CONTEXT_DEPENDENT_OWNER_DEICTIC = re.compile(
+    r"^(?:(?:那就|就)(?:把)?|把)?"
+    r"(?:这个|这些|上面(?:的)?|前面(?:的)?|刚才(?:的)?|这样|"
+    r"按(?:这个|上面|建议)).{0,28}(?:吧)?$",
+    re.IGNORECASE,
+)
+_CONTEXT_DEPENDENT_OWNER_DESTINATION = re.compile(
+    r"^(?:写|放|加|发|贴|存|同步|更新|部署)(?:进|到|在|上)"
+    r"[^。！？!?]{1,28}吧$",
+    re.IGNORECASE,
+)
+
+
 class MemoryCompilerError(ValueError):
     """A compile envelope violates the source or lifecycle contract."""
 
@@ -66,6 +88,42 @@ def flat(value: Any, limit: int = 4000) -> str:
 
 def normalized(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def context_dependent_owner_text(value: Any) -> bool:
+    """Return true when an owner turn cannot authorize a claim by itself.
+
+    Short acknowledgements are meaningful inside a conversation, but their
+    referent lives in the previous turn. An exact quote therefore proves that
+    the owner said the words, not the model-expanded decision attached to them.
+    """
+    text = normalized(value)
+    if re.search(r"[?？]\s*$", text):
+        return True
+    text = re.sub(r"[。！!？?，,；;：:]+$", "", text).strip()
+    if text in _CONTEXT_DEPENDENT_OWNER_EXACT:
+        return True
+    return bool(
+        _CONTEXT_DEPENDENT_OWNER_DEICTIC.fullmatch(text)
+        or _CONTEXT_DEPENDENT_OWNER_DESTINATION.fullmatch(text)
+    )
+
+
+def source_authority(role: Any, text: Any) -> str:
+    return (
+        "owner_asserted"
+        if source_activation_policy(role, text) == "owner_asserted"
+        else "assistant_candidate"
+    )
+
+
+def source_activation_policy(role: Any, text: Any) -> str:
+    role_name = normalized(role)
+    if role_name != "user":
+        return "assistant_candidate"
+    if context_dependent_owner_text(text):
+        return "owner_context_candidate"
+    return "owner_asserted"
 
 
 def claim_key(value: Any) -> str:
