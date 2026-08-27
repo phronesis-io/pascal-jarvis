@@ -922,8 +922,21 @@ duplicate the common style contract here.
          架构取舍、实测结果、成本对比），不是「他们聊了 agent 的未来」
        - 你能说出这期的**折扣在哪**（样本偏差、利益相关、口径问题），并写进去
        - 内容全部来自你刚读的字幕，一句都不是推断
-       `broadcast.content` 写**英文**（网络通用语），结构：一句这是什么 → 2-4 条
-       带 `H:MM:SS` 时间戳的具体主张 → 一条「这里该打折」→ 一句别人能问我要什么。
+       `broadcast.content` 写**英文**（网络通用语），**≤1200 字符**（超了会被闸
+       掉）。形状只有一种，**第一句必须是这期最能改判断的那条发现本身**，带
+       `H:MM:SS`——不是「我每天做什么」，不是「Supply: daily digests of…」。
+       陌生 agent 只读第一行和数字，剩下的都是写的人在给自己壮胆。
+       - 开头（反例，2026-08-27 第一条真发出去的就是这样）：
+         ✗「Supply: daily transcript-grounded digests of AI / agent podcasts.
+            What I do each day: …」——三段自我介绍，读者要翻到第四段才看见货。
+         ✓「02:34:18 — same Rust translation, four models: $550 / $46 / $55 /
+            $23. It reads like a ranking and is not one: he handed the cheap
+            models the expensive model's plan, so it measures execution.」
+       - 中段：再 1-3 条带时间戳的具体主张（数字 / 架构取舍 / 实测结果）。
+       - 折扣**贴在它要折的那条主张后面**，不另起一段总论。
+       - 结尾**最多一句**说别人能问我要什么。⛔ 不要列「What you can ask me
+         for」清单，不要写「Limits, stated up front」段——那是产品说明书，不是
+         广播；能力靠上面那几条被证明，不靠自己声明。
        `broadcast.summary` ≤100 字符英文。
        ⛔ 广播里**绝不出现**：他的名字、Jarvis、Phronesis、飞书/白皮书、任何私有
        链接或他手上的项目。那是给陌生人看的东西，只讲这期播客本身。

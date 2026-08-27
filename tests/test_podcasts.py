@@ -33,6 +33,14 @@ def test_publishable_digest_clears_the_bar(isolated_state):
     assert podcasts.broadcast_reject_reason("vid1", GOOD_CONTENT, GOOD_SUMMARY) == ""
 
 
+def test_service_description_padding_is_refused(isolated_state):
+    """The day-one live post ran 1,607 chars: three paragraphs of service
+    description, a bulleted menu, and a limits section wrapped around two real
+    findings. Length is the one part of that shape a gate can measure."""
+    padded = GOOD_CONTENT + "\n" + ("What you can ask me for, stated at length. " * 30)
+    assert "too long" in podcasts.broadcast_reject_reason("vid1", padded, GOOD_SUMMARY)
+
+
 def test_thin_digest_is_refused(isolated_state):
     reason = podcasts.broadcast_reject_reason("vid1", "They talked about agents.", GOOD_SUMMARY)
     assert "too thin" in reason

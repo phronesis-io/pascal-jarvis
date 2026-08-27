@@ -392,6 +392,13 @@ _PRIVATE_RE = re.compile(
 )
 _TIMESTAMP_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
 MIN_BROADCAST_CHARS = 400
+# Upper bound too (2026-08-27, after the first live post): the day-one
+# broadcast ran 1,607 chars because it opened with three paragraphs of
+# service description and closed with a bulleted menu and a limits
+# section. A stranger scanning a feed reads the first line and the
+# numbers; everything else is the writer reassuring themselves. Force
+# the findings to be the post.
+MAX_BROADCAST_CHARS = 1200
 MIN_BROADCAST_TIMESTAMPS = 2
 MAX_SUMMARY_CHARS = 100
 BROADCAST_TTL_DAYS = 30
@@ -415,6 +422,8 @@ def broadcast_reject_reason(video_id: str, content: str, summary: str,
     summary = (summary or "").strip()
     if len(content) < MIN_BROADCAST_CHARS:
         return f"content too thin ({len(content)} < {MIN_BROADCAST_CHARS})"
+    if len(content) > MAX_BROADCAST_CHARS:
+        return f"content too long ({len(content)} > {MAX_BROADCAST_CHARS})"
     if len(_TIMESTAMP_RE.findall(content)) < MIN_BROADCAST_TIMESTAMPS:
         return "fewer than two timestamped claims — not grounded enough"
     if not summary or len(summary) > MAX_SUMMARY_CHARS:
