@@ -65,6 +65,11 @@ DEFAULT_WATCHLIST = [
      "min_minutes": 20},
     {"name": "Y Combinator", "url": "https://www.youtube.com/@ycombinator/videos",
      "min_minutes": 20},
+    # tech x investing, the Gavin Baker end of the table — his stated interest,
+    # and the one show here that argues about capex and market structure rather
+    # than model releases.
+    {"name": "BG2", "url": "https://www.youtube.com/@BG2Pod/videos",
+     "min_minutes": 30},
 ]
 
 
