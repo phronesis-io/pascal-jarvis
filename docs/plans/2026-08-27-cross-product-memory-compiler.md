@@ -38,10 +38,19 @@ quote, source reference, claim lifecycle, and Matter scope.
    Matter ID. Every source must be claimed or explicitly ignored.
 5. `core.memory_compiler apply` validates the envelope and atomically records a
    receipt. Invalid or incomplete output leaves the batch pending for retry.
-6. User-authored claims become active. Assistant-authored claims remain
-   candidates. Decisions, preferences, and todos supersede older owner
-   statements with the same key. Conflicting facts, constraints, or artifacts
-   suspend both values until explicit human review.
+6. A self-contained user-authored claim becomes active. Context-dependent
+   acknowledgements such as "搞吧", "写进 blog 吧", or "go ahead" are marked
+   `owner_context_candidate`: an exact quote proves the words but cannot prove
+   the model-expanded referent from a neighboring turn. Assistant-authored
+   claims also remain candidates. Concrete directives such as "发布 PR #130 吧"
+   remain owner assertions because their object is present. Core re-evaluates
+   both the complete source turn and the selected quote: questions are never
+   assertions, a question cannot become a fact by dropping its question mark,
+   and quoting only "好的" from a longer sentence cannot borrow the rest of
+   that sentence's authority.
+   Decisions, preferences, and todos supersede older owner statements with the
+   same key. Conflicting facts, constraints, or artifacts suspend both values
+   until explicit human review.
 
 ## Recall Contract
 
@@ -69,15 +78,20 @@ sent-cache, and rolling cross-session digest injection are retired.
    store; group Lark fixtures never enter a batch.
 2. Exact-quote forgery, omitted sources, inferred Matter IDs, and more than
    three claims per source fail closed without consuming the batch.
-3. Assistant completion prose remains a candidate and is absent from a Matter
+3. Context-dependent owner acknowledgements remain candidates; short,
+   self-contained constraints and concrete directives still activate. A later
+   explicit owner statement promotes an equal candidate and reconciles the
+   value it replaces. Upgrade repair demotes affected legacy claims and
+   restores any value they displaced.
+4. Assistant completion prose remains a candidate and is absent from a Matter
    Context Packet.
-4. A newer owner decision supersedes the prior one; the old value has zero
+5. A newer owner decision supersedes the prior one; the old value has zero
    default-prompt appearances.
-5. Conflicting facts suspend both values until a named reviewer chooses or
+6. Conflicting facts suspend both values until a named reviewer chooses or
    rejects one.
-6. Every active claim has at least one source receipt; no applied batch retains
+7. Every active claim has at least one source receipt; no applied batch retains
    its transcript payload; no key has two active values.
-7. Focused replay, full local tests, protected CI, independent review, release
+8. Focused replay, full local tests, protected CI, independent review, release
    gate, deploy verification, and post-release live replay all pass.
 
 ## Non-Goals

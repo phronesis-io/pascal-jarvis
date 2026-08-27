@@ -27,13 +27,15 @@ from core.memory_compiler_common import (
     VALID_STATUSES,
     MemoryCompilerError,
     claim_key as _claim_key,
+    context_dependent_owner_text,
     db as _db,
     decode as _decode,
     flat as _flat,
     normalized as _normalized,
     now as _now,
+    source_authority,
 )
-from core.memory_compiler_sources import prepare_batch
+from core.memory_compiler_sources import prepare_batch as _prepare_batch
 from core.safety import parse_json_response
 
 
@@ -84,6 +86,8 @@ def _validate_claim(
         raise MemoryCompilerError(
             f"claim cannot infer a Matter for {source_ref}"
         )
+    source_level_authority = source_authority(source["role"], source["text"])
+    quote_level_authority = source_authority(source["role"], quote)
     return {
         "source_ref": source_ref,
         "kind": kind,
@@ -93,6 +97,11 @@ def _validate_claim(
         "quote": quote,
         "matter_id": source_matter,
         "role": source["role"],
+        "authority": (
+            "owner_asserted"
+            if source_level_authority == quote_level_authority == "owner_asserted"
+            else "assistant_candidate"
+        ),
         "occurred_epoch": _occurred_epoch(source.get("occurred_at")),
     }
 
@@ -137,6 +146,10 @@ def _insert_claim(
               ORDER BY updated_epoch DESC""",
         (*scope_params, claim["kind"], claim["claim_key"]),
     ).fetchall()
+    authority = claim["authority"]
+    claim_id = ""
+    outcome = ""
+    status = ""
     for row in existing_rows:
         if str(row["normalized_content"]) == claim["normalized_content"]:
             claim_id = str(row["id"])
@@ -149,33 +162,50 @@ def _insert_claim(
                 "UPDATE memory_claims SET updated_epoch=? WHERE id=?",
                 (epoch, claim_id),
             )
+            if (
+                authority == "owner_asserted"
+                and str(row["authority"]) == "assistant_candidate"
+                and str(row["status"]) == "candidate"
+            ):
+                status = "active"
+                outcome = "promoted"
+                db.execute(
+                    """UPDATE memory_claims
+                          SET status='active',authority='owner_asserted',
+                              valid_from_epoch=?,updated_epoch=?
+                        WHERE id=?""",
+                    (claim["occurred_epoch"], epoch, claim_id),
+                )
+                break
             return claim_id, "reinforced", None
 
-    authority = (
-        "owner_asserted" if claim["role"] == "user"
-        else "assistant_candidate"
-    )
-    status = "active" if authority == "owner_asserted" else "candidate"
-    claim_id = f"mcl_{uuid.uuid4().hex[:20]}"
-    db.execute(
-        """INSERT INTO memory_claims
-           (id,kind,claim_key,content,normalized_content,status,authority,
-            matter_id,valid_from_epoch,created_epoch,updated_epoch)
-           VALUES (?,?,?,?,?,?,?,NULLIF(?,''),?,?,?)""",
-        (
-            claim_id, claim["kind"], claim["claim_key"], claim["content"],
-            claim["normalized_content"], status, authority, matter_id,
-            claim["occurred_epoch"], epoch, epoch,
-        ),
-    )
-    db.execute(
-        """INSERT INTO memory_claim_sources
-           (claim_id,source_ref,source_quote) VALUES (?,?,?)""",
-        (claim_id, claim["source_ref"], claim["quote"]),
-    )
-    active = [row for row in existing_rows if row["status"] in {"active", "conflicted"}]
+    if not claim_id:
+        status = "active" if authority == "owner_asserted" else "candidate"
+        outcome = status
+        claim_id = f"mcl_{uuid.uuid4().hex[:20]}"
+        db.execute(
+            """INSERT INTO memory_claims
+               (id,kind,claim_key,content,normalized_content,status,authority,
+                matter_id,valid_from_epoch,created_epoch,updated_epoch)
+               VALUES (?,?,?,?,?,?,?,NULLIF(?,''),?,?,?)""",
+            (
+                claim_id, claim["kind"], claim["claim_key"], claim["content"],
+                claim["normalized_content"], status, authority, matter_id,
+                claim["occurred_epoch"], epoch, epoch,
+            ),
+        )
+        db.execute(
+            """INSERT INTO memory_claim_sources
+               (claim_id,source_ref,source_quote) VALUES (?,?,?)""",
+            (claim_id, claim["source_ref"], claim["quote"]),
+        )
+    active = [
+        row for row in existing_rows
+        if str(row["id"]) != claim_id
+        and row["status"] in {"active", "conflicted"}
+    ]
     if status != "active" or not active:
-        return claim_id, status, None
+        return claim_id, outcome, None
     if claim["kind"] in AUTO_SUPERSEDE_KINDS:
         for row in active:
             db.execute(
@@ -190,7 +220,7 @@ def _insert_claim(
                    WHERE status='open' AND (prior_claim_id=? OR incoming_claim_id=?)""",
                 (epoch, row["id"], row["id"]),
             )
-        return claim_id, "superseded_previous", None
+        return claim_id, f"{outcome}_superseded_previous", None
 
     prior = active[0]
     conflict_id = f"mcf_{uuid.uuid4().hex[:20]}"
@@ -204,7 +234,131 @@ def _insert_claim(
             status,created_epoch) VALUES (?,?,?,?,?,'open',?)""",
         (conflict_id, matter_id, claim["claim_key"], prior["id"], claim_id, epoch),
     )
-    return claim_id, "conflicted", conflict_id
+    return claim_id, f"{outcome}_conflicted", conflict_id
+
+
+def repair_context_dependent_claims(*, now: float | None = None) -> dict[str, Any]:
+    """Demote legacy active claims whose owner quote needs prior context.
+
+    Early Memory Compiler releases treated any exact owner quote as enough to
+    activate the model's expanded claim. This repair is replay-safe: it only
+    touches auto-active ``owner_asserted`` rows for which every retained quote
+    is a context-dependent acknowledgement. Human-confirmed claims are never
+    changed.
+    """
+    connection = _db()
+    epoch = _now(now)
+    affected: list[str] = []
+    restored: set[str] = set()
+    resolved = 0
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        candidates = connection.execute(
+            """SELECT id FROM memory_claims
+                WHERE authority='owner_asserted'
+                  AND status IN ('active','conflicted')"""
+        ).fetchall()
+        for row in candidates:
+            claim_id = str(row["id"])
+            quotes = [
+                str(item[0] or "") for item in connection.execute(
+                    """SELECT source_quote FROM memory_claim_sources
+                        WHERE claim_id=?""",
+                    (claim_id,),
+                ).fetchall()
+            ]
+            if quotes and all(
+                context_dependent_owner_text(item) for item in quotes
+            ):
+                affected.append(claim_id)
+        for claim_id in affected:
+            connection.execute(
+                """UPDATE memory_claims
+                      SET status='candidate',authority='assistant_candidate',
+                          updated_epoch=? WHERE id=?""",
+                (epoch, claim_id),
+            )
+            predecessor = connection.execute(
+                """SELECT id FROM memory_claims
+                    WHERE superseded_by=? AND status='superseded'
+                    ORDER BY updated_epoch DESC LIMIT 1""",
+                (claim_id,),
+            ).fetchone()
+            if predecessor is not None:
+                predecessor_id = str(predecessor["id"])
+                connection.execute(
+                    """UPDATE memory_claims
+                          SET status='active',superseded_by=NULL,updated_epoch=?
+                        WHERE id=?""",
+                    (epoch, predecessor_id),
+                )
+                restored.add(predecessor_id)
+
+            conflicts = connection.execute(
+                """SELECT id,prior_claim_id,incoming_claim_id
+                     FROM memory_conflicts
+                    WHERE status='open'
+                      AND (prior_claim_id=? OR incoming_claim_id=?)""",
+                (claim_id, claim_id),
+            ).fetchall()
+            counterparts: set[str] = set()
+            for conflict in conflicts:
+                prior = str(conflict["prior_claim_id"])
+                incoming = str(conflict["incoming_claim_id"])
+                counterparts.add(incoming if prior == claim_id else prior)
+                connection.execute(
+                    """UPDATE memory_conflicts
+                          SET status='resolved',
+                              resolution='context_dependent_owner_quote',
+                              resolved_by='memory_compiler',resolved_epoch=?
+                        WHERE id=?""",
+                    (epoch, conflict["id"]),
+                )
+                resolved += 1
+            for counterpart_id in counterparts:
+                remaining = int(connection.execute(
+                    """SELECT COUNT(*) FROM memory_conflicts
+                        WHERE status='open'
+                          AND (prior_claim_id=? OR incoming_claim_id=?)""",
+                    (counterpart_id, counterpart_id),
+                ).fetchone()[0])
+                if remaining:
+                    continue
+                counterpart = connection.execute(
+                    "SELECT authority FROM memory_claims WHERE id=?",
+                    (counterpart_id,),
+                ).fetchone()
+                if counterpart is None:
+                    continue
+                target = (
+                    "active" if str(counterpart["authority"])
+                    in {"owner_asserted", "human_confirmed"} else "candidate"
+                )
+                connection.execute(
+                    "UPDATE memory_claims SET status=?,updated_epoch=? WHERE id=?",
+                    (target, epoch, counterpart_id),
+                )
+                if target == "active":
+                    restored.add(counterpart_id)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return {
+        "demoted": len(affected),
+        "restored": len(restored),
+        "resolved_conflicts": resolved,
+    }
+
+
+def prepare_batch(
+    *, root: str | Path | None = None, index_db: str | Path | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE, now: float | None = None,
+) -> dict[str, Any] | None:
+    repair_context_dependent_claims(now=now)
+    return _prepare_batch(
+        root=root, index_db=index_db, batch_size=batch_size, now=now,
+    )
 
 
 def apply_compile_result(

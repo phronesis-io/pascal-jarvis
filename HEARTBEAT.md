@@ -525,6 +525,11 @@ duplicate the common style contract here.
     artifacts, todos, constraints, and preferences. Do not summarize sessions.
     Do not infer completion, Matter identity, dates, or facts absent from an
     exact quote. Assistant statements are candidates, never proof.
+    DATA marks context-dependent owner acknowledgements with
+    activation_policy=owner_context_candidate. Do not use neighboring turns to
+    expand those words into owner-authorized facts. Core also re-checks the
+    complete source and exact quote you choose; questions and contextual text
+    remain candidate-only.
 
     Return exactly:
     {"schema":"jarvis.memory-candidates.v1","batch_id":"<DATA batch_id>",

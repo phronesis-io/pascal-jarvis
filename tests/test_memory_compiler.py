@@ -190,6 +190,226 @@ def test_owner_lark_assistant_turn_is_candidate_not_active():
     assert "日历已经全部更新完成" not in compiled_context()
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["搞吧", "写进 blog 吧", "把这个做完吧", "同步到飞书吧", "go ahead"],
+)
+def test_context_dependent_owner_acknowledgement_is_candidate_only(text):
+    batch, source = _one_lark_batch(text)
+
+    assert source["activation_policy"] == "owner_context_candidate"
+    _apply_all(batch, [_claim(
+        source, kind="decision", key="blog06.contextual_approval",
+        content="Pascal approved a specific Blog 06 rewrite",
+    )])
+
+    claim = search_compiled_memory(include_candidates=True)["claims"][0]
+    assert claim["status"] == "candidate"
+    assert claim["authority"] == "assistant_candidate"
+    assert compiled_context() == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "kind", "key"),
+    [
+        ("不要催我", "constraint", "attention.no_nudging"),
+        ("发布 PR #130 吧", "decision", "release.pr130"),
+        ("修复登录超时吧", "todo", "auth.fix_login_timeout"),
+    ],
+)
+def test_short_self_contained_owner_statement_still_activates(
+    text, kind, key,
+):
+    batch, source = _one_lark_batch(text)
+
+    assert source["activation_policy"] == "owner_asserted"
+    _apply_all(batch, [_claim(
+        source, kind=kind, key=key, content=text,
+    )])
+
+    claim = search_compiled_memory()["claims"][0]
+    assert claim["status"] == "active"
+    assert claim["authority"] == "owner_asserted"
+    assert text in compiled_context()
+
+
+def test_contextual_subquote_cannot_borrow_authority_from_full_owner_turn():
+    batch, source = _one_lark_batch("好的，主入口改为 Codex")
+
+    assert source["activation_policy"] == "owner_asserted"
+    _apply_all(batch, [
+        _claim(
+            source, kind="decision", key="product.ambiguous_ack",
+            quote="好的", content="Pascal approved the proposed frontstage",
+        ),
+        _claim(
+            source, kind="decision", key="product.primary_frontstage",
+            quote="主入口改为 Codex", content="主入口改为 Codex",
+        ),
+    ])
+
+    claims = {
+        item["claim_key"]: item
+        for item in search_compiled_memory(include_candidates=True)["claims"]
+    }
+    assert claims["product.ambiguous_ack"]["status"] == "candidate"
+    assert claims["product.primary_frontstage"]["status"] == "active"
+    assert "Pascal approved the proposed frontstage" not in compiled_context()
+    assert "主入口改为 Codex" in compiled_context()
+
+
+def test_owner_question_and_its_assertive_subquote_remain_candidates():
+    batch, source = _one_lark_batch("版本已经上线了吗？")
+
+    assert source["activation_policy"] == "owner_context_candidate"
+    _apply_all(batch, [
+        _claim(
+            source, kind="fact", key="release.question_whole",
+            content="版本已经上线", quote="版本已经上线了吗？",
+        ),
+        _claim(
+            source, kind="fact", key="release.question_subquote",
+            content="版本已经上线", quote="版本已经上线",
+        ),
+    ])
+
+    claims = search_compiled_memory(include_candidates=True)["claims"]
+    assert len(claims) == 2
+    assert {item["status"] for item in claims} == {"candidate"}
+    assert compiled_context() == ""
+
+
+def test_explicit_owner_statement_promotes_matching_contextual_candidate():
+    prior, prior_source = _one_lark_batch("主入口先用飞书")
+    _apply_all(prior, [_claim(
+        prior_source, kind="decision", key="product.primary_frontstage",
+        content="主入口先用飞书",
+    )])
+    contextual, contextual_source = _one_lark_batch("搞吧")
+    _apply_all(contextual, [_claim(
+        contextual_source, kind="decision", key="product.primary_frontstage",
+        content="主入口改为 Codex",
+    )])
+
+    explicit, explicit_source = _one_lark_batch("主入口改为 Codex")
+    receipt = _apply_all(explicit, [_claim(
+        explicit_source, kind="decision", key="product.primary_frontstage",
+        content="主入口改为 Codex",
+    )])
+
+    assert receipt["outcomes"][0]["outcome"] == "promoted_superseded_previous"
+    claims = search_compiled_memory(include_candidates=True)["claims"]
+    current = next(item for item in claims if item["content"] == "主入口改为 Codex")
+    assert current["status"] == "active"
+    assert current["authority"] == "owner_asserted"
+    assert len(current["source_refs"]) == 2
+    assert "主入口改为 Codex" in compiled_context()
+    assert "主入口先用飞书" not in compiled_context()
+
+
+def test_prepare_repairs_legacy_ack_claim_and_restores_displaced_decision():
+    first, first_source = _one_lark_batch("主入口先用飞书")
+    _apply_all(first, [_claim(
+        first_source, kind="decision", key="product.primary_frontstage",
+        content="主入口先用飞书",
+    )])
+    prior = _db_row(
+        "SELECT id FROM memory_claims WHERE content='主入口先用飞书'"
+    )
+
+    ack_batch, ack_source = _one_lark_batch("搞吧")
+    _apply_all(ack_batch, [])
+    connection = db_module.get_db()
+    connection.execute(
+        """INSERT INTO memory_claims
+           (id,kind,claim_key,content,normalized_content,status,authority,
+            created_epoch,updated_epoch)
+           VALUES ('legacy_ack','decision','product.primary_frontstage',
+                   '主入口改为 Codex','主入口改为 codex','active',
+                   'owner_asserted',100,100)"""
+    )
+    connection.execute(
+        """INSERT INTO memory_claim_sources(claim_id,source_ref,source_quote)
+           VALUES ('legacy_ack',?,'搞吧')""",
+        (ack_source["source_ref"],),
+    )
+    connection.execute(
+        """UPDATE memory_claims
+              SET status='superseded',superseded_by='legacy_ack'
+            WHERE id=?""",
+        (prior["id"],),
+    )
+    connection.commit()
+
+    assert prepare_batch(batch_size=20, now=200.0) is None
+
+    repaired = _db_row(
+        "SELECT status,authority FROM memory_claims WHERE id='legacy_ack'"
+    )
+    assert repaired["status"] == "candidate"
+    assert repaired["authority"] == "assistant_candidate"
+    restored = connection.execute(
+        "SELECT status,superseded_by FROM memory_claims WHERE id=?",
+        (prior["id"],),
+    ).fetchone()
+    assert restored["status"] == "active"
+    assert restored["superseded_by"] is None
+
+
+def test_prepare_repairs_legacy_ack_conflict_and_restores_grounded_fact():
+    first, first_source = _one_lark_batch("版本还没有上线")
+    _apply_all(first, [_claim(
+        first_source, kind="fact", key="release.current_status",
+        content="版本还没有上线",
+    )])
+    connection = db_module.get_db()
+    prior = connection.execute(
+        "SELECT id FROM memory_claims WHERE content='版本还没有上线'"
+    ).fetchone()
+    ack_batch, ack_source = _one_lark_batch("搞吧")
+    _apply_all(ack_batch, [])
+    connection.execute(
+        """INSERT INTO memory_claims
+           (id,kind,claim_key,content,normalized_content,status,authority,
+            created_epoch,updated_epoch)
+           VALUES ('legacy_conflict','fact','release.current_status',
+                   '版本已经上线','版本已经上线','conflicted',
+                   'owner_asserted',100,100)"""
+    )
+    connection.execute(
+        """INSERT INTO memory_claim_sources(claim_id,source_ref,source_quote)
+           VALUES ('legacy_conflict',?,'搞吧')""",
+        (ack_source["source_ref"],),
+    )
+    connection.execute(
+        "UPDATE memory_claims SET status='conflicted' WHERE id=?",
+        (prior["id"],),
+    )
+    connection.execute(
+        """INSERT INTO memory_conflicts
+           (id,matter_scope,claim_key,prior_claim_id,incoming_claim_id,
+            status,created_epoch)
+           VALUES ('legacy_conflict_row','','release.current_status',?,
+                   'legacy_conflict','open',100)""",
+        (prior["id"],),
+    )
+    connection.commit()
+
+    assert prepare_batch(batch_size=20, now=200.0) is None
+
+    assert connection.execute(
+        "SELECT status FROM memory_claims WHERE id='legacy_conflict'"
+    ).fetchone()["status"] == "candidate"
+    assert connection.execute(
+        "SELECT status FROM memory_claims WHERE id=?", (prior["id"],),
+    ).fetchone()["status"] == "active"
+    conflict = connection.execute(
+        "SELECT status,resolution FROM memory_conflicts WHERE id='legacy_conflict_row'"
+    ).fetchone()
+    assert conflict["status"] == "resolved"
+    assert conflict["resolution"] == "context_dependent_owner_quote"
+
+
 def test_model_cannot_fabricate_a_quote_or_omit_a_source(tmp_path):
     _, index_db = _sources(tmp_path)
     batch = prepare_batch(index_db=index_db, batch_size=20)
