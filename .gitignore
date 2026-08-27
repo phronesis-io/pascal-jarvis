@@ -151,3 +151,9 @@ memorials.jsonl.bak-*
 mail/.pending_batch.json
 mail/.*.json
 .config/taskline/
+
+# podcast-digest local state (per-machine watchlist/seen set + downloaded captions)
+data/podcast_watchlist.json
+data/podcast_state.json
+data/podcast_digest_day.txt
+data/podcasts/

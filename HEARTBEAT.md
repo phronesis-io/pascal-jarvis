@@ -20,6 +20,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | Daily Rhythm | daily-plan, activity-log, daily-reflect | reflect yes; daily-plan+activity-log silent |
 | Check-in | checkin | yes |
 | Lifelog | morning-anchor, exercise-week | yes (morning: one short line ~8:30; exercise: one Sunday-evening card) |
+| Content | podcast-digest | yes (one 知会级 card per day, 07:00-10:00; silent when nothing new on the watchlist) |
 | Calendar & Tasks | calendar-sync, weekly-review | calendar silent, weekly yes |
 | Intentions | intention-check | yes (when intent fires) |
 | Routines | routine-run | 看例程自己的自主级别：observe 只进审计，propose/act 出卡 |
@@ -879,3 +880,45 @@ duplicate the common style contract here.
     2. Pure data recap: no medical advice, no lecturing, no "加油/要坚持".
     3. Never invent sessions or activities not present in DATA.
     Reply HEARTBEAT_OK if DATA is empty.
+
+### podcast-digest
+- interval: 1h
+- pre: tasks/podcast_digest_pre.sh
+- post: tasks/podcast_digest_post.py
+- prompt: |
+    [PODCAST DIGEST — 今天这一期]
+    Pascal 2026-08-27 亲口要的：「像这样的播客可以每天给我想办法搞一点，我挺成
+    总结总结，我简单看看，你可以不要让我错过了。」他要的是**能扫的摘要**，不是
+    「有一期新的，你去听」。
+
+    DATA gives you ONE episode: real metadata, real chapter marks, and a LOCAL
+    PATH to the full official captions (already downloaded — typically
+    100k-300k chars). 这一步不能省：
+
+    1. **真的把字幕读完**，用 Read 分段读那个文件（一次 ~150 行）。DATA 里没有
+       摘要，因为摘要要你读出来。**绝不允许**凭标题、频道名或章节标题推断内容
+       （REQ-78：未核实的外部事实一律不出货）。不确定的地方就写「这段我没听懂/
+       他没展开」，那永远好过一个自信的猜测。
+    2. **写成一篇飞书文档**（本地 md 他手机上看不到）：
+       `lark-cli docs +create --as user --content '<title>...</title>...'`
+       结构建议，但按内容调整、别套死模板：
+       - 一句话结论（这期到底讲成了什么）
+       - 「对你直接有用的 N 条」——每条要说清楚**为什么和他有关**（EigenFlux /
+         Jarvis harness / 白皮书 / 他手上正在办的事），说不出来就不要列
+       - 其余值得知道的（按章节，带 ⏱ 时间戳跳转链接
+         `https://www.youtube.com/watch?v=<id>&amp;t=<秒>s`，秒数用 DATA 的章节秒数）
+       - **一到三处你不同意 / 该打的折**（§10 异议先行：这段不是装饰，是这篇
+         摘要比他自己听更值钱的地方）
+       - 值得直接引用的原话
+       XML 里 `&` 必须写成 `&amp;`。
+    3. 写完**回读一次**（`docs +fetch`）确认关键段落真的在线上，再报完成。
+
+    Return JSON: {"video_id": "<DATA 里的 video_id>", "title": "<≤20字的一句话结论>",
+      "doc_url": "<刚建好的飞书文档 URL>",
+      "user_message": "<≤400字的卡片正文：三到五行说清这期讲了什么、哪一条对他最有用，最后带文档链接>"}
+
+    HARD RULES:
+    - 卡片是**知会级**，他不需要拍板，不要写成待办、不要问他要不要听。
+    - 一张卡只说这一期。DATA 末尾「今天没选的」只是背景，**绝不**在卡里或文档里
+      描述它们的内容——那些字幕你没读过。
+    - 没建成文档就返回 HEARTBEAT_OK：宁可今天不发，也不发一个指向空处的卡。
