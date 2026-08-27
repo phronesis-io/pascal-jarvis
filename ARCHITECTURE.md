@@ -86,6 +86,14 @@ The implementation boundary is explicit:
   payloads, adds source references, and writes owner-only packet files;
 - `core.matter_executor` is the shared Claude/Codex adapter. Process exit and
   the last assistant message are observations only; they never close a Matter;
+- `core.codex_frontstage` exposes the provider-independent application
+  contract used by interactive harnesses: search/create, acquire, renew,
+  release, abort, and audit. It contains no MCP protocol code;
+- `core.codex_mcp` adapts that contract to the official MCP Python SDK over
+  local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
+  it does not read Codex's private task store or create a second conversation;
+- `core.frontstage_acceptance` stores explicit owner reviews for real desktop
+  and mobile journeys. The MCP exposes its report but no self-approval tool;
 - `scripts/jarvis-matter` exposes the same contract through `context`,
   `launch`, `run-status`, `finish`, and `audit`.
 
@@ -98,6 +106,13 @@ without losing the authoritative receipt.
 Foreground launcher sessions renew a bounded six-hour lease while alive;
 abandoned prepared handoffs still expire. Replayed handoff requests reuse the
 same unstarted run only when executor, task, workspace and packet all match.
+
+Codex itself owns task creation, resumption, streaming, approvals, diffs,
+mobile Remote, and ordinary task memory. Jarvis integrates through the
+supported MCP/plugin boundary for application-owned capabilities. A future
+host-driven workflow may use Codex app-server to create or resume tasks, but
+app-server event state must still project into the same Matter Run contract;
+it may not become a competing lifecycle store.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of

@@ -30,6 +30,7 @@ from core.matters import get_matter
 ACTIVE_STATUSES = {"acquired", "running"}
 TERMINAL_STATUSES = {"released", "failed", "expired"}
 _EXECUTOR_RE = re.compile(r"^[a-z0-9_.-]{1,80}$")
+VALID_SURFACES = {"", "desktop", "mobile", "lark", "api"}
 
 
 class MatterRunError(RuntimeError):
@@ -187,6 +188,7 @@ def acquire_run(
     task: str = "",
     workspace: str | Path = ".",
     authority: dict[str, Any] | None = None,
+    surface: str = "",
     lease_seconds: int = 3600,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -199,6 +201,9 @@ def acquire_run(
     executor = _validate_executor(executor)
     workspace_path = _workspace_path(workspace)
     task = _text(task, "task", 4000)
+    surface = str(surface or "").strip().lower()
+    if surface not in VALID_SURFACES:
+        raise MatterRunValidationError("invalid frontstage surface")
     lease_seconds = max(30, min(int(lease_seconds), 86400))
     epoch = float(time.time() if now is None else now)
     generation = current_context_generation(f"matter:{matter_id}")
@@ -267,9 +272,9 @@ def acquire_run(
         db.execute(
             """INSERT INTO matter_runs(
                    id,matter_id,executor,status,run_sequence,task,workspace,
-                   context_generation,authority_json,acquired_epoch,
+                   context_generation,authority_json,surface,acquired_epoch,
                    lease_expires_epoch
-               ) VALUES (?,?,?,'acquired',?,?,?,?,?,?,?)""",
+               ) VALUES (?,?,?,'acquired',?,?,?,?,?,?,?,?)""",
             (
                 run_id,
                 matter_id,
@@ -279,6 +284,7 @@ def acquire_run(
                 str(workspace_path),
                 generation,
                 _canonical(granted),
+                surface,
                 epoch,
                 epoch + lease_seconds,
             ),

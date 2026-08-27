@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "jarvis": {
+      "command": "./scripts/launch-jarvis-mcp",
+      "args": [],
+      "cwd": ".",
+      "env_vars": ["HOME", "PATH", "JARVIS_DIR", "JARVIS_VENV_DIR"],
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 120
+    }
+  }
+}

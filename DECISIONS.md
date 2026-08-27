@@ -76,6 +76,32 @@ apply the route plan, call an adapter, and record the actual result through
 `matter_bridge`, but execution, continuity, and the conversation ledger must
 not create a second preference or route-policy store.
 
+## ADR-006: Codex Owns The Frontstage; Jarvis Integrates Through MCP
+
+**Status:** accepted
+
+- Codex owns interactive tasks, desktop/mobile Remote, tools, approvals,
+  diffs, long output, and ordinary task-local memory.
+- Jarvis exposes only application-owned capabilities through a local stdio MCP
+  server: durable Matter discovery, bounded Context Packets, run leases,
+  verified Result Receipts, and protocol health.
+- The MCP adapter calls `core.codex_frontstage`; it does not implement a second
+  Matter state machine. Claude Code or another harness may reuse that Python
+  contract without MCP.
+- The connector does not scrape or mutate undocumented Codex task storage.
+  Codex app-server is reserved for a future host-driven journey that truly
+  needs programmatic task creation/resumption and streamed approvals.
+- Jarvis cannot grant an executor Matter-completion authority or accept model
+  prose as external-effect evidence. Release closes the run only.
+- Desktop/mobile migration evidence is written through the operator CLI, not
+  an MCP write tool. A model may expose the report but cannot review itself.
+- A repo-owned Codex plugin supplies concise routing guidance and starts the
+  local MCP process. Its installation records only the local repository path;
+  secrets and private Matter data stay in the existing private Jarvis store.
+
+The full product journey and replacement rules are in
+`docs/codex_jarvis_user_journey.md`.
+
 ## Architecture Adjacency Check
 
 Use the stdlib-only graph check before and after a broad self-improve round:

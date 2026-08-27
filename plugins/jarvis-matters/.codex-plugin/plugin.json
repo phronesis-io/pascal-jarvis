@@ -1,0 +1,23 @@
+{
+  "name": "jarvis-matters",
+  "version": "0.1.0",
+  "description": "Use Codex as the frontstage for Jarvis Matters without duplicating chat state.",
+  "author": {
+    "name": "Phronesis"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Jarvis Matters",
+    "shortDescription": "Continue durable Jarvis work from Codex.",
+    "longDescription": "Connects Codex tasks to Jarvis Matter identity, bounded context, execution leases, and verified result receipts.",
+    "developerName": "Phronesis",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "defaultPrompt": [
+      "Continue the most relevant Jarvis Matter.",
+      "Show my active Matters and their next actions.",
+      "Bind this work to a Jarvis Matter."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

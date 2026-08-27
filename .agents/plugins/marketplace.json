@@ -1,0 +1,20 @@
+{
+  "name": "pascal-jarvis",
+  "interface": {
+    "displayName": "Pascal Jarvis"
+  },
+  "plugins": [
+    {
+      "name": "jarvis-matters",
+      "source": {
+        "source": "local",
+        "path": "./plugins/jarvis-matters"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

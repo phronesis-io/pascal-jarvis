@@ -36,10 +36,11 @@ not compare Lark with Codex on mobile. The owner now uses Codex on both desktop
 and mobile, where separate tasks, long content, artifacts, and execution are a
 better fit than an indefinitely growing bot conversation.
 
-This is an adopted target contract, not a claim that the migration is already
-shipped. Until the Codex context/receipt adapter passes production acceptance,
-Lark remains the current reliable proactive transport. No feature may drop its
-existing reachable path merely because this direction was documented.
+The repository now contains the Phase-1 Codex plugin, local MCP connector, and
+verified Context Packet/Result Receipt contract. This is not yet a claim that
+the production migration is complete. Until 20 desktop and 20 mobile journeys
+pass acceptance, Lark remains the current reliable proactive transport. No
+feature may drop its existing reachable path merely because code exists.
 
 - **Codex desktop and mobile**: the primary place to begin, split, continue,
   inspect, and finish substantive work. Each task is a bounded executor
@@ -70,6 +71,9 @@ existing reachable path merely because this direction was documented.
   same Matter. They do not own product state or model policy.
 - **Admin and Ops (`:3456`)**: operator-only diagnosis and recovery, never a
   daily user workflow.
+
+The concrete decision table and desktop/mobile journeys are authoritative in
+`docs/codex_jarvis_user_journey.md`.
 
 ## Product Principles
 

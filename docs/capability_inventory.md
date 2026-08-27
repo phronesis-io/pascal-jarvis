@@ -21,9 +21,9 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **175**
-- Status: keep **175**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **65**, heartbeat-task **38**, lark-command **21**, runtime-component **15**, task-script **7**
+- Total: **177**
+- Status: keep **177**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **67**, heartbeat-task **38**, lark-command **21**, runtime-component **15**, task-script **7**
 
 ## Inventory
 
@@ -95,6 +95,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:602` | `core/aux_model.py:602` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:512` | - |
 | `cli:core.change_gate` | core-cli | **keep** | `core/change_gate.py:97` | `core/change_gate.py:97` | python3 -m core.change_gate | `tests/test_change_gate.py:47` | - |
 | `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:562` | `core/codex_fallback.py:562` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:299`, `tests/test_provider_continuity_e2e.py:227`, `tests/test_session_lifecycle.py:267` | - |
+| `cli:core.codex_mcp` | core-cli | **keep** | `core/codex_mcp.py:190` | `core/codex_mcp.py:190` | python3 -m core.codex_mcp | `tests/test_codex_frontstage.py:155` | - |
 | `cli:core.companion` | core-cli | **keep** | `core/companion.py:475` | `core/companion.py:475` | python3 -m core.companion | `tests/test_checkin_post.py:23`, `tests/test_companion.py:63`, `tests/test_heartbeat_regressions.py:202` | - |
 | `cli:core.components` | core-cli | **keep** | `core/components.py:745` | `core/components.py:745` | python3 -m core.components | `tests/test_companion.py:204`, `tests/test_components_gating.py:35`, `tests/test_components_heartbeat_tasks.py:170` | - |
 | `cli:core.conversation_audit` | core-cli | **keep** | `core/conversation_audit.py:1094` | `core/conversation_audit.py:1094` | python3 -m core.conversation_audit | `tests/test_components_gating.py:101`, `tests/test_components_post_wake_grace.py:160`, `tests/test_conversation_audit.py:14` | - |
@@ -115,6 +116,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.eigenflux_publish_material` | core-cli | **keep** | `core/eigenflux_publish_material.py:112` | `core/eigenflux_publish_material.py:112` | python3 -m core.eigenflux_publish_material | `tests/test_eigenflux_publish_material.py:49` | - |
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:130` | - |
 | `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_circuit_breaker.py:109`, `tests/test_core_db.py:133`, `tests/test_core_db_audit.py:94` | - |
+| `cli:core.frontstage_acceptance` | core-cli | **keep** | `core/frontstage_acceptance.py:228` | `core/frontstage_acceptance.py:228` | python3 -m core.frontstage_acceptance | `tests/test_codex_frontstage.py:300` | - |
 | `cli:core.geo` | core-cli | **keep** | `core/geo.py:487` | `core/geo.py:487` | python3 -m core.geo | `tests/test_geo.py:68`, `tests/test_weather.py:111` | - |
 | `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:2029` | `core/heartbeat_loop.py:2029` | python3 -m core.heartbeat_loop | `tests/test_daemon_regressions.py:129`, `tests/test_heartbeat_loop.py:106`, `tests/test_import_graph.py:157` | - |
 | `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3581` | `core/intentions.py:3581` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_card_residue_leak.py:56` | - |
@@ -126,7 +128,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.mail_draft` | core-cli | **keep** | `core/mail_draft.py:267` | `core/mail_draft.py:267` | python3 -m core.mail_draft | `tests/test_mail_draft.py:42` | - |
 | `cli:core.matter_bridge` | core-cli | **keep** | `core/matter_bridge.py:780` | `core/matter_bridge.py:780` | python3 -m core.matter_bridge | `tests/test_prompt.py:506`, `tests/test_session_lifecycle.py:471` | - |
 | `cli:core.matter_executor` | core-cli | **keep** | `core/matter_executor.py:417` | `core/matter_executor.py:417` | python3 -m core.matter_executor | `tests/test_coverage_budget.py:31`, `tests/test_matter_continuity.py:308` | - |
-| `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_continuity.py:300`, `tests/test_import_graph.py:154`, `tests/test_intentions_post.py:323` | - |
+| `cli:core.matters` | core-cli | **keep** | `core/matters.py:520` | `core/matters.py:520` | python3 -m core.matters | `tests/test_codex_frontstage.py:52`, `tests/test_codex_plugin_install.py:81`, `tests/test_continuity.py:300` | - |
 | `cli:core.memorial` | core-cli | **keep** | `core/memorial.py:3693` | `core/memorial.py:3693` | python3 -m core.memorial | `tests/test_absence.py:128`, `tests/test_attention_roi.py:134`, `tests/test_bot_trust_boundary.py:63` | - |
 | `cli:core.memorial_thread` | core-cli | **keep** | `core/memorial_thread.py:135` | `core/memorial_thread.py:135` | python3 -m core.memorial_thread | `tests/test_bot_trust_boundary.py:63`, `tests/test_import_graph.py:161`, `tests/test_matter_continuity.py:485` | - |
 | `cli:core.metrics_digest` | core-cli | **keep** | `core/metrics_digest.py:250` | `core/metrics_digest.py:250` | python3 -m core.metrics_digest | `tests/test_metrics_digest.py:312` | - |

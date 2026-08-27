@@ -498,6 +498,35 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_matter_runs_matter
         ON matter_runs(matter_id, run_sequence DESC);
     """,
+    # v13: Human-reviewed desktop/mobile acceptance evidence for the Codex
+    # frontstage. Runtime receipts remain authoritative; this table records
+    # whether the user journey was actually useful before a Lark path retires.
+    """
+    ALTER TABLE matter_runs ADD COLUMN surface TEXT NOT NULL DEFAULT ''
+        CHECK(surface IN ('', 'desktop', 'mobile', 'lark', 'api'));
+    CREATE TABLE IF NOT EXISTS frontstage_acceptance (
+        run_id TEXT PRIMARY KEY REFERENCES matter_runs(id) ON DELETE CASCADE,
+        connector_version TEXT NOT NULL,
+        surface TEXT NOT NULL CHECK(surface IN ('desktop', 'mobile')),
+        matter_discovered_correct INTEGER NOT NULL CHECK(
+            matter_discovered_correct IN (0, 1)
+        ),
+        context_packet_correct INTEGER NOT NULL CHECK(
+            context_packet_correct IN (0, 1)
+        ),
+        task_completed INTEGER NOT NULL CHECK(task_completed IN (0, 1)),
+        receipt_valid INTEGER NOT NULL CHECK(receipt_valid IN (0, 1)),
+        duplicate_effect INTEGER NOT NULL CHECK(duplicate_effect IN (0, 1)),
+        reexplanation_required INTEGER NOT NULL CHECK(
+            reexplanation_required IN (0, 1)
+        ),
+        reviewer TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        reviewed_epoch REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_frontstage_acceptance_version_surface
+        ON frontstage_acceptance(connector_version, surface, reviewed_epoch);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None

@@ -253,14 +253,17 @@ Context Packet。任何新增系统指令都必须证明它解决了可复现失
 **准出：** 手机和电脑各完成至少 20 次真实继续任务；正确 Matter 绑定率达到目标，
 中途更换入口不要求 Pascal 重讲背景。
 
-**2026-08-27 工程检查点：** 第一层协议已经进入仓库实现，但尚未宣称 Phase 1
-准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
+**2026-08-27 工程检查点：** Phase 0 协议和 Phase 1 本地 Codex 连接层已经进入
+仓库实现，但尚未宣称 Phase 1 准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
 收据；`core.matter_context` 生成带来源引用、权限边界和摘要指纹的
 `jarvis.context-packet.v2`；`core.matter_executor` 让 Claude/Codex 共用同一条
 acquire/run/release 路径。产物必须在 workspace 内存在并按内容哈希，外部动作必须引用
 当前 Delegation 的可信证据。模型最后一句和进程退出码只作为未验证叙述，Matter 不会
-自动完成。当前还欠桌面/手机各 20 次真实接受测试、Codex 主动唤醒/恢复适配、Item 与
-Intent 的自动 reconcile，以及完整的 Model Runtime 收口。
+自动完成。`core.codex_frontstage` 和 `core.codex_mcp` 通过官方 MCP v2 SDK 暴露
+search/create/start/renew/release/abort/health；`plugins/jarvis-matters` 让 Codex
+发现这条能力而不读取其内部 task 文件。当前还欠桌面/手机各 20 次真实接受测试、
+Codex 主动唤醒/恢复适配、Item 与 Intent 的自动 reconcile，以及完整的 Model
+Runtime 收口。
 
 ### Phase 2：Memory Compiler
 

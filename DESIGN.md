@@ -60,6 +60,10 @@ interaction. Therefore:
   a concise pointer but must not carry a lossy duplicate of the work.
 - A Codex task is replaceable execution context, not the source of product
   truth. Failure to read or write a task never corrupts the Matter ledger.
+- Ordinary one-turn work remains Codex-only. The Jarvis connector appears only
+  when continuity, time, authority, or verified effects justify a Matter.
+- Search before creating a Matter. One recognizable outcome keeps one Matter;
+  separate Codex tasks may contribute one verified run at a time.
 
 ### Lark
 
