@@ -527,6 +527,88 @@ MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_frontstage_acceptance_version_surface
         ON frontstage_acceptance(connector_version, surface, reviewed_epoch);
     """,
+    # v14: Cross-product Memory Compiler. Raw provider transcripts remain the
+    # audit source; these tables hold only bounded source receipts, validated
+    # claim quotes, lifecycle state, and explicit conflicts.
+    """
+    CREATE TABLE IF NOT EXISTS memory_compile_batches (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK(status IN ('pending','applied','failed')),
+        source_refs TEXT NOT NULL DEFAULT '[]',
+        payload TEXT NOT NULL DEFAULT '{}',
+        created_epoch REAL NOT NULL,
+        completed_epoch REAL,
+        last_error TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_compile_sources (
+        source_ref TEXT PRIMARY KEY,
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('session_turn','lark_turn')),
+        provider TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+        occurred_at TEXT NOT NULL DEFAULT '',
+        source_digest TEXT NOT NULL,
+        matter_id TEXT REFERENCES matters(id) ON DELETE SET NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','compiled','ignored','failed')),
+        batch_id TEXT NOT NULL REFERENCES memory_compile_batches(id),
+        metadata TEXT NOT NULL DEFAULT '{}',
+        processed_epoch REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_claims (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(
+            kind IN ('fact','decision','artifact','todo','constraint','preference')
+        ),
+        claim_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_content TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+            status IN ('candidate','active','conflicted','superseded','rejected')
+        ),
+        authority TEXT NOT NULL CHECK(
+            authority IN ('assistant_candidate','owner_asserted','human_confirmed')
+        ),
+        matter_id TEXT REFERENCES matters(id) ON DELETE SET NULL,
+        valid_from_epoch REAL,
+        valid_until_epoch REAL,
+        superseded_by TEXT REFERENCES memory_claims(id),
+        confirmed_by TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        updated_epoch REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_claim_sources (
+        claim_id TEXT NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+        source_ref TEXT NOT NULL REFERENCES memory_compile_sources(source_ref)
+            ON DELETE RESTRICT,
+        source_quote TEXT NOT NULL,
+        PRIMARY KEY(claim_id, source_ref)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_conflicts (
+        id TEXT PRIMARY KEY,
+        matter_scope TEXT NOT NULL DEFAULT '',
+        claim_key TEXT NOT NULL,
+        prior_claim_id TEXT NOT NULL REFERENCES memory_claims(id),
+        incoming_claim_id TEXT NOT NULL REFERENCES memory_claims(id),
+        status TEXT NOT NULL CHECK(status IN ('open','resolved')),
+        resolution TEXT NOT NULL DEFAULT '',
+        resolved_by TEXT NOT NULL DEFAULT '',
+        created_epoch REAL NOT NULL,
+        resolved_epoch REAL,
+        UNIQUE(prior_claim_id, incoming_claim_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_sources_status
+        ON memory_compile_sources(status, occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_claims_scope
+        ON memory_claims(matter_id, status, kind, claim_key);
+    CREATE INDEX IF NOT EXISTS idx_memory_claims_updated
+        ON memory_claims(status, updated_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_conflicts_open
+        ON memory_conflicts(status, created_epoch DESC);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None
@@ -594,6 +676,7 @@ def _run_migrations(db: sqlite3.Connection):
         columns=(
             ("context_key", "TEXT NOT NULL DEFAULT ''"),
             ("matter_id", "TEXT NOT NULL DEFAULT ''"),
+            ("memory_eligible", "INTEGER NOT NULL DEFAULT 0"),
         ),
     )
     try:

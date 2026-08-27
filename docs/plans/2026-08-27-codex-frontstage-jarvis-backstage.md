@@ -267,10 +267,15 @@ Runtime 收口。
 
 ### Phase 2：Memory Compiler
 
-- 原始会话只做审计源；
-- 提取事实、决定、产物、待办和冲突，并与权威状态比对；
-- 按任务编译最小 Context Packet；
-- 删除低价值“跨会话动态”卡，只有冲突、重要完成和需要判断的缺口才浮现。
+- **仓库实现完成，发布与真实回放待验。** 原始会话只做审计源；
+- `core.memory_compiler` 从 Codex、Claude Code 和 owner-private Lark 提取
+  带精确引文的事实、决定、产物、待办、约束和偏好；
+- owner 原话可成为有效记忆，assistant 原话只能成为候选；新决定可替代旧决定，
+  事实冲突会同时停用直到显式人工选择；
+- Matter Context Packet 只编译该 Matter 的当前有效 claim；默认提示词不再注入原始
+  session tail、历史搜索结果或旧 `cross_session_digest.md`；
+- 旧“跨会话动态”模型卡、PR/time/近重复过滤链已删除，只有确定性发现的新冲突才
+  进入 ambient ledger。
 
 **准出：** 记忆回放集达到召回/失效指标，提示词显著缩小且任务质量不下降。
 

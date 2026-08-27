@@ -233,7 +233,8 @@ def recent_provider_context(conv_key: str, limit: int = 12,
 def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
                 provider: str = "lark", model: str = "",
                 session_id: str = "", context_key: str = "",
-                matter_id: str | None = None) -> bool:
+                matter_id: str | None = None,
+                memory_eligible: bool = False) -> bool:
     from core.conversation_context import (
         context_generation_from_key,
         context_snapshot,
@@ -261,10 +262,11 @@ def record_turn(conv_key: str, role: str, text: str, message_id: str = "",
         db.execute(
             """INSERT OR IGNORE INTO conversation_turns
                (conv_key, role, text, message_id, provider, model,
-                session_id, created_at, context_key, matter_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                session_id, created_at, context_key, matter_id, memory_eligible)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (conv_key, role, clean_turn, message_id, provider, model,
-             session_id, _now(), selected_context, selected_matter),
+             session_id, _now(), selected_context, selected_matter,
+             int(memory_eligible)),
         )
         stored = db.total_changes > before
         # Keep this continuity projection bounded. Native provider sessions and
@@ -731,13 +733,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jarvis-dir", default="")
     parser.add_argument("--context-key", default="")
     parser.add_argument("--matter-id", default=None)
+    parser.add_argument("--memory-eligible", action="store_true")
     args = parser.parse_args(argv)
     if args.record_role:
         result = {"recorded": record_turn(
             args.conv_key, args.record_role, args.content,
             args.message_id, provider=args.provider, model=args.model,
             session_id=args.session_id, context_key=args.context_key,
-            matter_id=args.matter_id)}
+            matter_id=args.matter_id,
+            memory_eligible=args.memory_eligible)}
     else:
         try:
             result = handle_lark_command(

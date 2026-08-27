@@ -107,6 +107,8 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
         "may_complete_matter": False,
         "may_self_attest_external_effects": False,
     })
+    from core.memory_compiler import context_records
+    compiled_memory = context_records(matter_id)
     bundle = {
         "schema": "jarvis.context-packet.v2",
         "context_generation": generation,
@@ -148,6 +150,8 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
         "sessions": sessions[-8:],
         "artifacts": artifacts[-20:],
         "memory_pointers": memory_pointers[-8:],
+        "compiled_memory": compiled_memory["claims"],
+        "memory_conflicts": compiled_memory["conflicts"],
         "related": related[-20:],
         "privacy": (
             "This bundle contains summaries and pointers only. Do not infer or load "
@@ -156,9 +160,14 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
     }
     # Preserve the current state while enforcing the requested hard limit.
     # Lower-value history is removed before durable pointers and decisions.
-    trim_order = ("recent_timeline", "related", "artifacts", "sessions",
-                  "confirmed_decisions", "memory_pointers")
-    while len(render_context_markdown(bundle)) > max(1000, int(char_limit)):
+    hard_limit = max(1000, int(char_limit))
+    bundle["packet_id"] = "ctx_" + ("0" * 20)
+    trim_order = (
+        "recent_timeline", "related", "artifacts", "sessions",
+        "compiled_memory", "memory_conflicts", "confirmed_decisions",
+        "memory_pointers",
+    )
+    while len(render_context_markdown(bundle)) > hard_limit:
         changed = False
         for key in trim_order:
             if bundle[key]:
@@ -167,6 +176,15 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
                 break
         if not changed:
             break
+    for key in ("summary", "outcome", "next_action"):
+        while len(render_context_markdown(bundle)) > hard_limit:
+            current = str(bundle["matter"].get(key) or "")
+            if not current:
+                break
+            overflow = len(render_context_markdown(bundle)) - hard_limit
+            keep = max(0, len(current) - max(overflow, 40))
+            bundle["matter"][key] = _clip(current, keep) if keep else ""
+    bundle.pop("packet_id", None)
     identity = hashlib.sha256(
         json.dumps(
             bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -212,6 +230,21 @@ def render_context_markdown(bundle: dict) -> str:
         lines.extend(["", "## Confirmed decisions"])
         for item in bundle["confirmed_decisions"]:
             lines.append(f"- {item.get('at', '')}: {item.get('summary', '')}")
+    if bundle.get("compiled_memory"):
+        lines.extend(["", "## Compiled memory"])
+        for item in bundle["compiled_memory"]:
+            refs = ", ".join(item.get("source_refs", []))
+            lines.append(
+                f"- [{item.get('kind', '')}] {item.get('content', '')} "
+                f"(claim `{item.get('id', '')}`; source `{refs}`)"
+            )
+    if bundle.get("memory_conflicts"):
+        lines.extend(["", "## Unresolved memory conflicts"])
+        for item in bundle["memory_conflicts"]:
+            lines.append(
+                f"- `{item.get('claim_key', '')}` needs review "
+                f"(conflict `{item.get('id', '')}`)"
+            )
     if bundle.get("recent_timeline"):
         lines.extend(["", "## Recent timeline"])
         for item in bundle["recent_timeline"]:

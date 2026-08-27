@@ -277,3 +277,28 @@ artifact/effect verification, Result Receipt v1, expiry recovery, and a
 read-only Phase-0 residue audit. It does not auto-close Matters, move proactive
 delivery out of Lark, or claim that Codex mobile notification/resume APIs are
 already proven.
+
+## ADR-008: Memory Is Compiled Claims, Not Replayed Conversation
+
+**Status:** accepted; repository implementation complete, release pending
+
+- Provider transcripts and Lark conversation turns are audit sources. They do
+  not enter default prompts and cannot become mutable product truth directly.
+- `core.cross_session_index` continues to own private redacted raw-history
+  search. `core.memory_compiler` owns batches, exact-quote validation, claim
+  authority, supersession, conflict lifecycle, Matter scope, and recall.
+- Only owner-authored turns from owner-operated Codex/Claude sessions or Lark
+  turns explicitly marked owner-private may activate a claim automatically.
+  Assistant claims remain candidates even when they say work is complete.
+- A newer decision, preference, or todo with the same semantic key supersedes
+  the old value. Conflicting facts, constraints, or artifacts suspend both
+  values until a named human reviewer chooses or rejects one.
+- Context Packet recall is exact-Matter and active-only. Unbound owner recall is
+  query-focused. Groups receive neither. Every rendered claim carries a claim
+  ID and source reference.
+- Applied batches erase temporary transcript payloads. The legacy rolling
+  cross-session digest stays on disk for audit but is excluded from all memory
+  loaders and consolidation prompts.
+
+No memory claim, including a human-authored one, is proof of an external side
+effect. Delegation and domain-specific read-back remain authoritative.

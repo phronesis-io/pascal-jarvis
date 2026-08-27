@@ -24,6 +24,10 @@ Jarvis should let the user:
   is currently usable, without exposing credentials;
 - trust reminders, delivery status, system health, and model fallback;
 - preserve useful context across sessions without leaking private data;
+- ask from desktop or mobile what was previously decided and receive the
+  current source-linked answer without replaying whole conversations;
+- see package usage, reset time, likely exhaustion, and the active fallback
+  route without visiting each provider's billing page;
 - spend less time operating the assistant than the assistant returns.
 
 ## Product Surfaces
@@ -112,6 +116,9 @@ The concrete decision table and desktop/mobile journeys are authoritative in
 20. A Jarvis capability survives only when it adds continuity, offline value,
     governance, multi-executor coordination, or verified closure beyond what
     a standalone Codex task already provides.
+21. Usage is a product fact, not an operator chore: expose known quota, spend,
+    reset, throttling, and predicted exhaustion in one model-runtime view;
+    label unknowns honestly and interrupt only when the route is at risk.
 
 ## Non-Goals
 
@@ -143,6 +150,8 @@ The concrete decision table and desktop/mobile journeys are authoritative in
   completion, and private-data leakage rates;
 - 100% model-call attribution to task, Matter, provider, and model, with cost
   per useful outcome trending down;
+- percentage of configured model routes with fresh usage/reset evidence,
+  predicted-exhaustion calibration, and zero surprise all-routes exhaustion;
 - context-token reduction without regression in replayed continuity tests;
 - silent component outage duration and owner-visible self-heal noise;
 - active capability count by `keep`, `quiet`, `replace-with-codex`, and

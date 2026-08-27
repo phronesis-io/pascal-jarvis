@@ -35,6 +35,18 @@ task that can finish and be verified entirely in the current Codex task.
    or are verifiably deleted. External effects need Delegation evidence IDs.
 6. If execution cannot finish, abort the run so the next task is not blocked.
 
+## Remember
+
+- Search compiled memory when Pascal refers to a settled decision, preference,
+  commitment, or fact from another Codex task, Claude Code session, or Lark.
+- Active compiled claims may enter a Context Packet. Raw transcripts and
+  assistant-only candidates may not.
+- Each claim must retain source references. Follow the raw source only for an
+  explicit audit or when Pascal asks to inspect the original conversation.
+- Use memory review only after Pascal explicitly confirms, chooses, or rejects
+  the named claim in the current conversation. Never infer consent, self-review
+  a claim, or invent a reviewer identity.
+
 ## Authority
 
 - A Result Receipt closes the execution window, not the Matter.

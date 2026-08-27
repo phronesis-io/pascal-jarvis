@@ -15,7 +15,9 @@ import pytest
 
 import core.db as db_module
 from core import codex_fallback, model_fallback, provider_health
+from core.cross_session_index import index_sessions
 from core.matter_bridge import record_turn
+from core.memory_compiler import apply_compile_result, prepare_batch
 from core.prompt import build_system_prompt
 
 
@@ -57,6 +59,39 @@ def _write_codex_session(path: Path) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _compile_whitepaper_claim(codex_root: Path, state_root: Path) -> None:
+    index_db = state_root / "cross-session.db"
+    index_sessions(
+        db_path=index_db,
+        claude_root=state_root / "empty-claude",
+        codex_root=codex_root,
+        tracker_path=state_root / "missing-tracker.json",
+        batch_size=20,
+    )
+    batch = prepare_batch(index_db=index_db, batch_size=64)
+    assert batch is not None
+    source = next(
+        item for item in batch["sources"]
+        if item["text"] == "继续白皮书节奏安排"
+    )
+    apply_compile_result({
+        "schema": "jarvis.memory-candidates.v1",
+        "batch_id": batch["batch_id"],
+        "claims": [{
+            "source_ref": source["source_ref"],
+            "quote": "继续白皮书节奏安排",
+            "kind": "todo",
+            "claim_key": "whitepaper.next_work",
+            "content": "继续白皮书节奏安排",
+            "matter_id": source.get("matter_id", ""),
+        }],
+        "ignored_source_refs": [
+            item["source_ref"] for item in batch["sources"]
+            if item["source_ref"] != source["source_ref"]
+        ],
+    })
 
 
 def _write_fake_codex(path: Path) -> None:
@@ -212,13 +247,14 @@ def test_weekly_limit_codex_takeover_returns_context_to_next_provider(
     assert model_fallback.limit_reason(claude_error) == "spend_limit"
     model_fallback.trip("spend_limit", jarvis_dir)
     assert model_fallback.gate(jarvis_dir, probe=False) == "backup"
+    _compile_whitepaper_claim(codex_root, tmp_path / "compile-state")
 
     system_before = build_system_prompt(
         str(jarvis_dir), str(memory_dir), str(session_dir), "lark-session",
         "ou_owner", "2026-08-12 18:00", str(tracker),
     )
     assert "继续白皮书节奏安排" in system_before
-    assert "先完成第四章审阅，再冻结第五章范围" in system_before
+    assert "先完成第四章审阅，再冻结第五章范围" not in system_before
 
     fake_codex = tmp_path / "codex-bin"
     prompt_log = tmp_path / "codex-prompt.txt"
@@ -437,9 +473,13 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     assert "这次请求没有执行" in final_log
 
     monkeypatch.setattr(db_module, "DB_PATH", db_path)
+    if db_module._connection is not None:
+        db_module._connection.close()
+    db_module._connection = None
     monkeypatch.setenv("JARVIS_DIR", str(jarvis_dir))
     monkeypatch.setenv("CROSS_SESSION_CLAUDE_ROOT", str(claude_sessions))
     monkeypatch.setenv("CROSS_SESSION_CODEX_ROOT", str(codex_sessions))
+    _compile_whitepaper_claim(codex_sessions, jarvis_dir / "compile-state")
     next_prompt = build_system_prompt(
         str(jarvis_dir), str(memory_dir), str(claude_sessions),
         "session-bot-e2e", "ou_owner", "2026-08-12 19:00", str(tracker),

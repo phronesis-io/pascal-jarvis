@@ -4,6 +4,11 @@
 >
 > Status: Draft **v2**(经一轮对抗式多视角审查 + 事实核对后定稿) · Owner: Pascal · 调研日期: 2026-06-09 · 适用仓库: `pascal-jarvis`(= Jarvis 本身)
 >
+> **2026-08-27 历史说明**：本文中的“全量 memory 注入”和
+> `cross_session_digest.md` 描述只代表当时现状，现已被编译式记忆契约取代。
+> 跨产品原始对话只作审计来源；普通 prompt 只接收有来源、处于 active
+> 生命周期的 claim。见 `docs/plans/2026-08-27-cross-product-memory-compiler.md`。
+>
 > ⚠️ **实现状态声明**:本 PRD 描述的 `core/perception.py`、`sources/`、`core/perception_route.py`、`sources.yaml`、`perception-collect` heartbeat 任务、`load_tiered_memory(purpose=)` 参数、`config.py` 的 `perception/secrets` 段、以及所有 `inbox_*.md` / `perception_seen.jsonl` / `perception_state.jsonl` / `perception_delivery.jsonl` 文件**全部为净新增,今天尚不存在**(已逐一核对代码)。凡引用现有文件处均带 `file:line` 证据;凡为新增设计处均如此标注。**别把本 PRD 的目标态当成已建态。**
 
 ---
@@ -41,7 +46,7 @@
 | EigenFlux feed | 10m | CLI poll+enrich, 打分 | feedback→网络 / card / `needs_research.jsonl` | EF 专属 |
 | EigenFlux PM/好友 | 10m, priority | CLI fetch + `entity_resolve.py` | card | EF 专属 |
 | EigenFlux 实时流 | 常驻 ws | `ef_stream_loop.py`,seen-set 去重 | Lark + outbox | EF 专属 |
-| 跨 session | 10m | `cross_session_pre.sh:8,15` 扫 `$HOME/.claude/projects/**/*.jsonl`(近 24h) | `system/cross_session_digest.md` | 路径 glob 固定 |
+| 跨 session（历史实现） | 10m | `cross_session_pre.sh` 扫 Claude/Codex 日志 | `system/cross_session_digest.md`（已退役，仅留审计） | 2026-08-27 起改由 Memory Compiler 生成有来源的 claim |
 | 多 repo git | 2h | 遍历 `$REPOS_DIR` fetch+log+diff | digest(经 consolidate) | `REPOS_DIR` 走 **env var + fallback**(`${WORK_DIR:-…/repos}`),非字面量硬编码——与 phronesis 不同 |
 | 内容推荐 | 1h, 9–23h | `yt-dlp` 18+ 类目轮询 | card | 类目/口味写死在脚本 |
 | 活动日志 | 45m | 日历+对话推断 | `system/activity_log.jsonl`(静默) | 45min 窗口写死 |
@@ -395,7 +400,7 @@ def load_perception_sources(self) -> list[dict]:
 三个落地区,全部基于已验证机制:
 
 **① 感知缓冲 `memory/system/inbox_*.md`**
-新信号的"鲜货"surface。被 `load_tiered_memory()` 无条件注入 → 下一回合前台/heartbeat 即感知(§1.2)。按域分文件(`inbox_team.md` / `inbox_market.md` / `inbox_ops.md`)。**权威保留策略(2026-07-14 REQ-92 修订)**:有 loader char-cap 的 buffer 按 entry 边界滚动保留最新条目 ≤ cap 字符(<48h 条目保护不裁,>7 天条目强制离场);无 cap 的 buffer 保留近 500 行。两种离场:① 已被 reconciler 消费的行就地清理(`→ UPDATE` 删行);② 未消费却已超 500 行/7 天边界的溢出行,归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。memory-consolidate 校验清理防 orphan。**这是今天 `cross_session_digest.md` 已在用的模式,只是泛化。**
+新信号的"鲜货"surface。被 `load_tiered_memory()` 按预算注入 → 下一回合前台/heartbeat 即感知(§1.2)。按域分文件(`inbox_team.md` / `inbox_market.md` / `inbox_ops.md`)。**权威保留策略(2026-07-14 REQ-92 修订)**:有 loader char-cap 的 buffer 按 entry 边界滚动保留最新条目 ≤ cap 字符(<48h 条目保护不裁,>7 天条目强制离场);无 cap 的 buffer 保留近 500 行。两种离场:① 已被 reconciler 消费的行就地清理(`→ UPDATE` 删行);② 未消费却已超 500 行/7 天边界的溢出行,归档到 `warm/perception_archive_YYYYMM.md`(仅显式查询时读,绝不自动注入)。memory-consolidate 校验清理防 orphan。跨产品对话不走这条通用 inbox；它由 Memory Compiler 单独执行来源、权限和冲突校验。
 
 **② Reconciler(泛化 `memory-consolidate`,响应式)**
 把"3 个输入概念"改成"消费感知缓冲里所有 `consolidate:true` 的 Signal"。沿用 `→ UPDATE:` / `→ REPLACE:` 指令契约(`memory_consolidate_post.py` 落地逻辑不动),让 durable 事实就地落到 `warm/` 项目文件、去重消矛盾。**触发器**(修 §3.5):

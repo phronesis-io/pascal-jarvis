@@ -35,11 +35,12 @@ PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 3600
 
 
 def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
-    """Load owner-private coding-session context only inside the live runtime.
+    """Load current compiled memory only inside the owner-private runtime.
 
     Tests and library callers often build prompts against temporary roots.  A
     strict root match keeps those calls hermetic and prevents an accidental
-    read of the machine owner's real provider transcripts.
+    read of the machine owner's private memory. Raw provider transcripts remain
+    available for explicit audit/search and never enter the default prompt.
     """
     runtime_root = os.environ.get("JARVIS_DIR", "").strip()
     if not runtime_root:
@@ -47,17 +48,8 @@ def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
     try:
         if Path(runtime_root).resolve() != Path(jarvis_dir).resolve():
             return ""
-        from core.cross_session import build_prompt_context
-        from core.cross_session_index import search_history
-        recent = build_prompt_context(
-            tracker_path=Path(runtime_root) / "active_sessions.json")
-        historical = search_history(
-            focus_text,
-            root=runtime_root,
-            # Recent work is already projected with fuller whole-turn context.
-            before_epoch=time.time() - 24 * 3600,
-        )
-        return "\n\n".join(part for part in (recent, historical) if part)
+        from core.memory_compiler import compiled_context
+        return compiled_context(focus_text, matter_id=None)
     except Exception:
         # Provider transcript drift must not make the primary conversation fail.
         return ""

@@ -338,7 +338,7 @@ def test_index_excludes_managed_provider_calls_and_removes_deleted_sources(tmp_p
     assert cross_session_index.index_stats(db_path=db)["turns"] == 0
 
 
-def test_owner_external_context_retrieves_old_focus_without_exposing_generic_archive(
+def test_default_owner_context_never_injects_raw_history_but_explicit_search_can(
     tmp_path, monkeypatch,
 ):
     jarvis = tmp_path / "jarvis"
@@ -353,10 +353,14 @@ def test_owner_external_context_retrieves_old_focus_without_exposing_generic_arc
 
     focused = _external_work_context(jarvis, "之前董责险转发是怎么设计的")
     generic = _external_work_context(jarvis, "继续")
+    explicit = cross_session_index.search_history(
+        "董责险跨 Agent 转发", root=jarvis,
+    )
 
-    assert "Relevant Historical Work Sessions" in focused
-    assert "董责险跨 Agent 转发" in focused
-    assert "Relevant Historical Work Sessions" not in generic
+    assert focused == ""
+    assert generic == ""
+    assert "Relevant Historical Work Sessions" in explicit
+    assert "董责险跨 Agent 转发" in explicit
 
 
 def test_identical_turns_in_different_sessions_do_not_collide(tmp_path):

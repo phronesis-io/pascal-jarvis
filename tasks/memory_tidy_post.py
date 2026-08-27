@@ -48,7 +48,7 @@ HEARTBEAT_MEMORY = _hb_mem()
 
 # Budget enforcement (2026-07-07 memory audit): system/todos.md is append-only
 # and grew unbounded since April (70KB) — it alone overflowed the loader's 40k
-# system reserve, so cross_session_digest / pending_updates / the inboxes were
+# system reserve, so pending_updates and the inboxes were
 # dropped from EVERY prompt for days. Tidy is the maintenance path, so it owns
 # the cap. Archive-not-delete, per the file's own 维护规则.
 # Aligned with core.memory._SYSTEM_FILE_CAPS["todos.md"] (2026-07-29): keeping

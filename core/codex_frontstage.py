@@ -27,7 +27,7 @@ from core.matter_runs import (
     release_run,
     renew_run,
 )
-from core.matters import create_matter, get_matter, list_matters
+from core.matters import create_matter, get_matter, link_entity, list_matters
 
 
 DEFAULT_OPEN_STATUSES = "active,waiting,blocked"
@@ -194,6 +194,19 @@ def start_matter_run(
         run = mark_run_running(
             run["id"], session_id=task_ref, model=model
         )
+        if task_ref and executor in {"codex", "claude"}:
+            link_entity(
+                matter_id,
+                "session",
+                task_ref,
+                provider=executor,
+                title=f"{executor} frontstage task",
+                metadata={
+                    "workspace": str(Path(workspace).expanduser().resolve()),
+                    "status": "running",
+                },
+                actor="frontstage",
+            )
     except Exception as exc:
         if run and run.get("id"):
             try:
@@ -260,14 +273,40 @@ def abort_matter_run(run_id: str, *, error: str) -> dict[str, Any]:
     }
 
 
+def search_memory(
+    *, query: str = "", matter_id: str | None = None,
+    include_candidates: bool = False, limit: int = 20,
+) -> dict[str, Any]:
+    """Search compiled claims without returning raw provider transcripts."""
+    from core.memory_compiler import search_compiled_memory
+    return search_compiled_memory(
+        query,
+        matter_id=matter_id,
+        include_candidates=include_candidates,
+        limit=limit,
+    )
+
+
+def review_memory_claim(
+    *, claim_id: str, action: str, reviewer: str,
+) -> dict[str, Any]:
+    """Apply one explicit human review to a candidate or conflict."""
+    from core.memory_compiler import resolve_claim
+    return resolve_claim(
+        claim_id, action=action, reviewer=reviewer,
+    )
+
+
 def frontstage_health() -> dict[str, Any]:
     """Return protocol health and recoverable residue for operator review."""
     audit = audit_matter_runs(now=time.time())
     from core.frontstage_acceptance import acceptance_report
+    from core.memory_compiler import compiler_status
 
     return {
         "schema": "jarvis.frontstage-health.v1",
         "healthy": audit["healthy"],
         "audit": audit,
         "acceptance": acceptance_report(),
+        "memory_compiler": compiler_status(),
     }

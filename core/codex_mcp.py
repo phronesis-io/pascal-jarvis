@@ -9,9 +9,11 @@ from core.codex_frontstage import (
     create_frontstage_matter,
     frontstage_health,
     matter_status,
+    review_memory_claim,
     release_matter_run,
     renew_matter_run,
     search_matters,
+    search_memory,
     start_matter_run,
 )
 
@@ -22,6 +24,8 @@ only for work that must survive tasks, devices, time, or execution providers.
 Acquire before doing Matter work, preserve the returned context generation and
 digest, and release every run. A Result Receipt never completes the Matter.
 External effects require trusted Delegation evidence; model prose is not proof.
+Compiled memory is read-only unless Pascal has explicitly reviewed a named
+claim in the current conversation. Never infer approval or invent a reviewer.
 """.strip()
 
 
@@ -169,6 +173,41 @@ def create_server():
     def abort(run_id: str, error: str) -> dict[str, Any]:
         """Release a failed execution lease with a system-observed receipt."""
         return abort_matter_run(run_id, error=error)
+
+    @server.tool(
+        name="jarvis_memory_search",
+        annotations=readonly,
+        structured_output=True,
+    )
+    def memory_search(
+        query: str = "", matter_id: str | None = None,
+        include_candidates: bool = False, limit: int = 20,
+    ) -> dict[str, Any]:
+        """Search current compiled memory; raw transcripts stay outside the prompt."""
+        return search_memory(
+            query=query,
+            matter_id=matter_id,
+            include_candidates=include_candidates,
+            limit=limit,
+        )
+
+    @server.tool(
+        name="jarvis_memory_review",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    def memory_review(
+        claim_id: str, action: str, reviewer: str,
+    ) -> dict[str, Any]:
+        """Apply Pascal's explicit current-conversation review to one claim."""
+        return review_memory_claim(
+            claim_id=claim_id, action=action, reviewer=reviewer,
+        )
 
     @server.tool(
         name="jarvis_frontstage_health",

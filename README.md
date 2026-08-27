@@ -115,7 +115,12 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 1. **Heartbeat Loop + Guardian Daemon** — A background scheduler runs tasks on configurable intervals (defined in `HEARTBEAT.md`, executed via pre/post shell scripts + a batched Claude call). A guardian daemon (`daemon.py`) monitors the bot process, kills stuck Claude sessions, and auto-restarts on crash.
 
-2. **Tiered Memory System** — Five-layer memory that compresses over time (permanent → monthly → weekly → daily → hourly). Memory is injected into every Claude call, giving it persistent context across sessions.
+2. **Tiered + Compiled Memory** — Local warm/system/timeline knowledge remains
+   available by relevance. Claude Code, Codex, and eligible owner Lark turns
+   feed a private Memory Compiler: raw transcripts stay audit evidence; only
+   source-linked active claims enter ordinary prompts or Matter Context
+   Packets. Assistant completion prose remains a candidate, and contradictory
+   facts stay out of context until Pascal resolves them.
 
 3. **Multi-format Message Handling** — Beyond plain text, the bot processes:
    - *Images* — downloaded and passed to Claude for visual understanding
@@ -146,9 +151,9 @@ Pascal Jarvis wraps Claude Code with a full personal-agent runtime:
 
 7. **Unified Perception Layer** — Declarative source registry (`sources.yaml`): watch files/reports, local repo commits, Lark group chats, and mailbox metadata with *one config block per source* — no new scripts. Signals are deduplicated across sources, buffered into memory (so the next Claude call "knows"), and sensitivity-tagged so private content (mail, DMs) never leaks into outward-facing tasks. A new source type = one `sources/<type>.py` adapter implementing `collect(cfg, state)`.
 
-8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). The L3 iteration loop turns observed product and engineering signals into reviewed proposals instead of letting a background model edit behavior rules directly. Cross-session sync imports recent Claude Code/Codex context, while a private local index retrieves relevant older work without injecting the whole archive.
+8. **Self-Evolution** — Engagement tracking analyzes which messages land and which don't, auto-tuning task frequency within guardrails (infrastructure tasks exempt, drift capped at 4× the configured cadence). The L3 iteration loop turns observed product and engineering signals into reviewed proposals instead of letting a background model edit behavior rules directly. Cross-session indexing keeps Claude Code/Codex turns searchable; the Memory Compiler converts grounded owner statements into lifecycle-aware claims without injecting the archive.
 
-9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), and cross-session context bridging.
+9. **Admin Console & Ops Tooling** — Local web dashboard (`python3 admin.py`) for browsing memory and session history. Background tasks handle repos sync, system self-diagnostics (channel watermarks that catch silently-dead pipelines, stream health, CLI version tracking, process conflict detection), cross-session indexing, and compiled-memory conflict audit.
 
 10. **Closed-Loop Intents & Trust Guards** — Proactive reminders are a real state machine, not fire-and-forget. An intent the bot raises (a reminder, a prep, a follow-up) is tracked to a terminal state: the LLM authors the message but never its own bookkeeping; delivery is acknowledged via an inflight manifest; failures retry within a bound and then surface *one* apology card instead of nagging. A loop closes when you reply (`做了` / `没做` / `不用追` — a negation-aware classifier, no button backend required), on a button tap, or on a TTL. Calendar events map to intents idempotently (one row per date·title·role, a prep that would fire after its event is dropped), and "bring an umbrella" carry-reminders anchor to the morning before you first leave. Two trust guards back the agent's completion claims: a **document write-guard** (`core/doc_guard.py`) that verifies protected-file edits by independent read-back counts + a multiplicity-aware block diff (so a "fixed it ✅" can't be reported when the change isn't in the live file, and a full-rewrite that would wipe hand-entered content is rejected), and **live self-monitoring** (`core/selfmon.py`) that computes noise/re-fire/overdue/crash signals from the real JSONL+state+DB with a liveness assertion — surfaced through the self-diagnostic and CLI, never raw in chat. If the pinned Claude model is unavailable or you hit a Claude limit, owner Lark conversations route through the configured Claude chain, local Codex CLI, then the OpenAI-compatible Responses fallback. `core.model_control` keeps upstream account, model, harness, tools, health, and route order as separate facts, so GPT can run through Codex, Responses, or a Claude-compatible relay without confusing the product layer. Send `切到 Codex` or `切回 Claude` in the private chat to change the preferred executor; `/model` reports the actual responder, current plan, and real upstream diversity. Heartbeat and untrusted conversations do not receive the local Codex tool route.
 
@@ -566,8 +571,15 @@ Memory files live in `~/.jarvis/memory/` (or your configured `data_dir/memory/`)
 3. **Weekly**: Merges daily entries into a 5-10 point digest
 4. **Monthly**: Compresses weekly digest into a long-term archive
 5. **Consolidation**: Nightly review that proposes updates to permanent memory files
+6. **Cross-product compilation**: eligible owner turns from Codex, Claude Code,
+   and Lark are extracted into exact-quote-backed claims. Active claims are
+   searchable and prompt-safe; candidates/conflicts require explicit review.
 
 Each layer archives before clearing, so nothing is ever lost.
+
+Use `python3 -m core.memory_compiler search "query"` to inspect compiled
+claims, or `python3 -m core.memory_compiler status` to audit traceability and
+open conflicts. Raw transcript search remains an explicit audit action.
 
 ### Adding permanent memory
 

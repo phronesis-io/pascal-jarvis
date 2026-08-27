@@ -171,11 +171,15 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract():
                 "jarvis_matter_search",
                 "jarvis_matter_start",
                 "jarvis_matter_status",
+                "jarvis_memory_review",
+                "jarvis_memory_search",
             }
             by_name = {tool.name: tool for tool in tools.tools}
             assert by_name["jarvis_matter_search"].annotations.read_only_hint
             assert by_name["jarvis_matter_abort"].annotations.destructive_hint
             assert by_name["jarvis_matter_release"].annotations.idempotent_hint
+            assert by_name["jarvis_memory_search"].annotations.read_only_hint
+            assert by_name["jarvis_memory_review"].annotations.destructive_hint
             result = await client.call_tool(
                 "jarvis_matter_search", {"query": "MCP"}
             )

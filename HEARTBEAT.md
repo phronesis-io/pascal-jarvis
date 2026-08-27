@@ -27,7 +27,7 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 | EigenFlux | eigenflux-inbox-reconcile, eigenflux-feed-triage, eigenflux-friends, eigenflux-publish, eigenflux-profile | inbox reconcile silent; feed+friends yes, others silent |
 | Mail | mail-triage | yes (push only; reads every email body, surfaces rare) |
 | Thinking Review | thinking-review | silent (log only) |
-| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync: digest silent; a gated user_message (anchor check + live gh PR verify + sent dedup) is AMBIENT — it lands in the ledger and the morning-anchor 攒批 line, not as a realtime Lark card (REQ-119 ledger-only); metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
+| Analytics | engagement-analyze, cross-session-sync, metrics-digest | engagement-analyze silent; cross-session-sync compiles source-grounded memory and surfaces only a newly detected contradiction as an ambient ledger item; metrics-digest: state flips only (anomaly/recovery/absence, REQ-121) — flip cards DO deliver to Lark; steady-state snapshots stay in data/metrics/ 台账; skips when no metrics_probe sources configured |
 | Team | phronesis-monitor | only when the user is named or his action is needed (REQ-121); team chatter never cards |
 | Maintenance | repos-sync, eigenflux-preinstall, delegation-reconcile, iteration-observe, log-maintenance, provider-canary, self-diagnostic | silent (beat only on change/fail; repos-sync = one daily rollup; iteration-observe + self-diagnostic always silent) |
 
@@ -517,19 +517,23 @@ duplicate the common style contract here.
 - pre: tasks/cross_session_pre.sh
 - post: tasks/cross_session_post.py
 - prompt: |
-    [CROSS-SESSION DIGEST]
-    Summarize each project in 2-3 bullets: decisions, solved problems, blockers,
-    and next steps. `[context]` lines are prior digest, never new evidence. A
-    state claim older than two hours is historical, not a current request; use
-    coarse time words/date, never a bare HH:MM. The post-hook independently
-    verifies pending-PR claims.
+    [MEMORY COMPILER]
+    DATA is one private batch of redacted owner-operated Codex, Claude Code,
+    and eligible owner-Lark turns. Extract only durable facts, decisions,
+    artifacts, todos, constraints, and preferences. Do not summarize sessions.
+    Do not infer completion, Matter identity, dates, or facts absent from an
+    exact quote. Assistant statements are candidates, never proof.
 
-    Add `user_message` (<=80 Chinese words) only for a new blocker, decision,
-    cross-reference, or incident the main assistant/user must know. Routine
-    progress remains digest-only.
-
-    Return JSON: {"digest": "...", "user_message": "..."} or just {"digest": "..."}
-    Always produce digest when DATA exists; only empty DATA may HEARTBEAT_OK.
+    Return exactly:
+    {"schema":"jarvis.memory-candidates.v1","batch_id":"<DATA batch_id>",
+    "claims":[{"source_ref":"<DATA source_ref>","quote":"<exact non-empty substring>",
+    "kind":"fact|decision|artifact|todo|constraint|preference",
+    "claim_key":"<stable subject/property key>","content":"<one durable claim>",
+    "matter_id":"<copy DATA source matter_id or empty>"}],
+    "ignored_source_refs":["<every DATA source with no durable claim>"]}
+    Every source_ref must appear in claims or ignored_source_refs. At most three
+    claims per source. Never author user_message, cards, advice, or prose outside
+    the JSON object.
 
 ## Analytics
 

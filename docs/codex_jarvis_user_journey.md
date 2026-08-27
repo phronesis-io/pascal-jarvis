@@ -58,6 +58,12 @@ Jarvis time/signal trigger
 7. Jarvis reconciles the receipt. Matter closure remains a separate verified
    transition; a process exit or confident sentence cannot close it.
 
+When Pascal refers to a decision from another product, Codex first searches
+compiled memory. An active claim includes its exact source reference and may be
+used without replaying the whole transcript. Assistant-authored claims remain
+candidates. Contradictory facts disappear from ordinary context until Pascal
+chooses one; claim review is never inferred from silence or model prose.
+
 ## Normal Mobile Journey
 
 1. Pascal uses Codex mobile/Remote as the primary work surface. The Mac must be
@@ -93,6 +99,18 @@ clean Codex task continue it. It should not grow one permanent chat context.
 | Lark | bounded wake-up and native communication/calendar/document workflows | long analysis, second task inbox, duplicate Matter state |
 | Model Runtime | capability/trust/cost/health-based route and observed model | product state, permission, closure semantics |
 | Claude Code | optional execution session for tasks where it is useful | product continuity or exclusive model ownership |
+
+## Model And Package Usage
+
+Pascal should not need to open several provider billing pages. The Model
+Runtime is the single read surface for the route that actually answered,
+available quota or spend signals, reset time, recent throttling, predicted
+exhaustion, and the fallback route currently available. Codex desktop/mobile
+is the normal query surface. Lark receives only a bounded warning when a route
+is likely to run out soon, has been rate-limited, or no healthy fallback
+remains. Unknown provider data must be labeled unknown; a small canary, a
+configured token, or a successful login is not proof of usable production
+quota.
 
 ## Replacement And Retirement Rules
 

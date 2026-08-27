@@ -372,16 +372,22 @@ warning only after the automatic retry budget is exhausted.
   unknown, or post-tool failures stop fail-closed.
 - `core.runtime_provider`: per-conversation executor preference. Preference
   changes route order only; `conversation_runtime` records what actually ran.
-- `core.cross_session`: bounded, redacted owner-only continuity across
-  interactive Claude Code and Codex sessions. It excludes Jarvis-managed
-  provider calls and supplies both immediate prompt context and the durable
-  heartbeat digest; provider transcripts remain the source of truth. The
-  choice/execution/continuity ownership split is recorded in `DECISIONS.md`.
+- `core.cross_session`: bounded, redacted discovery and explicit audit search
+  across owner-operated Claude Code and Codex sessions. It excludes
+  Jarvis-managed provider calls. Raw turns remain evidence and are never a
+  default prompt or durable truth surface.
 - `core.cross_session_index`: private, WAL-backed, rebuildable indexing of
   redacted visible turns from owner-operated Claude Code and Codex sessions.
-  Small heartbeat batches converge through old transcripts; the current owner
-  request retrieves only relevant older turns. It is never injected into a
-  group or named Matter and never turns remembered prose into current truth.
+  Small batches converge through old transcripts and explicit searches can
+  retrieve relevant turns. It never turns remembered prose into current truth.
+- `core.memory_compiler`: deterministic reconciliation between source turns
+  and prompt-safe claims. A model may extract bounded candidates only when it
+  supplies an exact quote and covers every source. Owner-authored claims may
+  become active; assistant-authored claims remain candidates. New decisions
+  supersede old ones, contradictory facts suspend both values, and only an
+  explicit Pascal review can confirm, choose, or reject a disputed claim.
+  Applied compile batches erase transcript payloads while retaining source
+  digests, references, claim lifecycle, and audit evidence.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
@@ -442,6 +448,9 @@ warning only after the automatic retry budget is exhausted.
   retries;
 - L3 signals, proposals, and post-release observations;
 - verified external-action receipts.
+- Memory Compiler batches, source digests, traceable claims, source links, and
+  unresolved/resolved conflicts. These records are remembered assertions, not
+  independent evidence that an external action or release succeeded.
 
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
