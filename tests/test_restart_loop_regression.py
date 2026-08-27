@@ -103,6 +103,9 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
         RESTART_SH.index('case "${1:-}"')
     ]
     assert full.index("\n  confirm_restart") < full.index(
+        "\n  prepare_codex_frontstage"
+    )
+    assert full.index("\n  prepare_codex_frontstage") < full.index(
         "\n  refresh_launchd_definitions"
     )
     assert full.index("\n  refresh_launchd_definitions") < full.index(
@@ -117,6 +120,25 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
         "verify_full_runtime")
     assert full.index("verify_full_runtime") < full.index(
         "record_release_receipt governed")
+
+
+def test_governed_deploy_prepares_codex_before_stopping_runtime():
+    """A green daemon is not a release if the primary Codex surface is stale."""
+    prepare = RESTART_SH[
+        RESTART_SH.index("prepare_codex_frontstage()"):
+        RESTART_SH.index("# ── Main")
+    ]
+    assert 'version("mcp")' in prepare
+    assert '"mcp>=2,<3"' in prepare
+    assert "scripts/install_codex_integration.sh" in prepare
+    assert "scripts/check_codex_frontstage.py" in prepare
+    assert "jarvis-matters@pascal-jarvis" in prepare
+
+    full = RESTART_SH[
+        RESTART_SH.index("governed_deploy()"):
+        RESTART_SH.index('case "${1:-}"')
+    ]
+    assert full.index("prepare_codex_frontstage") < full.index("kill_bot")
 
     verify = RESTART_SH[
         RESTART_SH.index("verify_full_runtime()"):

@@ -12,7 +12,8 @@ If nothing needs attention, reply HEARTBEAT_OK — no message is sent.
 **Tier 0 tasks** bypass Claude entirely (deterministic local work):
 `calendar-sync`, `delegation-reconcile`, `eigenflux-inbox-reconcile`,
 `iteration-observe`, `log-maintenance`, `memorial-escrow`,
-`model-usage`, `perception-collect`, `provider-canary`, `self-diagnostic`
+`model-usage`, `perception-collect`, `provider-canary`, `self-diagnostic`,
+`weekly-review`
 
 ## Task Index
 
@@ -830,49 +831,9 @@ duplicate the common style contract here.
 - pre: tasks/weekly_review_pre.sh
 - post: tasks/weekly_review_post.py
 - prompt: |
-    [WEEKLY REVIEW — 周省]
-    This is the only moment where the full landscape is visible.
-    NOT a performance review. A landscape survey. A walk with a wise friend.
-
-    STEPS:
-    1. PRAXIS CHECK: Show streaks. No judgment. Pattern only.
-       "拉伸做了5/7天，冥想2/7。" No "should do better".
-
-    2. STALE SCAN: Any committed items touched 2+ times without completion?
-       Present each with: "还想做吗？要么这周真的排进去，要么放手。"
-       (王阳明: 知而不行非真知 — if you keep not doing it, maybe you don't actually want it)
-
-    3. PROJECT PULSE: For each in-progress project,
-       one sentence on momentum: moving / stuck / dormant.
-       Dormant > 2 weeks: "这个项目沉默了两周。暂停是有意的吗？"
-
-    4. INBOX ZERO: Force-triage any remaining inbox items.
-       48h+ items get surfaced. Decision required.
-
-    5. ENGAGEMENT REVIEW: If engagement insights exist in DATA, surface the top 1-2
-       adaptation suggestions briefly: "数据显示 X 互动率低，建议 Y". Skip if no insights.
-
-    6. NEXT WEEK LANDSCAPE: Show calendar density.
-       If >80% filled: "下周很满，想提前砍掉什么吗？" (道家: 留白)
-       If <40% filled: "下周比较松，有没有什么想主动安排的？"
-
-    7. ONE QUESTION: End with one question that reflects their trajectory.
-       Not "what are your goals" but something specific based on the data.
-       (Existentialist authenticity check — "上周花最多时间的事，是你真正想做的吗？")
-
-    Tone: wise friend on a walk, not a coach with a clipboard.
-    Under 200 words Chinese. No emojis except minimal structure markers.
-
-    Return JSON: {
-      "user_message": "<markdown>",
-      "auto_actions": [
-        {"action": "decay", "task_id": "...", "reason": "..."},
-        {"action": "defer", "task_id": "...", "to_date": "..."}
-      ]
-    }
-    JSON MUST be valid: inside string values never use bare ASCII double
-    quotes (") for emphasis — use 「」 or 『』 instead, or it won't parse.
-    Or HEARTBEAT_OK if truly nothing to review.
+    Deterministic Tier-0 Matter result review. The pre-script reads only
+    authoritative Matter/Run state and the post-script renders it directly.
+    It never invokes a model, edits task state, or creates a parallel inbox.
 
 ### exercise-week
 - interval: 1h

@@ -329,3 +329,21 @@ effect. Delegation and domain-specific read-back remain authoritative.
 - Reading usage may cache sanitized telemetry but causes no provider spend and
   no external effect. Buying capacity or consuming a reset credit always
   requires explicit owner action.
+
+## ADR-010: Review Is A Read Model Over Matter Outcomes
+
+**Status:** accepted; repository implementation complete, release pending
+
+- `core.matter_review` is the single read contract for “what was accomplished,
+  what awaits owner closure, and what should continue next.” Codex exposes it
+  through `jarvis_matter_review`; the weekly Lark card renders the same data.
+- A Matter appears under outcomes only when it has a
+  `matter_closure_completed` receipt. A released executor Run appears under
+  “awaiting closure” and must never be promoted by model prose or exit status.
+- The review is bounded, transcript-free, and read-only. It must not decay,
+  defer, archive, create, close, or reprioritize work.
+- `weekly-review` is Tier 0 and makes no provider call. Empty reviews are
+  silent but advance the weekly success watermark; malformed evidence fails
+  visibly and does not spend the occurrence.
+- Routine retention and L3 value choices remain human decisions informed by
+  real use. A result review is not authority to create more recurring work.

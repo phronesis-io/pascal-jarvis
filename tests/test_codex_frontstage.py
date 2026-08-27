@@ -231,6 +231,7 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
                 "jarvis_matter_continue",
                 "jarvis_matter_create",
                 "jarvis_matter_release",
+                "jarvis_matter_review",
                 "jarvis_matter_renew",
                 "jarvis_matter_search",
                 "jarvis_matter_start",
@@ -242,6 +243,7 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             assert by_name["jarvis_matter_search"].annotations.read_only_hint
             assert by_name["jarvis_matter_abort"].annotations.destructive_hint
             assert by_name["jarvis_matter_release"].annotations.idempotent_hint
+            assert by_name["jarvis_matter_review"].annotations.read_only_hint
             assert by_name["jarvis_memory_search"].annotations.read_only_hint
             assert by_name["jarvis_memory_review"].annotations.destructive_hint
             result = await client.call_tool(
@@ -258,6 +260,9 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             assert usage.structured_content["report"]["codex"]["windows"][0][
                 "remaining_percent"
             ] == 50
+            review = await client.call_tool("jarvis_matter_review", {})
+            assert review.is_error is False
+            assert review.structured_content["schema"] == "jarvis.matter-review.v1"
 
     asyncio.run(scenario())
 
@@ -416,3 +421,24 @@ def test_plugin_launcher_starts_from_a_codex_cache_directory(tmp_path):
             )
 
     asyncio.run(scenario())
+
+
+def test_release_smoke_handshakes_with_the_installed_frontstage(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "check_codex_frontstage.py")],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "JARVIS_DIR": str(root),
+            "JARVIS_PYTHON": sys.executable,
+            "JARVIS_DB_PATH": str(tmp_path / "release-smoke.db"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["schema"] == "jarvis.codex-frontstage-smoke.v1"

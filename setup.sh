@@ -125,7 +125,7 @@ if "$JARVIS_PYTHON" - <<'PYEOF'
 import importlib
 
 required = (
-    "yaml", "lark_oapi", "pytest",
+    "yaml", "lark_oapi", "mcp", "pytest",
 )
 missing = []
 for module in required:

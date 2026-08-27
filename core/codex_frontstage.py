@@ -391,6 +391,13 @@ def model_usage_status(*, refresh: bool = True) -> dict[str, Any]:
     return load_latest()
 
 
+def review_matters(*, days: int = 7, limit: int = 8) -> dict[str, Any]:
+    """Read recent Matter outcomes and bounded next actions."""
+    from core.matter_review import build_matter_review
+
+    return build_matter_review(days=days, limit=limit)
+
+
 def frontstage_health() -> dict[str, Any]:
     """Return protocol health and recoverable residue for operator review."""
     audit = audit_matter_runs(now=time.time())

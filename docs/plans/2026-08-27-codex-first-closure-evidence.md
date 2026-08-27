@@ -68,7 +68,7 @@ capability.
 | Phase 2 memory | compiled claims, source receipts, supersession/conflict gates | replay target and context-token reduction not yet measured in production | implemented, not accepted |
 | Phase 3 usage | exact Codex quota/reset, 45-day local observations, honest unknown providers | alert calibration needs elapsed observations | implemented, not live |
 | Phase 3 route runtime | route catalog, health and fallback paths exist | all calls are not yet proven under one attribution/cost runtime | partial |
-| Phase 4 async organization | Intent/Routine/L3 primitives exist | retained 1-2 routines and Matter-result review not selected by real use | open |
+| Phase 4 async organization | Intent/Routine/L3 primitives plus one deterministic Matter-result review shared by Codex and weekly Lark | retained 1-2 routines and L3 value choices are not selected by real use | review substrate implemented; value selection open |
 | Lark reduction | bounded wake-up contract exists | no interaction class retires before acceptance | deliberately gated |
 
 ## Current Hard Gates
@@ -91,3 +91,7 @@ capability.
    cards/Intents, duplicate effects, and closure replay.
 5. One week of usage-warning calibration and one retained Routine chosen from
    real value, not system enthusiasm.
+
+The Phase-4 review substrate is intentionally not a new approval queue. It
+counts only owner closure receipts as outcomes, keeps executor results in an
+awaiting-closure section, and performs no automatic Task/Matter mutation.

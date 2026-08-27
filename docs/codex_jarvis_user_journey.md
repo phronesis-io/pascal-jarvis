@@ -37,6 +37,7 @@ Jarvis time/signal trigger
 | Use a Feishu document, calendar, contact, group, or approval | Usually Codex with the native Lark tool | Add a Matter only if continuity or follow-up is needed | Native tools should remain native; Jarvis must not proxy everything. |
 | Receive a deadline, outage, safety issue, or decision that cannot wait | Lark wake-up | Jarvis owns trigger, dedupe, attention budget, and Item state | This is interruption, not a long work surface. |
 | Run recurring observation or organization while Pascal is absent | Jarvis Routine/Intent | Record evidence and remain quiet unless the threshold says to wake | This is the backstage's unique asynchronous value. |
+| Ask what was accomplished or what to do next | Codex task | Read the bounded Matter result review | The answer uses confirmed outcomes and next actions, not Agent activity or raw history. |
 | Diagnose the resident system | Admin `:3456` or Codex engineering task | Jarvis exposes component and receipt truth | Ops is not a daily personal workflow. |
 
 ## Normal Desktop Journey
@@ -67,6 +68,12 @@ compiled memory. An active claim includes its exact source reference and may be
 used without replaying the whole transcript. Assistant-authored claims remain
 candidates. Contradictory facts disappear from ordinary context until Pascal
 chooses one; claim review is never inferred from silence or model prose.
+
+When Pascal asks “what did we finish?” or “what next?”, Codex reads
+`jarvis_matter_review`. Confirmed closures, released work awaiting his decision,
+blocked/waiting Matters, and bounded next actions remain separate. The weekly
+Lark review is only a low-noise rendering of this same read model, not another
+inbox and not a model-authored performance report.
 
 ## Normal Mobile Journey
 
@@ -133,6 +140,12 @@ The repository now implements this contract through `core.model_usage`:
 
 The runtime does not redeem reset credits, buy capacity, or open billing pages.
 Those actions are consequential and remain explicit owner decisions.
+
+The governed release path also prepares the Codex surface before stopping the
+resident bot: it verifies MCP 2.x, registers the repo marketplace, installs the
+current `jarvis-matters` plugin, reads back `installed, enabled`, then starts
+the stdio server and exercises its health and Matter-review tools. Repository
+code and a healthy daemon therefore cannot produce a false frontstage release.
 
 ## Replacement And Retirement Rules
 

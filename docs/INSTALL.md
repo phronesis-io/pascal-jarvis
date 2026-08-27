@@ -93,6 +93,12 @@ codex mcp list           # jarvis 应显示 enabled
 插件。MCP 使用本地 stdio，不开放端口，不复制密钥或私人 Matter 数据。
 安装或升级后新开一个 Codex task 才会加载新插件。
 
+Governed release (`./restart.sh --yes`) repeats this registration and verifies
+the enabled plugin plus a real stdio MCP handshake and representative read-only
+request before stopping the running bot. If MCP 2.x is absent from the selected
+Jarvis runtime venv, the release installs it first; a failure leaves the
+existing runtime untouched.
+
 验证提示词：`Show my active Jarvis Matters and their next actions.`。普通
 一次性问答不会创建 Matter；跨 session、设备、产品或日期的工作才绑定 Matter。
 完整旅程见 `docs/codex_jarvis_user_journey.md`。

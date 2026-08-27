@@ -27,6 +27,7 @@ ENGAGEMENT_TUNING_PROTECTED_TASKS = frozenset({
     "routine-run",
     "self-diagnostic",
     "thinking-review",
+    "weekly-review",
 })
 
 

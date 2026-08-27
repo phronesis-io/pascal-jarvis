@@ -301,6 +301,13 @@ Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
 - Jarvis 把工作推进到最后判断，而不是把新发现原样扔给 Pascal；
 - 日常回顾按 Matter 结果组织，不按 Agent 活动量组织。
 
+**2026-08-27 工程检查点：** `core.matter_review` 已把“本周形成的结果、已有执行
+收据但尚未 owner 收口、卡住/等待、下一步”做成同一个只读结果模型；Codex 通过
+`jarvis_matter_review` 查询，每周飞书卡只做一次有界渲染。旧周回顾的模型调用、
+TaskManager 自动 decay/defer/archive 和活动量叙事已删除。只有
+`matter_closure_completed` 算完成，Result Receipt 仍只能进入待收口。Routine 保留
+哪 1 到 2 条以及 L3 Proposal 的价值判断仍须由真实使用和 Pascal 决定。
+
 **准出：** Pascal 明显减少重复解释和运维，系统在更少消息下闭环更多 Matter。
 
 ## 七、反例与边界

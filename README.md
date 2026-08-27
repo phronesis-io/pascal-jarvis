@@ -138,7 +138,8 @@ task does not own:
    - *Daily reflect* — evening review with wins, patterns, and tomorrow prep
    - *Calendar read/write* — 30-day rolling window (7 days detailed + 8-30 days compact), with create/update/delete write-back
    - *Task triage* — philosophical task system (praxis/poiesis capture → commit → decay)
-   - *Weekly review* — end-of-week summary and planning
+   - *Weekly review* — model-free Matter outcomes, work awaiting owner closure,
+     and bounded next actions; it never scores Agent activity or edits tasks
 
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
@@ -169,8 +170,11 @@ an owner-private Context Packet, and an immutable Result Receipt. Model prose
 cannot close the Matter; artifacts are hashed and external effects must point
 to authoritative Delegation evidence. Codex can continue one unambiguous Matter
 through a single connector call; after Pascal explicitly confirms completion,
-one recoverable closure retires linked reminders, Items, and Handoffs. All Lark
-output still crosses the unified
+one recoverable closure retires linked reminders, Items, and Handoffs. Codex
+and the weekly Lark card read the same
+result-oriented Matter review, where only an owner closure receipt counts as
+completed and a Result Receipt remains “awaiting closure.” All Lark output
+still crosses the unified
 delivery state machine with sanitization, deduplication, attention caps, retry,
 dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
 Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).

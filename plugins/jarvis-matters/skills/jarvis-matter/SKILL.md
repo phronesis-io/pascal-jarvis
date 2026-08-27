@@ -64,6 +64,15 @@ task that can finish and be verified entirely in the current Codex task.
 - Report unknown providers plainly. Never convert token counts into a made-up
   subscription percentage.
 
+## Review
+
+- Use `jarvis_matter_review` when Pascal asks what was actually accomplished,
+  what is awaiting his closure, or what is most useful to continue next.
+- Organize the answer by Matter outcomes and next actions, never by Agent
+  activity, commit count, token volume, or raw task history.
+- A Result Receipt may appear as awaiting closure. Never restate it as a
+  completed outcome until the owner closure receipt exists.
+
 ## Authority
 
 - A Result Receipt closes the execution window, not the Matter.

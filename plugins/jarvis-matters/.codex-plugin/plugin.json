@@ -1,6 +1,6 @@
 {
   "name": "jarvis-matters",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Use Codex as the frontstage for Jarvis Matters without duplicating chat state.",
   "author": {
     "name": "Phronesis"

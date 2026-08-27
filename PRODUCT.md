@@ -28,6 +28,8 @@ Jarvis should let the user:
   current source-linked answer without replaying whole conversations;
 - see package usage, reset time, likely exhaustion, and the active fallback
   route without visiting each provider's billing page;
+- ask what was actually accomplished and what is worth continuing next,
+  organized by authoritative Matter outcomes rather than Agent activity;
 - spend less time operating the assistant than the assistant returns.
 
 ## Product Surfaces
@@ -122,6 +124,9 @@ The concrete decision table and desktop/mobile journeys are authoritative in
 22. The protocol stays backstage: the user says “continue” or “done” in normal
     language; deterministic code resolves identity, acquires the run, and
     converges linked state. Ambiguity or missing authority stops the action.
+23. Review measures useful outcomes, not visible busyness: only owner-confirmed
+    Matter closure counts as completed; executor receipts remain “awaiting
+    closure,” and the review itself never mutates work state.
 
 ## Non-Goals
 

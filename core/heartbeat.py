@@ -441,6 +441,7 @@ class HeartbeatRunner:
         "perception-collect",
         "provider-canary",
         "self-diagnostic",
+        "weekly-review",
     }  # deterministic pre/post work; no model call
 
     # Permanently silent housekeeping tasks (behavioral_rules.md: "daily-plan /

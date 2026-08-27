@@ -88,8 +88,12 @@ The implementation boundary is explicit:
   the last assistant message are observations only; they never close a Matter;
 - `core.codex_frontstage` exposes the provider-independent application
   contract used by interactive harnesses: one-step continuation, search/create,
-  acquire, renew, release, owner-confirmed closure, abort, and audit. It
-  contains no MCP protocol code;
+  acquire, renew, release, owner-confirmed closure, abort, result review, and
+  audit. It contains no MCP protocol code;
+- `core.matter_review` is the bounded read model shared by Codex and the
+  weekly Lark surface. It counts only `matter_closure_completed` as an outcome,
+  separates released runs awaiting owner closure, and never reads transcripts
+  or mutates Matter/Task state;
 - `core.matter_closure` owns the separate owner-authorized terminal saga. It
   reconciles linked Intent/Item/Handoff state before Matter completion and
   fails closed on live runs, Jobs, or Delegations;
@@ -117,6 +121,11 @@ supported MCP/plugin boundary for application-owned capabilities. A future
 host-driven workflow may use Codex app-server to create or resume tasks, but
 app-server event state must still project into the same Matter Run contract;
 it may not become a competing lifecycle store.
+
+The weekly review is a deterministic Tier-0 heartbeat task. Its pre-hook reads
+the same `core.matter_review` contract exposed as `jarvis_matter_review`; its
+post-hook renders at most one bounded card. It makes no model call and cannot
+decay, defer, archive, or otherwise edit a parallel task system.
 
 Owner conversations and tool-capable heartbeat calls default to indexed warm
 memory. Stable identity and standing guidance remain inline at the start of

@@ -12,6 +12,7 @@ from core.codex_frontstage import (
     frontstage_health,
     matter_status,
     model_usage_status,
+    review_matters,
     review_memory_claim,
     release_matter_run,
     renew_matter_run,
@@ -61,7 +62,7 @@ def create_server():
         title="Jarvis Matters",
         description="Durable Matter continuity for Codex and other frontstages.",
         instructions=SERVER_INSTRUCTIONS,
-        version="0.2.0",
+        version="0.3.0",
     )
 
     @server.tool(
@@ -239,6 +240,15 @@ def create_server():
     def model_status(refresh: bool = True) -> dict[str, Any]:
         """Read exact known package usage, reset times, health and fallbacks."""
         return model_usage_status(refresh=refresh)
+
+    @server.tool(
+        name="jarvis_matter_review",
+        annotations=readonly,
+        structured_output=True,
+    )
+    def matter_review(days: int = 7, limit: int = 8) -> dict[str, Any]:
+        """Review confirmed Matter outcomes and the most useful next actions."""
+        return review_matters(days=days, limit=limit)
 
     @server.tool(
         name="jarvis_memory_search",
