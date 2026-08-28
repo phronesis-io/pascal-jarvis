@@ -1,6 +1,6 @@
 # Jarvis PRD Portfolio
 
-- Last updated: 2026-08-27
+- Last updated: 2026-08-28
 - Status: Authoritative portfolio index
 - Purpose: distinguish current product contracts from historical records,
   superseded designs, observation-only experiments, and rejected scope.
@@ -45,6 +45,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `plans/2026-08-14-model-control-and-cross-product-memory.md` | Current, implementation in release verification | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
 | `plans/2026-08-15-lark-identity-transport.md` | Current, implementation in release verification | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
 | `plans/2026-08-27-codex-frontstage-jarvis-backstage.md` | Active; Phase 0/1 implemented, production acceptance pending | Codex desktop/mobile is the primary interactive frontstage; Jarvis is the continuity and control plane; Git/GitHub is the native code-evidence plane; Lark is bounded wake-up/native integration. The repository has the provider-neutral run protocol and local Codex MCP/plugin connector. `codex_frontstage_completion_audit.md` separates implementation, release, and real-use proof. Migration remains fail-closed until 20 desktop and 20 mobile journeys pass. |
+| `plans/2026-08-28-provider-neutral-model-runtime.md` | Active; foundation implemented, release pending | One effect-safe, task-attributed execution runtime now covers auxiliary calls. Main Lark and heartbeat route loops remain explicit migration work; Phase 3 is not complete until those callers converge and production receipts prove the boundary. |
 
 ## 3. Active Work
 

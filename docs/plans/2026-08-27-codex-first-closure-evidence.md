@@ -67,7 +67,7 @@ capability.
 | Phase 1 terminal convergence | owner-confirmed closure receipt; Intent/Item/Handoff reconciliation | post-release stale-card rate absent | implemented, not live |
 | Phase 2 memory | compiled claims, source receipts, supersession/conflict gates | replay target and context-token reduction not yet measured in production | implemented, not accepted |
 | Phase 3 usage | exact Codex quota/reset, 45-day local observations, honest unknown providers | alert calibration needs elapsed observations | implemented, not live |
-| Phase 3 route runtime | route catalog, health and fallback paths exist | all calls are not yet proven under one attribution/cost runtime | partial |
+| Phase 3 route runtime | shared runtime and receipts cover auxiliary, compaction, EigenFlux analysis, and idle-noise calls | main Lark conversation and primary heartbeat route loops remain; all-call attribution is not yet proven | foundation implemented; migration partial |
 | Phase 4 async organization | Intent/Routine/L3 primitives plus one deterministic Matter-result review shared by Codex and weekly Lark | retained 1-2 routines and L3 value choices are not selected by real use | review substrate implemented; value selection open |
 | Lark reduction | bounded wake-up contract exists | no interaction class retires before acceptance | deliberately gated |
 

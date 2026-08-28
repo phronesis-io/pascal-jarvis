@@ -629,6 +629,59 @@ MIGRATIONS = [
             route_id, limit_id, window_name, resets_at_epoch, observed_epoch DESC
         );
     """,
+    # v16: Provider-neutral model execution receipts. Prompts and credentials
+    # are deliberately absent; attribution and terminal evidence survive the
+    # caller process without turning model prose into product truth.
+    """
+    CREATE TABLE IF NOT EXISTS model_runtime_calls (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        matter_id TEXT NOT NULL DEFAULT '',
+        context TEXT NOT NULL,
+        effect_authority TEXT NOT NULL,
+        prompt_digest TEXT NOT NULL,
+        status TEXT NOT NULL,
+        selected_route TEXT NOT NULL DEFAULT '',
+        requested_model TEXT NOT NULL DEFAULT '',
+        observed_model TEXT NOT NULL DEFAULT '',
+        terminal_reason TEXT NOT NULL DEFAULT '',
+        cost_usd REAL,
+        executor_pid INTEGER NOT NULL DEFAULT 0,
+        started_epoch REAL NOT NULL,
+        finished_epoch REAL,
+        duration_ms INTEGER,
+        attempt_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS model_runtime_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id TEXT NOT NULL REFERENCES model_runtime_calls(id)
+            ON DELETE CASCADE,
+        attempt INTEGER NOT NULL,
+        route_id TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        adapter TEXT NOT NULL,
+        requested_model TEXT NOT NULL,
+        observed_model TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        effects_started INTEGER,
+        cost_usd REAL,
+        started_epoch REAL NOT NULL,
+        finished_epoch REAL NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        UNIQUE(call_id, attempt)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_task
+        ON model_runtime_calls(task_id, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_matter
+        ON model_runtime_calls(matter_id, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_status
+        ON model_runtime_calls(status, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_attempt_call
+        ON model_runtime_attempts(call_id, attempt);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None
@@ -717,6 +770,16 @@ def _run_migrations(db: sqlite3.Connection):
         namespace="frontstage_acceptance_v2",
         table="frontstage_acceptance",
         columns=(("owner_confirmation", "TEXT NOT NULL DEFAULT ''"),),
+    )
+    # The model-runtime foundation was exercised against disposable databases
+    # before its first release. Keep those pre-release v16 databases compatible
+    # with the final receipt shape instead of assuming migration history alone
+    # proves the physical column exists.
+    ensure_additive_columns(
+        db,
+        namespace="model_runtime_executor_v1",
+        table="model_runtime_calls",
+        columns=(("executor_pid", "INTEGER NOT NULL DEFAULT 0"),),
     )
     try:
         db.execute("BEGIN IMMEDIATE")

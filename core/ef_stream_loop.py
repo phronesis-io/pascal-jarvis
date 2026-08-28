@@ -516,6 +516,7 @@ C. 完全不需要任何动作 → HEARTBEAT_OK
         process_holder=procs,
         process_key="analysis",
         cancelled=stop_event.is_set if stop_event is not None else None,
+        task_id=f"eigenflux-analysis:{conv_id}",
     )
     if not result.text:
         log(

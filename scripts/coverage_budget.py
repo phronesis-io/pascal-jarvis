@@ -18,6 +18,7 @@ MINIMUMS = {
     "core/delegations.py": (89.0, 75.0),
     "core/delivery.py": (81.0, 77.0),
     "core/heartbeat_loop.py": (75.0, 71.0),
+    "core/model_runtime.py": (88.0, 78.0),
     "core/ef_stream_loop.py": (72.0, 61.0),
     "core/lark_bot_transport.py": (83.0, 65.0),
     "core/matter_context.py": (88.0, 71.0),

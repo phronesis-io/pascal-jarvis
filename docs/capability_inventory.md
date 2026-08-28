@@ -21,29 +21,30 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 
 ## Summary
 
-- Total: **182**
-- Status: keep **182**, fix **0**, retire-candidate **0**
-- Kinds: admin-api **29**, core-cli **70**, heartbeat-task **39**, lark-command **22**, runtime-component **15**, task-script **7**
+- Total: **184**
+- Status: keep **184**, fix **0**, retire-candidate **0**
+- Kinds: admin-api **29**, core-cli **71**, heartbeat-task **39**, lark-command **22**, runtime-component **16**, task-script **7**
 
 ## Inventory
 
 | ID | Kind | Status | Definition | Implementation | Runtime / entrypoint | Tests | Evidence gap |
 |---|---|---|---|---|---|---|---|
-| `component:admin` | runtime-component | **keep** | `components.yaml:111` | `core/components.py:672` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
-| `component:bot` | runtime-component | **keep** | `components.yaml:47` | `core/components.py:670` | python3 -m core.components --json | `tests/test_components_gating.py:510`, `tests/test_daemon_audit_fixes.py:631`, `tests/test_delegation_verify.py:274` | - |
-| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:130` | `core/components.py:679` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:243` | - |
-| `component:companion-voice` | runtime-component | **keep** | `components.yaml:153` | `core/components.py:673` | python3 -m core.components --json | `tests/test_companion.py:204` | - |
-| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:145` | `core/components.py:676` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
-| `component:daemon` | runtime-component | **keep** | `components.yaml:40` | `core/components.py:670` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
-| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:118` | `core/components.py:679` | python3 -m core.components --json | `tests/test_install_flow.py:232`, `tests/test_restart_loop_regression.py:202` | - |
-| `component:ef-stream` | runtime-component | **keep** | `components.yaml:90` | `core/components.py:674` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:522`, `tests/test_daemon_regressions.py:161` | - |
-| `component:external-deadman` | runtime-component | **keep** | `components.yaml:124` | `core/components.py:675` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
-| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:53` | `core/components.py:671` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:631`, `tests/test_daemon_regressions.py:137`, `tests/test_deploy.py:40` | - |
-| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:60` | `core/components.py:677` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:174` | - |
-| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:103` | `core/components.py:671` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:631`, `tests/test_daemon_regressions.py:210` | - |
-| `component:session-backup` | runtime-component | **keep** | `components.yaml:137` | `core/components.py:673` | python3 -m core.components --json | `tests/test_components_gating.py:594`, `tests/test_reliability_v2.py:26`, `tests/test_restart_loop_regression.py:245` | - |
-| `component:taskline` | runtime-component | **keep** | `components.yaml:35` | `core/components.py:680` | python3 -m core.components --json | `tests/test_components_gating.py:525`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:224` | - |
-| `component:unified-delivery` | runtime-component | **keep** | `components.yaml:75` | `core/components.py:678` | python3 -m core.components --json | `tests/test_components_gating.py:258` | - |
+| `component:admin` | runtime-component | **keep** | `components.yaml:127` | `core/components.py:767` | python3 -m core.components --json | `tests/test_admin.py:51`, `tests/test_admin_api.py:582`, `tests/test_admin_destructive.py:109` | - |
+| `component:bot` | runtime-component | **keep** | `components.yaml:49` | `core/components.py:765` | python3 -m core.components --json | `tests/test_components_gating.py:510`, `tests/test_daemon_audit_fixes.py:631`, `tests/test_delegation_verify.py:274` | - |
+| `component:caffeinate-launchd` | runtime-component | **keep** | `components.yaml:146` | `core/components.py:775` | python3 -m core.components --json | `tests/test_restart_loop_regression.py:243` | - |
+| `component:companion-voice` | runtime-component | **keep** | `components.yaml:169` | `core/components.py:768` | python3 -m core.components --json | `tests/test_companion.py:204` | - |
+| `component:conversation-audit` | runtime-component | **keep** | `components.yaml:161` | `core/components.py:771` | python3 -m core.components --json | `tests/test_components_gating.py:128`, `tests/test_reliability_v2.py:27` | - |
+| `component:daemon` | runtime-component | **keep** | `components.yaml:42` | `core/components.py:765` | python3 -m core.components --json | `tests/test_admin.py:135`, `tests/test_admin_api.py:352`, `tests/test_anchor_guard.py:84` | - |
+| `component:daemon-launchd` | runtime-component | **keep** | `components.yaml:134` | `core/components.py:775` | python3 -m core.components --json | `tests/test_install_flow.py:232`, `tests/test_restart_loop_regression.py:202` | - |
+| `component:ef-stream` | runtime-component | **keep** | `components.yaml:106` | `core/components.py:769` | python3 -m core.components --json | `tests/test_components_gating.py:29`, `tests/test_daemon_audit_fixes.py:522`, `tests/test_daemon_regressions.py:161` | - |
+| `component:external-deadman` | runtime-component | **keep** | `components.yaml:140` | `core/components.py:770` | python3 -m core.components --json | `tests/test_deadman.py:82` | - |
+| `component:heartbeat-loop` | runtime-component | **keep** | `components.yaml:55` | `core/components.py:766` | python3 -m core.components --json | `tests/test_daemon_audit_fixes.py:631`, `tests/test_daemon_regressions.py:137`, `tests/test_deploy.py:40` | - |
+| `component:heartbeat-tasks` | runtime-component | **keep** | `components.yaml:62` | `core/components.py:772` | python3 -m core.components --json | `tests/test_components_heartbeat_tasks.py:174` | - |
+| `component:lark-sidecar` | runtime-component | **keep** | `components.yaml:119` | `core/components.py:766` | python3 -m core.components --json | `tests/test_components_gating.py:80`, `tests/test_daemon_audit_fixes.py:631`, `tests/test_daemon_regressions.py:210` | - |
+| `component:model-runtime` | runtime-component | **keep** | `components.yaml:92` | `core/components.py:774` | python3 -m core.components --json | `tests/test_components_model_runtime.py:163` | - |
+| `component:session-backup` | runtime-component | **keep** | `components.yaml:153` | `core/components.py:768` | python3 -m core.components --json | `tests/test_components_gating.py:594`, `tests/test_reliability_v2.py:26`, `tests/test_restart_loop_regression.py:245` | - |
+| `component:taskline` | runtime-component | **keep** | `components.yaml:37` | `core/components.py:776` | python3 -m core.components --json | `tests/test_components_gating.py:525`, `tests/test_delegation_reconcile.py:196`, `tests/test_install_flow.py:224` | - |
+| `component:unified-delivery` | runtime-component | **keep** | `components.yaml:77` | `core/components.py:773` | python3 -m core.components --json | `tests/test_components_gating.py:258` | - |
 | `heartbeat:activity-log` | heartbeat-task | **keep** | `HEARTBEAT.md:573` | `tasks/activity_log_pre.sh:1`, `tasks/activity_log_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_components_heartbeat_tasks.py:83`, `tests/test_heartbeat.py:178`, `tests/test_memory.py:140` | - |
 | `heartbeat:calendar-sync` | heartbeat-task | **keep** | `HEARTBEAT.md:391` | `tasks/calendar_sync_pre.sh:1`, `tasks/calendar_sync_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_attention_roi.py:66`, `tests/test_card_residue_leak.py:161`, `tests/test_delivery_and_quiet_hours.py:67` | - |
 | `heartbeat:checkin` | heartbeat-task | **keep** | `HEARTBEAT.md:217` | `tasks/checkin_pre.sh:1`, `tasks/checkin_post.py:1` | python3 -m core.heartbeat_loop | `tests/test_admin_api.py:371`, `tests/test_card_delivery_closure.py:60`, `tests/test_checkin_post.py:45` | - |
@@ -93,12 +94,12 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.actions` | core-cli | **keep** | `core/actions.py:1066` | `core/actions.py:1066` | python3 -m core.actions | `tests/test_actions.py:288`, `tests/test_bot_trust_boundary.py:43`, `tests/test_card.py:101` | - |
 | `cli:core.attention_roi` | core-cli | **keep** | `core/attention_roi.py:353` | `core/attention_roi.py:353` | python3 -m core.attention_roi | `tests/test_attention_roi.py:51`, `tests/test_eigenflux_publish_post.py:94`, `tests/test_import_graph.py:152` | - |
 | `cli:core.autoreply_activity` | core-cli | **keep** | `core/autoreply_activity.py:173` | `core/autoreply_activity.py:173` | python3 -m core.autoreply_activity | `tests/test_autoreply_activity.py:64` | - |
-| `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:602` | `core/aux_model.py:602` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:512` | - |
+| `cli:core.aux_model` | core-cli | **keep** | `core/aux_model.py:628` | `core/aux_model.py:628` | python3 -m core.aux_model | `tests/test_aux_model.py:33`, `tests/test_model_fallback.py:512` | - |
 | `cli:core.change_gate` | core-cli | **keep** | `core/change_gate.py:97` | `core/change_gate.py:97` | python3 -m core.change_gate | `tests/test_change_gate.py:47` | - |
 | `cli:core.codex_fallback` | core-cli | **keep** | `core/codex_fallback.py:562` | `core/codex_fallback.py:562` | python3 -m core.codex_fallback | `tests/test_model_fallback.py:299`, `tests/test_provider_continuity_e2e.py:263`, `tests/test_session_lifecycle.py:267` | - |
 | `cli:core.codex_mcp` | core-cli | **keep** | `core/codex_mcp.py:340` | `core/codex_mcp.py:340` | python3 -m core.codex_mcp | `tests/test_codex_frontstage.py:215` | - |
 | `cli:core.companion` | core-cli | **keep** | `core/companion.py:475` | `core/companion.py:475` | python3 -m core.companion | `tests/test_checkin_post.py:23`, `tests/test_companion.py:63`, `tests/test_heartbeat_regressions.py:202` | - |
-| `cli:core.components` | core-cli | **keep** | `core/components.py:745` | `core/components.py:745` | python3 -m core.components | `tests/test_companion.py:204`, `tests/test_components_gating.py:35`, `tests/test_components_heartbeat_tasks.py:170` | - |
+| `cli:core.components` | core-cli | **keep** | `core/components.py:841` | `core/components.py:841` | python3 -m core.components | `tests/test_companion.py:204`, `tests/test_components_gating.py:35`, `tests/test_components_heartbeat_tasks.py:170` | - |
 | `cli:core.conversation_audit` | core-cli | **keep** | `core/conversation_audit.py:1094` | `core/conversation_audit.py:1094` | python3 -m core.conversation_audit | `tests/test_components_gating.py:101`, `tests/test_components_post_wake_grace.py:160`, `tests/test_conversation_audit.py:14` | - |
 | `cli:core.conversation_context` | core-cli | **keep** | `core/conversation_context.py:339` | `core/conversation_context.py:339` | python3 -m core.conversation_context | `tests/test_bot_trust_boundary.py:34`, `tests/test_memorial.py:639` | - |
 | `cli:core.cross_session` | core-cli | **keep** | `core/cross_session.py:237` | `core/cross_session.py:237` | python3 -m core.cross_session | `tests/test_cross_session_context.py:349`, `tests/test_cross_session_index.py:55`, `tests/test_memory.py:386` | - |
@@ -111,13 +112,13 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.delivery` | core-cli | **keep** | `core/delivery.py:1932` | `core/delivery.py:1932` | python3 -m core.delivery | `tests/test_admin_api.py:403`, `tests/test_admin_destructive.py:262`, `tests/test_bot_trust_boundary.py:60` | - |
 | `cli:core.deploy` | core-cli | **keep** | `core/deploy.py:696` | `core/deploy.py:696` | python3 -m core.deploy | `tests/test_daemon_audit_fixes.py:386`, `tests/test_daemon_regressions.py:125`, `tests/test_dashboard_retirement.py:76` | - |
 | `cli:core.doc_guard` | core-cli | **keep** | `core/doc_guard.py:159` | `core/doc_guard.py:159` | python3 -m core.doc_guard | `tests/test_doc_guard.py:58` | - |
-| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1346` | `core/ef_stream_loop.py:1346` | python3 -m core.ef_stream_loop | `tests/test_bot_trust_boundary.py:199`, `tests/test_components_gating.py:31`, `tests/test_daemon_regressions.py:152` | - |
+| `cli:core.ef_stream_loop` | core-cli | **keep** | `core/ef_stream_loop.py:1347` | `core/ef_stream_loop.py:1347` | python3 -m core.ef_stream_loop | `tests/test_bot_trust_boundary.py:199`, `tests/test_components_gating.py:31`, `tests/test_daemon_regressions.py:152` | - |
 | `cli:core.eigenflux_ingress` | core-cli | **keep** | `core/eigenflux_ingress.py:410` | `core/eigenflux_ingress.py:410` | python3 -m core.eigenflux_ingress | `tests/test_eigenflux_ingress.py:22` | - |
 | `cli:core.eigenflux_messages` | core-cli | **keep** | `core/eigenflux_messages.py:1396` | `core/eigenflux_messages.py:1396` | python3 -m core.eigenflux_messages | `tests/test_delegation_projection.py:302`, `tests/test_eigenflux_friend_actions.py:117`, `tests/test_eigenflux_friends_post.py:39` | - |
 | `cli:core.eigenflux_publish_material` | core-cli | **keep** | `core/eigenflux_publish_material.py:112` | `core/eigenflux_publish_material.py:112` | python3 -m core.eigenflux_publish_material | `tests/test_eigenflux_publish_material.py:49` | - |
 | `cli:core.eigenflux_skill_overlay` | core-cli | **keep** | `core/eigenflux_skill_overlay.py:58` | `core/eigenflux_skill_overlay.py:58` | python3 -m core.eigenflux_skill_overlay | `tests/test_capability_contracts.py:130` | - |
-| `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_circuit_breaker.py:109`, `tests/test_core_db.py:143`, `tests/test_core_db_audit.py:94` | - |
-| `cli:core.frontstage_acceptance` | core-cli | **keep** | `core/frontstage_acceptance.py:409` | `core/frontstage_acceptance.py:409` | python3 -m core.frontstage_acceptance | `tests/test_codex_frontstage.py:541`, `tests/test_core_db.py:65` | - |
+| `cli:core.engagement` | core-cli | **keep** | `core/engagement.py:119` | `core/engagement.py:119` | python3 -m core.engagement | `tests/test_circuit_breaker.py:109`, `tests/test_core_db.py:150`, `tests/test_core_db_audit.py:94` | - |
+| `cli:core.frontstage_acceptance` | core-cli | **keep** | `core/frontstage_acceptance.py:409` | `core/frontstage_acceptance.py:409` | python3 -m core.frontstage_acceptance | `tests/test_codex_frontstage.py:541`, `tests/test_core_db.py:72` | - |
 | `cli:core.geo` | core-cli | **keep** | `core/geo.py:487` | `core/geo.py:487` | python3 -m core.geo | `tests/test_geo.py:68`, `tests/test_weather.py:111` | - |
 | `cli:core.heartbeat_loop` | core-cli | **keep** | `core/heartbeat_loop.py:2029` | `core/heartbeat_loop.py:2029` | python3 -m core.heartbeat_loop | `tests/test_daemon_regressions.py:129`, `tests/test_heartbeat_loop.py:106`, `tests/test_import_graph.py:157` | - |
 | `cli:core.intentions` | core-cli | **keep** | `core/intentions.py:3581` | `core/intentions.py:3581` | python3 -m core.intentions | `tests/test_actions.py:601`, `tests/test_admin_api.py:448`, `tests/test_card_residue_leak.py:56` | - |
@@ -137,6 +138,7 @@ python3 scripts/capability_inventory.py --format json > /tmp/jarvis-capabilities
 | `cli:core.metrics_digest` | core-cli | **keep** | `core/metrics_digest.py:250` | `core/metrics_digest.py:250` | python3 -m core.metrics_digest | `tests/test_metrics_digest.py:312` | - |
 | `cli:core.model_control` | core-cli | **keep** | `core/model_control.py:580` | `core/model_control.py:580` | python3 -m core.model_control | `tests/test_model_control.py:34` | - |
 | `cli:core.model_fallback` | core-cli | **keep** | `core/model_fallback.py:373` | `core/model_fallback.py:373` | python3 -m core.model_fallback | `tests/test_aux_model.py:20`, `tests/test_heartbeat.py:868`, `tests/test_model_fallback.py:84` | - |
+| `cli:core.model_runtime` | core-cli | **keep** | `core/model_runtime.py:647` | `core/model_runtime.py:647` | python3 -m core.model_runtime | `tests/test_components_model_runtime.py:138`, `tests/test_core_db.py:60`, `tests/test_model_runtime.py:385` | - |
 | `cli:core.model_usage` | core-cli | **keep** | `core/model_usage.py:452` | `core/model_usage.py:452` | python3 -m core.model_usage | `tests/test_codex_frontstage.py:231`, `tests/test_matter_continuity.py:99`, `tests/test_model_usage.py:103` | - |
 | `cli:core.openai_fallback` | core-cli | **keep** | `core/openai_fallback.py:525` | `core/openai_fallback.py:525` | python3 -m core.openai_fallback | `tests/test_aux_model.py:144`, `tests/test_heartbeat.py:940`, `tests/test_model_fallback.py:298` | - |
 | `cli:core.perception` | core-cli | **keep** | `core/perception.py:557` | `core/perception.py:557` | python3 -m core.perception | `tests/test_brain_health.py:89`, `tests/test_metrics_digest.py:351`, `tests/test_perception.py:133` | - |

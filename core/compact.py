@@ -118,6 +118,7 @@ def generate_compact(jarvis_dir: str | Path, session_dir: str | Path,
         timeout=180,
         allow_tools=False,
         work_dir=work_dir or jarvis_dir,
+        task_id=f"compact:{conv_key}:{old_session_id}",
     )
     compact_text = result.text
     if not compact_text or len(compact_text) < 50:

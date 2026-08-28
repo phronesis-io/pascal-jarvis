@@ -1,7 +1,8 @@
 # Codex Frontstage Completion Audit
 
-- Audited: 2026-08-27
-- Release candidate: PR #129
+- Audited: 2026-08-28
+- Production baseline: `1254b84` (PR #131); later release candidates remain
+  separate until reviewed, authorized, merged, deployed, and observed
 - Rule: repository implementation, production deployment, and product
   acceptance are separate claims.
 
@@ -13,7 +14,7 @@
 | Jarvis owns durable continuity rather than another chat UI | `core.codex_frontstage`, `core.matter_runs`, `core.matter_context` | Matter contract, continuation, lease, recovery, and context tests | Implemented |
 | A clean task can continue the right Matter without replaying raw history | `jarvis_matter_continue`, Context Packet v2 | Ambiguous/missing/exact continuation and provenance tests | Implemented; real desktop/mobile acceptance pending |
 | Codex, Claude Code, and Lark share current cross-product memory | `core.memory_compiler` and source-linked claims | Compiler, conflict, privacy, and cross-session E2E tests | Implemented in release candidate; production replay observation pending |
-| Models, harnesses, and product state are independent | `core.model_control`, provider adapters, Matter contract | Provider/fallback/continuity tests | Implemented; provider quota remains honestly unknown where no API exists |
+| Models, harnesses, and product state are independent | `core.model_control`, `core.model_runtime`, provider adapters, Matter contract | Route, effect-replay, receipt, provider/fallback, and continuity tests | Control plane implemented; auxiliary execution is unified, while main Lark/heartbeat migration and provider quota without an API remain open |
 | Package usage is visible without opening billing pages | `core.model_usage`, Codex MCP, deterministic owner-Lark query | Model-usage and Matter-continuity tests plus read-only local smoke | Implemented in release candidate |
 | Git/GitHub remains the code-evidence plane | Native Git/GitHub plus existing `git`/`github` Matter artifact providers | Product-contract test and existing artifact/provider tests | Product boundary complete; no duplicate Jarvis Git state machine is intended |
 | Lark is a bounded wake-up/native-integration surface | Existing unified delivery and the frontstage journey contract | Delivery, attention, Lark transport, and weekly review tests | Retained until Codex acceptance passes; no long-output migration claimed |

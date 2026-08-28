@@ -628,6 +628,101 @@ def _check_delivery(comp: dict, root: Path) -> tuple[bool, str]:
     )
 
 
+def _check_model_runtime(comp: dict, root: Path) -> tuple[bool, str]:
+    """Inspect model execution receipts without starting or restarting models."""
+    path = root / str(comp.get("path") or "data/jarvis.db")
+    now = time.time()
+    window = max(60, int(comp.get("window_seconds", 3600) or 3600))
+    failure_limit = max(1, int(comp.get("failure_streak", 3) or 3))
+    stale_after = max(60, int(comp.get("stale_after_seconds", 1800) or 1800))
+    integrity_window = max(
+        window,
+        int(comp.get("integrity_window_seconds", 86400) or 86400),
+    )
+    db = None
+    try:
+        db = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=1,
+        )
+        db.row_factory = sqlite3.Row
+        tables = {
+            str(row[0])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required = {"model_runtime_calls", "model_runtime_attempts"}
+        if not required.issubset(tables):
+            return False, "model runtime receipt schema is not initialized"
+        stale = db.execute(
+            "SELECT COUNT(*) AS count,MIN(started_epoch) AS oldest "
+            "FROM model_runtime_calls WHERE status='running' "
+            "AND started_epoch<?",
+            (now - stale_after,),
+        ).fetchone()
+        mismatched = db.execute(
+            """SELECT COUNT(*) AS count FROM model_runtime_calls c
+                 WHERE c.started_epoch>=? AND c.status!='running'
+                   AND c.attempt_count!=(
+                       SELECT COUNT(*) FROM model_runtime_attempts a
+                        WHERE a.call_id=c.id
+                   )""",
+            (now - integrity_window,),
+        ).fetchone()
+        ambiguous = db.execute(
+            """SELECT COUNT(*) AS count FROM model_runtime_calls
+                 WHERE started_epoch>=? AND status='ambiguous'
+                   AND effect_authority IN ('workspace_write','external')""",
+            (now - integrity_window,),
+        ).fetchone()
+        rows = db.execute(
+            """SELECT status FROM model_runtime_calls
+                 WHERE started_epoch>=? AND status!='running'
+                 ORDER BY started_epoch DESC LIMIT 100""",
+            (now - window,),
+        ).fetchall()
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        return False, f"model runtime receipts unreadable ({type(exc).__name__})"
+    finally:
+        if db is not None:
+            db.close()
+
+    stale_count = int(stale["count"] or 0) if stale else 0
+    if stale_count:
+        oldest = float(stale["oldest"] or now)
+        return False, (
+            f"model runtime stalled: {stale_count} call(s), oldest "
+            f"{max(0, int(now - oldest)) // 60}min"
+        )
+    mismatch_count = int(mismatched["count"] or 0) if mismatched else 0
+    if mismatch_count:
+        return False, f"model runtime receipt mismatch: {mismatch_count} call(s)"
+    ambiguous_count = int(ambiguous["count"] or 0) if ambiguous else 0
+    if ambiguous_count:
+        return False, (
+            f"model runtime has {ambiguous_count} recent ambiguous "
+            "write/external call(s)"
+        )
+
+    failure_streak = 0
+    for row in rows:
+        status = str(row["status"] or "")
+        if status == "succeeded":
+            break
+        if status in {"failed", "ambiguous"}:
+            failure_streak += 1
+        elif status == "cancelled":
+            break
+    if failure_streak >= failure_limit:
+        return False, (
+            f"model runtime unavailable: {failure_streak} consecutive failed "
+            f"call(s) in {window // 60}min"
+        )
+    if not rows:
+        return True, "model runtime quiet; no recent calls or stale receipts"
+    return True, f"model runtime healthy; failure streak {failure_streak}"
+
+
 def _check_launchctl(comp: dict, root: Path) -> tuple[bool, str]:
     label = comp.get("label", "")
     try:
@@ -676,6 +771,7 @@ _CHECKS = {
     "audit_age": _check_audit_age,
     "heartbeat_tasks": _check_heartbeat_tasks,
     "delivery": _check_delivery,
+    "model_runtime": _check_model_runtime,
     "launchctl": _check_launchctl,
     "taskline": _check_taskline,
 }

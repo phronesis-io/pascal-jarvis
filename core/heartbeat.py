@@ -1578,6 +1578,7 @@ class HeartbeatRunner:
                 timeout=60,
                 allow_tools=False,
                 claude_bin=self._claude_bin,
+                task_id="heartbeat:idle-noise-judge",
             )
             if not result.text:
                 return False  # fail-open: deliver

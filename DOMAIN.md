@@ -68,6 +68,27 @@ Invariant: at most one acquired/running Matter Run exists per Matter. Expired
 leases are recoverable; a second release is idempotent only when it describes
 the exact same evidence. A conflicting receipt is rejected, never overwritten.
 
+### Model Call / Model Attempt
+
+A Model Call is one task-attributed request with one total wall-clock and
+effect-replay budget. A Model Attempt is one bounded execution of that request
+through a specific route, adapter, and requested model.
+
+Invariant: product state, permissions, and completion do not belong to the
+model runtime. Every accepted call has a task ID; optional Matter attribution
+is explicit. Prompts and credentials are never persisted. A failed attempt may
+move to another route or model only when no effect began, or when the call is
+read-only/effect-free. An uncertain write or external attempt stops as
+`ambiguous` and must be reconciled rather than replayed.
+An expired `running` receipt is closed as `process_interrupted` only after its
+recorded executor process is confirmed absent; a live executor is never
+recovered speculatively. Interrupted write/external work becomes `ambiguous`,
+never a retryable-looking failure.
+An effectful cancellation with unknown effect state is likewise `ambiguous`.
+The request digest covers both system and user prompts while persisting neither.
+A tool-capable provider process is considered effect-uncertain once launched;
+later error text alone cannot authorize automatic failover.
+
 ### Intent
 
 A time-bound internal promise to trigger, retry, and optionally ask a closure

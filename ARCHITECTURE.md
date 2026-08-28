@@ -373,13 +373,18 @@ warning only after the automatic retry budget is exhausted.
   health cooldown, and real provider diversity. It emits the private
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
-- **Target Model Runtime boundary:** route execution is still spread across the
-  current conversation, heartbeat, auxiliary, and Codex adapters. The migration
-  converges those callers on one provider-neutral orchestrator that consumes
-  `model_control` policy, enforces one wall-clock/effect budget, and records
-  task, Matter, provider, observed model, latency, cost, and terminal reason.
-  Product state, permissions, and completion receipts stay outside that runtime.
-  Tiny canaries and real-workload health remain distinct signals.
+- `core.model_runtime`: the provider-neutral execution orchestrator. It consumes
+  `model_control` policy, enforces one wall-clock and effect-replay budget, and
+  records task, Matter, route, requested/observed model, latency, optional cost,
+  and terminal reason without storing prompts or credentials. The auxiliary
+  Claude/OpenAI path, compaction, EigenFlux analysis, and idle-noise
+  classification use it. Route/model replay stops after an uncertain write or
+  external effect; untrusted contexts cannot enable tools. Product state,
+  permissions, and completion receipts stay outside this runtime. The main
+  Lark conversation loop and primary heartbeat executor still have legacy
+  route loops and are the remaining migration boundary; this is not yet a
+  system-wide Phase-3 completion claim. Tiny canaries and real-workload health
+  remain distinct signals.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog. Canary and real-request
   evidence remain separate: a green tiny canary cannot erase a production
@@ -485,6 +490,9 @@ warning only after the automatic retry budget is exhausted.
 - Numeric model-usage observations by route, limit, window, and reset epoch.
   They are private telemetry for trend/forecast calculations, not billing
   authority and not proof that a production-sized request will succeed.
+- Provider-neutral model call and attempt receipts, including effect authority,
+  task/Matter attribution, route/model/timing and terminal reason. Prompt text,
+  credentials and raw provider errors are not stored.
 
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
