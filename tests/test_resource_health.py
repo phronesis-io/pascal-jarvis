@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from core import resource_health
 
 
@@ -17,7 +19,17 @@ def test_fd_health_unknown_is_not_a_false_alarm(monkeypatch):
 
 
 def test_lsof_output_counts_only_numeric_fd_rows(monkeypatch):
-    monkeypatch.setattr(resource_health.Path, "is_dir", lambda _self: False)
+    isolated_memory = Path.home() / ".jarvis" / "memory"
+    assert isolated_memory.is_dir()
+
+    class MissingProcFd:
+        def is_dir(self):
+            return False
+
+    # Replace only resource_health's constructor binding. Patching
+    # pathlib.Path.is_dir on the shared class also changes pytest's runtime
+    # write guard and can make existing directories disappear at teardown.
+    monkeypatch.setattr(resource_health, "Path", lambda _value: MissingProcFd())
     monkeypatch.setattr(resource_health.shutil, "which", lambda _name: "/usr/sbin/lsof")
 
     class Result:
@@ -28,6 +40,7 @@ def test_lsof_output_counts_only_numeric_fd_rows(monkeypatch):
         resource_health.subprocess, "run", lambda *_args, **_kwargs: Result()
     )
     assert resource_health.open_fd_count(123) == 3
+    assert isolated_memory.is_dir()
 
 
 def test_macos_uses_launchd_service_limit(monkeypatch):
