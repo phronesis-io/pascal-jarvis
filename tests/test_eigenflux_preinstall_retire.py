@@ -90,3 +90,43 @@ def test_bad_previous_sha_fails_closed_without_deleting(tmp_path):
         )
 
     assert (destination / "ef-important/SKILL.md").is_file()
+
+
+def test_dry_run_reports_same_retirement_without_mutating(tmp_path):
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init")
+    _git(upstream, "config", "user.email", "test@example.com")
+    _git(upstream, "config", "user.name", "Test")
+    _write(upstream / "skills/ef-current/SKILL.md", "current")
+    _write(upstream / "skills/ef-current/removed.md", "old")
+    _write(upstream / "skills/ef-retired/SKILL.md", "retire")
+    _git(upstream, "add", "skills")
+    _git(upstream, "commit", "-m", "initial skills")
+    previous = _git(upstream, "rev-parse", "HEAD")
+
+    (upstream / "skills/ef-current/removed.md").unlink()
+    (upstream / "skills/ef-retired/SKILL.md").unlink()
+    (upstream / "skills/ef-retired").rmdir()
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-m", "retire paths")
+
+    destination = tmp_path / "installed"
+    _write(destination / "ef-current/SKILL.md", "current")
+    _write(destination / "ef-current/removed.md", "old")
+    _write(destination / "ef-retired/SKILL.md", "retire")
+
+    result = retire_removed(
+        upstream,
+        previous,
+        upstream / "skills",
+        destination,
+        apply=False,
+    )
+
+    assert result == {
+        "removed_files": ["ef-current/removed.md"],
+        "retired_skills": ["ef-retired"],
+    }
+    assert (destination / "ef-current/removed.md").is_file()
+    assert (destination / "ef-retired/SKILL.md").is_file()

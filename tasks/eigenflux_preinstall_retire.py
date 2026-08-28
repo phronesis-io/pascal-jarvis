@@ -44,12 +44,15 @@ def retire_removed(
     previous_sha: str,
     source_skills: Path,
     destination_skills: Path,
+    *,
+    apply: bool = True,
 ) -> dict[str, list[str]]:
-    """Remove only destination paths that the previous upstream tree owned."""
+    """Plan or remove paths that the previous upstream tree provably owned."""
     previous = _previous_paths(upstream_repo, previous_sha)
     previous_skills = {path.split("/", 1)[0] for path in previous}
     removed_files: list[str] = []
     retired_skills: list[str] = []
+    retired_skill_names: set[str] = set()
     preserved_local_skills: set[str] = set()
 
     for skill in sorted(previous_skills):
@@ -72,18 +75,22 @@ def retire_removed(
         # to the caller's orphan review.
         if destination_paths - previous:
             continue
-        shutil.rmtree(destination_skill)
+        if apply:
+            shutil.rmtree(destination_skill)
         retired_skills.append(skill)
+        retired_skill_names.add(skill)
 
     for relative in sorted(previous):
-        if relative.split("/", 1)[0] in preserved_local_skills:
+        skill = relative.split("/", 1)[0]
+        if skill in preserved_local_skills or skill in retired_skill_names:
             continue
         if (source_skills / relative).is_file():
             continue
         destination = destination_skills / relative
         if not destination.is_file() and not destination.is_symlink():
             continue
-        destination.unlink()
+        if apply:
+            destination.unlink()
         removed_files.append(relative)
 
     return {
@@ -98,6 +105,11 @@ def main() -> int:
     parser.add_argument("--previous-sha", required=True)
     parser.add_argument("--source-skills", required=True, type=Path)
     parser.add_argument("--destination-skills", required=True, type=Path)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report proven removals without changing the destination",
+    )
     args = parser.parse_args()
 
     result = retire_removed(
@@ -105,6 +117,7 @@ def main() -> int:
         args.previous_sha,
         args.source_skills,
         args.destination_skills,
+        apply=not args.dry_run,
     )
     for path in result["removed_files"]:
         print(f"REMOVED_FILE\t{path}")
