@@ -3,9 +3,13 @@
 - Audited: 2026-08-28
 - Production baseline: `1254b84` (PR #131); later release candidates remain
   separate until reviewed, authorized, merged, deployed, and observed
-- Integration branch: `release/codex-frontstage-control-plane-20260828`;
-  its candidate SHA is the branch HEAD after local commit, while the final
-  merged release SHA remains unset until protected-main integration
+- Reviewed integration evidence: local branch
+  `release/codex-frontstage-control-plane-20260828` at `03d1cecc`, product tree
+  `264ae499`; this 45-commit exploration branch is not the release vehicle
+- Review/release candidate: draft PR #139 from
+  `release/codex-frontstage-control-plane-20260829`; the PR head is the
+  authoritative candidate SHA and remains unset as a release SHA until
+  independent review, Owner authorization, and protected-main integration
 - Rule: repository implementation, production deployment, and product
   acceptance are separate claims.
 
@@ -61,10 +65,10 @@ For `1254b84c72b5cf265203bb1a50c044fb93d62545`, the production release has:
    stdio MCP smoke;
 5. post-release L3 observation without an execution error.
 
-The current integration candidate, including connector `0.4.0`, the executable
+The draft PR #139 candidate, including connector `0.4.0`, the executable
 operating model, interruption contract, model-runtime migration, and unattended-
-mutation retirement boundary, is not covered by that old receipt. Its
-release requires:
+mutation retirement boundary, is not covered by that old receipt. Its release
+requires:
 
 1. independent non-author review of the final candidate SHA;
 2. explicit Owner release authorization bound to that exact SHA;
