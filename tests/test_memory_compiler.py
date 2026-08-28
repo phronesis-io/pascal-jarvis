@@ -192,7 +192,11 @@ def test_owner_lark_assistant_turn_is_candidate_not_active():
 
 @pytest.mark.parametrize(
     "text",
-    ["搞吧", "写进 blog 吧", "把这个做完吧", "同步到飞书吧", "go ahead"],
+    [
+        "搞吧", "写进 blog 吧", "把这个做完吧", "同步到飞书吧",
+        "太复杂了", "不太好", "没做好", "too complex", "looks good",
+        "go ahead",
+    ],
 )
 def test_context_dependent_owner_acknowledgement_is_candidate_only(text):
     batch, source = _one_lark_batch(text)
@@ -215,6 +219,10 @@ def test_context_dependent_owner_acknowledgement_is_candidate_only(text):
         ("不要催我", "constraint", "attention.no_nudging"),
         ("发布 PR #130 吧", "decision", "release.pr130"),
         ("修复登录超时吧", "todo", "auth.fix_login_timeout"),
+        (
+            "白皮书的问题表述太复杂了", "preference",
+            "whitepaper.question_wording",
+        ),
     ],
 )
 def test_short_self_contained_owner_statement_still_activates(
@@ -277,6 +285,20 @@ def test_owner_question_and_its_assertive_subquote_remain_candidates():
     assert len(claims) == 2
     assert {item["status"] for item in claims} == {"candidate"}
     assert compiled_context() == ""
+
+
+def test_owner_active_content_is_the_exact_quote_not_model_expansion():
+    text = "不是说一个人有100万个 Agent 合作"
+    batch, source = _one_lark_batch(text)
+    _apply_all(batch, [_claim(
+        source, kind="constraint", key="network.cross_owner_agents",
+        content="必须由不同人的 Agent 互相合作",
+    )])
+
+    claim = search_compiled_memory()["claims"][0]
+    assert claim["status"] == "active"
+    assert claim["content"] == text
+    assert "必须由不同人的 Agent" not in compiled_context()
 
 
 def test_explicit_owner_statement_promotes_matching_contextual_candidate():
@@ -354,6 +376,100 @@ def test_prepare_repairs_legacy_ack_claim_and_restores_displaced_decision():
     ).fetchone()
     assert restored["status"] == "active"
     assert restored["superseded_by"] is None
+
+
+def test_prepare_repairs_legacy_context_only_evaluation():
+    batch, source = _one_lark_batch("太复杂了")
+    _apply_all(batch, [])
+    connection = db_module.get_db()
+    connection.execute(
+        """INSERT INTO memory_claims
+           (id,kind,claim_key,content,normalized_content,status,authority,
+            created_epoch,updated_epoch)
+           VALUES ('legacy_evaluation','decision','whitepaper.wording',
+                   'Pascal rejected a specific whitepaper question',
+                   'pascal rejected a specific whitepaper question','active',
+                   'owner_asserted',100,100)"""
+    )
+    connection.execute(
+        """INSERT INTO memory_claim_sources(claim_id,source_ref,source_quote)
+           VALUES ('legacy_evaluation',?,'太复杂了')""",
+        (source["source_ref"],),
+    )
+    connection.commit()
+
+    assert prepare_batch(batch_size=20, now=200.0) is None
+    repaired = connection.execute(
+        """SELECT status,authority FROM memory_claims
+            WHERE id='legacy_evaluation'"""
+    ).fetchone()
+    assert repaired["status"] == "candidate"
+    assert repaired["authority"] == "assistant_candidate"
+
+
+def test_prepare_rewrites_legacy_owner_paraphrase_to_its_only_exact_quote():
+    text = "不是说一个人有100万个 Agent 合作"
+    batch, source = _one_lark_batch(text)
+    _apply_all(batch, [])
+    connection = db_module.get_db()
+    connection.execute(
+        """INSERT INTO memory_claims
+           (id,kind,claim_key,content,normalized_content,status,authority,
+            created_epoch,updated_epoch)
+           VALUES ('legacy_paraphrase','constraint','network.cross_owner_agents',
+                   '必须由不同人的 Agent 互相合作',
+                   '必须由不同人的 agent 互相合作','active',
+                   'owner_asserted',100,100)"""
+    )
+    connection.execute(
+        """INSERT INTO memory_claim_sources(claim_id,source_ref,source_quote)
+           VALUES ('legacy_paraphrase',?,?)""",
+        (source["source_ref"], text),
+    )
+    connection.commit()
+
+    assert prepare_batch(batch_size=20, now=200.0) is None
+    repaired = connection.execute(
+        """SELECT content,normalized_content,status,authority
+             FROM memory_claims WHERE id='legacy_paraphrase'"""
+    ).fetchone()
+    assert repaired["content"] == text
+    assert repaired["normalized_content"] == text.casefold()
+    assert repaired["status"] == "active"
+    assert repaired["authority"] == "owner_asserted"
+
+
+def test_prepare_demotes_ambiguous_multi_quote_owner_paraphrase():
+    first, first_source = _one_lark_batch("主入口是 Codex")
+    _apply_all(first, [])
+    second, second_source = _one_lark_batch("日常工作从 Codex 开始")
+    _apply_all(second, [])
+    connection = db_module.get_db()
+    connection.execute(
+        """INSERT INTO memory_claims
+           (id,kind,claim_key,content,normalized_content,status,authority,
+            created_epoch,updated_epoch)
+           VALUES ('legacy_ambiguous','decision','product.primary_frontstage',
+                   'Codex 是日常工作前台','codex 是日常工作前台','active',
+                   'owner_asserted',100,100)"""
+    )
+    connection.executemany(
+        """INSERT INTO memory_claim_sources(claim_id,source_ref,source_quote)
+           VALUES ('legacy_ambiguous',?,?)""",
+        [
+            (first_source["source_ref"], first_source["text"]),
+            (second_source["source_ref"], second_source["text"]),
+        ],
+    )
+    connection.commit()
+
+    assert prepare_batch(batch_size=20, now=200.0) is None
+    repaired = connection.execute(
+        """SELECT status,authority FROM memory_claims
+            WHERE id='legacy_ambiguous'"""
+    ).fetchone()
+    assert repaired["status"] == "candidate"
+    assert repaired["authority"] == "assistant_candidate"
 
 
 def test_prepare_repairs_legacy_ack_conflict_and_restores_grounded_fact():
@@ -505,8 +621,9 @@ def test_compiled_search_returns_source_refs_but_not_raw_quotes():
         source, kind="preference", key="communication.answer_order",
         content="回答先给结论",
     )])
-    result = search_compiled_memory("回答")
+    result = search_compiled_memory("先给结论")
     assert result["raw_transcripts_included"] is False
+    assert result["claims"][0]["content"] == "我偏好先给结论"
     assert result["claims"][0]["source_refs"] == [source["source_ref"]]
     assert "sources" not in result["claims"][0]
     assert "source_quote" not in json.dumps(result, ensure_ascii=False)

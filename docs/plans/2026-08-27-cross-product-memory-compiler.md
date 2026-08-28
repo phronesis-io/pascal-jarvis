@@ -39,15 +39,20 @@ quote, source reference, claim lifecycle, and Matter scope.
 5. `core.memory_compiler apply` validates the envelope and atomically records a
    receipt. Invalid or incomplete output leaves the batch pending for retry.
 6. A self-contained user-authored claim becomes active. Context-dependent
-   acknowledgements such as "搞吧", "写进 blog 吧", or "go ahead" are marked
+   acknowledgements such as "搞吧", destination-only actions such as "写进 blog
+   吧", and object-free evaluations such as "太复杂了" are marked
    `owner_context_candidate`: an exact quote proves the words but cannot prove
    the model-expanded referent from a neighboring turn. Assistant-authored
-   claims also remain candidates. Concrete directives such as "发布 PR #130 吧"
-   remain owner assertions because their object is present. Core re-evaluates
-   both the complete source turn and the selected quote: questions are never
-   assertions, a question cannot become a fact by dropping its question mark,
-   and quoting only "好的" from a longer sentence cannot borrow the rest of
-   that sentence's authority.
+   claims also remain candidates. Concrete directives and evaluations such as
+   "发布 PR #130 吧" and "白皮书的问题表述太复杂了" remain owner assertions because
+   their object is present. Core re-evaluates both the complete source turn and
+   the selected quote: questions are never assertions, a question cannot become
+   a fact by dropping its question mark, and quoting only "好的" from a longer
+   sentence cannot borrow the rest of that sentence's authority. Auto-active
+   content is always the exact self-contained owner quote; model paraphrases
+   remain candidates and cannot strengthen the owner's meaning. Upgrade repair
+   rewrites a legacy claim with one independent quote to that quote, and
+   demotes an ambiguous paraphrase backed by multiple different quotes.
    Decisions, preferences, and todos supersede older owner statements with the
    same key. Conflicting facts, constraints, or artifacts suspend both values
    until explicit human review.
@@ -79,10 +84,11 @@ sent-cache, and rolling cross-session digest injection are retired.
 2. Exact-quote forgery, omitted sources, inferred Matter IDs, and more than
    three claims per source fail closed without consuming the batch.
 3. Context-dependent owner acknowledgements remain candidates; short,
-   self-contained constraints and concrete directives still activate. A later
-   explicit owner statement promotes an equal candidate and reconciles the
-   value it replaces. Upgrade repair demotes affected legacy claims and
-   restores any value they displaced.
+   self-contained constraints and concrete directives still activate with the
+   exact quote as content. A later explicit owner statement promotes an equal
+   candidate and reconciles the value it replaces. Upgrade repair demotes
+   affected legacy claims, grounds unambiguous legacy content in owner words,
+   and restores any value a demoted claim displaced.
 4. Assistant completion prose remains a candidate and is absent from a Matter
    Context Packet.
 5. A newer owner decision supersedes the prior one; the old value has zero

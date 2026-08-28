@@ -48,6 +48,19 @@ _CONTEXT_DEPENDENT_OWNER_DESTINATION = re.compile(
     r"[^。！？!?]{1,28}吧$",
     re.IGNORECASE,
 )
+_CONTEXT_DEPENDENT_OWNER_EVALUATION = re.compile(
+    r"^(?:真)?(?:有点|太|过于|不太|很|比较|更|还|挺|非常|特别)?"
+    r"(?:不|没)?(?:好|行|对|合理|合适|自然|清楚|明白|准确|复杂|简单|"
+    r"牵强|重要|舒服|做好|慢|快|长|短)"
+    r"(?:了|的|吧|一些|一点|点|多了|过头了)?$",
+    re.IGNORECASE,
+)
+_CONTEXT_DEPENDENT_OWNER_EVALUATION_EN = re.compile(
+    r"^(?:(?:looks?|sounds?|feels?)\s+|(?:too|very|really|pretty|not)\s+)"
+    r"(?:good|bad|complex|simple|clear|unclear|reasonable|right|wrong|slow|"
+    r"fast|long|short)$",
+    re.IGNORECASE,
+)
 
 
 class MemoryCompilerError(ValueError):
@@ -106,6 +119,8 @@ def context_dependent_owner_text(value: Any) -> bool:
     return bool(
         _CONTEXT_DEPENDENT_OWNER_DEICTIC.fullmatch(text)
         or _CONTEXT_DEPENDENT_OWNER_DESTINATION.fullmatch(text)
+        or _CONTEXT_DEPENDENT_OWNER_EVALUATION.fullmatch(text)
+        or _CONTEXT_DEPENDENT_OWNER_EVALUATION_EN.fullmatch(text)
     )
 
 
