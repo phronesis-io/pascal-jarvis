@@ -296,9 +296,12 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "--limit-reason" in bot             # session/spend limit reason preserved
     assert '"$_cur_model"' in bot              # main path uses degradable model
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
-    assert "core.codex_fallback" in bot        # ChatGPT-login Codex escape hatch
-    assert bot.count("run_codex_locked") == 3  # definition + preferred + fallback
-    assert '"$_lock_file" "$_codex_pid" "$_lock_token"; then' in bot
+    assert "run_codex_locked" not in bot       # no second provider loop in shell
+    assert "python3 -m core.owner_chat_model" in bot
+    adapters = (
+        Path(__file__).parent.parent / "core" / "owner_chat_adapters.py"
+    ).read_text()
+    assert "core.codex_fallback" in adapters    # one provider-neutral owner path
     assert "openai_fallback_flags=(--no-tools)" in bot
     assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
@@ -312,70 +315,18 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "（GPT 兜底）" in bot
 
 
-def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
-    import os
-    import signal
-    import subprocess
+def test_owner_runtime_uses_the_generic_killable_worker_receipt():
     from pathlib import Path
 
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
-    start = bot.index("run_codex_locked() {")
-    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
-    function = bot[start:end]
-    lock = tmp_path / "session.lock"
-    lock.write_text("acquiring test-token", encoding="utf-8")
-    script = tmp_path / "codex-lock-test.sh"
-    script.write_text(
-        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n' +
-        "process_start_token() { printf 'test-start\\n'; }\n" +
-        "python3() { exec sleep 30; }\n" + function + "\n" +
-        'run_codex_locked "hello" "conv" "system" "model" "30" ' +
-        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
-        encoding="utf-8",
-    )
-    process = subprocess.Popen(["bash", str(script)])
-    child_pid = None
-    for _ in range(100):
-        fields = lock.read_text(encoding="utf-8").rstrip("\n").split("\t")
-        if len(fields) == 3 and fields[0].isdigit():
-            child_pid = int(fields[0])
-            assert fields[1]
-            assert fields[2] == "test-token"
-            break
-        time.sleep(0.02)
-    assert child_pid is not None
-    os.kill(child_pid, signal.SIGTERM)
-    lock.unlink(missing_ok=True)
-    assert process.wait(timeout=5) == 143
+    runtime_spawn = bot.index("python3 -m core.owner_chat_model")
+    publish = bot.index("session_lock_publish", runtime_spawn)
 
-
-def test_codex_locked_runner_stops_when_identity_receipt_cannot_publish(
-        tmp_path):
-    import subprocess
-    from pathlib import Path
-
-    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
-    start = bot.index("run_codex_locked() {")
-    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
-    function = bot[start:end]
-    lock = tmp_path / "session.lock"
-    lock.write_text("acquiring test-token", encoding="utf-8")
-    script = tmp_path / "codex-lock-fail-closed.sh"
-    script.write_text(
-        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n'
-        "process_start_token() { return 1; }\n"
-        "python3() { exec sleep 30; }\n" + function + "\n"
-        'run_codex_locked "hello" "conv" "system" "model" "30" '
-        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        ["/bin/bash", str(script)], check=False, timeout=5,
-    )
-
-    assert result.returncode == 74
-    assert lock.read_text(encoding="utf-8") == "acquiring test-token"
+    assert "exec_model_worker" in bot[runtime_spawn - 120:runtime_spawn]
+    assert "_claude_pid=$!" in bot[runtime_spawn:publish]
+    assert '"$LOCK_FILE" "$_claude_pid" "$_lock_token"' in bot[
+        publish:publish + 180
+    ]
 
 
 def test_bot_sh_scopes_complete_backup_config_and_reports_chain_failure():

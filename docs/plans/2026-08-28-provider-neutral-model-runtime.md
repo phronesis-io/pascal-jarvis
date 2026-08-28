@@ -71,23 +71,34 @@ then persists one call receipt and one row per attempt.
 - `core.heartbeat_model`: route-specific prompt composition, isolated
   credentials, Claude CLI/OpenAI adapters, bounded relay timeouts, usage
   observations, and transient redacted diagnostics.
+- `core.owner_chat_model` and `core.owner_chat_adapters`: one owner-private
+  Lark turn boundary for Claude, Codex, and OpenAI. The resident shell passes
+  one gate/preference fact, supervises one killable wrapper, and receives a
+  bounded result envelope; route selection and replay do not happen again in
+  shell.
 - Migrated callers: compaction, EigenFlux analysis, heartbeat idle-noise
-  classification, and all primary heartbeat task execution. Solo and batch
-  heartbeat calls carry stable task IDs and durable per-attempt receipts.
+  classification, all primary heartbeat task execution, and owner-private Lark
+  conversations. Solo and batch heartbeat calls and owner turns carry stable
+  task IDs and durable per-attempt receipts.
 - The previous heartbeat provider loop and its duplicate timeout/fallback
-  helpers have been deleted; heartbeat now has one provider execution path.
+  helpers have been deleted. The owner shell's second Codex provider loop has
+  also been deleted; both callers now have one provider execution path.
 - SQLite migration v16: `model_runtime_calls` and `model_runtime_attempts`.
 - `model-runtime` component: observation-only checks for stale calls, receipt
   mismatch, repeated recent failure, and recent ambiguous write/external
   effects. Authoritative reconciliation remains with the owning connector.
 
-## Remaining Migration
+## Remaining Migration And Evidence
 
-- Main owner/group Lark conversation execution in `bot.sh`.
+- Shared/group and non-owner Lark traffic intentionally remains on the
+  restricted text/no-private-tools path. Moving that boundary is separate work
+  and must preserve its narrower trust contract; it is not implied by the
+  owner migration.
 - Self-improve coding worker, after its acquire/run/release receipt is mapped
   without weakening its independent lifecycle boundary.
 - Per-provider cost adapters where a provider returns authoritative usage.
-- Production receipt observation and runtime failure-budget calibration.
+- Independent review, protected CI, production receipt observation, and runtime
+  failure-budget calibration for the owner-chat candidate.
 
 These are named remaining callers, not hidden completion. Until they converge,
 Phase 3 remains partial and the architecture gate cannot ban every legacy loop.
@@ -110,5 +121,5 @@ Phase 3 remains partial and the architecture gate cannot ban every legacy loop.
 - replaying an uncertain side effect to improve availability;
 - pretending provider allowance or cost is known when no authoritative API
   exposes it;
-- migrating the remaining owner-chat and self-improve loops without their own
+- migrating shared/untrusted chat or self-improve loops without their own
   focused review and runtime evidence.

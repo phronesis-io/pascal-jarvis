@@ -34,7 +34,8 @@ Lark event
   -> bot.sh parsing and trust boundary
   -> core.prompt current memory + Matter context
   -> selected model/provider
-       owner p2p: preferred executor -> Claude chain -> Codex CLI -> GPT API
+       owner p2p: core.owner_chat_model -> core.model_runtime
+                  -> Claude chain / Codex CLI / GPT API
        shared/untrusted: restricted Claude chain -> text-only GPT API
   -> deterministic action processors
   -> core.delivery reply envelope
@@ -154,11 +155,11 @@ or no-tool calls retain full inline memory so index mode can never make
 knowledge unreachable.
 
 Provider credentials follow the same execution boundary. `bot.sh` keeps the
-primary Anthropic, relay, and OpenAI keys shell-private. The heartbeat routing
-worker receives the configured route set, while a direct provider adapter
-receives only its active credential. Ordinary task scripts and model-started
-Codex/GPT tools receive a scrubbed environment; child-process handling inside
-a third-party provider CLI remains that CLI's responsibility.
+primary Anthropic, relay, and OpenAI keys shell-private. Only the owner-chat or
+heartbeat model worker receives the configured route set, while each direct
+provider adapter receives only its active credential. Ordinary task scripts
+and model-started Codex/GPT tools receive a scrubbed environment; child-process
+handling inside a third-party provider CLI remains that CLI's responsibility.
 
 Heartbeat model choice is task policy, separate from provider execution.
 `HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`
@@ -385,15 +386,21 @@ warning only after the automatic retry budget is exhausted.
 - `core.model_runtime`: the provider-neutral execution orchestrator. It consumes
   `model_control` policy, enforces one wall-clock and effect-replay budget, and
   records task, Matter, route, requested/observed model, latency, optional cost,
-  and terminal reason without storing prompts or credentials. The auxiliary
-  Claude/OpenAI path, compaction, EigenFlux analysis, and idle-noise
-  classification use it. Route/model replay stops after an uncertain write or
-  external effect; untrusted contexts cannot enable tools. Product state,
-  permissions, and completion receipts stay outside this runtime. The main
-  Lark conversation loop and primary heartbeat executor still have legacy
-  route loops and are the remaining migration boundary; this is not yet a
-  system-wide Phase-3 completion claim. Tiny canaries and real-workload health
-  remain distinct signals.
+  and terminal reason without storing prompts or credentials. Owner-private
+  Lark turns, heartbeat execution, auxiliary calls, compaction, EigenFlux
+  analysis, and idle-noise classification use it. Route/model replay stops
+  after an uncertain write or external effect; untrusted contexts cannot enable
+  tools. Product state, permissions, and completion receipts stay outside this
+  runtime. Shared and non-owner Lark traffic intentionally remains on its
+  restricted no-private-tools adapter path, so this is not yet a system-wide
+  Phase-3 completion claim. Tiny canaries and real-workload health remain
+  distinct signals.
+- `core.owner_chat_model`: the owner-private Lark adapter boundary. `bot.sh`
+  still owns trust classification, serialization, progress, background
+  promotion, cancellation, actions, and delivery; one wrapper process gives
+  Model Runtime the exact gate/preference once, provider-specific session and
+  prompt behavior, and the only fallback decision. The wrapper emits a bounded
+  result envelope; an ambiguous tool-capable failure produces no shell replay.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog. Canary and real-request
   evidence remain separate: a green tiny canary cannot erase a production

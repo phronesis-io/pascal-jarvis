@@ -8,7 +8,6 @@ the total deadline, replay safety, health observations, and durable receipts.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +20,15 @@ from core.heartbeat_provider import (
     openai_usage_fields,
 )
 from core.model_control import ModelRoute, model_routes
-from core.model_credentials import without_model_credentials
+from core.model_adapter_support import (
+    PREEXECUTION_REASONS,
+    TRANSPORT_REASONS,
+    bounded_timeout,
+    claude_env,
+    provider_health_rows,
+    provider_reason,
+    safe_error_detail,
+)
 from core.model_fallback import (
     fallback_for_stderr,
     is_preexecution_error,
@@ -37,22 +44,6 @@ PromptBuilder = Callable[[ModelRoute], tuple[str, str]]
 Logger = Callable[..., None]
 UsageObserver = Callable[[str, str, dict[str, int]], None]
 
-_OVERFLOW_SIGNATURES = ("autocompact is thrashing", "prompt is too long")
-_PREEXECUTION_REASONS = {
-    "account_limit",
-    "auth_error",
-    "rate_limited",
-    "server_overloaded",
-}
-_TRANSPORT_REASONS = {"network_error", "server_error", "timeout"}
-_SECRET_RE = re.compile(
-    r"(sk-[A-Za-z0-9_\-]{8,}"
-    r"|Bearer\s+\S+"
-    r"|\b(?:token|secret|(?:x-)?api[-_]?key|password)\b\s*[=:]\s*\S+)",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class HeartbeatModelResult:
     text: str = ""
@@ -66,62 +57,6 @@ class HeartbeatModelResult:
     timed_out: bool = False
     context_overflow: bool = False
     killed: bool = False
-
-
-def provider_health_rows(root: str | Path) -> list[dict[str, Any]]:
-    """Read sanitized health evidence; damaged telemetry must fail open."""
-    try:
-        from core.provider_health import snapshot
-
-        return list(snapshot(root).get("providers") or [])
-    except Exception:
-        return []
-
-
-def _provider_reason(error_text: str) -> str:
-    lowered = str(error_text or "").lower()
-    if any(signature in lowered for signature in _OVERFLOW_SIGNATURES):
-        return "context_overflow"
-    try:
-        from core.provider_health import reason_code_for_error
-
-        return reason_code_for_error(error_text)
-    except Exception:
-        return "request_failed"
-
-
-def _safe_error_detail(error_text: str) -> str:
-    """Keep a useful transient diagnosis without persisting provider output."""
-    return _SECRET_RE.sub("[redacted]", error_summary(error_text))[:900]
-
-
-def _claude_env(route: ModelRoute) -> dict[str, str]:
-    if route.id == "primary":
-        return without_model_credentials(
-            keep=frozenset({"ANTHROPIC_API_KEY"}),
-        )
-    env = without_model_credentials()
-    env["ANTHROPIC_AUTH_TOKEN"] = route.credential
-    env["ANTHROPIC_BASE_URL"] = route.base_url
-    return env
-
-
-def _bounded_timeout(route: ModelRoute, attempt_timeout: float) -> float:
-    cap_name = ""
-    default = int(max(1, attempt_timeout))
-    if route.id in {"backup1", "backup2"}:
-        cap_name = "CLAUDE_RELAY_ATTEMPT_TIMEOUT"
-        default = 120
-    elif route.id == "openai":
-        cap_name = "OPENAI_FALLBACK_TIMEOUT"
-        default = 120
-    if not cap_name:
-        return max(0.05, float(attempt_timeout))
-    try:
-        cap = max(1, int(os.environ.get(cap_name, str(default))))
-    except (TypeError, ValueError):
-        cap = default
-    return max(0.05, min(float(attempt_timeout), float(cap)))
 
 
 def run_heartbeat_model(
@@ -189,13 +124,13 @@ def run_heartbeat_model(
             f"Calling heartbeat route={route.id} model="
             f"{current_model or '(default)'}"
         )
-        attempt_limit = _bounded_timeout(route, attempt_timeout)
+        attempt_limit = bounded_timeout(route, attempt_timeout)
         try:
             completed = runner(
                 command,
                 timeout=attempt_limit,
                 cwd=str(work_dir),
-                env=_claude_env(route),
+                env=claude_env(route),
             )
         except subprocess.TimeoutExpired as exc:
             timeout_value = getattr(exc, "timeout", attempt_limit)
@@ -243,7 +178,9 @@ def run_heartbeat_model(
             ) if value
         ))
         if error_text:
-            last_error_detail = _safe_error_detail(error_text)
+            last_error_detail = safe_error_detail(
+                error_text, summary=error_summary,
+            )
             logger(
                 f"Heartbeat route {route.id} failed: "
                 f"{last_error_detail}",
@@ -255,7 +192,7 @@ def run_heartbeat_model(
                 trip(account_reason, base)
             except Exception:
                 pass
-        reason = _provider_reason(error_text)
+        reason = provider_reason(error_text)
         next_model = fallback_for_stderr(current_model, error_text) or ""
         if completed.returncode in {137, 143}:
             return AdapterResult(
@@ -263,7 +200,7 @@ def run_heartbeat_model(
                 reason="process_interrupted",
                 effects_started=None,
             )
-        if is_preexecution_error(error_text) or reason in _PREEXECUTION_REASONS:
+        if is_preexecution_error(error_text) or reason in PREEXECUTION_REASONS:
             # Account/model/auth/rate/overload rejection happens before the
             # model can run a tool, even though the CLI process itself started.
             status = "preexecution_failure"
@@ -271,7 +208,7 @@ def run_heartbeat_model(
             # Any later tool-capable failure cannot prove that an earlier
             # model round caused no local/external effect.
             status = "ambiguous_failure"
-        elif reason in _TRANSPORT_REASONS:
+        elif reason in TRANSPORT_REASONS:
             status = "transport_failure"
         else:
             status = "ambiguous_failure"
@@ -311,7 +248,7 @@ def run_heartbeat_model(
                     max_tokens,
                     route.credential,
                     route.base_url or openai_fallback.DEFAULT_BASE_URL,
-                    max(1, int(_bounded_timeout(route, attempt_timeout))),
+                    max(1, int(bounded_timeout(route, attempt_timeout))),
                     route.user_agent,
                 )
             else:
@@ -322,23 +259,25 @@ def run_heartbeat_model(
                     payload,
                     route.credential,
                     route.base_url or openai_fallback.DEFAULT_BASE_URL,
-                    max(1, int(_bounded_timeout(route, attempt_timeout))),
+                    max(1, int(bounded_timeout(route, attempt_timeout))),
                     route.user_agent,
                 )
                 text = openai_fallback.extract_text(response)
         except Exception as exc:
             error_text = str(exc)
-            reason = _provider_reason(error_text)
-            last_error_detail = _safe_error_detail(error_text)
+            reason = provider_reason(error_text)
+            last_error_detail = safe_error_detail(
+                error_text, summary=error_summary,
+            )
             logger(
                 f"Heartbeat route openai failed: {last_error_detail}",
                 level="warn",
             )
-            if is_preexecution_error(error_text) or reason in _PREEXECUTION_REASONS:
+            if is_preexecution_error(error_text) or reason in PREEXECUTION_REASONS:
                 status = "preexecution_failure"
             elif request.allow_tools:
                 status = "ambiguous_failure"
-            elif reason in _TRANSPORT_REASONS:
+            elif reason in TRANSPORT_REASONS:
                 status = "transport_failure"
             else:
                 status = "ambiguous_failure"

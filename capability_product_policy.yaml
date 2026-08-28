@@ -173,6 +173,7 @@ rules:
       - cli:core.metrics_digest
       - cli:core.model_fallback
       - cli:core.openai_fallback
+      - cli:core.owner_chat_model
       - cli:core.perception
       - cli:core.presence
       - cli:core.prompt

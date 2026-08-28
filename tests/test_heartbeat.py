@@ -236,21 +236,21 @@ def test_task_scripts_do_not_inherit_model_credentials(tmp_path, monkeypatch):
 def test_provider_process_receives_only_its_active_credential(monkeypatch):
     from types import SimpleNamespace
 
-    from core.heartbeat_model import _claude_env
+    from core.model_adapter_support import claude_env
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
     monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-secret")
     monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
 
-    primary = _claude_env(SimpleNamespace(
+    primary = claude_env(SimpleNamespace(
         id="primary", credential="", base_url="",
     ))
     assert primary["ANTHROPIC_API_KEY"] == "primary-secret"
     assert "CLAUDE_BACKUP_AUTH_TOKEN" not in primary
     assert "OPENAI_API_KEY" not in primary
 
-    backup2 = _claude_env(SimpleNamespace(
+    backup2 = claude_env(SimpleNamespace(
         id="backup2",
         credential="backup2-secret",
         base_url="https://backup2.invalid",

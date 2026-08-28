@@ -7,8 +7,8 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 184 active capabilities with complete engineering
-  evidence. Product disposition is now independent: 82 `keep`, 86 `quiet`, 16
+- The generated inventory has 185 active capabilities with complete engineering
+  evidence. Product disposition is now independent: 82 `keep`, 87 `quiet`, 16
   `replace-with-codex`, and 0 `unreviewed`, plus four recorded retired surfaces.
   An engineering `keep` still means definition, implementation, entrypoint, and
   executable-test reference exist; it is not a value or coverage claim. New
