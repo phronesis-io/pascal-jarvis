@@ -23,6 +23,12 @@ task that can finish and be verified entirely in the current Codex task.
 
 ## Work
 
+0. A task may have been prepared by a Jarvis wake receipt. Preparation is not
+   execution: wait for Pascal's first message. When he asks to continue, use
+   the exact Matter ID from the trusted task instruction and call
+   `jarvis_matter_continue`; omit `task_ref` because Jarvis already linked the
+   real Codex thread in the wake receipt. Never treat task creation as acquire,
+   progress, or completion evidence.
 1. The user speaks naturally; do not teach or expose the Matter protocol. When
    the request clearly continues durable work, call `jarvis_matter_continue`
    with a concise identifying phrase. If it returns one match, proceed. If it

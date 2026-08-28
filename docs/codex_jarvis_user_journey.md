@@ -23,7 +23,8 @@ Pascal
 Jarvis time/signal trigger
   -> ledger first
   -> bounded Lark wake-up only when time or judgment cannot wait
-  -> continue the substantive Matter in Codex
+  -> explicit owner handoff may prepare one verified empty Codex task
+  -> first owner message continues the substantive Matter in Codex
 ```
 
 ## Which Path To Use
@@ -91,9 +92,11 @@ inbox and not a model-authored performance report.
 3. Long analysis, diffs, artifacts, approvals, and test evidence stay in
    Codex. Lark does not receive a clipped duplicate.
 4. A Lark wake-up remains independently understandable until an exact Codex
-   continuation link has been proven in production. It names the result or
-   decision and the Matter, then gives one stable phrase to use in a clean
-   Codex task; it never promises a broken deep link.
+   continuation link has been proven in production. An explicit `去 Codex`
+   action may prepare and name a real empty task through Codex app-server, but
+   the message still gives one stable phrase until mobile visibility is proven.
+   Task preparation performs no model turn and takes no Matter lease; it never
+   promises a broken deep link.
 
 ## When Pascal Talks Directly To Jarvis
 
@@ -103,6 +106,12 @@ Direct Jarvis conversation is an exception, not the main journey:
 - an urgent/time-bound reply to a Jarvis wake-up;
 - a native Lark action whose participants are already in that conversation;
 - outage fallback when the Codex frontstage is unavailable.
+
+When the private conversation is already bound to an active Matter, `去 Codex`,
+`在 Codex 继续`, and `/matter handoff codex` use the same deterministic wake
+path. A repeated action reuses the linked task only while it still has zero
+turns. If creation or read-back is uncertain, Jarvis says it did not confirm a
+task and returns the stable continuation phrase.
 
 Jarvis should convert durable substance into Matter state and let the next
 clean Codex task continue it. It should not grow one permanent chat context.

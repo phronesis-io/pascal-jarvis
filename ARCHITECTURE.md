@@ -101,6 +101,13 @@ The implementation boundary is explicit:
 - `core.codex_mcp` adapts that contract to the official MCP Python SDK over
   local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
   it does not read Codex's private task store or create a second conversation;
+- `core.codex_app_server` is the bounded JSON-RPC client shared by supported
+  host-side Codex integrations. `core.codex_wake` uses it only after an
+  explicit private-owner Lark action to create, name, and read back one empty
+  Codex task. The committed Matter session link is the wake receipt. No model
+  turn or Matter lease starts during preparation. Requested, externally
+  created, linked, and failed states remain auditable so a process death cannot
+  hide a half-created task;
 - `core.frontstage_acceptance` stores explicit owner reviews for real desktop
   and mobile journeys. It atomically claims at most one optional prompt per
   successful run and maps only Pascal's exact published labels to immutable
@@ -115,16 +122,19 @@ An external-effect claim is accepted only when it references current,
 qualifying evidence from the Delegation verifier. Release persists the receipt
 before projecting session/artifact links, so projection failure is observable
 without losing the authoritative receipt.
-Foreground launcher sessions renew a bounded six-hour lease while alive;
-abandoned prepared handoffs still expire. Replayed handoff requests reuse the
-same unstarted run only when executor, task, workspace and packet all match.
+Foreground launcher sessions renew a bounded six-hour lease while alive.
+Claude CLI handoffs prepared through the legacy launcher still expire. A Codex
+wake no longer pre-acquires a run: repeated owner actions reuse the same
+verified zero-turn task, and the first real Codex continuation acquires the
+lease through the MCP contract.
 
 Codex itself owns task creation, resumption, streaming, approvals, diffs,
 mobile Remote, and ordinary task memory. Jarvis integrates through the
-supported MCP/plugin boundary for application-owned capabilities. A future
-host-driven workflow may use Codex app-server to create or resume tasks, but
-app-server event state must still project into the same Matter Run contract;
-it may not become a competing lifecycle store.
+supported MCP/plugin boundary for application-owned capabilities. The bounded
+wake adapter may request an empty task through Codex app-server, but it stores
+no competing task lifecycle and starts no execution. The first owner message
+continues through the same Matter Run contract. Mobile visibility remains
+unverified until owner acceptance records prove it.
 
 Git and GitHub remain outside the Jarvis state machine. They own source
 history, commits, pull requests, review, CI, and merge evidence. Matter links

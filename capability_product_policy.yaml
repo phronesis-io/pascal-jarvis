@@ -116,6 +116,7 @@ rules:
     capabilities:
       - cli:core.actions
       - cli:core.codex_mcp
+      - cli:core.codex_wake
       - cli:core.components
       - cli:core.delegation_cli
       - cli:core.delivery

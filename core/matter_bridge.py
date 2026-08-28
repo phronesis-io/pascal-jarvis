@@ -339,6 +339,10 @@ def record_channel_message(matter_id: str, channel: str, message_id: str,
 
 def _match_command(content: str) -> tuple[str, str, str] | None:
     text = str(content or "").strip()
+    if re.sub(r"\s+", "", text).lower() in {
+        "去codex", "在codex继续", "交给codex", "用codex继续",
+    }:
+        return "handoff", "codex", "matter"
     match = re.match(r"^/(session|会话)(?:\s+(.+))?$", text, re.I)
     if match:
         rest = (match.group(2) or "current").strip()
@@ -545,7 +549,8 @@ def _is_model_usage_command(content: str) -> bool:
 
 
 def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
-                        chat_type: str = "p2p", actor: str = "user") -> dict:
+                        chat_type: str = "p2p", actor: str = "user",
+                        message_id: str = "") -> dict:
     preference_command = _model_preference_command(content)
     if preference_command:
         if chat_type != "p2p":
@@ -758,12 +763,33 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
                 "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "handoff":
         provider = arg.lower() if arg.lower() in {"claude", "codex"} else "codex"
+        if provider == "codex":
+            from core.codex_wake import prepare_codex_wake
+            wake = prepare_codex_wake(
+                matter["id"],
+                source="lark",
+                source_ref=message_id,
+                actor=actor,
+            )
+            if wake["status"] in {"prepared", "reused"}:
+                verb = "已创建" if wake["status"] == "prepared" else "已找到"
+                return {"handled": True, "reply": (
+                    f"{verb} Codex 任务「{wake['task_name']}」。没有替你开工，"
+                    "也没有占用事项锁。\n"
+                    "打开 Codex 的任务列表，进入这个任务后直接说“继续”即可。\n\n"
+                    "如果手机端暂时没出现，请在新任务里说：\n"
+                    f"{wake['continuation_prompt']}"
+                )}
+            return {"handled": True, "reply": (
+                "这次没有确认 Codex 任务创建成功，所以没有假装已经打开。\n"
+                "请在 Codex 新任务里说：\n"
+                f"{wake['continuation_prompt']}"
+            )}
         from core.matter_executor import prepare_handoff
-        prepare_handoff(matter["id"], provider, actor="lark")
-        from core.codex_frontstage import continuation_prompt
+        handoff = prepare_handoff(matter["id"], provider, actor="lark")
         return {"handled": True, "reply": (
-            "上下文已经整理好。请在 Codex 新任务里说：\n"
-            f"{continuation_prompt(matter)}"
+            "上下文已经整理好。请在电脑的仓库终端运行：\n"
+            f"{handoff['command']}"
         )}
     return {"handled": True, "reply": "支持：new / use / current / list / done / handoff / clear"}
 
@@ -796,7 +822,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             result = handle_lark_command(
-                args.content, args.conv_key, args.destination_id, args.chat_type)
+                args.content, args.conv_key, args.destination_id, args.chat_type,
+                message_id=args.message_id,
+            )
         except Exception as exc:
             # Deterministic commands must never fall through into an LLM after
             # an infrastructure failure: that can duplicate a partially

@@ -230,17 +230,87 @@ def test_lark_handoff_gives_a_human_codex_continuation_phrase(monkeypatch):
     matter = create_matter("手机继续白皮书")
     bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
     monkeypatch.setattr(
-        matter_executor,
-        "prepare_handoff",
-        lambda *_a, **_k: {"context_path": "/private/context.md"},
+        "core.codex_wake.prepare_codex_wake",
+        lambda *_a, **_k: {
+            "status": "prepared",
+            "task_name": "继续：手机继续白皮书",
+            "continuation_prompt": (
+                f"继续 Jarvis 事项「手机继续白皮书」（{matter['id']}）"
+            ),
+        },
     )
 
     result = handle_lark_command(
         "/matter handoff codex", "ou_owner", "ou_owner")
 
-    assert "请在 Codex 新任务里说" in result["reply"]
+    assert "已创建 Codex 任务" in result["reply"]
+    assert "没有替你开工" in result["reply"]
+    assert "请在新任务里说" in result["reply"]
     assert matter["id"] in result["reply"]
     assert "在仓库运行" not in result["reply"]
+
+
+def test_lark_natural_codex_handoff_uses_same_deterministic_path(monkeypatch):
+    matter = create_matter("自然语言去 Codex")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    seen = {}
+
+    def fake_prepare(matter_id, **kwargs):
+        seen.update({"matter_id": matter_id, **kwargs})
+        return {
+            "status": "reused",
+            "task_name": "继续：自然语言去 Codex",
+            "continuation_prompt": (
+                f"继续 Jarvis 事项「自然语言去 Codex」（{matter_id}）"
+            ),
+        }
+
+    monkeypatch.setattr("core.codex_wake.prepare_codex_wake", fake_prepare)
+
+    result = handle_lark_command(
+        "去 Codex", "ou_owner", "ou_owner", message_id="om_source")
+
+    assert result["handled"] is True
+    assert "已找到 Codex 任务" in result["reply"]
+    assert seen["matter_id"] == matter["id"]
+    assert seen["source_ref"] == "om_source"
+
+
+def test_group_cannot_create_local_codex_wake(monkeypatch):
+    called = False
+
+    def fake_prepare(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("core.codex_wake.prepare_codex_wake", fake_prepare)
+
+    result = handle_lark_command(
+        "去 Codex", "oc_group", "oc_group", chat_type="group",
+    )
+
+    assert "只在你的私聊中开放" in result["reply"]
+    assert called is False
+
+
+def test_claude_handoff_keeps_the_existing_cli_launcher(monkeypatch):
+    matter = create_matter("Claude Code 继续")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    monkeypatch.setattr(
+        matter_executor,
+        "prepare_handoff",
+        lambda *_a, **_k: {
+            "command": "./scripts/jarvis-matter launch mat_test claude"
+        },
+    )
+
+    result = handle_lark_command(
+        "/matter handoff claude", "ou_owner", "ou_owner",
+    )
+
+    assert "电脑的仓库终端" in result["reply"]
+    assert "jarvis-matter launch mat_test claude" in result["reply"]
 
 
 def test_force_close_keeps_an_audited_warning():

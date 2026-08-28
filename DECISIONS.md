@@ -89,8 +89,12 @@ not create a second preference or route-policy store.
   Matter state machine. Claude Code or another harness may reuse that Python
   contract without MCP.
 - The connector does not scrape or mutate undocumented Codex task storage.
-  Codex app-server is reserved for a future host-driven journey that truly
-  needs programmatic task creation/resumption and streamed approvals.
+  An explicit private-owner Lark handoff may use supported Codex app-server
+  methods to create, name, and read back one empty task. This preparation
+  records a Matter wake receipt but starts neither a model turn nor a Matter
+  lease. Repetition reuses a verified zero-turn task; failure falls back to a
+  stable phrase rather than promising a broken link. Streaming execution and
+  approval ownership remain in Codex.
 - Jarvis cannot grant an executor Matter-completion authority or accept model
   prose as external-effect evidence. Release closes the run only.
 - Desktop/mobile migration evidence comes only from Pascal's exact response to

@@ -316,6 +316,7 @@ assumption rather than a production-code defect:
 | 132 | Self-monitoring labeled every awaiting closure older than three days a zombie, even though the lifecycle authority gives external closures fourteen days and keeps any category alive while its follow-up is still pending or triggered | The read-only monitor now uses the authoritative per-category closure TTL and the same live-follow-up exclusion as the lifecycle sweeper; explicit diagnostic overrides remain available. External 7/15-day boundaries, live/dead follow-up transitions, and human-readable threshold output have regressions |
 | 133 | The documented default code-release command restarted only the bot tree, while launchd-owned daemon and Dashboard kept the previous revision; the script nevertheless printed a successful runtime-version verdict, and this half-deploy recurred on two consecutive releases | The default command and `--full` now call one complete governed-deploy function that refreshes installed launchd definitions, restarts daemon/bot/UI, and verifies every resident component. Admin and sidecar operational restarts explicitly use the same-revision `--runtime` path; source regressions pin both dispatch boundaries |
 | 134 | Four domain bootstraps still performed unregistered `ALTER TABLE ADD COLUMN` operations, so a partial migration had no durable identity and a marker could not be checked against the physical schema | A shared SQLite migration executor now applies each domain's additive compatibility columns under a named `IMMEDIATE` transaction; concurrent processes serialize before reading state and retry whole transactions after bounded lock contention. Compatible pre-existing columns are adopted without rewriting data, failed batches leave neither columns nor markers, and type/nullability/default or marker/schema disagreement fails closed. Intentions also serializes its shared-connection bootstrap; migration-engine, concurrency, and existing legacy-schema regressions cover the path |
+| 135 | The honest Lark-to-Codex handoff still required manual task creation, while the historical Codex launcher acquired a six-hour Matter lease before the owner opened anything | The owner-private wake adapter now uses supported app-server methods to create, name, and read back a durable zero-turn task, commits its real thread ID as a Matter wake receipt, and leaves the run ledger untouched until the first owner message. Double actions reuse one unused task; partial creation deletes the orphan; any uncertainty returns the stable phrase without claiming success. App-server boundary, privacy, idempotency, cleanup, no-lease, and Lark natural-command regressions cover the path |
 
 Generic `COMMENTED` reviews do not count as approval. Formal approval must
 reference the final PR head, so a review submitted before the final push cannot
@@ -362,7 +363,8 @@ The following are decisions, not unfinished promises:
 
 Each production release must carry:
 
-- full local test result (`2115 passed` for this candidate);
+- full local test result bound to the exact candidate SHA (never carry a stale
+  test count forward from an earlier release);
 - public-repository hygiene and secret scan;
 - independent review, or an explicit admin-owner release decision where branch
   policy intentionally requires zero approvals and no other review rule, and

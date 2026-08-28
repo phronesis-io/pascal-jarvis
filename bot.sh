@@ -597,12 +597,13 @@ delivery_reply_reliable() {
   return 1
 }
 
-# run_matter_command <content> <conv_key> <destination> <chat_type>
+# run_matter_command <content> <conv_key> <destination> <chat_type> <message_id>
 # A deterministic command is classified before execution. Once classified,
 # even a hard process exit must fail closed instead of handing a potentially
 # committed command to the model for a second interpretation.
 run_matter_command() {
   local content="$1" conv_key="$2" destination_id="$3" chat_type="$4"
+  local message_id="${5:-}"
   local deterministic output status
   deterministic=$(JV_CONTENT="$content" python3 -c "
 import os
@@ -612,6 +613,7 @@ print('true' if command_would_handle(os.environ.get('JV_CONTENT', '')) else 'fal
   output=$(python3 -m core.matter_bridge \
     --content "$content" --conv-key "$conv_key" \
     --destination-id "$destination_id" --chat-type "$chat_type" \
+    --message-id "$message_id" \
     --tracker "$SESSION_TRACKER" --session-dir "$CLAUDE_PROJECT_DIR" \
     --jarvis-dir "$JARVIS_DIR" \
     2>>"$LOG_FILE")
@@ -3034,7 +3036,8 @@ except Exception:
           fi
         fi
         _matter_cmd=$(run_matter_command \
-          "$content" "$conv_key" "${chat_id:-$sender_id}" "$chat_type")
+          "$content" "$conv_key" "${chat_id:-$sender_id}" "$chat_type" \
+          "$message_id")
         if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
           if delivery_reply_reliable "$message_id" "$_matter_reply"; then

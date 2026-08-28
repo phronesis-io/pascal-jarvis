@@ -64,6 +64,9 @@ interaction. Therefore:
   when continuity, time, authority, or verified effects justify a Matter.
 - Search before creating a Matter. One recognizable outcome keeps one Matter;
   separate Codex tasks may contribute one verified run at a time.
+- An explicit private Lark `去 Codex` action may prepare a named, empty task.
+  Preparation must read back zero turns, record the real thread ID, and leave
+  the Matter lease untouched. The first owner message starts continuation.
 
 ### Lark
 
@@ -170,6 +173,9 @@ interaction. Therefore:
   the user search through an unrelated chat history. Until that path is
   verified, the Lark message must remain independently understandable and may
   not promise a broken deep link.
+- A verified empty task may be named in that message, but mobile visibility is
+  still unproven until Pascal completes the real acceptance journey. Keep the
+  stable continuation phrase as fallback.
 
 ## Content and Visual Rules
 

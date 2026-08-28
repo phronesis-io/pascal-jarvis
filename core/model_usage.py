@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import selectors
 import subprocess
 import time
 from datetime import datetime
@@ -19,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.claude_bin import resolve_claude_bin
-from core.codex_fallback import resolve_codex_bin
+from core.codex_app_server import CodexAppServerClient, CodexAppServerError
 from core.config import Config
 from core.model_control import catalog_report, route_plan
 from core.model_fallback import gate
@@ -58,79 +57,26 @@ def _window_label(minutes: int, fallback: str = "") -> str:
     return str(fallback or "当前")
 
 
-def _read_response(process, request_id: int, timeout: float) -> dict[str, Any]:
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + max(0.1, float(timeout))
-    try:
-        while time.monotonic() < deadline:
-            events = selector.select(max(0.0, deadline - time.monotonic()))
-            if not events:
-                break
-            line = process.stdout.readline()
-            if not line:
-                break
-            try:
-                payload = json.loads(line)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-            if payload.get("id") != request_id:
-                continue
-            if payload.get("error"):
-                raise UsageReadError("Codex app-server rejected the usage read")
-            result = payload.get("result")
-            if isinstance(result, dict):
-                return result
-            raise UsageReadError("Codex app-server returned an invalid result")
-    finally:
-        selector.close()
-    raise UsageReadError("Codex app-server usage read timed out")
-
-
 def read_codex_rate_limits(
     binary: str = "", *, timeout: int = CODEX_TIMEOUT_SECONDS,
     popen_factory: Callable[..., Any] = subprocess.Popen,
 ) -> dict[str, Any]:
     """Read the signed-in ChatGPT/Codex account's rate-limit snapshot."""
-    executable = binary or resolve_codex_bin()
-    if not executable:
-        raise UsageReadError("Codex CLI is unavailable")
-    process = popen_factory(
-        [executable, "app-server", "--stdio"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
     try:
-        initialize = {
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "jarvis-usage", "version": "0.1.0"},
-                "capabilities": {},
-            },
-        }
-        process.stdin.write(json.dumps(initialize) + "\n")
-        process.stdin.flush()
-        _read_response(process, 1, timeout)
-        process.stdin.write(json.dumps({
-            "id": 2, "method": "account/rateLimits/read", "params": {},
-        }) + "\n")
-        process.stdin.flush()
-        return _read_response(process, 2, timeout)
-    except (BrokenPipeError, OSError) as exc:
-        raise UsageReadError("Codex app-server could not be started") from exc
-    finally:
-        try:
-            process.terminate()
-            process.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                process.kill()
-            except OSError:
-                pass
+        with CodexAppServerClient(
+            binary,
+            timeout=timeout,
+            client_name="jarvis-usage",
+            client_version="0.1.0",
+            experimental_api=False,
+            popen_factory=popen_factory,
+        ) as client:
+            result = client.request("account/rateLimits/read", {})
+    except CodexAppServerError as exc:
+        raise UsageReadError("Codex app-server usage read failed") from exc
+    if not isinstance(result, dict):
+        raise UsageReadError("Codex app-server returned an invalid result")
+    return result
 
 
 def read_claude_account(

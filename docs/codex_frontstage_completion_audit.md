@@ -18,7 +18,7 @@
 | Package usage is visible without opening billing pages | `core.model_usage`, Codex MCP, deterministic owner-Lark query | Model-usage and Matter-continuity tests plus read-only local smoke | Deployed; exact Codex windows and honest unknowns are available through the MCP contract |
 | Every legacy capability has an explicit place in the new product | `capability_product_policy.yaml`, generated capability inventory | Exact policy coverage, migration-gate, retired-surface, and drift tests | 185 active capabilities classified: 82 keep, 87 quiet, 16 replace-with-codex, 0 unreviewed; release pending |
 | Git/GitHub remains the code-evidence plane | Native Git/GitHub plus existing `git`/`github` Matter artifact providers | Product-contract test and existing artifact/provider tests | Product boundary complete; no duplicate Jarvis Git state machine is intended |
-| Lark is a bounded wake-up/native-integration surface | Existing unified delivery and the frontstage journey contract | Delivery, attention, Lark transport, and weekly review tests | Retained until Codex acceptance passes; no long-output migration claimed |
+| Lark is a bounded wake-up/native-integration surface | Existing unified delivery, `core.codex_wake`, and the frontstage journey contract | Delivery, attention, Lark transport, zero-turn task preparation, and weekly review tests | Explicit private handoff can prepare a verified empty Codex task without a run lease; retained until desktop/mobile acceptance passes; no long-output migration claimed |
 | Result evidence cannot silently complete a Matter | `core.matter_runs`, `core.matter_closure`, Delegation verifier | Receipt, closure, effect, and result-review tests | Implemented |
 | One owner confirmation converges linked state | `core.matter_closure` | Intent/Item/Handoff reconciliation and replay tests | Deployed |
 | Desktop/mobile migration is measured by the user, not the Agent | `core.frontstage_acceptance`, bounded MCP tools, plugin skill | Exact-label, once-only prompt, immutability, version-binding, and MCP E2E tests | Instrumentation complete; 20 desktop + 20 mobile production samples pending |
@@ -56,6 +56,8 @@ true for one exact merged SHA:
 4. same-revision component, delivery, provider, and stdio MCP smoke pass;
 5. post-release L3 observation finds no new P0/P1 regression;
 6. 20 real desktop and 20 real mobile continuation samples meet the published
-   quality thresholds before any corresponding Lark path is reduced.
+   quality thresholds before any corresponding Lark path is reduced. Wake
+   samples must separately prove task visibility, correct Matter continuation,
+   zero premature execution, and no duplicate task on repeated owner action.
 
 Tests and Agent prose cannot manufacture any of these production observations.

@@ -178,6 +178,24 @@ def test_deterministic_matter_reply_closes_only_after_reliable_delivery():
     assert handled < send < close < branch_end
 
 
+def test_matter_command_passes_source_message_to_wake_receipt():
+    source = (ROOT / "bot.sh").read_text(encoding="utf-8")
+    helper = source[
+        source.index("run_matter_command() {"):
+        source.index("delivery_send_reliable()")
+    ]
+    caller = source[
+        source.index("_matter_cmd=$(run_matter_command"):
+        source.index("if [ \"$(echo \"$_matter_cmd\"", source.index(
+            "_matter_cmd=$(run_matter_command"
+        ))
+    ]
+
+    assert 'local message_id="${5:-}"' in helper
+    assert '--message-id "$message_id"' in helper
+    assert '"$message_id")' in caller
+
+
 def test_deterministic_command_hard_exit_is_not_replayed_through_model():
     source = (ROOT / "bot.sh").read_text(encoding="utf-8")
     helper = source[source.index("run_matter_command()"):
