@@ -10,18 +10,27 @@
 
 | Requirement | Authoritative implementation | Verification | Current state |
 |---|---|---|---|
-| Codex is the normal desktop/mobile interaction surface | `PRODUCT.md`, `docs/codex_jarvis_user_journey.md`, repo-owned `jarvis-matters` plugin | Plugin manifest/install tests and real stdio MCP smoke | Implemented in release candidate; production plugin install pending release |
+| Codex is the normal desktop/mobile interaction surface | `PRODUCT.md`, `docs/codex_jarvis_user_journey.md`, repo-owned `jarvis-matters` plugin | Plugin manifest/install tests and real stdio MCP smoke | Plugin deployed at PR #131; current pre-install task cannot gain tools retroactively; real desktop/mobile acceptance pending |
 | Jarvis owns durable continuity rather than another chat UI | `core.codex_frontstage`, `core.matter_runs`, `core.matter_context` | Matter contract, continuation, lease, recovery, and context tests | Implemented |
 | A clean task can continue the right Matter without replaying raw history | `jarvis_matter_continue`, Context Packet v2 | Ambiguous/missing/exact continuation and provenance tests | Implemented; real desktop/mobile acceptance pending |
-| Codex, Claude Code, and Lark share current cross-product memory | `core.memory_compiler` and source-linked claims | Compiler, conflict, privacy, and cross-session E2E tests | Implemented in release candidate; production replay observation pending |
-| Models, harnesses, and product state are independent | `core.model_control`, `core.model_runtime`, provider adapters, Matter contract | Route, effect-replay, receipt, provider/fallback, and continuity tests | Control plane implemented; auxiliary execution is unified, while main Lark/heartbeat migration and provider quota without an API remain open |
-| Package usage is visible without opening billing pages | `core.model_usage`, Codex MCP, deterministic owner-Lark query | Model-usage and Matter-continuity tests plus read-only local smoke | Implemented in release candidate |
+| Codex, Claude Code, and Lark share current cross-product memory | `core.memory_compiler` and source-linked claims | Compiler, conflict, privacy, and cross-session E2E tests | Deployed; ongoing production replay observation remains part of Phase 2 acceptance |
+| Models, harnesses, and product state are independent | `core.model_control`, `core.model_runtime`, provider adapters, Matter contract | Route, effect-replay, receipt, provider/fallback, and continuity tests | Control plane and auxiliary runtime are in PR #133; heartbeat migration is stacked in PR #135; owner-chat migration and provider quota without an API remain open |
+| Package usage is visible without opening billing pages | `core.model_usage`, Codex MCP, deterministic owner-Lark query | Model-usage and Matter-continuity tests plus read-only local smoke | Deployed; exact Codex windows and honest unknowns are available through the MCP contract |
+| Every legacy capability has an explicit place in the new product | `capability_product_policy.yaml`, generated capability inventory | Exact policy coverage, migration-gate, retired-surface, and drift tests | 184 active capabilities classified: 82 keep, 86 quiet, 16 replace-with-codex, 0 unreviewed; release pending |
 | Git/GitHub remains the code-evidence plane | Native Git/GitHub plus existing `git`/`github` Matter artifact providers | Product-contract test and existing artifact/provider tests | Product boundary complete; no duplicate Jarvis Git state machine is intended |
 | Lark is a bounded wake-up/native-integration surface | Existing unified delivery and the frontstage journey contract | Delivery, attention, Lark transport, and weekly review tests | Retained until Codex acceptance passes; no long-output migration claimed |
 | Result evidence cannot silently complete a Matter | `core.matter_runs`, `core.matter_closure`, Delegation verifier | Receipt, closure, effect, and result-review tests | Implemented |
-| One owner confirmation converges linked state | `core.matter_closure` | Intent/Item/Handoff reconciliation and replay tests | Implemented in release candidate |
+| One owner confirmation converges linked state | `core.matter_closure` | Intent/Item/Handoff reconciliation and replay tests | Deployed |
 | Desktop/mobile migration is measured by the user, not the Agent | `core.frontstage_acceptance`, bounded MCP tools, plugin skill | Exact-label, once-only prompt, immutability, version-binding, and MCP E2E tests | Instrumentation complete; 20 desktop + 20 mobile production samples pending |
-| The release cannot claim a plugin that does not start | governed deploy plus `scripts/check_codex_frontstage.py` | Installed-plugin readback and real stdio tool handshake | Implemented; same-revision production deploy pending Owner authorization |
+| The release cannot claim a plugin that does not start | governed deploy plus `scripts/check_codex_frontstage.py` | Installed-plugin readback and real stdio tool handshake | Deployed at PR #131; later connector changes still require the same governed evidence |
+
+The production plugin is installed and its MCP registration is enabled, but the
+Codex task used for this audit started before that install and therefore does not
+have the Jarvis tools in its immutable task toolset. Its real thread ID remains
+linked to a terminal Matter; PR #132 is the tested terminal-link rebind fix. A
+new Codex task is still required to collect the first honest desktop acceptance
+sample after release. Neither an independent stdio smoke nor this shell-based
+audit counts as user acceptance.
 
 ## Normal Use Contract
 

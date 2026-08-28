@@ -146,7 +146,7 @@ task does not own:
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
    - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with feed triage, verified friend actions, private messaging, and a real-time stream.
-   - *Content recommend* and *watch-later* — curates content for you; saved items remain queryable without creating nagging reminder intents.
+   - *Watch-later* — saves bounded owner-selected material for later retrieval without creating nagging reminder intents. The former standalone content-recommendation heartbeat is retired.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
@@ -183,6 +183,9 @@ repeat and Agent inference never counts.
 Delivery uses sanitization, deduplication, attention caps, retry,
 dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
 Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+The generated [capability inventory](docs/capability_inventory.md) records the
+engineering evidence and explicit product disposition for every supported
+surface; `capability_product_policy.yaml` is the fail-closed product policy.
 
 ### Provider-neutral Matter execution
 

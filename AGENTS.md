@@ -29,10 +29,13 @@ python3 scripts/import_graph.py core tasks --threshold 24 --limit 20
 python3 scripts/import_graph.py core --max-direct-cycles 11
 ```
 
-The capability inventory is the evidence-backed list of supported runtime
-surfaces. Update it with the generator whenever a component, heartbeat task,
-CLI, admin route, or Lark command changes; never delete a capability
-from a broad cleanup without an explicit retirement and migration review.
+The capability inventory combines two independent claims: engineering evidence
+from the generator and product disposition from
+`capability_product_policy.yaml`. Update both whenever a component, heartbeat
+task, CLI, admin route, or Lark command changes. A newly discovered capability
+without an explicit `keep`, `quiet`, `replace-with-codex`, or `retire` decision
+fails closed. Never delete a capability from a broad cleanup without explicit
+replacement, migration, and data-retention review.
 
 The import graph is a review signal for broad or self-improve rounds, not a
 hard quality verdict. Compare the high-adjacency list before and after the

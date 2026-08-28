@@ -23,8 +23,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATUSES = ("keep", "fix", "retire-candidate")
+PRODUCT_DISPOSITIONS = (
+    "keep", "quiet", "replace-with-codex", "retire", "unreviewed",
+)
+SURVIVAL_VALUES = {
+    "continuity",
+    "offline_value",
+    "governance",
+    "coordination",
+    "verified_closure",
+}
+PRODUCT_POLICY_FILE = "capability_product_policy.yaml"
 KIND_ORDER = {
     "runtime-component": 0,
     "heartbeat-task": 1,
@@ -328,6 +339,152 @@ def classify_capability(item: dict[str, Any]) -> dict[str, Any]:
         )
     item["evidence_gaps"] = list(dict.fromkeys(gaps))
     return item
+
+
+def _load_product_policy(root: Path) -> dict[str, Any]:
+    """Load explicit product decisions without turning evidence into value."""
+    path = root / PRODUCT_POLICY_FILE
+    if not path.is_file():
+        return {
+            "configured": False,
+            "path": PRODUCT_POLICY_FILE,
+            "decisions": {},
+            "retired_surfaces": {
+                name: {
+                    "disposition": "retire",
+                    "rationale": rationale,
+                }
+                for name, rationale in RETIRED_SURFACES.items()
+            },
+            "errors": [],
+        }
+    try:
+        import yaml
+
+        data = yaml.safe_load(_read(path)) or {}
+    except Exception as exc:
+        return {
+            "configured": True,
+            "path": PRODUCT_POLICY_FILE,
+            "decisions": {},
+            "retired_surfaces": {},
+            "errors": [f"cannot parse {PRODUCT_POLICY_FILE}: {type(exc).__name__}"],
+        }
+
+    errors: list[str] = []
+    if data.get("schema_version") != 1:
+        errors.append("product policy has unsupported schema_version")
+    decisions: dict[str, dict[str, Any]] = {}
+    for index, raw_rule in enumerate(data.get("rules") or [], start=1):
+        rule = raw_rule if isinstance(raw_rule, dict) else {}
+        rule_id = str(rule.get("id") or f"rule-{index}").strip()
+        disposition = str(rule.get("disposition") or "").strip()
+        rationale = str(rule.get("rationale") or "").strip()
+        migration_gate = str(rule.get("migration_gate") or "").strip()
+        values = tuple(dict.fromkeys(
+            str(value).strip() for value in (rule.get("survival_values") or [])
+            if str(value).strip()
+        ))
+        capability_ids = rule.get("capabilities") or []
+        if disposition not in PRODUCT_DISPOSITIONS[:-1]:
+            errors.append(f"product rule {rule_id}: invalid disposition")
+        if disposition == "unreviewed":
+            errors.append(f"product rule {rule_id}: unreviewed is not a decision")
+        if not rationale:
+            errors.append(f"product rule {rule_id}: rationale is required")
+        unknown_values = sorted(set(values) - SURVIVAL_VALUES)
+        if unknown_values:
+            errors.append(
+                f"product rule {rule_id}: unsupported survival_values "
+                + ", ".join(unknown_values)
+            )
+        if disposition in {"keep", "quiet"} and not values:
+            errors.append(
+                f"product rule {rule_id}: retained capability needs a survival value"
+            )
+        if disposition == "replace-with-codex" and not migration_gate:
+            errors.append(
+                f"product rule {rule_id}: replace-with-codex needs migration_gate"
+            )
+        if not isinstance(capability_ids, list) or not capability_ids:
+            errors.append(f"product rule {rule_id}: capabilities are required")
+            continue
+        for value in capability_ids:
+            capability_id = str(value or "").strip()
+            if not capability_id:
+                errors.append(f"product rule {rule_id}: blank capability id")
+                continue
+            if capability_id in decisions:
+                errors.append(
+                    f"product capability {capability_id} appears in multiple rules"
+                )
+                continue
+            decisions[capability_id] = {
+                "rule_id": rule_id,
+                "disposition": disposition,
+                "survival_values": list(values),
+                "rationale": rationale,
+                "migration_gate": migration_gate,
+            }
+
+    retired_surfaces: dict[str, dict[str, str]] = {}
+    raw_retired = data.get("retired_surfaces") or {}
+    if not isinstance(raw_retired, dict):
+        errors.append("product policy retired_surfaces must be a mapping")
+    else:
+        for raw_name, raw_item in raw_retired.items():
+            name = str(raw_name or "").strip()
+            item = raw_item if isinstance(raw_item, dict) else {}
+            disposition = str(item.get("disposition") or "").strip()
+            rationale = str(item.get("rationale") or "").strip()
+            if not name or disposition != "retire" or not rationale:
+                errors.append(
+                    f"retired surface {name or '<blank>'}: retire disposition and rationale required"
+                )
+                continue
+            retired_surfaces[name] = {
+                "disposition": "retire",
+                "rationale": rationale,
+            }
+    return {
+        "configured": True,
+        "path": PRODUCT_POLICY_FILE,
+        "decisions": decisions,
+        "retired_surfaces": retired_surfaces,
+        "errors": errors,
+    }
+
+
+def _apply_product_policy(
+    root: Path, capabilities: list[dict[str, Any]],
+) -> dict[str, Any]:
+    policy = _load_product_policy(root)
+    decisions = policy.pop("decisions")
+    active_ids = {str(item.get("id") or "") for item in capabilities}
+    for item in capabilities:
+        decision = decisions.get(item["id"])
+        if decision is None:
+            item.update({
+                "product_disposition": "unreviewed",
+                "product_rule": "",
+                "product_survival_values": [],
+                "product_rationale": "",
+                "product_migration_gate": "",
+            })
+            continue
+        item.update({
+            "product_disposition": decision["disposition"],
+            "product_rule": decision["rule_id"],
+            "product_survival_values": decision["survival_values"],
+            "product_rationale": decision["rationale"],
+            "product_migration_gate": decision["migration_gate"],
+        })
+    policy["unknown_capabilities"] = sorted(set(decisions) - active_ids)
+    policy["unreviewed_capabilities"] = sorted(
+        item["id"] for item in capabilities
+        if item["product_disposition"] == "unreviewed"
+    )
+    return policy
 
 
 def _component_capabilities(root: Path) -> list[dict[str, Any]]:
@@ -875,6 +1032,30 @@ def validate_inventory(inventory: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}: retirement candidate has no retirement evidence")
             if item.get("runtime_evidence"):
                 errors.append(f"{prefix}: retirement candidate still has an active entrypoint")
+        disposition = item.get("product_disposition", "unreviewed")
+        if disposition not in PRODUCT_DISPOSITIONS:
+            errors.append(f"{prefix}: invalid product disposition")
+        if disposition in {"keep", "quiet"} \
+                and not item.get("product_survival_values"):
+            errors.append(f"{prefix}: retained product capability has no survival value")
+        if disposition == "replace-with-codex" \
+                and not item.get("product_migration_gate"):
+            errors.append(f"{prefix}: replace-with-codex has no migration_gate")
+        if disposition == "retire":
+            errors.append(f"{prefix}: retired product capability remains in active inventory")
+        if disposition != "unreviewed" and not item.get("product_rationale"):
+            errors.append(f"{prefix}: product rationale is required")
+    policy = inventory.get("product_policy") or {}
+    if policy.get("configured"):
+        errors.extend(str(item) for item in policy.get("errors") or [])
+        errors.extend(
+            f"unreviewed capability: {capability_id}"
+            for capability_id in policy.get("unreviewed_capabilities") or []
+        )
+        errors.extend(
+            f"product policy references missing capability: {capability_id}"
+            for capability_id in policy.get("unknown_capabilities") or []
+        )
     return errors
 
 
@@ -893,8 +1074,10 @@ def build_inventory(root: Path) -> dict[str, Any]:
     capabilities.sort(key=lambda item: (
         KIND_ORDER.get(item["kind"], 99), item["id"]
     ))
+    product_policy = _apply_product_policy(root, capabilities)
     by_kind = Counter(item["kind"] for item in capabilities)
     by_status = Counter(item["status"] for item in capabilities)
+    by_product = Counter(item["product_disposition"] for item in capabilities)
     inventory = {
         "schema_version": SCHEMA_VERSION,
         "generator": "scripts/capability_inventory.py",
@@ -912,9 +1095,16 @@ def build_inventory(root: Path) -> dict[str, Any]:
             "total": len(capabilities),
             "by_kind": dict(sorted(by_kind.items())),
             "by_status": {status: by_status.get(status, 0) for status in STATUSES},
+            "by_product_disposition": {
+                disposition: by_product.get(disposition, 0)
+                for disposition in PRODUCT_DISPOSITIONS
+                if by_product.get(disposition, 0)
+                or disposition == "unreviewed"
+            },
         },
+        "product_policy": product_policy,
         "resolved_evidence_audit": RESOLVED_EVIDENCE_AUDIT,
-        "retired_surfaces": RETIRED_SURFACES,
+        "retired_surfaces": product_policy["retired_surfaces"],
         "capabilities": capabilities,
     }
     errors = validate_inventory(inventory)
@@ -944,8 +1134,9 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "# Jarvis Capability Inventory",
         "",
         "This file is generated by `scripts/capability_inventory.py`. It is an evidence map,",
-        "not a product verdict: `fix` means static evidence is missing or contradictory;",
-        "`retire-candidate` never authorizes deletion and always requires human migration review.",
+        "plus an explicit product disposition from `capability_product_policy.yaml`.",
+        "Engineering `status` answers whether implementation evidence is complete; product",
+        "`disposition` answers whether the capability belongs in the Codex-frontstage product.",
         "An executable-test reference proves that a `test_*` body or parametrization",
         "mentions the capability, not that every behavior is covered.",
         "",
@@ -964,11 +1155,25 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         lines.append(f"- **{status}**: {requirements}.")
     lines.extend([
         "",
+        "Product dispositions are independent:",
+        "",
+        "- **keep**: an intentional reachable surface with a unique Jarvis value.",
+        "- **quiet**: retained backstage work that should not become an ordinary interruption.",
+        "- **replace-with-codex**: transitional surface retained until its named acceptance gate passes.",
+        "- **retire**: removed surface with replacement, migration, and retention rationale recorded.",
+        "- **unreviewed**: forbidden when the product policy is configured; CI fails closed.",
+    ])
+    lines.extend([
+        "",
         "## Summary",
         "",
         f"- Total: **{summary['total']}**",
         "- Status: " + ", ".join(
             f"{status} **{summary['by_status'][status]}**" for status in STATUSES
+        ),
+        "- Product: " + ", ".join(
+            f"{disposition} **{count}**"
+            for disposition, count in summary["by_product_disposition"].items()
         ),
         "- Kinds: " + ", ".join(
             f"{kind} **{count}**" for kind, count in summary["by_kind"].items()
@@ -976,8 +1181,8 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "",
         "## Inventory",
         "",
-        "| ID | Kind | Status | Definition | Implementation | Runtime / entrypoint | Tests | Evidence gap |",
-        "|---|---|---|---|---|---|---|---|",
+        "| ID | Kind | Engineering | Product | Product reason | Definition | Implementation | Runtime / entrypoint | Tests | Evidence gap |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ])
     for item in inventory["capabilities"]:
         runtime = ", ".join(
@@ -990,6 +1195,8 @@ def render_markdown(inventory: dict[str, Any]) -> str:
                 f"`{_escape(item['id'])}`",
                 _escape(item["kind"]),
                 f"**{_escape(item['status'])}**",
+                f"**{_escape(item['product_disposition'])}**",
+                _escape(item["product_rationale"]),
                 _evidence_label(item["source_evidence"]),
                 _evidence_label(item["implementation_evidence"]),
                 runtime,
@@ -998,8 +1205,19 @@ def render_markdown(inventory: dict[str, Any]) -> str:
             )) + " |"
         )
     lines.extend(["", "## Retired Surfaces", ""])
-    for surface, note in inventory.get("retired_surfaces", {}).items():
-        lines.append(f"- **{surface}** — {note}")
+    for surface, item in inventory.get("retired_surfaces", {}).items():
+        lines.append(
+            f"- **{surface}** — **{item['disposition']}**: {item['rationale']}"
+        )
+    replacement = [
+        item for item in inventory["capabilities"]
+        if item["product_disposition"] == "replace-with-codex"
+    ]
+    lines.extend(["", "## Codex Replacement Queue", ""])
+    for item in replacement:
+        lines.append(
+            f"- `{item['id']}` — {item['product_migration_gate']}"
+        )
     lines.extend(["", "## Resolved Evidence Audit", ""])
     by_id = {item["id"]: item for item in inventory["capabilities"]}
     for capability_id, resolution in inventory["resolved_evidence_audit"].items():
@@ -1013,6 +1231,9 @@ def render_markdown(inventory: dict[str, Any]) -> str:
         "- Keep capabilities remain in regression scope; missing runtime health is handled by their existing probes.",
         "- Fix capabilities need the named evidence gap closed before their status changes.",
         "- Retire candidates are review prompts only. Deletion requires replacement/migration evidence and a separate PR.",
+        "- Product keep/quiet decisions must cite at least one survival value: continuity, offline value, governance, coordination, or verified closure.",
+        "- Replace-with-Codex capabilities remain reachable until their explicit migration gate passes; then a separate deletion PR records retention impact.",
+        "- A newly discovered capability without a product-policy rule fails the inventory gate.",
         "- Regenerate this file whenever a component, heartbeat task, standalone task tool, CLI, admin route, or Lark command changes.",
         "- A surface retirement must leave an explicit Retired Surfaces entry, never a silent disappearance.",
         "",

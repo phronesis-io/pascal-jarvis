@@ -332,9 +332,11 @@ warning only after the automatic retry budget is exhausted.
   delivery envelope is durable. Terminal retries are automatic only for a
   typed, definitive no-send failure; closed user decisions never reopen.
 - `docs/capability_inventory.md`: generated evidence map for supported
-  components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
-  missing contracts and drift; it never authorizes deletion without explicit
-  retirement, replacement, migration, and data-retention evidence.
+  components, scheduled work, CLIs, pages, APIs, and Lark commands, joined with
+  the explicit product policy in `capability_product_policy.yaml`. Engineering
+  status and product value remain separate; an unreviewed new capability fails
+  the inventory gate. Deletion still requires explicit retirement,
+  replacement, migration, and data-retention evidence.
 - `core.memorial`: visible Item and decision ledger. New cards persist a
   `work_receipt`, rendered above the body; proactive model output must supply
   one `WORKED:` directive per card block.

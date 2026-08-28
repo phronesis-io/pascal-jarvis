@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.capability_inventory import (
     build_inventory,
     classify_capability,
@@ -192,6 +194,120 @@ def test_status_rules_are_conservative():
     assert "conflicts" in contradictory["status_reason"]
 
 
+def test_product_policy_is_separate_and_fails_closed_for_unreviewed_capability(
+    tmp_path,
+):
+    root = _fixture_repo(tmp_path)
+    discovered = build_inventory(root)["capabilities"]
+    ids = [item["id"] for item in discovered]
+    engineering_status = {item["id"]: item["status"] for item in discovered}
+    policy = root / "capability_product_policy.yaml"
+    policy.write_text(
+        "schema_version: 1\n"
+        "rules:\n"
+        "  - id: reviewed-backstage\n"
+        "    disposition: quiet\n"
+        "    survival_values: [governance]\n"
+        "    rationale: Tested backstage fixtures stay available without user noise.\n"
+        "    capabilities:\n"
+        + "".join(f"      - {capability_id}\n" for capability_id in ids)
+        + "retired_surfaces:\n"
+        "  old-demo:\n"
+        "    disposition: retire\n"
+        "    rationale: Removed after its replacement was verified.\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_inventory(root)
+    assert inventory["product_policy"]["configured"] is True
+    assert inventory["summary"]["by_product_disposition"] == {
+        "quiet": len(ids),
+        "unreviewed": 0,
+    }
+    reviewed = next(
+        item for item in inventory["capabilities"]
+        if item["product_disposition"] == "quiet"
+    )
+    assert reviewed["status"] == engineering_status[reviewed["id"]]
+    assert reviewed["product_rationale"].startswith("Tested backstage")
+
+    text = policy.read_text(encoding="utf-8")
+    policy.write_text(
+        text.replace(f"      - {ids[-1]}\n", ""), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unreviewed capability"):
+        build_inventory(root)
+
+
+def test_replace_with_codex_requires_an_explicit_migration_gate(tmp_path):
+    root = _fixture_repo(tmp_path)
+    ids = [item["id"] for item in build_inventory(root)["capabilities"]]
+    (root / "capability_product_policy.yaml").write_text(
+        "schema_version: 1\n"
+        "rules:\n"
+        "  - id: migrate\n"
+        "    disposition: replace-with-codex\n"
+        "    survival_values: [continuity]\n"
+        "    rationale: Codex owns this interaction after acceptance.\n"
+        "    capabilities:\n"
+        + "".join(f"      - {capability_id}\n" for capability_id in ids),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="migration_gate"):
+        build_inventory(root)
+
+
+def test_product_policy_rejects_unknown_duplicate_and_active_retired_ids(
+    tmp_path,
+):
+    root = _fixture_repo(tmp_path)
+    ids = [item["id"] for item in build_inventory(root)["capabilities"]]
+    reviewed = "".join(f"      - {capability_id}\n" for capability_id in ids)
+    policy = root / "capability_product_policy.yaml"
+    policy.write_text(
+        "schema_version: 1\n"
+        "rules:\n"
+        "  - id: retained\n"
+        "    disposition: quiet\n"
+        "    survival_values: [governance]\n"
+        "    rationale: Internal fixture support.\n"
+        "    capabilities:\n"
+        + reviewed
+        + "      - cli:core.missing\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="references missing capability"):
+        build_inventory(root)
+
+    policy.write_text(
+        policy.read_text(encoding="utf-8")
+        .replace("      - cli:core.missing\n", "")
+        + "  - id: duplicate\n"
+        "    disposition: keep\n"
+        "    survival_values: [continuity]\n"
+        "    rationale: Duplicate fixture rule.\n"
+        "    capabilities:\n"
+        f"      - {ids[0]}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="appears in multiple rules"):
+        build_inventory(root)
+
+    policy.write_text(
+        "schema_version: 1\n"
+        "rules:\n"
+        "  - id: active-retirement\n"
+        "    disposition: retire\n"
+        "    rationale: This must be deleted before retirement is recorded.\n"
+        "    capabilities:\n"
+        + reviewed,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="remains in active inventory"):
+        build_inventory(root)
+
+
 def test_module_level_string_is_not_executable_test_evidence(tmp_path):
     root = _fixture_repo(tmp_path)
     (root / "tests" / "test_facts.py").write_text(
@@ -270,7 +386,40 @@ def test_real_inventory_has_expected_anchors_and_unique_ids():
     assert any("3458" in key for key in inventory["retired_surfaces"])
     assert any("harness proposal apply" in key for key in inventory["retired_surfaces"])
     assert not any(item["kind"].startswith("dashboard") for item in by_id.values())
+    assert inventory["product_policy"]["configured"] is True
+    assert inventory["summary"]["by_product_disposition"]["unreviewed"] == 0
+    assert {
+        "keep", "quiet", "replace-with-codex",
+    } <= set(inventory["summary"]["by_product_disposition"])
+    assert all(
+        item["disposition"] == "retire"
+        for item in inventory["retired_surfaces"].values()
+    )
     assert validate_inventory(inventory) == []
+
+
+def test_product_policy_matches_the_frontstage_backstage_boundary():
+    by_id = {
+        item["id"]: item
+        for item in build_inventory(ROOT)["capabilities"]
+    }
+
+    assert by_id["heartbeat:checkin"]["product_disposition"] == "keep"
+    assert by_id["heartbeat:self-diagnostic"]["product_disposition"] == "quiet"
+    assert by_id["heartbeat:repos-sync"]["product_disposition"] == (
+        "replace-with-codex"
+    )
+    assert by_id["lark:session:new"]["product_disposition"] == (
+        "replace-with-codex"
+    )
+    assert by_id["lark:model:usage"]["product_disposition"] == "keep"
+    assert by_id["admin-route:get:/health"]["product_disposition"] == "keep"
+    for item in by_id.values():
+        if item["product_disposition"] == "replace-with-codex":
+            assert "20" in item["product_migration_gate"]
+            assert "core.frontstage_acceptance report" in (
+                item["product_migration_gate"]
+            )
 
 
 def test_json_and_markdown_are_deterministic(tmp_path, capsys):
@@ -282,7 +431,7 @@ def test_json_and_markdown_are_deterministic(tmp_path, capsys):
 
     assert main(["--root", str(root), "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
 
 
 def test_checked_document_matches_generator():

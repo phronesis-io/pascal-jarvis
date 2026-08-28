@@ -7,11 +7,13 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 175 active capabilities: 175 `keep`, 0 `fix`,
-  0 `retire-candidate`. A `keep` row means definition, implementation,
-  entrypoint, and executable-test reference exist; it is not a coverage claim.
-  Seven standalone task tools are now included instead of disappearing behind
-  their bot/shell callers.
+- The generated inventory has 184 active capabilities with complete engineering
+  evidence. Product disposition is now independent: 82 `keep`, 86 `quiet`, 16
+  `replace-with-codex`, and 0 `unreviewed`, plus four recorded retired surfaces.
+  An engineering `keep` still means definition, implementation, entrypoint, and
+  executable-test reference exist; it is not a value or coverage claim. New
+  capabilities fail closed until `capability_product_policy.yaml` assigns a
+  survival value or an explicit Codex migration gate.
 - `core.cross_session` is a small facade over discovery, parsing, historical
   indexing, and projection modules.
 - Memorial storage, card composition, transport, and shared state contracts

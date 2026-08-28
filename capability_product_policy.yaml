@@ -1,0 +1,277 @@
+schema_version: 1
+
+# Product judgment is deliberately separate from engineering evidence. Every
+# active capability must appear in exactly one rule. A new capability therefore
+# needs an explicit place in the Codex-frontstage product before CI accepts it.
+rules:
+  - id: reachable-runtime-foundation
+    disposition: keep
+    survival_values: [continuity, governance, coordination, verified_closure]
+    rationale: These are intentional runtime or operator surfaces that keep cross-product state, native channels, and verified delivery reachable.
+    capabilities:
+      - component:admin
+      - component:bot
+      - component:companion-voice
+      - component:ef-stream
+      - component:lark-sidecar
+      - component:model-runtime
+      - component:taskline
+      - component:unified-delivery
+
+  - id: quiet-runtime-foundation
+    disposition: quiet
+    survival_values: [offline_value, governance, coordination]
+    rationale: These processes protect availability, recovery, audit, and scheduling while remaining invisible during healthy operation.
+    capabilities:
+      - component:caffeinate-launchd
+      - component:conversation-audit
+      - component:daemon
+      - component:daemon-launchd
+      - component:external-deadman
+      - component:heartbeat-loop
+      - component:heartbeat-tasks
+      - component:session-backup
+
+  - id: intentional-asynchronous-products
+    disposition: keep
+    survival_values: [continuity, offline_value, governance, verified_closure]
+    rationale: These tasks add time-bound, offline, native-channel, or companion value that one foreground Codex task cannot supply by itself.
+    capabilities:
+      - heartbeat:calendar-sync
+      - heartbeat:checkin
+      - heartbeat:daily-reflect
+      - heartbeat:eigenflux-feed-triage
+      - heartbeat:eigenflux-friends
+      - heartbeat:eigenflux-inbox-reconcile
+      - heartbeat:eigenflux-publish
+      - heartbeat:exercise-week
+      - heartbeat:explain-card
+      - heartbeat:intention-check
+      - heartbeat:mail-triage
+      - heartbeat:model-usage
+      - heartbeat:morning-anchor
+      - heartbeat:phronesis-monitor
+      - heartbeat:reply-followup
+      - heartbeat:routine-run
+      - heartbeat:weekly-review
+
+  - id: quiet-heartbeat-foundation
+    disposition: quiet
+    survival_values: [continuity, offline_value, governance, coordination]
+    rationale: These tasks maintain evidence, memory, health, and internal state; healthy or self-healed work must not become ordinary owner interruption.
+    capabilities:
+      - heartbeat:activity-log
+      - heartbeat:cross-session-sync
+      - heartbeat:daily-plan
+      - heartbeat:delegation-reconcile
+      - heartbeat:eigenflux-preinstall
+      - heartbeat:eigenflux-profile
+      - heartbeat:engagement-analyze
+      - heartbeat:iteration-observe
+      - heartbeat:log-maintenance
+      - heartbeat:memorial-escrow
+      - heartbeat:memory-consolidate
+      - heartbeat:memory-daily
+      - heartbeat:memory-hourly
+      - heartbeat:memory-tidy
+      - heartbeat:memory-weekly
+      - heartbeat:metrics-digest
+      - heartbeat:perception-collect
+      - heartbeat:provider-canary
+      - heartbeat:self-diagnostic
+      - heartbeat:self-improve-cycle
+      - heartbeat:thinking-review
+
+  - id: git-activity-rollup-transition
+    disposition: replace-with-codex
+    survival_values: [continuity]
+    rationale: Repository activity belongs in native Git and Codex result review rather than a daily model-authored Lark rollup.
+    migration_gate: Retire only after `python3 -m core.frontstage_acceptance report` is ready with 20 accepted desktop and 20 accepted mobile runs, and Pascal confirms the daily repository rollup adds no unique value.
+    capabilities:
+      - heartbeat:repos-sync
+
+  - id: user-capture-tool
+    disposition: keep
+    survival_values: [continuity]
+    rationale: Watch-later capture creates durable personal continuity from a bounded owner action.
+    capabilities:
+      - task-script:watchlater_save
+
+  - id: quiet-task-libraries
+    disposition: quiet
+    survival_values: [continuity, governance, verified_closure]
+    rationale: These executable helpers support retained pipelines but are not independent user-facing products.
+    capabilities:
+      - task-script:checkin_busy_filter
+      - task-script:eigenflux_preinstall_retire
+      - task-script:journal_capture
+      - task-script:mail_triage_lib
+      - task-script:memorial_escrow
+      - task-script:write_claim_audit
+
+  - id: durable-product-contracts
+    disposition: keep
+    survival_values: [continuity, governance, coordination, verified_closure]
+    rationale: These CLIs are stable product or operator contracts for Matters, authority, execution evidence, model truth, and governed release.
+    capabilities:
+      - cli:core.actions
+      - cli:core.codex_mcp
+      - cli:core.components
+      - cli:core.delegation_cli
+      - cli:core.delivery
+      - cli:core.deploy
+      - cli:core.frontstage_acceptance
+      - cli:core.intentions
+      - cli:core.jobs
+      - cli:core.lark_auth
+      - cli:core.matter_executor
+      - cli:core.matter_review
+      - cli:core.matters
+      - cli:core.memory_compiler
+      - cli:core.model_control
+      - cli:core.model_runtime
+      - cli:core.model_usage
+      - cli:core.release_gate
+      - cli:core.routines
+      - cli:core.taskline_bridge
+
+  - id: quiet-internal-clis
+    disposition: quiet
+    survival_values: [continuity, offline_value, governance, coordination, verified_closure]
+    rationale: These are backstage adapters, diagnostics, projections, and pipeline tools; they remain callable without becoming normal interaction surfaces.
+    capabilities:
+      - cli:core.attention_roi
+      - cli:core.autoreply_activity
+      - cli:core.aux_model
+      - cli:core.change_gate
+      - cli:core.codex_fallback
+      - cli:core.companion
+      - cli:core.conversation_audit
+      - cli:core.conversation_context
+      - cli:core.cross_session
+      - cli:core.cross_session_index
+      - cli:core.deadman
+      - cli:core.delegation_reconcile
+      - cli:core.delegation_shadow
+      - cli:core.delegation_verify
+      - cli:core.doc_guard
+      - cli:core.ef_stream_loop
+      - cli:core.eigenflux_ingress
+      - cli:core.eigenflux_messages
+      - cli:core.eigenflux_publish_material
+      - cli:core.eigenflux_skill_overlay
+      - cli:core.engagement
+      - cli:core.geo
+      - cli:core.heartbeat_loop
+      - cli:core.iteration_loop
+      - cli:core.lifelog
+      - cli:core.log_maintenance
+      - cli:core.mail_draft
+      - cli:core.matter_bridge
+      - cli:core.memorial
+      - cli:core.memorial_thread
+      - cli:core.metrics_digest
+      - cli:core.model_fallback
+      - cli:core.openai_fallback
+      - cli:core.perception
+      - cli:core.presence
+      - cli:core.prompt
+      - cli:core.provider_health
+      - cli:core.reaction_save
+      - cli:core.reply_closure
+      - cli:core.resource_health
+      - cli:core.responsiveness
+      - cli:core.runtime_hygiene
+      - cli:core.runtime_provider
+      - cli:core.sched_events
+      - cli:core.self_improve_cycle
+      - cli:core.selfmon
+      - cli:core.skip_digest
+      - cli:core.triage_profile
+      - cli:core.usage_stats
+      - cli:core.watermarks
+      - cli:core.weather
+
+  - id: admin-operator-surface
+    disposition: keep
+    survival_values: [governance, verified_closure]
+    rationale: Admin remains the bounded operational surface; it is not a competing daily chat or mobile product.
+    capabilities:
+      - admin-route:get:/api/bot_status
+      - admin-route:get:/api/eigenflux/settings
+      - admin-route:get:/api/eigenflux/status
+      - admin-route:get:/api/heartbeat-timeline
+      - admin-route:get:/api/heartbeat/status
+      - admin-route:get:/api/intents
+      - admin-route:get:/api/lark_chats
+      - admin-route:get:/api/live
+      - admin-route:get:/api/logs
+      - admin-route:get:/api/memories
+      - admin-route:get:/api/queues
+      - admin-route:get:/api/sched_events
+      - admin-route:get:/api/search
+      - admin-route:get:/api/session/{param}
+      - admin-route:get:/api/sessions_meta
+      - admin-route:get:/api/settings
+      - admin-route:get:/api/skills
+      - admin-route:get:/api/views
+      - admin-route:get:/health
+      - admin-route:get:/healthz
+      - admin-route:get:/view/{param}
+      - admin-route:post:/api/bot/restart
+      - admin-route:post:/api/bot/stop_task
+      - admin-route:post:/api/eigenflux/settings
+      - admin-route:post:/api/heartbeat/force/{param}
+      - admin-route:post:/api/heartbeat/task
+      - admin-route:post:/api/intents/cancel
+      - admin-route:post:/api/intents/rearm
+      - admin-route:post:/api/memory
+
+  - id: bounded-lark-native-actions
+    disposition: keep
+    survival_values: [continuity, offline_value, governance, verified_closure]
+    rationale: These commands close a bounded Lark action, emergency stop, native approval, usage query, pagination, or handoff without making Lark the long-form workbench.
+    capabilities:
+      - lark:eigenflux:publish-confirm
+      - lark:matter:done
+      - lark:matter:handoff
+      - lark:memorial:continue
+      - lark:model:status
+      - lark:model:usage
+      - lark:session:stop
+
+  - id: lark-protocol-transition
+    disposition: replace-with-codex
+    survival_values: [continuity, governance]
+    rationale: These protocol-shaped Lark commands expose Session, Matter, or provider mechanics that the natural Codex frontstage should absorb.
+    migration_gate: Keep reachable until `python3 -m core.frontstage_acceptance report` is ready with 20 accepted desktop and 20 accepted mobile runs, then have Pascal separately confirm that Codex discovery, continuation, closure, and model status leave these protocol commands no unique value.
+    capabilities:
+      - lark:matter:clear
+      - lark:matter:current
+      - lark:matter:list
+      - lark:matter:new
+      - lark:matter:use
+      - lark:model:auto
+      - lark:model:codex
+      - lark:session:close
+      - lark:session:current
+      - lark:session:help
+      - lark:session:leave
+      - lark:session:list
+      - lark:session:new
+      - lark:session:reset
+      - lark:session:switch
+
+retired_surfaces:
+  dashboard :3457 (NiceGUI pages + /api routes):
+    disposition: retire
+    rationale: Retired 2026-08-21; archive duty moved to the morning-anchor batch and Admin :3456, while shared state moved to core/db.py.
+  mobile gateway :3458 + Tailscale funnel:
+    disposition: retire
+    rationale: Retired 2026-08-11; Codex mobile is the work surface and Lark remains the bounded wake-up/native channel.
+  standalone content recommendation heartbeat:
+    disposition: retire
+    rationale: Retired 2026-08-25 after 14 days without production use; it duplicated external recommendation products.
+  harness proposal apply CLI (tasks/harness_apply.py):
+    disposition: retire
+    rationale: Retired 2026-08-26 after its producer was removed and production had no queue; implementation remains in Git history.
