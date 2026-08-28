@@ -3,7 +3,7 @@
 #
 # REQ-75 (event-gate low-value proactive sources): the bare "你有空" nudge
 # earned only ~7% engagement and double-fired (a pre-block fire + an in-progress
-# fire ~60min apart in the same block). Per Pascal's principle — every proactive
+# fire ~60min apart in the same block). Perthe owner's principle — every proactive
 # message must earn its interruption — this pre-script now:
 #   1. emits NOTHING unless there is genuine content to offer in this free
 #      block: an unconsumed watch-later item OR a fitting todo/deadline.

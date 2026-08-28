@@ -47,6 +47,71 @@ def test_every_production_memorial_create_declares_a_work_receipt():
     assert missing == []
 
 
+def test_every_direct_memorial_producer_declares_the_full_message_gate():
+    missing: list[str] = []
+    paths = [*ROOT.glob("core/**/*.py"), *ROOT.glob("tasks/**/*.py")]
+    for path in paths:
+        if path.name == "memorial.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "create"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "memorial"
+            ):
+                continue
+            keywords = {keyword.arg for keyword in node.keywords}
+            for required in (
+                "owner_need", "why_now", "owner_action", "silence_cost",
+            ):
+                if required not in keywords:
+                    missing.append(
+                        f"{path.relative_to(ROOT)}:{node.lineno}:{required}"
+                    )
+    assert missing == []
+
+
+def test_every_locally_imported_memorial_create_declares_interruption_contract():
+    missing: list[str] = []
+    paths = [*ROOT.glob("core/**/*.py"), *ROOT.glob("tasks/**/*.py")]
+    for path in paths:
+        if path.name == "memorial.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        create_aliases = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "core.memorial"
+            for alias in node.names
+            if alias.name == "create"
+        }
+        if not create_aliases:
+            continue
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in create_aliases
+            ):
+                continue
+            keywords = {keyword.arg for keyword in node.keywords}
+            for required in (
+                "work_receipt", "owner_need", "why_now", "owner_action",
+                "silence_cost",
+            ):
+                if required not in keywords:
+                    missing.append(
+                        f"{path.relative_to(ROOT)}:{node.lineno}:{required}"
+                    )
+    assert missing == []
+
+
 def test_heartbeat_enables_the_proactive_receipt_gate():
     tree = ast.parse(
         (ROOT / "core" / "heartbeat_loop.py").read_text(encoding="utf-8")

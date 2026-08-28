@@ -107,7 +107,7 @@ def main() -> None:
 
     print("## Recent Turns (原文缓冲)")
     print()
-    print("这是你和 Pascal 最近的原文对话（已截断），如果看起来像被截断或跨 session 的，优先相信这份原文。")
+    print("这是你和用户最近的原文对话（已截断），如果看起来像被截断或跨 session 的，优先相信这份原文。")
     print()
     for line in formatted:
         print(line)

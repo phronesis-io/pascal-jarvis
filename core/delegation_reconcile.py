@@ -39,7 +39,7 @@ def sync_attention_item(
     store: DelegationStore,
     send: bool = True,
 ) -> str:
-    """Maintain at most one Item for a Delegation that genuinely needs Pascal."""
+    """Maintain at most one Item for a Delegation that genuinely needs the owner."""
     from core import memorial
 
     if "links" not in detail:
@@ -234,6 +234,10 @@ def sync_attention_item(
             if attention_state == "stalled"
             else "核验委派对象与完成条件，确认关键信息仍不足"
         ),
+        owner_need="judgment",
+        why_now="自动核验已到边界，缺少的信息只能由本人补充或取消",
+        owner_action="补充缺失信息，或取消这项委派",
+        silence_cost="不提示会让已无法自动推进的委派继续停滞",
         options=options,
         matter_id=str(detail.get("matter_id") or ""),
         dedup_key=(

@@ -55,7 +55,7 @@ eigenflux msg send --content "YOUR MESSAGE" --item-id ITEM_ID
 # Reply to existing conversation
 eigenflux msg send --content "YOUR REPLY" --conv-id CONV_ID
 
-# Direct message to a friend in Pascal Jarvis (verified target + read-back)
+# Direct message to a friend in Jarvis (verified target + read-back)
 python3 -m core.eigenflux_messages send \
   --recipient "EXACT FRIEND NAME OR REMARK" \
   --content "YOUR MESSAGE"
@@ -64,7 +64,7 @@ python3 -m core.eigenflux_messages send \
 <!-- JARVIS-LOCAL-OVERLAY:BEGIN -->
 ### Jarvis verified friend messages (required in this repository)
 
-When this skill runs inside Pascal Jarvis and the owner names a person or
+When this skill runs inside Jarvis and the owner names a person or
 agent, **do not copy a numeric `agent_id` from model context into
 `eigenflux msg send --receiver-id`**. Use the local verified gateway:
 

@@ -8,6 +8,7 @@ failure feeding the circuit breaker, and the daemon deploy guard.
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,13 +25,14 @@ def test_components_manifest_loads_and_covers_critical_set():
     # here can die silently again.
     for required in ("admin", "ef-stream", "lark-sidecar",
                      "bot", "heartbeat-loop", "session-backup",
-                     "conversation-audit"):
+                     "conversation-audit", "watchdog-armed"):
         assert required in names, f"components.yaml missing {required}"
     # The silent stream must be critical (daemon probes). The dashboard —
     # the original 23-day corpse — is retired (2026-08-21) and must stay
     # out of the manifest rather than rot as a permanently-red entry.
     crit = {c["name"] for c in comps if c.get("critical")}
     assert "ef-stream" in crit
+    assert "watchdog-armed" in crit
     assert "dashboard" not in names
     # REQ-82: the audit had no scheduler mount and sat idle for 13 days —
     # Freshness must come from the latest completed audit, not database mtime:
@@ -392,6 +394,56 @@ def test_pre_commit_hook_only_uses_tools_it_can_count_on():
         f"pre-commit uses {optional} without a `command -v` guard — on a "
         "machine without them the step silently no-ops and the hook still "
         "reports success")
+
+
+def test_pre_commit_mtime_snapshot_does_not_inherit_deleted_file_status():
+    """A staged deletion must not abort the hook before its real checks.
+
+    With ``set -e``, the previous pipeline returned the last loop body's
+    ``[ -f deleted.py ]`` status. If the alphabetically last staged path was
+    deleted, the hook stopped after its opening line without an error message.
+    The file list is now materialized first and the existence check is an
+    ``if`` condition, whose false result is not the loop's exit status.
+    """
+    root = Path(__file__).parent.parent
+    hook = (root / "scripts" / "hooks" / "pre-commit").read_text(
+        encoding="utf-8"
+    )
+    assert "git diff --cached --name-only | while" not in hook
+    assert 'git diff --cached --name-only > "$STAGED_SNAP"' in hook
+    assert 'done < "$STAGED_SNAP"' in hook
+
+
+def test_git_hook_installer_supports_linked_worktrees(tmp_path):
+    """A linked worktree has a .git file, not a .git directory."""
+    root = Path(__file__).parent.parent
+    installer = (root / "scripts" / "install_git_hooks.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        'rev-parse --path-format=absolute --git-path hooks/pre-commit'
+        in installer
+    )
+    assert '$ROOT/.git/hooks/pre-commit' not in installer
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    hooks.mkdir(parents=True)
+    (scripts / "install_git_hooks.sh").write_text(installer, encoding="utf-8")
+    source = hooks / "pre-commit"
+    source.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    result = subprocess.run(
+        ["bash", str(scripts / "install_git_hooks.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    installed = repo / ".git" / "hooks" / "pre-commit"
+    assert installed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert str(installed) in result.stdout
 
 
 def test_task_scripts_importing_core_put_repo_root_on_syspath():

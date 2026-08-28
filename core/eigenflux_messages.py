@@ -36,6 +36,7 @@ from core.person_registry import (
     PersonRegistry,
     PersonRegistryError,
 )
+from core.outbound_privacy import outbound_content_gate
 
 
 class EigenFluxMessageError(RuntimeError):
@@ -1096,6 +1097,11 @@ class EigenFluxMessenger:
         message = str(content or "").strip()
         if not message:
             raise EigenFluxMessageError("消息正文为空，未发送")
+        privacy_rule = outbound_content_gate(message)
+        if privacy_rule:
+            raise EigenFluxMessageError(
+                f"消息触发出站隐私规则 {privacy_rule}，未发送"
+            )
         friend = self.resolve_friend(recipient)
         return self._send_friend(
             friend,
@@ -1123,6 +1129,11 @@ class EigenFluxMessenger:
         message = str(content or "").strip()
         if not message:
             raise EigenFluxMessageError("消息正文为空，未发送")
+        privacy_rule = outbound_content_gate(message)
+        if privacy_rule:
+            raise EigenFluxMessageError(
+                f"消息触发出站隐私规则 {privacy_rule}，未发送"
+            )
         return self._send_friend(
             matches[0],
             message,

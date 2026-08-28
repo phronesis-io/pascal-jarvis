@@ -23,7 +23,8 @@ Pascal
 Jarvis time/signal trigger
   -> ledger first
   -> bounded Lark wake-up only when time or judgment cannot wait
-  -> continue the substantive Matter in Codex
+  -> explicit owner handoff may prepare one verified empty Codex task
+  -> first owner message continues the substantive Matter in Codex
 ```
 
 ## Which Path To Use
@@ -54,6 +55,11 @@ Jarvis time/signal trigger
 4. The continuation call acquires the Matter. Jarvis returns a bounded, traceable Context
    Packet containing current consensus, decisions, pointers, authority, and
    next action. Raw chat histories are not dumped into the prompt.
+   If a Codex task still carries a Session link to a terminal Matter, the
+   continuation moves that link forward and records both sides of the move.
+   It never steals a Session from another active Matter: that conflict stops
+   before a run is created and the user starts a separate task or closes the
+   earlier outcome.
 5. Codex does the interactive work with its native tools and approvals. Jarvis
    stays out of the conversation unless asked for durable state or an effect.
 6. Code work uses the repository's ordinary branch, commit, PR, review, and CI
@@ -91,9 +97,13 @@ inbox and not a model-authored performance report.
 3. Long analysis, diffs, artifacts, approvals, and test evidence stay in
    Codex. Lark does not receive a clipped duplicate.
 4. A Lark wake-up remains independently understandable until an exact Codex
-   continuation link has been proven in production. It names the result or
-   decision and the Matter, then gives one stable phrase to use in a clean
-   Codex task; it never promises a broken deep link.
+   continuation link has been proven in production. An explicit `去 Codex`
+   action may prepare and name a real empty task through Codex app-server, but
+   the message still gives one stable phrase until mobile visibility is proven.
+   Task preparation performs no model turn and takes no Matter lease; it never
+   promises a broken deep link. The first real message presents the trusted
+   wake ID through MCP, so the run records the real task rather than guessing
+   from a title.
 
 ## When Pascal Talks Directly To Jarvis
 
@@ -104,8 +114,39 @@ Direct Jarvis conversation is an exception, not the main journey:
 - a native Lark action whose participants are already in that conversation;
 - outage fallback when the Codex frontstage is unavailable.
 
+When the private conversation is already bound to an active Matter, `去 Codex`,
+`在 Codex 继续`, and `/matter handoff codex` use the same deterministic wake
+path. A repeated action reuses the linked task only while it still has zero
+turns. If creation or read-back is uncertain, Jarvis says it did not confirm a
+task and returns the stable continuation phrase. Once work begins, the wake
+receipt moves from prepared to running and then to the run's verified terminal
+state.
+
 Jarvis should convert durable substance into Matter state and let the next
 clean Codex task continue it. It should not grow one permanent chat context.
+
+## When Jarvis Talks First
+
+Jarvis talks first only when the value comes from arriving without Pascal
+having to remember to ask: a deadline, a material external change, an
+explicitly retained companion rhythm, or the verified result of work he
+already entrusted. It may also ask for judgment or authority after it has
+finished every reversible step itself.
+
+It stays quiet when it merely ran, retried, self-healed, found a health fact,
+or produced material Pascal can retrieve later in Codex without loss. Such
+work remains traceable in the ledger or the Matter review. Every proactive
+Item declares its owner need, completed-work receipt, and why-now evidence;
+missing evidence never falls through as raw prose. Silence never approves,
+rejects, closes, or validates anything, and it never causes a second ask.
+
+Recurring companion contact is explicit private configuration, not an inferred
+preference. `jarvis.yaml retained_rhythms` defaults `checkin`, `daily_reflect`,
+and `exercise_week` to false; only exact boolean `true` enables one, and more
+than two enabled rhythms fails all three closed. Both pre- and post-hooks check
+the subscription so a manual or stale model result cannot bypass it. User-
+created Routines remain separate explicit requests. Time since Jarvis last
+spoke is analytics, never a reason to speak.
 
 ## What Each Layer Owns
 
@@ -147,11 +188,12 @@ The repository now implements this contract through `core.model_usage`:
 The runtime does not redeem reset credits, buy capacity, or open billing pages.
 Those actions are consequential and remain explicit owner decisions.
 
-The governed release path also prepares the Codex surface before stopping the
-resident bot: it verifies MCP 2.x, registers the repo marketplace, installs the
-current `jarvis-matters` plugin, reads back `installed, enabled`, then starts
-the stdio server and exercises its health and Matter-review tools. Repository
-code and a healthy daemon therefore cannot produce a false frontstage release.
+Setup prepares the Codex surface: it installs MCP 2.x, registers the repo
+marketplace, installs the current `jarvis-matters` plugin, and exercises the
+stdio handshake. Governed release is read-only: it checks the installed plugin
+and handshake but never installs packages or changes Codex configuration. A
+degraded optional frontstage cannot block resident Jarvis recovery; it remains
+an explicit health warning for setup to repair.
 
 ## Replacement And Retirement Rules
 

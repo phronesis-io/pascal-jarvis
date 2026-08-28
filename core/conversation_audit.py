@@ -771,7 +771,7 @@ def derive_issues(conn: sqlite3.Connection, run_id: int) -> int:
 
 
 # ── Card leak sentinel (REQ-104) ─────────────────────────────────────────
-# Template/JSON/prompt-framing residue reaching Pascal's cards is a recurring
+# Template/JSON/prompt-framing residue reaching the owner's cards is a recurring
 # family (HEARTBEAT_OK 7/15 "这卡片非常蠢", raw {"response":...} ×4, a card
 # whose whole body was "send", "=== TASK: checkin ===", "[2026-07-19 09:16]
 # checkin" headers, raw "OPTIONS:" lines when the button parser missed).

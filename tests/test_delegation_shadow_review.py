@@ -157,4 +157,4 @@ def test_gate_reports_ready_without_deciding(tmp_path):
         "high_risk_recall": 1.0, "verifier_accuracy": 1.0,
         "phase1_ready": True,
     })
-    assert "由 Pascal 决定" in text
+    assert "由用户决定" in text

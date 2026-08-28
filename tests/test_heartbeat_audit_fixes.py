@@ -305,8 +305,7 @@ def test_non_cli_sentinel_errors_pass_through_unfiltered(tmp_path, monkeypatch,
     # sentinel scenario, so reopen the route instead of accidentally testing
     # the cooldown short-circuit.
     monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "primary",
+        "core.heartbeat_model.provider_health_rows", lambda _root: [],
     )
     _fake_cli(monkeypatch, raise_exc=FileNotFoundError("no claude"))
     assert runner.claude_call("hi") == ""

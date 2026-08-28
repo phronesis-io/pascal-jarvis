@@ -84,7 +84,7 @@ cat <<'EOF'
 你是 Jarvis 的自进化任务。基于上面的「增量」（新反馈、行为信号、提交），
 判断 harness 是否需要演化。完整记忆（behavioral_rules / feedback_rules /
 warm / system）已在你的 system prompt 里加载——据此判断什么是「新」、
-什么已被现有契约覆盖。这是**自主内务**，不要把分析过程 triage 给 Pascal。
+什么已被现有契约覆盖。这是**自主内务**，不要把分析过程 triage 给用户。
 
 产出**两类**变更，分级处理：
 
@@ -93,12 +93,12 @@ warm / system）已在你的 system prompt 里加载——据此判断什么是�
   **禁止**对 hot/behavioral_rules.md 或 hot/feedback_rules.md 用 A 级。
 
 【B 级 · 提案】改 behavioral_rules / feedback_rules / 代码——**绝不自动改**，
-  进审批队列、发飞书给 Pascal 批。
+  进审批队列、发飞书给用户批。
 
 三道质量闸（不过闸就别提，宁缺毋滥）：
   1. 去重：现有契约/记忆已覆盖的，不提。
   2. 不 memorize 代码：repo/git 已记录的实现细节不写成规则（至多引用）。
-  3. 重复信号阈值：一条行为规则要么是 Pascal 的**明确纠正/指令**，
+  3. 重复信号阈值：一条行为规则要么是用户的**明确纠正/指令**，
      要么在多处/多次出现（≥2 个独立信号）才提；单次一时之言不进契约。
   调和冲突：若与现有规则张力，措辞要 reconcile，不制造矛盾。
   体积预算：behavioral_rules 每周期加载，提炼成精炼规则 + 指向详情记忆，别堆长文。

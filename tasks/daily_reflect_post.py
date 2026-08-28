@@ -12,6 +12,7 @@ from core.safety import looks_like_error, parse_json_response, summarize
 from core.jsonl import read_jsonl, write_jsonl
 from core.timeutil import now_local_str
 from core.journal import append_entry
+from core.retained_rhythms import is_enabled as retained_rhythm_enabled
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", Path.home() / ".jarvis" / "memory"))
 PATTERNS_FILE = MEMORY_DIR / "system" / "patterns.jsonl"
@@ -28,6 +29,8 @@ def _log_failure(message: str, exc: Exception) -> None:
 
 
 def main() -> int:
+    if not retained_rhythm_enabled("daily_reflect"):
+        return 0
     raw = sys.stdin.read().strip()
     if not raw or raw == "HEARTBEAT_OK":
         return 0

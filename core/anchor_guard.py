@@ -11,7 +11,7 @@ at 6:35 existed. Same failure family as the fake basketball score and the fake
 The rule encoded here: any proactive narration that names a concrete clock time
 (HH:MM) describing a *past* event must correspond to a real log line near that
 time. Anchors that cannot be grounded are reported, and the caller suppresses the
-user-facing surface rather than ping Pascal with a fabricated specific.
+user-facing surface rather than ping the owner with a fabricated specific.
 
 This is deliberately narrow — it verifies clock-time anchors against the actual
 log tail, nothing more. It does not try to validate arbitrary prose claims.

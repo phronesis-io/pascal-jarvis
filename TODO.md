@@ -1,6 +1,6 @@
 # Jarvis Roadmap
 
-> **Current release: v1.7.0 (2026-07-27)** — see `CHANGELOG.md` for the full
+> **Current release: v1.15.0 (2026-08-28)** — see `CHANGELOG.md` for the full
 > release history. `docs/prd_portfolio.md` is the authority on which PRDs are
 > shipped, superseded, rejected, or active; `docs/release_acceptance_2026-07-24.md`
 > is the requirement-to-evidence ledger.

@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import time
@@ -175,14 +176,16 @@ def test_verify_required_components_ignores_stale_optional_registration(
     assert not any("admin" in issue for issue in result["issues"])
 
 
-def test_deploy_smoke_reaches_acted_within_budget(tmp_path):
+def test_deploy_smoke_stops_at_verified_delivery_without_fake_owner_action(tmp_path):
     result = smoke_delivery(
         root=tmp_path, db_path=tmp_path / "jarvis.db", timeout=3)
     assert result["ok"] is True
-    assert result["state"] == "acted"
+    assert result["state"] == "delivered"
     row = DeliveryPipeline(
         tmp_path, db_path=tmp_path / "jarvis.db").get(result["delivery_id"])
-    assert row["state"] == "acted"
+    assert row["state"] == "delivered"
+    assert row["acted_epoch"] is None
+    assert json.loads(row["metadata"])["healthcheck"] is True
 
 
 def test_dirty_runtime_paths_preserves_worktree_only_filename(tmp_path):
@@ -356,6 +359,8 @@ def test_release_receipt_persists_one_joined_success_record(
     gate_path.write_text(
         '{"ok":true,"sha":"' + sha + '","pr":105,'
         '"approval_mode":"owner_release_decision",'
+        '"evidence_source":"cached_live_verification","stale":true,'
+        '"live_verified_epoch":1200.0,"cache_age_seconds":34.5,'
         '"owner_release_decisions":[{"actor":"owner",'
         '"reason":"private release reason"}]}',
         encoding="utf-8",
@@ -386,6 +391,11 @@ def test_release_receipt_persists_one_joined_success_record(
     assert result["receipt"]["git_head"] == sha
     assert result["receipt"]["gate"]["pr"] == 105
     assert result["receipt"]["gate"]["owner_actors"] == ["owner"]
+    assert result["receipt"]["gate"]["evidence_source"] == (
+        "cached_live_verification"
+    )
+    assert result["receipt"]["gate"]["stale"] is True
+    assert result["receipt"]["gate"]["cache_age_seconds"] == 34.5
     assert "private release reason" not in str(result["receipt"])
     assert result["receipt"]["runtime"]["ok"] is True
     assert result["receipt"]["components"][0]["name"] == "bot"

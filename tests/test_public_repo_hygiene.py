@@ -196,6 +196,37 @@ def test_no_personal_life_markers_in_tracked_files():
     assert offenders == []
 
 
+def test_runtime_surfaces_do_not_hardcode_owner_identity_or_home():
+    """Runtime behavior is portable; identity comes from private config.
+
+    Historical plans and tests may describe the original incidents. Active
+    code, prompts, and installed skills may not bake one machine or owner into
+    every collaborator install.
+    """
+    personal_name = "Pas" + "cal"
+    personal_home = "/Users/" + personal_name.lower()
+    offenders = []
+    for rel in _tracked_files():
+        path = Path(rel)
+        if rel.startswith(("tests/", "docs/")) or path.name.startswith("test_"):
+            continue
+        active = (
+            path.suffix in {".py", ".sh"}
+            or rel in {"HEARTBEAT.md", "components.yaml",
+                       "capability_product_policy.yaml"}
+            or rel.startswith(("plugins/", ".agents/"))
+        )
+        if not active or path.suffix not in TEXT_SUFFIXES:
+            continue
+        try:
+            text = (ROOT / path).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if re.search(rf"\b{personal_name}\b", text) or personal_home in text:
+            offenders.append(rel)
+    assert offenders == []
+
+
 def test_release_version_is_stated_consistently():
     """VERSION, the newest CHANGELOG entry, and the README banner must agree.
 

@@ -31,8 +31,8 @@ from core.frontstage_acceptance import (
     record_acceptance,
     record_owner_feedback,
 )
-from core.matter_runs import MatterRunConflict, get_run
-from core.matters import create_matter, get_matter
+from core.matter_runs import MatterRunConflict, abort_run, get_run
+from core.matters import create_matter, get_matter, link_entity, update_matter
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +100,135 @@ def test_continue_fails_closed_on_ambiguous_or_missing_query(tmp_path):
     assert missing["candidates"] == []
 
 
+def test_wake_receipt_binds_the_real_thread_and_advances_with_the_run(tmp_path):
+    matter = create_matter("唤醒后完整执行")
+    link_entity(
+        matter["id"],
+        "session",
+        "codex-thread-wake",
+        provider="codex",
+        title="继续：唤醒后完整执行",
+        metadata={
+            "source": "codex_wake",
+            "wake_id": "wake_exact",
+            "wake_status": "prepared",
+            "workspace": str(tmp_path.resolve()),
+            "matter_lease_started": False,
+            "turn_count": 0,
+        },
+    )
+
+    started = continue_matter_run(
+        matter_id=matter["id"],
+        wake_id="wake_exact",
+        task="继续完成这个结果",
+        workspace=str(tmp_path),
+        surface="desktop",
+    )
+
+    run = started["run"]
+    assert run["session_id"] == "codex-thread-wake"
+    running_link = get_matter(matter["id"])["links"][0]
+    assert running_link["metadata"]["wake_status"] == "running"
+    assert running_link["metadata"]["run_id"] == run["id"]
+    assert running_link["metadata"]["matter_lease_started"] is True
+    packet = started["context_packet"]
+
+    receipt = release_matter_run(
+        run_id=run["id"],
+        context_generation=packet["context_generation"],
+        context_digest=packet["digest"],
+    )
+
+    assert receipt["session"]["id"] == "codex-thread-wake"
+    released_link = get_matter(matter["id"])["links"][0]
+    assert released_link["metadata"]["wake_status"] == "released"
+    assert released_link["metadata"]["matter_lease_started"] is False
+    assert any(
+        event["event_type"] == "codex_wake_consumed"
+        for event in get_matter(matter["id"])["events"]
+    )
+
+
+def test_wake_receipt_refuses_wrong_workspace_or_task_reference(tmp_path):
+    matter = create_matter("唤醒收据不能猜")
+    link_entity(
+        matter["id"],
+        "session",
+        "codex-thread-bound",
+        provider="codex",
+        metadata={
+            "source": "codex_wake",
+            "wake_id": "wake_bound",
+            "wake_status": "prepared",
+            "workspace": str(tmp_path.resolve()),
+        },
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+
+    with pytest.raises(MatterRunConflict, match="different workspace"):
+        continue_matter_run(
+            matter_id=matter["id"],
+            wake_id="wake_bound",
+            task="wrong workspace",
+            workspace=str(other),
+        )
+    with pytest.raises(MatterRunConflict, match="task_ref conflicts"):
+        continue_matter_run(
+            matter_id=matter["id"],
+            wake_id="wake_bound",
+            task_ref="some-other-thread",
+            task="wrong task",
+            workspace=str(tmp_path),
+        )
+
+    assert matter_status(matter["id"])["active_runs"] == []
+    assert get_matter(matter["id"])["links"][0]["metadata"]["wake_status"] == (
+        "prepared"
+    )
+
+
+def test_wake_abort_releases_the_link_and_stale_projection_is_audited(tmp_path):
+    from core.codex_wake import audit_codex_wakes
+
+    matter = create_matter("唤醒任务异常退出")
+    link_entity(
+        matter["id"],
+        "session",
+        "codex-thread-abort",
+        provider="codex",
+        metadata={
+            "source": "codex_wake",
+            "wake_id": "wake_abort",
+            "wake_status": "prepared",
+            "workspace": str(tmp_path.resolve()),
+        },
+    )
+    started = continue_matter_run(
+        matter_id=matter["id"],
+        wake_id="wake_abort",
+        task="先触发底层异常",
+        workspace=str(tmp_path),
+    )
+
+    abort_run(started["run"]["id"], error="simulated lower-level exit")
+    stale = audit_codex_wakes()
+
+    assert stale["healthy"] is False
+    assert stale["issues"][0]["code"] == "wake_projection_stale"
+
+    aborted = abort_matter_run(
+        started["run"]["id"], error="project terminal state"
+    )
+
+    assert aborted["status"] == "failed"
+    failed_link = get_matter(matter["id"])["links"][0]
+    assert failed_link["metadata"]["wake_status"] == "failed"
+    assert failed_link["metadata"]["matter_lease_started"] is False
+    assert audit_codex_wakes()["healthy"] is True
+
+
 def test_frontstage_close_needs_owner_confirmation_and_reconciles(tmp_path):
     matter = create_matter("自然关闭")
 
@@ -139,7 +268,117 @@ def test_start_returns_bounded_packet_and_records_the_codex_task(tmp_path):
     assert run["session_id"] == "codex-task-123"
     assert run["surface"] == "mobile"
     assert Path(started["context_path"]).is_file()
-    assert matter_status(matter["id"])["active_runs"][0]["id"] == run["id"]
+    status_run = matter_status(matter["id"])["active_runs"][0]
+    assert status_run["id"] == run["id"]
+    assert status_run["task"] == "完成 Phase 1"
+    assert set(status_run).isdisjoint({
+        "workspace",
+        "context_path",
+        "context_digest",
+        "context_packet_id",
+        "session_id",
+        "authority",
+        "receipt",
+        "last_error",
+        "result_digest",
+    })
+    assert str(tmp_path) not in str(matter_status(matter["id"]))
+    assert "codex-task-123" not in str(matter_status(matter["id"]))
+
+
+def test_status_excludes_lark_conversation_text_unless_explicitly_requested():
+    from core.matters import add_event
+
+    matter = create_matter("状态最小披露")
+    add_event(
+        matter["id"], "conversation_user", "飞书里的私人原话",
+        actor="Claude primary",
+    )
+    add_event(
+        matter["id"], "implementation_verified", "测试已经通过",
+        actor="codex",
+    )
+
+    default = matter_status(matter["id"])
+    explicit = matter_status(
+        matter["id"], include_conversation_events=True
+    )
+
+    assert "飞书里的私人原话" not in str(default)
+    verified = next(
+        item for item in default["recent_events"]
+        if item["type"] == "implementation_verified"
+    )
+    assert verified["source"] == "codex"
+    lark_event = next(
+        item for item in explicit["recent_events"]
+        if item["type"] == "conversation_user"
+    )
+    assert lark_event["source"] == "lark"
+    assert lark_event["summary"] == "飞书里的私人原话"
+
+
+def test_start_moves_a_session_forward_from_a_terminal_matter(tmp_path):
+    previous = create_matter("已经结束的旧结果")
+    first = start_matter_run(
+        matter_id=previous["id"],
+        task="finish old result",
+        workspace=str(tmp_path),
+        task_ref="codex-task-reused",
+        surface="desktop",
+    )
+    abort_matter_run(first["run"]["id"], error="old task ended")
+    update_matter(previous["id"], status="done", outcome="旧结果已结束")
+    current = create_matter("同一 Codex 任务里的新结果")
+
+    started = start_matter_run(
+        matter_id=current["id"],
+        task="start new result",
+        workspace=str(tmp_path),
+        task_ref="  codex-task-reused  ",
+        surface="desktop",
+    )
+
+    assert started["run"]["status"] == "running"
+    assert started["run"]["session_id"] == "codex-task-reused"
+    assert get_matter(previous["id"])["links"] == []
+    current_links = get_matter(current["id"])["links"]
+    assert current_links[0]["entity_id"] == "codex-task-reused"
+    assert any(
+        event["event_type"] == "link_moved_out"
+        for event in get_matter(previous["id"])["events"]
+    )
+    assert any(
+        event["event_type"] == "link_moved_in"
+        for event in get_matter(current["id"])["events"]
+    )
+
+
+def test_start_refuses_to_steal_a_session_from_an_active_matter(tmp_path):
+    previous = create_matter("仍在进行的旧结果")
+    current = create_matter("不该抢走 Session 的新结果")
+    first = start_matter_run(
+        matter_id=previous["id"],
+        task="old active result",
+        workspace=str(tmp_path),
+        task_ref="codex-task-active",
+        surface="desktop",
+    )
+    abort_matter_run(first["run"]["id"], error="execution stopped")
+
+    with pytest.raises(MatterRunConflict, match="still linked to active matter"):
+        start_matter_run(
+            matter_id=current["id"],
+            task="new result",
+            workspace=str(tmp_path),
+            task_ref="codex-task-active",
+            surface="desktop",
+        )
+
+    assert matter_status(current["id"])["active_runs"] == []
+    assert get_matter(previous["id"])["links"][0]["entity_id"] == (
+        "codex-task-active"
+    )
 
 
 def test_only_one_frontstage_can_own_a_matter(tmp_path):
@@ -154,6 +393,39 @@ def test_only_one_frontstage_can_own_a_matter(tmp_path):
         )
 
     assert get_run(first["run"]["id"])["status"] == "running"
+
+
+def test_start_failure_receipt_keeps_the_specific_reason(
+    tmp_path, monkeypatch, capsys,
+):
+    import core.codex_frontstage as frontstage
+    from core.matter_runs import list_runs
+
+    matter = create_matter("启动失败仍可追溯")
+    monkeypatch.setattr(
+        frontstage,
+        "write_context_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("context directory is not writable")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not writable"):
+        start_matter_run(
+            matter_id=matter["id"],
+            task="继续",
+            workspace=str(tmp_path),
+            task_ref="codex-task-failed",
+        )
+
+    failed = list_runs(matter_id=matter["id"])[0]
+    assert failed["status"] == "failed"
+    assert failed["last_error"] == (
+        "frontstage_start_failed:ValueError:"
+        "context directory is not writable"
+    )
+    assert failed["receipt"]["narrative"] == failed["last_error"]
+    assert "matter_run_start_failed" in capsys.readouterr().err
 
 
 def test_release_is_idempotent_and_does_not_complete_the_matter(tmp_path):
@@ -207,6 +479,7 @@ def test_health_reports_unreleased_residue_without_mutating_it(tmp_path):
     report = frontstage_health()
 
     assert report["audit"]["counts"]["running"] == 1
+    assert report["wake_audit"]["healthy"] is True
     assert get_run(started["run"]["id"])["status"] == "running"
 
 
@@ -248,6 +521,7 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
                 "jarvis_acceptance_record",
                 "jarvis_frontstage_health",
                 "jarvis_model_status",
+                "jarvis_operating_model",
                 "jarvis_matter_abort",
                 "jarvis_matter_close",
                 "jarvis_matter_continue",
@@ -262,10 +536,14 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
                 "jarvis_memory_search",
             }
             by_name = {tool.name: tool for tool in tools.tools}
+            assert "wake_id" in by_name[
+                "jarvis_matter_continue"
+            ].input_schema["properties"]
             assert by_name["jarvis_matter_search"].annotations.read_only_hint
             assert by_name["jarvis_matter_abort"].annotations.destructive_hint
             assert by_name["jarvis_matter_release"].annotations.idempotent_hint
             assert by_name["jarvis_matter_review"].annotations.read_only_hint
+            assert by_name["jarvis_operating_model"].annotations.read_only_hint
             assert by_name["jarvis_acceptance_prompt"].annotations.idempotent_hint
             assert by_name[
                 "jarvis_acceptance_record"
@@ -286,6 +564,12 @@ def test_official_mcp_adapter_exposes_only_the_bounded_matter_contract(
             assert usage.structured_content["report"]["codex"]["windows"][0][
                 "remaining_percent"
             ] == 50
+            operating = await client.call_tool("jarvis_operating_model", {})
+            assert operating.is_error is False
+            assert operating.structured_content["default_entry"][
+                "surface"
+            ] == "codex"
+            assert operating.structured_content["quiet_is_healthy"] is True
             review = await client.call_tool("jarvis_matter_review", {})
             assert review.is_error is False
             assert review.structured_content["schema"] == "jarvis.matter-review.v1"
@@ -595,12 +879,12 @@ def test_delayed_feedback_stays_bound_to_the_prompt_connector_version(
         context_digest=packet["digest"],
     )
     prompt = claim_acceptance_prompt(started["run"]["id"], now=200.0)
-    monkeypatch.setattr(frontstage_acceptance, "CONNECTOR_VERSION", "0.3.2")
+    monkeypatch.setattr(frontstage_acceptance, "CONNECTOR_VERSION", "0.4.1")
 
     review = record_owner_feedback(started["run"]["id"], "顺", now=201.0)
 
-    assert prompt["connector_version"] == "0.3.1"
-    assert review["connector_version"] == "0.3.1"
+    assert prompt["connector_version"] == "0.4.0"
+    assert review["connector_version"] == "0.4.0"
     assert acceptance_report()["surfaces"]["mobile"]["reviewed"] == 0
 
 

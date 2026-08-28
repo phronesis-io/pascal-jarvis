@@ -71,6 +71,7 @@ need_cmd claude  "  npm i -g @anthropic-ai/claude-code"
 need_optional lark-cli    "Lark plugin — install: npm i -g @larksuite/cli"
 need_optional eigenflux   "EigenFlux plugin — install: curl -fsSL https://www.eigenflux.ai/install.sh | sh"
 need_optional gh          "GitHub CLI — required only for governed production deploys"
+need_optional codex       "Codex frontstage — install the Codex desktop/CLI first"
 
 if [ "$MISSING_REQUIRED" -ne 0 ]; then
   err ""
@@ -125,7 +126,7 @@ if "$JARVIS_PYTHON" - <<'PYEOF'
 import importlib
 
 required = (
-    "yaml", "lark_oapi", "mcp", "pytest",
+    "yaml", "lark_oapi", "mcp", "pytest", "coverage",
 )
 missing = []
 for module in required:
@@ -144,6 +145,17 @@ else
 fi
 "$JARVIS_PYTHON" -m pip check
 ok "Python dependency graph is consistent"
+
+if command -v codex >/dev/null 2>&1; then
+  step "Installing Codex frontstage integration"
+  if "$JARVIS_DIR/scripts/install_codex_integration.sh" >/dev/null 2>&1 \
+      && "$JARVIS_PYTHON" "$JARVIS_DIR/scripts/check_codex_frontstage.py" \
+        >/dev/null 2>&1; then
+    ok "Codex Jarvis Matters plugin and MCP handshake are healthy"
+  else
+    warn "Codex integration is not ready; rerun ./scripts/install_codex_integration.sh"
+  fi
+fi
 
 # ── 3. Executable bits ───────────────────────────────────────────────
 step "Making shell scripts executable"
@@ -211,8 +223,8 @@ step "Running test suite (sanity check)"
 if [ "${JARVIS_SETUP_SKIP_TESTS:-0}" = "1" ]; then
   warn "tests skipped because JARVIS_SETUP_SKIP_TESTS=1"
 else
-  "$JARVIS_PYTHON" -m pytest tests/ -q
-  ok "tests passed"
+  JARVIS_PYTHON="$JARVIS_PYTHON" "$JARVIS_DIR/scripts/localtest.sh"
+  ok "local verification gate passed"
 fi
 
 # ── 7. Next steps ────────────────────────────────────────────────────

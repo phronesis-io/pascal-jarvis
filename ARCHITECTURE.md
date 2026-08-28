@@ -24,6 +24,11 @@ verified. That target does not revive a Jarvis-owned mobile web application.
 
 `components.yaml` is the only manifest of what should be alive. The daemon,
 doctor, restart/status tooling, and self-diagnostic consume it.
+`runtime_sources.txt` is the shared boundary for code that may affect resident
+behavior. `bot.sh` records its loaded Git revision in `.bot.pid`; the
+`watchdog-armed` component requires that revision, the current checkout, and
+all protected paths to remain identical. A mismatch blocks child respawns and
+stays visibly unhealthy until a governed deploy restarts the stack.
 
 ## Main Flows
 
@@ -34,7 +39,8 @@ Lark event
   -> bot.sh parsing and trust boundary
   -> core.prompt current memory + Matter context
   -> selected model/provider
-       owner p2p: preferred executor -> Claude chain -> Codex CLI -> GPT API
+       owner p2p: core.owner_chat_model -> core.model_runtime
+                  -> Claude chain / Codex CLI / GPT API
        shared/untrusted: restricted Claude chain -> text-only GPT API
   -> deterministic action processors
   -> core.delivery reply envelope
@@ -100,9 +106,19 @@ The implementation boundary is explicit:
 - `core.codex_mcp` adapts that contract to the official MCP Python SDK over
   local stdio. `plugins/jarvis-matters` supplies the Codex skill and launcher;
   it does not read Codex's private task store or create a second conversation;
+- `core.codex_app_server` is the bounded JSON-RPC client shared by supported
+  host-side Codex integrations. `core.codex_wake` uses it only after an
+  explicit private-owner Lark action to create, name, and read back one empty
+  Codex task. The committed Matter session link is the wake receipt. No model
+  turn or Matter lease starts during preparation. Requested, externally
+  created, linked, and failed states remain auditable so a process death cannot
+  hide a half-created task. The first continuation returns the exact generated
+  wake ID through MCP; Jarvis resolves the real thread and workspace without
+  guessing, records it on the Matter Run, and advances the link through
+  `prepared -> running -> released|failed`;
 - `core.frontstage_acceptance` stores explicit owner reviews for real desktop
   and mobile journeys. It atomically claims at most one optional prompt per
-  successful run and maps only Pascal's exact published labels to immutable
+  successful run and maps only the owner's exact published labels to immutable
   version-bound evidence. MCP cannot submit free-form scores, a surface, or a
   reviewer identity;
 - `scripts/jarvis-matter` exposes the same contract through `context`,
@@ -114,16 +130,30 @@ An external-effect claim is accepted only when it references current,
 qualifying evidence from the Delegation verifier. Release persists the receipt
 before projecting session/artifact links, so projection failure is observable
 without losing the authoritative receipt.
-Foreground launcher sessions renew a bounded six-hour lease while alive;
-abandoned prepared handoffs still expire. Replayed handoff requests reuse the
-same unstarted run only when executor, task, workspace and packet all match.
+Foreground launcher sessions renew a bounded six-hour lease while alive.
+Preparing a Claude or Codex launcher handoff writes only a bounded preview
+packet and canonical command; it never creates a Matter Run. The command's
+real execution acquires the lease and compiles a fresh packet. A Codex wake
+likewise does not pre-acquire a run: repeated owner actions reuse the same
+verified zero-turn task, and the first real Codex continuation acquires the
+lease through the MCP contract. The wake audit detects a missing run, a thread
+mismatch, or a terminal run whose link projection stayed stale. A failed
+frontstage start aborts any run it acquired and preserves a bounded concrete
+reason in both the Result Receipt and structured operations log.
+Foreground lease renewal owns a short-lived SQLite connection separate from
+the process singleton, retries transient failures with bounded backoff, and
+stops only when the run is terminal or missing. Completion-capture failure is
+itself terminal evidence: the launcher aborts the run instead of leaving an
+active lease. Weekly review first recovers expired runs; its read model also
+checks lease expiry so stale rows cannot hide actionable work.
 
 Codex itself owns task creation, resumption, streaming, approvals, diffs,
 mobile Remote, and ordinary task memory. Jarvis integrates through the
-supported MCP/plugin boundary for application-owned capabilities. A future
-host-driven workflow may use Codex app-server to create or resume tasks, but
-app-server event state must still project into the same Matter Run contract;
-it may not become a competing lifecycle store.
+supported MCP/plugin boundary for application-owned capabilities. The bounded
+wake adapter may request an empty task through Codex app-server, but it stores
+no competing task lifecycle and starts no execution. The first owner message
+continues through the same Matter Run contract. Mobile visibility remains
+unverified until owner acceptance records prove it.
 
 Git and GitHub remain outside the Jarvis state machine. They own source
 history, commits, pull requests, review, CI, and merge evidence. Matter links
@@ -137,9 +167,11 @@ the same `core.matter_review` contract exposed as `jarvis_matter_review`; its
 post-hook renders at most one bounded card. It makes no model call and cannot
 decay, defer, archive, or otherwise edit a parallel task system.
 
-Owner conversations and tool-capable heartbeat calls default to indexed warm
-memory. Stable identity and standing guidance remain inline at the start of
-the reusable prompt prefix. An owner conversation stores one exact private
+Owner conversations may use indexed warm memory because their attended tools
+can fetch a relevant note. Heartbeat model calls are always tool-free and keep
+their required memory inline; deterministic pre/post hooks are their only
+effect boundary. Stable identity and standing guidance remain inline at the
+start of the reusable prompt prefix. An owner conversation stores one exact private
 system-prompt snapshot per provider session and reuses it until the session,
 reviewed runtime revision, prompt implementation, or one-hour freshness window
 changes. Private snapshots are capped at 128. Heartbeat reuses one bounded snapshot per
@@ -149,29 +181,39 @@ The snapshot directory lock covers cache reads, pruning, and atomic publication
 only. Memory and cross-session assembly run outside that lock, followed by a
 second cache read before publication, so unrelated new sessions do not block
 one another while the first complete snapshot still wins each session key.
-Models fetch indexed reference notes from disk only when relevant. Restricted
-or no-tool calls retain full inline memory so index mode can never make
-knowledge unreachable.
+Attended models fetch indexed reference notes from disk only when relevant.
+Restricted and heartbeat calls retain full inline memory so index mode can
+never make knowledge unreachable.
 
 Provider credentials follow the same execution boundary. `bot.sh` keeps the
-primary Anthropic, relay, and OpenAI keys shell-private. The heartbeat routing
-worker receives the configured route set, while a direct provider adapter
-receives only its active credential. Ordinary task scripts and model-started
-Codex/GPT tools receive a scrubbed environment; child-process handling inside
-a third-party provider CLI remains that CLI's responsibility.
+primary Anthropic, relay, and OpenAI keys shell-private. Only the owner-chat or
+heartbeat model worker receives the configured route set, while each direct
+provider adapter receives only its active credential. Ordinary task scripts
+and attended model-started Codex/GPT tools receive a scrubbed environment; child-process
+handling inside a third-party provider CLI remains that CLI's responsibility.
+The owner-chat worker and every direct conversational provider process also
+drop `LARK_APP_SECRET`; deterministic transport code, not model-controlled
+tools, owns the bot application credential and final delivery.
 
 Heartbeat model choice is task policy, separate from provider execution.
 `HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`
-validates that declaration, isolates outbound/untrusted contexts, selects a
-compatible provider, and records the model that actually answered. One
-logical call owns one wall-clock budget. Provider recovery is measured by the
-small `provider-canary`; a full production prompt is never sacrificed as a
-health probe, and a timed-out tool-capable request is never replayed.
-Claude-compatible relays also have an independent
-`claude.relay_attempt_timeout` cap inside that budget, so a green tiny canary
-cannot let a stalled production-size relay monopolize the scheduler.
-Outbound model stages are no-tools and receive only the curated public group
-context; deterministic post-hooks remain the only effect boundary.
+validates that declaration and owns task framing, while
+`core.heartbeat_model` adapts route-specific prompts and provider processes to
+`core.model_runtime`. The runtime owns route order, health cooldowns, one
+logical wall-clock, replay safety, and durable call/attempt receipts. Solo
+tasks use `heartbeat:<task>` attribution; shared batches use a stable sorted
+`heartbeat:batch:<tasks>` identity. The old heartbeat fallback loop is gone.
+
+Primary routes receive the cacheable full-memory prompt profile. Relays and
+OpenAI receive a freshly composed constrained profile, so private prompt state
+cannot leak across provider attempts. A full production prompt is never used
+as a health probe. Every heartbeat route is tool-free, including GPT fallback,
+so a transport failure can move through the bounded provider chain without
+creating ambiguous local effects. Claude-compatible relays also have an
+independent attempt cap inside the same deadline, so a green tiny canary cannot
+let a stalled production-size relay monopolize the scheduler. Outbound model
+stages additionally receive only the curated public group context;
+deterministic post-hooks remain the only effect boundary.
 
 ### Proactive Work
 
@@ -290,12 +332,27 @@ own prose as proof. A merged task starts its pending runtime-verification step
 even when its release SHA was bound in an earlier pass. Runtime proof accepts
 the exact release commit or a healthy resident descendant that contains it.
 
-The daily self-improvement coding session is detached from heartbeat model
-work. Its heartbeat pre-hook is expected to return no text; health is derived
-from an `acquire -> run -> release` receipt containing prompt/output digests,
-exit status, and timestamps. A missing release is reconciled as interrupted,
-failed sessions retry on a bounded clock, and self-diagnostic records a
-warning only after the automatic retry budget is exhausted.
+Unattended code mutation was retired on 2026-08-29. An adversarial review found
+that a workspace-sandboxed coding process could ask launchd to create a second
+job outside the controller's process boundary; a real local Seatbelt probe
+confirmed it. Process cleanup therefore could not prove that all mutation had
+ended before a candidate was finalized.
+
+Jarvis keeps the L3 observation and proposal loop in `core.iteration_loop` and
+the `iteration-observe` task. It may collect evidence, deduplicate findings,
+and prepare a bounded proposal. Code mutation, tests, commits, review, and
+release begin only in an owner-started Codex or Claude Code task. No heartbeat
+task may start a mutating coding agent. Model and provider availability never
+weakens this boundary, and the existing exact-SHA review, CI, Owner authority,
+deploy, and runtime-verification gates remain unchanged. The decision and its
+experimental evidence are recorded in
+`docs/plans/2026-08-28-coding-harness-release-authority.md`.
+
+The heartbeat model boundary enforces the same rule independently in both
+`core.heartbeat` and `core.heartbeat_model`: even a stale caller that requests
+tools is downgraded to a tool-free call. Release preflight also fails closed on
+unknown legacy state, malformed process identity, or unparseable `ps`/launchd
+evidence before any deploy guard or runtime process is touched.
 
 ## Module Boundaries
 
@@ -322,12 +379,17 @@ warning only after the automatic retry budget is exhausted.
   path; a deterministic five-minute `msg fetch` + CLI-cache reconciliation is
   the no-loss path. Both serialize on the same local lock, deduplicate on the
   server's canonical `msg_id`, and mark the receipt only after a Memorial or
-  delivery envelope is durable. Terminal retries are automatic only for a
+  delivery envelope is durable. Six consecutive long-lived connections with
+  zero protocol output make the stream visibly degraded and slow its retries;
+  a fresh poll remains available but is never rendered as real-time green.
+  Terminal retries are automatic only for a
   typed, definitive no-send failure; closed user decisions never reopen.
 - `docs/capability_inventory.md`: generated evidence map for supported
-  components, scheduled work, CLIs, pages, APIs, and Lark commands. It detects
-  missing contracts and drift; it never authorizes deletion without explicit
-  retirement, replacement, migration, and data-retention evidence.
+  components, scheduled work, CLIs, pages, APIs, and Lark commands, joined with
+  the explicit product policy in `capability_product_policy.yaml`. Engineering
+  status and product value remain separate; an unreviewed new capability fails
+  the inventory gate. Deletion still requires explicit retirement,
+  replacement, migration, and data-retention evidence.
 - `core.memorial`: visible Item and decision ledger. New cards persist a
   `work_receipt`, rendered above the body; proactive model output must supply
   one `WORKED:` directive per card block.
@@ -373,13 +435,30 @@ warning only after the automatic retry budget is exhausted.
   health cooldown, and real provider diversity. It emits the private
   compatibility environment consumed by harnesses but never starts a model
   process or exposes credentials on a status surface.
-- **Target Model Runtime boundary:** route execution is still spread across the
-  current conversation, heartbeat, auxiliary, and Codex adapters. The migration
-  converges those callers on one provider-neutral orchestrator that consumes
-  `model_control` policy, enforces one wall-clock/effect budget, and records
-  task, Matter, provider, observed model, latency, cost, and terminal reason.
-  Product state, permissions, and completion receipts stay outside that runtime.
-  Tiny canaries and real-workload health remain distinct signals.
+- `core.model_runtime`: the provider-neutral execution orchestrator. It consumes
+  `model_control` policy, enforces one wall-clock and effect-replay budget, and
+  records task, Matter, route, requested/observed model, latency, optional cost,
+  and terminal reason without storing prompts or credentials. Owner-private
+  Lark turns, heartbeat execution, auxiliary calls, compaction, EigenFlux
+  analysis, and idle-noise classification use it. Route/model replay stops
+  after an uncertain write or external effect; untrusted contexts cannot enable
+  tools. Product state, permissions, and completion receipts stay outside this
+  runtime. Shared and non-owner Lark traffic intentionally remains on its
+  restricted no-private-tools adapter path, so this is not yet a system-wide
+  Phase-3 completion claim. Tiny canaries and real-workload health remain
+  distinct signals.
+- `core.owner_chat_model`: the owner-private Lark adapter boundary. `bot.sh`
+  still owns trust classification, serialization, progress, background
+  promotion, cancellation, actions, and delivery; one wrapper process gives
+  Model Runtime the exact gate/preference once, provider-specific session and
+  prompt behavior, and the only fallback decision. The wrapper emits a bounded
+  result envelope; an ambiguous tool-capable failure produces no shell replay.
+  Slow-call promotion is activity-aware: transcript writes keep the current
+  logical session inline, a 60-second idle window after 90 seconds permits a
+  background handoff, and a 10-minute hard ceiling preserves conversation
+  availability. A promoted process rotates because concurrent `--resume` of a
+  still-writing provider transcript is unsafe; active work no longer rotates
+  merely because a fixed stopwatch elapsed.
 - `core.provider_health`: bounded provider canaries and sanitized model-chain
   observability over the shared `model_control` catalog. Canary and real-request
   evidence remain separate: a green tiny canary cannot erase a production
@@ -408,7 +487,7 @@ warning only after the automatic retry budget is exhausted.
   supplies an exact quote and covers every source. Owner-authored claims may
   become active; assistant-authored claims remain candidates. New decisions
   supersede old ones, contradictory facts suspend both values, and only an
-  explicit Pascal review can confirm, choose, or reject a disputed claim.
+  explicit the owner review can confirm, choose, or reject a disputed claim.
   Applied compile batches erase transcript payloads while retaining source
   digests, references, claim lifecycle, and audit evidence.
 - `core.model_usage`: the joined product view over package allowance,
@@ -416,9 +495,11 @@ warning only after the automatic retry budget is exhausted.
   fallback plan. Codex allowance comes from the signed-in local app-server;
   providers without a provider-defined quota surface remain `unknown`. Numeric
   observations support exhaustion forecasts but never store credentials,
-  opaque credit identifiers, or provider billing prose. The hourly Tier-0
-  usage task refreshes this view and emits only the first warning in a new
-  critical/exhausted episode; recovery rearms it.
+  opaque credit identifiers, or provider billing prose. Forecasts appear only
+  after 50% use or 25% of a window has elapsed and remain informational; only
+  verified 90% use or an authoritative limit flag creates proactive attention.
+  The hourly Tier-0 task emits only the first alert in one episode. Unknown
+  reads preserve that episode because missing evidence is not recovery.
 - `core.release_gate`: fail-closed merged-PR, CI, branch-protection, and
   independent-review evidence before a production code restart. The default
   deploy and its `--full` alias refresh and verify every installed resident
@@ -427,6 +508,9 @@ warning only after the automatic retry budget is exhausted.
   `restart.sh --runtime` path is configuration-only: it revalidates release
   authority, requires a clean worktree, and proves the running bot/heartbeat
   already match `HEAD`, so it cannot preserve or deploy unreviewed code.
+  Codex dependencies and plugin registration belong to setup. Governed deploy
+  performs only read-only plugin/MCP health checks; an optional frontstage
+  degradation is reported but cannot block resident Jarvis recovery.
 - `core.deploy`: runtime registrations, delivery smoke, and durable release
   receipts. A receipt is written only when the release-gate SHA equals `HEAD`,
   all registered resident versions match, every critical component is healthy,
@@ -485,6 +569,9 @@ warning only after the automatic retry budget is exhausted.
 - Numeric model-usage observations by route, limit, window, and reset epoch.
   They are private telemetry for trend/forecast calculations, not billing
   authority and not proof that a production-sized request will succeed.
+- Provider-neutral model call and attempt receipts, including effect authority,
+  task/Matter attribution, route/model/timing and terminal reason. Prompt text,
+  credentials and raw provider errors are not stored.
 
 Append-only JSONL remains where event history itself is useful, notably
 Memorial and compatibility ledgers. New policy must not depend on two writable
@@ -505,17 +592,24 @@ interactive frontstage, not as a second broadcast inbox. A delivery class moves
 only after its Codex notification, resume, and closure receipts pass real
 desktop/mobile acceptance tests.
 
-| Attention | Durable surface | Interrupting reach |
+| Owner need / attention | Durable surface | Interrupting reach |
 |---|---|---|
 | conversation reply | Lark thread | immediate Lark reply |
-| decision | Item | Lark card |
-| alert | Item | Lark card (quiet-hours bypass) |
-| ordinary notice | Item | Lark card |
-| ambient exhaust (`AMBIENT_SOURCES`) | Item, `delivery_status=ledger_only` | none — batched into the morning anchor digest line (`core.presence`) |
+| `judgment` / `authority`, decision | Item | one Lark decision card |
+| `deadline`, alert | Item | Lark card (quiet-hours bypass) |
+| `requested_result` / material `external_change`, notice | Item | bounded Lark result/wake-up |
+| `scheduled_companion`, notice | Item | optional subscribed rhythm |
+| `decision_batch`, decision | Item | one bounded batch |
+| `none` | Item, `delivery_status=ledger_only` | none — available to bounded review |
 
 `ledger_only` means durable placement, not verified human reach; the morning
 digest line is its one batched reach. `web_only`/`phone_ready` survive only
 as legacy ledger values from the pre-REQ-119 era.
+
+`core.interruption` is the pure policy boundary. Producers declare
+`owner_need`, `why_now`, and a completed-work receipt at `core.memorial.create`;
+the ledger persists all three and `core.interruption_audit` reports explicit,
+legacy-inferred, invalid, and ledger/Lark counts without mutating state.
 
 ## Authority Matrix
 
@@ -546,15 +640,20 @@ The Guardian is an independent process path, not an independent communication
 channel. Its Lark alerts can fail with Lark. A configured external dead-man is
 the actual out-of-band detector: the daemon withholds its success ping after
 three consecutive real Lark transport failures, as well as when the local
-stack is unhealthy.
+stack has remained brain-dead through the recovery verification window. A raw
+brain-health candidate, post-wake grace, or offline deferral keeps pinging;
+those states are diagnostic evidence, not proof that the host is dead.
 
 Guardian follows `observe -> bounded repair -> verify -> notify`. It may only
 recycle a process after proving that process descends from this repository's
 live bot and matches the exact component command. A first red probe starts
 recovery and is silent. A user-facing alert means the repair grace expired and a second probe
-was still red. Delivery receipts are three-valued: confirmed/covered closes an
-incident, queued/attempting leaves it durably in flight without a local banner,
-and only a refused or dropped alert invokes the rate-limited macOS fallback.
+was still red. Guardian's owner-visible result is an Item card with one
+acknowledgement and a conversation exit. Delivery receipts are three-valued:
+delivered or an existing pending incident covers the event; queued/retry-queued
+leaves it durably in flight without a local banner; only a refused or dropped
+alert invokes the rate-limited macOS fallback. A raw daemon error is never the
+final user copy.
 All Guardian and external dead-man payloads are `owner_private`; a failed owner
 route fails closed and never falls back to a group or public monitoring route.
 

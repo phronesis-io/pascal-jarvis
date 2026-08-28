@@ -7,11 +7,13 @@ work. The supported product surface remains the generated
 
 ## Current Evidence
 
-- The generated inventory has 175 active capabilities: 175 `keep`, 0 `fix`,
-  0 `retire-candidate`. A `keep` row means definition, implementation,
-  entrypoint, and executable-test reference exist; it is not a coverage claim.
-  Seven standalone task tools are now included instead of disappearing behind
-  their bot/shell callers.
+- The generated inventory has 186 active capabilities with complete engineering
+  evidence. Product disposition is now independent: 82 `keep`, 88 `quiet`, 16
+  `replace-with-codex`, and 0 `unreviewed`, plus 5 recorded retired surfaces.
+  An engineering `keep` still means definition, implementation, entrypoint, and
+  executable-test reference exist; it is not a value or coverage claim. New
+  capabilities fail closed until `capability_product_policy.yaml` assigns a
+  survival value or an explicit Codex migration gate.
 - `core.cross_session` is a small facade over discovery, parsing, historical
   indexing, and projection modules.
 - Memorial storage, card composition, transport, and shared state contracts
@@ -20,6 +22,13 @@ work. The supported product surface remains the generated
   owns orchestration and interaction workflows and remains a refactor target.
 - The strict test write guard is enabled by default. `JARVIS_TEST_STRICT_GUARD=0`
   is a diagnostic opt-out and cannot be quoted as release evidence.
+- The release gate records one private `0600` live-evidence cache. A recognized
+  transient GitHub network outage may reuse it for the exact clean `main` SHA
+  for at most 24 hours and marks the result `stale`; auth, policy, CI, review,
+  SHA, age, ownership, and permission failures never use the cache. The joined
+  deploy receipt preserves whether live or cached evidence authorized restart.
+  Raw `launchctl kickstart` is not a release path: the governed restart owns it
+  between the release gate and post-start runtime verification.
 - The provider scenario extracts the relevant `bot.sh` production handler
   functions verbatim and executes them in an isolated harness: Claude limit ->
   Codex lock/session -> reliable Lark delivery -> provider/model turn record ->
@@ -32,13 +41,21 @@ work. The supported product surface remains the generated
 - Protected CI measures the Python runtime surfaces (`core/`, `tasks/`,
   `handlers/`, `sources/`, `admin.py`, and `daemon.py`) with
   `coverage.py`, including Python subprocesses started by the tests. The
-  reviewed 2026-08-26 baseline is 81.3% statements and 73.3% branches.
+  current 2026-08-29 local candidate evidence is 82.2% statements and 74.1%
+  branches across 3,674 passing tests (6 platform/fixture skips).
   `scripts/coverage_budget.py` ratchets the total and critical
   runtime modules; it is a regression floor, not a claim that every path is
   sufficiently tested. Ratios between changed test lines and implementation
   lines remain review-volume indicators and are not coverage percentages.
-- `core/memorial.py` is 3,694 lines and its longest function is 181 lines;
-  `core/intentions.py` is 3,583/324; `core/heartbeat.py` is 2,556/882; and
+- The required GitHub `test` check keeps its branch-protection identity while
+  running the same Python 3.14 major/minor as the resident processes. A
+  separate Python 3.12 compatibility job runs the full suite. Both CI jobs set
+  the host `/etc/localtime` to `Asia/Shanghai`, so timezone regressions execute
+  instead of skipping on a UTC runner. The default local gate now runs the
+  same branch-coverage budget; focused selections stay fast and are never
+  presented as the full gate.
+- `core/memorial.py` is 3,663 lines and its longest function is 178 lines;
+  `core/intentions.py` is 3,583/324; `core/heartbeat.py` is 2,099/879; and
   `core/delegations.py` is 2,450/218. These are verified maintainability risks
   even though line count alone is not a defect. Their current file/longest-
   function values are checked into `docs/maintainability_budget.json` and run
@@ -46,6 +63,16 @@ work. The supported product surface remains the generated
 - A Python-wide scan for commented-out `def`/`class` declarations has no
   production matches. The earlier claim of seven such files is not
   reproducible and therefore is not an active cleanup task.
+- Proactive delivery now has a first-principles owner-interruption boundary.
+  Every direct production Memorial producer declares the versioned five-field
+  contract: completed-work evidence, `owner_need`, `why_now`, one minimal
+  `owner_action`, and concrete `silence_cost`; unknown, incomplete, or
+  semantically incompatible explicit needs fail before the ledger write.
+  `core.interruption_audit` separates v2 coverage, historical explicit rows,
+  and legacy inferred mismatches. Presence health no
+  longer requires five cards per day: zero valuable messages is healthy, while
+  a promised Lark envelope that actually failed or stalled becomes delivery
+  debt.
 
 ## Verified Audit Decisions
 

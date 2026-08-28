@@ -90,20 +90,49 @@ def test_temp_cleanup_removes_only_old_owned_regular_allowlisted_files(tmp_path)
     assert recent.exists() and unrelated.exists()
 
 
-def test_memory_git_gc_is_bounded_and_uses_auto(tmp_path):
+def test_memory_git_gc_is_bounded_and_uses_auto_below_threshold(tmp_path):
     (tmp_path / ".git").mkdir()
     calls = []
 
     class Result:
         returncode = 0
+        stdout = "count: 12\nsize: 48\n"
 
     def runner(command, **kwargs):
         calls.append((command, kwargs))
         return Result()
 
-    assert memory_git_gc(tmp_path, runner=runner)["status"] == "ok"
-    assert calls[0][0][-2:] == ["gc", "--auto"]
-    assert calls[0][1]["timeout"] == 60
+    result = memory_git_gc(tmp_path, runner=runner)
+    assert result["status"] == "ok"
+    assert result["mode"] == "auto"
+    assert calls[0][0][-2:] == ["count-objects", "-v"]
+    assert calls[1][0][-2:] == ["gc", "--auto"]
+    assert calls[1][1]["timeout"] == 60
+
+
+def test_memory_git_gc_runs_real_safe_gc_above_loose_object_threshold(tmp_path):
+    (tmp_path / ".git").mkdir()
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "count: 5044\nsize: 81920\n"
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return Result()
+
+    result = memory_git_gc(tmp_path, runner=runner)
+
+    assert result == {
+        "status": "ok",
+        "mode": "full",
+        "loose_objects": 5044,
+        "loose_kib": 81920,
+    }
+    assert calls[1][0][-2:] == ["gc", "--quiet"]
+    assert calls[1][1]["timeout"] == 300
+    assert "--prune=now" not in calls[1][0]
 
 
 def test_runtime_hygiene_cli_returns_structured_result(tmp_path):

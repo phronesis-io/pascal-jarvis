@@ -32,6 +32,8 @@ PROMPT_SNAPSHOT_KEEP = 128
 # Exact blocks amortize the 190k-token prompt without freezing newly learned
 # cross-session context for days. This matches Heartbeat's cache horizon.
 PROMPT_SNAPSHOT_MAX_AGE_SECONDS = 3600
+RECENT_SESSION_FALLBACK_HOURS = 24
+RECENT_SESSION_FALLBACK_CHARS = 4000
 
 
 def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
@@ -49,7 +51,19 @@ def _external_work_context(jarvis_dir: str, focus_text: str = "") -> str:
         if Path(runtime_root).resolve() != Path(jarvis_dir).resolve():
             return ""
         from core.memory_compiler import compiled_context
-        return compiled_context(focus_text, matter_id=None)
+        compiled = compiled_context(focus_text, matter_id=None)
+        if compiled:
+            return compiled
+        # A poison compile batch must not erase cross-product continuity. This
+        # bounded, redacted projection is owner-private and explicitly marked
+        # untrusted by its renderer; shared conversations never call here.
+        from core.cross_session import build_prompt_context
+        return build_prompt_context(
+            tracker_path=Path(jarvis_dir) / "active_sessions.json",
+            jobs_registry_path=Path(jarvis_dir) / "jobs" / "registry.json",
+            window_hours=RECENT_SESSION_FALLBACK_HOURS,
+            max_chars=RECENT_SESSION_FALLBACK_CHARS,
+        )
     except Exception:
         # Provider transcript drift must not make the primary conversation fail.
         return ""
@@ -184,7 +198,7 @@ CLIs over markers — run with Bash from JARVIS_DIR and read the printed result:
               `... do calendar_create title=X start=<ISO> end=<ISO>`)
   - `python3 -m core.intentions list [status] | due | awaiting | get <id> | cancel <id> [reason]`
     `| close <id> [done|recorded|na] [result...] | delete <id> | stats | reset-stale | purge <...>`
-When Pascal tells you he did (or didn't) something an intent was tracking, close the loop:
+When the owner tells you he did (or didn't) something an intent was tracking, close the loop:
 `do intent_close id=<parent> outcome=done result=<他说的一句>` — capture the result, never nag.
 Only after the command confirms success do you report it as done.
 
@@ -374,7 +388,7 @@ For reference docs, read files in:
 
 IMPORTANT: When presenting EigenFlux feed content:
   - Fetch source URL via `eigenflux feed get --item-id <ID>`
-  - Append '📡 Powered by EigenFlux' at the end
+  - Lead with why the signal matters to the user; quote the source briefly
   - Never expose internal metadata (item_id, group_id, impression_id)
 """
 

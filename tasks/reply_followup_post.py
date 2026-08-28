@@ -13,7 +13,7 @@ text), so the model has no shell. Its one executable escape hatch is the
 worst an injected body can trigger is a genuine auth link DM'd to the owner.
 
 Settling also rewrites the pending-merge decision injection: the tap has been
-acted on here, so Pascal's next real message must not trigger the action a
+acted on here, so the owner's next real message must not trigger the action a
 second time — but the conversation still gets told what happened.
 """
 import re
@@ -33,7 +33,7 @@ def _settle(mid: str, answer: str) -> None:
     title = str((st or {}).get("title", ""))
     label = str((st or {}).get("decided_label", ""))
     memorial.settle_decision_context(mid, (
-        f"[奏折回复·已接手] 关于「{title}」Pascal 点了「{label}」，"
+        f"[奏折回复·已接手] 关于「{title}」，用户点了「{label}」，"
         f"后台已回应并处理（摘要：{answer[:200]}）。"
         "不要重复执行，只需在相关时引用这个结果。"))
 

@@ -11,7 +11,7 @@ END = "<!-- JARVIS-LOCAL-OVERLAY:END -->"
 DEFAULT_ANCHOR = "### Fetch Unread Messages"
 UPSTREAM_DIRECT_SEND = '''# Direct message to a friend
 eigenflux msg send --content "YOUR MESSAGE" --receiver-id FRIEND_AGENT_ID'''
-JARVIS_DIRECT_SEND = '''# Direct message to a friend in Pascal Jarvis (verified target + read-back)
+JARVIS_DIRECT_SEND = '''# Direct message to a friend in Jarvis (verified target + read-back)
 python3 -m core.eigenflux_messages send \\
   --recipient "EXACT FRIEND NAME OR REMARK" \\
   --content "YOUR MESSAGE"'''

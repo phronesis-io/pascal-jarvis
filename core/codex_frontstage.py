@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from core.matter_context import build_context_bundle, write_context_bundle
+from core.matter_prompts import continuation_prompt
 from core.matter_run_audit import audit_matter_runs
 from core.matter_runs import (
     ACTIVE_STATUSES,
+    MatterRunConflict,
     abort_run,
     acquire_run,
     bind_context_packet,
@@ -27,11 +29,24 @@ from core.matter_runs import (
     release_run,
     renew_run,
 )
-from core.matters import create_matter, get_matter, link_entity, list_matters
+from core.matters import (
+    add_event,
+    create_matter,
+    find_by_entity,
+    get_matter,
+    link_entity,
+    list_matters,
+)
 
 
 DEFAULT_OPEN_STATUSES = "active,waiting,blocked"
 _SPACE_RE = re.compile(r"\s+")
+
+
+def _start_failure(exc: BaseException) -> str:
+    detail = _SPACE_RE.sub(" ", str(exc or "")).strip()[:200]
+    reason = f"frontstage_start_failed:{type(exc).__name__}"
+    return f"{reason}:{detail}" if detail else reason
 
 
 def _compact_matter(matter: dict[str, Any]) -> dict[str, Any]:
@@ -54,6 +69,27 @@ def _compact_matter(matter: dict[str, Any]) -> dict[str, Any]:
             "providers",
         )
         if key in matter
+    }
+
+
+def _compact_active_run(run: dict[str, Any]) -> dict[str, Any]:
+    """Project operational run state without local paths or authority data."""
+    return {
+        key: run.get(key)
+        for key in (
+            "id",
+            "matter_id",
+            "executor",
+            "status",
+            "run_sequence",
+            "task",
+            "model",
+            "surface",
+            "acquired_epoch",
+            "lease_expires_epoch",
+            "started_epoch",
+        )
+        if key in run
     }
 
 
@@ -132,9 +168,122 @@ def create_frontstage_matter(
     }
 
 
-def continuation_prompt(matter: dict[str, Any]) -> str:
-    """Stable user-facing resume phrase; never depends on Codex internals."""
-    return f"继续 Jarvis 事项「{matter['title']}」（{matter['id']}）"
+def _wake_session(
+    matter_id: str, wake_id: str, workspace: str,
+) -> dict[str, Any]:
+    """Resolve one prepared wake receipt without guessing from task titles."""
+    matter = get_matter(matter_id)
+    if matter is None:
+        raise MatterRunConflict("wake receipt Matter no longer exists")
+    matches = []
+    for link in matter.get("links", []):
+        metadata = link.get("metadata") or {}
+        if (
+            link.get("entity_type") == "session"
+            and link.get("provider") == "codex"
+            and metadata.get("source") == "codex_wake"
+            and str(metadata.get("wake_id") or "") == wake_id
+        ):
+            matches.append(link)
+    if len(matches) != 1:
+        raise MatterRunConflict("wake receipt does not resolve one Codex task")
+    link = matches[0]
+    metadata = link.get("metadata") or {}
+    if metadata.get("wake_status") != "prepared":
+        raise MatterRunConflict("wake receipt has already been consumed")
+    expected_workspace = str(metadata.get("workspace") or "")
+    try:
+        expected_path = Path(expected_workspace).expanduser().resolve()
+        actual_path = Path(workspace).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise MatterRunConflict("wake receipt workspace is invalid") from exc
+    if not expected_workspace or expected_path != actual_path:
+        raise MatterRunConflict("wake receipt belongs to a different workspace")
+    return link
+
+
+def _record_wake_event(
+    matter_id: str, event_type: str, summary: str, payload: dict[str, Any],
+) -> None:
+    """Project a secondary timeline event without weakening the durable link."""
+    try:
+        add_event(
+            matter_id, event_type, summary, actor="frontstage", payload=payload,
+        )
+    except Exception as exc:
+        from core.log import log
+        log(
+            "codex-frontstage",
+            "wake_timeline_projection_failed",
+            level="warn",
+            matter_id=matter_id,
+            event_type=event_type,
+            error_type=type(exc).__name__,
+        )
+
+
+def _project_wake_run(run: dict[str, Any]) -> None:
+    """Advance a wake link after the authoritative run transition committed."""
+    session_id = str(run.get("session_id") or "")
+    if not session_id:
+        return
+    matter = get_matter(str(run.get("matter_id") or ""))
+    if matter is None:
+        return
+    link = next((
+        item for item in matter.get("links", [])
+        if item.get("entity_type") == "session"
+        and item.get("provider") == "codex"
+        and str(item.get("entity_id") or "") == session_id
+        and (item.get("metadata") or {}).get("source") == "codex_wake"
+    ), None)
+    if link is None:
+        return
+    status = str(run.get("status") or "")
+    metadata = {
+        **(link.get("metadata") or {}),
+        "wake_status": status,
+        "run_id": str(run.get("id") or ""),
+        "run_status": status,
+        "executed": True,
+        "matter_lease_started": status in ACTIVE_STATUSES,
+        "run_state_epoch": float(time.time()),
+    }
+    try:
+        link_entity(
+            str(run["matter_id"]),
+            "session",
+            session_id,
+            provider="codex",
+            title=str(link.get("title") or "Codex frontstage task"),
+            metadata=metadata,
+            actor="frontstage",
+        )
+    except Exception as exc:
+        from core.log import log
+        log(
+            "codex-frontstage",
+            "wake_link_projection_failed",
+            level="error",
+            matter_id=str(run.get("matter_id") or ""),
+            run_id=str(run.get("id") or ""),
+            thread_id=session_id,
+            run_status=status,
+            error_type=type(exc).__name__,
+        )
+        return
+    _record_wake_event(
+        str(run["matter_id"]),
+        "codex_wake_run_state",
+        f"Codex 唤醒任务执行状态：{status}",
+        {
+            "wake_id": str(metadata.get("wake_id") or ""),
+            "thread_id": session_id,
+            "run_id": str(run.get("id") or ""),
+            "run_status": status,
+            "matter_lease_started": status in ACTIVE_STATUSES,
+        },
+    )
 
 
 def continue_matter_run(
@@ -144,6 +293,7 @@ def continue_matter_run(
     matter_id: str = "",
     query: str = "",
     task_ref: str = "",
+    wake_id: str = "",
     model: str = "",
     surface: str = "",
     lease_seconds: int = 21600,
@@ -184,16 +334,42 @@ def continue_matter_run(
             ],
         }
 
+    wake_metadata: dict[str, Any] | None = None
+    exact_wake_id = str(wake_id or "").strip()
+    if exact_wake_id:
+        if not direct_id:
+            raise MatterRunConflict("wake receipt requires an exact Matter ID")
+        wake_link = _wake_session(selected["id"], exact_wake_id, workspace)
+        wake_task_ref = str(wake_link.get("entity_id") or "")
+        supplied_task_ref = str(task_ref or "").strip()
+        if supplied_task_ref and supplied_task_ref != wake_task_ref:
+            raise MatterRunConflict("task_ref conflicts with the wake receipt")
+        task_ref = wake_task_ref
+        wake_metadata = dict(wake_link.get("metadata") or {})
+
     started = start_matter_run(
         matter_id=selected["id"],
         task=task,
         workspace=workspace,
         executor="codex",
         task_ref=task_ref,
+        session_metadata=wake_metadata,
         model=model,
         surface=surface,
         lease_seconds=lease_seconds,
     )
+    if exact_wake_id:
+        _record_wake_event(
+            selected["id"],
+            "codex_wake_consumed",
+            "Codex 唤醒任务已开始 Matter Run",
+            {
+                "wake_id": exact_wake_id,
+                "thread_id": str(started["run"].get("session_id") or ""),
+                "run_id": str(started["run"]["id"]),
+                "matter_lease_started": True,
+            },
+        )
     return {
         "schema": "jarvis.matter-continuation.v1",
         "status": "started",
@@ -217,14 +393,25 @@ def close_frontstage_matter(
     )
 
 
-def matter_status(matter_id: str, *, event_limit: int = 12) -> dict[str, Any]:
+def matter_status(
+    matter_id: str,
+    *,
+    event_limit: int = 12,
+    include_conversation_events: bool = False,
+) -> dict[str, Any]:
     """Return current Matter truth and run residue without raw transcripts."""
     matter = get_matter(matter_id)
     if matter is None:
         raise KeyError(f"matter not found: {matter_id}")
-    events = list(reversed(matter.get("events", [])[: max(1, min(event_limit, 30))]))
+    events = list(matter.get("events", []))
+    if not include_conversation_events:
+        events = [
+            item for item in events
+            if not str(item.get("event_type") or "").startswith("conversation_")
+        ]
+    events = list(reversed(events[: max(1, min(event_limit, 30))]))
     active = [
-        run
+        _compact_active_run(run)
         for run in list_runs(matter_id=matter_id, limit=20)
         if run.get("status") in ACTIVE_STATUSES
     ]
@@ -237,6 +424,11 @@ def matter_status(matter_id: str, *, event_limit: int = 12) -> dict[str, Any]:
                 "id": item.get("id"),
                 "type": item.get("event_type"),
                 "actor": item.get("actor"),
+                "source": (
+                    "lark"
+                    if str(item.get("event_type") or "").startswith("conversation_")
+                    else str(item.get("actor") or "system")
+                ),
                 "summary": item.get("summary"),
                 "created_at": item.get("created_at"),
             }
@@ -255,8 +447,24 @@ def start_matter_run(
     model: str = "",
     surface: str = "",
     lease_seconds: int = 21600,
+    session_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Acquire a fresh run and return its immutable bounded Context Packet."""
+    session_provider = str(executor or "").strip().lower()
+    session_ref = str(task_ref or "").strip()
+    if session_ref and session_provider in {"codex", "claude"}:
+        linked_matter = find_by_entity(
+            "session", session_ref, provider=session_provider,
+        )
+        if (
+            linked_matter
+            and linked_matter.get("id") != matter_id
+            and linked_matter.get("status") not in {"done", "archived"}
+        ):
+            raise MatterRunConflict(
+                f"session is still linked to active matter "
+                f"{linked_matter['id']}"
+            )
     recover_expired_runs(matter_id=matter_id)
     run: dict[str, Any] | None = None
     try:
@@ -277,27 +485,49 @@ def start_matter_run(
             context_path=context_path,
         )
         run = mark_run_running(
-            run["id"], session_id=task_ref, model=model
+            run["id"], session_id=session_ref, model=model
         )
-        if task_ref and executor in {"codex", "claude"}:
+        if session_ref and session_provider in {"codex", "claude"}:
+            metadata = {
+                **(session_metadata or {}),
+                "workspace": str(Path(workspace).expanduser().resolve()),
+                "status": "running",
+                "run_id": str(run["id"]),
+                "run_status": "running",
+            }
+            if metadata.get("source") == "codex_wake":
+                metadata.update({
+                    "wake_status": "running",
+                    "executed": True,
+                    "matter_lease_started": True,
+                    "run_state_epoch": float(time.time()),
+                })
             link_entity(
                 matter_id,
                 "session",
-                task_ref,
-                provider=executor,
+                session_ref,
+                provider=session_provider,
                 title=f"{executor} frontstage task",
-                metadata={
-                    "workspace": str(Path(workspace).expanduser().resolve()),
-                    "status": "running",
-                },
+                metadata=metadata,
                 actor="frontstage",
+                move_from_terminal=True,
             )
     except Exception as exc:
+        failure = _start_failure(exc)
+        from core.log import log
+        log(
+            "codex-frontstage",
+            "matter_run_start_failed",
+            level="error",
+            matter_id=matter_id,
+            run_id=str((run or {}).get("id") or ""),
+            error=failure,
+        )
         if run and run.get("id"):
             try:
                 abort_run(
                     str(run["id"]),
-                    error=f"frontstage_start_failed:{type(exc).__name__}",
+                    error=failure,
                 )
             except Exception:
                 # Preserve the start failure. Residue remains visible to the
@@ -336,7 +566,7 @@ def release_matter_run(
     effects: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Release one execution window; never complete the Matter implicitly."""
-    return release_run(
+    receipt = release_run(
         run_id,
         context_generation=context_generation,
         context_digest=context_digest,
@@ -345,10 +575,15 @@ def release_matter_run(
         artifacts=artifacts or [],
         effects=effects or [],
     )
+    run = get_run(run_id)
+    if run:
+        _project_wake_run(run)
+    return receipt
 
 
 def abort_matter_run(run_id: str, *, error: str) -> dict[str, Any]:
     run = abort_run(run_id, error=error)
+    _project_wake_run(run)
     return {
         "schema": "jarvis.frontstage-abort.v1",
         "run_id": run["id"],
@@ -421,12 +656,14 @@ def frontstage_health() -> dict[str, Any]:
     """Return protocol health and recoverable residue for operator review."""
     audit = audit_matter_runs(now=time.time())
     from core.frontstage_acceptance import acceptance_report
+    from core.codex_wake import audit_codex_wakes
     from core.memory_compiler import compiler_status
 
     return {
         "schema": "jarvis.frontstage-health.v1",
         "healthy": audit["healthy"],
         "audit": audit,
+        "wake_audit": audit_codex_wakes(),
         "acceptance": acceptance_report(),
         "memory_compiler": compiler_status(),
     }

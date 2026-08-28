@@ -113,6 +113,15 @@ def test_claude_weekly_limit_caught_even_under_card_header():
     assert looks_like_error(text, proactive=True) is True
 
 
+def test_claude_organization_access_error_is_never_user_copy():
+    text = (
+        "Your organization has disabled Claude subscription access for "
+        "Claude Code"
+    )
+    assert looks_like_error(text) is True
+    assert looks_like_error(f"**Intent**\n\n{text}", proactive=True) is True
+
+
 def test_account_limit_variants_share_provider_classifier():
     assert looks_like_error("You have reached your weekly limit") is True
     assert looks_like_error("Weekly usage limit reached") is True

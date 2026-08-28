@@ -11,7 +11,7 @@
 #
 # The anchor ITEMS are personal → gitignored data/morning_anchor_personal.txt
 # (one per line), neutral defaults otherwise (multi-user product principle).
-# Pascal hates nagging: the nudge is ONE short line, no follow-up if ignored.
+# the owner hates nagging: the nudge is ONE short line, no follow-up if ignored.
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"

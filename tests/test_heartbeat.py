@@ -48,6 +48,7 @@ def test_parse_heartbeat_basic(tmp_path):
     assert tasks[0]["heavy"] is False
     assert tasks[0]["timeout"] is None
     assert tasks[0]["no_tools"] is False
+    assert tasks[0]["private"] is False
     assert tasks[0]["model"] is None
     assert tasks[0]["memory_purpose"] == "inbound"
 
@@ -143,6 +144,19 @@ def test_parse_heartbeat_untrusted_input_field(tmp_path):
     assert by_name["checkin"]["untrusted_input"] is False
 
 
+def test_parse_heartbeat_private_field(tmp_path):
+    hb = tmp_path / "HEARTBEAT.md"
+    hb.write_text(
+        "### memory\n- private: true\n- prompt: compile\n\n"
+        "### public\n- prompt: inspect\n"
+    )
+
+    by_name = {task["name"]: task for task in parse_heartbeat(hb)}
+
+    assert by_name["memory"]["private"] is True
+    assert by_name["public"]["private"] is False
+
+
 def test_parse_heartbeat_no_tools_field(tmp_path):
     hb = tmp_path / "HEARTBEAT.md"
     hb.write_text("""
@@ -177,9 +191,16 @@ def test_production_task_model_policy_and_outbound_privacy():
     for name in ("cross-session-sync", "intention-check", "metrics-digest",
                  "phronesis-monitor", "repos-sync", "activity-log"):
         assert tasks[name]["model"] == "sonnet"
+    assert tasks["cross-session-sync"]["private"] is True
+    implicit = {
+        name for name, task in tasks.items()
+        if task["model"] is None
+        and name not in HeartbeatRunner.TIER0_TASKS
+    }
+    assert implicit == set(), f"non-deterministic tasks default to Opus: {implicit}"
     assert "personal-site" not in tasks
     assert "content-recommend" not in tasks
-    for name in ("eigenflux-publish", "eigenflux-profile"):
+    for name in ("eigenflux-publish", "eigenflux-profile", "eigenflux-friends"):
         assert tasks[name]["memory_purpose"] == "outbound"
 
 
@@ -234,19 +255,27 @@ def test_task_scripts_do_not_inherit_model_credentials(tmp_path, monkeypatch):
 
 
 def test_provider_process_receives_only_its_active_credential(monkeypatch):
-    from core.heartbeat_provider import provider_env
+    from types import SimpleNamespace
+
+    from core.model_adapter_support import claude_env
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "primary-secret")
     monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-secret")
     monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
 
-    primary = provider_env(False, False)
+    primary = claude_env(SimpleNamespace(
+        id="primary", credential="", base_url="",
+    ))
     assert primary["ANTHROPIC_API_KEY"] == "primary-secret"
     assert "CLAUDE_BACKUP_AUTH_TOKEN" not in primary
     assert "OPENAI_API_KEY" not in primary
 
-    backup2 = provider_env(True, True)
+    backup2 = claude_env(SimpleNamespace(
+        id="backup2",
+        credential="backup2-secret",
+        base_url="https://backup2.invalid",
+    ))
     assert backup2["ANTHROPIC_AUTH_TOKEN"] == "backup2-secret"
     assert "ANTHROPIC_API_KEY" not in backup2
     assert "CLAUDE_BACKUP_AUTH_TOKEN" not in backup2
@@ -298,10 +327,9 @@ def test_only_task_filter(tmp_path, monkeypatch):
     assert "task-b" not in called_with[0]
 
 
-def test_untrusted_task_isolated_without_restricting_trusted_batch(
+def test_untrusted_task_isolated_without_restricting_trusted_memory(
         tmp_path, monkeypatch):
-    """Attacker-chosen mail text gets a no-tools/no-memory solo call while a
-    trusted check-in in the same cycle keeps its normal capabilities."""
+    """Untrusted data loses memory while the trusted batch keeps its context."""
     hb = (
         "### mail-triage\n- interval: 15m\n- untrusted-input: true\n- prompt: triage\n\n"
         "### checkin\n- interval: 30m\n- prompt: check in\n"
@@ -353,10 +381,8 @@ def test_no_tools_task_isolated_without_withholding_private_memory(
     assert len(captured) == 2
     tidy = next(c for c in captured if "memory-tidy" in c["prompt"])
     trusted = next(c for c in captured if "checkin" in c["prompt"])
-    assert tidy["allow_tools"] is False
     assert tidy["restrict_tools"] is False
     assert "checkin" not in tidy["prompt"]
-    assert trusted["allow_tools"] is True
     assert "memory-tidy" not in trusted["prompt"]
 
 
@@ -404,7 +430,7 @@ def test_claude_call_disables_all_tools_and_memory_when_restricted(
     assert "personal memory withheld" in system_prompt
 
 
-def test_claude_call_no_tool_restriction_by_default(tmp_path, monkeypatch):
+def test_claude_call_is_read_only_by_default(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     captured_cmds = []
 
@@ -419,8 +445,11 @@ def test_claude_call_no_tool_restriction_by_default(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.heartbeat.subprocess.run", _fake_run)
     runner.claude_call("hello")
+    runner.claude_call("hello", allow_tools=True)
 
-    assert "--disallowedTools" not in captured_cmds[0]
+    assert len(captured_cmds) == 2
+    for cmd in captured_cmds:
+        assert cmd[cmd.index("--tools") + 1] == ""
 
 
 def test_claude_call_read_only_keeps_memory_but_disables_tools(
@@ -615,6 +644,106 @@ def test_claude_call_json_envelope_returns_result_and_accounts_usage(
     assert "result" not in event
 
 
+def test_claude_call_maps_runtime_result_and_builds_route_specific_memory(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from core.heartbeat_model import HeartbeatModelResult
+
+    runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
+    runner._model_task_id = "heartbeat:stable-task"
+    monkeypatch.setenv("BACKUP_MAX_MEMORY_CHARS", "12345")
+    monkeypatch.setattr(
+        "core.model_fallback.gate", lambda _root, probe=False: "primary",
+    )
+    prompt_calls = []
+
+    def build_prompt_pair(**kwargs):
+        prompt_calls.append(kwargs)
+        return "system", "request"
+
+    monkeypatch.setattr("core.heartbeat._build_prompt_pair", build_prompt_pair)
+    runtime_calls = []
+
+    def run_model(logical_prompt, **kwargs):
+        runtime_calls.append((logical_prompt, kwargs))
+        kwargs["prompt_builder"](SimpleNamespace(id="primary"))
+        kwargs["prompt_builder"](SimpleNamespace(id="backup1"))
+        return HeartbeatModelResult(
+            text="runtime answer",
+            provider="Claude backup",
+            model="relay-opus",
+            call_id="mrc_test",
+            route_id="backup1",
+            status="succeeded",
+        )
+
+    monkeypatch.setattr("core.heartbeat_model.run_heartbeat_model", run_model)
+
+    assert runner.claude_call("logical prompt") == "runtime answer"
+    assert runtime_calls[0][0] == "logical prompt"
+    assert runtime_calls[0][1]["task_id"] == "heartbeat:stable-task"
+    assert prompt_calls[0]["mem_budget"] is None
+    assert prompt_calls[0]["cacheable_provider"] is True
+    assert prompt_calls[1]["mem_budget"] == 12345
+    assert prompt_calls[1]["cacheable_provider"] is False
+    assert runner.last_provider == "Claude backup"
+    assert runner.last_model == "relay-opus"
+    events = [
+        json.loads(line)
+        for line in (runner.jarvis_dir / "sched_events.jsonl").read_text().splitlines()
+    ]
+    receipt = next(row for row in events if row["event"] == "model_runtime_call")
+    assert receipt["task"] == "heartbeat:stable-task"
+    assert receipt["call_id"] == "mrc_test"
+    assert receipt["route"] == "backup1"
+
+
+def test_solo_and_batch_calls_expose_stable_runtime_task_ids(
+        tmp_path, monkeypatch):
+    solo_root = tmp_path / "solo"
+    solo_root.mkdir()
+    solo = _make_runner(
+        solo_root,
+        "### deep-work\n- interval: 1h\n- heavy: true\n- prompt: x\n",
+    )
+    seen = []
+
+    def record_solo(*_args, **_kwargs):
+        seen.append(solo._model_task_id)
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(solo, "claude_call", record_solo)
+    task = parse_heartbeat(solo.heartbeat_file)[0]
+    solo._run_solo_task(task, {}, {}, time.time(), [], [])
+    assert seen == ["heartbeat:deep-work"]
+    assert solo._model_task_id == ""
+
+    batch_root = tmp_path / "batch"
+    batch_root.mkdir()
+    batch = _make_runner(
+        batch_root,
+        """
+### beta
+- interval: 1h
+- prompt: b
+
+### alpha
+- interval: 1h
+- prompt: a
+""",
+    )
+
+    def record_batch(*_args, **_kwargs):
+        seen.append(batch._model_task_id)
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(batch, "claude_call", record_batch)
+    assert batch.run_cycle(force=True) == ""
+    assert seen[-1] == "heartbeat:batch:alpha,beta"
+    assert batch._model_task_id == ""
+
+
 def test_claude_call_plain_text_stdout_keeps_old_behavior_no_event(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
@@ -710,7 +839,7 @@ def test_self_diagnostic_runs_tier0_without_a_model_call(tmp_path, monkeypatch):
     assert spawn["tier"] == 0
 
 
-def test_full_memory_flag_overrides_index_env_others_stay_on_index(
+def test_unattended_read_only_calls_keep_full_memory_without_file_tools(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setenv("JARVIS_WARM_MEMORY_MODE", "index")
@@ -731,7 +860,7 @@ def test_full_memory_flag_overrides_index_env_others_stay_on_index(
 
     runner.claude_call("hello", full_memory=True)
     runner.claude_call("hello")
-    assert seen == ["full", "index"]
+    assert seen == ["full", "full"]
 
 
 def test_run_cycle_threads_full_memory_flag_into_the_solo_call(
@@ -778,11 +907,43 @@ def test_task_model_and_outbound_memory_policy_reach_solo_call(
     assert len(captured) == 1
     assert captured[0][1]["requested_model"] == "sonnet"
     assert captured[0][1]["memory_purpose"] == "outbound"
-    assert captured[0][1]["allow_tools"] is False
     events = [json.loads(line) for line in
               (runner.jarvis_dir / "sched_events.jsonl").read_text().splitlines()]
     spawn = next(event for event in events if event["event"] == "task_spawn")
     assert spawn["isolation"] == "outbound-privacy"
+
+
+def test_private_task_isolated_and_reaches_primary_only_model_policy(
+    tmp_path, monkeypatch,
+):
+    runner = _make_runner(
+        tmp_path,
+        "### memory\n- interval: 1h\n- model: sonnet\n"
+        "- private: true\n- prompt: compile private memory\n\n"
+        "### ordinary\n- interval: 1h\n- model: sonnet\n- prompt: inspect\n",
+    )
+    captured = []
+
+    def _fake_call(prompt, **kwargs):
+        captured.append((prompt, kwargs))
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True)
+
+    private = next(item for item in captured if "compile private" in item[0])
+    ordinary = next(item for item in captured if "ordinary" in item[0])
+    assert private[1]["primary_only"] is True
+    assert private[1]["requested_model"] == "sonnet"
+    assert "ordinary" not in private[0]
+    assert ordinary[1] == {"requested_model": "sonnet"}
+    events = [json.loads(line) for line in
+              (runner.jarvis_dir / "sched_events.jsonl").read_text().splitlines()]
+    spawn = next(
+        event for event in events
+        if event["event"] == "task_spawn" and event["task"] == "memory"
+    )
+    assert spawn["isolation"] == "private-primary"
 
 
 def test_batch_uses_highest_declared_model(tmp_path, monkeypatch):
@@ -926,30 +1087,31 @@ def test_explicit_gpt_model_routes_without_spawning_claude(
         lambda _fmt: "2026-08-26 13:00 Wednesday",
     )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
-    monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "primary",
-    )
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_FALLBACK_MODEL", "gpt-test")
     monkeypatch.setattr(
         "core.heartbeat._run_isolated",
         lambda *_args, **_kwargs: pytest.fail("explicit GPT must skip Claude"),
     )
     calls = []
+
+    def openai_call(payload, _key, _url, timeout, _user_agent):
+        calls.append((payload, timeout))
+        return {"output_text": "GPT_SELECTED"}
+
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
-        lambda system, prompt, **kwargs: (
-            calls.append((prompt, kwargs)) or "GPT_SELECTED"
-        ),
+        "core.openai_fallback.call_openai", openai_call,
     )
 
     assert runner.claude_call(
         "score", requested_model="gpt", restrict_tools=True,
     ) == "GPT_SELECTED"
-    assert calls == [(
-        "score\n\nCurrent time: 2026-08-26 13:00 Wednesday",
-        {"restrict_tools": True, "timeout": 300},
-    )]
+    assert calls[0][0]["input"] == [{
+        "role": "user",
+        "content": "score\n\nCurrent time: 2026-08-26 13:00 Wednesday",
+    }]
+    assert calls[0][1] == 120
 
 
 def test_openai_no_tools_call_records_provider_model_and_usage(
@@ -970,8 +1132,8 @@ def test_openai_no_tools_call_records_provider_model_and_usage(
         },
     )
 
-    assert runner._openai_fallback_call(
-        "system", "prompt", restrict_tools=True,
+    assert runner.claude_call(
+        "prompt", requested_model="gpt", restrict_tools=True,
     ) == "GPT_OK"
     events = _read_llm_usage_events(runner)
     assert len(events) == 1
@@ -991,18 +1153,25 @@ def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
     )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
     monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "openai",
+        "core.heartbeat_model.provider_health_rows",
+        lambda _root: [{
+            "id": "backup1",
+            "status": "unhealthy",
+            "observation_source": "real_request",
+            "detail": "real request: timeout",
+            "checked_epoch": time.time(),
+        }],
     )
     monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     calls = []
+
+    def call_openai(payload, *_args, **_kwargs):
+        calls.append(payload)
+        return {"output_text": "GPT_OK"}
+
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
-        lambda system, prompt, restrict_tools=False, **_kwargs: (
-            calls.append((system, prompt, restrict_tools)) or "GPT_OK"
-        ),
+        "core.openai_fallback.call_openai", call_openai,
     )
     monkeypatch.setattr(
         "core.heartbeat._run_isolated",
@@ -1010,9 +1179,8 @@ def test_heartbeat_skips_cooling_relay_and_routes_directly_to_gpt(
     )
 
     assert runner.claude_call("focus on eigenflux") == "GPT_OK"
-    assert calls and calls[0][1:] == (
-        "focus on eigenflux\n\nCurrent time: 2026-08-26 13:00 Wednesday",
-        False,
+    assert calls and calls[0]["input"][0]["content"] == (
+        "focus on eigenflux\n\nCurrent time: 2026-08-26 13:00 Wednesday"
     )
 
 
@@ -1020,9 +1188,23 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
         tmp_path, monkeypatch):
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://relay.invalid")
+    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "none",
+        "core.heartbeat_model.provider_health_rows",
+        lambda _root: [
+            {
+                "id": route_id,
+                "status": "unhealthy",
+                "observation_source": "real_request",
+                "detail": "real request: timeout",
+                "checked_epoch": time.time(),
+            }
+            for route_id in ("backup1", "openai")
+        ],
     )
     monkeypatch.setattr(
         "core.heartbeat._run_isolated",
@@ -1031,15 +1213,14 @@ def test_heartbeat_stops_when_every_fallback_route_is_cooling(
         ),
     )
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
+        "core.openai_fallback.run_agentic",
         lambda *_args, **_kwargs: pytest.fail(
             "cooling OpenAI fallback must not be retried"
         ),
     )
 
     assert runner.claude_call("focus") == ""
-    assert runner._last_call_error == "no healthy provider fallback available"
+    assert runner._last_call_error == "model runtime failed: no_eligible_route"
 
 
 def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
@@ -1050,10 +1231,6 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
         lambda _fmt: "2026-08-26 13:00 Wednesday",
     )
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
-    monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "backup1",
-    )
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
     monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
     monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://relay.invalid")
@@ -1065,12 +1242,13 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
             heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])),
     )
     fallback_calls = []
+
+    def openai_call(payload, _key, _url, timeout, _user_agent):
+        fallback_calls.append((payload, timeout))
+        return {"output_text": "GPT_RECOVERED"}
+
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
-        lambda system, prompt, **kwargs: (
-            fallback_calls.append((prompt, kwargs)) or "GPT_RECOVERED"
-        ),
+        "core.openai_fallback.call_openai", openai_call,
     )
     observed = []
     monkeypatch.setattr(
@@ -1081,12 +1259,14 @@ def test_backup_timeout_continues_to_gpt_instead_of_ending_the_cycle(
     )
 
     assert runner.claude_call("routine payload", allow_tools=False) == "GPT_RECOVERED"
-    assert fallback_calls == [(
-        "routine payload\n\nCurrent time: 2026-08-26 13:00 Wednesday", {
-        "restrict_tools": False,
-        "allow_tools": False,
-        "timeout": 120,
-    })]
+    assert fallback_calls[0][0]["input"] == [{
+        "role": "user",
+        "content": (
+            "routine payload\n\n"
+            "Current time: 2026-08-26 13:00 Wednesday"
+        ),
+    }]
+    assert fallback_calls[0][1] == 120
     assert ("backup1", "unhealthy", "timeout") in observed
     assert runner._call_timed_out is False
 
@@ -1117,11 +1297,6 @@ def test_primary_timeout_tries_backup_before_gpt(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
     monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
-    monkeypatch.setattr(
-        runner, "_openai_fallback_call",
-        lambda *_a, **_kw: pytest.fail("healthy Backup1 must run before GPT"),
-    )
-
     assert runner.claude_call("safe", allow_tools=False) == "BACKUP1_OK"
     assert "CLAUDE_BACKUP_AUTH_TOKEN" not in calls[0]
     assert "OPENAI_API_KEY" not in calls[0]
@@ -1157,11 +1332,6 @@ def test_backup1_timeout_tries_backup2_before_gpt(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
     monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
-    monkeypatch.setattr(
-        runner, "_openai_fallback_call",
-        lambda *_a, **_kw: pytest.fail("healthy Backup2 must run before GPT"),
-    )
-
     assert runner.claude_call("safe", allow_tools=False) == "BACKUP2_OK"
     assert calls[0]["ANTHROPIC_AUTH_TOKEN"] == "backup1-token"
     assert calls[1]["ANTHROPIC_AUTH_TOKEN"] == "backup2-token"
@@ -1184,66 +1354,32 @@ def test_elapsed_time_budget_keeps_a_final_gpt_slot(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
     monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
     monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.invalid")
-    clock = [10_000.0]
-    monkeypatch.setattr(heartbeat_mod.time, "monotonic", lambda: clock[0])
     attempt_timeouts = []
 
     def isolated(cmd, **kwargs):
         attempt_timeouts.append(kwargs["timeout"])
-        clock[0] += kwargs["timeout"]
         raise heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
 
     monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
     monkeypatch.setattr("core.provider_health.observe", lambda *_a, **_kw: None)
     gpt_timeouts = []
+
+    def openai_call(_payload, _key, _url, timeout, _user_agent):
+        gpt_timeouts.append(timeout)
+        return {"output_text": "GPT_OK"}
+
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
-        lambda _system, _prompt, **kwargs: (
-            gpt_timeouts.append(kwargs["timeout"]) or "GPT_OK"
-        ),
+        "core.openai_fallback.call_openai", openai_call,
     )
 
     assert runner.claude_call("safe", allow_tools=False) == "GPT_OK"
-    # One 600s logical envelope: primary keeps the remainder after three
-    # bounded downstream slots, then every relay/GPT route gets at most 120s.
-    assert attempt_timeouts == [240, 120, 120]
+    # One logical deadline is divided across the routes. Relays and GPT keep
+    # their explicit 120s caps, so an early provider cannot consume the final
+    # recovery slot.
+    assert len(attempt_timeouts) == 3
+    assert 0 < attempt_timeouts[0] <= 150
+    assert attempt_timeouts[1:] == [120, 120]
     assert gpt_timeouts == [120]
-
-
-def test_small_fallback_budget_shrinks_every_remaining_slot_fairly(
-        monkeypatch):
-    from core.heartbeat_provider import fallback_attempt_timeout
-
-    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
-    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
-    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
-    monkeypatch.setenv("CLAUDE_BACKUP2_ENABLED", "true")
-    monkeypatch.setenv("CLAUDE_BACKUP2_AUTH_TOKEN", "backup2-token")
-    monkeypatch.setenv("CLAUDE_BACKUP2_BASE_URL", "https://backup2.invalid")
-    monkeypatch.setenv("OPENAI_FALLBACK_ENABLED", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    remaining = [60]
-
-    def budget(*, cap=None):
-        return remaining[0] if cap is None else min(remaining[0], cap)
-
-    slots = []
-    for use_backup, backup2_active in (
-        (False, False), (True, False), (True, True),
-    ):
-        slot = fallback_attempt_timeout(
-            budget,
-            60,
-            use_backup=use_backup,
-            backup2_active=backup2_active,
-            safe_replay=True,
-        )
-        slots.append(slot)
-        remaining[0] -= slot
-
-    assert slots == [15, 15, 15]
-    assert remaining == [15]
 
 
 def test_tool_capable_backup_timeout_is_bounded_without_replay(
@@ -1251,10 +1387,6 @@ def test_tool_capable_backup_timeout_is_bounded_without_replay(
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n",
                           claude_timeout=600)
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "backup")
-    monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "backup1",
-    )
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
     monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup1-token")
     monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup1.invalid")
@@ -1267,8 +1399,7 @@ def test_tool_capable_backup_timeout_is_bounded_without_replay(
 
     monkeypatch.setattr("core.heartbeat._run_isolated", isolated)
     monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
+        "core.openai_fallback.run_agentic",
         lambda *_args, **_kwargs: pytest.fail(
             "a tool-capable timed-out request must never be replayed"
         ),
@@ -1285,8 +1416,14 @@ def test_heartbeat_skips_primary_during_real_request_overload_cooldown(
     runner = _make_runner(tmp_path, "### t\n- prompt: x\n")
     monkeypatch.setattr("core.model_fallback.gate", lambda _root: "primary")
     monkeypatch.setattr(
-        "core.provider_health.preferred_route",
-        lambda _root, **_kwargs: "backup1",
+        "core.heartbeat_model.provider_health_rows",
+        lambda _root: [{
+            "id": "primary",
+            "status": "unhealthy",
+            "observation_source": "real_request",
+            "detail": "real request: server_overloaded",
+            "checked_epoch": time.time(),
+        }],
     )
     monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
     monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "relay-test")
@@ -1316,14 +1453,6 @@ def test_tool_capable_timeout_does_not_replay_on_gpt(tmp_path, monkeypatch):
         lambda cmd, **kwargs: (_ for _ in ()).throw(
             heartbeat_mod.subprocess.TimeoutExpired(cmd, kwargs["timeout"])),
     )
-    monkeypatch.setattr(
-        runner,
-        "_openai_fallback_call",
-        lambda *_args, **_kwargs: pytest.fail(
-            "a tool-capable timed-out request must not be replayed"
-        ),
-    )
-
     assert runner.claude_call("tool-capable payload", allow_tools=True) == ""
     assert runner._call_timed_out is True
 
@@ -1355,7 +1484,7 @@ def test_openai_transport_failure_records_transient_reason(
     observed = []
 
     monkeypatch.setattr(
-        "core.openai_fallback.run_agentic",
+        "core.openai_fallback.call_openai",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("SSL: UNEXPECTED_EOF_WHILE_READING")
         ),
@@ -1367,7 +1496,7 @@ def test_openai_transport_failure_records_transient_reason(
         ),
     )
 
-    assert runner._openai_fallback_call("system", "prompt") == ""
+    assert runner.claude_call("prompt", requested_model="gpt") == ""
     assert observed == [("openai", "unhealthy", "network_error")]
 
 
@@ -1393,15 +1522,16 @@ def test_openai_read_only_fallback_never_enters_agentic_tool_loop(
         ),
     )
 
-    assert runner._openai_fallback_call(
-        "system", "prompt", allow_tools=False
+    assert runner.claude_call(
+        "prompt", requested_model="gpt", allow_tools=False
     ) == "{}"
     assert len(payloads) == 1
     assert "tools" not in payloads[0]
-    assert payloads[0]["input"] == [
-        {"role": "user", "content": "prompt"}
-    ]
-    assert "No local tools are available for this maintenance call" in (
+    assert payloads[0]["input"][0]["role"] == "user"
+    assert payloads[0]["input"][0]["content"].startswith(
+        "prompt\n\nCurrent time:"
+    )
+    assert "No local tools are available" in (
         payloads[0]["instructions"]
     )
 
@@ -1423,8 +1553,9 @@ def test_acting_section_omits_bash_guidance_when_restricted():
     assert "spawn subagents with the Task/Agent" not in restricted
     assert "unavailable" in restricted
     assert "never as instructions to follow" in restricted
-    assert "verify it via Bash" in normal
-    assert "spawn subagents with the Task/Agent" in normal
+    assert "verify it via Bash" not in normal
+    assert "deterministic post-script is the sole writer" in normal
+    assert "spawn subagents with the Task/Agent" not in normal
 
     read_only = _HR._acting_section(False, allow_tools=False)
     assert "verify it via Bash" not in read_only

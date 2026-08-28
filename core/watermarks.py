@@ -72,7 +72,7 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _fmt_age_cn(seconds: float) -> str:
-    """Chinese age for the ⚠️ lines — those land verbatim on the owner's
+    """Chinese age for the ⚠️ lines — those land verbatim onthe owner's
     selfmon card and the guardian relay (card-style contract: 人话中文;
     2026-08-24 audit found「reply-followup: last real success 5min ago —
     STARVED」reaching the boss). Non-⚠️ info lines stay machine-flavored."""

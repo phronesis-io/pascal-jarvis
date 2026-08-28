@@ -11,5 +11,6 @@ the observation window. Moving a hook back into `tasks/` requires:
 2. Tests restored under `tests/`.
 3. A local runtime smoke that proves the hook is not noisy or silently dead.
 
-Active reusable cores such as `core/eigenflux_messages.py` and
-`tasks/harness_apply.py` remain outside this directory.
+Active reusable cores such as `core/eigenflux_messages.py` remain outside this
+directory. The former `tasks/harness_apply.py` surface is deleted and recorded
+in the capability inventory's retirement ledger; Git history is its archive.

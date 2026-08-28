@@ -569,7 +569,7 @@ BUDGET_EXEMPT_SOURCES = {"deploy-smoke", "host-absence"}
 # have sent today. The budget is spent by early afternoon on an ordinary day
 # (8/20-8/22 prod: nine cards gone by 13:00), so a card that by design fires
 # in the evening never gets a slot. daily-reflect (20:55, the two-way
-# check-in Pascal asked for on 2026-06-20, acted 4/5 days while it was still
+# check-in the owner asked for on 2026-06-20, acted 4/5 days while it was still
 # reaching him) was suppressed with global_daily_cap on every night from
 # 2026-08-14 to 2026-08-22. Reserving does not raise the budget: ordinary
 # cards see `global_cap - outstanding reservations`, the anchor sees the full
@@ -1454,7 +1454,7 @@ class DeliveryPipeline:
 
         The original envelope and idempotency key are retained. Stale alerts,
         resolved Memorials, superseded twins and already-replayed rows become
-        audited suppressions instead of being dumped on Pascal after recovery.
+        audited suppressions instead of being dumped on the owner after recovery.
         """
         epoch = self.clock() if recovery_epoch is None else float(recovery_epoch)
         requeued: list[str] = []
@@ -1671,6 +1671,58 @@ class DeliveryPipeline:
         )
         with closing(_connect(self.path)) as db, db:
             return [dict(row) for row in db.execute(query, params).fetchall()]
+
+    def replace_memorial_payload(
+        self,
+        memorial_id: str,
+        *,
+        card_json: str,
+        text: str = "",
+    ) -> list[str]:
+        """Replace the durable payload for a mutable pending memorial.
+
+        A producer may revise one already-queued card instead of creating a
+        second notification.  Only rows that are not currently inside a
+        transport attempt are changed; racing an in-flight send would make it
+        impossible to know which body the transport accepted.  Delivered rows
+        are updated for audit/recovery parity while the caller PATCHes the
+        already-visible Lark message in place.
+        """
+        memorial_id = str(memorial_id or "").strip()
+        if not memorial_id:
+            raise ValueError("memorial_id is required")
+        envelope = DeliveryEnvelope(
+            source="memorial-revision",
+            kind="card",
+            payload={"card_json": str(card_json or ""), "text": str(text or "")},
+        ).normalized()
+        envelope, blocked = sanitize(envelope)
+        if blocked:
+            raise ValueError(f"revised card rejected: {blocked}")
+        content_hash = _content_hash(envelope)
+        payload = json.dumps(envelope.payload, ensure_ascii=False)
+        with closing(_connect(self.path)) as db, db:
+            rows = db.execute(
+                "SELECT id,state FROM delivery_envelopes "
+                "WHERE memorial_id=? ORDER BY created_epoch",
+                (memorial_id,),
+            ).fetchall()
+            mutable = [
+                (str(row["id"]), str(row["state"]))
+                for row in rows
+                if str(row["state"]) != "attempting"
+            ]
+            if mutable:
+                ids = [delivery_id for delivery_id, _state in mutable]
+                placeholders = ",".join("?" for _ in ids)
+                db.execute(
+                    f"UPDATE delivery_envelopes SET payload=?,content_hash=?,"
+                    f"updated_epoch=? WHERE id IN ({placeholders})",
+                    (payload, content_hash, self.clock(), *ids),
+                )
+                for delivery_id, state in mutable:
+                    self._event(db, delivery_id, state, "payload revised")
+            return [delivery_id for delivery_id, _state in mutable]
 
     def confirm(self, delivery_id: str, state: str) -> DeliveryResult:
         if state not in {"read", "acted"}:

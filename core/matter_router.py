@@ -129,6 +129,10 @@ def ingest_signal(signal: dict, *, create_decision_memorial: bool = False) -> di
             source=source, title=title,
             body=str(signal.get("body") or signal.get("summary") or title),
             work_receipt="完成信号归档、事项绑定和决策必要性判断",
+            owner_need="judgment",
+            why_now="信号已完成归档和去重，只剩事项方向需要本人判断",
+            owner_action="选择这个事项接下来是否推进",
+            silence_cost="不提示会让已核验信号停在未决状态，无法继续或关闭",
             preset="decision", context=json.dumps(payload, ensure_ascii=False),
             matter_id=matter_id,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import types
@@ -24,7 +25,7 @@ from core.matter_bridge import (
 )
 from core.matter_context import build_context_bundle, render_context_markdown
 from core.matter_executor import prepare_handoff, record_completion
-from core.matter_runs import MatterRunConflict
+from core.matter_runs import MatterRunConflict, acquire_run
 from core.matter_router import classify_signal, ingest_signal
 from core.matters import (
     MatterConflict,
@@ -125,7 +126,8 @@ def test_usage_question_uses_deterministic_runtime_report(monkeypatch):
     assert result["handled"] is True
     assert "已用 47%" in result["reply"]
     assert "7 天额度已用 47%" in result["reply"]
-    assert "当前尝试顺序：codex -> primary" in result["reply"]
+    assert "当前尝试顺序：Codex 备用通道、Claude 主通道" in result["reply"]
+    assert "还剩约 53%" in result["reply"]
     assert calls == [1]
 
 
@@ -230,17 +232,101 @@ def test_lark_handoff_gives_a_human_codex_continuation_phrase(monkeypatch):
     matter = create_matter("手机继续白皮书")
     bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
     monkeypatch.setattr(
-        matter_executor,
-        "prepare_handoff",
-        lambda *_a, **_k: {"context_path": "/private/context.md"},
+        "core.codex_wake.prepare_codex_wake",
+        lambda *_a, **_k: {
+            "status": "prepared",
+            "task_name": "继续：手机继续白皮书",
+            "continuation_prompt": "继续 Jarvis 事项「手机继续白皮书」",
+        },
     )
 
     result = handle_lark_command(
         "/matter handoff codex", "ou_owner", "ou_owner")
 
-    assert "请在 Codex 新任务里说" in result["reply"]
-    assert matter["id"] in result["reply"]
+    assert "已创建 Codex 任务" in result["reply"]
+    assert "没有替你开工" in result["reply"]
+    assert "请在新任务里说" in result["reply"]
+    assert matter["id"] not in result["reply"]
     assert "在仓库运行" not in result["reply"]
+
+
+def test_lark_natural_codex_handoff_uses_same_deterministic_path(monkeypatch):
+    matter = create_matter("自然语言去 Codex")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    seen = {}
+
+    def fake_prepare(matter_id, **kwargs):
+        seen.update({"matter_id": matter_id, **kwargs})
+        return {
+            "status": "reused",
+            "task_name": "继续：自然语言去 Codex",
+            "continuation_prompt": "继续 Jarvis 事项「自然语言去 Codex」",
+        }
+
+    monkeypatch.setattr("core.codex_wake.prepare_codex_wake", fake_prepare)
+
+    result = handle_lark_command(
+        "去 Codex", "ou_owner", "ou_owner", message_id="om_source")
+
+    assert result["handled"] is True
+    assert "已找到 Codex 任务" in result["reply"]
+    assert seen["matter_id"] == matter["id"]
+    assert seen["source_ref"] == "om_source"
+
+
+def test_lark_closure_translates_live_run_without_internal_identifiers(tmp_path):
+    matter = create_matter("收口发布")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    run = acquire_run(
+        matter["id"], executor="codex", workspace=tmp_path,
+        task="secret internal task", lease_seconds=600,
+    )
+
+    result = handle_lark_command(
+        "/matter done 已经完成", "ou_owner", "ou_owner",
+    )
+
+    assert "还有一个执行窗口没收尾" in result["reply"]
+    assert "不需要你排查内部编号" in result["reply"]
+    assert run["id"] not in result["reply"]
+    assert "secret internal task" not in result["reply"]
+
+
+def test_group_cannot_create_local_codex_wake(monkeypatch):
+    called = False
+
+    def fake_prepare(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("core.codex_wake.prepare_codex_wake", fake_prepare)
+
+    result = handle_lark_command(
+        "去 Codex", "oc_group", "oc_group", chat_type="group",
+    )
+
+    assert "只在你的私聊中开放" in result["reply"]
+    assert called is False
+
+
+def test_claude_handoff_keeps_the_existing_cli_launcher(monkeypatch):
+    matter = create_matter("Claude Code 继续")
+    bind_conversation("ou_owner", matter["id"], destination_id="ou_owner")
+    monkeypatch.setattr(
+        matter_executor,
+        "prepare_handoff",
+        lambda *_a, **_k: {
+            "command": "./scripts/jarvis-matter launch mat_test claude"
+        },
+    )
+
+    result = handle_lark_command(
+        "/matter handoff claude", "ou_owner", "ou_owner",
+    )
+
+    assert "电脑的仓库终端" in result["reply"]
+    assert "jarvis-matter launch mat_test claude" in result["reply"]
 
 
 def test_force_close_keeps_an_audited_warning():
@@ -328,24 +414,47 @@ def test_prepare_handoff_uses_the_same_launcher_for_both_entry_points(
     )
     assert handoff["command"] == (
         f"./scripts/jarvis-matter launch {matter['id']} codex "
-        f"--run-id {handoff['run_id']}")
+        f"--workspace {tmp_path}")
+    assert handoff["run_id"] == ""
+    assert handoff["matter_lease_started"] is False
     assert Path(handoff["context_path"]).exists()
     assert Path(handoff["context_path"]).with_suffix(".json").exists()
+    assert matter_executor.list_runs(matter_id=matter["id"]) == []
     events = get_matter(matter["id"])["events"]
     event = next(item for item in events
                  if item["event_type"] == "handoff_prepared")
     assert event["payload"]["provider"] == "codex"
-    assert event["payload"]["run_id"] == handoff["run_id"]
+    assert event["payload"]["matter_lease_started"] is False
+    assert event["payload"]["context_packet_id"] == handoff["context_packet_id"]
 
 
-def test_replayed_handoff_reuses_the_same_unstarted_run(tmp_path):
+def test_replayed_handoff_is_stable_without_acquiring_a_run(tmp_path):
     matter = create_matter("重复点击同一交接")
 
     first = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
     replay = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
 
-    assert replay["run_id"] == first["run_id"]
+    assert replay["run_id"] == first["run_id"] == ""
     assert replay["context_path"] == first["context_path"]
+    assert replay["context_packet_id"] == first["context_packet_id"]
+    assert matter_executor.list_runs(matter_id=matter["id"]) == []
+
+
+def test_handoff_preview_does_not_block_an_immediate_codex_continuation(tmp_path):
+    from core.codex_frontstage import continue_matter_run
+
+    matter = create_matter("准备之后立即接续", next_action="继续完成")
+    preview = prepare_handoff(matter["id"], "claude", workspace=tmp_path)
+
+    continued = continue_matter_run(
+        matter_id=matter["id"],
+        task="在 Codex 继续",
+        workspace=str(tmp_path),
+    )
+
+    assert preview["matter_lease_started"] is False
+    assert continued["status"] == "started"
+    assert continued["run"]["executor"] == "codex"
 
 
 @pytest.mark.parametrize("provider", ("claude", "codex"))
@@ -426,6 +535,66 @@ def test_executor_launch_records_session_and_only_new_artifacts(
     assert receipt["payload"]["receipt_id"].startswith("rr_")
 
 
+def test_executor_aborts_when_completion_receipt_cannot_be_recorded(
+    tmp_path, monkeypatch,
+):
+    matter = create_matter("收据失败不能留活锁", next_action="执行后收口")
+    snapshots = iter((set(), set()))
+    monkeypatch.setattr(matter_executor.shutil, "which", lambda _name: "/mock/codex")
+    monkeypatch.setattr(matter_executor, "discover_sessions", lambda **_kwargs: [])
+    monkeypatch.setattr(matter_executor, "_git_files", lambda _path: next(snapshots))
+    monkeypatch.setattr(
+        matter_executor.subprocess,
+        "run",
+        lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        matter_executor,
+        "record_completion",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MatterRunConflict("logical context generation changed")
+        ),
+    )
+
+    with pytest.raises(MatterRunConflict, match="generation changed"):
+        matter_executor.launch(matter["id"], "codex", workspace=tmp_path)
+
+    run = matter_executor.list_runs(matter_id=matter["id"])[0]
+    assert run["status"] == "failed"
+    assert "logical context generation changed" in run["last_error"]
+    assert run["receipt"]["narrative_trust"] == "system_observation"
+
+
+def test_lease_keeper_retries_a_transient_failure(monkeypatch):
+    waits = []
+    calls = []
+
+    class Stop:
+        outcomes = iter((False, False, True))
+
+        def wait(self, seconds):
+            waits.append(seconds)
+            return next(self.outcomes)
+
+    @contextlib.contextmanager
+    def connection():
+        yield object()
+
+    def renew(*_args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise OSError("database temporarily busy")
+
+    monkeypatch.setattr("core.db.independent_connection", connection)
+    monkeypatch.setattr(matter_executor, "renew_run", renew)
+
+    matter_executor._keep_lease_alive("mrun_retry", Stop())
+
+    assert waits == [60.0, 5.0, 60.0]
+    assert len(calls) == 2
+    assert calls[0]["connection"] is calls[1]["connection"]
+
+
 def test_executor_launch_fails_before_writing_handoff_without_provider_cli(
         tmp_path, monkeypatch):
     matter = create_matter("缺执行器")
@@ -448,7 +617,9 @@ def test_executor_launch_fails_before_writing_handoff_without_provider_cli(
 def test_executor_can_launch_a_prepared_run_without_reacquiring(
         tmp_path, monkeypatch):
     matter = create_matter("预备后启动", next_action="继续")
-    handoff = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+    run, _context_path = matter_executor._new_run_context(
+        matter["id"], "codex", tmp_path, "继续"
+    )
     snapshots = iter((set(), set()))
     monkeypatch.setattr(matter_executor.shutil, "which", lambda _name: "/mock/codex")
     monkeypatch.setattr(matter_executor, "discover_sessions", lambda **_kwargs: [])
@@ -461,28 +632,30 @@ def test_executor_can_launch_a_prepared_run_without_reacquiring(
     with pytest.raises(MatterRunConflict, match="task does not match"):
         matter_executor.launch(
             matter["id"], "codex", workspace=tmp_path,
-            prompt="偷偷换任务", run_id=handoff["run_id"],
+            prompt="偷偷换任务", run_id=run["id"],
         )
     assert matter_executor.launch(
         matter["id"], "codex", workspace=tmp_path,
-        run_id=handoff["run_id"],
+        run_id=run["id"],
     ) == 0
-    assert matter_executor.get_run(handoff["run_id"])["status"] == "released"
+    assert matter_executor.get_run(run["id"])["status"] == "released"
 
 
 def test_matter_executor_cli_reports_context_status_and_audit(
         tmp_path, capsys):
     matter = create_matter("CLI 合同", next_action="检查")
-    handoff = prepare_handoff(matter["id"], "codex", workspace=tmp_path)
+    run, _context_path = matter_executor._new_run_context(
+        matter["id"], "codex", tmp_path, "检查"
+    )
 
     assert matter_executor.main(["context", matter["id"], "--output",
                                  str(tmp_path / "manual.md")]) == 0
     assert (tmp_path / "manual.json").exists()
     capsys.readouterr()
 
-    assert matter_executor.main(["run-status", handoff["run_id"]]) == 0
+    assert matter_executor.main(["run-status", run["id"]]) == 0
     status = json.loads(capsys.readouterr().out)
-    assert status["id"] == handoff["run_id"]
+    assert status["id"] == run["id"]
 
     assert matter_executor.main(["audit"]) == 0
     audit = json.loads(capsys.readouterr().out)
@@ -562,7 +735,7 @@ def test_web_decision_updates_every_delivered_lark_card(monkeypatch):
     calls = []
     monkeypatch.setattr(memorial_thread, "sent_message_ids",
                         lambda _: ["om_first", "om_second"])
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: (
+    monkeypatch.setattr(memorial, "_LARK_CARD_SYNC_RUNNER", lambda command, **kwargs: (
         calls.append((command, kwargs)) or types.SimpleNamespace(
             returncode=0, stdout="", stderr="")))
     memorial._sync_lark_card("m_test", {"schema": "2.0"})

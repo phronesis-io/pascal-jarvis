@@ -200,7 +200,7 @@ Each run (idempotent, < 60s — the heartbeat pre-script cap):
 
 The heartbeat prompt for this task lives in [`HEARTBEAT.md`](../../HEARTBEAT.md)
 under `### eigenflux-preinstall`; it turns the report into either silence, a short
-"what's newly pre-installed" beat, or a "propose to Pascal" beat for review flags.
+"what's newly pre-installed" beat, or a "propose to the owner" beat for review flags.
 
 To run it by hand:
 

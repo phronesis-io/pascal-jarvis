@@ -66,10 +66,15 @@ _ORIGIN_MAIN_HEAD=$(git rev-parse origin/main 2>/dev/null || true)
 # development fallback, but cannot enumerate every module that contributes to
 # the assembled prompt.
 export JARVIS_RUNTIME_GIT_HEAD="$_BOOT_GIT_HEAD"
-_RUNTIME_GIT_PATHS=(
-  core tasks scripts plugins handlers sources static
-  admin.py daemon.py bot.sh restart.sh components.yaml HEARTBEAT.md
-)
+_RUNTIME_GIT_PATHS_FILE="$JARVIS_DIR/runtime_sources.txt"
+_RUNTIME_GIT_PATHS=()
+if [ ! -s "$_RUNTIME_GIT_PATHS_FILE" ]; then
+  echo "FATAL: runtime source manifest missing or empty" >&2
+  exit 1
+fi
+while IFS= read -r _runtime_path; do
+  [ -n "$_runtime_path" ] && _RUNTIME_GIT_PATHS+=("$_runtime_path")
+done < "$_RUNTIME_GIT_PATHS_FILE"
 
 runtime_source_unchanged() {
   local _current_head _dirty
@@ -109,7 +114,11 @@ if [ -f "$PIDFILE" ]; then
   fi
   rm -f "$PIDFILE"
 fi
-echo "$$ $_BOOT_TS" > "$PIDFILE"
+# The third field is the exact revision loaded by this process. Existing
+# consumers intentionally read only fields one/two, so this remains backward
+# compatible while `watchdog-armed` can distinguish a clean new checkout from
+# the old process that is still running code from an earlier revision.
+echo "$$ $_BOOT_TS $_BOOT_GIT_HEAD" > "$PIDFILE"
 python3 -m core.deploy register bot --pid "$$" >/dev/null 2>&1 \
   || echo "WARN: failed to register bot runtime version" >&2
 
@@ -342,16 +351,16 @@ export -n ANTHROPIC_API_KEY CLAUDE_BACKUP_AUTH_TOKEN \
   CLAUDE_BACKUP2_AUTH_TOKEN OPENAI_API_KEY 2>/dev/null || true
 with_primary_model_credential() {
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" "$@"
+    env -u LARK_APP_SECRET ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" "$@"
   else
-    "$@"
+    env -u LARK_APP_SECRET "$@"
   fi
 }
 with_openai_credential() {
   if [ -n "${OPENAI_API_KEY:-}" ]; then
-    OPENAI_API_KEY="$OPENAI_API_KEY" "$@"
+    env -u LARK_APP_SECRET OPENAI_API_KEY="$OPENAI_API_KEY" "$@"
   else
-    "$@"
+    env -u LARK_APP_SECRET "$@"
   fi
 }
 exec_model_worker() {
@@ -360,6 +369,13 @@ exec_model_worker() {
   [ -n "${CLAUDE_BACKUP2_AUTH_TOKEN:-}" ] && export CLAUDE_BACKUP2_AUTH_TOKEN
   [ -n "${OPENAI_API_KEY:-}" ] && export OPENAI_API_KEY
   exec "$@"
+}
+exec_owner_model_worker() {
+  # Owner chat receives untrusted text and runs tool-capable model processes.
+  # Keep provider credentials scoped to that worker, but never expose the
+  # Lark application secret; deterministic transport code owns delivery.
+  unset LARK_APP_SECRET
+  exec_model_worker "$@"
 }
 # Sidecar event backend (empty = lark-cli default; see plugins/lark/client.sh)
 export JARVIS_EVENT_BACKEND LARK_APP_SECRET
@@ -597,12 +613,13 @@ delivery_reply_reliable() {
   return 1
 }
 
-# run_matter_command <content> <conv_key> <destination> <chat_type>
+# run_matter_command <content> <conv_key> <destination> <chat_type> <message_id>
 # A deterministic command is classified before execution. Once classified,
 # even a hard process exit must fail closed instead of handing a potentially
 # committed command to the model for a second interpretation.
 run_matter_command() {
   local content="$1" conv_key="$2" destination_id="$3" chat_type="$4"
+  local message_id="${5:-}"
   local deterministic output status
   deterministic=$(JV_CONTENT="$content" python3 -c "
 import os
@@ -612,6 +629,7 @@ print('true' if command_would_handle(os.environ.get('JV_CONTENT', '')) else 'fal
   output=$(python3 -m core.matter_bridge \
     --content "$content" --conv-key "$conv_key" \
     --destination-id "$destination_id" --chat-type "$chat_type" \
+    --message-id "$message_id" \
     --tracker "$SESSION_TRACKER" --session-dir "$CLAUDE_PROJECT_DIR" \
     --jarvis-dir "$JARVIS_DIR" \
     2>>"$LOG_FILE")
@@ -888,66 +906,6 @@ No output found for job: $out_id"
   fi
 }
 
-# Run one Codex turn while publishing its killable wrapper PID through the
-# same session lock used by Claude. core.codex_fallback handles SIGTERM by
-# terminating Codex's own process group, so owner stop/cancel remains real.
-run_codex_locked() {
-  local _content="$1" _conv_key="$2" _system_prompt_file="$3"
-  local _model="$4" _timeout="$5" _work_dir="$6" _binary="$7"
-  local _lock_file="$8" _lock_token="$9" _answer_base="${10}"
-  local _context_key="${11:-}"
-  local _stdin_file="${_answer_base}.codex.stdin"
-  local _stdout_file="${_answer_base}.codex.stdout"
-  local _stderr_file="${_answer_base}.codex.stderr"
-  local _codex_pid _codex_rc
-
-  printf '%s' "$_content" > "$_stdin_file"
-  : > "$_stdout_file"
-  : > "$_stderr_file"
-  python3 -m core.codex_fallback \
-    --conv-key "$_conv_key" \
-    --context-key "$_context_key" \
-    --system-prompt-file "$_system_prompt_file" \
-    --model "$_model" \
-    --timeout "$_timeout" \
-    --work-dir "$_work_dir" \
-    --binary "$_binary" \
-    < "$_stdin_file" > "$_stdout_file" 2> "$_stderr_file" &
-  _codex_pid=$!
-
-  if ! grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
-    kill "$_codex_pid" 2>/dev/null || true
-    wait "$_codex_pid" 2>/dev/null || true
-    rm -f "$_stdin_file" "$_stdout_file"
-    return 143
-  fi
-  if ! session_lock_publish \
-      "$_lock_file" "$_codex_pid" "$_lock_token"; then
-    kill "$_codex_pid" 2>/dev/null || true
-    wait "$_codex_pid" 2>/dev/null || true
-    if grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
-      printf 'acquiring %s' "$_lock_token" > "$_lock_file"
-    fi
-    rm -f "$_stdin_file" "$_stdout_file"
-    return 74
-  fi
-  wait "$_codex_pid" 2>/dev/null
-  _codex_rc=$?
-
-  if grep -Fq "$_lock_token" "$_lock_file" 2>/dev/null; then
-    printf 'acquiring %s' "$_lock_token" > "$_lock_file"
-  else
-    # stop/cancel removed the lock. Even a just-finished answer is discarded:
-    # once the user cancelled, no late reply or alternate provider may run.
-    _codex_rc=143
-  fi
-  if [ "$_codex_rc" -eq 0 ]; then
-    cat "$_stdout_file"
-  fi
-  rm -f "$_stdin_file" "$_stdout_file"
-  return "$_codex_rc"
-}
-
 # ── Message Handler (runs in background subshell) ────────────────────
 # Extracted from the main loop so different conversations run in parallel.
 # Same-session messages serialize via the existing lock file mechanism.
@@ -1214,8 +1172,7 @@ except Exception:
         rm -f "$LOCK_FILE"
         rm -f "$ANSWER_FILE" "$SYS_PROMPT_FILE" \
           "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
-          "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.codex.stderr" \
-          "${ANSWER_FILE}.codex.stdin" "${ANSWER_FILE}.codex.stdout" \
+          "${ANSWER_FILE}.promoted" \
           "${ANSWER_FILE}.openai.stderr"
         delivery_reply_reliable "$message_id" \
           "这条排队消息所属的会话已经切换，因此没有跨会话执行。请切回原会话后重发。" || true
@@ -1274,11 +1231,15 @@ print(build_cached_system_prompt(
   local _claude_backup_token="${CLAUDE_BACKUP_AUTH_TOKEN:-}"
   local _claude_backup_base_url="${CLAUDE_BACKUP_BASE_URL:-}"
   local _codex_tried=0
-  local _codex_uncertain=0
-  local _codex_cancelled=0
   local _openai_tried=0
   local _answer_provider=""
   local _answer_model=""
+  local _use_model_runtime=0
+  local _runtime_call_id=""
+  local _runtime_status=""
+  local _runtime_reason=""
+  local _runtime_error_detail=""
+  [ "$is_owner_p2p" -eq 1 ] && _use_model_runtime=1
   # REQ-77: the model to use this attempt. Degrades (opus→sonnet→haiku) if a
   # spawn fails with a model-unavailable / spend-limit stderr, instead of
   # looping to empty death ("Continue / No response requested").
@@ -1311,53 +1272,17 @@ print(build_cached_system_prompt(
     _provider_preference=$(python3 -m core.runtime_provider get "$conv_key" \
       2>>"$LOG_FILE" || echo auto)
   fi
-  if [ "$_provider_preference" = "auto" ] \
+  if [ "$_use_model_runtime" -eq 0 ] \
+    && [ "$_provider_preference" = "auto" ] \
     && { [ "$_health_route" = "codex" ] || [ "$_health_route" = "openai" ]; }; then
     _provider_preference="$_health_route"
     _health_routed=1
     log_info "[$session_id] Provider health route: skipping cooling relay and trying $_health_route"
   fi
-  if [ "$_provider_preference" = "codex" ] \
-    && [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ]; then
-    _codex_tried=1
-    log_info "[$session_id] Conversation preference: trying Codex first (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
-    answer=$(run_codex_locked "$content" "$conv_key" "$SYS_PROMPT_FILE" \
-      "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
-      "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
-      "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
-      "$ANSWER_FILE" "$logical_context_key")
-    _codex_exit=$?
-    if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
-      _answer_provider="Codex"
-      _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
-      python3 -m core.provider_health observe codex healthy \
-        --detail request_succeeded >/dev/null 2>&1 || true
-      log_info "[$session_id] Preferred Codex route succeeded (${#answer} chars)"
-    elif [ "$_codex_exit" -eq 75 ]; then
-      answer=""
-      python3 -m core.provider_health observe codex unhealthy \
-        --detail request_failed >/dev/null 2>&1 || true
-      _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
-      log_warn "[$session_id] Preferred Codex route failed (exit=$_codex_exit, stderr=${_codex_err:-none}) — continuing to Claude"
-    elif [ "$_codex_exit" -eq 143 ]; then
-      answer=""
-      _codex_cancelled=1
-      log_info "[$session_id] Preferred Codex route cancelled — no replay"
-    else
-      answer=""
-      _codex_uncertain=1
-      _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
-      log_warn "[$session_id] Preferred Codex route ended ambiguously (exit=$_codex_exit, stderr=${_codex_err:-none}) — refusing automatic replay"
-    fi
-  fi
-
-  # After any safe Codex pre-return failure, re-elect from routes outside
-  # cooldown. This also covers an explicit per-conversation Codex preference:
-  # it must not fall back to an account-limited primary when every fallback is
-  # cooling. An empty route means the health command itself failed, so the
-  # historical bounded chain remains the fail-soft path.
-  if [ -z "$answer" ] \
-    && [ "$_codex_uncertain" -eq 0 ] && [ "$_codex_cancelled" -eq 0 ]; then
+  # Shared/untrusted traffic retains the restricted legacy adapter path. Owner
+  # traffic delegates the complete route plan to core.owner_chat_model below.
+  if [ "$_use_model_runtime" -eq 0 ] \
+    && [ -z "$answer" ]; then
     _health_route=$(python3 -m core.provider_health route \
       --context "$_route_context" --gate "$_provider_gate" \
       2>/dev/null || true)
@@ -1367,7 +1292,8 @@ print(build_cached_system_prompt(
       *) _health_routed=0 ;;
     esac
   fi
-  if [ "$_health_routed" -eq 1 ] && [ -z "$answer" ] \
+  if [ "$_use_model_runtime" -eq 0 ] \
+    && [ "$_health_routed" -eq 1 ] && [ -z "$answer" ] \
     && [ "$_health_route" = "openai" ] \
     && [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
     && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -1398,7 +1324,8 @@ print(build_cached_system_prompt(
   # fresh, start attempt 1 on backup; _claude_backup_tried=1 keeps the
   # OpenAI rung reachable if backup itself fails. 'probe' elects this
   # message to try primary once — success clears the flag below.
-  if { [ "$_health_route" = "backup1" ] \
+  if [ "$_use_model_runtime" -eq 0 ] \
+    && { [ "$_health_route" = "backup1" ] \
       || { [ "$_provider_gate" = "backup" ] && [ -z "$_health_route" ]; }; } \
     && [ "$_health_routed" -eq 0 ] \
     && [ "${CLAUDE_BACKUP_ENABLED:-true}" = "true" ] \
@@ -1409,7 +1336,8 @@ print(build_cached_system_prompt(
     _active_claude_provider="backup1"
     _cur_model="${CLAUDE_BACKUP_MODEL:-$MAIN_MODEL}"
     log_info "[$session_id] Model route: starting on backup provider (model=$_cur_model, primary_gate=$_provider_gate)"
-  elif { [ "$_health_route" = "backup2" ] \
+  elif [ "$_use_model_runtime" -eq 0 ] \
+    && { [ "$_health_route" = "backup2" ] \
       || { [ "$_provider_gate" = "backup" ] && [ -z "$_health_route" ]; }; } \
     && [ "$_health_routed" -eq 0 ] \
     && [ "${CLAUDE_BACKUP2_ENABLED:-false}" = "true" ] \
@@ -1428,9 +1356,11 @@ print(build_cached_system_prompt(
   # primary opus → sonnet → haiku → Backup 1 → Backup 2. Codex, then the
   # text/API fallback, are invoked after the final Claude-compatible route.
   local _attempt_sequence="1 2 3 4 5"
-  { [ -n "$answer" ] || [ "$_health_routed" -eq 1 ] \
-      || [ "$_codex_uncertain" -eq 1 ] \
-      || [ "$_codex_cancelled" -eq 1 ]; } && _attempt_sequence=""
+  [ "$_use_model_runtime" -eq 1 ] && _attempt_sequence="1"
+  if [ "$_use_model_runtime" -eq 0 ]; then
+    { [ -n "$answer" ] || [ "$_health_routed" -eq 1 ]; } \
+      && _attempt_sequence=""
+  fi
   for _attempt in $_attempt_sequence; do
     if [ "$_attempt" -gt 1 ]; then
       log_info "[$session_id] Retry attempt $_attempt after empty response (sleeping 3s)"
@@ -1446,11 +1376,33 @@ print(build_cached_system_prompt(
       break
     fi
 
-    if [ -f "$session_file" ]; then
+    if [ "$_use_model_runtime" -eq 1 ]; then
+      log_info "[$session_id] Calling owner chat Model Runtime"
+      (printf '%s' "$content" | exec_owner_model_worker \
+        python3 -m core.owner_chat_model \
+          --task-id "lark:${message_id:-$session_id}" \
+          --conv-key "$conv_key" \
+          --context-key "$logical_context_key" \
+          --matter-id "$matter_id" \
+          --session-id "$session_id" \
+          --session-dir "$CLAUDE_PROJECT_DIR" \
+          --system-prompt-file "$SYS_PROMPT_FILE" \
+          --memory-dir "$MEMORY_DIR" \
+          --tracker "$SESSION_TRACKER" \
+          --chat-type "$prompt_chat_type" \
+          --backup-max-memory-chars "${BACKUP_MAX_MEMORY_CHARS:-40000}" \
+          --model "$MAIN_MODEL" \
+          --preference "$_provider_preference" \
+          --gate-state "$_provider_gate" \
+          --timeout "${OWNER_CHAT_MODEL_TIMEOUT:-6000}" \
+          --work-dir "$WORK_DIR" \
+          --root "$JARVIS_DIR" \
+          2>"${ANSWER_FILE}.stderr" > "$ANSWER_FILE") &
+    elif [ -f "$session_file" ]; then
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] Resuming session"
       if [ "$_use_claude_backup" -eq 1 ]; then
         log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | env \
+        (cd "$WORK_DIR" && printf '%s' "$content" | env -u LARK_APP_SECRET \
           ANTHROPIC_AUTH_TOKEN="$_claude_backup_token" \
           ANTHROPIC_BASE_URL="$_claude_backup_base_url" \
           claude -p \
@@ -1476,7 +1428,7 @@ print(build_cached_system_prompt(
       [ "$_attempt" -eq 1 ] && log_info "[$session_id] New session"
       if [ "$_use_claude_backup" -eq 1 ]; then
         log_warn "[$session_id] Calling Claude Code backup provider model=$_cur_model"
-        (cd "$WORK_DIR" && printf '%s' "$content" | env \
+        (cd "$WORK_DIR" && printf '%s' "$content" | env -u LARK_APP_SECRET \
           ANTHROPIC_AUTH_TOKEN="$_claude_backup_token" \
           ANTHROPIC_BASE_URL="$_claude_backup_base_url" \
           claude -p \
@@ -1521,8 +1473,11 @@ print(build_cached_system_prompt(
      eval "$(python3 -m core.responsiveness env 2>/dev/null)"
      : "${JV_POLL_FIRST:=10}" "${JV_POLL_STEADY:=10}" \
        "${JV_ACK_AFTER:=20}" "${JV_PROMOTE_AFTER:=90}" \
+       "${JV_PROMOTE_IDLE_AFTER:=60}" "${JV_PROMOTE_HARD_AFTER:=600}" \
        "${JV_PROGRESS_ACK:=我还在处理，查清楚后马上告诉你。}"
      _poll="$JV_POLL_FIRST"
+     _session_mtime=$(stat -f%m "$session_file" 2>/dev/null || stat -c%Y "$session_file" 2>/dev/null || echo 0)
+     _last_activity_elapsed=0
      while [ "$_elapsed" -lt 6000 ]; do
        sleep "$_poll"
        _elapsed=$((_elapsed + _poll))
@@ -1531,6 +1486,17 @@ print(build_cached_system_prompt(
        if [ "$_ack_sent" -eq 0 ] && [ "$_elapsed" -ge "$JV_ACK_AFTER" ]; then
          lark_reply_text "$message_id" "$JV_PROGRESS_ACK" >/dev/null 2>&1 || true
          _ack_sent=1
+       fi
+       _current_mtime=$(stat -f%m "$session_file" 2>/dev/null || stat -c%Y "$session_file" 2>/dev/null || echo 0)
+       if [ "${_current_mtime:-0}" -gt "${_session_mtime:-0}" ]; then
+         _session_mtime="$_current_mtime"
+         _last_activity_elapsed="$_elapsed"
+       fi
+       _idle_for=$((_elapsed - _last_activity_elapsed))
+       _promotion_decision="none"
+       if [ "$_elapsed" -ge "$JV_PROMOTE_AFTER" ]; then
+         _promotion_decision=$(python3 -m core.responsiveness promote \
+           "$_elapsed" "$_idle_for" 2>/dev/null || echo none)
        fi
        # Tool activity remains observable in the private session log.
        # ── Auto-promotion (REQ-16 MVP-2): a call still running at the tested
@@ -1545,7 +1511,7 @@ print(build_cached_system_prompt(
        # group conv_key visible to non-owners. The correct fix is making bg
        # jobs inherit tool restrictions, but that needs a run_background_job
        # refactor; for now, group long-running calls stay inline and timeout.
-       if [ "$is_group" -ne 1 ] && [ "$_elapsed" -ge "$JV_PROMOTE_AFTER" ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
+       if [ "$is_group" -ne 1 ] && [ "$_promotion_decision" = "promote" ] && [ ! -f "${ANSWER_FILE}.promoted" ] && kill -0 $_claude_pid 2>/dev/null; then
          _bg_job_id=$(JV_JOBS_DIR="$JOBS_DIR" JV_CONV_KEY="$conv_key" \
            JV_DESC="auto-promoted: ${content:0:120}" JV_MSG_ID="$message_id" \
            JV_CONTEXT_KEY="$logical_context_key" JV_MATTER_ID="$matter_id" \
@@ -1569,7 +1535,7 @@ sm.force_rotate(os.environ['JV_KEY'],
                rm -f "$LOCK_FILE"
              fi
              # The turn is now an independently scoped background job.  Let
-             # Pascal switch logical sessions while it finishes; its result is
+             # the owner switch logical sessions while it finishes; its result is
              # queued against the captured context and cannot leak elsewhere.
              _promoted_marker="$JARVIS_DIR/.dispatch_job_${_bg_job_id}_${_handler_pid}"
              if dispatch_marker_handoff_owned "$dispatch_marker" \
@@ -1632,13 +1598,42 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
+    if [ "$_use_model_runtime" -eq 1 ]; then
+      _runtime_meta=$(JV_AF="$ANSWER_FILE" python3 -c "
+import json, os
+try:
+    payload = json.load(open(os.environ['JV_AF']))
+    runtime = payload.get('runtime') if isinstance(payload, dict) else {}
+    runtime = runtime if isinstance(runtime, dict) else {}
+except Exception:
+    runtime = {}
+for key in ('call_id', 'status', 'terminal_reason', 'provider', 'model', 'error_detail'):
+    print(str(runtime.get(key) or '').replace('\\n', ' ')[:900])
+routes = runtime.get('attempted_routes') or []
+print(','.join(str(item) for item in routes if isinstance(item, str)))
+" 2>/dev/null || true)
+      _runtime_call_id=$(printf '%s\n' "$_runtime_meta" | sed -n '1p')
+      _runtime_status=$(printf '%s\n' "$_runtime_meta" | sed -n '2p')
+      _runtime_reason=$(printf '%s\n' "$_runtime_meta" | sed -n '3p')
+      _answer_provider=$(printf '%s\n' "$_runtime_meta" | sed -n '4p')
+      _answer_model=$(printf '%s\n' "$_runtime_meta" | sed -n '5p')
+      _runtime_error_detail=$(printf '%s\n' "$_runtime_meta" | sed -n '6p')
+      _runtime_attempted=$(printf '%s\n' "$_runtime_meta" | sed -n '7p')
+      case ",$_runtime_attempted," in
+        *,codex,*) _codex_tried=1 ;;
+      esac
+      case ",$_runtime_attempted," in
+        *,openai,*) _openai_tried=1 ;;
+      esac
+      log_info "[$session_id] Model Runtime call=${_runtime_call_id:-missing} status=${_runtime_status:-missing} route=${_answer_provider:-none} model=${_answer_model:-none}"
+    fi
     local _stderr_content
     _stderr_content=$(head -5 "${ANSWER_FILE}.stderr" 2>/dev/null | tr '\n' ' ')
     local _answer_is_error=0
     if [ -n "$answer" ] && looks_like_error "$answer"; then
       _answer_is_error=1
     fi
-    local _model_error_text="${_stderr_content:-}"
+    local _model_error_text="${_runtime_error_detail:-${_stderr_content:-}}"
     if [ "$_answer_is_error" -eq 1 ]; then
       _model_error_text="${_model_error_text} ${answer}"
     fi
@@ -1662,10 +1657,14 @@ except Exception:
       if [ "${_exit_code:-0}" -eq 143 ]; then
         break
       fi
+      if [ "$_use_model_runtime" -eq 1 ]; then
+        log_warn "[$session_id] Owner chat Model Runtime ended status=${_runtime_status:-unknown} reason=${_runtime_reason:-unknown}; no shell-level replay"
+        break
+      fi
       # Sticky provider gate: a HARD account limit from PRIMARY is account-wide
       # — persist it so every caller (replies, heartbeat, background jobs)
       # starts on backup instead of re-walking the doomed primary ladder.
-      # --trip also pages Pascal once per outage episode (never again for the
+      # --trip also pages the owner once per outage episode (never again for the
       # same ongoing episode; 6h anti-flap across episodes) via the daemon's
       # Claude-independent dead-letter channel.
       _account_limit_reason=""
@@ -1762,87 +1761,33 @@ print(build_cached_system_prompt(
         _cur_model="${CLAUDE_BACKUP2_MODEL:-$MAIN_MODEL}"
         _claude_backup_token="$CLAUDE_BACKUP2_AUTH_TOKEN"
         _claude_backup_base_url="$CLAUDE_BACKUP2_BASE_URL"
-      elif { { [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ] \
-                && [ "$is_group" -ne 1 ] \
-                && [ "$_codex_tried" -eq 0 ]; } \
-             || { [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
-                  && [ -n "${OPENAI_API_KEY:-}" ] \
-                  && [ "$_openai_tried" -eq 0 ]; }; } \
+      elif [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
+        && [ -n "${OPENAI_API_KEY:-}" ] \
+        && [ "$_openai_tried" -eq 0 ] \
         && { printf '%s' "$_model_error_text" | python3 -m core.model_fallback --is-preexecution-error 2>/dev/null \
              || { { [ "$_claude_backup_tried" -eq 1 ] \
                     || [ "$_claude_backup2_tried" -eq 1 ]; } \
                   && [ "$_attempt" -ge 2 ] \
                   && [ -n "${_model_error_text//[[:space:]]/}" ]; }; }; then
-        # The || arm: an auth/network error from the backup relay matches no
-        # model-error signature (kept tight after the red-team fix), but once
-        # backup has been tried primary is known-dead — dead-ending here left
-        # a silent total outage while a working OpenAI route existed.
-        # _attempt >= 2 (2026-07-08 red-team fix): the gate PRESETS
-        # _claude_backup_tried=1 before attempt 1, so without it one transient
-        # relay blip skipped the whole retry ladder and answered with a
-        # context-free GPT reply; requiring a completed failed attempt means
-        # backup really failed at least once in THIS handler run.
-        if [ "${CODEX_FALLBACK_ENABLED:-true}" = "true" ] \
-          && [ "$is_group" -ne 1 ] && [ "$_codex_tried" -eq 0 ]; then
-          _codex_tried=1
-          if [ "$_use_claude_backup" -eq 1 ]; then
-            python3 -m core.provider_health observe "$_active_claude_provider" unhealthy \
-              --detail "$_provider_failure_reason" >/dev/null 2>&1 || true
-          fi
-          log_warn "[$session_id] Claude model chain exhausted on $_cur_model → trying Codex fallback (${CODEX_FALLBACK_MODEL:-gpt-5.5})"
-          answer=$(run_codex_locked "$content" "$conv_key" \
-            "$SYS_PROMPT_FILE" "${CODEX_FALLBACK_MODEL:-gpt-5.5}" \
-            "${CODEX_FALLBACK_TIMEOUT:-300}" "$WORK_DIR" \
-            "${CODEX_FALLBACK_BINARY:-}" "$LOCK_FILE" "$_lock_token" \
-            "$ANSWER_FILE" "$logical_context_key")
-          _codex_exit=$?
-          if [ "$_codex_exit" -eq 0 ] && [ -n "$answer" ]; then
-            _answer_provider="Codex"
-            _answer_model="${CODEX_FALLBACK_MODEL:-gpt-5.5}"
-            python3 -m core.provider_health observe codex healthy \
-              --detail request_succeeded >/dev/null 2>&1 || true
-            log_warn "[$session_id] Codex fallback succeeded (${#answer} chars)"
-            break
-          fi
-          answer=""
-          if [ "$_codex_exit" -eq 143 ]; then
-            _codex_cancelled=1
-            log_info "[$session_id] Codex fallback cancelled — no replay"
-            break
-          fi
-          _codex_err=$(head -5 "${ANSWER_FILE}.codex.stderr" 2>/dev/null | tr '\n' ' ')
-          python3 -m core.provider_health observe codex unhealthy \
-            --detail request_failed >/dev/null 2>&1 || true
-          log_warn "[$session_id] Codex fallback failed (exit=$_codex_exit, stderr=${_codex_err:-none})"
-          if [ "$_codex_exit" -ne 75 ]; then
-            # A timeout/nonzero run may already have executed tools. Replaying
-            # the same request through GPT could duplicate external actions.
-            _codex_uncertain=1
-            break
-          fi
+        _openai_tried=1
+        log_warn "[$session_id] Restricted Claude chain exhausted → trying text-only OpenAI fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
+        answer=$(printf '%s' "$content" | with_openai_credential env \
+          JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
+          ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
+          2>"${ANSWER_FILE}.openai.stderr")
+        _openai_exit=$?
+        if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
+          _answer_provider="GPT fallback"
+          _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
+          python3 -m core.provider_health observe openai healthy \
+            --detail request_succeeded >/dev/null 2>&1 || true
+          log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
+          break
         fi
-        if [ "${OPENAI_FALLBACK_ENABLED:-true}" = "true" ] \
-          && [ -n "${OPENAI_API_KEY:-}" ] && [ "$_openai_tried" -eq 0 ]; then
-          _openai_tried=1
-          log_warn "[$session_id] Codex unavailable → trying OpenAI API fallback (${OPENAI_FALLBACK_MODEL:-gpt-5.5})"
-          answer=$(printf '%s' "$content" | with_openai_credential env \
-            JV_SYSTEM_PROMPT_FILE="$SYS_PROMPT_FILE" python3 -m core.openai_fallback \
-            ${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"} \
-            2>"${ANSWER_FILE}.openai.stderr")
-          _openai_exit=$?
-          if [ "$_openai_exit" -eq 0 ] && [ -n "$answer" ]; then
-            _answer_provider="GPT fallback"
-            _answer_model="${OPENAI_FALLBACK_MODEL:-gpt-5.5}"
-            python3 -m core.provider_health observe openai healthy \
-              --detail request_succeeded >/dev/null 2>&1 || true
-            log_warn "[$session_id] OpenAI fallback succeeded (${#answer} chars)"
-            break
-          fi
-          _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
-          python3 -m core.provider_health observe openai unhealthy \
-            --detail request_failed >/dev/null 2>&1 || true
-          log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
-        fi
+        _openai_err=$(head -5 "${ANSWER_FILE}.openai.stderr" 2>/dev/null | tr '\n' ' ')
+        python3 -m core.provider_health observe openai unhealthy \
+          --detail request_failed >/dev/null 2>&1 || true
+        log_warn "[$session_id] OpenAI fallback failed (exit=$_openai_exit, stderr=${_openai_err:-none})"
         # Every independent route has now had one bounded attempt. Repeating a
         # relay or uncertain tool-capable turn could duplicate side effects.
         break
@@ -1850,7 +1795,11 @@ print(build_cached_system_prompt(
       # On first failure, session file may have been created — update for retry
       session_file="$CLAUDE_PROJECT_DIR/${session_id}.jsonl"
     else
-      if [ "$_claude_backup2_tried" -eq 1 ]; then
+      if [ "$_use_model_runtime" -eq 1 ]; then
+        # Provider health, route choice, model attribution and gate recovery
+        # were already recorded atomically with the Model Runtime receipt.
+        break
+      elif [ "$_claude_backup2_tried" -eq 1 ]; then
         _answer_provider="Claude backup2"
       elif [ "$_use_claude_backup" -eq 1 ]; then
         _answer_provider="Claude backup"
@@ -1858,7 +1807,7 @@ print(build_cached_system_prompt(
         _answer_provider="Claude primary"
         if [ "$_provider_gate" != "primary" ]; then
           # Elected probe succeeded on primary while the spend-limit flag was
-          # set — reopen primary for every process (also pages Pascal 恢复了).
+          # set — reopen primary for every process (also pages the owner恢复了).
           python3 -m core.model_fallback --clear >/dev/null 2>&1 || true
         fi
       fi
@@ -1874,8 +1823,7 @@ print(build_cached_system_prompt(
   [ -f "${ANSWER_FILE}.dispatch_marker" ] \
     && dispatch_marker=$(cat "${ANSWER_FILE}.dispatch_marker" 2>/dev/null)
   rm -f "$ANSWER_FILE" "${ANSWER_FILE}.stderr" "${ANSWER_FILE}.watchdog" \
-    "${ANSWER_FILE}.promoted" "${ANSWER_FILE}.codex.stderr" \
-    "${ANSWER_FILE}.codex.stdin" "${ANSWER_FILE}.codex.stdout" \
+    "${ANSWER_FILE}.promoted" \
     "${ANSWER_FILE}.openai.stderr" "${ANSWER_FILE}.dispatch_marker" "$SYS_PROMPT_FILE"
   # Remove the lock ONLY if we still own it: after promotion released it (or
   # a staleness reclaim), it may belong to another live handler — an
@@ -1924,14 +1872,23 @@ print(build_cached_system_prompt(
     fi
     # Tell user exactly what happened — not a vague "try again"
     if [ "${#answer}" -eq 0 ]; then
-      if [ "${_no_healthy_provider:-0}" -eq 1 ]; then
+      if [ "${_runtime_status:-}" = "ambiguous" ]; then
+        lark_reply_text "$message_id" \
+          "模型执行被中断，是否已经产生操作无法确认。为避免重复，我没有换模型重跑；请先核对相关结果，再决定是否继续。" >/dev/null
+      elif [ "${_runtime_status:-}" = "failed" ]; then
+        if [ "${_codex_tried:-0}" -eq 1 ] && [ "${_openai_tried:-0}" -eq 1 ]; then
+          lark_reply_text "$message_id" \
+            "Claude、Codex 接力和 GPT 兜底都未能开始完成这次请求；没有自动重复操作，具体故障已记录。" >/dev/null
+        elif [ "${_codex_tried:-0}" -eq 1 ]; then
+          lark_reply_text "$message_id" \
+            "Claude 和 Codex 接力都未能开始完成这次请求；没有自动重复操作，具体故障已记录。" >/dev/null
+        else
+          lark_reply_text "$message_id" \
+            "当前模型通道未能开始完成这次请求；没有自动重复操作，具体故障已记录。" >/dev/null
+        fi
+      elif [ "${_no_healthy_provider:-0}" -eq 1 ]; then
         lark_reply_text "$message_id" \
           "当前已配置的模型通道都在恢复中，这次请求没有执行。Jarvis 会自动探测恢复，不需要反复重试。" >/dev/null
-      elif [ "${_codex_cancelled:-0}" -eq 1 ]; then
-        log_info "[$session_id] Cancelled Codex turn ended — staying silent"
-      elif [ "${_codex_uncertain:-0}" -eq 1 ]; then
-        lark_reply_text "$message_id" \
-          "Codex 执行被中断，是否已经完成无法确认。为避免重复操作，我没有自动换模型重跑；可以先让我核对结果，再决定是否继续。" >/dev/null
       elif [ "${_exit_code:-0}" -eq 143 ] && [ "$_watchdog_killed" -eq 1 ] && [ -n "$_promoted_job" ]; then
         # Promoted job hit the 6000s ceiling. 「继续」 would land in the NEW
         # (rotated) session and not resume this work — say so honestly.
@@ -1977,7 +1934,7 @@ print(build_cached_system_prompt(
       fi
     else
       # looks_like_error suppresses provider/auth/CLI failures; it is not a
-      # content-safety classifier. Calling this a "安全过滤器" sent Pascal
+      # content-safety classifier. Calling this a "安全过滤器" sent the owner
       # debugging the wrong subsystem while the real fault was an exhausted
       # provider chain.
       if [ "${_codex_tried:-0}" -eq 1 ] && [ "${_openai_tried:-0}" -eq 1 ]; then
@@ -1997,9 +1954,9 @@ print(build_cached_system_prompt(
 
   # Reply footer: only when NOT served by primary, and in plain Chinese —
   # the old English "Model: Claude backup opus" on EVERY reply was jargon in
-  # Pascal's chat (2026-07-07; feedback-no-jargon-dashboards). Silence on
+  # the owner's chat (2026-07-07; feedback-no-jargon-dashboards). Silence on
   # primary = normal operation needs no caption.
-  # Never in groups: provider status is the owner's internal ops detail —
+  # Never in groups: provider status isthe owner's internal ops detail —
   # "（备用通道）" leaking into a group reply confused the first live test
   # (2026-07-14 16:04) and tells outsiders about the owner's infra state.
   local _model_footer=""
@@ -2278,7 +2235,7 @@ print(j['status'] if j else 'unknown')
   local card_body card_json
   if [ "$status" = "completed" ]; then
     # Keep the Lark result readable; the full result remains in the private
-    # job ledger without making Pascal learn job commands.
+    # job ledger without making the owner learn job commands.
     local summary
     if [ ${#output} -gt 3000 ]; then
       summary="${output:0:3000}
@@ -2420,7 +2377,7 @@ heartbeat_watchdog() {
     # bash keeps $$ stable inside background functions (BASHPID differs).
     if [ "$(awk '{print $1}' "$PIDFILE" 2>/dev/null)" != "$$" ]; then
       log_warn "[watchdog] Pidfile missing or foreign — re-asserting ($$)"
-      echo "$$ $_BOOT_TS" > "$PIDFILE"
+      echo "$$ $_BOOT_TS $_BOOT_GIT_HEAD" > "$PIDFILE"
     fi
     if ! kill -0 "$HEARTBEAT_PID" 2>/dev/null; then
       # Adopt a surviving singleton before declaring death (7/7 incident: an
@@ -2701,7 +2658,7 @@ except:
         && mv "${_dedup_file}.tmp" "$_dedup_file"
 
       # Journal capture (PRD P1, 每日复盘 check-in): if this message quotes the
-      # daily-reflect card, save Pascal's OWN words ("我怎么看一些事") into his
+      # daily-reflect card, savethe owner's OWN words ("我怎么看一些事") into his
       # private 《Jarvis 日志》. For DIRECT (non-quote) messages the script is
       # REQ-86 SHADOW ONLY: it just logs an attribution candidate to
       # data/journal_capture_shadow.jsonl and never writes the journal.
@@ -3109,7 +3066,8 @@ except Exception:
           fi
         fi
         _matter_cmd=$(run_matter_command \
-          "$content" "$conv_key" "${chat_id:-$sender_id}" "$chat_type")
+          "$content" "$conv_key" "${chat_id:-$sender_id}" "$chat_type" \
+          "$message_id")
         if [ "$(echo "$_matter_cmd" | jq -r '.handled // false' 2>/dev/null)" = "true" ]; then
           _matter_reply=$(echo "$_matter_cmd" | jq -r '.reply // "事项命令已处理"' 2>/dev/null)
           if delivery_reply_reliable "$message_id" "$_matter_reply"; then
@@ -3187,7 +3145,7 @@ except Exception:
       fi
 
       # "stop" / "cancel" — kill the running Claude process for this session (safety bypass).
-      # Accept Chinese stop words too: Pascal naturally types「结束/停/停止/停下/取消」,
+      # Accept Chinese stop words too:the owner naturally types「结束/停/停止/停下/取消」,
       # and previously those fell through to the LLM path — so a runaway/looping
       # session could never be halted by the user (the exact "我说结束它不理" bug).
       # Match the whole message only, so "取消那个日程" won't be treated as a stop.
@@ -3370,7 +3328,7 @@ if old_sid:
       # ── Engagement tracking (background — independent of the reply, must not
       # block the ack or dispatch; a fresh Python import here costs ~0.5-2s).
       # Groups excluded: a non-owner member's message must not be recorded as
-      # the owner's response to the last proactive send — that would inflate
+      #the owner's response to the last proactive send — that would inflate
       # engagement scores and confuse the checkin cadence (red-team catch). ──
       if [ "$_owner_p2p" -eq 1 ]; then
         python3 -m core.engagement "$content" >/dev/null 2>>"$LOG_FILE" &

@@ -1,6 +1,6 @@
 """Checkin as a companion that learns from the interaction.
 
-Checkin is not one of the heartbeat's 36 tasks — it is the product. On
+Checkin is an optional, explicitly retained rhythm. On
 2026-08-02 it had been **silent for 10 days** (last card 7/23) while reporting
 perfect health: `last_status: ok`, 708 runs, "last success" that same evening.
 
@@ -9,7 +9,7 @@ That silence was the designed behaviour of the 7/21 rewrite, which said so:
     If neither exists in the pre-script context: HEARTBEAT_OK. That is the
     EXPECTED outcome most of the time. Silence is the default, not failure.
 
-The 7/21 rewrite was a real correction to a real complaint (Pascal named
+The 7/21 rewrite was a real correction to a real complaint (the owner named
 「乱联系」four times), but it conflated *contacting him for no reason* with
 *contacting him without a task*, and banned the second. The result reads like
 an assistant waiting for a work item, not a friend.
@@ -17,7 +17,7 @@ an assistant waiting for a work item, not a friend.
 This module fixes the loop rather than the wording, because the wording was
 never the durable problem:
 
-**Before:** Pascal complains → a human hand-edits HEARTBEAT.md → the pendulum
+**Before:**the owner complains → a human hand-edits HEARTBEAT.md → the pendulum
 overshoots → 10 days of nothing → he complains again. Nothing measured whether
 the correction was right.
 
@@ -37,12 +37,9 @@ Four mechanisms, all built on the ledger that already exists:
 2. **A kind per card** (`followup` / `standing` / `notice` / `guide`). The kind
    is the unit of learning. Until now every card was logged as `source=checkin`
    and the four registers collapsed into one blob nothing could learn from.
-3. **A budget with a floor and a ceiling**, replacing the binary gate. Each
-   kind's daily allowance moves with its own score, but silence is no longer
-   free: after FLOOR_HOURS of saying nothing, the best-scoring kind is owed a
-   slot. No kind ever decays to zero, because a kind at zero can never earn its
-   way back — demotion is a hypothesis, not a sentence (the same principle
-   core.attention_roi states for lanes).
+3. **A small ceiling**, replacing the binary gate. Each kind's daily allowance
+   moves with its own score. Negative evidence may reduce a kind to zero; the
+   owner does not owe the system more samples after saying a register is noise.
 4. **Silence is a recorded decision**, not an absence. `HEARTBEAT_OK` writes a
    row saying it declined to speak and why, so ten days of muteness is visible
    as an anomaly instead of 708 green runs.
@@ -62,6 +59,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from core.timeutil import now_local, now_local_str
+from core.retained_rhythms import is_enabled as retained_rhythm_enabled
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,21 +91,16 @@ WINDOW_DAYS = 14
 # would leave the governor inert for weeks.
 MIN_SAMPLE = 6
 
-# Per-kind daily allowance. FLOOR is the point of the whole module: a kind that
-# scores badly gets quieter, never mute, because a mute kind produces no
-# evidence and can never be re-evaluated.
-ALLOWANCE_FLOOR = 1
-ALLOWANCE_BASE = 2
-ALLOWANCE_CEILING = 4
+# Per-kind daily allowance. A rejected register may go to zero. Re-entry comes
+# from an explicit owner request or a different time-sensitive source, not from
+# manufacturing another message so the system can collect engagement data.
+ALLOWANCE_FLOOR = 0
+ALLOWANCE_BASE = 1
+ALLOWANCE_CEILING = 2
 
 # Total cards per day across all kinds. A healthy score must not be able to
 # turn checkin into the card storm this system was already burned by (7/22).
-DAILY_CEILING = 5
-
-# After this long without saying anything during waking hours, the
-# best-scoring kind is owed a slot. This is the direct fix for the 10-day gap:
-# the system must be able to notice its own muteness.
-FLOOR_HOURS = 20
+DAILY_CEILING = 2
 
 # Score weights over the trailing window. A chat is worth far more than a tap
 # because it is the only signal that the card started something.
@@ -206,11 +199,9 @@ def read_voice_log(limit: int = 500) -> list[dict]:
 def hours_since_spoke() -> float | None:
     """Hours since the last card shipped. None when it has never spoken.
 
-    Read from the stamp file's mtime — the very fact components.yaml's
-    file_age check supervises — so the silence alarm and the budget floor can
-    never disagree about the same outage. A missing stamp reads as
-    never-spoken, which makes the floor owe a card, which recreates the
-    stamp: self-healing in the direction of speaking.
+    Read from the stamp file's mtime for product analytics only. A missing or
+    old stamp is healthy when no qualifying message exists; age never creates
+    an obligation to interrupt the owner.
     """
     import time as _time
     try:
@@ -326,11 +317,10 @@ def spoken_today(rows: list[dict] | None = None) -> dict[str, int]:
 def plan(stats: dict[str, dict] | None = None,
          rows: list[dict] | None = None,
          silent_hours: float | None = None) -> dict:
-    """What checkin is allowed — and owed — right now.
+    """What an explicitly retained checkin rhythm is allowed right now.
 
-    ``owed`` is the floor: after FLOOR_HOURS of silence the best-scoring kind
-    with remaining budget is due a card, and the prompt is told so explicitly.
-    Silence stops being free.
+    Silence never creates debt. Only an entrusted result, an explicit rhythm,
+    or a verified time-sensitive change can justify Jarvis speaking first.
     """
     stats = kind_stats() if stats is None else stats
     allow = allowances(stats)
@@ -342,17 +332,6 @@ def plan(stats: dict[str, dict] | None = None,
         remaining = {k: 0 for k in KINDS}
 
     hours = hours_since_spoke() if silent_hours is None else silent_hours
-    owed = ""
-    # No day_left check: a spent day zeroes every `remaining` entry above,
-    # so `ranked` comes back empty on its own.
-    if hours is None or hours >= FLOOR_HOURS:
-        ranked = sorted(
-            (k for k in KINDS if remaining[k] > 0),
-            key=lambda k: (-(stats.get(k) or {}).get("score", 0.0), k),
-        )
-        if ranked:
-            owed = ranked[0]
-
     return {
         "stats": stats,
         "allowance": allow,
@@ -360,7 +339,7 @@ def plan(stats: dict[str, dict] | None = None,
         "remaining": remaining,
         "day_remaining": day_left,
         "hours_since_spoke": hours,
-        "owed": owed,
+        "owed": "",
     }
 
 
@@ -409,27 +388,16 @@ def brief(state: dict | None = None) -> str:
         lines.append(f"  {kind:9} {KIND_HELP[kind]}")
     lines.append(
         "按卡片的真实性质选，预算按它扣，「这类不必」教的也是它——"
-        "别为绕开用完的预算把 notice 标成 followup，那会污染 Pascal 唯一的信号。"
+        "别为绕开用完的预算把 notice 标成 followup，那会污染用户唯一的信号。"
         "这一行送出前会被剥掉。")
 
     lines.append("")
-    if state["owed"]:
-        # hours is None on a host that has never spoken — the first run after
-        # install, and also exactly the state the 10-day outage looked like
-        # from a fresh log. It must not crash the brief; that would turn the
-        # silence alarm itself into another silent failure.
-        how_long = ("还从没说过话" if hours is None
-                    else f"已经 {hours:.0f} 小时没说话了")
-        lines.append(
-            f"⚠️ {how_long}（阈值 {FLOOR_HOURS}h）。"
-            f"这一轮欠一张 `{state['owed']}`：不要回 HEARTBEAT_OK，"
-            "找一件真的、具体的事说。沉默不是免费的。")
-    elif state["day_remaining"] == 0:
+    if state["day_remaining"] == 0:
         lines.append("今天的额度用完了。这一轮回 HEARTBEAT_OK。")
     else:
         lines.append(
-            "没有欠账。有真东西就说，没有就回 HEARTBEAT_OK —— "
-            "但记住沉默会被记账，连着不说话会触发上面的欠账。")
+            "没有消息债。有被托付的结果、明确订阅的节奏，或会过期的真实变化才说；"
+            "否则回 HEARTBEAT_OK。不要为了维持存在感而开口。")
     return "\n".join(lines)
 
 
@@ -451,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "preflight":
-        return 0 if plan()["day_remaining"] > 0 else 1
+        return 0 if (retained_rhythm_enabled("checkin")
+                     and plan()["day_remaining"] > 0) else 1
 
     state = plan()
     hours = state["hours_since_spoke"]
@@ -467,8 +436,6 @@ def main(argv: list[str] | None = None) -> int:
               f"余 {state['remaining'][kind]}  "
               f"样本 {row.get('n', 0)}  分数 {row.get('score', 0):.2f}")
         print(f"            {KIND_HELP[kind]}")
-    if state["owed"]:
-        print(f"\n⚠️ 欠一张 {state['owed']}（静默超过 {FLOOR_HOURS}h）")
     return 0
 
 

@@ -22,7 +22,7 @@ exec > >(tee "$JARVIS_DIR/.diag_last_pre.txt")
 
 # Optional-feature switches (2026-07-13 fresh-install audit): a collaborator's
 # default install got ⚠️ lines every 4h for features they never enabled
-# (EigenFlux, Lark user calendar, Pascal's personal site). Every ⚠️ below must
+# (EigenFlux, Lark user calendar,the owner's personal site). Every ⚠️ below must
 # be gated on the feature actually being configured.
 _HAS_EF=0; command -v eigenflux >/dev/null 2>&1 && _HAS_EF=1
 _LARK_UID=$(python3 -c "
@@ -154,7 +154,7 @@ elif [ "$_stream_count" -eq 0 ]; then
   # No CLI child ≠ outage: the supervising loop (core.ef_stream_loop) kills
   # and respawns the child through backoff windows (stall-kill, deploy
   # restart, reconnect) — sampling inside such a window produced recurring
-  # false "Stream NOT running" alerts (Pascal 2026-07-14; also fired on the
+  # false "Stream NOT running" alerts (the owner 2026-07-14; also fired on the
   # collaborator's first install). Loop alive = supervised, it WILL respawn;
   # only a dead loop is a real outage (components.yaml pgrep also catches it).
   # Anchored ps match (NOT bare pgrep -f substring — the 2026-07-07 phantom
@@ -193,13 +193,6 @@ echo ""
 (cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" python3 -m core.watermarks 2>/dev/null) \
   || echo "--- Channel Watermarks ---
   ⚠️ 后台任务的健康检查这一步自己没跑成"
-
-# The heartbeat entry for self-improve is intentionally empty: it only starts
-# a detached coding session. Check that session's acquire/run/release receipt,
-# not the scheduler's expected empty stdout, and surface only after bounded
-# automatic retries have already failed.
-(cd "$JARVIS_DIR" && JARVIS_DIR="$JARVIS_DIR" \
-  python3 -m core.self_improve_cycle health 2>/dev/null) || true
 
 # 7b. Component manifest (REQ-40): the single source of truth for "what
 #     should be running". Failures print as ⚠️ lines → REQ-39 alert path.

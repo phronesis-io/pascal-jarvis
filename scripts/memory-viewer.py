@@ -8,7 +8,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 from core.claude_projects import auto_memory_dir, projects_root
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -639,7 +640,7 @@ def load_settings() -> dict:
             pass
     for label, path in [
         ("Global CLAUDE.md", CLAUDE_DIR / "CLAUDE.md"),
-        ("Project CLAUDE.md", Path("/Users/pascal/Desktop/jarvis/CLAUDE.md")),
+        ("Project CLAUDE.md", ROOT / "CLAUDE.md"),
     ]:
         if path.exists():
             result[label] = {"content": path.read_text(encoding="utf-8")[:3000]}

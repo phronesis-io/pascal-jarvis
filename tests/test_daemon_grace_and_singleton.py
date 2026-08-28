@@ -193,6 +193,7 @@ def test_offline_defers_page_and_rearms_grace(brain_env, monkeypatch):
     assert st["grace_until"] > time.time()   # re-armed for the recovery
     assert st["suppressed"] == {}            # offline accrual never penetrates
     assert st["last_alert"] == 0             # dedup clock NOT consumed
+    assert st["deadman_withhold"] is False   # unverified candidate keeps pinging
     assert _no_errors(logs)
 
     # Network back: the re-armed grace holds — no instant page on recovery.
@@ -236,6 +237,7 @@ def test_persistent_failure_after_recovery_grace_stays_internal(brain_env):
     warn = [m for lvl, m in logs if lvl == "WARN"]
     assert warn and warn[0].startswith("BRAIN-DEAD heartbeat: ")
     assert "persisted across post-wake grace" not in warn[0]
+    assert _persisted(tmp_path)["deadman_withhold"] is True
     assert _no_errors(logs)
 
 
@@ -252,6 +254,7 @@ def test_healthy_check_clears_suppression_ledger(brain_env, monkeypatch):
     assert alerts == []
     assert _persisted(tmp_path)["suppressed"] == {}
     assert _persisted(tmp_path)["repair_requested_at"] == 0
+    assert _persisted(tmp_path)["deadman_withhold"] is False
     assert _no_errors(logs)
 
 

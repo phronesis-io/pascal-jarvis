@@ -18,6 +18,10 @@
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
 export PYTHONPATH="$JARVIS_DIR${PYTHONPATH:+:$PYTHONPATH}"
+if ! JARVIS_DIR="$JARVIS_DIR" python3 -m core.retained_rhythms \
+    enabled exercise_week >/dev/null 2>&1; then
+  exit 0
+fi
 
 # Rolling daily harvest — runs BEFORE the Sunday gate on purpose. Fail-open:
 # a harvest error must never surface as task noise.

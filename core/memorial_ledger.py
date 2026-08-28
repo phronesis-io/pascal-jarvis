@@ -84,6 +84,14 @@ def fold(
                 "authoring_protocol": bool(
                     event.get("authoring_protocol", False)),
                 "work_receipt": str(event.get("work_receipt", "")),
+                "owner_need": str(event.get("owner_need", "")),
+                "why_now": str(event.get("why_now", "")),
+                "owner_action": str(event.get("owner_action", "")),
+                "silence_cost": str(event.get("silence_cost", "")),
+                "message_gate_version": int(
+                    event.get("message_gate_version", 0) or 0),
+                "owner_need_explicit": bool(
+                    event.get("owner_need_explicit", False)),
                 "authoring_audit_text": (
                     str(event.get("authoring_audit_text", ""))
                     if "authoring_audit_text" in event else None),
@@ -164,6 +172,25 @@ def fold(
                     state["attention"] = str(event["attention"])
                 if "review_surface" in event:
                     state["review_surface"] = str(event["review_surface"])
+        elif event_type == "revise":
+            state = states.get(memorial_id)
+            if state is not None and state["status"] == "pending":
+                for field in (
+                    "title", "body", "context", "work_receipt",
+                    "authoring_audit_text", "why_now", "owner_action",
+                    "silence_cost",
+                ):
+                    if field in event:
+                        value = event[field]
+                        state[field] = (
+                            None
+                            if field == "authoring_audit_text" and value is None
+                            else str(value or "")
+                        )
+                if "options" in event:
+                    state["options"] = list(event.get("options") or [])
+                if "recommend" in event:
+                    state["recommend"] = event.get("recommend") or None
     return states
 
 

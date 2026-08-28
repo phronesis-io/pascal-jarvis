@@ -76,6 +76,40 @@ def test_state_machine_deliver_read_acted(pipeline):
     assert pipe.get(result.delivery_id)["acted_epoch"]
 
 
+def test_queued_memorial_payload_can_be_revised_without_second_envelope(
+        tmp_path):
+    now = [_local_ts(2026, 8, 28, 14, 0)]
+    pipe = DeliveryPipeline(
+        tmp_path,
+        db_path=tmp_path / "jarvis.db",
+        transport=lambda *_: pytest.fail("forced queue must not send"),
+        clock=lambda: now[0],
+    )
+    old = json.dumps({
+        "schema": "2.0",
+        "body": {"elements": [{"tag": "markdown", "content": "旧正文"}]},
+    }, ensure_ascii=False)
+    result = pipe.deliver(DeliveryEnvelope(
+        source="eigenflux",
+        kind="card",
+        payload={"card_json": old, "text": "旧正文"},
+        memorial_id="mem_hour",
+        metadata={"force_queue": True},
+    ))
+    assert result.state == "queued"
+
+    new = json.dumps({
+        "schema": "2.0",
+        "body": {"elements": [{"tag": "markdown", "content": "合并后的正文"}]},
+    }, ensure_ascii=False)
+    assert pipe.replace_memorial_payload(
+        "mem_hour", card_json=new, text="合并后的正文"
+    ) == [result.delivery_id]
+    row = pipe.get(result.delivery_id)
+    assert json.loads(row["payload"])["text"] == "合并后的正文"
+    assert len(pipe.list_source("eigenflux")) == 1
+
+
 def test_alert_without_explicit_key_gets_stable_incident_identity(pipeline):
     pipe, sent, _ = pipeline
     first = pipe.deliver(DeliveryEnvelope(

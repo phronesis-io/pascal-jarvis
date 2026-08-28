@@ -20,9 +20,10 @@ INDEX_DIGEST = (
     "注入规模由运行时指标持续复核。"
 )
 RESTART_SECTION = """## 重启 Jarvis 的正确方式
-生产发布必须走受保护的 release gate、Owner 收据和 launchd kickstart；
-不要手动 pkill，也不要用 `restart.sh --full` 绕过发布证据。普通状态检查可用
-`./restart.sh --status`，准确步骤以 `core.deploy` 和发布 Runbook 为准。
+生产发布只走 `./restart.sh --full --yes`：它先校验 release gate 和 Owner
+收据，再由 launchd kickstart，并在启动后运行 `core.deploy verify`。不要手动
+`pkill` 或直接运行 `launchctl kickstart`；同版本恢复用 `./restart.sh --runtime
+--yes`，普通状态检查用 `./restart.sh --status`。
 """
 
 

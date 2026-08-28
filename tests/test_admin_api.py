@@ -285,6 +285,42 @@ def test_post_with_wrong_host_403(server):
     assert not (ctx["root"] / ".restart_trigger").exists()
 
 
+def test_private_get_with_wrong_host_403(server):
+    base, _ = server
+    req = urllib.request.Request(
+        f"{base}/api/memories", headers={"Host": "evil.example.com"}
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=3)
+
+    assert exc.value.code == 403
+    assert json.loads(exc.value.read())["error"] == (
+        "forbidden: Host must be localhost"
+    )
+
+
+def test_private_get_with_localhost_host_succeeds(server):
+    base, _ = server
+    req = urllib.request.Request(
+        f"{base}/api/memories", headers={"Host": "localhost"}
+    )
+
+    with urllib.request.urlopen(req, timeout=3) as response:
+        assert response.status == 200
+        assert json.loads(response.read()) == []
+
+
+def test_health_remains_available_to_non_browser_monitor_host(server):
+    base, _ = server
+    req = urllib.request.Request(
+        f"{base}/health", headers={"Host": "monitor.internal"}
+    )
+
+    with urllib.request.urlopen(req, timeout=3) as response:
+        assert response.status == 200
+
+
 def test_post_wrong_content_type_415(server):
     base, ctx = server
     status, body = _post(f"{base}/api/memory", {

@@ -19,6 +19,10 @@
 #               being alive (reuses the daemon's brain_health.assess verdict)
 #   delivery  — recent envelopes include real provider receipts rather than a
 #               streak of terminal failures or an overdue retry queue
+#   model_runtime — shared model call receipts are complete, not stale, and do
+#               not show an unresolved write-side ambiguity or failure streak
+#   runtime_source — bot boot revision, checkout revision, and protected
+#               runtime paths still agree, so child respawns remain armed
 #
 # critical: true → daemon.py checks it every 30s (alert-only for components
 # it does not own; daemon only ever restarts bot.sh). Everything is checked
@@ -49,6 +53,17 @@ components:
     path: .bot.pid
     critical: true
     note: main Lark loop; daemon restarts it
+
+  - name: watchdog-armed
+    check: runtime_source
+    pid_path: .bot.pid
+    paths_file: runtime_sources.txt
+    critical: true
+    note: >-
+      A live bot is not enough: if its checkout revision changes or protected
+      runtime source becomes dirty, the bot intentionally blocks heartbeat,
+      EigenFlux, and admin child respawns until a governed deploy. This probe
+      makes that fail-closed state visible instead of reporting false health.
 
   - name: heartbeat-loop
     check: pgrep
@@ -81,11 +96,25 @@ components:
     critical: false
     requires_file: data/jarvis.db
     note: >-
-      Process and HTTP health do not prove that Pascal receives anything. A
+      Process and HTTP health do not prove that the owner receives anything. A
       recent streak of failed envelopes, or an overdue retry queue, makes the
       product unhealthy even while bot/admin remain alive. The
       daemon's independent dead-letter path owns paging; this check is
       observation-only and must not create a credential restart loop.
+
+  - name: model-runtime
+    check: model_runtime
+    path: data/jarvis.db
+    window_seconds: 3600
+    failure_streak: 3
+    stale_after_seconds: 1800
+    integrity_window_seconds: 86400
+    critical: false
+    requires_file: data/jarvis.db
+    note: >-
+      Provider-neutral execution receipts. Observation-only: a stalled call,
+      broken receipt, repeated recent failures, or recent ambiguous write/external
+      effect is visible to operators without triggering a restart loop.
 
   - name: ef-stream
     check: ef_stream
@@ -149,16 +178,3 @@ components:
     critical: false
     requires_file: ~/Library/LaunchAgents/com.jarvis.conversation-audit.plist
     note: latest completed audit must stay fresh; launchd com.jarvis.conversation-audit runs daily at 04:20
-
-  - name: companion-voice
-    check: file_age
-    path: data/companion_last_spoke
-    max_age_hours: 48
-    critical: false
-    requires_file: data/companion_last_spoke
-    note: >-
-      checkin 是产品本身，不是 36 个任务里的一个。2026-08-02 发现它整整 10 天
-      一句话没说（上一张卡 7/23），而任务状态一路 last_status=ok、708 次运行全绿：
-      沉默从来没有被当成一个状态。core.companion 每次真发出卡片就 touch 这个文件，
-      所以「不说话」现在会像别的组件死掉一样亮红。requires_file 让它在从没开口过的
-      全新安装上跳过，而不是对着一个还不存在的文件报警。

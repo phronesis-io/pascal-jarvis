@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import companion
+from core.retained_rhythms import is_enabled as retained_rhythm_enabled
 from core.card import build_card
 from core.safety import (looks_like_error, parse_json_response,
                          strip_task_framing)
@@ -175,6 +176,8 @@ def extract_kind(message: str) -> tuple[str, str]:
 
 
 def main() -> int:
+    if not retained_rhythm_enabled("checkin"):
+        return 0
     message = sys.stdin.read().strip()
     # Suppress on the silence sentinel even if the model wrapped it with a header
     # line and/or trailing reasoning. A real check-in never contains this token,
@@ -191,7 +194,7 @@ def main() -> int:
     # Unwrap a JSON envelope. The checkin prompt asks for plain markdown, but
     # the model sometimes reuses the intention-check response shape
     # ({"response": "...", "action": "notify"}) from elsewhere in the
-    # heartbeat context — and the raw envelope went onto Pascal's card
+    # heartbeat context — and the raw envelope went ontothe owner's card
     # verbatim (his 2026-07-14 complaint: the card was unreadable JSON).
     parsed = parse_json_response(message)
     if isinstance(parsed, dict) and isinstance(parsed.get("response"), str):

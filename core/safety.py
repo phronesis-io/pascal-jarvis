@@ -61,6 +61,7 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "Failed to authenticate",
     "Prompt is too long",
     "autocompact is thrashing",
+    "Your organization has disabled Claude subscription access for Claude Code",
 )
 
 # Patterns checked anywhere in first 300 chars (substring match)
@@ -78,7 +79,7 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
 NOOP_REPLY_NEEDLES: tuple[str, ...] = (
     "no response requested",
     # Bare CLI failure of a helper call (e.g. the haiku tool-narrator) — six
-    # "🔧 Execution error" messages reached Pascal in the week of 7/13.
+    # "🔧 Execution error" messages reachedthe owner in the week of 7/13.
     "execution error",
 )
 
@@ -87,7 +88,7 @@ NOOP_REPLY_NEEDLES: tuple[str, ...] = (
 # 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours as
 # "**Intent** | Failed to authenticate. API Error: 403 Request not allowed" —
 # the markdown header defeated the line-start check. They are NOT applied to
-# interactive replies: when Pascal debugs this very bot, a legitimate answer
+# interactive replies: when the owner debugs this very bot, a legitimate answer
 # may quote "API Error: 403" verbatim in its opening lines.
 PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "Failed to authenticate. API Error",
@@ -203,7 +204,7 @@ def plain_user_copy(text: str) -> str:
     )
 
 # Prompt-framing headers the model echoes back at the top of a task slice.
-# These reached Pascal's cards verbatim through 7/20 ("=== TASK: checkin ===",
+# These reached the owner's cards verbatim through 7/20 ("=== TASK: checkin ===",
 # "[CHECKIN]", "[2026-07-19 09:16] checkin") — fix the CLASS at the shared
 # boundary, not one task at a time (the 7/16 humanlaya lesson: per-task
 # patches let the family keep breeding).

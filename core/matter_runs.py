@@ -428,12 +428,13 @@ def mark_run_running(
 
 
 def renew_run(
-    run_id: str, *, lease_seconds: int = 3600, now: float | None = None
+    run_id: str, *, lease_seconds: int = 3600, now: float | None = None,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Extend a live run without reviving an expired or terminal lease."""
     epoch = float(time.time() if now is None else now)
     lease_seconds = max(30, min(int(lease_seconds), 86400))
-    db = _db()
+    db = connection or _db()
     try:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM matter_runs WHERE id=?", (run_id,)).fetchone()
@@ -452,6 +453,12 @@ def renew_run(
     except Exception:
         db.rollback()
         raise
+    if connection is not None:
+        return _row(
+            connection.execute(
+                "SELECT * FROM matter_runs WHERE id=?", (run_id,)
+            ).fetchone()
+        ) or {}
     return get_run(run_id) or {}
 
 

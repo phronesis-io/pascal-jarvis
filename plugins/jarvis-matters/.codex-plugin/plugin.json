@@ -1,22 +1,22 @@
 {
   "name": "jarvis-matters",
-  "version": "0.3.1",
-  "description": "Use Codex as the frontstage for Jarvis Matters without duplicating chat state.",
+  "version": "0.4.0",
+  "description": "Work normally in Codex while Jarvis preserves durable continuity, timing, authority, and closure.",
   "author": {
     "name": "Phronesis"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Jarvis Matters",
-    "shortDescription": "Continue durable Jarvis work from Codex.",
-    "longDescription": "Connects Codex tasks to Jarvis Matter identity, bounded context, execution leases, and verified result receipts.",
+    "shortDescription": "Keep continuity across Codex tasks without another chat.",
+    "longDescription": "Explains when to use Codex or Jarvis and connects durable work to Matter identity, compiled memory, execution leases, model status, and verified result receipts.",
     "developerName": "Phronesis",
     "category": "Productivity",
     "capabilities": ["Read", "Write", "Interactive"],
     "defaultPrompt": [
-      "Continue the most relevant Jarvis Matter.",
-      "Show my active Matters and their next actions.",
-      "Bind this work to a Jarvis Matter."
+      "我现在该在 Codex 做什么，什么时候需要 Jarvis？",
+      "列出真正需要我判断、收口或继续的事情。",
+      "继续最相关的 Jarvis 事项。"
     ]
   },
   "mcpServers": "./.mcp.json"

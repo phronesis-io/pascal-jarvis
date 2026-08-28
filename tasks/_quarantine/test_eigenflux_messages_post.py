@@ -57,7 +57,7 @@ def _run(payload: str, tmp_path: Path, auto_reply_value: str):
 
 
 def test_auto_reply_off_holds_replies(tmp_path):
-    """auto_reply_pm=false: the reply is held and Pascal is told."""
+    """auto_reply_pm=false: the reply is held and the owner is told."""
     out = _run(REPLY_PAYLOAD, tmp_path, "false").stdout
     assert "auto_reply_pm 已关闭" in out
     assert "已暂停" in out

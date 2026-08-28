@@ -23,4 +23,5 @@ if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$_this_week" ]; then
 fi
 
 cd "$JARVIS_DIR"
+"$_python" -c 'from core.matter_runs import recover_expired_runs; recover_expired_runs()'
 exec "$_python" -m core.matter_review --days 7 --limit 8

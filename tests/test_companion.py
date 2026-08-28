@@ -1,6 +1,6 @@
-"""Companion checkin: the gradient, the budget, the floor, and the silence.
+"""Companion checkin: the gradient, the small budget, and healthy silence.
 
-The incident these guard is 2026-08-02: checkin — the product itself — had
+The incident these guard is 2026-08-02: the then-primary checkin surface had
 been silent for 10 days (last card 7/23) while reporting `last_status: ok`
 across 708 runs, because the 7/21 prompt declared silence the expected outcome
 and nothing anywhere counted it.
@@ -105,17 +105,12 @@ def test_other_sources_are_not_counted():
 # ── the budget ───────────────────────────────────────────────────────────────
 
 
-def test_rejected_kind_decays_but_never_to_zero():
-    """A kind at zero can never earn its way back.
-
-    Demotion is a hypothesis, not a sentence — the same principle
-    core.attention_roi states for lanes. A muted kind stops producing
-    evidence, so the mute becomes permanent by construction.
-    """
+def test_rejected_kind_can_decay_to_zero():
+    """The owner does not owe a rejected register more engagement samples."""
     states = [_card("guide", opt=companion.NEGATIVE_OPT) for _ in range(12)]
     allow = companion.allowances(companion.kind_stats(states=states))
     assert allow["guide"] == companion.ALLOWANCE_FLOOR
-    assert allow["guide"] >= 1
+    assert allow["guide"] == 0
 
 
 def test_well_received_kind_earns_more_room():
@@ -143,22 +138,29 @@ def test_daily_ceiling_caps_every_kind():
 
 
 def test_preflight_skips_gathering_after_daily_budget(monkeypatch):
+    monkeypatch.setattr(
+        companion, "retained_rhythm_enabled", lambda _name: True
+    )
     monkeypatch.setattr(companion, "plan", lambda: {"day_remaining": 0})
     assert companion.main(["preflight"]) == 1
     monkeypatch.setattr(companion, "plan", lambda: {"day_remaining": 1})
     assert companion.main(["preflight"]) == 0
 
 
-# ── the floor: silence stops being free ──────────────────────────────────────
-
-
-def test_long_silence_owes_a_card():
-    """The 10-day outage, in miniature."""
-    state = companion.plan(silent_hours=companion.FLOOR_HOURS + 1)
-    assert state["owed"], (
-        "after the floor window the system must owe a card; this is exactly "
-        "the state that went unnoticed for 10 days"
+def test_preflight_fails_closed_without_explicit_subscription(monkeypatch):
+    monkeypatch.setattr(
+        companion, "retained_rhythm_enabled", lambda _name: False
     )
+    monkeypatch.setattr(companion, "plan", lambda: {"day_remaining": 1})
+    assert companion.main(["preflight"]) == 1
+
+
+# ── silence never manufactures a message debt ───────────────────────────────
+
+
+def test_long_silence_owes_no_card():
+    state = companion.plan(silent_hours=24 * 30)
+    assert state["owed"] == ""
 
 
 def test_recent_speech_owes_nothing():
@@ -166,25 +168,27 @@ def test_recent_speech_owes_nothing():
     assert state["owed"] == ""
 
 
-def test_owed_card_goes_to_the_best_scoring_kind():
+def test_high_score_does_not_turn_silence_into_debt():
     states = ([_card("notice", chat=True) for _ in range(8)]
               + [_card("guide", opt=companion.NEGATIVE_OPT) for _ in range(8)])
     state = companion.plan(stats=companion.kind_stats(states=states),
-                           silent_hours=companion.FLOOR_HOURS + 1)
-    assert state["owed"] == "notice"
+                           silent_hours=24 * 30)
+    assert state["owed"] == ""
 
 
 def test_brief_survives_never_having_spoken():
     """Regression: formatting None hours crashed the brief, which would have
     made the silence alarm itself fail silently."""
     text = companion.brief(companion.plan(silent_hours=None))
-    assert "还从没说过话" in text
+    assert "从没有过" in text
     assert companion.KIND_NOTICE in text
 
 
-def test_brief_tells_the_model_when_it_owes_a_card():
-    text = companion.brief(companion.plan(silent_hours=companion.FLOOR_HOURS + 5))
-    assert "HEARTBEAT_OK" in text and "欠一张" in text
+def test_brief_forbids_presence_for_its_own_sake():
+    text = companion.brief(companion.plan(silent_hours=24 * 30))
+    assert "HEARTBEAT_OK" in text
+    assert "不要为了维持存在感而开口" in text
+    assert "欠一张" not in text
 
 
 # ── silence is a recorded decision ───────────────────────────────────────────
@@ -197,13 +201,10 @@ def test_silence_is_written_to_the_ledger():
     assert rows[0]["reason"] == "no anchor found"
 
 
-def test_speaking_stamps_the_freshness_file_components_watches():
+def test_speaking_stamps_the_analytics_file():
     assert not companion.last_spoke_path().exists()
     companion.record_spoke("notice", "topic")
-    assert companion.last_spoke_path().exists(), (
-        "components.yaml companion-voice watches this file; without the stamp "
-        "a mute checkin stays invisible to supervision"
-    )
+    assert companion.last_spoke_path().exists()
 
 
 def test_checkin_post_records_silence_on_heartbeat_ok(tmp_path, monkeypatch):
@@ -220,6 +221,9 @@ def test_checkin_post_records_silence_on_heartbeat_ok(tmp_path, monkeypatch):
         "PYTHONPATH": str(ROOT),
     }
     (tmp_path / "memory" / "system").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "jarvis.yaml").write_text(
+        "retained_rhythms:\n  checkin: true\n", encoding="utf-8"
+    )
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tasks" / "checkin_post.py")],
         input="HEARTBEAT_OK", capture_output=True, text=True, env=env,
@@ -243,6 +247,9 @@ def test_checkin_post_strips_kind_and_carries_it_into_the_card(tmp_path):
         "PYTHONPATH": str(ROOT),
     }
     (tmp_path / "memory" / "system").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "jarvis.yaml").write_text(
+        "retained_rhythms:\n  checkin: true\n", encoding="utf-8"
+    )
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tasks" / "checkin_post.py")],
         input="昨晚那条你自己留的口子，今天还开着。\nKIND: followup\nTHEMES: 测试主题",
@@ -295,6 +302,9 @@ def test_checkin_post_strips_model_authored_options_line(tmp_path):
         "PYTHONPATH": str(ROOT),
     }
     (tmp_path / "memory" / "system").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "jarvis.yaml").write_text(
+        "retained_rhythms:\n  checkin: true\n", encoding="utf-8"
+    )
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tasks" / "checkin_post.py")],
         input="昨晚那条线你自己收了尾。\nOPTIONS: 说说这个 | 知道了\nKIND: notice\nTHEMES: 收尾",

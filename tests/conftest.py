@@ -8,8 +8,10 @@ active_sessions.json (which happened before isolation was in place).
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,30 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 _SUBPROCESS_RUN = subprocess.run
+
+# Set HOME before pytest imports test modules. Several runtime modules resolve
+# Path.home() into module-level constants during collection; a per-test fixture
+# would be too late and could bind those constants to the operator's real
+# ~/.jarvis, ~/.eigenflux, ~/.claude, or ~/.lark-cli trees.
+_ORIGINAL_HOME = os.environ.get("HOME")
+_ORIGINAL_EIGENFLUX_HOME = os.environ.get("EIGENFLUX_HOME")
+_TEST_HOME = Path(tempfile.mkdtemp(prefix="jarvis-pytest-home-"))
+for _relative in (".jarvis/memory", ".eigenflux", ".claude", ".codex", ".lark-cli"):
+    (_TEST_HOME / _relative).mkdir(parents=True, exist_ok=True)
+os.environ["HOME"] = str(_TEST_HOME)
+os.environ["EIGENFLUX_HOME"] = str(_TEST_HOME / ".eigenflux")
+
+
+def pytest_unconfigure(config):
+    if _ORIGINAL_HOME is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _ORIGINAL_HOME
+    if _ORIGINAL_EIGENFLUX_HOME is None:
+        os.environ.pop("EIGENFLUX_HOME", None)
+    else:
+        os.environ["EIGENFLUX_HOME"] = _ORIGINAL_EIGENFLUX_HOME
+    shutil.rmtree(_TEST_HOME, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +188,15 @@ def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
         )
     except OSError:
         pass
-    for directory in (ROOT / "data", ROOT / "views"):
+    for directory in (
+        ROOT / "data",
+        ROOT / "views",
+        _TEST_HOME / ".jarvis",
+        _TEST_HOME / ".eigenflux",
+        _TEST_HOME / ".lark-cli",
+        _TEST_HOME / ".claude",
+        _TEST_HOME / ".codex",
+    ):
         if not directory.exists():
             continue
         paths.add(directory)
@@ -181,6 +215,41 @@ def _metadata_snapshot() -> dict[Path, tuple[int, int, int]]:
         except OSError:
             continue
     return snapshot
+
+
+@pytest.fixture(autouse=True)
+def _block_unmocked_lark_cli(monkeypatch, tmp_path_factory, request):
+    """Fail a test that reaches the machine's real lark-cli executable."""
+    import core.memorial as memorial
+
+    monkeypatch.setattr(
+        memorial,
+        "_LARK_CARD_SYNC_RUNNER",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="{}",
+            stderr="",
+        ),
+    )
+    bin_dir = tmp_path_factory.mktemp("blocked-lark-cli")
+    calls = bin_dir / "calls"
+    shim = bin_dir / "lark-cli"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$JARVIS_TEST_LARK_CALLS\"\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("JARVIS_TEST_LARK_CALLS", str(calls))
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    yield
+    if calls.exists() and calls.read_text(encoding="utf-8").strip():
+        raise AssertionError(
+            "UNMOCKED lark-cli CALL BY TEST: "
+            f"{request.node.nodeid}\n{calls.read_text(encoding='utf-8')[:1000]}"
+        )
 
 
 @pytest.fixture(autouse=True)

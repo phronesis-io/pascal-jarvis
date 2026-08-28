@@ -95,7 +95,7 @@ def breach_queue_lock(queue: Path):
     The queue has concurrent writers in different processes: _queue_breach
     (heartbeat, via lifecycle_sweep/reconcile_inflight), skip_digest's
     backfill/aggregate appends (heartbeat pre), and clear_breaches /
-    mark_breaches_shown rewrites (BOT process, on Pascal's reply-closure
+    mark_breaches_shown rewrites (BOT process, on the owner's reply-closure
     path). An unlocked append racing an unlocked read→tmp→os.replace rewrite
     could land the rewrite AFTER the append and silently destroy it — for a
     skip-digest bill backfill that loss is permanent (the event is already
@@ -136,7 +136,7 @@ STORM_AGE = timedelta(hours=24)
 CRON_STALENESS = timedelta(hours=6)
 
 # Closure follow-up staleness (REQ-60): a "后来怎么样" ask more than this past
-# its target is no longer worth surfacing — Pascal got the 小明 dinner
+# its target is no longer worth surfacing —the owner got the 小明 dinner
 # closure 2 days late. Expire instead of nag.
 CLOSURE_STALE_DAYS = timedelta(days=2)
 
@@ -207,7 +207,7 @@ def _link_new_intent(intent_id: str, name: str, context: dict | None,
 # may be spawned to capture the OUTPUT ("did you do it?") into closure_result.
 # The TWO orthogonal knobs (the design's core insight):
 #   CAPTURE  — closure_status/closure_result are ALWAYS maintained (the record).
-#   SURFACE  — whether we actively re-ask Pascal is gated by `category`.
+#   SURFACE  — whether we actively re-askthe owner is gated by `category`.
 # Healing/autonomous CAPTURE but never SURFACE (no card, no re-ask) — that is
 # how "追问做了吗+记录" coexists with "不追做没做/永不催" (closure != nagging).
 #
@@ -249,7 +249,7 @@ _SOCIAL_RE = re.compile(r"饭|聚|咖啡|午餐|晚餐|见面|面试|lunch|dinne
 _STATUS_BLOCK_RE = re.compile(r"请假|婚假|年假|休假|调休|leave|OOO|status", re.IGNORECASE)
 
 # REQ-70 carry/bring detection. A "要带的东西" reminder (伞/球拍/要还的东西…)
-# must fire in the MORNING before Pascal leaves home, not at the event's own
+# must fire in the MORNING before the owner leaves home, not at the event's own
 # prep time — the 6/13 root cause: 12:30 康复课的伞被锚到午饭点，
 # 他早上 9 点出门时根本没收到。匹配事件标题/详情里暗示需要随身携带的线索。
 # Red-team fix: the bare 带 alternative over-matched 纽带/一带一路/带宽/带娃/携带
@@ -262,7 +262,7 @@ _CARRY_RE = re.compile(
 
 # REQ-70 first-leave anchor. A carry checklist fires this many minutes before
 # the day's earliest out-of-home event, but never earlier than the morning
-# floor nor later than the morning ceiling — so it lands while Pascal is still
+# floor nor later than the morning ceiling — so it lands whilethe owner is still
 # home getting ready, regardless of whether the first event is at 09:00 or
 # 14:30.
 CARRY_LEAD = timedelta(minutes=75)        # ~60-90min before first leave
@@ -1358,7 +1358,7 @@ def get_due_intents() -> list[dict]:
                 # (source='closure') that is overdue by more than
                 # CLOSURE_STALE_DAYS is no longer worth surfacing — the dinner
                 # was days ago. Asking "后来怎么样" 2+ days late is the nag
-                # Pascal got (int_023339f780__fu fired 6/15 for a 6/13 meal).
+                # the owner got (int_023339f780__fu fired 6/15 for a 6/13 meal).
                 # Expire it instead of firing.
                 if (triggered and target_dt
                         and intent.get("source") == "closure"
@@ -1482,7 +1482,7 @@ def _queue_breach(intent: dict, now: datetime) -> bool:
     """Append a dropped-commitment notification to the breach queue (REQ-31).
 
     intentions_pre.sh drains this queue into the next intention-check cycle so
-    Pascal hears '我没能按时把「X」提醒出来' instead of silence. The original
+   the owner hears '我没能按时把「X」提醒出来' instead of silence. The original
     prompt rides along — the reminder's value isn't lost with its schedule.
     Append under breach_queue_lock (F-6): an unlocked append racing a
     rewrite (clear_breaches in the bot process) could be silently destroyed
@@ -1712,7 +1712,7 @@ def mark_executed(intent_id: str, result: str = "") -> bool:
         except Exception:
             pass
         # last_error is for ERRORS, not status (REQ-61): cron success used to
-        # store the run narration here ('小时报 11:30-12:21：Pascal 在深度
+        # store the run narration here ('小时报 11:30-12:21：用户在深度
         # 投入…'), polluting every error scan and the funnel. Clear it on
         # success so a non-NULL last_error always means a real failure.
         cursor = db.execute(
@@ -1877,7 +1877,7 @@ def _spawn_closure_followup(parent: dict) -> str | None:
     pid = parent["id"]
     if pol["may_notify"]:
         fu_prompt = (
-            f"闭环跟进：{parent['name']}。直接问 Pascal：{cq}\n"
+            f"闭环跟进：{parent['name']}。直接问用户：{cq}\n"
             f"他答了就在信封里带 closure 字段记录："
             f'{{"closure":{{"parent":"{pid}","outcome":"done","result":"<他的一句话答复>"}}}}。'
             f"还没答就发这条 notify 卡片问他；什么都没有就 action: silent。"
@@ -1885,7 +1885,7 @@ def _spawn_closure_followup(parent: dict) -> str | None:
     else:
         fu_prompt = (
             f"闭环跟进（疗愈/自主类，永不主动催、永不发卡）：{parent['name']}。闭环问题：{cq}\n"
-            f"绝不主动问 Pascal。仅当他已在对话/记忆里自然提到答案时，"
+            f"绝不主动问用户。仅当他已在对话/记忆里自然提到答案时，"
             f'在信封里带 closure 记录：{{"closure":{{"parent":"{pid}","outcome":"done","result":"<一句>"}}}}，'
             f"并 action: silent。否则 action: silent（不产出任何用户可见内容）。"
         )
@@ -2011,7 +2011,7 @@ def note_closure_touch(parent_id: str, via: str = "card") -> bool:
     """Count a proactive closure touch only after a card actually rendered.
 
     Creation of a re-ask intent is not a touch; a duplicate-suppressed outbox is
-    not a touch. The budget is about Pascal-visible asks, so post-script calls
+    not a touch. The budget is about the owner-visible asks, so post-script calls
     this after the card print path succeeds.
     """
     _init()
@@ -2096,7 +2096,7 @@ def generate_closure_reask_intents(now: datetime | None = None,
         fire_at = snap_to_golden(now) if pol.get("may_notify") else now
         cq = parent.get("closure_question", "")
         prompt = (
-            f"闭环再问（第 {touch_index} 次，有界）：{parent['name']}。直接问 Pascal：{cq}\n"
+            f"闭环再问（第 {touch_index} 次，有界）：{parent['name']}。直接问用户：{cq}\n"
             f"如果他已经回答，就在信封里带 closure 字段记录："
             f'{{"closure":{{"parent":"{pid}","outcome":"done","result":"<他的一句话答复>"}}}}。'
             f"如果还没答，就发这一条 notify 卡片；保持短，带按钮，不道歉、不施压。"
@@ -2306,7 +2306,7 @@ def _legacy_span_dup(ev: dict, current_date: str, title: str,
     per-day keying a multi-day event left rows keyed on EVERY covered day
     (a 15-day all-day span, one row per day, all cancelled by hand). Before
     minting the start-day key, scan day 2..N of the true span for any legacy
-    key — read old keys, write only the start-day one — so rows Pascal already
+    key — read old keys, write only the start-day one — so rowsthe owner already
     cancelled can never be recreated (_load_cal_index snapshots ALL statuses,
     cancelled included). Day 1 is the caller's normal existing_tags check;
     the scan is capped at 30 days (the rolling window never wrote beyond it).
@@ -2341,7 +2341,7 @@ def generate_calendar_intents(calendar_md: str,
       events only. Asks, never nags.
     - carry (role='carry', category='context'): ONE morning checklist per day,
       merging every "要带的东西" (伞/球拍/要还的) across that day's events,
-      anchored to the FIRST out-of-home event so it fires while Pascal is still
+      anchored to the FIRST out-of-home event so it fires while the owner is still
       home (REQ-70 — the 康复课 伞 was anchored to lunchtime and missed the
       morning he actually left).
 
@@ -2440,7 +2440,7 @@ def generate_calendar_intents(calendar_md: str,
 
     # Standing cron intents already ARE the reminder for their activity: a
     # calendar event of the same activity must not mint a per-instance prep on
-    # top (7/19-7/20: the 08:45 晨间康复 cron anchor Pascal asked for plus the
+    # top (7/19-7/20: the 08:45 晨间康复 cron anchorthe owner asked for plus the
     # matching recurring calendar event = two near-identical cards 30 minutes
     # apart, every single morning). Normalized once per sync, matched below.
     def _activity_norm(name: str) -> str:
@@ -2518,7 +2518,7 @@ def generate_calendar_intents(calendar_md: str,
             prep_dt, prep_prompt = None, ""
             if hours_until > 48:
                 prep_dt = (event_dt - timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-                prep_prompt = f"明天 {start_time} 有 {title}。帮 Pascal 做准备：回忆相关上下文、准备需要带的东西、确认地点和时间。"
+                prep_prompt = f"明天 {start_time} 有 {title}。帮用户做准备：回忆相关上下文、准备需要带的东西、确认地点和时间。"
             elif hours_until > 2:
                 prep_dt = event_dt - PREP_LEAD
                 prep_prompt = f"{title} 在 {start_time} 开始（还有 30 分钟）。快速回顾：这个会/活动的目的是什么？有什么需要提前准备的？"
@@ -2630,7 +2630,7 @@ def generate_calendar_intents(calendar_md: str,
                         name=f"{title}（事后跟进）",
                         trigger_type="date",
                         trigger_config={"datetime": close_dt.isoformat()},
-                        prompt=(f"{title} 应该结束了。若 Pascal 提到，记录：聊了/做了什么值得跟进的？"
+                        prompt=(f"{title} 应该结束了。若用户提到，记录：聊了/做了什么值得跟进的？"
                                 f"有具体线索才发卡问，没有就静默。"),
                         context={"event_title": title, "event_date": current_date},
                         action_type="notify",
@@ -2658,7 +2658,7 @@ def _generate_carry_intents(by_date: dict, now: datetime,
                             existing_tags: set, tag_to_row: dict) -> list[str]:
     """Emit one morning "要带的东西" checklist per day, anchored to first leave.
 
-    REQ-70: a carry/bring reminder must fire in the MORNING before Pascal
+    REQ-70: a carry/bring reminder must fire in the MORNING before the owner
     leaves home, not at the event's own prep time. For each day we:
       1. collect every event whose title/details suggest something to bring;
       2. anchor the fire time to CARRY_LEAD before the day's FIRST out-of-home
@@ -2722,7 +2722,7 @@ def _generate_carry_intents(by_date: dict, now: datetime,
         items_desc = "、".join(
             f"{e['title']}（{e['start_time']}）" for e in carry_items)
         carry_prompt = (
-            f"早上出门前提醒 Pascal 今天要带的东西。今天最早 {first['start_time']} 出门，"
+            f"早上出门前提醒用户今天要带的东西。今天最早 {first['start_time']} 出门，"
             f"涉及携带：{items_desc}。一句话清单提醒他别忘带（伞/球拍/要还的东西等），"
             f"出门前一次性说清，别等到事件本身的准备时间。"
         )
@@ -2883,7 +2883,7 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
     # must NOT mark these shown this cycle — they were queued AFTER the pre's
     # apology-card prompt, so they haven't ridden a card yet (red-team fix).
     # "skipped" = cron occurrences retired after exhausting their retry budget
-    # (F-14) — surfaced to Pascal via the skip-digest path, never silently.
+    # (F-14) — surfaced tothe owner via the skip-digest path, never silently.
     out = {"retried": [], "expired": [], "breached": [], "skipped": []}
     if not inflight:
         return out
@@ -3000,7 +3000,7 @@ def reconcile_inflight(covered_ids: list[str]) -> dict:
 
 # A breach apology is shown ONCE, not retried (2026-06-15 fix). The old
 # default of 3 meant the same "我没能按时提醒" card fired on 3 separate cycles
-# — Pascal received the identical 「和小明哥哥吃饭」饭后闭环 apology 3 times
+# —the owner received the identical 「和小明哥哥吃饭」饭后闭环 apology 3 times
 # across two days. A rendered card IS delivered (genuine send failures are the
 # REQ-11 delivery-ACK layer's job, not this counter), and breach cards carry
 # ✅/❌/🚫 buttons, so one apology is enough; re-showing is pure nagging.
@@ -3296,13 +3296,13 @@ def snapshot_active_intents(memory_dir: str | Path) -> int:
     lines = [
         f"# 活跃 Intents（共 {len(intents)} 条 · 自动刷新）",
         "",
-        "> **这不是待办清单，是给 Pascal 的成长加顺风。** 指针 = 长得更快，不是做完更多。",
+        "> **这不是待办清单，是给用户的成长加顺风。** 指针 = 长得更快，不是做完更多。",
         "> 记录结果、不施压：做了就记一句，没做就悄悄记成探索信号，绝不算账 / 不打分 / 不催"
         "（①硬约束、④对外跟进 除外，那两类我替你追）。没完成 ≠ 失败 = 探索信号。",
         "> 我是这些 intent 的 **owner**：明显漂移（日期对不上日历/stale/重复）自己修；"
         "唯独「他到底执行没」绝不假设、有影响才问。",
         "> 闭环记录用 `python3 -m core.actions do intent_close id=<父id> outcome=done result=<一句>`——"
-        "**仅当 Pascal 主动提到或记忆里出现答案时**才记；**绝不**主动问「你康复/读书做了吗」。",
+        "**仅当用户主动提到或记忆里出现答案时**才记；**绝不**主动问「你康复/读书做了吗」。",
         "",
         "## 定时（一次性，按时间排序）",
     ]

@@ -93,11 +93,12 @@ codex mcp list           # jarvis 应显示 enabled
 插件。MCP 使用本地 stdio，不开放端口，不复制密钥或私人 Matter 数据。
 安装或升级后新开一个 Codex task 才会加载新插件。
 
-Governed release (`./restart.sh --yes`) repeats this registration and verifies
-the enabled plugin plus a real stdio MCP handshake and representative read-only
-request before stopping the running bot. If MCP 2.x is absent from the selected
-Jarvis runtime venv, the release installs it first; a failure leaves the
-existing runtime untouched.
+`setup.sh` owns dependency and plugin installation. Governed release
+(`./restart.sh --yes`) only reads back the enabled plugin and performs a real
+stdio MCP handshake plus representative read-only request. A missing Codex
+CLI, plugin, login, or MCP dependency is reported as degraded but cannot block
+an otherwise valid resident Jarvis release; rerun setup or the explicit
+installer to repair the frontstage.
 
 验证提示词：`Show my active Jarvis Matters and their next actions.`。普通
 一次性问答不会创建 Matter；跨 session、设备、产品或日期的工作才绑定 Matter。
@@ -257,6 +258,13 @@ ops:
 规则。普通配置变化使用 `--runtime`；该路径仍会验证当前提交的发布授权，再证明
 正在运行的 bot/heartbeat 已经是当前干净 `HEAD`；任何一项不满足都会拒绝。
 
+一次在线门禁成功后会在 `~/.jarvis/release-gate-cache.json` 保存权限为 `0600`
+的同 SHA 验收收据。仅当 GitHub 因明确的临时网络错误不可达时，24 小时内的精确
+同 SHA 收据可作为 `stale: true` 的降级证据；换提交、认证失败、CI/审核失败、
+工作树不干净、缓存过期或权限不安全仍然失败关闭。发布收据会保留本次使用的是
+在线证据还是缓存证据。不要直接执行 `launchctl kickstart`：官方 kickstart 只在
+`restart.sh` 内发生，并在前后分别校验 release gate 与 `core.deploy verify`。
+
 **（可选，macOS）launchd 常驻监督** —— 让守护进程/看板/备份在重启和崩溃后
 自动拉活。plist 是模板（`__JARVIS_DIR__` 等占位符），脚本安装时替换成本机
 真实路径，**不要手动拷贝 plist**：
@@ -265,8 +273,8 @@ ops:
 ./scripts/launchd/install.sh   # 幂等；常驻服务需连续稳定 running，否则事务回滚
 ```
 
-默认发布与 `restart.sh --full` 只同步这台机器上已经启用的 daemon 和 Dashboard
-定义，不会替新安装擅自启用可选服务。定义切换失败时安装器恢复旧 plist
+默认发布与 `restart.sh --full` 只同步这台机器上已经启用的 daemon 定义，不会
+替新安装擅自启用可选服务。定义切换失败时安装器恢复旧 plist
 和原加载状态；launchd 状态无法可靠读取时发布会在停止 bot 前失败关闭。
 
 **首装后的健康告警预期**（转述给人类，避免虚惊）：

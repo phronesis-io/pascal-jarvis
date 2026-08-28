@@ -296,9 +296,12 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "--limit-reason" in bot             # session/spend limit reason preserved
     assert '"$_cur_model"' in bot              # main path uses degradable model
     assert "core.openai_fallback" in bot       # Claude-limit escape hatch
-    assert "core.codex_fallback" in bot        # ChatGPT-login Codex escape hatch
-    assert bot.count("run_codex_locked") == 3  # definition + preferred + fallback
-    assert '"$_lock_file" "$_codex_pid" "$_lock_token"; then' in bot
+    assert "run_codex_locked" not in bot       # no second provider loop in shell
+    assert "python3 -m core.owner_chat_model" in bot
+    adapters = (
+        Path(__file__).parent.parent / "core" / "owner_chat_adapters.py"
+    ).read_text()
+    assert "core.codex_fallback" in adapters    # one provider-neutral owner path
     assert "openai_fallback_flags=(--no-tools)" in bot
     assert '${openai_fallback_flags[@]+"${openai_fallback_flags[@]}"}' in bot
     assert "CLAUDE_BACKUP_AUTH_TOKEN" in bot   # Claude Code-compatible backup
@@ -312,70 +315,18 @@ def test_bot_sh_wires_reply_closure_and_model_fallback():
     assert "（GPT 兜底）" in bot
 
 
-def test_codex_locked_runner_publishes_a_killable_pid(tmp_path):
-    import os
-    import signal
-    import subprocess
+def test_owner_runtime_uses_the_secret_scrubbed_killable_worker_receipt():
     from pathlib import Path
 
     bot = (Path(__file__).parent.parent / "bot.sh").read_text()
-    start = bot.index("run_codex_locked() {")
-    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
-    function = bot[start:end]
-    lock = tmp_path / "session.lock"
-    lock.write_text("acquiring test-token", encoding="utf-8")
-    script = tmp_path / "codex-lock-test.sh"
-    script.write_text(
-        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n' +
-        "process_start_token() { printf 'test-start\\n'; }\n" +
-        "python3() { exec sleep 30; }\n" + function + "\n" +
-        'run_codex_locked "hello" "conv" "system" "model" "30" ' +
-        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
-        encoding="utf-8",
-    )
-    process = subprocess.Popen(["bash", str(script)])
-    child_pid = None
-    for _ in range(100):
-        fields = lock.read_text(encoding="utf-8").rstrip("\n").split("\t")
-        if len(fields) == 3 and fields[0].isdigit():
-            child_pid = int(fields[0])
-            assert fields[1]
-            assert fields[2] == "test-token"
-            break
-        time.sleep(0.02)
-    assert child_pid is not None
-    os.kill(child_pid, signal.SIGTERM)
-    lock.unlink(missing_ok=True)
-    assert process.wait(timeout=5) == 143
+    runtime_spawn = bot.index("python3 -m core.owner_chat_model")
+    publish = bot.index("session_lock_publish", runtime_spawn)
 
-
-def test_codex_locked_runner_stops_when_identity_receipt_cannot_publish(
-        tmp_path):
-    import subprocess
-    from pathlib import Path
-
-    bot = (Path(__file__).parent.parent / "bot.sh").read_text()
-    start = bot.index("run_codex_locked() {")
-    end = bot.index("\n}\n\n# ── Message Handler", start) + 3
-    function = bot[start:end]
-    lock = tmp_path / "session.lock"
-    lock.write_text("acquiring test-token", encoding="utf-8")
-    script = tmp_path / "codex-lock-fail-closed.sh"
-    script.write_text(
-        f'source "{Path(__file__).parent.parent / "scripts" / "process_lifecycle.sh"}"\n'
-        "process_start_token() { return 1; }\n"
-        "python3() { exec sleep 30; }\n" + function + "\n"
-        'run_codex_locked "hello" "conv" "system" "model" "30" '
-        f'"{tmp_path}" "" "{lock}" "test-token" "{tmp_path / "answer"}"\n',
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        ["/bin/bash", str(script)], check=False, timeout=5,
-    )
-
-    assert result.returncode == 74
-    assert lock.read_text(encoding="utf-8") == "acquiring test-token"
+    assert "exec_owner_model_worker" in bot[runtime_spawn - 120:runtime_spawn]
+    assert "_claude_pid=$!" in bot[runtime_spawn:publish]
+    assert '"$LOCK_FILE" "$_claude_pid" "$_lock_token"' in bot[
+        publish:publish + 180
+    ]
 
 
 def test_bot_sh_scopes_complete_backup_config_and_reports_chain_failure():
@@ -406,8 +357,10 @@ def test_bot_sh_scopes_complete_backup_config_and_reports_chain_failure():
         )
     assert "export -n ANTHROPIC_API_KEY CLAUDE_BACKUP_AUTH_TOKEN" in bot
     assert bot.count("exec_model_worker python3 -m core.heartbeat_loop") == 2
+    assert bot.count("exec_owner_model_worker \\") == 1
     assert bot.count("with_primary_model_credential claude -p") == 2
     assert bot.count("with_openai_credential env") == 2
+    assert bot.count("env -u LARK_APP_SECRET \\") == 2
     assert "回复被安全过滤器拦截" not in bot
     assert "本次操作没有执行成功" in bot
     assert 'log_warn "Session compact failed' in bot
@@ -431,11 +384,12 @@ def test_bot_shell_credential_boundaries_execute_on_macos_bash(tmp_path):
     end = bot.index("# Sidecar event backend", start)
     boundary = bot[start:end]
     probe = (
-        'printf "%s|%s|%s|%s\\n" '
+        'printf "%s|%s|%s|%s|%s\\n" '
         '"${ANTHROPIC_API_KEY-unset}" '
         '"${CLAUDE_BACKUP_AUTH_TOKEN-unset}" '
         '"${CLAUDE_BACKUP2_AUTH_TOKEN-unset}" '
-        '"${OPENAI_API_KEY-unset}"'
+        '"${OPENAI_API_KEY-unset}" '
+        '"${LARK_APP_SECRET-unset}"'
     )
     script = tmp_path / "credential-boundary.sh"
     script.write_text(
@@ -444,7 +398,8 @@ def test_bot_shell_credential_boundaries_execute_on_macos_bash(tmp_path):
         + f'printf "ambient="; /bin/bash -c \'{probe}\'\n'
         + f'printf "primary="; with_primary_model_credential /bin/bash -c \'{probe}\'\n'
         + f'printf "openai="; with_openai_credential /bin/bash -c \'{probe}\'\n'
-        + f'printf "router="; (exec_model_worker /bin/bash -c \'{probe}\')\n',
+        + f'printf "router="; (exec_model_worker /bin/bash -c \'{probe}\')\n'
+        + f'printf "owner-router="; (exec_owner_model_worker /bin/bash -c \'{probe}\')\n',
         encoding="utf-8",
     )
     env = {
@@ -453,6 +408,7 @@ def test_bot_shell_credential_boundaries_execute_on_macos_bash(tmp_path):
         "CLAUDE_BACKUP_AUTH_TOKEN": "backup1-secret",
         "CLAUDE_BACKUP2_AUTH_TOKEN": "backup2-secret",
         "OPENAI_API_KEY": "openai-secret",
+        "LARK_APP_SECRET": "lark-secret",
     }
 
     result = subprocess.run(
@@ -466,10 +422,11 @@ def test_bot_shell_credential_boundaries_execute_on_macos_bash(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "ambient=unset|unset|unset|unset",
-        "primary=primary-secret|unset|unset|unset",
-        "openai=unset|unset|unset|openai-secret",
-        "router=primary-secret|backup1-secret|backup2-secret|openai-secret",
+        "ambient=unset|unset|unset|unset|lark-secret",
+        "primary=primary-secret|unset|unset|unset|unset",
+        "openai=unset|unset|unset|openai-secret|unset",
+        "router=primary-secret|backup1-secret|backup2-secret|openai-secret|lark-secret",
+        "owner-router=primary-secret|backup1-secret|backup2-secret|openai-secret|unset",
     ]
 
 
@@ -837,9 +794,9 @@ def test_heartbeat_primary_dns_failure_reaches_gpt_without_relay(
     assert calls == ["gpt"]
 
 
-def test_heartbeat_tool_capable_transport_failure_does_not_replay(
+def test_heartbeat_allow_tools_request_is_forced_read_only_and_can_replay(
         tmp_path, monkeypatch):
-    """A request that may have used tools cannot be replayed on another model."""
+    """Heartbeat denies tools, so a transport failure is replay-safe."""
     from subprocess import CompletedProcess
 
     runner = _gate_runner(tmp_path)
@@ -856,10 +813,10 @@ def test_heartbeat_tool_capable_transport_failure_does_not_replay(
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert runner.claude_call("prompt", allow_tools=True) == ""
-    assert calls == [""]
+    assert calls == ["", "backup-token"]
 
 
-def test_heartbeat_nontransport_request_error_does_not_fan_out(
+def test_heartbeat_read_only_request_error_can_try_the_configured_relay(
         tmp_path, monkeypatch):
     from subprocess import CompletedProcess
 
@@ -877,7 +834,7 @@ def test_heartbeat_nontransport_request_error_does_not_fan_out(
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert runner.claude_call("prompt") == ""
-    assert calls == [""]
+    assert calls == ["", "backup-token"]
 
 
 def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path, monkeypatch):
@@ -916,20 +873,19 @@ def test_heartbeat_claude_call_uses_openai_after_claude_chain_exhausted(tmp_path
 
     openai_calls = []
 
-    def fake_openai(system_prompt, user_input, model, max_output_tokens,
-                    api_key, base_url, timeout, user_agent=""):
-        openai_calls.append((model, system_prompt, user_input))
-        return "HEARTBEAT_OK"
+    def fake_openai(payload, *_args, **_kwargs):
+        openai_calls.append(payload)
+        return {"output_text": "HEARTBEAT_OK"}
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     # No haiku detour on spend limit: one doomed opus call, then straight past
     # the (unconfigured) backup tier to OpenAI.
     assert [c[c.index("--model") + 1] for c in claude_calls] == ["opus"]
     assert openai_calls
-    assert openai_calls[0][0] == "gpt-test"
+    assert openai_calls[0]["model"] == "gpt-test"
 
 
 def test_heartbeat_weekly_limit_reaches_openai_fallback(tmp_path, monkeypatch):
@@ -956,12 +912,11 @@ def test_heartbeat_weekly_limit_reaches_openai_fallback(tmp_path, monkeypatch):
     )
     calls = []
 
-    def fake_openai(system_prompt, user_input, model, max_output_tokens,
-                    api_key, base_url, timeout, user_agent=""):
-        calls.append(model)
-        return "HEARTBEAT_OK"
+    def fake_openai(payload, *_args, **_kwargs):
+        calls.append(payload["model"])
+        return {"output_text": "HEARTBEAT_OK"}
 
-    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert calls == ["gpt-test"]
@@ -1100,12 +1055,11 @@ def test_heartbeat_backup_auth_error_still_reaches_openai(tmp_path, monkeypatch)
     )
     openai_calls = []
 
-    def fake_openai(system_prompt, user_input, model, max_output_tokens,
-                    api_key, base_url, timeout, user_agent=""):
-        openai_calls.append(model)
-        return "HEARTBEAT_OK"
+    def fake_openai(payload, *_args, **_kwargs):
+        openai_calls.append(payload["model"])
+        return {"output_text": "HEARTBEAT_OK"}
 
-    monkeypatch.setattr(openai_fallback, "run_agentic", fake_openai)
+    monkeypatch.setattr(openai_fallback, "call_openai", fake_openai)
 
     assert runner.claude_call("prompt") == "HEARTBEAT_OK"
     assert openai_calls == ["gpt-test"]

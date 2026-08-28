@@ -16,7 +16,7 @@ Dedup: at most one alert per 4h window (.diag_last_alert.json stamp) so a
 persistent condition does not nag every cycle. The LLM summary on stdin is
 still swallowed (stays silent) — only the deterministic ⚠️ extraction talks.
 
-No LLM and no raw diagnostic strings reach Pascal.
+No LLM and no raw diagnostic strings reach the owner.
 """
 
 import json
@@ -72,7 +72,7 @@ def should_alert(warnings: list[str], stamp: dict, now: float | None = None) -> 
 
     The old time-only window produced an 8h relay ping-pong: the daemon's
     re-send wrote the shared stamp, this post then suppressed on the fresh
-    stamp, the daemon's window lapsed first and it "rescued" again — Pascal
+    stamp, the daemon's window lapsed first and it "rescued" again — the owner
     got the same persisting warning every 8 hours, each blaming a "broken"
     primary path. Rules: 4h hard floor stays; past it, send only if a warning
     line is not already in the stamped set; an unchanged set re-alerts at
@@ -114,7 +114,7 @@ def _mark_alerted(lines: list[str], *, user_alert: bool = False) -> None:
 
 # Warning line emitted by self_diagnostic_pre.sh when the lark-cli user
 # token is gone. Seeing it means the card can offer a REAL fix button —
-# 「现在授权」runs the device flow instead of asking Pascal to open a
+# 「现在授权」runs the device flow instead of askingthe owner to open a
 # terminal (2026-08-07: the reply-only version of this button was a dead
 # end he had to talk his way out of).
 _USER_TOKEN_MARKER = "user token 探针失败"
@@ -131,7 +131,7 @@ _AUTH_OPTIONS = [
 
 
 def user_actionable_warnings(warnings: list[str]) -> list[str]:
-    """Return only diagnostics that require Pascal's personal action."""
+    """Return only diagnostics that require the owner's personal action."""
     return [line for line in warnings if _USER_TOKEN_MARKER in line]
 
 
@@ -153,8 +153,12 @@ def _send(text: str, user_id: str) -> bool:
         mid, _ = memorial.create(
             source="selfmon", title="自诊断发现问题", body=text,
             work_receipt="完成确定性健康检查、同类告警去重和可恢复性判断",
-            options=_options_for(text), preset="fyi", urgent=True,
-            attention="alert")
+            options=_options_for(text), preset="fyi", urgent=False,
+            owner_need="authority",
+            why_now="飞书个人授权已失效，后台无法代替本人重新授权",
+            owner_action="重新授权飞书，或决定停用需要个人授权的能力",
+            silence_cost="不处理会让依赖个人授权的飞书动作持续不可用",
+            attention="decision")
         state = memorial.get_memorial(mid) or {}
         if state.get("delivery_status") in {
                 "delivered", "queued", "retry_queued"}:
@@ -240,7 +244,7 @@ def main():
     # starvation, delivery queues and component probes all have deterministic
     # recovery owners. Recording them in the shared stamp prevents Guardian
     # from re-sending the same evidence through its independent channel. Only
-    # a missing user OAuth token genuinely needs Pascal to act.
+    # a missing user OAuth token genuinely needs the owner to act.
     uid = _user_id()
     if not uid:
         print("[self_diagnostic_post] no user_open_id — cannot alert",

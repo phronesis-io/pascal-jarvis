@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import selectors
 import subprocess
 import time
 from datetime import datetime
@@ -19,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.claude_bin import resolve_claude_bin
-from core.codex_fallback import resolve_codex_bin
+from core.codex_app_server import CodexAppServerClient, CodexAppServerError
 from core.config import Config
 from core.model_control import catalog_report, route_plan
 from core.model_fallback import gate
@@ -29,6 +28,13 @@ from core.safety import atomic_write
 
 LATEST_FILE = "data/model_usage_latest.json"
 CODEX_TIMEOUT_SECONDS = 8
+OWNER_ROUTE_LABELS = {
+    "primary": "Claude 主通道",
+    "backup1": "Claude 第一备用",
+    "backup2": "Claude 第二备用",
+    "codex": "Codex 备用通道",
+    "openai": "GPT 备用通道",
+}
 
 
 class UsageReadError(RuntimeError):
@@ -45,6 +51,24 @@ def _epoch_iso(value: Any) -> str:
     return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="minutes")
 
 
+def human_time(value: Any) -> str:
+    """Render one ISO timestamp in compact Chinese for owner-facing copy."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone()
+    except (TypeError, ValueError, OSError):
+        return ""
+    return f"{moment.month}月{moment.day}日 {moment:%H:%M}"
+
+
+def owner_route_label(route_id: Any, fallback: Any = "") -> str:
+    """Stable owner-facing route name without internal fallback jargon."""
+    value = str(route_id or "").strip()
+    return OWNER_ROUTE_LABELS.get(value, str(fallback or value or "模型通道"))
+
+
 def _window_label(minutes: int, fallback: str = "") -> str:
     value = max(0, int(minutes or 0))
     if value and value % 10080 == 0:
@@ -58,79 +82,26 @@ def _window_label(minutes: int, fallback: str = "") -> str:
     return str(fallback or "当前")
 
 
-def _read_response(process, request_id: int, timeout: float) -> dict[str, Any]:
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + max(0.1, float(timeout))
-    try:
-        while time.monotonic() < deadline:
-            events = selector.select(max(0.0, deadline - time.monotonic()))
-            if not events:
-                break
-            line = process.stdout.readline()
-            if not line:
-                break
-            try:
-                payload = json.loads(line)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-            if payload.get("id") != request_id:
-                continue
-            if payload.get("error"):
-                raise UsageReadError("Codex app-server rejected the usage read")
-            result = payload.get("result")
-            if isinstance(result, dict):
-                return result
-            raise UsageReadError("Codex app-server returned an invalid result")
-    finally:
-        selector.close()
-    raise UsageReadError("Codex app-server usage read timed out")
-
-
 def read_codex_rate_limits(
     binary: str = "", *, timeout: int = CODEX_TIMEOUT_SECONDS,
     popen_factory: Callable[..., Any] = subprocess.Popen,
 ) -> dict[str, Any]:
     """Read the signed-in ChatGPT/Codex account's rate-limit snapshot."""
-    executable = binary or resolve_codex_bin()
-    if not executable:
-        raise UsageReadError("Codex CLI is unavailable")
-    process = popen_factory(
-        [executable, "app-server", "--stdio"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
     try:
-        initialize = {
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "jarvis-usage", "version": "0.1.0"},
-                "capabilities": {},
-            },
-        }
-        process.stdin.write(json.dumps(initialize) + "\n")
-        process.stdin.flush()
-        _read_response(process, 1, timeout)
-        process.stdin.write(json.dumps({
-            "id": 2, "method": "account/rateLimits/read", "params": {},
-        }) + "\n")
-        process.stdin.flush()
-        return _read_response(process, 2, timeout)
-    except (BrokenPipeError, OSError) as exc:
-        raise UsageReadError("Codex app-server could not be started") from exc
-    finally:
-        try:
-            process.terminate()
-            process.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                process.kill()
-            except OSError:
-                pass
+        with CodexAppServerClient(
+            binary,
+            timeout=timeout,
+            client_name="jarvis-usage",
+            client_version="0.1.0",
+            experimental_api=False,
+            popen_factory=popen_factory,
+        ) as client:
+            result = client.request("account/rateLimits/read", {})
+    except CodexAppServerError as exc:
+        raise UsageReadError("Codex app-server usage read failed") from exc
+    if not isinstance(result, dict):
+        raise UsageReadError("Codex app-server returned an invalid result")
+    return result
 
 
 def read_claude_account(
@@ -226,7 +197,18 @@ def _forecast_window(
     if prior is not None:
         elapsed = observed_epoch - float(prior["observed_epoch"])
         consumed = float(row["used_percent"]) - float(prior["used_percent"])
-        if elapsed >= 300 and consumed > 0:
+        window_seconds = max(0, int(row.get("window_minutes") or 0)) * 60
+        reset_epoch = float(row.get("resets_at_epoch") or 0)
+        window_start = reset_epoch - window_seconds
+        elapsed_ratio = (
+            max(0.0, min(1.0, (observed_epoch - window_start) / window_seconds))
+            if window_seconds > 0 and reset_epoch > 0
+            else 0.0
+        )
+        forecast_eligible = (
+            float(row["used_percent"]) >= 50.0 or elapsed_ratio >= 0.25
+        )
+        if elapsed >= 300 and consumed > 0 and forecast_eligible:
             prediction = observed_epoch + (
                 (100.0 - float(row["used_percent"])) / (consumed / elapsed)
             )
@@ -254,7 +236,7 @@ def _forecast_window(
     used = float(row["used_percent"])
     if reached or used >= 100:
         row["risk"] = "exhausted"
-    elif used >= 90 or prediction:
+    elif used >= 90:
         row["risk"] = "critical"
     elif used >= 80:
         row["risk"] = "warning"
@@ -322,6 +304,7 @@ def build_report(
         row = health.get(route["id"], {})
         routes.append({
             **route,
+            "owner_label": owner_route_label(route["id"], route.get("label")),
             "health": str(row.get("status") or "not_run"),
             "health_source": str(row.get("observation_source") or "unknown"),
             "health_detail": str(row.get("detail") or "")[:160],
@@ -359,6 +342,9 @@ def build_report(
         "observed_at": _epoch_iso(observed_epoch),
         "active_route": plan.routes[0].id if plan.routes else "none",
         "fallback_order": [route.id for route in plan.routes],
+        "fallback_labels": [
+            owner_route_label(route.id, route.label) for route in plan.routes
+        ],
         "claude_account": claude_account,
         "codex": {
             "source": "codex_app_server" if windows else "unknown",
@@ -389,7 +375,17 @@ def load_latest(root: str | Path | None = None) -> dict[str, Any]:
 
 
 def status_text(report: dict[str, Any]) -> str:
-    lines = [f"当前可执行通道：{report.get('active_route', 'none')}"]
+    route_labels = {
+        str(route.get("id") or ""): str(
+            route.get("owner_label")
+            or owner_route_label(route.get("id"), route.get("label"))
+        )
+        for route in report.get("routes", []) if isinstance(route, dict)
+    }
+    active = str(report.get("active_route") or "")
+    lines = [
+        f"当前可执行通道：{route_labels.get(active) or owner_route_label(active)}"
+    ]
     account = report.get("claude_account") or {}
     subscription = str(account.get("subscription_type") or "unknown")
     if account.get("logged_in") or subscription != "unknown":
@@ -408,14 +404,17 @@ def status_text(report: dict[str, Any]) -> str:
                 row.get("window_minutes", 0), row.get("window_name", ""),
             )
             forecast = (
-                f"，按当前速度预计 {row['predicted_exhaustion_at']} 用尽"
-                if row.get("predicted_exhaustion_at") else ""
+                f"，按当前速度预计 {human_time(row['predicted_exhaustion_at'])} 用尽"
+                if human_time(row.get("predicted_exhaustion_at")) else ""
             )
+            remaining = row.get("remaining_percent")
+            if remaining is None:
+                remaining = max(0.0, 100.0 - float(row.get("used_percent") or 0))
             lines.append(
                 f"- {label} {window}额度已用 "
                 f"{row['used_percent']:g}%，还剩约 "
-                f"{row.get('remaining_percent', 0):g}%；"
-                f"{row['resets_at']} 重置{forecast}"
+                f"{remaining:g}%；"
+                f"{human_time(row['resets_at']) or '重置时间未知'} 重置{forecast}"
             )
         credits = codex.get("reset_credits") or {}
         if credits.get("available_count"):
@@ -423,15 +422,21 @@ def status_text(report: dict[str, Any]) -> str:
     else:
         lines.append("Codex：暂时读不到套餐窗口，状态标为未知")
     unknown = [
-        route["label"] for route in report.get("routes", [])
+        str(route.get("owner_label") or owner_route_label(
+            route.get("id"), route.get("label")))
+        for route in report.get("routes", [])
         if route.get("quota_evidence") == "unknown" and route.get("enabled")
     ]
     if unknown:
         lines.append("未提供余额接口：" + "、".join(unknown))
-    order = report.get("fallback_order") or []
-    lines.append("当前尝试顺序：" + (" -> ".join(order) if order else "无"))
+    order = report.get("fallback_labels") or [
+        owner_route_label(route_id) for route_id in report.get("fallback_order", [])
+    ]
+    lines.append("当前尝试顺序：" + ("、".join(order) if order else "无"))
     if report.get("observed_at"):
-        lines.append(f"观测时间：{report['observed_at']}")
+        lines.append(
+            f"观测时间：{human_time(report['observed_at']) or '刚刚'}"
+        )
     return "\n".join(lines)
 
 

@@ -10,6 +10,10 @@
 # - Rotates through value-oriented "modes" by hour
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+if ! PYTHONPATH="$JARVIS_DIR" JARVIS_DIR="$JARVIS_DIR" \
+    python3 -m core.retained_rhythms enabled checkin >/dev/null 2>&1; then
+  exit 0
+fi
 eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true
 
 hour=$((10#$(date +%H)))  # 10# forces base-10 so "08"/"09" aren't parsed as invalid octal in (( ))
@@ -57,7 +61,7 @@ fi
 
 # (7/21) hour-parity mode selection removed — the 2h cadence pinned it to
 # wellbeing mode 88% of the time, producing the repetitive body-state cards
-# Pascal complained about 4 times. The prompt now uses a relevance gate.
+# the owner complained about 4 times. The prompt now uses a relevance gate.
 
 # ── Calendar context: transition detection + next-event lookahead ──
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -211,7 +215,7 @@ fi
 # checkin that isn't a standing request. Source: timeline/hourly_log.md
 # (memory-hourly's digest of REAL interactions). The conversation_audit_*
 # files were rejected here (red-team 7/21 finding 4): they are internal
-# audit PRD reports, not what Pascal said, and the 1h file is stale.
+# audit PRD reports, not what the owner said, and the 1h file is stale.
 recent_conversation=""
 _hourly_log="${MEMORY_DIR:-$HOME/.jarvis/memory}/timeline/hourly_log.md"
 if [ -f "$_hourly_log" ]; then

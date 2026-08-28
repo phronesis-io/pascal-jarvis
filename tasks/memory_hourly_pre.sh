@@ -40,7 +40,7 @@ all_msgs = []
 
 for conv_key, entry in tracker.items():
     # GROUP sessions (conv_key = Lark chat_id, "oc_..." prefix) never feed
-    # the owner's personal memory — shipped decision 群内容不进记忆
+    #the owner's personal memory — shipped decision 群内容不进记忆
     # (docs/plans/2026-07-14-group-chat.md). Without this filter a rotating
     # group session's transcript (strangers' messages) would be indexed into
     # the timeline and propagate into every future P2P prompt.

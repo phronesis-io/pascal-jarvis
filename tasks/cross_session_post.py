@@ -14,21 +14,44 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.memory_compiler import MemoryCompilerError, apply_compile_result
+from core.memory_compiler import (
+    MemoryCompilerError,
+    apply_compile_result,
+    pending_compile_batch,
+    record_compile_failure,
+)
 from core.safety import looks_like_error
 
 
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
+        pending = pending_compile_batch()
+        if pending:
+            receipt = record_compile_failure(
+                "provider returned empty output or HEARTBEAT_OK",
+                batch_id=pending["id"],
+            )
+            print(
+                "[memory-compiler] pending batch received no compile envelope: "
+                + json.dumps(receipt, ensure_ascii=False, sort_keys=True),
+                file=sys.stderr,
+            )
+            return 1
         return 0
     if looks_like_error(raw):
+        receipt = record_compile_failure("provider output looks like an error")
         print("[memory-compiler] provider output looks like an error", file=sys.stderr)
+        if receipt:
+            print(json.dumps(receipt, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
     try:
         receipt = apply_compile_result(raw)
     except (MemoryCompilerError, KeyError, ValueError) as exc:
+        failure = record_compile_failure(str(exc))
         print(f"[memory-compiler] rejected output: {exc}", file=sys.stderr)
+        if failure:
+            print(json.dumps(failure, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
     print(json.dumps(receipt, ensure_ascii=False), file=sys.stderr)
     conflicts = receipt.get("new_conflict_ids") or []

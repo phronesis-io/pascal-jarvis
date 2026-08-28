@@ -10,7 +10,7 @@ export PYTHONPATH="$JARVIS_DIR${PYTHONPATH:+:$PYTHONPATH}"
 python3 - <<'PYEOF' || true
 from core import memorial
 
-# Bounded loop: skip requests the conversation already answered (Pascal
+# Bounded loop: skip requests the conversation already answered (the owner
 # spoke before this task ran, so bot.sh consumed the decision injection and
 # the session acted on it — answering again here would be a double response).
 for _ in range(5):
@@ -38,7 +38,7 @@ for _ in range(5):
     # we are answering it here — double action. If this model call dies the
     # retake re-answers; a defused injection is the cheaper failure.
     memorial.settle_decision_context(mid, (
-        f"[奏折回复·接手中] 关于「{st.get('title', '')}」Pascal 点了"
+        f"[奏折回复·接手中] 关于「{st.get('title', '')}」，用户点了"
         f"「{req.get('label', '')}」，后台已在处理并会另行答复。"
         "不要重复执行，如他问起就说正在办。"))
     print(f"[reply-followup {st['id']}] 来源: {st.get('source', '?')}")

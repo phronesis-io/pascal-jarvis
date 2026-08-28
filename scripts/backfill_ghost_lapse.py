@@ -12,7 +12,7 @@ they were never seen.
 This script moves them to 留中 through the NORMAL event stream:
 ``memorial.lapse()`` appends a ``lapse`` event with
 ``reason="web_surface_retired_backfill"``. No historical line is rewritten,
-so a card Pascal scrolls back to and taps still revives exactly like any
+so a card the owner scrolls back to and taps still revives exactly like any
 other 留中 row.
 
 Ghost definition (matches ``memorial.delivery_accepted`` semantics):

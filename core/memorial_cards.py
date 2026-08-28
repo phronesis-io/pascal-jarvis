@@ -290,6 +290,31 @@ def normalize_extra_buttons(buttons: list[dict] | None) -> list[dict]:
     return normalized
 
 
+def parse_option_spec(spec: str, index: int) -> dict:
+    """Parse one CLI option into a reply or an action-backed choice."""
+    spec = str(spec).strip()
+    if "=" not in spec:
+        if not spec:
+            raise ValueError("empty --option")
+        return {"key": f"opt{index}", "label": spec, "action": None}
+    label, action_raw = spec.split("=", 1)
+    label = label.strip()
+    if not label:
+        raise ValueError(f"--option has no label: {spec!r}")
+    action_type, separator, params_raw = action_raw.partition(":")
+    params = {}
+    if separator:
+        for segment in params_raw.split(","):
+            if "=" in segment:
+                key, value = segment.split("=", 1)
+                params[key.strip()] = value.strip()
+    return {
+        "key": f"opt{index}",
+        "label": label,
+        "action": {"type": action_type.strip(), "params": params},
+    }
+
+
 def header(state: dict, source_emoji: dict[str, str]) -> str:
     emoji = source_emoji.get(state["source"], "")
     return " ".join(part for part in ("📜", emoji, state["title"]) if part)

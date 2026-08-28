@@ -493,13 +493,13 @@ verify_full_runtime() {
   return 1
 }
 
-prepare_codex_frontstage() {
+verify_codex_frontstage() {
   if ! command -v codex >/dev/null 2>&1; then
-    dim "  Codex CLI unavailable; frontstage plugin install skipped."
-    return 0
+    dim "  Codex CLI unavailable; frontstage verification skipped."
+    return 2
   fi
 
-  echo "Preparing Codex frontstage integration..."
+  echo "Verifying Codex frontstage integration..."
   if ! "$JARVIS_PYTHON" - <<'PY' >/dev/null 2>&1
 from importlib.metadata import PackageNotFoundError, version
 
@@ -510,14 +510,23 @@ except (PackageNotFoundError, TypeError, ValueError):
 raise SystemExit(0 if major == 2 else 1)
 PY
   then
-    echo "  Installing the supported MCP runtime..."
-    "$JARVIS_PYTHON" -m pip install --disable-pip-version-check \
-      "mcp>=2,<3"
+    red "  Supported MCP runtime is missing; run ./setup.sh after release."
+    return 2
   fi
 
-  "$JARVIS_DIR/scripts/install_codex_integration.sh" >/dev/null
-  if codex plugin list 2>/dev/null \
-       | grep -q 'jarvis-matters@pascal-jarvis.*installed, enabled'; then
+  if codex plugin list --json 2>/dev/null | "$JARVIS_PYTHON" -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin).get("installed", [])
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if any(
+    row.get("pluginId") == "jarvis-matters@pascal-jarvis"
+    and row.get("installed") is True
+    and row.get("enabled") is True
+    for row in rows if isinstance(row, dict)
+) else 1)
+'; then
     if "$JARVIS_PYTHON" "$JARVIS_DIR/scripts/check_codex_frontstage.py" \
          >/dev/null; then
       green "  Codex Jarvis Matters plugin and MCP handshake are healthy."
@@ -565,6 +574,18 @@ _verify_release_gate() {
   fi
 }
 
+_verify_retired_self_improve_quiescent() {
+  echo "Checking that the retired unattended coding worker is quiescent..."
+  if python3 "$JARVIS_DIR/scripts/retired_self_improve_preflight.py" \
+      --root "$JARVIS_DIR" >/tmp/jarvis_retired_self_improve_preflight.json; then
+    green "  No legacy mutation worker or launchd job is active."
+  else
+    red "  Deploy refused: legacy unattended mutation may still be active."
+    cat /tmp/jarvis_retired_self_improve_preflight.json
+    exit 1
+  fi
+}
+
 _verify_runtime_only_gate() {
   local dirty
   dirty=$(git -C "$JARVIS_DIR" status --porcelain --untracked-files=all)
@@ -591,11 +612,14 @@ governed_deploy() {
   echo "=== $heading ==="
   echo ""
   _verify_release_gate
+  _verify_retired_self_improve_quiescent
   _set_deploy_guard
-  # Confirmation must precede definition refresh because installing a changed
-  # plugin mutates Codex config and a changed plist restarts its launchd job.
+  # Confirmation must precede definition refresh because a changed plist may
+  # restart its launchd job. Codex verification is deliberately read-only.
   confirm_restart
-  prepare_codex_frontstage
+  if ! verify_codex_frontstage; then
+    red "  Codex frontstage is degraded; continuing the resident Jarvis release."
+  fi
   refresh_launchd_definitions
   kill_bot
   echo ""
@@ -631,6 +655,7 @@ case "${1:-}" in
     echo "=== Same-Revision Runtime Restart ==="
     echo ""
     _verify_release_gate
+    _verify_retired_self_improve_quiescent
     _verify_runtime_only_gate
     _set_deploy_guard
     kill_bot

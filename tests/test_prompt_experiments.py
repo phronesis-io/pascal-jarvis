@@ -51,5 +51,5 @@ def test_inject_variant_is_soft_and_hidden_from_user():
     prompt = inject_variant("Base prompt.", _Variant())
     assert "Base prompt." in prompt
     assert "[Prompt experiment]" in prompt
-    assert "Do not mention the experiment to Pascal" in prompt
+    assert "Do not mention the experiment to the owner" in prompt
     assert "Ask one concrete question." in prompt

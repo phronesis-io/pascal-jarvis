@@ -155,6 +155,27 @@ def _get_json(
         return _read_json(response)
 
 
+def _patch_json(
+    url: str,
+    body: dict,
+    *,
+    headers: Mapping[str, str] | None = None,
+    opener: Callable = urllib.request.urlopen,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            **dict(headers or {}),
+        },
+        method="PATCH",
+    )
+    with opener(request, timeout=timeout) as response:
+        return _read_json(response)
+
+
 def _tenant_token(
     app_id: str,
     app_secret: str,
@@ -289,6 +310,72 @@ def send(
         message_id = str(payload.get("message_id") or "").strip()
         if not message_id:
             return BotSendResult(True, False, error="message_receipt_missing")
+        return BotSendResult(True, True, message_id=message_id)
+    except urllib.error.HTTPError as exc:
+        return BotSendResult(True, False, error=f"http_{int(exc.code)}")
+    except urllib.error.URLError:
+        return BotSendResult(True, False, error="network_error")
+    except TimeoutError:
+        return BotSendResult(True, False, error="timeout")
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return BotSendResult(True, False, error="request_failed")
+
+
+def update_card(
+    message_id: str,
+    card_json: str,
+    *,
+    root: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+    opener: Callable = urllib.request.urlopen,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    now_epoch: float | None = None,
+) -> BotSendResult:
+    """Replace one bot-authored interactive card without macOS Keychain."""
+    env = os.environ if env is None else env
+    app_id, app_secret = _credentials(root, env=env)
+    if not app_id or not app_secret:
+        return BotSendResult(False, False, error="bot_credentials_unavailable")
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return BotSendResult(True, False, error="message_id_required")
+    try:
+        _msg_type, content = _card_payload(card_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return BotSendResult(True, False, error="invalid_payload")
+    base_url = _base_url(env)
+    now_epoch = float(time.time() if now_epoch is None else now_epoch)
+    url = (
+        f"{base_url}/open-apis/im/v1/messages/"
+        f"{urllib.parse.quote(message_id, safe='')}"
+    )
+    try:
+        data = {}
+        for auth_attempt in range(2):
+            token = _tenant_token(
+                app_id,
+                app_secret,
+                base_url,
+                opener=opener,
+                timeout=timeout,
+                now_epoch=now_epoch,
+                force_refresh=bool(auth_attempt),
+            )
+            try:
+                data = _patch_json(
+                    url,
+                    {"content": content},
+                    headers={"Authorization": f"Bearer {token}"},
+                    opener=opener,
+                    timeout=timeout,
+                )
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401 and auth_attempt == 0:
+                    continue
+                raise
+        if int(data.get("code") or 0) != 0:
+            return BotSendResult(True, False, error="message_update_rejected")
         return BotSendResult(True, True, message_id=message_id)
     except urllib.error.HTTPError as exc:
         return BotSendResult(True, False, error=f"http_{int(exc.code)}")

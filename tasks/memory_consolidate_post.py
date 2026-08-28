@@ -3,7 +3,7 @@
 
 The diary portion (non-directive lines) is archived to silent_outputs.jsonl,
 NEVER printed to stdout: post-script stdout becomes a Lark message, and on
-2026-07-07 21:08 the internal third-person diary (bookkeeping about Pascal,
+2026-07-07 21:08 the internal third-person diary (bookkeeping about the owner,
 ops jargon, a wrong 「我这边没有直接对话」 claim) was delivered to his chat —
 HEARTBEAT.md classifies the whole Memory Pipeline as silent.
 """
@@ -29,7 +29,7 @@ def _canon_warm_target(memory_dir: Path, rel: Path, target: Path,
                        task: str = "memory-consolidate") -> Path:
     """Reroute a warm/ directive from the heartbeat replica to canon.
 
-    CLAUDE.md source-of-truth rule: warm/ 用户画像以 auto-memory 为准 — the
+    CLAUDE.md source-of-truth rule: warm/用户画像以 auto-memory 为准 — the
     heartbeat copy is a read-only replica that only memory-tidy's one-way
     sync (auto → heartbeat) may write. This task runs under the heartbeat
     MEMORY_DIR, so writing warm/ in place made it a second replica writer and

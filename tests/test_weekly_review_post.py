@@ -66,6 +66,9 @@ def test_confirmed_results_render_as_one_bounded_card(tmp_path):
     encoded = json.dumps(card, ensure_ascii=False)
     assert "本周形成的结果" in encoded
     assert "已经发布并读回" in encoded
+    assert "这周没有需要你接手的事" in encoded
+    assert encoded.count("已经发布并读回") == 1
+    assert "Matter" not in encoded
     assert (tmp_path / "data" / ".weekly_review_stamp").exists()
     assert len(list((tmp_path / "views").glob("*.json"))) == 1
 

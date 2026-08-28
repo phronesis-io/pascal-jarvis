@@ -1,6 +1,6 @@
-"""Memorial (奏折) cards — the unified "ask Pascal" surface.
+"""Memorial (奏折) cards — the unified "ask the owner" surface.
 
-Every proactive output that needs Pascal's eyes (mail triage, decisions,
+Every proactive output that needs the owner's eyes (mail triage, decisions,
 follow-ups, heartbeat asks…) becomes one durable memorial.  Lark is the only
 delivery surface (REQ-119, 2026-08-11): alerts, decisions, and notices all go
 to the chat, while ambient monitoring exhaust (AMBIENT_SOURCES) stays
@@ -8,7 +8,7 @@ ledger-only and is batched into the morning anchor's digest line.
 Tapping an option = 批红: it is recorded (and optionally
 executes an action through ActionProcessor). Tapping「聊聊这个」injects the
 memorial's full context into the p2p conversation via bot.sh's existing
-pending-merge channel, so Pascal's NEXT message lands with the topic loaded.
+pending-merge channel, so the owner's NEXT message lands with the topic loaded.
 
 Ledger: `memorials.jsonl` (repo root, same level as engagement_log.jsonl).
 Append-only event stream — {"ev":"create"|"decide"|"chat", ...} — folded by id
@@ -25,13 +25,13 @@ heartbeat_outbox.jsonl so the main session knows the card went out.
 Buttons follow the card, not the emitter. In priority order a memorial's
 options come from: (1) an ``OPTIONS: a | b | c`` line the card author wrote at
 the end of the body — these become suggested-reply buttons whose label IS the
-sentence Pascal would have typed; (2) ``SOURCE_DEFAULT_PRESET`` for sources
+sentence the owner would have typed; (2) ``SOURCE_DEFAULT_PRESET`` for sources
 that inherently ask for a decision or a follow-up; (3)「已阅／标为重点」.
 
 Every new user-visible card also carries a short work receipt. Proactive model
 output must author it as ``WORKED: ...``; deterministic callers pass
 ``work_receipt=...``. The receipt says what Jarvis already completed before
-asking for Pascal's attention. Missing receipts fail closed at model and
+asking for the owner's attention. Missing receipts fail closed at model and
 Routine boundaries instead of turning unfinished work into a card.
 
 CLI (any emitter can send a memorial in one line):
@@ -71,6 +71,9 @@ from core.card_envelope import (
     trusted_ledger_card_id,
 )
 from core.log import log
+from core.interruption import evaluate as evaluate_interruption
+from core.interruption import (MESSAGE_CONTRACT_FIELDS, build_message_contract,
+                               infer_owner_need)
 from core.memorial_contracts import (
     ATTENTION_ALERT,
     ATTENTION_DECISION,
@@ -126,7 +129,7 @@ SEND_RETRY_DELAYS = (2, 5)
 
 # A re-tap of「聊聊这个」within this window is a no-op (the first tap already
 # sent the opener + queued the injection): Lark re-pushes un-ACKed callback
-# events and Pascal re-taps after a client-side "操作失败", so chat() must not
+# events andthe owner re-taps after a client-side "操作失败", so chat() must not
 # stack duplicate openers/injections.
 CHAT_RETAP_THROTTLE_S = 120
 
@@ -140,7 +143,7 @@ CARD_BODY_MAX_LINES = 6
 # chat message. Bounding it keeps a runaway emitter from pasting a novel into
 # the conversation, but it sits far above the card bound: the card is the
 # decision surface, the chat is where the full record is allowed to land.
-# (2026-08-11: Pascal — "我只能看到一堆截断". Tapping the button used to load
+# Owner feedback: the mobile card showed only clipped fragments. Tapping used to load
 # context for the MODEL and tell HIM nothing he hadn't already seen.)
 FULL_TEXT_MAX_CHARS = 4000
 # Follow-up chunks leave room for the title and an honest remaining/done note
@@ -151,7 +154,7 @@ CONTINUATION_CHUNK_CHARS = 3500
 CHAT_OPENER_CONTEXT_MAX = 1000
 
 # The model's injected chat context must cover at least everything the opener
-# just showed Pascal (FULL_TEXT_MAX_CHARS of body) — if he quotes the tail of
+# just showed the owner(FULL_TEXT_MAX_CHARS of body) — if he quotes the tail of
 # the「全文」he was sent and the model never saw it, the model confabulates in
 # the very conversation whose point was giving both sides the same record.
 CHAT_CONTEXT_MAX_CHARS = 6000
@@ -196,7 +199,7 @@ PRESETS: dict[str, list[dict]] = {
     #
     # Until now a checkin offered「已阅／标为重点」, and 22 of 23 cards ever sent
     # were acknowledged. That number taught nothing: 「已阅」is emitted both by
-    # "that was good" and by "noted, go away". Pascal's only way to say the
+    # "that was good" and by "noted, go away". the owner's only way to say the
     # second was to complain out of band, which he did four times, after which
     # a human overcorrected the prompt into ten days of total silence.
     #
@@ -210,7 +213,7 @@ PRESETS: dict[str, list[dict]] = {
     ],
 }
 
-# A tap on a REPLY option means "Pascal said this sentence". The label is the
+# A tap on a REPLY option means "the owner said this sentence". The label is the
 # suggested reply itself, so it is carried into the next conversation turn
 # first-person (see _queue_decision_context) instead of being filed away as a
 # generic 批红 rating. FYI keys are the only taps that stay purely analytic.
@@ -228,7 +231,7 @@ _FYI_KEYS = {"read", "watch", "ack", "not_this_kind", "pause"}
 # Deadlines are measured, not guessed (7/29, over memorials decided since 7/01):
 #   decision  median 2.1h, 75% inside 24h, 90% inside 48h, only 3% ever later
 #   alert     median 0.2h, 78% inside 24h — a stale alert has no salvage value
-#   notice    is informational, not work Pascal owes the system. The 2026-08-17
+#   notice    is informational, not work the owner owes the system. The 2026-08-17
 #             owner reset made this explicit: after one day it leaves the live
 #             queue and remains recoverable as 留中. This bounds attention debt
 #             even when a delivery outage creates a large historical backlog.
@@ -280,27 +283,8 @@ WEB_FIRST_SOURCES = {
     "eigenflux-feed-triage",
 }
 
-# Monitoring exhaust whose NOTICES are LEDGER-ONLY (REQ-119, 2026-08-11):
-# create() records them in memorials.jsonl — where the morning anchor's
-# 攒批 digest line (core.presence) is their one batched shot at being seen —
-# but they get no delivery envelope and never enter the delivery pipeline.
-# Rationale, measured 14d to 8/11: Lark cards were read 95.7% (235 cards),
-# web cards 1.8% (170 cards) — the web desk was a fake surface whose
-# transport unconditionally reported success. Pushing raw exhaust to Lark
-# instead would recreate the 7/22 card storm. Alerts and decisions from an
-# ambient source still deliver — attention class outranks the source.
-#
-# Adversarial-review verdict (2026-08-11): ledger-only narrows by ATTENTION,
-# not by blanket source membership, so this set holds ONLY sources whose
-# per-card value is unfiltered exhaust. metrics-digest, phronesis-monitor
-# and repos-sync are NOT here: their noise is governed upstream (REQ-121 —
-# steady-state snapshots dropped at the pre-hook, 60m interval + 成卡门槛,
-# 24h daily rollup), so a card they DO emit is curated signal that must
-# reach the chat, not a row that quietly rots in the ledger.
-# Interactive, personal voices (checkin, routines, intention-check,
-# daily-reflect, heartbeat prose) are deliberately NOT here: those going
-# invisible is exactly the 7/24 regression. eigenflux-feed-triage is NOT
-# ambient (2026-08-03): curated one-line briefs earn the chat.
+# Monitoring exhaust is ledger-only. Alerts and decisions still outrank this
+# compatibility set; new producers declare their first-principles owner_need.
 AMBIENT_SOURCES = {
     "cross-session-sync",
 }
@@ -441,20 +425,13 @@ def delivery_accepted(state: dict) -> bool:
 
 
 def should_push_to_lark(state: dict) -> bool:
-    """Lark is the ONLY delivery surface (REQ-119, 2026-08-11 拍板).
-
-    A card either goes to Lark or stays ledger-only, and ledger-only
-    narrows by ATTENTION, never by a blanket source verdict: alerts and
-    decisions always ring, and only an ambient-source NOTICE stays in the
-    ledger, where the morning anchor's 攒批 digest line re-surfaces it.
-    The 14d读卡数据 (Lark 95.7% vs web 1.8%) settled that any other
-    surface is a place cards go to die.
-    """
+    """Route first-principles owner needs to Lark; keep exhaust local."""
+    if state.get("owner_need"):
+        return evaluate_interruption(state)["lane"] == "lark"
     if str(state.get("attention", "") or "") == ATTENTION_ALERT:
         return True
-    if requires_decision(state):
-        return True
-    return str(state.get("source", "")) not in AMBIENT_SOURCES
+    return requires_decision(state) or str(
+        state.get("source", "")) not in AMBIENT_SOURCES
 
 
 _ALERT_RE = re.compile(
@@ -501,7 +478,7 @@ _OPTIONS_SPLIT_RE = re.compile(r"\s*[|｜/／]\s*")
 _TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：]\s*(.+?)\s*$", re.I)
 _ANY_TITLE_LINE_RE = re.compile(r"^\s*(?:TITLE|标题)\s*[:：](.*)$", re.I)
 # Work receipt: a card is an output of completed preparation, never a request
-# that Pascal do the preparation himself. TITLE remains first so concatenated
+# that the owner do the preparation himself. TITLE remains first so concatenated
 # authored cards can still be split mechanically; WORKED belongs immediately
 # below it (the parser accepts any unquoted top-level line for graceful
 # recovery). Quoted/fenced examples are protected by _markdown_protected_lines.
@@ -515,7 +492,7 @@ _MARKDOWN_LIST_FENCE_OPEN_RE = re.compile(
 
 # 票拟 — the Grand Secretariat's proposed rescript, attached to the memorial so
 # the emperor's job is 依议 or 驳, not drafting the answer himself. A decision
-# card that only lists options makes Pascal do the Secretariat's work: measured
+# card that only lists options makes the owner do the Secretariat's work: measured
 # 7/29, decision cards answered inside 48h ran 90%, but the ones that stalled
 # were disproportionately the ones with no stated preference behind them.
 #
@@ -591,7 +568,7 @@ def _ledger_path() -> Path:
 
 def _pending_merge_path() -> Path:
     # bot.sh's bg-job merge channel: lines matching conv_key are prepended to
-    # Pascal's next message and consumed (rewrite-keep-others). We only ever
+    # the owner's next message and consumed (rewrite-keep-others). We only ever
     # append — same as bot.sh's own two writers.
     return memorial_ledger.pending_merge_path(runtime_root())
 
@@ -654,7 +631,7 @@ def _new_id() -> str:
 
 
 def _resolve_user_id() -> str:
-    """Pascal's open_id: USER_ID env (bot.sh exports it) → jarvis.yaml."""
+    """the owner's open_id: USER_ID env (bot.sh exports it) → jarvis.yaml."""
     uid = os.environ.get("USER_ID", "").strip()
     if uid:
         return uid
@@ -812,6 +789,40 @@ def counts_in_ledger(state: dict) -> bool:
     return str(state.get("source", "")) != ESCROW_DIGEST_SOURCE
 
 
+def _linked_intents_are_terminal(state: dict) -> bool:
+    """Whether every closure intent behind a card has already finished."""
+    intent_ids = _intent_ids_for_state(state)
+    if not intent_ids:
+        return False
+    try:
+        from core.db import get_db
+
+        placeholders = ",".join("?" for _ in intent_ids)
+        rows = get_db().execute(
+            f"SELECT id,status FROM intentions WHERE id IN ({placeholders})",
+            tuple(sorted(intent_ids)),
+        ).fetchall()
+    except Exception as exc:
+        _ops_log("docket linked-intent lookup failed", level="warn",
+                 error_type=type(exc).__name__)
+        return False
+    terminal = {"executed", "expired", "cancelled"}
+    statuses = {str(row["id"]): str(row["status"] or "") for row in rows}
+    return len(statuses) == len(intent_ids) and all(
+        statuses.get(intent_id) in terminal for intent_id in intent_ids
+    )
+
+
+def _docket_decision(state: dict) -> bool:
+    """True only for an ask the owner actually received and still owes."""
+    return (
+        str(state.get("status") or "") == "pending"
+        and str(state.get("attention") or "") == ATTENTION_DECISION
+        and str(state.get("delivery_status") or "") == "delivered"
+        and not _linked_intents_are_terminal(state)
+    )
+
+
 def escrow_scan(now: datetime | None = None,
                 states: list[dict] | None = None) -> dict:
     """Classify every pending memorial against its deadline. Pure — no writes.
@@ -836,9 +847,13 @@ def escrow_scan(now: datetime | None = None,
             continue
         attention = str(st.get("attention", "")) or ATTENTION_NOTICE
         if attention == ATTENTION_DECISION:
+            if _linked_intents_are_terminal(st):
+                out["lapse"].append((st, "关联事项已经闭环"))
+                continue
             if age > ESCROW_HARD_LAPSE_H:
                 out["lapse"].append((st, f"逾期未批 {age / 24:.0f} 天"))
-            elif age > ESCROW_DEADLINE_H[ATTENTION_DECISION]:
+            elif (age > ESCROW_DEADLINE_H[ATTENTION_DECISION]
+                  and _docket_decision(st)):
                 out["overdue"].append(st)
             continue
         deadline = ESCROW_DEADLINE_H.get(attention, ESCROW_DEADLINE_H[ATTENTION_NOTICE])
@@ -922,29 +937,17 @@ def _wait_cn(age_h: float) -> str:
     return f"等了 {days} 天" if days >= 1 else "今天刚来"
 
 
-# The 📡 line summarizes accumulated EigenFlux briefs (owner, 8/3: 「信号…
-# 攒的比较多，你可以提醒我去看一眼」). Threshold keeps it from nagging over
-# one or two unread briefs.
-SIGNAL_SOURCE = "eigenflux-feed-triage"
-SIGNAL_LINE_THRESHOLD = 5
-
-
 def escrow_docket(states: list[dict],
                   now: datetime | None = None) -> tuple[str, str]:
     """Render the daily docket as ``(title, body)``.
 
     Two contracts, both bought with production feedback:
 
-    数字口径 (REQ-122): every number on the card face comes from
-    ledger_accounting() over the very states passed in. The 8/11 docket said
-    「待批 14 件」 the same morning the ledger counted 106 open, because the
-    card ran its own private arithmetic. It no longer has any: each pending
-    row lands on exactly one line — decisions, then alerts (never described
-    as "不用动手"), then plain notices, then the 📡 signal digest — and a
-    per-line sum that disagrees with the accounting raises instead of
-    shipping a split number.
+    Scope: this is not a ledger summary. It names only decision cards that
+    reached Lark and whose linked Intent is still live. Unsent, informational,
+    alert, and already-resolved rows remain internal bookkeeping.
 
-    文风 (奏折铁律): the 8/11 docket is one of only two cards Pascal ever
+    文风 (奏折铁律): the 8/11 docket is one of only two cardsthe owner ever
     tapped 「看不懂」 on. So: first sentence is the conclusion, the most
     urgent asks are named by title, the rest is one line, zero asks is said
     out loud (「知道就行」), and bookkeeping jargon (待批/留中/escrow/
@@ -953,43 +956,15 @@ def escrow_docket(states: list[dict],
     """
     now = now or now_local()
     rows = [st for st in states if counts_in_ledger(st)]
-    acct = ledger_accounting(states=rows, now=now)
     decisions: list[tuple[float, dict]] = []
-    alerts: list[tuple[float, dict]] = []
-    notices: list[tuple[float, dict]] = []
     for st in rows:
-        if str(st.get("status", "")) != "pending":
+        if not _docket_decision(st):
             continue
         age = _age_hours(st, now)
         if age is None:
             continue
-        attention = str(st.get("attention", "")) or ATTENTION_NOTICE
-        if attention == ATTENTION_DECISION:
-            decisions.append((age, st))
-        elif attention == ATTENTION_ALERT:
-            alerts.append((age, st))
-        else:
-            notices.append((age, st))
+        decisions.append((age, st))
     decisions.sort(key=lambda r: -r[0])
-    alerts.sort(key=lambda r: -r[0])
-    signals = [row for row in notices
-               if str(row[1].get("source", "")) == SIGNAL_SOURCE]
-    show_signals = len(signals) >= SIGNAL_LINE_THRESHOLD
-    signal_count = len(signals) if show_signals else 0
-    others = len(notices) - signal_count
-    # 机械一致, enforced with real exceptions (python -O keeps them): the
-    # headline IS the accounting number, and every pending row is counted on
-    # exactly one line of the card face.
-    if len(decisions) != acct["pending_decision"]:
-        raise RuntimeError(
-            f"docket split from accounting: {len(decisions)} decisions "
-            f"on the card vs pending_decision={acct['pending_decision']}")
-    if (len(decisions) + len(alerts) + others + signal_count
-            != acct["pending"]):
-        raise RuntimeError(
-            "docket lines do not sum to the pending total: "
-            f"{len(decisions)}+{len(alerts)}+{others}+{signal_count} "
-            f"!= {acct['pending']}")
     lines: list[str] = []
     if decisions:
         n = len(decisions)
@@ -1009,13 +984,6 @@ def escrow_docket(states: list[dict],
     else:
         title = "没有等你拍板的事"
         lines.append("没有等你拍板的事，知道就行。")
-    if alerts:
-        top_alert = (str(alerts[0][1].get("title", "")) or "一条告警")[:38]
-        lines.append(f"⚠️ {len(alerts)} 条告警还挂着：「{top_alert}」。")
-    if others:
-        lines.append(f"另有 {others} 条只是说给你听的，不用动手；没看的过几天自动归档。")
-    if show_signals:
-        lines.append(f"\n📡 信号攒了 {signal_count} 条没看，得空扫一眼。")
     return title, "\n".join(lines)
 
 
@@ -1128,6 +1096,24 @@ def card_json(memorial_id: str) -> str:
     return _render_card(st)
 
 
+def pipeline_card_json(memorial_id: str) -> str:
+    """Ledger card plus its private work receipt for heartbeat adoption.
+
+    ``card_json`` remains valid for direct Lark transport. This envelope is for
+    caller-owned stdout pipelines: ``adopt_card`` removes the private field,
+    verifies the remaining card byte-for-byte against the ledger rendering,
+    and never forwards the field to Lark.
+    """
+    state = get_memorial(memorial_id)
+    if state is None:
+        raise KeyError(f"memorial not found: {memorial_id}")
+    card = json.loads(_render_card(state))
+    receipt = " ".join(str(state.get("work_receipt") or "").split())
+    if receipt:
+        card["__jarvis_work_receipt"] = receipt[:MAX_WORK_RECEIPT_CHARS]
+    return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+
+
 def _hhmm(ts: str) -> str:
     # ledger ts is "YYYY-MM-DD HH:MM" — show just the clock on the card.
     return ts[-5:] if len(ts) >= 5 else ts
@@ -1157,7 +1143,7 @@ def _replacement_card(rendered: str, state: dict) -> dict:
 def _decided_card(state: dict) -> dict:
     """Replacement after 批红: durable proof plus a conversation escape hatch."""
     if _decided_is_reply(state):
-        # A suggested reply reads back as something Pascal said, not as an
+        # A suggested reply reads back as something the owner said, not as an
         # approval stamp on someone else's proposal.
         status = (f"🗣 你回了：{state['decided_label']} · "
                   f"{_hhmm(state['decided_ts'])}")
@@ -1176,7 +1162,7 @@ def _decided_card(state: dict) -> dict:
 
 def _chatting_card(state: dict, ts: str) -> dict:
     """Replacement card after「聊聊这个」: chatting banner, remaining options
-    stay tappable so Pascal can still 批 while (or after) chatting."""
+    stay tappable sothe owner can still 批 while (or after) chatting."""
     status = f"💬 聊天中 · {_hhmm(ts)} — 直接回消息就行"
     return _replacement_card(
         _render_card(
@@ -1266,7 +1252,7 @@ def _write_outbox(text: str) -> None:
 def _record_engagement(row: dict) -> None:
     """One row into engagement_log.jsonl — same shapes bot.sh / heartbeat_loop
     already write ("sent" / "feedback"), so engagement-analyze sees memorial
-    sources and Pascal's 批红 without a new schema. Accounting must never
+    sources andthe owner's 批红 without a new schema. Accounting must never
     break a delivery or a card callback, hence the broad except."""
     try:
         row.setdefault("ts", now_local_str("%Y-%m-%d %H:%M"))
@@ -1284,7 +1270,7 @@ def suppressed_delivery_status(reason: str) -> str:
 
     Budget overflow ("no room in today's nine slots") is not the same event as
     "this card is obsolete", and the ledger must not spell them the same way.
-    A cap drop still owes Pascal a mention, so it takes the ledger-only status
+    A cap drop still owes the owner a mention, so it takes the ledger-only status
     that core.presence batches into the morning anchor's 攒批 line — the same
     surface ambient exhaust uses. Everything else (recovery_incident_obsolete,
     recovery_item_resolved, expired_ttl, ambient dedup) is stale by design and
@@ -1372,7 +1358,7 @@ def _queue_for_morning(mid: str, card_json_str: str, title: str,
 # Handle to the last opener-send thread — chat() runs inside the sidecar's
 # websocket callback, which must return within Lark's 3s ACK budget; a
 # synchronous lark-cli send (retries + sleeps, worst case ~52s) would freeze
-# the single event loop that forwards ALL of Pascal's messages. Module-level
+# the single event loop that forwards ALL of the owner's messages. Module-level
 # so tests can join() it deterministically.
 _opener_thread: threading.Thread | None = None
 
@@ -1631,11 +1617,18 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                            dedup_key: str = "",
                            work_receipt: str = "",
                            attention: str = "",
+                           owner_need: str = "",
                            review_at: str = "") -> dict | None:
     """A still-pending memorial with identical content created within the
     dedup window, or the same explicit external identity."""
     now = time.time()
     for st in _fold(read_jsonl(_ledger_path())).values():
+        if (dedup_key and source == "guardian-daemon"
+                and st.get("source") == source
+                and st.get("dedup_key", "") == dedup_key
+                and st.get("epoch")
+                and now - float(st["epoch"]) < 24 * 3600):
+            return st
         if (dedup_key and st["status"] == "pending"
                 and st["source"] == source
                 and st.get("dedup_key", "") == dedup_key):
@@ -1650,6 +1643,8 @@ def _find_recent_duplicate(source: str, title: str, body: str,
                 and st.get("matter_id", "") == matter_id
                 and st.get("work_receipt", "") == work_receipt
                 and str(st.get("attention", "")) == attention
+                and str(st.get("owner_need") or infer_owner_need(
+                    st.get("source", ""), st.get("attention", ""))) == owner_need
                 and review_surface(st) == review_at
                 and st.get("epoch") and now - st["epoch"] < DEDUP_WINDOW_S):
             return st
@@ -1706,6 +1701,8 @@ def _deliver_existing(
             throttle_key=str(state.get("throttle_key") or ""),
             metadata={
                 "review_surface": review_at,
+                **{key: state.get(key, "") for key in
+                   MESSAGE_CONTRACT_FIELDS if key != "owner_need_explicit"},
                 "dedup_text": json.dumps({
                     "title": state.get("title", ""),
                     "body": state.get("body", ""),
@@ -1723,6 +1720,14 @@ def _deliver_existing(
                 "bypass_throttle": state.get("source") == "eigenflux",
                 "retry_existing": True,
                 "recovery_reason": str(recovery_reason or ""),
+                # Guardian reports failures in this same pipeline. Its alert
+                # must never create another dead letter about itself, and a
+                # stable incident stays deduplicated for one day even after
+                # the acknowledgement button closes the Item.
+                **({
+                    "suppress_dead_letter": True,
+                    "dedup_window_seconds": 24 * 3600,
+                } if state.get("source") == "guardian-daemon" else {}),
             },
         ),
         root=runtime_root(),
@@ -1914,6 +1919,9 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
            review_at: str = "",
            recommend: dict | None = None,
            work_receipt: str = "",
+           owner_need: str = "",
+           why_now: str = "",
+           owner_action: str = "", silence_cost: str = "",
            require_work_receipt: bool = False,
            authoring_protocol: bool = False,
            authoring_audit_text: str | None = None) -> tuple[str, bool]:
@@ -1971,10 +1979,14 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
         attention = ATTENTION_ALERT
     if attention not in {ATTENTION_DECISION, ATTENTION_NOTICE, ATTENTION_ALERT}:
         raise ValueError("attention must be decision, notice, or alert")
-    # REQ-119: Lark is the only review surface — the attention class fully
-    # determines where a card waits. The caller's legacy ``review_at`` hint
-    # is ignored (the phone desk is retired); it stays in the signature so
-    # older emitters keep working.
+    contract = build_message_contract(
+        source=source, attention=attention, work_receipt=work_receipt,
+        owner_need=owner_need, why_now=why_now, owner_action=owner_action,
+        silence_cost=silence_cost,
+    )
+    owner_need = contract["owner_need"]
+    owner_action = contract["owner_action"]
+    silence_cost = contract["silence_cost"]
     review_at = REVIEW_LARK if attention == ATTENTION_DECISION else REVIEW_NONE
 
     if not matter_id:
@@ -1992,7 +2004,8 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
 
     dup = _find_recent_duplicate(
         source, title, body, opts, native_buttons, str(context), str(chat_id),
-        str(matter_id), str(dedup_key), work_receipt, attention, review_at)
+        str(matter_id), str(dedup_key), work_receipt, attention,
+        owner_need, review_at)
     if dup is not None:
         _ops_log(
             "pending_duplicate_reused",
@@ -2013,6 +2026,7 @@ def create(source: str, title: str, body: str, options: list[dict] | None = None
           "source": source, "title": title, "body": body, "options": opts,
           "extra_buttons": native_buttons, "context": str(context),
           "attention": attention, "review_surface": review_at,
+          **contract,
           "authoring_protocol": bool(authoring_protocol),
           "work_receipt": work_receipt}
     if authoring_audit_text is not None:
@@ -2107,6 +2121,10 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
     if _card_memorial_id(card):
         _ops_log("untrusted_memorial_card", level="warn", source=source)
+        # A forged callback-shaped id cannot borrow a producer-authored receipt
+        # to cross the strict gate. Legitimate pipeline cards matched the exact
+        # ledger rendering above after the private receipt field was removed.
+        structured_work_receipt = ""
         strip_memorial_actions(card)
 
     # core.card keeps a bounded visible fallback for direct Lark callers, but
@@ -2543,42 +2561,15 @@ def _execute_action(
     return handler(raw) or ""
 
 
-def _sync_lark_card(memorial_id: str, card: dict) -> None:
-    """Best-effort update of every delivered Lark copy after a web decision."""
-    try:
-        from core.memorial_thread import sent_message_ids
-        message_ids = sent_message_ids(memorial_id)
-    except Exception as exc:
-        _ops_log(
-            "thread_receipt_lookup_failed",
-            level="warn",
-            memorial_id=memorial_id,
-            error_type=type(exc).__name__,
-        )
-        return
-    if not message_ids:
-        return
-    data = json.dumps(
-        {"content": json.dumps(card, ensure_ascii=False)}, ensure_ascii=False)
-    for message_id in message_ids:
-        try:
-            result = subprocess.run(
-                ["lark-cli", "api", "PATCH",
-                 f"/open-apis/im/v1/messages/{message_id}",
-                 "--data", data, "--as", "bot"],
-                capture_output=True, text=True, timeout=12,
-            )
-            if result.returncode != 0:
-                _ops_log(
-                    "lark_card_sync_rejected", level="warn",
-                    memorial_id=memorial_id, message_id=message_id,
-                    returncode=int(result.returncode),
-                )
-        except Exception as e:
-            _ops_log(
-                "lark_card_sync_failed", level="warn",
-                memorial_id=memorial_id, error_type=type(e).__name__,
-            )
+_LARK_CARD_SYNC_RUNNER = subprocess.run
+
+
+def _sync_lark_card(memorial_id: str, card: dict, *, runner=None) -> None:
+    """Best-effort update of every delivered Lark copy after a state change."""
+    memorial_transport.sync_card(
+        memorial_id, card, root=runtime_root(), runner=runner,
+        cli_runner=_LARK_CARD_SYNC_RUNNER, ops_log=_ops_log,
+    )
 
 
 def _complete_surface_handoffs(memorial_id: str) -> None:
@@ -2871,7 +2862,7 @@ def decide(
             memorial_id=memorial_id, error_type=type(e).__name__,
         )
     # 批红 = engagement：same "feedback" shape the legacy card buttons write,
-    # so engagement-analyze sees which sources Pascal actually acts on.
+    # so engagement-analyze sees which sources the owner actually acts on.
     _record_engagement({"source": st.get("source", "memorial"),
                         "type": "feedback", "rating": opt_key})
 
@@ -2989,7 +2980,7 @@ def _injection_queued(conv_key: str, job_id: str,
 def _bounded_chat_context(st: dict) -> str:
     """Build a bounded injection without truncating away state/instructions."""
     fixed = [
-        "[奏折上下文] Pascal 点了「聊聊这个」，下一条消息讨论这件事：",
+        "[奏折上下文] 用户点了「聊聊这个」，下一条消息讨论这件事：",
         f"来源: {st['source']}",
         f"标题: {st['title']}",
         f"当前状态: {_status_line(st)}",
@@ -3001,7 +2992,7 @@ def _bounded_chat_context(st: dict) -> str:
     body = str(st.get("body", "")).strip()
     context = str(st.get("context", "")).strip()
     # Cover at least the FULL_TEXT_MAX_CHARS of body the opener may have just
-    # shown Pascal; the model must never know less than he does.
+    # shown the owner; the model must never know less than he does.
     body_budget = min(FULL_TEXT_MAX_CHARS, int(budget * 0.7))
     body = body[:body_budget].rstrip()
     context = context[:max(budget - len(body), 0)].rstrip()
@@ -3020,7 +3011,7 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "",
     The existing pending-merge bridge is the durable per-conversation handoff.
 
     ``is_reply`` marks a suggested-reply button, whose label IS the sentence
-    Pascal would have typed — it is handed over first-person so the next turn
+   the owner would have typed — it is handed over first-person so the next turn
     acts on it rather than merely filing a preference.
     """
     conv_key = st.get("chat_id", "") or _resolve_user_id()
@@ -3032,13 +3023,13 @@ def _queue_decision_context(st: dict, label: str, action_result: str = "",
         return
     if is_reply:
         lines = [
-            f"[奏折回复] 关于「{st['title']}」，Pascal 点了推荐回复：「{label}」。",
+            f"[奏折回复] 关于「{st['title']}」，用户点了推荐回复：「{label}」。",
             "当作他刚亲口说了这句话——直接照它行动或接话，不要复述卡片、"
             "不要再问一遍他的意思。",
         ]
     else:
         lines = [
-            f"[奏折批示] Pascal 对「{st['title']}」选择了「{label}」。",
+            f"[奏折批示] 用户对「{st['title']}」选择了「{label}」。",
             "把它视为已经确认的偏好或决定，不要原样再问一次。",
         ]
     if action_result:
@@ -3164,7 +3155,7 @@ def _queue_reply_followup(st: dict, opt_key: str, label: str) -> None:
     """A suggested-reply tap is a spoken sentence, not a filed preference.
 
     Before this queue existed the tap only wrote a pending-merge injection
-    that waits for Pascal's NEXT message — so a button labeled with an action
+    that waits forthe owner's NEXT message — so a button labeled with an action
     verb (「现在授权」) sat inert until he typed something himself, which is
     the dead end he called out on 2026-08-07. Queueing here lets the
     reply-followup heartbeat task answer proactively, exactly like
@@ -3242,7 +3233,7 @@ def settle_decision_context(memorial_id: str, handled_note: str) -> None:
     """Rewrite the still-pending decision injection after a proactive answer.
 
     The reply-followup task already acted on the tap, but the pending-merge
-    injection still says「照它行动」— left as-is, Pascal's next real message
+    injection still says「照它行动」— left as-is,the owner's next real message
     would make the conversational session act a SECOND time. The conversation
     must still learn the decision, so the entry is rewritten, not removed.
 
@@ -3399,7 +3390,7 @@ def read_full(memorial_id: str) -> dict:
 
 def chat(memorial_id: str) -> dict:
     """「聊聊这个」: inject the memorial's full context into bot.sh's
-    pending-merge channel (so Pascal's next message arrives with the topic
+    pending-merge channel (so the owner's next message arrives with the topic
     loaded) + send a conversation opener. Returns the card-callback payload.
 
     Runs inside the sidecar's websocket callback (3s ACK budget, single event
@@ -3427,8 +3418,8 @@ def chat(memorial_id: str) -> dict:
     #    opener is only garnish): bot.sh prepends matching lines to the next
     #    message from this conv_key and consumes them (multiple queued
     #    memorials merge automatically). conv_key mirrors bot.sh: p2p =
-    #    Pascal's open_id, group = chat_id. Injecting before the opener send
-    #    means Pascal's immediate reply can't race past a slow opener.
+    #    the owner's open_id, group = chat_id. Injecting before the opener send
+    #    means the owner's immediate reply can't race past a slow opener.
     conv_key = st.get("chat_id", "") or _resolve_user_id()
     if conv_key:
         pending_context = _pending_context_key(conv_key, st)
@@ -3468,7 +3459,7 @@ def chat(memorial_id: str) -> dict:
                 memorial_id=memorial_id, error_type=type(exc).__name__,
             )
 
-    # 2. Opener so Pascal has something to reply to — off the callback thread.
+    # 2. Opener sothe owner has something to reply to — off the callback thread.
     #    When the card was clipped, the opener IS the payload: he taps the
     #    button precisely because he cannot see the rest, and until now this
     #    only loaded context for the model and told him "已带上背景".
@@ -3527,34 +3518,6 @@ def chat(memorial_id: str) -> dict:
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 
-def _parse_option_spec(spec: str, idx: int) -> dict:
-    """Parse one --option value.
-
-    '缓'                                → record-only option
-    '准=intent_close:id=xxx,outcome=done' → label=准, action intent_close
-    """
-    spec = spec.strip()
-    if "=" not in spec:
-        if not spec:
-            raise ValueError("empty --option")
-        return {"key": f"opt{idx}", "label": spec, "action": None}
-    label, action_raw = spec.split("=", 1)
-    label = label.strip()
-    if not label:
-        raise ValueError(f"--option has no label: {spec!r}")
-    if ":" in action_raw:
-        atype, params_raw = action_raw.split(":", 1)
-    else:
-        atype, params_raw = action_raw, ""
-    params = {}
-    for seg in params_raw.split(","):
-        if "=" in seg:
-            k, v = seg.split("=", 1)
-            params[k.strip()] = v.strip()
-    return {"key": f"opt{idx}", "label": label,
-            "action": {"type": atype.strip(), "params": params}}
-
-
 def main(argv: list[str] | None = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(
@@ -3578,6 +3541,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="推荐回复按钮（点了等于他说了这句话）")
     sp.add_argument("--context", default="")
     sp.add_argument("--chat-id", dest="chat_id", default="")
+    for flag in ("owner-need", "why-now", "owner-action", "silence-cost"):
+        sp.add_argument(f"--{flag}", default="")
     sp.add_argument("--urgent", action="store_true",
                     help="bypass quiet hours (only for genuinely urgent asks)")
     # No --review-at flag: decisions always review on Lark (REQ-119) — a
@@ -3622,7 +3587,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "send":
         try:
-            options = ([_parse_option_spec(s, i)
+            options = ([memorial_cards.parse_option_spec(s, i)
                         for i, s in enumerate(args.option, 1)] or None)
             if args.options:
                 # Reuse the same parser the OPTIONS body line uses, so the CLI
@@ -3635,6 +3600,10 @@ def main(argv: list[str] | None = None) -> int:
             mid, sent = create(args.source, args.title, args.body,
                                options=options, preset=args.preset,
                                work_receipt=args.worked,
+                               owner_need=args.owner_need,
+                               why_now=args.why_now,
+                               owner_action=args.owner_action,
+                               silence_cost=args.silence_cost,
                                context=args.context, chat_id=args.chat_id,
                                urgent=args.urgent)
         except ValueError as e:

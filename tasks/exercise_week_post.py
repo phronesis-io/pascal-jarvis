@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.lifelog import (exercise_card_mark, exercise_card_sent_this_week,
                           exercise_week_summary)
 from core.safety import looks_like_error, parse_json_response, strip_task_framing
+from core.retained_rhythms import is_enabled as retained_rhythm_enabled
 
 MAX_BODY_CHARS = 300
 
@@ -41,6 +42,8 @@ def _fallback_body(summary: dict) -> str:
 
 
 def main() -> int:
+    if not retained_rhythm_enabled("exercise_week"):
+        return 0
     raw = sys.stdin.read().strip()
     if not raw or "HEARTBEAT_OK" in raw:
         return 0
@@ -82,10 +85,14 @@ def main() -> int:
         mem_id, _ = memorial.create(
             source="exercise-week", title="本周运动", body=body,
             work_receipt="汇总本周日历运动事件与手记记录并完成次数核对",
+            owner_need="scheduled_companion",
+            why_now="你订阅的每周运动回顾时间到了",
+            owner_action="只需查看、暂停或忽略这次回顾",
+            silence_cost="不提示会错过你主动保留的本周运动回顾节奏",
             options=OPTIONS, authoring_protocol=True, send=False,
             context="每周日晚的运动小结（REQ-116）：数据来自日历运动事件 + 手记运动条目，纯记录不说教。",
         )
-        print(memorial.card_json(mem_id))
+        print(memorial.pipeline_card_json(mem_id))
     except Exception as e:
         # Memorial should never be a single point of failure for the card.
         print(f"[exercise-week] memorial failed, using plain card: {e}",

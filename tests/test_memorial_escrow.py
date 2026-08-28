@@ -38,7 +38,7 @@ NOW = datetime(2026, 7, 29, 9, 0)
 _SEQ = iter(range(1, 10_000))
 
 
-def _make(env, source, attention, age_h, **kw):
+def _make(env, source, attention, age_h, *, delivered=True, **kw):
     """Create a memorial and backdate it by rewriting its create event ts.
 
     Bodies are made unique: create()'s 6h content dedup is a real production
@@ -49,6 +49,8 @@ def _make(env, source, attention, age_h, **kw):
         source=source, title=f"{source} card {n}", body=f"body {n}",
         preset="decision" if attention == memorial.ATTENTION_DECISION else "fyi",
         attention=attention, send=False, **kw)
+    if delivered:
+        memorial._record_delivery(mid, "delivered")
     stamp = (NOW - timedelta(hours=age_h)).strftime("%Y-%m-%d %H:%M")
     path = memorial._ledger_path()
     lines = []
@@ -93,6 +95,38 @@ def test_decision_past_hard_ceiling_stops_nagging(env):
     old = _make(env, "eigenflux-publish", memorial.ATTENTION_DECISION, age_h=24 * 15)
     scan = memorial.escrow_scan(now=NOW)
     assert [s["id"] for s, _ in scan["lapse"]] == [old]
+    assert scan["overdue"] == []
+
+
+def test_never_delivered_decision_never_becomes_owner_backlog(env):
+    unseen = _make(
+        env, "intention-check", memorial.ATTENTION_DECISION,
+        age_h=72, delivered=False,
+    )
+
+    scan = memorial.escrow_scan(now=NOW)
+    title, body = memorial.escrow_docket(memorial.list_memorials(), now=NOW)
+
+    assert unseen not in [state["id"] for state in scan["overdue"]]
+    assert title == "没有等你拍板的事"
+    assert "知道就行" in body
+
+
+def test_terminal_linked_intent_retires_its_old_decision(env, monkeypatch):
+    decision = _make(
+        env, "intention-check", memorial.ATTENTION_DECISION, age_h=72,
+    )
+    monkeypatch.setattr(
+        memorial,
+        "_linked_intents_are_terminal",
+        lambda state: state.get("id") == decision,
+    )
+
+    scan = memorial.escrow_scan(now=NOW)
+
+    assert [(state["id"], reason) for state, reason in scan["lapse"]] == [
+        (decision, "关联事项已经闭环")
+    ]
     assert scan["overdue"] == []
 
 

@@ -1,20 +1,18 @@
-"""Presence — is Jarvis actually showing up in Feishu?
+"""Presence — are owner-visible results reaching their promised surface?
 
 2026-08-07, owner's verdict on the platform: 「飞书里面没有卡片了，jarvis 就
 没有存在感」. The 7/24–8/2 cliff (69→1 cards/day, routed to a phone desk that
 was never paired) ran ten days with every internal check green: cards were
 produced, "delivered", and archived to web surfaces with zero recorded
-traffic. Feishu arrival volume IS the product's pulse, so:
+traffic. That incident required transport receipts, not a permanent quota of
+messages, so:
 
-- ``check``: a floor sentinel for selfmon — fewer than SENT_FLOOR_24H cards
-  actually reaching Feishu in 24h is a red flag regardless of how healthy
-  the pipeline claims to be.
+- ``check``: a debt sentinel for selfmon — an owner-visible delivery that
+  failed or remains stuck after a real attempt is a red flag. Raw message
+  volume is not health: a quiet day with nothing worth saying is success.
 - ``morning-digest``: ledger-only cards batched into the morning anchor (the
   style contract's 「攒批≥5条晨匣提一行」clause, PR #36 — never implemented
   until now), instead of silently rotting in an archive nobody opens.
-The other reason the pulse goes flat is that the host was asleep. This module
-only has to stop blaming the delivery chain for it (``check`` below); saying
-it out loud is ``core.absence``'s receipt, sent on the wake itself.
 
 Since REQ-119 (2026-08-11) Lark is the only delivery surface: a card either
 has a successful receipt in the unified delivery database or stayed
@@ -35,27 +33,15 @@ from core.textutil import middle_ellipsize
 JARVIS_DIR = Path(os.environ.get(
     "JARVIS_DIR", Path(__file__).resolve().parent.parent))
 
-# Healthy days run 18-25 sent cards; the cliff ran 1-7. Five splits them
-# with margin and survives quiet weekends (observed floor ~18 even then).
-SENT_FLOOR_24H = 5
 DIGEST_MIN = 5      # 攒批≥5条晨匣提一行 — the signed style contract's number
 DIGEST_TITLES = 3
 DIGEST_TITLE_CHARS = 24
+DELIVERY_DEBT_GRACE_MINUTES = 15
 
 # Stable text on purpose: selfmon dedups alerts by line content, so a
 # changing count would re-page every 4h for one persisting condition.
-FLOOR_WARNING = ("⚠️ 过去24h真正到飞书的卡片不足5张——产出可能正被路由进"
-                 "没人看的归档，Jarvis 正在消失。先查投递链路（7/24悬崖同款）")
-
-# A shut lid produces the same reading as a broken pipe, and on 2026-08-18/19
-# it did: the host slept ~39h, card output fell 76/day → 2, and this sentinel
-# would have sent whoever read it to audit the delivery chain — which was
-# fine. Volume is only evidence about routing when the machine was awake to
-# route anything.
-ABSENCE_HOURS = 3.0
-ABSENCE_WARNING = ("⚠️ 过去24h这台机器有大段时间是睡着的（合盖或断电），"
-                   "卡片少是因为 Jarvis 没醒着，不是投递坏了——投递链路不用查。")
-
+DELIVERY_DEBT_WARNING = (
+    "⚠️ 有本该送达的消息在真实投递后仍失败或卡住——检查投递债务")
 
 def _ledger_path() -> Path:
     return JARVIS_DIR / "memorials.jsonl"
@@ -123,6 +109,37 @@ def sent_count(hours: float = 24, now: datetime | None = None) -> int:
                if e.get("ev") == "sent" and _in_window(e, cutoff))
 
 
+def delivery_debt_count(hours: float = 24,
+                        now: datetime | None = None) -> int:
+    """Owner-visible envelopes that failed or stalled after a real attempt."""
+    from core.runtime_paths import database_path
+    from core.timeutil import now_local
+
+    path = database_path(JARVIS_DIR)
+    if not path.exists():
+        return 0
+    moment = now or datetime.now()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=now_local().tzinfo)
+    cutoff = (moment - timedelta(hours=hours)).timestamp()
+    overdue = (moment - timedelta(
+        minutes=DELIVERY_DEBT_GRACE_MINUTES)).timestamp()
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM delivery_envelopes "
+                "WHERE kind='card' AND route_channel='lark' "
+                "AND source!='deploy-smoke' AND created_epoch>=? AND ("
+                "state='failed' OR (state IN ('queued','attempting') "
+                "AND attempts>0 AND updated_epoch<=? AND last_error!=''))",
+                (cutoff, overdue),
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return 0
+    return int(row[0] if row else 0)
+
+
 def ledger_only(hours: float = 24, now: datetime | None = None) -> list[dict]:
     """Cards created in the window whose only reach is this digest.
 
@@ -174,22 +191,8 @@ def host_asleep_seconds(hours: float = 24,
 
 
 def check(now: datetime | None = None) -> str:
-    """Selfmon sentinel line, or "" when presence is healthy.
-
-    A fresh install with neither delivery DB nor memorial activity is not an
-    outage. Once the delivery DB exists, it is authoritative even when the
-    legacy memorial ledger has never been created.
-    """
-    moment = now or datetime.now()
-    delivered = _delivery_sent_count(24, moment)
-    if delivered is None and not _ledger_path().exists():
-        return ""
-    count = delivered if delivered is not None else sent_count(24, now=moment)
-    if count < SENT_FLOOR_24H:
-        if host_asleep_seconds(24, now=moment) >= ABSENCE_HOURS * 3600:
-            return ABSENCE_WARNING
-        return FLOOR_WARNING
-    return ""
+    """Selfmon sentinel line, or "" when no promised delivery is owed."""
+    return DELIVERY_DEBT_WARNING if delivery_debt_count(now=now) else ""
 
 
 def last_call_decisions(now: datetime | None = None) -> list[dict]:
@@ -212,7 +215,7 @@ def last_call_decisions(now: datetime | None = None) -> list[dict]:
     horizon = moment + timedelta(hours=24)
     deadline_h = ESCROW_DEADLINE_H[ATTENTION_DECISION]
     events = _events()
-    # decide/lapse/resolve all end the pending state; a row Pascal already
+    # decide/lapse/resolve all end the pending state; a row the owner already
     # answered (or that the escrow sweep filed as 留中) owes him nothing.
     closed = {str(e.get("id")) for e in events
               if e.get("ev") in ("decide", "lapse", "resolve")}
@@ -267,7 +270,7 @@ def morning_digest_line(now: datetime | None = None) -> str:
     moment = now or datetime.now()
     rows = ledger_only(24, now=moment)
     # 攒批≥5 is the style contract's threshold for 周知. A card that was going
-    # to ask Pascal for a decision and lost its slot to the daily cap is not
+    # to ask the owner for a decision and lost its slot to the daily cap is not
     # 周知 — holding it back for lacking four companions would be the same
     # silent drop this line exists to end, so any decision-class row in the
     # bin publishes the line on its own.

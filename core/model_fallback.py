@@ -3,7 +3,7 @@
 Real sessions died mid-task on "You've hit your monthly spend limit" and
 "There's an issue with the selected model (claude-fable-5)", followed by the
 harness injecting "Continue from where you left off." → "No response
-requested." — an empty death-loop, with the in-flight work lost. Pascal became
+requested." — an empty death-loop, with the in-flight work lost.the owner became
 the retry button.
 
 This module gives the bot a deterministic fallback: detect a model-unavailable /
@@ -20,12 +20,12 @@ Sticky provider gate (2026-07-07 spend-limit incident): the primary account
 hit its monthly limit at 16:10 and every single call — bot replies, heartbeat
 cycles, background jobs — re-discovered that from scratch for 6.5h: ~11s of
 doomed primary probes per reply, raw error text recorded as assistant turns in
-the live session transcript, and Pascal never told. All failover state was
+the live session transcript, and the owner never told. All failover state was
 per-call locals. gate()/trip()/clear() persist the outage in
 data/provider_state.json (atomic tmp+os.replace under flock, same recipe as
 memory.set_fact — bot.sh handlers, heartbeat and jobs are separate processes)
 so every caller starts on the backup provider, one elected caller re-probes
-primary at most every 30 min, and the first trip pages Pascal once in plain
+primary at most every 30 min, and the first trip pages the owner once in plain
 Chinese through the delivery dead-letter channel (survives a dead loop).
 Stdlib-only on purpose; the dead-letter producer is lazily imported and
 failure to page never breaks the gate.
@@ -47,7 +47,7 @@ DEGRADE_CHAIN = ["opus", "sonnet", "haiku"]
 # Provider-gate state (relative to JARVIS_DIR). Epoch-float fields:
 #   spend_limit_since  — set while the primary account is known-exhausted
 #   last_primary_probe — last time a caller was elected to try primary
-#   notified_at        — last time Pascal was paged (once per episode + 6h
+#   notified_at        — last timethe owner was paged (once per episode + 6h
 #                        anti-flap across episodes; persisted because
 #                        heartbeat restarts must not re-page)
 STATE_FILE = "data/provider_state.json"
@@ -203,7 +203,7 @@ def fallback_for_stderr(current: str, stderr: str) -> str | None:
 
 # ── Sticky cross-process provider gate ──────────────────────────────────────
 
-# Pascal-facing text (no jargon, no backup-provider names).
+# the owner-facing text (no jargon, no backup-provider names).
 _TRIP_NOTES = {
     "session_limit": (
         "Claude 主通道暂时达到本次会话额度，我已自动切到备用通道。"
@@ -270,7 +270,7 @@ class _state_lock:
 
 def _notify_pascal(jarvis_dir: str | Path | None, detail: str,
                    since_ts: float) -> None:
-    """Page Pascal through the delivery dead-letter file (daemon.py consumer
+    """Page the owner through the delivery dead-letter file (daemon.py consumer
     has its own Claude-independent Lark channel — the whole point during a
     provider outage). Lazily imported + guarded: a page failure must never
     break the gate itself."""
@@ -318,7 +318,7 @@ def trip(reason: str = "spend_limit",
          jarvis_dir: str | Path | None = None) -> None:
     """Record 'primary is account-limited' — every subsequent gate() answers
     'backup'. Re-tripping (a failed probe) just re-arms the probe timer.
-    Pages Pascal ONCE per outage EPISODE (first trip only — a re-trip within
+    Pagesthe owner ONCE per outage EPISODE (first trip only — a re-trip within
     the same episode never re-pages, however long it lasts: the old 6h
     cadence re-paged him ~4×/day for a month-long spend limit, 2026-07-08
     red-team fix). A NEW episode (fresh spend_limit_since after a clear())
@@ -349,7 +349,7 @@ def trip(reason: str = "spend_limit",
 
 
 def clear(jarvis_dir: str | Path | None = None) -> None:
-    """Primary answered while the flag was set — reopen it. Tells Pascal the
+    """Primary answered while the flag was set — reopen it. Tellsthe owner the
     main channel is back, but only if he was told about the failover (a
     cooldown-suppressed flap must not produce a lone '恢复了')."""
     path = _state_path(jarvis_dir)

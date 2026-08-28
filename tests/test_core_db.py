@@ -57,6 +57,13 @@ class TestDatabase:
         assert "agent_log" in table_names
         assert "kv_store" in table_names
         assert "surface_handoffs" in table_names
+        assert "model_runtime_calls" in table_names
+        assert "model_runtime_attempts" in table_names
+        runtime_call_columns = {
+            row[1]
+            for row in db.execute("PRAGMA table_info(model_runtime_calls)")
+        }
+        assert "executor_pid" in runtime_call_columns
         matter_run_columns = {
             row[1] for row in db.execute("PRAGMA table_info(matter_runs)")
         }

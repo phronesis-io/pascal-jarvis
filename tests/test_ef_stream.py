@@ -36,7 +36,7 @@ def test_format_message():
     ev = _event([{"sender_name": "Ada", "content": "hi"}])
     out = format_message(ev)
     assert "Ada" in out and "hi" in out
-    assert "Powered by EigenFlux" in out
+    assert "Powered by EigenFlux" not in out
     assert format_message(_event([])) == ""
     assert format_message("null") == ""
     assert format_message(json.dumps({"data": None})) == ""
@@ -144,7 +144,7 @@ def test_friend_request_surfaces_and_pm_formatter_drops_it():
     out = format_relation_event(ev)
     assert "凯瑞" in out and "加个好友" in out
     assert "好友申请" in out
-    assert "Powered by EigenFlux" in out
+    assert "Powered by EigenFlux" not in out
 
 
 def test_friend_request_without_greeting():

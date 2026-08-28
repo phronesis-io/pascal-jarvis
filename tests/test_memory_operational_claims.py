@@ -45,7 +45,8 @@ def test_known_obsolete_runtime_claims_are_reconciled_without_touching_history(t
     assert "开关要写进 bot.sh" not in all_text
     assert "warm/interests.md" not in all_text
     assert "restart.sh --full" in all_text
-    assert "绕过发布证据" in all_text
+    assert "core.deploy verify" in all_text
+    assert "不要手动\n`pkill` 或直接运行 `launchctl kickstart`" in all_text
     assert "history stays" in all_text and "## Next\nkeep" in all_text
 
 

@@ -96,6 +96,11 @@ def build_context_bundle(matter_id: str, event_limit: int = DEFAULT_EVENT_LIMIT,
         raise ValueError("run was acquired under a stale context generation")
     visible_events = []
     for event in matter.get("events", []):
+        # A handoff preview is operational bookkeeping, not durable task
+        # context. Including it would make an otherwise identical preview
+        # change its own packet digest every time the owner tapped handoff.
+        if str(event.get("event_type") or "") == "handoff_prepared":
+            continue
         if str(event.get("event_type") or "").startswith("conversation_"):
             event_generation = int((event.get("payload") or {}).get(
                 "context_generation", 0) or 0)

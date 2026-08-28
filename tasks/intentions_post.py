@@ -73,6 +73,12 @@ def _is_contentless(response: str) -> bool:
     return s in _STATUS_TOKENS
 
 
+def _is_redundant_morning_digest(response: str) -> bool:
+    """Keep intention-check from duplicating the morning anchor's overview."""
+    text = str(response or "").lstrip()
+    return bool(re.match(r"^(?:昨天主线|昨日主线)\s*[:：]", text))
+
+
 def _strip_fences(text: str) -> str:
     """Peel a leading/trailing ``` code fence (with optional language tag)."""
     s = (text or "").strip()
@@ -504,6 +510,7 @@ def _apply_action(intent_id: str, response: str, action: str,
     # Enforce the product boundary here instead of trusting model-selected
     # action prose.
     if action != "silent" and response and not _is_contentless(response) \
+            and not _is_redundant_morning_digest(response) \
             and not quiet_hour and intent_id not in PRODUCT_LOGS:
         user_messages.append(response)
         row = None
@@ -667,6 +674,11 @@ def _emit_closure_card(combined: str, button_specs: list,
             mid, _ = memorial.create(
                 source="intentions", title=title, body=combined,
                 work_receipt="核验触发条件、执行记录和当前完成状态",
+                owner_need="judgment",
+                why_now="承诺已到复核时点，系统已完成状态核验但不能代替本人确认",
+                owner_action="确认完成、继续或暂时放下这项承诺",
+                silence_cost="不提示会让已到复核点的承诺继续保持错误状态",
+                attention="decision",
                 options=options,
                 authoring_protocol=True, send=False,
                 matter_id=matter_id,
@@ -676,7 +688,7 @@ def _emit_closure_card(combined: str, button_specs: list,
                 # 2026-08-26 12:27/12:29) saw ``matter:mat_…`` — a fresh key,
                 # a second delivered card on the same question.
                 dedup_key=f"intent-decision:{matter_id}")
-            print(memorial.card_json(mid))
+            print(memorial.pipeline_card_json(mid))
             return True
         except Exception as e:
             print(f"[intentions_post] memorial failed, using plain card: {e}",
@@ -841,7 +853,7 @@ def main():
                 if not rendered:
                     return
                 _ledger_append(covered, card_roots=sorted(nag_roots))
-                # Proactive closure budget counts Pascal-visible asks, not row
+                # Proactive closure budget counts the owner-visible asks, not row
                 # creation. Duplicate-suppressed cards do not call this path.
                 for spec in button_specs:
                     try:

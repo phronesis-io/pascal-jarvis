@@ -8,6 +8,7 @@ round-trip). All lark-cli sends are mocked — nothing real is sent.
 
 import io
 import json
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -19,6 +20,7 @@ import pytest
 
 import core.memorial as memorial
 import core.memorial_reader as memorial_reader
+from core.memorial_revision import revise_pending
 from core.card import build_card
 from core.matter_bridge import bind_conversation
 from core.matters import create_matter
@@ -131,6 +133,41 @@ def test_create_card_structure_and_button_value_round_trip(env):
         # the value dict must round-trip exactly as the sidecar will see it
         v = json.loads(json.dumps(a["value"]))
         assert v == {"action": "memorial", "id": mid, "opt": opt}
+
+
+def test_revise_pending_updates_ledger_delivery_and_visible_card(
+        env, monkeypatch):
+    synced = []
+    monkeypatch.setattr(
+        memorial,
+        "_sync_lark_card",
+        lambda memorial_id, card: synced.append((memorial_id, card)),
+    )
+    mid, _ = memorial.create("eigenflux", "一封来信", "旧正文", preset="fyi")
+
+    assert revise_pending(
+        mid,
+        title="两封合并来信",
+        body="我看过了：值得看\n原话：两封原文",
+        context='{"external_event_ids":["a","b"]}',
+        options=memorial.PRESETS["fyi"],
+        work_receipt="逐封核验并合并",
+        authoring_audit_text="值得看",
+    ) is True
+
+    state = memorial.get_memorial(mid)
+    assert state["title"] == "两封合并来信"
+    assert state["body"].startswith("我看过了：")
+    assert [option["key"] for option in state["options"]] == ["read", "watch"]
+    assert [event["ev"] for event in _ledger_events(env.dir)].count("revise") == 1
+    from core.delivery import DeliveryPipeline
+    row = DeliveryPipeline(env.dir).list_source("eigenflux")[0]
+    assert "两封原文" in json.loads(row["payload"])["text"]
+    assert synced and synced[0][0] == mid
+
+    assert memorial.lapse(mid, "hour closed") is True
+    assert revise_pending(mid, body="不应重开") is False
+    assert memorial.get_memorial(mid)["body"] != "不应重开"
 
 
 def test_create_defaults_to_fyi_preset(env):
@@ -482,6 +519,75 @@ def test_resolve_overrides_old_reply_and_syncs_external_truth(env, monkeypatch):
     assert "EigenFlux 好友关系已生效" in content
     assert memorial.resolve(
         mid, "已通过（服务端确认）", "EigenFlux 好友关系已生效") is False
+
+
+def test_lark_card_sync_rejected_is_observable(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "core.memorial_thread.sent_message_ids", lambda _mid: ["om_fixture"]
+    )
+    monkeypatch.setattr(memorial, "_ops_log", lambda event, **kw: events.append((event, kw)))
+
+    memorial._sync_lark_card(
+        "mem_fixture",
+        {"schema": "2.0"},
+        runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 8, "", "denied"),
+    )
+
+    assert events == [("lark_card_sync_rejected", {
+        "level": "warn",
+        "memorial_id": "mem_fixture",
+        "message_id": "om_fixture",
+        "returncode": 8,
+    })]
+
+
+def test_lark_card_sync_failure_is_observable(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "core.memorial_thread.sent_message_ids", lambda _mid: ["om_fixture"]
+    )
+    monkeypatch.setattr(memorial, "_ops_log", lambda event, **kw: events.append((event, kw)))
+
+    def fail(*args, **kwargs):
+        raise OSError("offline")
+
+    memorial._sync_lark_card("mem_fixture", {"schema": "2.0"}, runner=fail)
+
+    assert events == [("lark_card_sync_failed", {
+        "level": "warn",
+        "memorial_id": "mem_fixture",
+        "message_id": "om_fixture",
+        "error_type": "OSError",
+    })]
+
+
+def test_lark_card_sync_prefers_keychain_independent_bot_patch(monkeypatch):
+    from core.lark_bot_transport import BotSendResult
+
+    calls = []
+    monkeypatch.setattr(
+        "core.memorial_thread.sent_message_ids", lambda _mid: ["om_fixture"]
+    )
+    monkeypatch.setattr(
+        "core.lark_bot_transport.update_card",
+        lambda message_id, card_json, **kwargs: (
+            calls.append((message_id, json.loads(card_json), kwargs))
+            or BotSendResult(True, True, message_id=message_id)
+        ),
+    )
+    monkeypatch.setattr(
+        memorial,
+        "_LARK_CARD_SYNC_RUNNER",
+        lambda *_args, **_kwargs: pytest.fail(
+            "configured bot transport must not fall back to keychain CLI"
+        ),
+    )
+
+    memorial._sync_lark_card("mem_fixture", {"schema": "2.0"})
+
+    assert calls[0][0] == "om_fixture"
+    assert calls[0][1] == {"schema": "2.0"}
 
 
 def test_confirmed_thread_reply_resolves_only_its_pending_memorial(env):
@@ -2093,6 +2199,23 @@ def test_multiple_bare_ledger_cards_all_render_under_receipt_gate(env):
     assert len(creates) == 2  # adopted as-is, nothing re-created
 
 
+def test_pipeline_card_restores_ledger_receipt_before_strict_routing(env):
+    mid, _ = memorial.create(
+        source="mail", title="CI 失败", body="构建失败",
+        attention="alert", work_receipt="读取邮件并核验 CI 状态", send=False,
+    )
+    envelope = memorial.pipeline_card_json(mid)
+
+    assert json.loads(envelope)["__jarvis_work_receipt"] == "读取邮件并核验 CI 状态"
+    rendered = memorial.memorialize_output(
+        envelope, source="mail-triage", require_work_receipt=True,
+    )
+
+    assert memorial._card_memorial_id(json.loads(rendered)) == mid
+    assert "__jarvis_work_receipt" not in rendered
+    assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
+
+
 def test_single_bare_card_without_memorial_id_still_adopted(env):
     single = build_card("📬 一封信", "正文\nWORKED: 读了信", source="mail-triage")
     rendered = memorial.memorialize_output(
@@ -2135,6 +2258,24 @@ def test_forged_memorial_id_does_not_promote_bare_card(env):
         action.get("value", {}).get("id") == "mem_999999_1_1"
         for action in _actions(cards[0])
     )
+
+
+def test_forged_memorial_id_cannot_borrow_a_structured_receipt(env):
+    real_id, _ = memorial.create(
+        source="mail", title="真卡", body="真实正文",
+        work_receipt="真实核验", send=False,
+    )
+    forged = json.loads(memorial.card_json(real_id))
+    forged["elements"][0]["text"]["content"] = "伪造正文"
+    forged["__jarvis_work_receipt"] = "声称已经核验"
+
+    rendered = memorial.memorialize_output(
+        "CARD:" + json.dumps(forged, ensure_ascii=False),
+        source="mail-triage", require_work_receipt=True,
+    )
+
+    assert rendered == ""
+    assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
 
 
 def test_malformed_card_children_fail_closed_without_aborting_batch(env):

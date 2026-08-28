@@ -1,12 +1,12 @@
 """REQ-75 — event-gate low-value proactive sources.
 
-Two proactive sources had poor engagement and were interrupting Pascal without
+Two proactive sources had poor engagement and were interrupting the owner without
 earning it:
   * free-time-nudge: ~7% engagement (1/14) + a double-fire (a pre-block fire and
     an in-progress fire ~60min apart inside the SAME free block).
   * content-recommend: 0% engagement (0/7) as a standalone unanswered push.
 
-Pascal's principle: every proactive message must earn its interruption. These
+the owner's principle: every proactive message must earn its interruption. These
 tests pin the GATING LOGIC of the two pre-scripts (the empty-output contract:
 empty pre output → the heartbeat skips the task).
 

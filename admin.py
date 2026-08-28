@@ -63,7 +63,9 @@ ADMIN_TOKEN = str(CONFIG.admin.get("token", "") or "")
 _post_token_cache: dict = {"path": None, "token": ""}
 
 # Hosts a browser is allowed to address this admin as. Anything else (DNS
-# rebinding, a LAN name, a public IP) is rejected on state-changing verbs.
+# rebinding, a LAN name, a public IP) is rejected before private reads or
+# state-changing verbs. Health and sanitized RichView pages are the two
+# deliberate public-read exceptions.
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
 # Trigger file consumed by core.heartbeat_loop — file CONTENT is the bare
@@ -1336,6 +1338,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path.startswith("/view/"):
             view_id = path.split("/view/")[1].split("/")[0].split("?")[0]
             self._serve_richview(view_id)
+            return
+
+        if not self._check_host():
+            self._json({"error": "forbidden: Host must be localhost"}, status=403)
             return
 
         if not self._check_auth():

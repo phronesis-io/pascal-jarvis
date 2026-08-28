@@ -372,7 +372,8 @@ def add_event(matter_id: str, event_type: str, summary: str = "",
 
 def link_entity(matter_id: str, entity_type: str, entity_id: str,
                 provider: str = "", title: str = "", metadata: dict | None = None,
-                actor: str = "user", move: bool = False) -> dict:
+                actor: str = "user", move: bool = False,
+                move_from_terminal: bool = False) -> dict:
     matter = get_matter(matter_id, include_links=False, include_events=False)
     if matter is None:
         raise KeyError(f"matter not found: {matter_id}")
@@ -385,6 +386,8 @@ def link_entity(matter_id: str, entity_type: str, entity_id: str,
         raise ValueError(f"invalid provider: {provider}")
     if not entity_id:
         raise ValueError("entity_id is required")
+    if move_from_terminal and entity_type != "session":
+        raise ValueError("terminal auto-move is allowed only for session links")
     now = _now()
     db = _db()
     try:
@@ -396,10 +399,21 @@ def link_entity(matter_id: str, entity_type: str, entity_id: str,
         ).fetchone()
         if existing is not None:
             old = dict(existing)
-            if old["matter_id"] != matter_id and not move:
-                raise ValueError(
-                    f"{provider}:{entity_type}:{entity_id} is already linked to "
-                    f"{old['matter_id']}; pass move=True to move it")
+            if old["matter_id"] != matter_id:
+                terminal_move_allowed = False
+                if move_from_terminal:
+                    old_matter = db.execute(
+                        "SELECT status FROM matters WHERE id = ?",
+                        (old["matter_id"],),
+                    ).fetchone()
+                    terminal_move_allowed = bool(
+                        old_matter
+                        and str(old_matter["status"]) in {"done", "archived"}
+                    )
+                if not move and not terminal_move_allowed:
+                    raise ValueError(
+                        f"{provider}:{entity_type}:{entity_id} is already "
+                        f"linked to {old['matter_id']}; pass move=True to move it")
             if old["matter_id"] != matter_id:
                 db.execute(
                     "UPDATE matter_links SET matter_id = ?, title = ?, metadata = ?, updated_at = ? "

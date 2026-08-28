@@ -1,7 +1,7 @@
 """Report EigenFlux auto-replies into the silent activity log.
 
 tasks/activity_log_pre.sh runs this as ``python3 -m core.autoreply_activity``.
-Auto-replies raise no card, so this report is the only place Pascal's day
+Auto-replies raise no card, so this report is the only place the owner's day
 shows the outbound side of the 2026-08-20 "有些你可以自动回复掉吧" feature.
 
 The reader keeps a byte-offset high-water cursor beside the ledger: every run

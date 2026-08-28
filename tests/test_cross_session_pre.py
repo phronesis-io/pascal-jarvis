@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -110,3 +111,53 @@ def test_invalid_post_keeps_batch_retryable(tmp_path):
     )
     assert invalid.returncode == 1
     assert json.loads(_run_pre(tmp_path).stdout)["batch_id"] == batch["batch_id"]
+
+
+def test_three_invalid_posts_fail_poison_batch_and_release_new_source(tmp_path):
+    session = _session(tmp_path)
+    session.write_text(
+        _turn("user", "毒批次", "2026-08-27T10:00:00Z"), encoding="utf-8"
+    )
+    first = json.loads(_run_pre(tmp_path).stdout)
+    with session.open("a", encoding="utf-8") as handle:
+        handle.write(_turn("user", "后续新决定", "2026-08-27T11:00:00Z"))
+
+    for attempt in range(1, 4):
+        failed = subprocess.run(
+            [sys.executable, str(POST)], input="not json", capture_output=True,
+            text=True, env=_env(tmp_path),
+        )
+        assert failed.returncode == 1
+        assert f'"attempts": {attempt}' in failed.stderr
+        if attempt < 3:
+            assert json.loads(_run_pre(tmp_path).stdout)["batch_id"] == first["batch_id"]
+
+    next_batch = json.loads(_run_pre(tmp_path).stdout)
+    assert next_batch["batch_id"] != first["batch_id"]
+    assert [item["text"] for item in next_batch["sources"]] == ["后续新决定"]
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        status, attempts = db.execute(
+            "SELECT status,attempts FROM memory_compile_batches WHERE id=?",
+            (first["batch_id"],),
+        ).fetchone()
+    assert (status, attempts) == ("failed", 3)
+
+
+def test_heartbeat_ok_is_a_failure_when_a_compile_batch_is_pending(tmp_path):
+    session = _session(tmp_path)
+    session.write_text(
+        _turn("user", "不能假绿", "2026-08-27T10:00:00Z"), encoding="utf-8"
+    )
+    batch = json.loads(_run_pre(tmp_path).stdout)
+    result = subprocess.run(
+        [sys.executable, str(POST)], input="HEARTBEAT_OK", capture_output=True,
+        text=True, env=_env(tmp_path),
+    )
+    assert result.returncode == 1
+    assert "received no compile envelope" in result.stderr
+    with sqlite3.connect(tmp_path / "jarvis.db") as db:
+        status, attempts = db.execute(
+            "SELECT status,attempts FROM memory_compile_batches WHERE id=?",
+            (batch["batch_id"],),
+        ).fetchone()
+    assert (status, attempts) == ("pending", 1)

@@ -121,7 +121,7 @@ if msgs:
 fi
 
 # ── 2.5 EigenFlux private messages Jarvis answered by itself ──
-# 2026-08-20, Pascal: "有些你可以自动回复掉吧，不一定要找我". Those replies raise
+# 2026-08-20,用户: "有些你可以自动回复掉吧，不一定要找我". Those replies raise
 # no card, so they would otherwise be invisible in his day.
 # core.autoreply_activity keeps a consumed-offset cursor beside the ledger and
 # reports EVERY row since the last report — the hourly gate above therefore

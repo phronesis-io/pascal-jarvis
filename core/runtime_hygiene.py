@@ -30,6 +30,8 @@ TEMP_PATTERNS = (
     "jarvis-*-audit.*",
     "jarvis-tailscaled.log",
 )
+MEMORY_GC_LOOSE_OBJECTS = 1000
+MEMORY_GC_LOOSE_KIB = 50 * 1024
 
 
 def _table_exists(db: sqlite3.Connection, name: str) -> bool:
@@ -168,16 +170,48 @@ def memory_git_gc(
     if path is None or not (path / ".git").is_dir():
         return {"status": "not_a_repository"}
     try:
-        result = runner(
-            ["git", "-C", str(path), "gc", "--auto"],
+        count_result = runner(
+            ["git", "-C", str(path), "count-objects", "-v"],
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
+        if count_result.returncode != 0:
+            return {"status": "error", "stage": "count_objects"}
+        metrics: dict[str, int] = {}
+        for line in str(getattr(count_result, "stdout", "") or "").splitlines():
+            key, separator, value = line.partition(":")
+            if not separator:
+                continue
+            try:
+                metrics[key.strip()] = int(value.strip())
+            except ValueError:
+                continue
+        loose_objects = metrics.get("count", 0)
+        loose_kib = metrics.get("size", 0)
+        full_gc = (
+            loose_objects >= MEMORY_GC_LOOSE_OBJECTS
+            or loose_kib >= MEMORY_GC_LOOSE_KIB
+        )
+        command = ["git", "-C", str(path), "gc"]
+        timeout = 300 if full_gc else 60
+        command.append("--quiet" if full_gc else "--auto")
+        result = runner(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "error", "error": type(exc).__name__}
-    return {"status": "ok" if result.returncode == 0 else "error"}
+    return {
+        "status": "ok" if result.returncode == 0 else "error",
+        "mode": "full" if full_gc else "auto",
+        "loose_objects": loose_objects,
+        "loose_kib": loose_kib,
+    }
 
 
 def maintain(

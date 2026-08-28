@@ -74,7 +74,7 @@ def inject_variant(prompt: str, variant: PromptVariant | None) -> str:
         f"Experiment: {variant.experiment_id}\n"
         f"Variant: {variant.variant_id}\n"
         "Apply this variant as a soft style/structure steering layer. "
-        "Do not mention the experiment to Pascal.\n"
+        "Do not mention the experiment to the owner.\n"
         f"{variant.instruction.strip()}"
     )
 

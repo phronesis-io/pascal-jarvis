@@ -127,7 +127,7 @@ def _is_past(mmdd: str) -> bool:
     cancellation — it already happened. Before this guard, a resync after a
     quiet stretch reported every elapsed event as 取消 (2026-08-19: two cards
     at once, '取消：8/17 羽毛球' and '取消：8/18 白皮书 + Vic 讨论', for
-    things Pascal had already done — "也不叫取消吧，做完了？"). A same-day
+    thingsthe owner had already done — "也不叫取消吧，做完了？"). A same-day
     removal IS a real cancellation and is deliberately kept.
     """
     if not mmdd:
@@ -142,7 +142,7 @@ def _is_past(mmdd: str) -> bool:
 
 
 def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
-    """Human-complete card body for a calendar change (Pascal's 2026-07-14
+    """Human-complete card body for a calendar change (the owner's 2026-07-14
     complaint — the old card said just "新增: 15:00 X" with no date):
     every line carries the DATE and weekday, a same-title add+remove pair is
     presented as ONE 改期 line (old→new) instead of a confusing add/cancel
@@ -198,7 +198,7 @@ def change_card_bodies(lines: list[str]) -> list[str]:
     """Card bodies for a batch of calendar changes.
 
     Delegates to core.card_split so this hook and the memorial backstop apply
-    ONE rule: 2–3 changes are 一张卡一件事 (Pascal's 7/10 decree, REQ-117 —
+    ONE rule: 2–3 changes are 一张卡一件事 (the owner's 7/10 decree, REQ-117 —
     on 7/21 he explicitly wanted three cards for three shifted meetings); a
     longer list stays on one card (2026-08-07, after 9 日程变动 cards in a day
     drew 0 taps). The …另有 N 项 overflow counter is never a matter of its

@@ -7,7 +7,7 @@ import re as _re
 # Every user-facing surface that mentions a heartbeat task or delivery source
 # must speak Chinese a non-engineer understands (feedback-card-style-contract,
 # 2026-08-24: guardian/selfmon cards read「reply-followup ... STARVED」and
-# 「- selfmon / c…」to Pascal). One shared map so watermarks, brain_health and
+# 「- selfmon / c…」to the owner). One shared map so watermarks, brain_health and
 # the guardian daemon can never drift apart. Deliberately import-free: this
 # module sits at the bottom of the core import graph and must stay there.
 #
@@ -56,7 +56,6 @@ TASK_DISPLAY_NAMES: dict[str, str] = {
     "thinking-review": "思考回顾",
     # 运维
     "self-diagnostic": "系统自检",
-    "self-improve-cycle": "自我改进",
     "delegation-reconcile": "委托任务核对",
     "iteration-observe": "迭代观察",
     "log-maintenance": "日志维护",
@@ -167,7 +166,7 @@ def _suffix_chars(text: str, limit: int, *, word_boundary: bool) -> str:
 
 
 # Mechanism words the closure machinery historically stacked onto intent
-# names —「闭环: X 后闭环」/「闭环再问: …」reached the owner verbatim as card
+# names —「闭环: X 后闭环」/「闭环再问: …」reachedthe owner verbatim as card
 # titles (2026-08-24 audit; the style contract says a title carries the
 # matter itself, not the mechanism). Lives here, not in core.intentions,
 # because tasks/intentions_post.py needs it for legacy rows too.

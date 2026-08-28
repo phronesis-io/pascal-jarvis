@@ -17,11 +17,54 @@ from core.actions import ActionProcessor
 from core.eigenflux_messages import (
     CliFailure,
     EigenFluxApiClient,
+    EigenFluxMessageError,
     EigenFluxMessenger,
     MessageReceipt,
     RecipientAmbiguous,
     RecipientNotFound,
 )
+
+
+def test_message_privacy_gate_runs_before_friend_resolution(tmp_path):
+    cli = FakeEigenFlux()
+    messenger = _messenger(tmp_path, cli)
+
+    with pytest.raises(EigenFluxMessageError, match="business-metric"):
+        messenger.send("Family agent", "当前用户数 12000")
+
+    assert cli.calls == []
+
+
+def test_action_privacy_gate_blocks_even_a_substituted_messenger(
+    monkeypatch, tmp_path,
+):
+    sent = []
+
+    class Messenger:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send(self, recipient, content, repeat_token=""):
+            sent.append((recipient, content, repeat_token))
+            raise AssertionError("privacy gate must run before transport")
+
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger", Messenger
+    )
+    processor = ActionProcessor(
+        jarvis_dir=tmp_path,
+        memory_dir=tmp_path / "memory",
+        jobs_dir=tmp_path / "jobs",
+    )
+    encoded = base64.b64encode("当前用户数 12000".encode()).decode()
+
+    result = processor._do_eigenflux_message(
+        f"recipient=Family agent|content_b64={encoded}"
+    )
+
+    assert "business-metric" in result
+    assert "未发送" in result
+    assert sent == []
 
 
 class FakeEigenFlux:
@@ -791,10 +834,14 @@ def test_uncertain_action_projects_stable_key_for_later_reconciliation(
 
 
 def test_reconciler_projects_an_unclaimed_message_receipt(
-    tmp_path,
+    monkeypatch, tmp_path,
 ):
     from core.delegation_reconcile import DelegationReconciler
     from core.delegations import DelegationStore
+
+    eigenflux_home = tmp_path / ".eigenflux"
+    eigenflux_home.mkdir()
+    monkeypatch.setenv("EIGENFLUX_HOME", str(eigenflux_home))
 
     cli = FakeEigenFlux()
     cli.history_error = True

@@ -39,6 +39,10 @@ def lifedir(tmp_path, monkeypatch):
 
 def _sub_env(tmp_path) -> dict:
     """Env for script subprocesses: JARVIS_DIR + MEMORY_DIR fully isolated."""
+    (tmp_path / "jarvis.yaml").write_text(
+        "retained_rhythms:\n  checkin: true\n  exercise_week: true\n",
+        encoding="utf-8",
+    )
     return {**os.environ,
             "JARVIS_DIR": str(tmp_path),
             "MEMORY_DIR": str(tmp_path / "memory"),

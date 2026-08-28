@@ -11,7 +11,7 @@ from typing import Any
 from core.matter_runs import get_run
 
 
-CONNECTOR_VERSION = "0.3.1"
+CONNECTOR_VERSION = "0.4.0"
 SURFACES = {"desktop", "mobile"}
 TARGET_PER_SURFACE = 20
 FEEDBACK_PROMPT = (
@@ -274,7 +274,7 @@ def record_acceptance(
 def record_owner_feedback(
     run_id: str, feedback: str, *, now: float | None = None,
 ) -> dict[str, Any]:
-    """Record Pascal's exact label response for one previously prompted run."""
+    """Record the owner's exact label response for one previously prompted run."""
     parsed = parse_owner_feedback(feedback)
     run = get_run(run_id)
     if run is None:

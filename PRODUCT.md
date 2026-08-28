@@ -47,8 +47,12 @@ verified Context Packet/Result Receipt contract. This is not yet a claim that
 the production migration is complete. Until 20 desktop and 20 mobile journeys
 pass acceptance, Lark remains the current reliable proactive transport. No
 feature may drop its existing reachable path merely because code exists.
+An explicit owner handoff can now prepare and verify an empty Codex task through
+the supported local app-server API without starting work or taking a Matter
+lease. Mobile appearance and continuation remain acceptance claims; Lark keeps
+the stable manual phrase until real samples prove them.
 Each eligible continuation may ask for feedback once, after the work result:
-Pascal can reply with one short published label or ignore it forever. Jarvis
+the owner can reply with one short published label or ignore it forever. Jarvis
 stores the exact owner words and deterministic dimensions; it never translates
 silence, praise, or its own confidence into migration evidence.
 
@@ -88,6 +92,11 @@ silence, praise, or its own confidence into migration evidence.
 The concrete decision table and desktop/mobile journeys are authoritative in
 `docs/codex_jarvis_user_journey.md`; implementation versus release versus
 real-use evidence is tracked in `docs/codex_frontstage_completion_audit.md`.
+The owner-facing daily path and example phrases live in
+`docs/jarvis_codex_daily_use.md`.
+The same boundary is executable through the read-only
+`jarvis_operating_model` connector tool, so a clean Codex task can answer
+"when do I need Jarvis?" without inventing a new division of responsibility.
 
 ## Product Principles
 
@@ -141,6 +150,15 @@ real-use evidence is tracked in `docs/codex_frontstage_completion_audit.md`.
 25. Native work systems remain authoritative: Git/GitHub owns code history and
     review; Lark owns its native communication objects; Jarvis links only the
     minimum evidence needed for continuity and closure.
+26. An interruption must earn its context switch. Every proactive message
+    declares the irreplaceable owner need and why it matters now; work Jarvis
+    can still do, self-healed incidents, and facts that can wait for a later
+    Codex question remain in the ledger. Silence is never assent.
+27. Engagement is not an outcome. Jarvis may protect expiring value, return an
+    entrusted result, surface a material external change, unlock one owner-only
+    decision, or honor a retained rhythm; it must never manufacture a reason
+    to chat. Zero messages is healthy unless an owed result or trigger has
+    become an undelivered obligation.
 
 ## Non-Goals
 

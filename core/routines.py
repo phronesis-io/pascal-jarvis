@@ -1,4 +1,4 @@
-"""User-authored Routines — recurring work Pascal can create by talking.
+"""User-authored Routines — recurring workthe owner can create by talking.
 
 Before this module every proactive behavior in Jarvis was developer-authored:
 a `tasks/<name>_pre.sh` + `_post.py` pair, a block in HEARTBEAT.md, and a
@@ -759,6 +759,10 @@ def apply_run_result(payload: dict) -> list[dict]:
                 source=f"routine:{routine['name']}"[:40],
                 title=title, body=card_body,
                 work_receipt=work_receipt,
+                owner_need="scheduled_companion",
+                why_now="你创建的例程已到触发时间并完成本轮证据采集",
+                owner_action="只需选择继续、暂停或忽略本轮",
+                silence_cost="不提示会错过你主动保留的这一次陪伴节奏",
                 options=_card_options(routine),
                 dedup_key=f"routine:{routine['id']}:{run_id}",
                 context=json.dumps({"kind": "routine_run",
@@ -771,7 +775,7 @@ def apply_run_result(payload: dict) -> list[dict]:
                         "memorial_id": memorial_id})
         except Exception as exc:
             # The work happened; only the card failed. Record it as failed so
-            # the run is not counted as reaching Pascal.
+            # the run is not counted as reaching the owner.
             finish_run(run_id, "failed", output=body, actions=action_results,
                        error=f"发卡失败：{type(exc).__name__}: {exc}")
             out.append({"run_id": run_id, "status": "failed"})

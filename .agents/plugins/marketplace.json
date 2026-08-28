@@ -1,7 +1,7 @@
 {
   "name": "pascal-jarvis",
   "interface": {
-    "displayName": "Pascal Jarvis"
+    "displayName": "Jarvis"
   },
   "plugins": [
     {
