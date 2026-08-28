@@ -661,11 +661,12 @@ code archive is git history.
 - Configure `openai.api_key` or `OPENAI_API_KEY` for the final API fallback.
   Main-chat fallback can use the bounded `bash`, `file_read`, and `file_write`
   loop in `core.openai_fallback`; pass `--no-tools` for text-only operation.
-  Owner background jobs retain the tool loop. Group conversations, heartbeat,
+  Owner background jobs retain the tool loop. Group/untrusted conversations,
   EigenFlux analysis, progress narration, and session compaction use text-only
-  paths by design. Auxiliary paths retain their own Claude/relay/API order
-  through `core.aux_model`; only the owner's live Lark conversation uses the
-  local Codex CLI rung.
+  paths by design. Heartbeat capabilities follow each stored task policy and
+  execute through `core.heartbeat_model` plus the shared `core.model_runtime`;
+  auxiliary paths use the same runtime through `core.aux_model`. Only the
+  owner's live Lark conversation uses the local Codex CLI rung.
 - Ask `/usage` (or naturally ask about package allowance) in the owner Lark
   chat, or use the Codex `jarvis_model_status` tool. Codex reports available
   account windows and reset times exactly. Claude-compatible relays and API

@@ -22,6 +22,7 @@ One `RuntimeRequest` declares:
 - a required task ID and optional Matter ID;
 - trust context and route preference;
 - requested model tier, if any;
+- an optional ordered route subset when a caller has a narrower contract;
 - effect authority: none, read-only, workspace write, or external;
 - whether tools are available;
 - one total wall-clock budget.
@@ -50,8 +51,16 @@ then persists one call receipt and one row per attempt.
     cancellation with unknown effect state also requires reconciliation.
 11. The request digest covers system and user prompts while persisting neither;
     model identifiers are bounded and reject control characters.
-12. After a tool-capable provider process starts, later error text cannot prove
-    that no tool ran; automatic cross-route replay stops for reconciliation.
+12. After a tool-capable provider process starts, later execution/transport
+    error text cannot prove that no tool ran; automatic cross-route replay
+    stops for reconciliation. Explicit account/model/auth/rate/overload
+    admission rejection remains pre-execution and may fail over.
+13. Replay safety and provider health are separate judgments: an ambiguous
+    tool-capable network failure cannot be replayed, but still cools the broken
+    route for later calls.
+14. Generic `opus` means the configured high-quality tier. A relay receives
+    its own configured Opus alias; explicit `sonnet` and `haiku` tiers remain
+    portable across Claude-compatible routes.
 
 ## Current Implementation
 
@@ -59,8 +68,14 @@ then persists one call receipt and one row per attempt.
   read-only CLI.
 - `core.aux_model`: Claude CLI and OpenAI Responses adapters now consume the
   shared runtime instead of maintaining their own provider loop.
-- Migrated callers: compaction, EigenFlux analysis, and heartbeat idle-noise
-  classification, each with a stable task attribution.
+- `core.heartbeat_model`: route-specific prompt composition, isolated
+  credentials, Claude CLI/OpenAI adapters, bounded relay timeouts, usage
+  observations, and transient redacted diagnostics.
+- Migrated callers: compaction, EigenFlux analysis, heartbeat idle-noise
+  classification, and all primary heartbeat task execution. Solo and batch
+  heartbeat calls carry stable task IDs and durable per-attempt receipts.
+- The previous heartbeat provider loop and its duplicate timeout/fallback
+  helpers have been deleted; heartbeat now has one provider execution path.
 - SQLite migration v16: `model_runtime_calls` and `model_runtime_attempts`.
 - `model-runtime` component: observation-only checks for stale calls, receipt
   mismatch, repeated recent failure, and recent ambiguous write/external
@@ -69,7 +84,6 @@ then persists one call receipt and one row per attempt.
 ## Remaining Migration
 
 - Main owner/group Lark conversation execution in `bot.sh`.
-- Primary heartbeat task execution in `core.heartbeat`.
 - Self-improve coding worker, after its acquire/run/release receipt is mapped
   without weakening its independent lifecycle boundary.
 - Per-provider cost adapters where a provider returns authoritative usage.
@@ -96,4 +110,5 @@ Phase 3 remains partial and the architecture gate cannot ban every legacy loop.
 - replaying an uncertain side effect to improve availability;
 - pretending provider allowance or cost is known when no authoritative API
   exposes it;
-- migrating the two high-risk main loops in the same unreviewable rewrite.
+- migrating the remaining owner-chat and self-improve loops without their own
+  focused review and runtime evidence.

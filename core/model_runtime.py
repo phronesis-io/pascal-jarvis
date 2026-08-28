@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from core.config import Config
-from core.model_control import CONTEXTS, ModelRoute, route_plan
+from core.model_control import CONTEXTS, ROUTE_IDS, ModelRoute, route_plan
 
 
 EFFECT_AUTHORITIES = {"none", "read_only", "workspace_write", "external"}
@@ -39,6 +39,16 @@ VALID_ZERO_ATTEMPT_REASONS = {
     "total_timeout",
 }
 MAX_MODELS_PER_ROUTE = 3
+PROVIDER_HEALTH_FAILURE_REASONS = {
+    "account_limit",
+    "auth_error",
+    "cli_unavailable",
+    "network_error",
+    "rate_limited",
+    "server_error",
+    "server_overloaded",
+    "timeout",
+}
 REASON_CODES = ADAPTER_STATUSES | {
     "account_limit",
     "adapter_failure",
@@ -67,6 +77,7 @@ class RuntimeRequest:
     system_prompt: str = ""
     matter_id: str = ""
     requested_model: str = ""
+    route_ids: tuple[str, ...] = ()
     preference: str = "auto"
     gate_state: str = "primary"
     effect_authority: str = "none"
@@ -93,6 +104,13 @@ class RuntimeRequest:
             and _sanitize_model(requested_model) != requested_model
         ):
             raise ValueError("model runtime requested_model is invalid")
+        if any(not isinstance(item, str) for item in self.route_ids):
+            raise ValueError("model runtime route_ids contain unsupported route")
+        if len(set(self.route_ids)) != len(self.route_ids):
+            raise ValueError("model runtime route_ids must be unique")
+        unknown_routes = [item for item in self.route_ids if item not in ROUTE_IDS]
+        if unknown_routes:
+            raise ValueError("model runtime route_ids contain unsupported route")
         if self.effect_authority in {"workspace_write", "external"} \
                 and not self.allow_tools:
             raise ValueError(
@@ -217,6 +235,14 @@ def _requested_family(model: str) -> str:
 def _model_for_route(requested: str, route: ModelRoute) -> str:
     requested = _sanitize_model(requested)
     if not requested:
+        return _sanitize_model(route.model)
+    if (
+        requested.lower() == "opus"
+        and route.id in {"backup1", "backup2"}
+    ):
+        # ``opus`` is Jarvis' generic quality tier, not a portable relay model
+        # identifier. Each Claude-compatible relay keeps its configured Opus
+        # alias, while explicit cheap tiers remain portable across relays.
         return _sanitize_model(route.model)
     family = _requested_family(requested)
     if family == route.model_family or route.model_family == "other":
@@ -419,6 +445,7 @@ def execute(
         preference=request.preference,
         gate_state=request.gate_state,
         health_rows=health_rows or [],
+        route_ids=request.route_ids or None,
     )
     if request.allow_tools and not plan.allow_tools:
         raise ValueError(
@@ -528,9 +555,12 @@ def execute(
                     else "cancelled"
                 )
                 break
-            if outcome.status in {
-                "transport_failure", "preexecution_failure"
-            }:
+            if (
+                outcome.status in {
+                    "transport_failure", "preexecution_failure"
+                }
+                or terminal_reason in PROVIDER_HEALTH_FAILURE_REASONS
+            ):
                 try:
                     observe(route.id, "unhealthy", terminal_reason)
                 except Exception:

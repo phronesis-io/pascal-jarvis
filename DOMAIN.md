@@ -86,8 +86,14 @@ recovered speculatively. Interrupted write/external work becomes `ambiguous`,
 never a retryable-looking failure.
 An effectful cancellation with unknown effect state is likewise `ambiguous`.
 The request digest covers both system and user prompts while persisting neither.
-A tool-capable provider process is considered effect-uncertain once launched;
-later error text alone cannot authorize automatic failover.
+A tool-capable provider process is effect-uncertain after model execution may
+have begun; later execution or transport error text alone cannot authorize
+automatic failover. Explicit account/model/auth/rate/overload admission
+rejection remains pre-execution and may move routes.
+An explicit route subset narrows a caller's authority; it cannot introduce a
+route forbidden by the call context. Route health is observed independently
+from replay permission: an ambiguous network failure may cool a provider even
+though the original effectful call must stop for reconciliation.
 
 ### Intent
 

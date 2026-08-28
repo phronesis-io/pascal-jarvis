@@ -162,14 +162,21 @@ a third-party provider CLI remains that CLI's responsibility.
 
 Heartbeat model choice is task policy, separate from provider execution.
 `HEARTBEAT.md` may select a quality tier or the GPT route; `core.heartbeat`
-validates that declaration, isolates outbound/untrusted contexts, selects a
-compatible provider, and records the model that actually answered. One
-logical call owns one wall-clock budget. Provider recovery is measured by the
-small `provider-canary`; a full production prompt is never sacrificed as a
-health probe, and a timed-out tool-capable request is never replayed.
-Claude-compatible relays also have an independent
-`claude.relay_attempt_timeout` cap inside that budget, so a green tiny canary
-cannot let a stalled production-size relay monopolize the scheduler.
+validates that declaration and owns task framing, while
+`core.heartbeat_model` adapts route-specific prompts and provider processes to
+`core.model_runtime`. The runtime owns route order, health cooldowns, one
+logical wall-clock, replay safety, and durable call/attempt receipts. Solo
+tasks use `heartbeat:<task>` attribution; shared batches use a stable sorted
+`heartbeat:batch:<tasks>` identity. The old heartbeat fallback loop is gone.
+
+Primary routes receive the cacheable full-memory prompt profile. Relays and
+OpenAI receive a freshly composed constrained profile, so private prompt state
+cannot leak across provider attempts. A full production prompt is never used
+as a health probe, and a timed-out tool-capable request is never replayed.
+Claude-compatible relays also have an independent attempt cap inside the same
+deadline, so a green tiny canary cannot let a stalled production-size relay
+monopolize the scheduler. Ambiguous tool-capable network failures stop the
+call for reconciliation while still cooling the failed provider.
 Outbound model stages are no-tools and receive only the curated public group
 context; deterministic post-hooks remain the only effect boundary.
 

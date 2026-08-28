@@ -116,6 +116,31 @@ def test_transport_failure_replays_only_when_effects_are_safe(tmp_path):
     assert routes == ["primary"]
 
 
+def test_ambiguous_network_failure_still_marks_provider_unhealthy(tmp_path):
+    observed = []
+
+    result = execute(
+        RuntimeRequest(
+            task_id="ambiguous-network",
+            prompt="x",
+            allow_tools=True,
+            effect_authority="external",
+        ),
+        {"claude_cli": lambda *_args: AdapterResult(
+            status="ambiguous_failure",
+            reason="network_error",
+            effects_started=None,
+        )},
+        root=tmp_path,
+        config=_config(tmp_path),
+        observer=lambda *args: observed.append(args),
+    )
+
+    assert result.status == "ambiguous"
+    assert observed == [("primary", "unhealthy", "network_error")]
+    assert [attempt.route_id for attempt in result.attempts] == ["primary"]
+
+
 def test_preexecution_failure_can_fail_over_for_external_authority(tmp_path):
     routes = []
 
@@ -239,6 +264,44 @@ def test_no_eligible_adapter_is_a_valid_zero_attempt_receipt(tmp_path):
     assert audit()["healthy"] is True
 
 
+def test_runtime_route_narrowing_is_explicit_ordered_and_validated(tmp_path):
+    routes = []
+
+    def adapter(route, _request, _model, _timeout):
+        routes.append(route.id)
+        return AdapterResult(status="succeeded", text="selected")
+
+    result = execute(
+        RuntimeRequest(
+            task_id="narrowed",
+            prompt="x",
+            route_ids=("backup1", "openai"),
+        ),
+        {"claude_cli": adapter, "openai_responses": adapter},
+        root=tmp_path,
+        config=_config(tmp_path),
+        observer=lambda *_args: None,
+    )
+
+    assert result.status == "succeeded"
+    assert result.route_id == "backup1"
+    assert routes == ["backup1"]
+
+    for route_ids in (
+        ("primary", "primary"),
+        ("missing",),
+        (object(),),
+    ):
+        try:
+            RuntimeRequest(
+                task_id="invalid", prompt="x", route_ids=route_ids,
+            ).validate()
+        except ValueError as exc:
+            assert "route_ids" in str(exc)
+        else:
+            raise AssertionError("invalid route narrowing was accepted")
+
+
 def test_next_model_cannot_bypass_ambiguous_effect_replay_gate(tmp_path):
     models = []
 
@@ -325,6 +388,36 @@ def test_cross_family_fallback_uses_the_route_model(tmp_path):
         ("backup1", "sonnet"),
         ("openai", "gpt-test"),
     ]
+
+
+def test_generic_opus_tier_uses_each_relay_configured_model(
+    tmp_path, monkeypatch,
+):
+    seen = []
+    monkeypatch.setenv("CLAUDE_BACKUP_MODEL", "custom-relay-model")
+
+    def claude(route, _request, model, _timeout):
+        seen.append((route.id, model))
+        if route.id == "primary":
+            return AdapterResult(
+                status="preexecution_failure",
+                reason="account_limit",
+                effects_started=False,
+            )
+        return AdapterResult(status="succeeded", text="relay answer")
+
+    result = execute(
+        RuntimeRequest(
+            task_id="generic-opus", prompt="x", requested_model="opus",
+        ),
+        {"claude_cli": claude},
+        root=tmp_path,
+        config=_config(tmp_path),
+        observer=lambda *_args: None,
+    )
+
+    assert result.status == "succeeded"
+    assert seen == [("primary", "opus"), ("backup1", "custom-relay-model")]
 
 
 def test_observer_failure_cannot_leave_success_receipt_running(tmp_path):
