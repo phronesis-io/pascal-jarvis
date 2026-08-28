@@ -32,7 +32,7 @@ from core.frontstage_acceptance import (
     record_owner_feedback,
 )
 from core.matter_runs import MatterRunConflict, get_run
-from core.matters import create_matter, get_matter
+from core.matters import create_matter, get_matter, update_matter
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +140,69 @@ def test_start_returns_bounded_packet_and_records_the_codex_task(tmp_path):
     assert run["surface"] == "mobile"
     assert Path(started["context_path"]).is_file()
     assert matter_status(matter["id"])["active_runs"][0]["id"] == run["id"]
+
+
+def test_start_moves_a_session_forward_from_a_terminal_matter(tmp_path):
+    previous = create_matter("已经结束的旧结果")
+    first = start_matter_run(
+        matter_id=previous["id"],
+        task="finish old result",
+        workspace=str(tmp_path),
+        task_ref="codex-task-reused",
+        surface="desktop",
+    )
+    abort_matter_run(first["run"]["id"], error="old task ended")
+    update_matter(previous["id"], status="done", outcome="旧结果已结束")
+    current = create_matter("同一 Codex 任务里的新结果")
+
+    started = start_matter_run(
+        matter_id=current["id"],
+        task="start new result",
+        workspace=str(tmp_path),
+        task_ref="  codex-task-reused  ",
+        surface="desktop",
+    )
+
+    assert started["run"]["status"] == "running"
+    assert started["run"]["session_id"] == "codex-task-reused"
+    assert get_matter(previous["id"])["links"] == []
+    current_links = get_matter(current["id"])["links"]
+    assert current_links[0]["entity_id"] == "codex-task-reused"
+    assert any(
+        event["event_type"] == "link_moved_out"
+        for event in get_matter(previous["id"])["events"]
+    )
+    assert any(
+        event["event_type"] == "link_moved_in"
+        for event in get_matter(current["id"])["events"]
+    )
+
+
+def test_start_refuses_to_steal_a_session_from_an_active_matter(tmp_path):
+    previous = create_matter("仍在进行的旧结果")
+    current = create_matter("不该抢走 Session 的新结果")
+    first = start_matter_run(
+        matter_id=previous["id"],
+        task="old active result",
+        workspace=str(tmp_path),
+        task_ref="codex-task-active",
+        surface="desktop",
+    )
+    abort_matter_run(first["run"]["id"], error="execution stopped")
+
+    with pytest.raises(MatterRunConflict, match="still linked to active matter"):
+        start_matter_run(
+            matter_id=current["id"],
+            task="new result",
+            workspace=str(tmp_path),
+            task_ref="codex-task-active",
+            surface="desktop",
+        )
+
+    assert matter_status(current["id"])["active_runs"] == []
+    assert get_matter(previous["id"])["links"][0]["entity_id"] == (
+        "codex-task-active"
+    )
 
 
 def test_only_one_frontstage_can_own_a_matter(tmp_path):

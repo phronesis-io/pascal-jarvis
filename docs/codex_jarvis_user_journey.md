@@ -54,6 +54,11 @@ Jarvis time/signal trigger
 4. The continuation call acquires the Matter. Jarvis returns a bounded, traceable Context
    Packet containing current consensus, decisions, pointers, authority, and
    next action. Raw chat histories are not dumped into the prompt.
+   If a Codex task still carries a Session link to a terminal Matter, the
+   continuation moves that link forward and records both sides of the move.
+   It never steals a Session from another active Matter: that conflict stops
+   before a run is created and the user starts a separate task or closes the
+   earlier outcome.
 5. Codex does the interactive work with its native tools and approvals. Jarvis
    stays out of the conversation unless asked for durable state or an effect.
 6. Code work uses the repository's ordinary branch, commit, PR, review, and CI

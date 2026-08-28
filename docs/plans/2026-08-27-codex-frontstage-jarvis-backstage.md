@@ -260,8 +260,9 @@ Context Packet。任何新增系统指令都必须证明它解决了可复现失
 Agent 不能提供评分、评审者身份或从称赞/沉默中推断通过。每个连接器版本独立积累
 20+20 样本，失败版本修复并升版后重新验证，不能拿旧样本替新实现背书。
 
-**2026-08-27 工程检查点：** Phase 0 协议和 Phase 1 本地 Codex 连接层已经进入
-仓库实现，但尚未宣称 Phase 1 准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
+**2026-08-28 生产检查点：** Phase 0 协议和 Phase 1 本地 Codex 连接层已随
+PR #129--#131 上线，并通过同版本 MCP、组件、投递和发布收据验证；这仍不等于
+Phase 1 准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
 收据；`core.matter_context` 生成带来源引用、权限边界和摘要指纹的
 `jarvis.context-packet.v2`；`core.matter_executor` 让 Claude/Codex 共用同一条
 acquire/run/release 路径。产物必须在 workspace 内存在并按内容哈希，外部动作必须引用
@@ -275,8 +276,8 @@ search/create/start/renew/release/abort/health；`plugins/jarvis-matters` 让 Co
 Context Packet 合成一个自然继续入口；歧义时不绑定。Lark 交接只给稳定 Matter
 短语，不伪造 Codex 深链。`core.matter_closure` 在明确 owner 完成确认后，先统一收掉
 关联 Intent、Item 和 Handoff，再把 Matter 标记完成；活跃 Run、Job、Delegation
-继续阻断，Result Receipt 仍不能自动完成 Matter。以上仍是待审查、待发布代码，且
-Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
+继续阻断，Result Receipt 仍不能自动完成 Matter。以上已在生产部署；Phase 1 的
+桌面/手机 20+20 真实准出证据仍未满足。
 
 **2026-08-27 验收入口检查点：** `core.frontstage_acceptance` 与 Codex MCP 已补齐
 一次性提示和显式 owner 反馈入口。提示状态写入 Matter Run，重复调用不会重复打扰；
@@ -288,7 +289,7 @@ Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
 
 ### Phase 2：Memory Compiler
 
-- **仓库实现完成，发布与真实回放待验。** 原始会话只做审计源；
+- **仓库实现、发布和首轮真实数据修复已完成，长期回放指标仍待积累。** 原始会话只做审计源；
 - `core.memory_compiler` 从 Codex、Claude Code 和 owner-private Lark 提取
   带精确引文的事实、决定、产物、待办、约束和偏好；
 - owner 原话可成为有效记忆，assistant 原话只能成为候选；新决定可替代旧决定，
@@ -299,6 +300,11 @@ Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
   进入 ambient ledger。
 
 **准出：** 记忆回放集达到召回/失效指标，提示词显著缩小且任务质量不下降。
+
+**2026-08-28 生产检查点：** PR #130--#131 修复了上下文依赖式短回复和模型语义
+扩写越权。生产修复后 9/9 条 active owner claim 都逐字匹配保留的 owner 引文，
+assistant candidate 为 active 的数量为零，冲突为零。该证据证明首轮迁移正确，
+但不能代替后续跨产品召回率、失效误注入和 token 缩减回放。
 
 ### Phase 3：Model Runtime
 

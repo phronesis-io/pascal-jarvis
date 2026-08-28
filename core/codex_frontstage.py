@@ -17,6 +17,7 @@ from core.matter_context import build_context_bundle, write_context_bundle
 from core.matter_run_audit import audit_matter_runs
 from core.matter_runs import (
     ACTIVE_STATUSES,
+    MatterRunConflict,
     abort_run,
     acquire_run,
     bind_context_packet,
@@ -27,7 +28,13 @@ from core.matter_runs import (
     release_run,
     renew_run,
 )
-from core.matters import create_matter, get_matter, link_entity, list_matters
+from core.matters import (
+    create_matter,
+    find_by_entity,
+    get_matter,
+    link_entity,
+    list_matters,
+)
 
 
 DEFAULT_OPEN_STATUSES = "active,waiting,blocked"
@@ -257,6 +264,21 @@ def start_matter_run(
     lease_seconds: int = 21600,
 ) -> dict[str, Any]:
     """Acquire a fresh run and return its immutable bounded Context Packet."""
+    session_provider = str(executor or "").strip().lower()
+    session_ref = str(task_ref or "").strip()
+    if session_ref and session_provider in {"codex", "claude"}:
+        linked_matter = find_by_entity(
+            "session", session_ref, provider=session_provider,
+        )
+        if (
+            linked_matter
+            and linked_matter.get("id") != matter_id
+            and linked_matter.get("status") not in {"done", "archived"}
+        ):
+            raise MatterRunConflict(
+                f"session is still linked to active matter "
+                f"{linked_matter['id']}"
+            )
     recover_expired_runs(matter_id=matter_id)
     run: dict[str, Any] | None = None
     try:
@@ -277,20 +299,21 @@ def start_matter_run(
             context_path=context_path,
         )
         run = mark_run_running(
-            run["id"], session_id=task_ref, model=model
+            run["id"], session_id=session_ref, model=model
         )
-        if task_ref and executor in {"codex", "claude"}:
+        if session_ref and session_provider in {"codex", "claude"}:
             link_entity(
                 matter_id,
                 "session",
-                task_ref,
-                provider=executor,
+                session_ref,
+                provider=session_provider,
                 title=f"{executor} frontstage task",
                 metadata={
                     "workspace": str(Path(workspace).expanduser().resolve()),
                     "status": "running",
                 },
                 actor="frontstage",
+                move_from_terminal=True,
             )
     except Exception as exc:
         if run and run.get("id"):
