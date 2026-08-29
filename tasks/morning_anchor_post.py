@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.lifelog import (morning_anchor_fired, morning_anchor_last_text,
                           morning_anchor_mark)
-from core.safety import looks_like_error, parse_json_response, strip_task_framing
+from core.safety import is_idle_reply, looks_like_error, parse_json_response, strip_task_framing
 
 # One short line — hard-clip anything longer so a rambling model can't turn
 # the anchor into a wall of text.
@@ -28,7 +28,7 @@ def _normalized(text: str) -> str:
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
     if looks_like_error(raw):
         return 0

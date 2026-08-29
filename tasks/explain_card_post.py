@@ -13,12 +13,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import memorial
-from core.safety import looks_like_error, strip_task_framing
+from core.safety import is_idle_reply, looks_like_error, strip_task_framing
 
 
 def main() -> int:
     text = strip_task_framing(sys.stdin.read().strip())
-    if not text or "HEARTBEAT_OK" in text or looks_like_error(text):
+    if is_idle_reply(text) or looks_like_error(text):
         return 0
     m = re.search(r"\[explain (mem_[a-z0-9_]+)\]", text)
     mid = m.group(1) if m else ""

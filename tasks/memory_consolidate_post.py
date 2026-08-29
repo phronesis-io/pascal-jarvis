@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.jsonl import append_jsonl
-from core.safety import looks_like_error
+from core.safety import is_idle_reply, looks_like_error
 from core.timeutil import now_local_str
 # Canonical/replica warm/ pair — single home is memory_tidy_post (the sync owner).
 from tasks.memory_tidy_post import AUTO_MEMORY, HEARTBEAT_MEMORY
@@ -144,7 +144,7 @@ def _apply_replace(memory_dir: Path, filename: str, old: str, new: str, ts: str)
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
     if looks_like_error(raw):
         print("[memory-consolidate] skipping — output looks like error", file=sys.stderr)

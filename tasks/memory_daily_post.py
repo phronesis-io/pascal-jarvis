@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import looks_like_error
+from core.safety import is_idle_reply, looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
@@ -107,7 +107,7 @@ def _apply_update(memory_dir: Path, filename: str, content: str, ts: str) -> Non
 
 def main() -> int:
     summary = sys.stdin.read().strip()
-    if not summary or "HEARTBEAT_OK" in summary:
+    if is_idle_reply(summary):
         return 0
     if looks_like_error(summary) or len(summary) < 10:
         print("[memory-daily] skipping — output looks like error/noise", file=sys.stderr)

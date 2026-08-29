@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.lifelog import (exercise_card_mark, exercise_card_sent_this_week,
                           exercise_week_summary)
-from core.safety import looks_like_error, parse_json_response, strip_task_framing
+from core.safety import is_idle_reply, looks_like_error, parse_json_response, strip_task_framing
 
 MAX_BODY_CHARS = 300
 
@@ -42,7 +42,7 @@ def _fallback_body(summary: dict) -> str:
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
 
     body = ""
