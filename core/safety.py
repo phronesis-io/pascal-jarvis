@@ -30,6 +30,29 @@ def sentinel_present(text) -> bool:
         return False
     return any(IDLE_SENTINEL in line for line in str(text).splitlines())
 
+def is_idle_reply(text) -> bool:
+    """True when a model reply is the idle acknowledgement, not content.
+
+    Post-hooks used to test ``"HEARTBEAT_OK" in raw`` — a bare substring
+    match. For prose that is the right, fail-silent direction (see
+    sentinel_present). For a structured JSON payload it is wrong: the Memory
+    Compiler batch quotes owner-operated Claude Code/Codex transcripts about
+    Jarvis itself, so a perfectly valid envelope can carry the token inside a
+    quoted source. That envelope was thrown away as "idle", the batch stayed
+    pending, and every 10-minute retry re-ran the same full sonnet call:
+    28.1h stuck on 2026-08-28 (143 calls) and 4.7h on 2026-08-29.
+
+    Rule: empty → idle; no token → content; token inside a parseable JSON
+    object → content (renderers still enforce sentinel_present on anything
+    user-facing); token anywhere in non-JSON text → idle.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if IDLE_SENTINEL not in stripped:
+        return False
+    return parse_json_response(stripped) is None
+
 # Patterns that indicate Claude (or the underlying tooling) returned an error
 # instead of a real answer. Post-scripts and the main bot reply path both
 # check against these so we never send a traceback/auth error to the user.

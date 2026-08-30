@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import companion
 from core.card import build_card
 from core.safety import (looks_like_error, parse_json_response,
-                         strip_task_framing)
+                         strip_task_framing, is_idle_reply)
 from core.jsonl import read_jsonl, write_jsonl
 from core.lifelog import diet_append, split_diet_line
 from core.timeutil import now_local_str
@@ -182,7 +182,7 @@ def main() -> int:
     # which leaked "🌿 关怀 / HEARTBEAT_OK + internal reasoning" cards to the user.
     if not message:
         return silent("empty model output")
-    if "HEARTBEAT_OK" in message:
+    if is_idle_reply(message):
         return silent("model chose silence (HEARTBEAT_OK)")
     if looks_like_error(message):
         print("[checkin] skipping — looks like error output", file=sys.stderr)

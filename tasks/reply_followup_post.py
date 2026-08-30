@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import memorial
-from core.safety import looks_like_error, strip_task_framing
+from core.safety import is_idle_reply, looks_like_error, strip_task_framing
 
 _AUTH_MARKER = "[ACTION:lark_auth_login]"
 
@@ -53,7 +53,7 @@ def _run_auth_marker(text: str) -> str:
 
 def main() -> int:
     text = strip_task_framing(sys.stdin.read().strip())
-    if not text or "HEARTBEAT_OK" in text or looks_like_error(text):
+    if is_idle_reply(text) or looks_like_error(text):
         return 0
     m = re.search(r"\[reply-followup (mem_[a-z0-9_]+)\]", text)
     text = _run_auth_marker(text if not m else text.replace(m.group(0), "").strip())
