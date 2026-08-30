@@ -402,17 +402,24 @@ def test_diag_intent_breach_check_does_not_misread_utc_date_as_last_24h(
         threshold_date.year, threshold_date.month, threshold_date.day,
         0, 0, 1)
     stale = stale_local.strftime("%Y-%m-%dT%H:%M:%S")
-    db.execute(
+    fresh = (
+        dt.datetime.now().astimezone().replace(tzinfo=None)
+        - dt.timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    db.executemany(
         "INSERT INTO intentions VALUES (?,?,?,?)",
-        ("int_stale", "expired", "auto-expired after 3 attempts", stale))
+        [
+            ("int_stale", "expired", "auto-expired after 3 attempts", stale),
+            ("int_fresh", "expired", "auto-expired after 3 attempts", fresh),
+        ])
     db.commit()
     db.close()
 
     result = subprocess.run(
         ["bash", "-c", snippet], capture_output=True, text=True, timeout=30,
         env={**os.environ, "JARVIS_DIR": str(tmp_path)})
-    assert "No silently dropped intents" in result.stdout, (
-        "a >24h-old breach was misread as inside the last 24h "
+    assert "过去24小时有 1 个" in result.stdout, (
+        "the local 24h window did not include only the fresh breach "
         f"(UTC/'T'-vs-space string comparison):\n"
         f"{result.stdout}\n{result.stderr}")
 
