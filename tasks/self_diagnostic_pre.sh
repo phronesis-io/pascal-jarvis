@@ -221,7 +221,8 @@ echo "--- Intent Lifecycle ---"
 _dropped=$(sqlite3 "file:$JARVIS_DIR/data/jarvis.db?mode=ro" \
   "SELECT COUNT(*) FROM intentions WHERE status='expired' \
    AND (last_error LIKE 'auto-expired%' OR last_error LIKE '%expired after%attempts%') \
-   AND triggered_at >= datetime('now','-1 day')" 2>/dev/null || echo "?")
+   AND replace(triggered_at,'T',' ') >= datetime('now','localtime','-1 day')" \
+  2>/dev/null || echo "?")
 if [ "$_dropped" != "?" ] && [ "${_dropped:-0}" -gt 0 ]; then
   echo "⚠️ 过去24小时有 $_dropped 个定时提醒重试多次仍失败、被放弃了——请核对补发卡片确实发出"
 else

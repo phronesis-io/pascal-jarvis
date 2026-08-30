@@ -376,6 +376,47 @@ def test_diag_pre_resolves_work_and_memory_dirs_without_inherited_env():
         f"MEMORY_DIR {memory_dir!r} does not derive from JARVIS_DIR's slug")
 
 
+def test_diag_intent_breach_check_does_not_misread_utc_date_as_last_24h(
+        tmp_path):
+    """The breach query must compare like-formatted local timestamps."""
+    import datetime as dt
+    import sqlite3
+    import subprocess
+
+    root = Path(__file__).parent.parent
+    lines = (root / "tasks" / "self_diagnostic_pre.sh").read_text(
+        encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith('echo "--- Intent Lifecycle ---"'))
+    end = next(i for i, ln in enumerate(lines) if ln.startswith("# 7d."))
+    snippet = "\n".join(lines[start:end])
+
+    (tmp_path / "data").mkdir()
+    db = sqlite3.connect(str(tmp_path / "data" / "jarvis.db"))
+    db.execute(
+        "CREATE TABLE intentions (id TEXT, status TEXT, last_error TEXT, "
+        "triggered_at TEXT)")
+    utc_now = dt.datetime.now(dt.timezone.utc)
+    threshold_date = (utc_now - dt.timedelta(days=1)).date()
+    stale_local = dt.datetime(
+        threshold_date.year, threshold_date.month, threshold_date.day,
+        0, 0, 1)
+    stale = stale_local.strftime("%Y-%m-%dT%H:%M:%S")
+    db.execute(
+        "INSERT INTO intentions VALUES (?,?,?,?)",
+        ("int_stale", "expired", "auto-expired after 3 attempts", stale))
+    db.commit()
+    db.close()
+
+    result = subprocess.run(
+        ["bash", "-c", snippet], capture_output=True, text=True, timeout=30,
+        env={**os.environ, "JARVIS_DIR": str(tmp_path)})
+    assert "No silently dropped intents" in result.stdout, (
+        "a >24h-old breach was misread as inside the last 24h "
+        f"(UTC/'T'-vs-space string comparison):\n"
+        f"{result.stdout}\n{result.stderr}")
+
+
 def test_pre_commit_hook_only_uses_tools_it_can_count_on():
     """A hook step that needs an absent tool exits 127 and reads as "no match".
 
