@@ -2394,12 +2394,20 @@ def test_ledger_cards_after_a_stray_prose_line_still_render(env, capsys):
         output, source="mail-triage", require_work_receipt=True)
 
     assert _rendered_ids(rendered) == ids
-    # The stray line is still gated (and now says what shape it had).
-    missing = _ops_records(capsys, "work_receipt_missing")
+    err = capsys.readouterr().err
+    records = [json.loads(ln) for ln in err.splitlines()
+               if ln.startswith("{")]
+    # The stray line is still gated (and now says what shape it had) …
+    missing = [r for r in records if r.get("msg") == "work_receipt_missing"]
     assert len(missing) == 1
     assert missing[0]["line_count"] == 1
     assert missing[0]["json_lines"] == 0
     assert missing[0]["first_line_kind"] == "prose"
+    # … and the rescue names what would have demoted the first card (the
+    # second follows a flushed buffer, so it needed no rescue).
+    rescued = [r for r in records if r.get("msg") == "ledger_card_rescued"]
+    assert [r["reason"] for r in rescued] == ["prose_ahead"]
+    assert "正文" not in err  # shape and reason only, never content
 
 
 def test_ledger_cards_inside_an_unclosed_fence_still_render(env):
@@ -2423,7 +2431,7 @@ def test_ledger_cards_behind_a_bad_envelope_are_not_swallowed(env):
     assert _rendered_ids(rendered) == ids
 
 
-def test_indented_ledger_card_is_rescued_from_prose(env, capsys):
+def test_indented_ledger_cards_are_rescued_from_markdown_code(env, capsys):
     ids = _two_ledger_cards()
     output = "\n".join("    " + memorial.card_json(m) for m in ids)
 
@@ -2432,8 +2440,18 @@ def test_indented_ledger_card_is_rescued_from_prose(env, capsys):
 
     assert _rendered_ids(rendered) == ids
     rescued = _ops_records(capsys, "ledger_card_rescued")
-    assert rescued and rescued[0]["card_count"] == 2
-    assert "正文" not in capsys.readouterr().err  # shape only, never content
+    assert [r["reason"] for r in rescued] == ["markdown_protected"] * 2
+
+
+def test_clean_ledger_cards_are_not_reported_as_rescued(env, capsys):
+    ids = _two_ledger_cards()
+    output = "\n".join(memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+    assert _ops_records(capsys, "ledger_card_rescued") == []
 
 
 def test_rescued_ledger_card_is_still_ledger_only_when_not_pushable(

@@ -2363,29 +2363,6 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
     return SOURCE_TITLE.get(source, source or "一件事"), chunk
 
 
-def _dropped_text_shape(text: str) -> dict:
-    """Describe dropped output by line shape only (no card/prose content)."""
-    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
-    stripped = [ln.strip() for ln in lines]
-    first = stripped[0] if stripped else ""
-    if first.startswith("CARD:"):
-        first_kind = "envelope"
-    elif first.startswith("{"):
-        first_kind = "json"
-    elif first.startswith(("```", "~~~")):
-        first_kind = "fence"
-    elif first.startswith(">"):
-        first_kind = "quote"
-    else:
-        first_kind = "prose" if first else "empty"
-    return {
-        "line_count": len(lines),
-        "json_lines": sum(1 for ln in stripped if ln.startswith("{")),
-        "envelope_lines": sum(1 for ln in stripped if ln.startswith("CARD:")),
-        "first_line_kind": first_kind,
-    }
-
-
 def memorialize_output(
     output: str,
     source: str = "heartbeat",
@@ -2397,15 +2374,17 @@ def memorialize_output(
     Existing decision cards pass through. Legacy cards are adopted while
     preserving their native actions. Ambient-source output stays ledger-only
     (REQ-119) instead of being pushed into Lark as another pending card.
-    Raw internal JSON remains blocked.
+    Raw internal JSON remains blocked. The prose side lives in
+    ``core.memorial_prose``.
     """
+    from core import memorial_prose
     source_names = [s.strip() for s in str(source).split(",") if s.strip()]
     single_source = source_names[0] if len(source_names) == 1 else "heartbeat"
     active_source = single_source
     rendered: list[str] = []
     prose: list[str] = []
 
-    def _render_existing(existing_id: str, card: dict) -> None:
+    def render_existing(existing_id: str, card: dict) -> None:
         state = get_memorial(existing_id) or {}
         if should_push_to_lark(state) and not delivery_accepted(state):
             card.pop("__jarvis_source", None)
@@ -2413,128 +2392,13 @@ def memorialize_output(
                 card, ensure_ascii=False, separators=(",", ":")))
         # else: ledger-only (REQ-119) or already accepted
 
-    def _rescue_ledger_cards() -> None:
-        # A ledger-backed card is provenance-verified: it is the byte-exact
-        # render of its own ledger state, so it carries nothing but its own
-        # callbacks and can never be a Markdown example. Whatever put it
-        # among prose (a stray line ahead, an indent, a fence) must not turn
-        # it into text the work-receipt gate then drops — T26 (2026-08-25/27/
-        # 28): every multi-card mail-triage run vanished with exactly one
-        # work_receipt_missing and zero envelopes, while single cards lived.
-        kept: list[str] = []
-        rescued: list[tuple[str, dict]] = []
-        for raw_prose in prose:
-            stripped = raw_prose.strip()
-            payload = stripped[5:] if stripped.startswith("CARD:") else stripped
-            card = None
-            if payload.startswith("{"):
-                try:
-                    card = json.loads(payload)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    card = None
-            mid = (_trusted_ledger_card_memorial_id(card)
-                   if is_card_payload(card) else "")
-            if mid:
-                rescued.append((mid, card))
-            else:
-                kept.append(raw_prose)
-        if not rescued:
-            return
-        prose[:] = kept
-        _ops_log(
-            "ledger_card_rescued", level="warn", source=active_source,
-            card_count=len(rescued),
-            prose_lines=sum(1 for k in kept if k.strip()),
-        )
-        for mid, card in rescued:
-            _render_existing(mid, card)
-
     def flush_prose() -> None:
-        _rescue_ledger_cards()
         text = "\n".join(prose).strip()
         prose.clear()
-        if not text:
-            return
-        try:
-            json.loads(text)
-            return
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-        # Echoed prompt framing ("=== TASK: x ===", "[CHECKIN]", "[ts] task")
-        # is never card content — same class fix as checkin_post (REQ-104).
-        from core.safety import strip_task_framing
-        text = strip_task_framing(text)
-        if not text:
-            return
-        authored_blocks = _split_authored_card_blocks(text)
-        if len(authored_blocks) > 1:
-            _ops_log(
-                "card_split", source=active_source,
-                split_kind="concatenated_directives",
-                card_count=len(authored_blocks),
-            )
-            for authored_block in authored_blocks:
-                prose.extend(authored_block.splitlines())
-                flush_prose()
-            return
-        explicit_title, text = _extract_title_line(text)
-        text, work_receipt = _extract_work_receipt(text)
-        if require_work_receipt and not work_receipt:
-            # Shape only, never content: enough to tell "model forgot the
-            # receipt" from "cards were demoted to prose" after the fact.
-            _ops_log(
-                "work_receipt_missing", level="warn", source=active_source,
-                **_dropped_text_shape(text),
-            )
-            return
-        if not text and explicit_title:
-            text = explicit_title
-        if not text:
-            return
-        # Buttons follow the card: an OPTIONS line authored by the task wins;
-        # otherwise fall back to what this source is usually asking for, and
-        # only then to「已阅」.
-        # RECOMMEND may legally follow OPTIONS. Remove it first so the
-        # trailing-line OPTIONS parser still sees the authored buttons, then
-        # carry the recommendation explicitly into create().
-        text, authored_recommend = _extract_recommendation(text)
-        body, inline_options = _extract_inline_options(text)
-        body = _scrub_embedded_authoring_directives(body)
-        preset = (None if inline_options
-                  else SOURCE_DEFAULT_PRESET.get(active_source, "fyi"))
-        # 一张卡一件事 (REQ-117): the prompt contract is the first line of
-        # defense; this is the mechanical backstop for bodies that merged
-        # several matters anyway. A card whose author wrote its own OPTIONS
-        # line designed ONE interactive ask — never split that.
-        chunks = ([body] if inline_options
-                  else split_matters(body))
-        if len(chunks) > 1:
-            _ops_log(
-                "card_split", source=active_source,
-                split_kind="prose_body", card_count=len(chunks),
-            )
-        for chunk in chunks:
-            if explicit_title and len(chunks) == 1:
-                chunk_title, chunk_body = explicit_title, chunk
-            else:
-                chunk_title, chunk_body = _title_for_chunk(chunk, active_source)
-            mid, _ = create(active_source, chunk_title, chunk_body,
-                            options=inline_options, preset=preset,
-                            recommend=authored_recommend,
-                            work_receipt=work_receipt,
-                            require_work_receipt=require_work_receipt,
-                            authoring_protocol=True, send=False,
-                            attention=(ATTENTION_ALERT
-                                       if _can_infer_alert_from_prose(active_source)
-                                       and _looks_like_alert(chunk_body)
-                                       and not inline_options and preset == "fyi"
-                                       else ""))
-            state = get_memorial(mid) or {}
-            if not should_push_to_lark(state):
-                continue  # ledger-only (REQ-119)
-            if delivery_accepted(state):
-                continue
-            rendered.append(card_json(mid))
+        if text:
+            memorial_prose.memorialize_prose(
+                text, source=active_source,
+                require_work_receipt=require_work_receipt, rendered=rendered)
 
     # One standalone legacy card, or bare ledger-backed cards one per line
     # (a post-hook printing several card_json), become CARD: envelopes. In
@@ -2555,22 +2419,23 @@ def memorialize_output(
             flush_prose()
             active_source = segment_source
             continue
-        is_card_envelope = line.startswith("CARD:")
-        card_raw = line[5:] if is_card_envelope else ""
-        parsed_card = None
-        if is_card_envelope and card_raw:
-            try:
-                parsed_card = json.loads(card_raw)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                parsed_card = None
-        trusted_id = (_trusted_ledger_card_memorial_id(parsed_card)
-                      if is_card_payload(parsed_card) else "")
-        if trusted_id:
+        trusted_id, trusted_card = memorial_prose.parse_ledger_card(
+            line, _trusted_ledger_card_memorial_id)
+        if trusted_id and trusted_card is not None:
             # Provenance-verified ledger card: executes regardless of a
             # preceding prose line, a Markdown fence, or a bad envelope
-            # being dropped ahead of it (see _rescue_ledger_cards).
+            # being dropped ahead of it (T26). Say so when the old rule
+            # would have demoted it — that reason is the missing evidence.
+            demotion = memorial_prose.demotion_reason(
+                prose_ahead=any(part.strip() for part in prose),
+                markdown_protected=not protocol_line,
+                bad_envelope_ahead=dropping_bad_card,
+            )
+            if demotion:
+                _ops_log("ledger_card_rescued", level="warn",
+                         source=active_source, reason=demotion)
             flush_prose()
-            _render_existing(trusted_id, parsed_card)
+            render_existing(trusted_id, trusted_card)
             continue
         if dropping_bad_card:
             if protocol_line and line == "---":
@@ -2579,6 +2444,8 @@ def memorialize_output(
         if protocol_line and line == "---":
             flush_prose()
             continue
+        is_card_envelope = line.startswith("CARD:")
+        card_raw = line[5:] if is_card_envelope else ""
         # CARD is an executable envelope, not inline Markdown. It can only
         # occupy its own top-level block; a preceding quote/list/prose line
         # makes it content and therefore non-executable.
@@ -2586,24 +2453,20 @@ def memorialize_output(
             protocol_line and is_card_envelope
             and not any(part.strip() for part in prose)
         )
-        card = parsed_card if can_execute_card else None
+        if can_execute_card:
+            try:
+                card = json.loads(card_raw) if card_raw else None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                card = None
+        else:
+            card = None
         if is_card_payload(card):
             flush_prose()
-            existing_id = _trusted_ledger_card_memorial_id(card)
-            if existing_id:
-                state = get_memorial(existing_id) or {}
-                if should_push_to_lark(state) and not delivery_accepted(state):
-                    card.pop("__jarvis_source", None)
-                    adopted = json.dumps(
-                        card, ensure_ascii=False, separators=(",", ":"))
-                else:
-                    adopted = ""  # ledger-only (REQ-119)
-            else:
-                adopted = adopt_card(
-                    active_source, card_raw, suppress_accepted=True,
-                    skip_ledger_only=True,
-                    require_work_receipt=require_work_receipt,
-                )
+            adopted = adopt_card(
+                active_source, card_raw, suppress_accepted=True,
+                skip_ledger_only=True,
+                require_work_receipt=require_work_receipt,
+            )
             if adopted:
                 rendered.append(adopted)
         elif is_card_envelope and protocol_line:
