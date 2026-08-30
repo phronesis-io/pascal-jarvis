@@ -6,7 +6,7 @@ import sys
 import traceback
 
 sys.path.insert(0, str(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
-from core.safety import parse_json_response
+from core.safety import is_idle_reply, parse_json_response
 
 LOG = open(os.environ.get("LOG_FILE", os.devnull), "a")
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
@@ -14,7 +14,7 @@ PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
 
     data = parse_json_response(raw)

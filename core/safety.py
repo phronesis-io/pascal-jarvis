@@ -30,6 +30,21 @@ def sentinel_present(text) -> bool:
         return False
     return any(IDLE_SENTINEL in line for line in str(text).splitlines())
 
+
+def is_idle_reply(text) -> bool:
+    """Return whether unstructured model output is an idle acknowledgement.
+
+    This deliberately preserves the fail-silent sentinel rule: empty output
+    is idle, and any unstructured output containing ``HEARTBEAT_OK`` is idle.
+    Structured protocols that allow arbitrary quoted source text must parse
+    and validate their expected envelope before calling this helper. That
+    ordering prevents a quoted token from being mistaken for the model's
+    control signal without allowing arbitrary JSON to bypass the user-facing
+    guard.
+    """
+    stripped = str(text or "").strip()
+    return not stripped or sentinel_present(stripped)
+
 # Patterns that indicate Claude (or the underlying tooling) returned an error
 # instead of a real answer. Post-scripts and the main bot reply path both
 # check against these so we never send a traceback/auth error to the user.

@@ -1,12 +1,12 @@
 # Codex Frontstage Completion Audit
 
-- Audited: 2026-08-28
+- Audited: 2026-08-30
 - Production baseline: `1254b84` (PR #131); later release candidates remain
   separate until reviewed, authorized, merged, deployed, and observed
 - Reviewed integration evidence: local branch
   `release/codex-frontstage-control-plane-20260828` at `03d1cecc`, product tree
   `264ae499`; this 45-commit exploration branch is not the release vehicle
-- Review/release candidate: draft PR #139 from
+- Review/release candidate: ready PR #139 from
   `release/codex-frontstage-control-plane-20260829`; the PR head is the
   authoritative candidate SHA and remains unset as a release SHA until
   independent review, Owner authorization, and protected-main integration
@@ -21,7 +21,7 @@
 | Codex is the normal desktop/mobile interaction surface | `PRODUCT.md`, `docs/codex_jarvis_user_journey.md`, repo-owned `jarvis-matters` plugin | Plugin manifest/install tests and real stdio MCP smoke | Plugin deployed at PR #131; current pre-install task cannot gain tools retroactively; real desktop/mobile acceptance pending |
 | Jarvis owns durable continuity rather than another chat UI | `core.codex_frontstage`, `core.matter_runs`, `core.matter_context` | Matter contract, continuation, lease, recovery, and context tests | Implemented |
 | A clean task can continue the right Matter without replaying raw history | `jarvis_matter_continue`, Context Packet v2, exact wake receipt | Ambiguous/missing/exact continuation, wake-thread binding, terminal projection, and provenance tests | Implemented integration candidate; real desktop/mobile acceptance pending |
-| Codex, Claude Code, and Lark share current cross-product memory | `core.memory_compiler` and source-linked claims | Compiler, conflict, privacy, and cross-session E2E tests | Deployed; production repair grounded all 9 active owner claims in exact retained quotes with no open conflict |
+| Codex, Claude Code, and Lark share current cross-product memory | `core.memory_compiler` and source-linked claims | Compiler, conflict, privacy, envelope-first protocol, bounded poison-batch, and cross-session E2E tests | Deployed foundation; current candidate prevents quoted idle/error tokens from dropping valid compile envelopes and keeps invalid output on a bounded, auditable failure lifecycle |
 | Product state, models, attended executors, and release authority are independent | `core.model_control`, `core.model_runtime`, provider adapters, Matter and release contracts | Route, effect-replay, receipt, provider/fallback, continuity, and release-gate tests | Codex/Claude are owner-started executors; provider choice cannot mutate product truth or grant release authority; shared/untrusted Lark keeps its restricted adapter by design |
 | Package usage is visible without opening billing pages | `core.model_usage`, Codex MCP, deterministic owner-Lark query | Model-usage and Matter-continuity tests plus read-only local smoke | Deployed; exact Codex windows and honest unknowns are available through the MCP contract |
 | Every legacy capability has an explicit place in the new product | `capability_product_policy.yaml`, generated capability inventory | Exact policy coverage, migration-gate, retired-surface, and drift tests | 186 active capabilities classified: 82 keep, 88 quiet, 16 replace-with-codex, 0 unreviewed; release pending |

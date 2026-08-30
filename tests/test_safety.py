@@ -1,7 +1,9 @@
 """Tests for core.safety — error pattern detection."""
 
 import os
+import re
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,7 @@ from core.safety import (
     ERROR_SUBSTRINGS,
     atomic_write,
     extract_json,
+    is_idle_reply,
     looks_like_error,
     parse_json_response,
     salvage_field,
@@ -378,3 +381,24 @@ def test_atomic_write_replace_failure_keeps_old_file_and_cleans_temp(
 
     assert target.read_text(encoding="utf-8") == "old"
     assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_idle_reply_preserves_fail_silent_unstructured_contract():
+    assert is_idle_reply("")
+    assert is_idle_reply("HEARTBEAT_OK")
+    assert is_idle_reply("nothing noteworthy\n\nHEARTBEAT_OK")
+    assert is_idle_reply('{"response": "HEARTBEAT_OK"}')
+    assert not is_idle_reply("今天有一件值得处理的事。")
+
+
+def test_no_active_post_hook_uses_bare_substring_idle_check():
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in sorted((root / "tasks").glob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            code = line.split("#", 1)[0]
+            if re.search(r'["\']HEARTBEAT_OK["\']\s+in\s', code):
+                offenders.append(f"{path.name}:{lineno}")
+    assert offenders == [], offenders

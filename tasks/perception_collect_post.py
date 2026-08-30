@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.safety import is_idle_reply
 from core.timeutil import now_local
 from core.textutil import ellipsize, task_display_name
 
@@ -106,7 +107,7 @@ def _card(sid: str, count: int, since: str) -> str:
 def run(summary: str, *, jarvis_dir: Path, now: datetime) -> str:
     """Return card text ('' = stay silent) and persist the alert clock."""
     summary = (summary or "").strip()
-    if not summary or "HEARTBEAT_OK" in summary:
+    if is_idle_reply(summary):
         return ""
     m = _ERRORS_RE.search(summary)
     errors = int(m.group(1)) if m else 0

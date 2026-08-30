@@ -26,7 +26,7 @@ from core.routines import (  # noqa: E402
     apply_run_result,
     defer_inflight_infrastructure,
 )
-from core.safety import parse_json_response  # noqa: E402
+from core.safety import is_idle_reply, parse_json_response  # noqa: E402
 
 
 def main() -> int:
@@ -41,7 +41,7 @@ def main() -> int:
     # '__NO_ENVELOPE__' is the ACK_REQUIRED_TASKS contract: the Claude call
     # answered without a usable Routine slice.  Infrastructure failures use
     # the distinct __CALL_FAILED__ path above and preserve the occurrence.
-    if not raw or raw == "__NO_ENVELOPE__" or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw) or raw == "__NO_ENVELOPE__":
         # Nothing usable came back, but runs were already claimed. Closing them
         # as no_output keeps the audit honest and re-arms the next occurrence.
         apply_run_result({})

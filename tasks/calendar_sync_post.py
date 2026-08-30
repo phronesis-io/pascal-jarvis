@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
 from core.card_split import split_matters
-from core.safety import looks_like_error
+from core.safety import is_idle_reply, looks_like_error
 from core.timeutil import now_local_str
 
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",
@@ -212,7 +212,7 @@ def change_card_bodies(lines: list[str]) -> list[str]:
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
     if looks_like_error(raw):
         print("[calendar-sync] skipping — output looks like error", file=sys.stderr)

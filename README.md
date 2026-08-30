@@ -409,13 +409,20 @@ The post-script receives **Claude's response on stdin** and can act on it:
 
 ### The `HEARTBEAT_OK` signal
 
-`HEARTBEAT_OK` is the universal "nothing to do" response. When Claude determines there's no actionable output for a task, it returns this string. Post-scripts should check for it and exit cleanly:
+`HEARTBEAT_OK` is the universal "nothing to do" response. When a model determines there's no actionable output for a task, it returns this string. Post-scripts must use the shared fail-silent guard rather than exact matching:
 
 ```python
+from core.safety import is_idle_reply
+
 response = sys.stdin.read().strip()
-if response == "HEARTBEAT_OK":
+if is_idle_reply(response):
     sys.exit(0)
 ```
+
+For a structured protocol that permits arbitrary quoted source text, parse and
+validate the expected envelope first, then call `is_idle_reply` only when no
+envelope was found. This keeps internal tokens quoted in evidence from dropping
+a valid result while arbitrary JSON still cannot bypass the user-facing guard.
 
 ### Example patterns
 

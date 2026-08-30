@@ -4,6 +4,11 @@
 The model is an extractor, not the memory authority. Exact source quotes,
 coverage, Matter scope, lifecycle changes, and conflict creation are enforced
 by ``core.memory_compiler``. Ordinary progress stays silent.
+
+The compiler envelope is parsed before idle detection because quoted owner
+transcripts can legitimately contain Jarvis's internal idle token. Invalid or
+idle output still advances the bounded failure lifecycle instead of silently
+leaving an expensive batch pending forever.
 """
 
 from __future__ import annotations
@@ -20,12 +25,13 @@ from core.memory_compiler import (
     pending_compile_batch,
     record_compile_failure,
 )
-from core.safety import looks_like_error
+from core.safety import is_idle_reply, looks_like_error, parse_json_response
 
 
 def main() -> int:
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    envelope = parse_json_response(raw)
+    if envelope is None and is_idle_reply(raw):
         pending = pending_compile_batch()
         if pending:
             receipt = record_compile_failure(
@@ -39,14 +45,14 @@ def main() -> int:
             )
             return 1
         return 0
-    if looks_like_error(raw):
+    if envelope is None and looks_like_error(raw):
         receipt = record_compile_failure("provider output looks like an error")
         print("[memory-compiler] provider output looks like an error", file=sys.stderr)
         if receipt:
             print(json.dumps(receipt, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
     try:
-        receipt = apply_compile_result(raw)
+        receipt = apply_compile_result(envelope if envelope is not None else raw)
     except (MemoryCompilerError, KeyError, ValueError) as exc:
         failure = record_compile_failure(str(exc))
         print(f"[memory-compiler] rejected output: {exc}", file=sys.stderr)

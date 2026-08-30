@@ -62,6 +62,13 @@ def _apply_ignored(tmp_path: Path, batch: dict) -> subprocess.CompletedProcess:
     )
 
 
+def _run_post(tmp_path: Path, raw: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(POST)], input=raw, capture_output=True,
+        text=True, env=_env(tmp_path),
+    )
+
+
 def test_pending_batch_replays_until_valid_post_then_goes_quiet(tmp_path):
     session = _session(tmp_path)
     session.write_text(
@@ -161,3 +168,42 @@ def test_heartbeat_ok_is_a_failure_when_a_compile_batch_is_pending(tmp_path):
             (batch["batch_id"],),
         ).fetchone()
     assert (status, attempts) == ("pending", 1)
+
+
+def test_envelope_quoting_idle_token_is_applied_not_dropped(tmp_path):
+    session = _session(tmp_path)
+    session.write_text(
+        _turn(
+            "user",
+            "决定：post 钩子不能把 HEARTBEAT_OK 或 rate_limit 当引文协议词",
+            "2026-08-29T10:00:00Z",
+        ),
+        encoding="utf-8",
+    )
+    batch = json.loads(_run_pre(tmp_path).stdout)
+    source = next(
+        item for item in batch["sources"]
+        if "HEARTBEAT_OK" in item["text"] and "rate_limit" in item["text"]
+    )
+    envelope = {
+        "schema": "jarvis.memory-candidates.v1",
+        "batch_id": batch["batch_id"],
+        "claims": [{
+            "source_ref": source["source_ref"],
+            "quote": "post 钩子不能把 HEARTBEAT_OK 或 rate_limit 当引文协议词",
+            "kind": "decision",
+            "claim_key": "post_hook_idle_check",
+            "content": "结构化信封中的引文不能触发原始文本协议过滤",
+            "matter_id": "",
+        }],
+        "ignored_source_refs": [
+            item["source_ref"] for item in batch["sources"]
+            if item["source_ref"] != source["source_ref"]
+        ],
+    }
+
+    applied = _run_post(tmp_path, json.dumps(envelope, ensure_ascii=False))
+
+    assert applied.returncode == 0, applied.stderr
+    assert "jarvis.memory-compile-receipt.v1" in applied.stderr
+    assert _run_pre(tmp_path).stdout == ""

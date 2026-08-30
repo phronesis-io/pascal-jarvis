@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.safety import looks_like_error, parse_json_response
+from core.safety import is_idle_reply, looks_like_error, parse_json_response
 from core.timeutil import now_local_str
 from tasks.memory_daily_post import _archive_old_daily_entries
 
@@ -607,7 +607,7 @@ def main() -> int:
         )
 
     raw = sys.stdin.read().strip()
-    if not raw or "HEARTBEAT_OK" in raw:
+    if is_idle_reply(raw):
         return 0
     return _process(raw)
 

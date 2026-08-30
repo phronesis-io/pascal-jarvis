@@ -87,7 +87,7 @@ truncating slightly differently.
 
 | Step | Use | Not |
 |------|-----|-----|
-| **Guard** error/empty/heartbeat output | `core.safety.looks_like_error`, check `HEARTBEAT_OK` | bespoke regexes |
+| **Guard** error/empty/heartbeat output | `core.safety.looks_like_error`, `core.safety.is_idle_reply` | exact/substr checks or bespoke regexes |
 | **Parse** Claude's JSON envelope | `core.safety.parse_json_response(raw) -> dict\|None` | local `extract_json` + `json.loads` + find-`{}` retries |
 | **Store** a rolling log | `core.jsonl.read_jsonl / write_jsonl / append_jsonl` | inline read-loop + tmp-rename |
 | **Emit** to the user | `core.card.build_card / build_rich_card`, `core.safety.summarize` for the card preview | hand-built card dicts, `splitlines()[:4]` |
@@ -101,6 +101,10 @@ Supporting rules baked into those helpers:
 - A short wrapper ending in `回复/reply: HEARTBEAT_OK` is an idle receipt, not
   an envelope failure. This recovery is disabled when an ACK-required task is
   present because its post-hook must reconcile claimed state.
+- A structured protocol that allows arbitrary source quotes parses and
+  validates its expected envelope before idle/error classification. Otherwise
+  quoted internal tokens can silently discard valid evidence. Unknown or
+  malformed JSON still fails closed through the protocol validator.
 - **All file writes are atomic** (`safety.atomic_write`, which `core.jsonl` uses):
   the main session and the heartbeat read these files concurrently, so a
   half-written file must never be observable.
