@@ -2363,6 +2363,29 @@ def _title_for_chunk(chunk: str, source: str) -> tuple[str, str]:
     return SOURCE_TITLE.get(source, source or "一件事"), chunk
 
 
+def _dropped_text_shape(text: str) -> dict:
+    """Describe dropped output by line shape only (no card/prose content)."""
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
+    stripped = [ln.strip() for ln in lines]
+    first = stripped[0] if stripped else ""
+    if first.startswith("CARD:"):
+        first_kind = "envelope"
+    elif first.startswith("{"):
+        first_kind = "json"
+    elif first.startswith(("```", "~~~")):
+        first_kind = "fence"
+    elif first.startswith(">"):
+        first_kind = "quote"
+    else:
+        first_kind = "prose" if first else "empty"
+    return {
+        "line_count": len(lines),
+        "json_lines": sum(1 for ln in stripped if ln.startswith("{")),
+        "envelope_lines": sum(1 for ln in stripped if ln.startswith("CARD:")),
+        "first_line_kind": first_kind,
+    }
+
+
 def memorialize_output(
     output: str,
     source: str = "heartbeat",
@@ -2382,7 +2405,52 @@ def memorialize_output(
     rendered: list[str] = []
     prose: list[str] = []
 
+    def _render_existing(existing_id: str, card: dict) -> None:
+        state = get_memorial(existing_id) or {}
+        if should_push_to_lark(state) and not delivery_accepted(state):
+            card.pop("__jarvis_source", None)
+            rendered.append(json.dumps(
+                card, ensure_ascii=False, separators=(",", ":")))
+        # else: ledger-only (REQ-119) or already accepted
+
+    def _rescue_ledger_cards() -> None:
+        # A ledger-backed card is provenance-verified: it is the byte-exact
+        # render of its own ledger state, so it carries nothing but its own
+        # callbacks and can never be a Markdown example. Whatever put it
+        # among prose (a stray line ahead, an indent, a fence) must not turn
+        # it into text the work-receipt gate then drops — T26 (2026-08-25/27/
+        # 28): every multi-card mail-triage run vanished with exactly one
+        # work_receipt_missing and zero envelopes, while single cards lived.
+        kept: list[str] = []
+        rescued: list[tuple[str, dict]] = []
+        for raw_prose in prose:
+            stripped = raw_prose.strip()
+            payload = stripped[5:] if stripped.startswith("CARD:") else stripped
+            card = None
+            if payload.startswith("{"):
+                try:
+                    card = json.loads(payload)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    card = None
+            mid = (_trusted_ledger_card_memorial_id(card)
+                   if is_card_payload(card) else "")
+            if mid:
+                rescued.append((mid, card))
+            else:
+                kept.append(raw_prose)
+        if not rescued:
+            return
+        prose[:] = kept
+        _ops_log(
+            "ledger_card_rescued", level="warn", source=active_source,
+            card_count=len(rescued),
+            prose_lines=sum(1 for k in kept if k.strip()),
+        )
+        for mid, card in rescued:
+            _render_existing(mid, card)
+
     def flush_prose() -> None:
+        _rescue_ledger_cards()
         text = "\n".join(prose).strip()
         prose.clear()
         if not text:
@@ -2412,8 +2480,11 @@ def memorialize_output(
         explicit_title, text = _extract_title_line(text)
         text, work_receipt = _extract_work_receipt(text)
         if require_work_receipt and not work_receipt:
+            # Shape only, never content: enough to tell "model forgot the
+            # receipt" from "cards were demoted to prose" after the fact.
             _ops_log(
                 "work_receipt_missing", level="warn", source=active_source,
+                **_dropped_text_shape(text),
             )
             return
         if not text and explicit_title:
@@ -2484,6 +2555,23 @@ def memorialize_output(
             flush_prose()
             active_source = segment_source
             continue
+        is_card_envelope = line.startswith("CARD:")
+        card_raw = line[5:] if is_card_envelope else ""
+        parsed_card = None
+        if is_card_envelope and card_raw:
+            try:
+                parsed_card = json.loads(card_raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parsed_card = None
+        trusted_id = (_trusted_ledger_card_memorial_id(parsed_card)
+                      if is_card_payload(parsed_card) else "")
+        if trusted_id:
+            # Provenance-verified ledger card: executes regardless of a
+            # preceding prose line, a Markdown fence, or a bad envelope
+            # being dropped ahead of it (see _rescue_ledger_cards).
+            flush_prose()
+            _render_existing(trusted_id, parsed_card)
+            continue
         if dropping_bad_card:
             if protocol_line and line == "---":
                 dropping_bad_card = False
@@ -2491,8 +2579,6 @@ def memorialize_output(
         if protocol_line and line == "---":
             flush_prose()
             continue
-        is_card_envelope = line.startswith("CARD:")
-        card_raw = line[5:] if is_card_envelope else ""
         # CARD is an executable envelope, not inline Markdown. It can only
         # occupy its own top-level block; a preceding quote/list/prose line
         # makes it content and therefore non-executable.
@@ -2500,13 +2586,7 @@ def memorialize_output(
             protocol_line and is_card_envelope
             and not any(part.strip() for part in prose)
         )
-        if can_execute_card:
-            try:
-                card = json.loads(card_raw) if card_raw else None
-            except (json.JSONDecodeError, TypeError, ValueError):
-                card = None
-        else:
-            card = None
+        card = parsed_card if can_execute_card else None
         if is_card_payload(card):
             flush_prose()
             existing_id = _trusted_ledger_card_memorial_id(card)
