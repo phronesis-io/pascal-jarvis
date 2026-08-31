@@ -1,6 +1,6 @@
 """Auto-investigation for the「一手源大面积断连」anomaly card.
 
-Pascal, 2026-08-13, on a card that ended with「👉 要我现在查具体是哪些源就说
+The owner, 2026-08-13, on a card that ended with「👉 要我现在查具体是哪些源就说
 一声」:「下次直接去查别等了」. So the metrics-digest pre-hook now runs the
 read-only investigation itself and the findings ride in the same card —
 which source families are down and how many, the dominant error, since
