@@ -13,8 +13,16 @@ Channels (cheapest first, each bounded by its own timeout):
    a handful of curls. Observed 2026-08-31: ssh + 5 queries = 6.7 s. It also
    works when the crawl host itself is dead (the exact moment the card
    matters), because Prometheus keeps the last scraped series.
-2. The crawl host's own ``/metrics`` exposition text (what the pgc_pulse
-   probe script already reads).
+2. The crawl host's own ``/metrics`` exposition text, fetched by curl ON
+   that host over ssh (a small python program on the host does the fetch).
+   The viewer binds whatever ``PGC_VIEWER_BIND_HOST`` says, so when the
+   configured URL is refused the program asks ``ss`` which address listens
+   on that port and retries there; if an env file with basic-auth
+   credentials is configured AND readable there, they go into the
+   Authorization header — read on the host, never copied into jarvis
+   config. Observed 2026-08-31: ``/metrics`` is auth-exempt in the viewer
+   (server.py ``_AUTH_EXEMPT_PATHS``) and answered 200 without auth; the
+   credentials file is root-only and unreadable to the ssh user anyway.
 3. Neither → ``ok=False`` with a plain-language reason.
 
 Config lives in the gitignored sources.yaml, on the metrics_probe source
@@ -50,6 +58,8 @@ DEFAULT_PROMETHEUS_TIMEOUT = 20
 # feature's build, so this is the existing probe's own budget, not a fresh
 # measurement.
 DEFAULT_METRICS_TIMEOUT = 15
+DEFAULT_METRICS_AUTH_USER_VAR = "PGC_VIEWER_BASIC_USER"
+DEFAULT_METRICS_AUTH_PASSWORD_VAR = "PGC_VIEWER_BASIC_PASSWORD"
 PENDING_FILE = ".investigation_pending.json"
 PENDING_REUSE_H = 2          # a retry within this window reuses the result
 SINCE_WINDOW_H = 24
@@ -298,6 +308,27 @@ def _display_name(name: str) -> str:
 # ── analysis ─────────────────────────────────────────────────────────
 
 
+def _last_run(samples: list[tuple[float, float]], threshold: float):
+    """(start, end, whole_window, reaches_now) of the most recent contiguous
+    run of samples at/over the threshold. All None/False without samples or
+    without any such run."""
+    if not samples:
+        return None, None, False, False
+    end_idx = None
+    for i in range(len(samples) - 1, -1, -1):
+        if samples[i][1] >= threshold:
+            end_idx = i
+            break
+    if end_idx is None:
+        return None, None, False, False
+    start_idx = end_idx
+    while start_idx > 0 and samples[start_idx - 1][1] >= threshold:
+        start_idx -= 1
+    return (samples[start_idx][0], samples[end_idx][0],
+            start_idx == 0, end_idx == len(samples) - 1)
+
+
+
 def analyse(broken: list[dict], info: list[dict], count_samples: list[tuple[float, float]],
             *, threshold: float, now: datetime, host_reachable: bool,
             stale_minutes: int | None = None) -> dict:
@@ -319,18 +350,8 @@ def analyse(broken: list[dict], info: list[dict], count_samples: list[tuple[floa
         pair[(fam, err)] += 1
         names.append(name)
     total = len(names)
-    since_ts = None
-    if count_samples:
-        run_start = None
-        for ts, val in reversed(count_samples):
-            if val >= threshold:
-                run_start = ts
-            else:
-                break
-        since_ts = run_start
-        whole_window = run_start is not None and run_start == count_samples[0][0]
-    else:
-        whole_window = False
+    since_ts, last_broken_ts, whole_window, still_broken = _last_run(
+        count_samples, threshold)
     diagnosis = ""
     if not host_reachable:
         diagnosis = "抓取主机本身没响应，所有源一起断——先看主机，不是源的问题"
@@ -351,6 +372,8 @@ def analyse(broken: list[dict], info: list[dict], count_samples: list[tuple[floa
         "errors": [(e, n) for e, n in errs.most_common(TOP_ERRORS)],
         "examples": [_display_name(n) for n in names[:EXAMPLE_NAMES]],
         "since_ts": since_ts,
+        "last_broken_ts": last_broken_ts,
+        "still_broken": still_broken,
         "since_whole_window": whole_window,
         "diagnosis": diagnosis,
         "host_reachable": host_reachable,
@@ -394,21 +417,162 @@ def _via_prometheus(cfg: dict, now: datetime) -> dict | None:
             "stale_minutes": stale_minutes}
 
 
+def _env_value(text: str, key: str) -> str:
+    """KEY=VALUE lookup in dotenv or systemd ``Environment=`` text without
+    sourcing it (real env files carry unquoted values with spaces and
+    parentheses)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Environment="):
+            line = line[len("Environment="):].strip()
+        if len(line) >= 2 and line[0] == line[-1] and line[0] in "\"'":
+            line = line[1:-1]
+        if line.startswith(key + "="):
+            value = line[len(key) + 1:].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value
+    return ""
+
+
+# Runs ON the crawl host (``ssh host python3 -``). Same logic the pgc_pulse
+# probe script carries; kept dependency-free (stdlib only) and secret-free
+# (it prints the metrics body or exits non-zero — never the credentials).
+_REMOTE_FETCH = r"""
+import base64, json, re, subprocess, sys, urllib.request
+CFG = json.loads(__CFG_JSON__)  # substituted by the caller; stdin is the program itself
+
+def env_value(paths, key):
+    for path in paths:
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("Environment="):
+                line = line[len("Environment="):].strip()
+            if len(line) >= 2 and line[0] == line[-1] and line[0] in "\"'":
+                line = line[1:-1]
+            if line.startswith(key + "="):
+                v = line[len(key) + 1:].strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                return v
+    return ""
+
+def listeners(port):
+    try:
+        out = subprocess.run(["ss", "-ltnH"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        addr = parts[3]
+        m = re.match(r"^\[?([^\]]*)\]?:(\d+)$", addr)
+        if not m or m.group(2) != str(port):
+            continue
+        host = m.group(1)
+        if host in ("", "*", "0.0.0.0", "::"):
+            host = "127.0.0.1"
+        if host not in found:
+            found.append(host)
+    return found
+
+url = CFG["url"]
+m = re.match(r"^(https?)://([^/:]+)(?::(\d+))?(/.*)?$", url)
+scheme, host, port, path = (m.groups() if m else ("http", "127.0.0.1", "9090", "/metrics"))
+port = port or ("443" if scheme == "https" else "80")
+path = path or "/"
+env_paths = CFG.get("env_files") or []
+bind = env_value(env_paths, CFG.get("bind_var") or "") if CFG.get("bind_var") else ""
+candidates = [url]
+for h in ([bind] if bind else []) + listeners(port):
+    u = f"{scheme}://{h}:{port}{path}"
+    if u not in candidates:
+        candidates.append(u)
+headers = {}
+user = env_value(env_paths, CFG.get("user_var") or "") if CFG.get("user_var") else ""
+if user:
+    token = base64.b64encode(
+        f"{user}:{env_value(env_paths, CFG.get('password_var') or '')}".encode()).decode()
+    headers["Authorization"] = "Basic " + token
+per = max(2, int(CFG.get("timeout") or 8) // max(1, len(candidates)))
+for u in candidates:
+    try:
+        with urllib.request.urlopen(urllib.request.Request(u, headers=headers),
+                                    timeout=per) as r:
+            body = r.read().decode("utf-8", "replace")
+    except Exception:
+        continue
+    keep = tuple(CFG.get("keep") or ())
+    if keep:
+        # The link back is slow (~5-30 KB/s observed); ship only the series
+        # the caller reads, not the whole 200 KB exposition.
+        body = "\n".join(ln for ln in body.splitlines() if ln.startswith(keep))
+    if body.strip():
+        sys.stdout.write(body)
+        sys.exit(0)
+sys.exit(3)
+"""
+
+
+def _remote_program(fetch_cfg: dict) -> str:
+    """The on-host fetch program with its config embedded as a string
+    literal (``python3 -`` consumes all of stdin as the program)."""
+    return _REMOTE_FETCH.replace("__CFG_JSON__", json.dumps(json.dumps(fetch_cfg)))
+
+
+def _metrics_fetch_cfg(cfg: dict, url: str, timeout: int) -> dict:
+    env_files = cfg.get("metrics_env_file") or []
+    if isinstance(env_files, str):
+        env_files = [env_files]
+    return {
+        "url": url,
+        "env_files": [str(e) for e in env_files if e],
+        "bind_var": str(cfg.get("metrics_bind_host_var") or "PGC_VIEWER_BIND_HOST"),
+        "user_var": str(cfg.get("metrics_auth_user_var") or DEFAULT_METRICS_AUTH_USER_VAR),
+        "password_var": str(cfg.get("metrics_auth_password_var")
+                            or DEFAULT_METRICS_AUTH_PASSWORD_VAR),
+        "timeout": timeout,
+        "keep": [COUNT_SERIES, BROKEN_SERIES, INFO_SERIES],
+    }
+
+
 def _via_metrics_text(cfg: dict) -> dict | None:
     timeout = _timeout(cfg, "metrics_timeout", DEFAULT_METRICS_TIMEOUT)
     host = str(cfg.get("metrics_ssh_host") or "").strip()
     url = str(cfg.get("metrics_url") or "http://127.0.0.1:9090/metrics")
     if host:
         connect = max(3, int(min(10, timeout / 2)))
+        fetch_cfg = _metrics_fetch_cfg(cfg, url, int(max(2, timeout - connect)))
         rc, out = _run(["ssh", "-o", "BatchMode=yes",
-                        "-o", f"ConnectTimeout={connect}", host,
-                        f"curl -s --max-time {int(max(2, timeout - connect))} "
-                        f"{shlex.quote(url)}"], timeout)
+                        "-o", f"ConnectTimeout={connect}", host, "python3", "-"],
+                       timeout, stdin=_remote_program(fetch_cfg))
         if rc != 0 or not out.strip():
             return None
     else:
+        fetch_cfg = _metrics_fetch_cfg(cfg, url, int(timeout))
+        headers = {}
+        text = ""
+        for path in fetch_cfg["env_files"]:
+            try:
+                text += Path(os.path.expanduser(path)).read_text(encoding="utf-8") + "\n"
+            except OSError:
+                continue
+        user = _env_value(text, fetch_cfg["user_var"]) if text else ""
+        if user:
+            import base64
+            token = base64.b64encode(
+                f"{user}:{_env_value(text, fetch_cfg['password_var'])}".encode()).decode()
+            headers["Authorization"] = f"Basic {token}"
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 out = r.read().decode("utf-8", "replace")
         except Exception:
             return None
@@ -422,32 +586,59 @@ def _via_metrics_text(cfg: dict) -> dict | None:
 # ── rendering ────────────────────────────────────────────────────────
 
 
-def _fmt_since(findings: dict, record_ts: str, now: datetime) -> str:
-    ts = findings.get("since_ts")
-    if findings.get("since_whole_window"):
-        return f"至少 {SINCE_WINDOW_H} 小时前"
-    dt = None
-    if ts:
+def _fmt_clock(ts, now: datetime) -> str | None:
+    if ts is None:
+        return None
+    try:
         dt = datetime.fromtimestamp(float(ts), tz=now.tzinfo)
-    else:
-        try:
-            dt = datetime.fromisoformat(str(record_ts))
-        except ValueError:
-            return "今天"
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=now.tzinfo)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
     if dt.date() == now.date():
         return dt.strftime("%H:%M")
     return dt.strftime("%m/%d %H:%M")
 
 
+def _fmt_since(findings: dict, record_ts: str, now: datetime) -> str:
+    if findings.get("since_whole_window"):
+        return f"至少 {SINCE_WINDOW_H} 小时前"
+    clock = _fmt_clock(findings.get("since_ts"), now)
+    if clock:
+        return clock
+    try:
+        dt = datetime.fromisoformat(str(record_ts))
+    except (TypeError, ValueError):
+        return "今天"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=now.tzinfo)
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    return dt.strftime("%m/%d %H:%M")
+
+
+def _count(value):
+    """A record's count as an int, or None — never a float/bool/str."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value:  # nan
+        return None
+    return int(value)
+
+
 def render_lines(findings: dict, actual, record_ts: str, now: datetime) -> list[str]:
     """≤3 plain-language lines; the first sentence is the conclusion."""
-    total = findings.get("total") or 0
-    shown = total or actual
+    total = int(findings.get("total") or 0)
+    actual = _count(actual)
     since = _fmt_since(findings, record_ts, now)
-    count_txt = f"{shown} 个一手源"
-    if total and actual not in (None, total):
+    if total == 0:
+        # Nothing broken by the time we looked. Still say what the alarm
+        # saw and when it ended — a card must never print an empty count.
+        if actual is None:
+            return ["追查时没有发现断连的一手源，告警里也没记下数字：像是追查前就恢复了。"]
+        last = _fmt_clock(findings.get("last_broken_ts"), now)
+        tail = f"（最后一次断连 {last}）" if last else ""
+        return [f"{actual} 个一手源曾从 {since} 起抓不到数据，追查时已全部恢复{tail}。"]
+    count_txt = f"{total} 个一手源"
+    if actual is not None and actual != total:
         count_txt = f"现在 {total} 个一手源（告警时 {actual} 个）"
     lead = f"{count_txt}从 {since} 起抓不到数据"
     diag = findings.get("diagnosis") or ""
@@ -478,6 +669,9 @@ def render_lines(findings: dict, actual, record_ts: str, now: datetime) -> list[
 
 def _failure_lines(actual, record_ts: str, now: datetime, reason: str) -> list[str]:
     since = _fmt_since({}, record_ts, now)
+    actual = _count(actual)
+    if actual is None:
+        return [f"一手源从 {since} 起持续抓不到数据（告警没记下数量）。追查没跑通：{reason}。"]
     return [f"{actual} 个一手源从 {since} 起持续抓不到数据。追查没跑通：{reason}。"]
 
 
@@ -494,6 +688,8 @@ def investigate(cfg: dict, record: dict, now: datetime,
     ``channels`` lets tests inject fetchers; each is ``fn() -> dict|None``.
     """
     actual = record.get("actual")
+    if _count(actual) is None:
+        actual = record.get("value")  # hand-built records name it this way
     record_ts = str(record.get("ts") or "")
     rule = record.get("rule") if isinstance(record.get("rule"), dict) else {}
     threshold = rule.get("value") if isinstance(rule.get("value"), (int, float)) else 1

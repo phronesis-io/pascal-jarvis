@@ -471,3 +471,130 @@ def test_rendered_card_meets_style_contract(tmp_path):
     assert lines[0].startswith("30 个一手源从 06:56 起抓不到数据：")
     assert len(lines) <= 3
     assert "要我" not in body and "_" not in body
+
+
+# ── recovered-by-the-time-we-looked / missing counts (2026-08-31 smoke) ──
+
+_NEVER = ("None", "nan", "NaN")
+
+
+def _assert_clean(lines):
+    for line in lines:
+        for token in _NEVER:
+            assert token not in line, line
+        assert line.strip()
+
+
+def test_live_zero_with_record_value_says_recovered_with_times():
+    raw = {"channel": "prometheus", "broken": [], "info": [],
+           "samples": _samples(since_hours_ago=2.07), "host_reachable": True,
+           "stale_minutes": None}
+    # the outage ended 30 minutes ago: trailing samples drop to 0
+    end = NOW.timestamp()
+    raw["samples"] = [(t, 0.0 if t > end - 30 * 60 else v) for t, v in raw["samples"]]
+    res = probe.investigate({}, _rec(actual=3), NOW, channels=(lambda: raw,))
+    assert res["ok"] and res["lines"] == [
+        "3 个一手源曾从 07:00 起抓不到数据，追查时已全部恢复（最后一次断连 08:30）。"]
+    _assert_clean(res["lines"])
+
+
+def test_live_zero_without_range_uses_record_time_and_omits_last_seen():
+    raw = {"channel": "metrics", "broken": [], "info": [], "samples": [],
+           "host_reachable": True, "stale_minutes": None}
+    res = probe.investigate({}, _rec(actual=3), NOW, channels=(lambda: raw,))
+    assert res["lines"] == ["3 个一手源曾从 06:56 起抓不到数据，追查时已全部恢复。"]
+    _assert_clean(res["lines"])
+
+
+def test_live_none_and_record_value_none_is_honest():
+    raw = {"channel": "metrics", "broken": [], "info": [], "samples": [],
+           "host_reachable": True, "stale_minutes": None}
+    rec = _rec(); rec["actual"] = None
+    res = probe.investigate({}, rec, NOW, channels=(lambda: raw,))
+    assert res["lines"] == ["追查时没有发现断连的一手源，告警里也没记下数字：像是追查前就恢复了。"]
+    _assert_clean(res["lines"])
+    # hand-built records name the count `value`
+    rec = {"metric": "broken_first_party", "value": 3, "ts": REC_TS}
+    res = probe.investigate({}, rec, NOW, channels=(lambda: raw,))
+    assert res["lines"][0].startswith("3 个一手源曾从 06:56 起")
+
+
+@pytest.mark.parametrize("actual", [None, float("nan"), "7", True])
+def test_no_none_or_nan_in_any_rendered_line(actual):
+    rec = _rec(); rec["actual"] = actual
+    live = {"channel": "metrics", "broken": _broken_rows(), "info": _info_rows(),
+            "samples": [], "host_reachable": True, "stale_minutes": None}
+    for channels in ((lambda: live,), (lambda: None,), (lambda: {**live, "broken": []},)):
+        res = probe.investigate({}, rec, NOW, channels=channels)
+        _assert_clean(res["lines"])
+        assert res["card_body"] and "None" not in res["card_body"]
+
+
+def test_last_run_finds_the_most_recent_outage_window():
+    s = [(0, 0.0), (1, 2.0), (2, 2.0), (3, 0.0), (4, 3.0), (5, 3.0), (6, 0.0)]
+    assert probe._last_run(s, 1) == (4, 5, False, False)
+    assert probe._last_run(s[:6], 1) == (4, 5, False, True)
+    assert probe._last_run([(0, 5.0), (1, 5.0)], 1) == (0, 1, True, True)
+    assert probe._last_run([(0, 0.0)], 1) == (None, None, False, False)
+    assert probe._last_run([], 1) == (None, None, False, False)
+
+
+# ── channel 2 runs ON the crawl host ─────────────────────────────────
+
+
+def test_env_value_reads_dotenv_and_systemd_formats():
+    text = ('# comment\nPGC_VIEWER_BIND_HOST=10.0.0.5\n'
+            'Environment="PGC_VIEWER_BASIC_USER=ops"\n'
+            "Environment=PGC_VIEWER_BASIC_PASSWORD='p a(ss)'\n"
+            "LLM_FALLBACK_USER_AGENT=Mozilla/5.0 (X11; rv:1) Gecko\n")
+    assert probe._env_value(text, "PGC_VIEWER_BIND_HOST") == "10.0.0.5"
+    assert probe._env_value(text, "PGC_VIEWER_BASIC_USER") == "ops"
+    assert probe._env_value(text, "PGC_VIEWER_BASIC_PASSWORD") == "p a(ss)"
+    assert probe._env_value(text, "MISSING") == ""
+
+
+def test_remote_program_embeds_config_and_never_secrets(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, timeout, stdin=None):
+        seen["cmd"], seen["stdin"] = cmd, stdin
+        return 0, f"{probe.COUNT_SERIES} 1.0\n{probe.BROKEN_SERIES}{{error=\"HTTP 403\",source=\"A\"}} 1.0\n"
+
+    monkeypatch.setattr(probe, "_run", fake_run)
+    raw = probe._via_metrics_text({"metrics_ssh_host": "crawl", "metrics_url": "http://127.0.0.1:9090/metrics",
+                                   "metrics_env_file": "/etc/pgc/viewer.env"})
+    assert raw and raw["broken"][0]["source"] == "A"
+    assert seen["cmd"][-2:] == ["python3", "-"] and "crawl" in seen["cmd"]
+    program = seen["stdin"]
+    import ast
+    ast.parse(program)                                   # a valid python program
+    assert "sys.stdin" not in program                    # stdin IS the program
+    assert '/etc/pgc/viewer.env' in program and "PGC_VIEWER_BASIC_USER" in program
+    assert "PGC_VIEWER_BIND_HOST" in program and '"ss", "-ltnH"' in program
+    assert probe.INFO_SERIES in program                  # only the needed series come back
+    # a failed program → channel yields None
+    monkeypatch.setattr(probe, "_run", lambda cmd, timeout, stdin=None: (3, ""))
+    assert probe._via_metrics_text({"metrics_ssh_host": "crawl"}) is None
+
+
+def test_local_metrics_channel_sends_basic_auth_from_env_file(stub_server, tmp_path):
+    base, stub = stub_server
+    env = tmp_path / "viewer.env"
+    env.write_text("Environment=PGC_VIEWER_BASIC_USER=ops\nEnvironment=PGC_VIEWER_BASIC_PASSWORD=s3cret\n")
+    captured = {}
+
+    class Auth(_Stub):
+        def do_GET(self):
+            captured["auth"] = self.headers.get("Authorization")
+            self._reply((f"{probe.COUNT_SERIES} 0.0\n", 200))
+    stub.routes = {}
+    srv = HTTPServer(("127.0.0.1", 0), Auth)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        raw = probe._via_metrics_text({"metrics_url": f"http://127.0.0.1:{srv.server_address[1]}/metrics",
+                                       "metrics_env_file": [str(env)]})
+    finally:
+        srv.shutdown()
+    assert raw and raw["broken"] == []
+    import base64
+    assert captured["auth"] == "Basic " + base64.b64encode(b"ops:s3cret").decode()
