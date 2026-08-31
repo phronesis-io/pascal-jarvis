@@ -288,6 +288,9 @@ def test_private_heartbeat_uses_ephemeral_read_only_codex_not_relays(
     monkeypatch.setattr(
         codex_fallback, "ensure_codex_authenticated", lambda *_args: None,
     )
+    monkeypatch.setattr(
+        codex_fallback, "resolve_codex_bin", lambda configured="": configured,
+    )
 
     def invoke(**kwargs):
         codex_calls.append(kwargs)
@@ -329,6 +332,7 @@ def test_private_heartbeat_uses_ephemeral_read_only_codex_not_relays(
     assert "ANTHROPIC_AUTH_TOKEN" not in claude_calls[0][1]["env"]
     assert len(codex_calls) == 1
     assert codex_calls[0]["thread_id"] == ""
+    assert codex_calls[0]["binary"] == "/opt/codex"
     assert codex_calls[0]["allow_tools"] is False
     assert codex_calls[0]["ephemeral"] is True
     assert codex_calls[0]["work_dir"] != tmp_path
