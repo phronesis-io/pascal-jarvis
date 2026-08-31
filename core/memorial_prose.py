@@ -15,9 +15,39 @@ delivered, not dropped by the work-receipt gate.
 from __future__ import annotations
 
 import json
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Mapping
 
 TrustedIdOf = Callable[[dict], str]
+
+
+@dataclass(frozen=True)
+class ProseRuntime:
+    """Explicit capabilities needed to turn prose into memorial cards.
+
+    ``memorial`` owns ledger and delivery policy. Keeping those callbacks on
+    this one-way boundary lets the text parser stay in a small module without
+    creating a deferred ``memorial <-> memorial_prose`` import cycle.
+    """
+
+    split_authored_card_blocks: Callable[[str], list[str]]
+    ops_log: Callable[..., None]
+    extract_title_line: Callable[[str], tuple[str, str]]
+    extract_work_receipt: Callable[[str], tuple[str, str]]
+    extract_recommendation: Callable[[str], tuple[str, str]]
+    extract_inline_options: Callable[[str], tuple[str, list[dict]]]
+    scrub_embedded_authoring_directives: Callable[[str], str]
+    source_default_preset: Mapping[str, str]
+    split_matters: Callable[[str], list[str]]
+    title_for_chunk: Callable[[str, str], tuple[str, str]]
+    create: Callable[..., tuple[str, bool]]
+    get_memorial: Callable[[str], dict | None]
+    should_push_to_lark: Callable[[dict], bool]
+    delivery_accepted: Callable[[dict], bool]
+    card_json: Callable[[str], str]
+    attention_alert: str
+    can_infer_alert_from_prose: Callable[[str], bool]
+    looks_like_alert: Callable[[str], bool]
 
 
 def dropped_text_shape(text: str) -> dict:
@@ -79,10 +109,9 @@ def demotion_reason(*, prose_ahead: bool, markdown_protected: bool,
 
 
 def memorialize_prose(text: str, *, source: str, require_work_receipt: bool,
-                      rendered: list[str]) -> None:
+                      rendered: list[str], runtime: ProseRuntime) -> None:
     """Turn one flushed prose block into memorial cards (appends to
     ``rendered`` the card JSON of every card that should reach Lark)."""
-    from core import memorial as m
     from core.safety import strip_task_framing
     text = str(text or "").strip()
     if not text:
@@ -97,9 +126,9 @@ def memorialize_prose(text: str, *, source: str, require_work_receipt: bool,
     text = strip_task_framing(text)
     if not text:
         return
-    authored_blocks = m._split_authored_card_blocks(text)
+    authored_blocks = runtime.split_authored_card_blocks(text)
     if len(authored_blocks) > 1:
-        m._ops_log(
+        runtime.ops_log(
             "card_split", source=source,
             split_kind="concatenated_directives",
             card_count=len(authored_blocks),
@@ -107,12 +136,13 @@ def memorialize_prose(text: str, *, source: str, require_work_receipt: bool,
         for authored_block in authored_blocks:
             memorialize_prose(
                 authored_block, source=source,
-                require_work_receipt=require_work_receipt, rendered=rendered)
+                require_work_receipt=require_work_receipt, rendered=rendered,
+                runtime=runtime)
         return
-    explicit_title, text = m._extract_title_line(text)
-    text, work_receipt = m._extract_work_receipt(text)
+    explicit_title, text = runtime.extract_title_line(text)
+    text, work_receipt = runtime.extract_work_receipt(text)
     if require_work_receipt and not work_receipt:
-        m._ops_log(
+        runtime.ops_log(
             "work_receipt_missing", level="warn", source=source,
             **dropped_text_shape(text),
         )
@@ -127,18 +157,18 @@ def memorialize_prose(text: str, *, source: str, require_work_receipt: bool,
     # RECOMMEND may legally follow OPTIONS. Remove it first so the
     # trailing-line OPTIONS parser still sees the authored buttons, then
     # carry the recommendation explicitly into create().
-    text, authored_recommend = m._extract_recommendation(text)
-    body, inline_options = m._extract_inline_options(text)
-    body = m._scrub_embedded_authoring_directives(body)
+    text, authored_recommend = runtime.extract_recommendation(text)
+    body, inline_options = runtime.extract_inline_options(text)
+    body = runtime.scrub_embedded_authoring_directives(body)
     preset = (None if inline_options
-              else m.SOURCE_DEFAULT_PRESET.get(source, "fyi"))
+              else runtime.source_default_preset.get(source, "fyi"))
     # 一张卡一件事 (REQ-117): the prompt contract is the first line of
     # defense; this is the mechanical backstop for bodies that merged
     # several matters anyway. A card whose author wrote its own OPTIONS
     # line designed ONE interactive ask — never split that.
-    chunks = [body] if inline_options else m.split_matters(body)
+    chunks = [body] if inline_options else runtime.split_matters(body)
     if len(chunks) > 1:
-        m._ops_log(
+        runtime.ops_log(
             "card_split", source=source,
             split_kind="prose_body", card_count=len(chunks),
         )
@@ -146,21 +176,23 @@ def memorialize_prose(text: str, *, source: str, require_work_receipt: bool,
         if explicit_title and len(chunks) == 1:
             chunk_title, chunk_body = explicit_title, chunk
         else:
-            chunk_title, chunk_body = m._title_for_chunk(chunk, source)
-        mid, _ = m.create(source, chunk_title, chunk_body,
-                          options=inline_options, preset=preset,
-                          recommend=authored_recommend,
-                          work_receipt=work_receipt,
-                          require_work_receipt=require_work_receipt,
-                          authoring_protocol=True, send=False,
-                          attention=(m.ATTENTION_ALERT
-                                     if m._can_infer_alert_from_prose(source)
-                                     and m._looks_like_alert(chunk_body)
-                                     and not inline_options and preset == "fyi"
-                                     else ""))
-        state = m.get_memorial(mid) or {}
-        if not m.should_push_to_lark(state):
+            chunk_title, chunk_body = runtime.title_for_chunk(chunk, source)
+        mid, _ = runtime.create(
+            source, chunk_title, chunk_body,
+            options=inline_options, preset=preset,
+            recommend=authored_recommend,
+            work_receipt=work_receipt,
+            require_work_receipt=require_work_receipt,
+            authoring_protocol=True, send=False,
+            attention=(runtime.attention_alert
+                       if runtime.can_infer_alert_from_prose(source)
+                       and runtime.looks_like_alert(chunk_body)
+                       and not inline_options and preset == "fyi"
+                       else ""),
+        )
+        state = runtime.get_memorial(mid) or {}
+        if not runtime.should_push_to_lark(state):
             continue  # ledger-only (REQ-119)
-        if m.delivery_accepted(state):
+        if runtime.delivery_accepted(state):
             continue
-        rendered.append(m.card_json(mid))
+        rendered.append(runtime.card_json(mid))

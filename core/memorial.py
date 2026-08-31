@@ -2383,6 +2383,26 @@ def memorialize_output(
     active_source = single_source
     rendered: list[str] = []
     prose: list[str] = []
+    prose_runtime = memorial_prose.ProseRuntime(
+        split_authored_card_blocks=_split_authored_card_blocks,
+        ops_log=_ops_log,
+        extract_title_line=_extract_title_line,
+        extract_work_receipt=_extract_work_receipt,
+        extract_recommendation=_extract_recommendation,
+        extract_inline_options=_extract_inline_options,
+        scrub_embedded_authoring_directives=_scrub_embedded_authoring_directives,
+        source_default_preset=SOURCE_DEFAULT_PRESET,
+        split_matters=split_matters,
+        title_for_chunk=_title_for_chunk,
+        create=create,
+        get_memorial=get_memorial,
+        should_push_to_lark=should_push_to_lark,
+        delivery_accepted=delivery_accepted,
+        card_json=card_json,
+        attention_alert=ATTENTION_ALERT,
+        can_infer_alert_from_prose=_can_infer_alert_from_prose,
+        looks_like_alert=_looks_like_alert,
+    )
 
     def render_existing(existing_id: str, card: dict) -> None:
         state = get_memorial(existing_id) or {}
@@ -2398,7 +2418,8 @@ def memorialize_output(
         if text:
             memorial_prose.memorialize_prose(
                 text, source=active_source,
-                require_work_receipt=require_work_receipt, rendered=rendered)
+                require_work_receipt=require_work_receipt, rendered=rendered,
+                runtime=prose_runtime)
 
     # One standalone legacy card, or bare ledger-backed cards one per line
     # (a post-hook printing several card_json), become CARD: envelopes. In
