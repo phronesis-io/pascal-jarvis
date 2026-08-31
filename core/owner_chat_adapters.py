@@ -63,8 +63,14 @@ def process_runner(holder: dict[str, Any]) -> Runner:
         process: subprocess.Popen[str] | None = None
         holder["process:spawning"] = True
         try:
+            # stdin MUST be a pipe: ``communicate(input=…)`` silently drops
+            # the prompt otherwise, and the child inherits the handler's
+            # already-drained stdin. 2026-08-31 15:06: every owner turn
+            # failed with 「Input must be provided either through stdin or
+            # as a prompt argument」 on the first day this path served chat.
             process = subprocess.Popen(
                 command,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
