@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import io
 import json
 import signal
@@ -388,3 +390,19 @@ def test_agentic_openai_tools_share_the_owner_cancellation_holder(
     assert captured["process_key"] == "process"
     holder["cancelled"] = signal.SIGTERM
     assert captured["cancelled"]() is True
+
+
+def test_process_runner_feeds_the_prompt_through_stdin(tmp_path):
+    """2026-08-31: the owner-chat runner spawned claude without a stdin pipe,
+    so ``communicate(input=…)`` dropped the prompt and every turn failed."""
+    import sys as _sys
+    from core.owner_chat_adapters import process_runner
+
+    run = process_runner({})
+    completed = run(
+        [_sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+        timeout=30, cwd=tmp_path, env=dict(os.environ),
+        input="你好，Jarvis",
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "你好，Jarvis"
