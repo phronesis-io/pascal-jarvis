@@ -104,3 +104,11 @@ def test_json_envelope_silent_action_suppresses(tmp_path):
     r = _run(raw, tmp_path)
     assert r.returncode == 0
     assert r.stdout.strip() == ""
+
+
+def test_bare_json_receipt_is_never_a_card(tmp_path):
+    """2026-08-30: {"sent": true, "kind": "guide"} reached the owner as a
+    card titled 「联系」."""
+    result = _run('{"sent": true, "kind": "guide"}', tmp_path)
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""

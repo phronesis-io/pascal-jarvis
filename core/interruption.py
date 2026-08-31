@@ -55,9 +55,24 @@ MESSAGE_CONTRACT_FIELDS = (
     "owner_need_explicit",
 )
 
+# Needs that may reach the owner in real time. ``external_change`` and
+# ``none`` never do: a 知道就行 card is exactly the message that can wait for
+# the morning digest line (2026-08-31, owner: 「突然弹出很多卡片…要么看不懂
+# 要么没有用」 — 14 days of ledger: eigenflux letters 31, feed triage 47,
+# self-healing guardian 14, own-calendar echoes 18, all notice-class).
+REALTIME_NEEDS = frozenset({
+    "judgment",
+    "authority",
+    "deadline",
+    "requested_result",
+    "scheduled_companion",
+    "decision_batch",
+})
+
 _SOURCE_NEEDS = {
     "attention-roi": "none",
     "cross-session-sync": "none",
+    "iteration-observe": "none",
     "checkin": "scheduled_companion",
     "daily-reflect": "scheduled_companion",
     "exercise-week": "scheduled_companion",
@@ -67,28 +82,46 @@ _SOURCE_NEEDS = {
     "mail": "external_change",
     "eigenflux": "external_change",
     "eigenflux-feed-triage": "external_change",
-    "eigenflux-friends": "authority",
+    "eigenflux-friends": "external_change",
     "eigenflux-publish": "authority",
+    "metrics-digest": "external_change",
+    "model-usage": "external_change",
+    "repos-sync": "external_change",
+    "calendar-sync": "external_change",
+    "guardian-daemon": "external_change",
     "delegation": "judgment",
-    "iteration-observe": "judgment",
     "intentions": "judgment",
-    "calendar-sync": "deadline",
     "selfmon": "authority",
-    "guardian-daemon": "deadline",
 }
+
+# A decision-class card from these sources asks for the owner's authority
+# (an outward action in his name), not merely his judgment.
+_AUTHORITY_SOURCES = frozenset({
+    "eigenflux-friends",
+    "eigenflux-publish",
+    "selfmon",
+})
 
 
 def infer_owner_need(source: str, attention: str) -> str:
-    """Compatibility inference for model-authored and historical cards."""
+    """Compatibility inference for model-authored and historical cards.
+
+    The attention class the producer chose is the strongest signal: an alert
+    is a deadline and a decision needs judgment (or authority, for sources
+    whose decisions act outward in the owner's name), whatever the source's
+    resting class. Only a notice falls back to the source table, where an
+    external-facing source means 知道就行 — the digest lane — and an unknown
+    source keeps its historical real-time behaviour.
+    """
     src = str(source or "")
+    if attention == "alert":
+        return "deadline"
+    if attention == "decision":
+        return "authority" if src in _AUTHORITY_SOURCES else "judgment"
     if src.startswith("routine:"):
         return "scheduled_companion"
     if src in _SOURCE_NEEDS:
         return _SOURCE_NEEDS[src]
-    if attention == "alert":
-        return "deadline"
-    if attention == "decision":
-        return "judgment"
     return "requested_result"
 
 
@@ -159,10 +192,12 @@ def evaluate(state: dict) -> dict:
         errors.append("deadline risk must use the alert lane")
     if need == "scheduled_companion" and attention != "notice":
         errors.append("scheduled companion work must remain optional")
-    lane = "ledger" if need == "none" else "lark"
+    lane = "lark" if need in REALTIME_NEEDS else "ledger"
     cadence = (
         "immediate" if need == "deadline"
         else "batch" if need == "decision_batch"
+        else "digest" if need == "external_change"
+        else "silent" if need == "none"
         else "bounded"
     )
     return {

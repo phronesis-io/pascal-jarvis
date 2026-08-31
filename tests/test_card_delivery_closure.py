@@ -62,16 +62,24 @@ def test_notice_pushes_to_lark():
     assert memorial.should_push_to_lark(st) is True
 
 
-def test_governed_sources_push_their_curated_cards():
-    """metrics-digest / phronesis-monitor / repos-sync are NOT ambient: their
-    noise is governed upstream (REQ-121 pre-filter, interval + 成卡门槛,
-    daily rollup), so a card they DO emit is signal and must reach the chat —
-    a prompt that promises delivery must not be contradicted by routing."""
-    for source in ("metrics-digest", "phronesis-monitor", "repos-sync"):
-        assert source not in memorial.AMBIENT_SOURCES
+def test_external_change_notices_wait_for_the_digest():
+    """2026-08-31: a 知道就行 card about an external change (metrics flip,
+    repo rollup, eigenflux letter) is not a real-time interruption — it is
+    kept in the ledger and named on the morning anchor's digest line. The
+    same source's alert or decision still reaches the chat now."""
+    for source in ("metrics-digest", "repos-sync", "eigenflux", "mail"):
         st = {"source": source, "attention": memorial.ATTENTION_NOTICE,
               "options": [], "extra_buttons": []}
-        assert memorial.should_push_to_lark(st) is True, source
+        assert memorial.should_push_to_lark(st) is False, source
+        assert memorial.should_push_to_lark(
+            {**st, "attention": memorial.ATTENTION_ALERT}) is True, source
+        assert memorial.should_push_to_lark(
+            {**st, "attention": memorial.ATTENTION_DECISION}) is True, source
+    # A mention of the owner in the company group is about him, not merely
+    # news: it keeps its real-time lane.
+    st = {"source": "phronesis-monitor", "attention": memorial.ATTENTION_NOTICE,
+          "options": [], "extra_buttons": []}
+    assert memorial.should_push_to_lark(st) is True
 
 
 def test_metrics_flip_card_reaches_lark_end_to_end(tmp_path, monkeypatch):
@@ -84,7 +92,13 @@ def test_metrics_flip_card_reaches_lark_end_to_end(tmp_path, monkeypatch):
         source="metrics-digest", title="🚨 demo 异常", body="a 掉到 0",
         preset="fyi")
     assert accepted is True
-    assert memorial.get_memorial(mid)["delivery_status"] == "delivered"
+    # A notice-class flip is 知道就行: ledger now, digest line in the morning.
+    assert memorial.get_memorial(mid)["delivery_status"] == "ledger_only"
+    mid2, accepted2 = memorial.create(
+        source="metrics-digest", title="🚨 demo 挂了", body="一手源挂了 2 个",
+        preset="fyi", attention=memorial.ATTENTION_ALERT)
+    assert accepted2 is True
+    assert memorial.get_memorial(mid2)["delivery_status"] == "delivered"
 
 
 @pytest.mark.parametrize("source", sorted(memorial.AMBIENT_SOURCES))
@@ -297,14 +311,15 @@ def test_retry_success_converges_the_card_via_memorial_resolve(tmp_path, monkeyp
     assert "已广播" in st.get("resolved_label", "")
 
 
-def test_curated_signals_reach_lark(monkeypatch):
-    """eigenflux-feed-triage is not ambient (2026-08-03): ~2 curated,
-    pre-contextualized signal briefs a day earn the chat; monitoring
-    exhaust stays out."""
+def test_curated_signals_wait_for_the_digest(monkeypatch):
+    """eigenflux-feed-triage briefs are 知道就行 (2026-08-31: 47 in 14 days,
+    the owner's 「看不懂／没用」 complaint): they keep their ledger row and
+    their line on the morning digest, but never interrupt in real time.
+    Monitoring exhaust (cross-session-sync) stays out of both."""
     st = {"source": "eigenflux-feed-triage",
           "attention": memorial.ATTENTION_NOTICE,
           "options": [], "extra_buttons": []}
-    assert memorial.should_push_to_lark(st) is True
+    assert memorial.should_push_to_lark(st) is False
     assert "eigenflux-feed-triage" not in memorial.AMBIENT_SOURCES
     assert "cross-session-sync" in memorial.AMBIENT_SOURCES
 

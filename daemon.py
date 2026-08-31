@@ -258,6 +258,14 @@ def _raise_banner(msg: str, why: str) -> None:
         pass
 
 
+_SELF_HEALING_MARKERS = (
+    "你暂时不用操作",
+    "我会继续处理",
+    "我会继续观察",
+    "不用你操作",
+)
+
+
 def notify_lark(msg: str, incident_key: str = "") -> bool | None:
     """Submit a Guardian alert as an owner-private actionable card.
 
@@ -282,15 +290,22 @@ def notify_lark(msg: str, incident_key: str = "") -> bool | None:
         stable = re.sub(r"[^a-zA-Z0-9:_-]+", "-", str(incident_key).strip())
         metric = stable[:80] if stable else hashlib.sha256(
             " ".join(str(msg).split()).encode("utf-8")).hexdigest()[:20]
+        # A message that says the daemon is still handling it asks nothing of
+        # the owner (2026-08-26: 「类似这种我真的…怎么老是这样」). It is kept
+        # in the ledger and counted on the morning digest line; only a
+        # message that needs his hands is an alert.
+        self_healing = any(marker in str(msg) for marker in _SELF_HEALING_MARKERS)
         memorial_id, accepted = memorial.create(
             source="guardian-daemon",
             title="系统守护",
             body=str(msg),
             options=[{"key": "ack", "label": "知道就行"}],
-            attention=memorial.ATTENTION_ALERT,
-            urgent=True,
+            attention=(memorial.ATTENTION_NOTICE if self_healing
+                       else memorial.ATTENTION_ALERT),
+            urgent=not self_healing,
             dedup_key=f"guardian:{metric}",
             work_receipt="已自动检查、尝试恢复并复查当前状态",
+            **({"owner_need": "none", "why_now": ""} if self_healing else {}),
         )
         state = memorial.get_memorial(memorial_id) or {}
         delivery_status = str(state.get("delivery_status") or "")

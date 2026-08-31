@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import json
 import os
 import subprocess
@@ -386,8 +388,14 @@ def execute_friend_action(
         )
         project_eigenflux_message_receipt(welcome, root=root)
     except Exception as exc:
+        # The transport error is for the log; the owner only needs to know
+        # the welcome is still pending (2026-08-29 card rendered a raw
+        # ``request failed: Get … EOF`` as its body).
+        print(f"[eigenflux-friends] welcome send failed for {from_name}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return (
-            f"已核验通过「{from_name}」的好友申请，但欢迎消息尚未核验：{exc}"
+            f"已核验通过「{from_name}」的好友申请；欢迎消息这次没发出去，"
+            "下一轮会自动重试。"
         ), True
     if not welcome.completed:
         return (

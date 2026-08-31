@@ -85,11 +85,13 @@ def render_usage_alert(report: dict, *, state_path: Path) -> str:
     for item in [keyed[key] for key in sorted(new_keys)][:4]:
         if item.get("code", "").startswith("codex_"):
             prediction = item.get("predicted_exhaustion_at")
+            used = float(item.get("used_percent") or 0)
+            # 「已用 1%…预计 9/3 用尽」(2026-08-30) is self-contradicting copy:
+            # a forecast is only worth a sentence once half the window is gone.
             timing = (
                 f"，按当前速度预计 {human_time(prediction)} 用尽"
-                if human_time(prediction) else ""
+                if human_time(prediction) and used >= 50.0 else ""
             )
-            used = float(item.get("used_percent") or 0)
             issue_lines.append(
                 f"Codex {item.get('window_label') or item.get('window_name', '')}"
                 f"额度已用 {used:g}%，还剩约 {max(0.0, 100.0 - used):g}%；"

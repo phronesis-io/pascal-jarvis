@@ -53,6 +53,20 @@ def _promote_watermark():
             print(f"[metrics_digest] watermark promote failed: {e}", file=sys.stderr)
 
 
+_ALERT_HEADER_RE = re.compile(r"🚨|⚠️|异常|挂了|缺席|掉到|失败")
+
+
+def _metric_attention(header: str) -> str:
+    """HEARTBEAT.md asks for an alert card on anomaly/absence and a short
+    all-clear on recovery. Since 2026-08-31 a notice waits for the morning
+    digest, so the anomaly must declare itself an alert to reach Lark now;
+    the all-clear (✅ 恢复) is 知道就行."""
+    head = str(header or "")
+    if head.lstrip().startswith("✅"):
+        return "notice"
+    return "alert" if _ALERT_HEADER_RE.search(head) else "notice"
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw:
@@ -85,6 +99,7 @@ def main() -> int:
                 _plain_metric_copy(header), _plain_metric_copy(body),
                 source="metrics-digest",
                 work_receipt="聚合运行指标、完成异常归因和重复信号压缩",
+                attention=_metric_attention(header),
             ))
     _promote_watermark()
     return 0

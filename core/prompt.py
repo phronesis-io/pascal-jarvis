@@ -373,6 +373,9 @@ def build_system_prompt(
             + compact
         )
 
+    from core.operating_model import owner_prompt_block
+    operating_section = owner_prompt_block()
+
     ef_skills = load_ef_skills(jarvis_dir)
     ef_section = ""
     if ef_skills:
@@ -404,6 +407,8 @@ Never output bare URLs — they're harder to tap on mobile. The user specificall
 {ACTIONS_DOC}
 
 {RULES_DOC}
+
+{operating_section}
 
 {ef_section}
 

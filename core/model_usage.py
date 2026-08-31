@@ -405,7 +405,8 @@ def status_text(report: dict[str, Any]) -> str:
             )
             forecast = (
                 f"，按当前速度预计 {human_time(row['predicted_exhaustion_at'])} 用尽"
-                if human_time(row.get("predicted_exhaustion_at")) else ""
+                if human_time(row.get("predicted_exhaustion_at"))
+                and float(row.get("used_percent") or 0) >= 50.0 else ""
             )
             remaining = row.get("remaining_percent")
             if remaining is None:

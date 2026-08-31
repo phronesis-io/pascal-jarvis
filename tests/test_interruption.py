@@ -244,3 +244,67 @@ def test_interruption_audit_cli_is_machine_readable(env, capsys, monkeypatch):
     assert interruption_audit.main(["--days", "0.000001"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["items"] == 0
+
+
+# ---- 2026-08-31: real-time lanes vs. the morning digest ------------------
+
+def test_notice_about_external_change_waits_for_digest():
+    for source in ("eigenflux", "eigenflux-feed-triage", "mail",
+                   "metrics-digest", "model-usage", "calendar-sync",
+                   "guardian-daemon", "eigenflux-friends", "repos-sync"):
+        decision = interruption.evaluate(
+            {"source": source, "attention": "notice", "work_receipt": "x"})
+        assert decision["owner_need"] == "external_change", source
+        assert decision["lane"] == "ledger", source
+        assert decision["cadence"] == "digest", source
+
+
+def test_attention_class_outranks_the_source_table():
+    alert = interruption.evaluate(
+        {"source": "calendar-sync", "attention": "alert"})
+    assert (alert["owner_need"], alert["lane"]) == ("deadline", "lark")
+    judgment = interruption.evaluate(
+        {"source": "eigenflux", "attention": "decision"})
+    assert (judgment["owner_need"], judgment["lane"]) == ("judgment", "lark")
+    authority = interruption.evaluate(
+        {"source": "eigenflux-friends", "attention": "decision"})
+    assert (authority["owner_need"], authority["lane"]) == (
+        "authority", "lark")
+
+
+def test_engineering_proposals_never_reach_the_owner():
+    for attention in ("notice",):
+        decision = interruption.evaluate(
+            {"source": "iteration-observe", "attention": attention})
+        assert decision["owner_need"] == "none"
+        assert decision["lane"] == "ledger"
+
+
+def test_retained_rhythms_and_batches_stay_realtime():
+    for source, need in (("checkin", "scheduled_companion"),
+                         ("daily-reflect", "scheduled_companion"),
+                         ("routine:起来动动", "scheduled_companion"),
+                         ("memorial-escrow", "decision_batch"),
+                         ("morning-anchor", "decision_batch")):
+        decision = interruption.evaluate(
+            {"source": source, "attention": "notice"})
+        assert (decision["owner_need"], decision["lane"]) == (need, "lark"), source
+
+
+def test_unknown_source_keeps_its_historical_realtime_lane():
+    decision = interruption.evaluate(
+        {"source": "phronesis-monitor", "attention": "notice"})
+    assert decision["lane"] == "lark"
+
+
+def test_external_change_notice_is_ledger_only_end_to_end(env):
+    memorial_id, accepted = memorial.create(
+        source="eigenflux", title="CatKing 来信", body="问你最常用的 MCP",
+        preset="fyi", work_receipt="校验身份并去重")
+    state = memorial.get_memorial(memorial_id)
+    assert accepted is True
+    assert state["delivery_status"] == "ledger_only"
+    decision_id, _ = memorial.create(
+        source="eigenflux", title="合作邀约", body="要不要回",
+        preset="decision", work_receipt="校验身份并去重")
+    assert memorial.get_memorial(decision_id)["delivery_status"] == "delivered"

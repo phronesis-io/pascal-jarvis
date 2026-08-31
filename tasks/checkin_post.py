@@ -197,6 +197,11 @@ def main() -> int:
     # heartbeat context — and the raw envelope went ontothe owner's card
     # verbatim (his 2026-07-14 complaint: the card was unreadable JSON).
     parsed = parse_json_response(message)
+    if isinstance(parsed, dict) and not isinstance(parsed.get("response"), str):
+        # A JSON object with no prose response is bookkeeping the model
+        # echoed ({"sent": true, "kind": "guide"} reached the owner verbatim
+        # on 2026-08-30 as a card titled 「联系」). Never a card.
+        return silent("JSON object without a response is not a card")
     if isinstance(parsed, dict) and isinstance(parsed.get("response"), str):
         action = str(parsed.get("action", "notify")).lower()
         if action in ("silent", "skip", "none"):
